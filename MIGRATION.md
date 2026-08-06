@@ -718,28 +718,50 @@ about *inference*, not about *agents*:
 | C | C1 — identity JWKS endpoint (+ key rotation) | ✅ merged | upstream #1174 |
 | C | C2/C3 — authorization code + token exchange | ✅ merged | upstream #1177 |
 | C | C4 — /authorize consent page | ✅ merged | upstream #1179 |
-| C | C5–C8 — inference grants, usage, contracts | ⏳ not started | needs Murphy design review |
+| C | C5–C8 — inference grants, usage, contracts | ✅ merged | upstream #1180–#1183, #1191, #1195 |
 | D | D1 — host package skeleton | ✅ done | landed with the B1 scaffold |
 | D | D2 — sandbox, runtimes, egress (+proxy) | ✅ merged | this repo #2 |
 | D | D3+D4 — workspace setup/paths/snapshot + patch gate | ✅ merged; D3 acceptance pending D6 | this repo #3; one PR because `workspace_snapshot` imports `patch_gate`; snapshot tests are owned by D6 above |
-| D | D5 — workspace broker + browser | 🔍 in review | this repo #4; `terminal_coordination` reclassified to Phase E (see manifest corrections) |
-| D | D6 — runner + broker client (+ logging entrypoint) | 🔍 in review | this repo #5, stacked on #4; closes both D6 register rows; D3's pending acceptance resolves here |
-| E | E10 — control-plane parity tests | 🔍 in review | 102 of 103 cases ported and passing at E10 (`test_agent_jobs_api.py` 102, `test_admin_agent_runner_hosts.py` 10) plus the `dbtest` lifecycle; 1 discarded and 1 `xfail(strict)` — both recorded above and both pre-existing upstream, not caused by the move. **101 in `test_agent_jobs_api.py` since 2026-08-04**: the API-key ruling discarded one more, recorded in the discarded register and replaced by `tests/unit/test_owner_auth_dispatch.py` |
-| E | E6 — API router and app shell | 🔍 in review | this repo #11, stacked on #10; the control plane boots and serves 45 operations |
-| E | E7+E8+E9 — auth dependencies, session endpoints, grants in the request path | 🔍 in review | one PR because they are one path: the cookie E8 mints is what E7 verifies, and the claim E9 rewrites is the only route that was still minting a credential of its own. `deps.py`'s placeholders are implemented, `tests/support/e7_auth.py` is **deleted** (its tripwire), `/v1/session/*` exists, the sandbox carries a gateway grant, and `0005_grants_and_audit` adds `agent_attempts.grant_id` plus `agent_admin_audit_log`. Two ported cases could not survive E9 — see the discarded register — and one gateway-side contract is still owed; see the deferred register |
-| E | E5 — source control + publishing | 🔍 in review | this repo #10, stacked on #9; cipher re-keyed to `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` |
-| E | E4 — visible models over HTTP | 🔍 in review | this repo #9, stacked on #8; **rewritten, not moved** — see the discarded-test record below |
-| E | E2+E3 — schemas, entitlement, control tokens (re-keyed) | 🔍 in review | this repo #8, stacked on #7; `AGENT_CONTROL_TOKEN_SECRET` replaces the gateway's root |
-| E | E1 — store + Alembic baseline | 🔍 in review | this repo #7, stacked on #6; `initialize()` becomes a no-op, schema **and its five startup backfills** move to `0001_baseline` |
-| D | D7 — host deploy files | 🔍 in review | this repo #6; co-located overlay undecided (see Open decisions) |
-| F | F1+F2+F3 — Next.js scaffold, API client + components, pages as the root app | 🔍 in review | this repo; one PR because the moved pages do not type-check without the components and the components do not run without the scaffold. See "The web app: what moved, what was recreated" above. |
-| H | H1 — connection migration tooling | 🔍 in review | `deploy/migrate/` — the two tables, re-keyed rather than copied, id-preserving, idempotent, row counts + a plaintext-derived checksum. 24 unit cases and 8 `dbtest` cases against two real databases. **Written, not run**: H2 step 5 runs it. |
-| H | H2 — staging cutover runbook | 🔍 in review | `docs/cutover.md`. Written against the code, so it names the three creation routes to block at the edge (there is no feature flag) and says the runner has no drain mode. Four blockers listed that must land before it can be executed. |
-| H | H4 — gateway removal checklist | 🔍 in review | `docs/gateway-removal.md`. Executed in the **source** repo after H3, not here. |
-| H | H5 — operations doc | 🔍 in review | `docs/operations.md`, moved from the source repo's `docs/developer/agent-sandbox-operations.md`; deviations listed in its own closing section. |
+| D | D5 — workspace broker + browser | ✅ merged | this repo #4; `terminal_coordination` reclassified to Phase E (see manifest corrections) |
+| D | D6 — runner + broker client (+ logging entrypoint) | ✅ merged | this repo #5, stacked on #4; closes both D6 register rows; D3's pending acceptance resolves here |
+| E | E10 — control-plane parity tests | ✅ merged | 102 of 103 cases ported and passing at E10 (`test_agent_jobs_api.py` 102, `test_admin_agent_runner_hosts.py` 10) plus the `dbtest` lifecycle; 1 discarded and 1 `xfail(strict)` — both recorded above and both pre-existing upstream, not caused by the move. **101 in `test_agent_jobs_api.py` since 2026-08-04**: the API-key ruling discarded one more, recorded in the discarded register and replaced by `tests/unit/test_owner_auth_dispatch.py` |
+| E | E6 — API router and app shell | ✅ merged | this repo #11, stacked on #10; the control plane boots and serves 45 operations |
+| E | E7+E8+E9 — auth dependencies, session endpoints, grants in the request path | ✅ merged | one PR because they are one path: the cookie E8 mints is what E7 verifies, and the claim E9 rewrites is the only route that was still minting a credential of its own. `deps.py`'s placeholders are implemented, `tests/support/e7_auth.py` is **deleted** (its tripwire), `/v1/session/*` exists, the sandbox carries a gateway grant, and `0005_grants_and_audit` adds `agent_attempts.grant_id` plus `agent_admin_audit_log`. Two ported cases could not survive E9 — see the discarded register — and one gateway-side contract is still owed; see the deferred register |
+| E | E5 — source control + publishing | ✅ merged | this repo #10, stacked on #9; cipher re-keyed to `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` |
+| E | E4 — visible models over HTTP | ✅ merged | this repo #9, stacked on #8; **rewritten, not moved** — see the discarded-test record below |
+| E | E2+E3 — schemas, entitlement, control tokens (re-keyed) | ✅ merged | this repo #8, stacked on #7; `AGENT_CONTROL_TOKEN_SECRET` replaces the gateway's root |
+| E | E1 — store + Alembic baseline | ✅ merged | this repo #7, stacked on #6; `initialize()` becomes a no-op, schema **and its five startup backfills** move to `0001_baseline` |
+| D | D7 — host deploy files | ✅ merged | this repo #6; co-located overlay undecided (see Open decisions) |
+| F | F1+F2+F3 — Next.js scaffold, API client + components, pages as the root app | ✅ merged | this repo; one PR because the moved pages do not type-check without the components and the components do not run without the scaffold. See "The web app: what moved, what was recreated" above. |
+| H | H1 — connection migration tooling | ✅ merged | `deploy/migrate/` — the two tables, re-keyed rather than copied, id-preserving, idempotent, row counts + a plaintext-derived checksum. 24 unit cases and 8 `dbtest` cases against two real databases. **Written, not run**: H2 step 5 runs it. |
+| H | H2 — staging cutover runbook | ✅ merged | `docs/cutover.md`. Written against the code, so it names the three creation routes to block at the edge (there is no feature flag) and says the runner has no drain mode. Four blockers listed that must land before it can be executed. |
+| H | H4 — gateway removal checklist | ✅ merged | `docs/gateway-removal.md`. Executed in the **source** repo after H3, not here. |
+| H | H5 — operations doc | ✅ merged | `docs/operations.md`, moved from the source repo's `docs/developer/agent-sandbox-operations.md`; deviations listed in its own closing section. |
 | H | H3 — production cutover | ⏳ not started | human-led, Murphy's approval gate |
-| G | G1–G7 — dynamic host pool | 🔍 in review | `0002_host_pool` + `0003_attempt_host`; enrollment, heartbeat, the status machine, host-aware claiming with atomic slots, per-host broker routing, drain/remove/revoke, and the host-loss chaos test. **Extends** `agent_runner_hosts` rather than adding the plan's second `agent_hosts` table — see Open decisions. The host-side client that would redeem an enrollment token is **not** written; see the deferred register. |
+| G | G1–G7 — dynamic host pool | ✅ merged | `0002_host_pool` + `0003_attempt_host`; enrollment, heartbeat, the status machine, host-aware claiming with atomic slots, per-host broker routing, drain/remove/revoke, and the host-loss chaos test. **Extends** `agent_runner_hosts` rather than adding the plan's second `agent_hosts` table — see Open decisions. The host-side client that would redeem an enrollment token is **not** written; see the deferred register. |
 | E–H | remaining control plane | ⏳ not started | — |
+
+**Verified end to end on staging, 2026-08-06.** The first job to complete on
+this stack — `ajob_8b0be5f9e7ff9ad5` — went queued → claimed on the remote host
+→ workspace prepared through the broker → checked out → `deepseek-v4-flash`
+answered with tool calls → `succeeded`. The split's contract ran with it: the
+gateway minted `agr_01KZBRDGJ7E7RZHS6QD6ZSABMD` for the attempt, the control
+plane renewed it four times at 30-second intervals, and it was revoked sixteen
+seconds after the job finished rather than left to expire. That is smoke.md § 5
+and the renewal half of § 6, on real infrastructure rather than a single host.
+
+**What it took, and what neither side checked.** The job before it failed three
+attempts at the same point, because the control plane could not reach the
+remote host's workspace broker. Two independent causes, one after the other:
+the host advertised a compose service name that means nothing on the control
+plane's machine (fixed in #41), and then the two machines turned out to hold
+*different* values for the shared `AGENT_WORKSPACE_BROKER_TOKEN`, which turned
+every broker call into a 401. Neither is refused anywhere — the first surfaces
+as a 503 and the second as a 401, both indistinguishable from a broken tunnel.
+`docs/cutover.md` now carries the token as a blocker to check before step 6.
+
+Still unproven on this stack: the publishing path (a job that opens a pull
+request), a mid-run cancel, and the fail-closed cases in smoke.md § 6.
 
 Update this table as tasks land. It is the answer to "what is actually done" —
 the plan describes intent, this describes reality.
