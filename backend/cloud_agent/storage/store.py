@@ -385,6 +385,81 @@ class AgentJobStore:
             )
         return deleted is not None
 
+    # ── MCP connections ────────────────────────────────────────────────
+    #
+    # One row per user per server: what *this person* connected, holding their
+    # credential. Every query here is scoped by ``user_id`` and none takes a
+    # connection id alone, so there is no shape in which one user's row can be
+    # read or removed through another's request — the property the deployment
+    # registry could not have, because it had no user to scope by.
+
+    async def list_mcp_connections(self, *, user_id: str) -> list[dict[str, Any]]:
+        """Return this user's MCP connections, including encrypted tokens.
+
+        Ordered by server name so the composer and the Integrations page agree
+        on order without either sorting again.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, user_id, server, account_label, access_token_ciphertext,
+                       refresh_token_ciphertext, expires_at, created_at, updated_at
+                FROM agent_mcp_connections WHERE user_id = $1 ORDER BY server
+                """,
+                user_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def upsert_mcp_connection(
+        self,
+        *,
+        user_id: str,
+        server: str,
+        account_label: str | None,
+        access_token_ciphertext: str,
+        refresh_token_ciphertext: str | None,
+        expires_at: Any,
+    ) -> int:
+        """Store one credential per user per server, replacing any earlier one.
+
+        Reconnecting is an update rather than a second row: "connected" is a
+        yes/no per person per server, and two live credentials for one pair
+        would leave which one a job used down to row order.
+        """
+        async with self._pool.acquire() as conn:
+            connection_id = await conn.fetchval(
+                """
+                INSERT INTO agent_mcp_connections
+                    (user_id, server, account_label, access_token_ciphertext,
+                     refresh_token_ciphertext, expires_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (user_id, server) DO UPDATE SET
+                    account_label = EXCLUDED.account_label,
+                    access_token_ciphertext = EXCLUDED.access_token_ciphertext,
+                    refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = NOW()
+                RETURNING id
+                """,
+                user_id,
+                server,
+                account_label,
+                access_token_ciphertext,
+                refresh_token_ciphertext,
+                expires_at,
+            )
+        return int(connection_id)
+
+    async def delete_mcp_connection(self, *, user_id: str, server: str) -> bool:
+        """Disconnect one server for this user; ``False`` if it was not connected."""
+        async with self._pool.acquire() as conn:
+            deleted = await conn.fetchval(
+                "DELETE FROM agent_mcp_connections WHERE user_id = $1 AND server = $2 RETURNING id",
+                user_id,
+                server,
+            )
+        return deleted is not None
+
     # ── Jobs ───────────────────────────────────────────────────────────
 
     async def create_job(

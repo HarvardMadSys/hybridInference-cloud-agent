@@ -688,10 +688,37 @@ class SourceControlProviderResponse(BaseModel):
     error: str | None = None
 
 
+class McpIntegrationResponse(BaseModel):
+    """One catalogue MCP server, and whether this user has connected it.
+
+    Carries no credential and no upstream URL — the same rule as
+    :class:`McpServerSummary`, for the same reason, and enforced the same way:
+    there is no field either could occupy. ``account_label`` is what the
+    provider calls the connected account, which is the user's own name for it
+    and the only way to tell two connections apart in the UI.
+    """
+
+    name: str
+    label: str
+    description: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    #: Whether connecting is possible on this deployment right now.
+    configured: bool = False
+    connected: bool = False
+    account_label: str | None = None
+    connect_url: str | None = None
+
+
 class SourceControlIntegrationsResponse(BaseModel):
-    """All source-control providers available to the current user."""
+    """Everything the Integrations page shows the current user.
+
+    Named for source control because that is all it carried first; ``mcp`` is
+    the second kind of connection on the same page, kept in one response so the
+    page makes one request and cannot render half-refreshed.
+    """
 
     providers: list[SourceControlProviderResponse]
+    mcp: list[McpIntegrationResponse] = Field(default_factory=list)
 
 
 class OAuthConnectRequest(BaseModel):

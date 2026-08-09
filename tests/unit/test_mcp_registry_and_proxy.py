@@ -5,10 +5,14 @@ credential never reaching the sandbox, a repository never supplying its own MCP
 servers, and a tool outside the allowlist being neither advertised nor callable.
 
 Since the deployment-configured registry was retired, one more property joins
-them: **no configuration can put a server back on offer.** The tests that used
-to exercise the YAML loader are gone with it; what replaces them asserts the
-absence, because "we deleted the parser" and "a deployment cannot supply
-servers" are different claims and only the second one is the product decision.
+them: **no configuration can put a server back on offer.** That claim outlives
+#48 — servers now come from per-user connections, and the tests below check
+that a deployment's file and variables are still inert against the *new*
+source, not merely against the deleted parser.
+
+The per-user properties are here too, and they are what #49 turns on: a server
+is reachable only for the person who connected it, and "unknown" means unknown
+to *that* user.
 """
 
 from __future__ import annotations
@@ -22,11 +26,13 @@ from cloud_agent.mcp_registry import (
     McpRegistry,
     McpRegistryError,
     McpServer,
-    get_registry,
+    mcp_cipher,
+    registry_for_user,
 )
 
 _GATEWAY = "https://gateway.example.com"
 _TOKEN = "ajt.job.attempt.signature"
+_CIPHER = mcp_cipher("unit-test-encryption-key")
 
 
 def _server(**overrides) -> McpServer:
@@ -39,15 +45,40 @@ def _server(**overrides) -> McpServer:
     )
 
 
-# ── nothing is on offer ───────────────────────────────────────────────
+class FakeConnectionStore:
+    """Connections by user, as the store returns them."""
+
+    def __init__(self, by_user: dict[str, list[dict]] | None = None) -> None:
+        self.by_user = by_user or {}
+
+    async def list_mcp_connections(self, *, user_id: str) -> list[dict]:
+        """Return one user's rows, and never another's."""
+        return list(self.by_user.get(user_id, []))
 
 
-def test_no_deployment_configuration_can_offer_servers(tmp_path, monkeypatch):
-    """A registry file and the variable that used to name it change nothing.
+def _connection(server: str = "github", token: str = "ghu_owner_secret") -> dict:
+    """One stored connection, encrypted the way the store holds it."""
+    return {
+        "server": server,
+        "account_label": "octocat",
+        "access_token_ciphertext": _CIPHER.encrypt(token),
+        "refresh_token_ciphertext": None,
+        "expires_at": None,
+    }
 
-    This is the test that distinguishes retiring the feature from unwiring it.
-    A deployment upgrading from a version that had the registry keeps its file
-    and its variable; both must now be inert rather than quietly honoured.
+
+# ── a server is one person's, or it is nobody's ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_no_deployment_configuration_can_offer_servers(tmp_path, monkeypatch):
+    """A registry file and the variables that used to name it change nothing.
+
+    This is the test that distinguishes retiring the feature from unwiring it,
+    and it has to keep holding now that servers come from somewhere else: a
+    deployment upgrading from the version that had the registry keeps its file
+    and its variables, and neither may put a server in front of a user who
+    connected nothing.
     """
     config = tmp_path / "mcp.yaml"
     config.write_text(
@@ -64,21 +95,97 @@ servers:
     monkeypatch.setenv("AGENT_MCP_CONFIG_FILE", str(config))
     monkeypatch.setenv("GITHUB_MCP_TOKEN", "ghs_secret")
 
-    assert get_registry().servers == {}
-    assert get_registry().names == []
-    assert get_registry().defaults == []
+    registry = await registry_for_user(FakeConnectionStore(), user_id="nobody", cipher=_CIPHER)
+    assert registry.servers == {}
+    assert registry.names == []
+    assert registry.defaults == []
 
 
-def test_a_job_cannot_name_a_server_because_none_are_on_offer():
+@pytest.mark.asyncio
+async def test_a_user_who_connected_nothing_cannot_name_a_server():
     """Naming one fails at creation, and says so in the owner's language."""
-    with pytest.raises(McpRegistryError, match="not available yet"):
-        get_registry().resolve(["github"])
+    registry = await registry_for_user(FakeConnectionStore(), user_id="nobody", cipher=_CIPHER)
+    with pytest.raises(McpRegistryError, match="have not connected"):
+        registry.resolve(["github"])
 
 
-def test_a_job_that_names_nothing_still_runs():
+@pytest.mark.asyncio
+async def test_a_job_that_names_nothing_still_runs():
     """No MCP is a supported shape, not an error: the job just gets no tools."""
-    assert get_registry().resolve(None) == []
-    assert get_registry().resolve([]) == []
+    registry = await registry_for_user(FakeConnectionStore(), user_id="nobody", cipher=_CIPHER)
+    assert registry.resolve(None) == []
+    assert registry.resolve([]) == []
+
+
+@pytest.mark.asyncio
+async def test_one_users_connection_is_not_another_users():
+    """The property the deployment registry could not have.
+
+    Same server name, same code path, two users: one connected it and one did
+    not, and the second is refused in exactly the words someone who connected
+    nothing gets. No credential of the first user's is reachable through the
+    second's resolution.
+    """
+    store = FakeConnectionStore({"owner": [_connection()]})
+
+    owner_registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    assert owner_registry.names == ["github"]
+    assert owner_registry.resolve(["github"]) == ["github"]
+    assert owner_registry.servers["github"].headers == {"Authorization": "Bearer ghu_owner_secret"}
+
+    other_registry = await registry_for_user(store, user_id="someone-else", cipher=_CIPHER)
+    assert other_registry.names == []
+    with pytest.raises(McpRegistryError, match="have not connected"):
+        other_registry.resolve(["github"])
+
+
+@pytest.mark.asyncio
+async def test_connecting_is_the_opt_in_so_a_job_that_chose_nothing_gets_them():
+    """``None`` takes what the owner connected; ``[]`` still takes nothing."""
+    store = FakeConnectionStore({"owner": [_connection()]})
+    registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    assert registry.resolve(None) == ["github"]
+    assert registry.resolve([]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_connection_to_a_retired_provider_is_inert_not_fatal():
+    """A row outliving its catalogue entry drops out, taking nothing with it.
+
+    Withdrawing a provider is our decision, not the user's mistake, so the row
+    must not break resolution for the servers they can still reach.
+    """
+    store = FakeConnectionStore(
+        {"owner": [_connection(server="withdrawn"), _connection(server="github")]}
+    )
+    registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    assert registry.names == ["github"]
+
+
+@pytest.mark.asyncio
+async def test_an_undecryptable_credential_drops_only_its_own_server():
+    """One corrupt row cannot take out the servers beside it."""
+    broken = _connection(server="github")
+    broken["access_token_ciphertext"] = "not-fernet-ciphertext"
+    store = FakeConnectionStore({"owner": [broken]})
+    registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    assert registry.names == []
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_server_carries_the_catalogue_bound_not_the_rows():
+    """The tool surface comes from the reviewed entry, never from stored data.
+
+    A connection row supplies a credential and nothing else. If it could widen
+    what the agent may call, the catalogue's scope decision would be advisory.
+    """
+    row = _connection()
+    row["tools"] = ["delete_repository"]
+    store = FakeConnectionStore({"owner": [row]})
+    registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    server = registry.servers["github"]
+    assert server.tools == frozenset()
+    assert server.url == "https://api.githubcopilot.com/mcp/readonly"
 
 
 # ── the shapes the relay and proxy resolve against ────────────────────

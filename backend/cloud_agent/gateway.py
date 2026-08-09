@@ -224,6 +224,6 @@ class GatewayClient:
     # The ownership amendment moved the registry, its credentials and its proxy
     # to this service, and the gateway's endpoint went with them — so the
     # method could only ever 404, while its docstring still said a sandbox
-    # reaches MCP through the gateway's proxy. Read `get_registry()` from
+    # reaches MCP through the gateway's proxy. Read `registry_for_user()` from
     # `cloud_agent.mcp_registry` instead; nothing here asks the gateway about
     # tools, which is the whole point of the amendment.

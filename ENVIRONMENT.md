@@ -60,7 +60,7 @@ need a gateway secret here, the design is wrong — stop and escalate.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
-| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | **NEW** | Wraps stored GitLab/GitHub credentials. Replaces the gateway-derived key those secrets were encrypted with before the split, which is why migrating them needs a re-wrap step and not a copy (task H1). Generate random 32 bytes, unique per environment. |
+| `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` | **NEW** | Wraps stored GitLab/GitHub credentials, **and each user's MCP connection credentials** — one key to deploy and rotate, with the two kinds derived under different domain separators so a ciphertext from one table cannot be read or planted as the other's. Unset leaves both unconfigured rather than storing anything in the clear: MCP then offers an empty picker instead of failing the page. Replaces the gateway-derived key those secrets were encrypted with before the split, which is why migrating them needs a re-wrap step and not a copy (task H1). Generate random 32 bytes, unique per environment. |
 | `AGENT_CONTROL_TOKEN_SECRET` | **NEW** | Signs host/worker control tokens. Replaces the old derivation from the gateway's `API_KEY_SECRET` (task E3). Generate random 32 bytes, unique per environment. |
 | `AGENT_SESSION_SECRET` | **NEW** | Signs the web session cookie (task E8). Generate random 32 bytes, unique per environment. |
 | `AGENT_DISPATCHER_TOKEN` | existing | Authenticates host agents claiming work. Existing deployments may hold this outside this service's own configuration; confirm where it is actually read from before cutover rather than assuming. |
@@ -94,9 +94,17 @@ need a gateway secret here, the design is wrong — stop and escalate.
 
 ### MCP
 
-MCP belongs to this service: it owns the registry, each upstream's credential
-and the attempt fence, so it is the only place that can decide a tool call. The
+MCP belongs to this service: it owns the catalogue, each user's credential and
+the attempt fence, so it is the only place that can decide a tool call. The
 gateway serves models and answers nothing about MCP.
+
+**Which servers exist is not configuration.** The catalogue is a reviewed,
+in-code list (`backend/cloud_agent/mcp_catalogue.py`) and a user connects their
+own account to an entry in it; there is no variable that adds a server, and no
+variable that grants one to somebody. Credentials live per user in
+`agent_mcp_connections`, wrapped with
+[`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`](#own-secrets). The variables below
+are all about *reaching* the relay, never about what it may reach.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|

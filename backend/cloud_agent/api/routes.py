@@ -61,7 +61,8 @@ from cloud_agent.github_app import AppNotInstalled, GitHubAppError
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp_registry import get_registry
+from cloud_agent.mcp_catalogue import catalogue as mcp_catalogue
+from cloud_agent.mcp_registry import registry_for_user
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     EVENT_TYPE_PATTERN,
@@ -92,6 +93,7 @@ from cloud_agent.schemas import (
     AgentWorkspaceWriteRequest,
     GitHubConnectionResponse,
     GitHubConnectRequest,
+    McpIntegrationResponse,
     McpServerSummary,
     OAuthConnectRequest,
     RepoBranchesResponse,
@@ -417,9 +419,16 @@ async def get_agent_config(
         # will hit — not /v1/models, which answers for the *browsing* user and
         # offered models whose first agent call then 404ed.
         models=await agent_visible_models(gateway, user_id=user["user_id"]),
-        # Public fields only — McpServerSummary has nowhere to put a URL or a
-        # credential, which is how it stays that way.
-        mcp_servers=[McpServerSummary(**entry) for entry in _mcp_registry()],
+        # This user's connected servers, not the deployment's: same reason the
+        # repository list above is theirs. Public fields only — McpServerSummary
+        # has nowhere to put a URL or a credential, which is how it stays that
+        # way.
+        mcp_servers=[
+            McpServerSummary(**entry)
+            for entry in (
+                await _mcp_servers_for_user(store, user["user_id"]) if store is not None else []
+            )
+        ],
         mcp_runtimes=runtimes_supporting_mcp(),
         setup_egress_tier=setup_tier,
         agent_egress_tier=agent_tier,
@@ -605,6 +614,37 @@ async def _source_control_providers(
     return providers
 
 
+async def _mcp_integrations(*, user_id: str, store: AgentJobStore) -> list[McpIntegrationResponse]:
+    """The catalogue, marked with what this user has connected.
+
+    The whole catalogue, not just the connected part: a page that listed only
+    connections would have nowhere to show what is on offer, which is the
+    question someone with no connections is asking.
+
+    ``configured`` is false for every provider until the connect flow lands
+    (#49's next change) — connecting takes an OAuth round trip this service
+    cannot make yet, and a Connect button that cannot connect is worse than the
+    "Coming soon" the UI already renders for a provider in this state. What is
+    live here is everything *after* connecting: a row that exists resolves,
+    scopes a job and authorizes tool calls, and can be removed.
+    """
+    connected: dict[str, dict[str, Any]] = {}
+    for connection in await store.list_mcp_connections(user_id=user_id):
+        connected[connection["server"]] = connection
+    return [
+        McpIntegrationResponse(
+            name=provider.name,
+            label=provider.label,
+            description=provider.description,
+            capabilities=list(provider.capabilities),
+            configured=False,
+            connected=provider.name in connected,
+            account_label=(connected.get(provider.name) or {}).get("account_label"),
+        )
+        for provider in mcp_catalogue()
+    ]
+
+
 @router.get("/integrations", response_model=SourceControlIntegrationsResponse)
 async def list_source_control_integrations(
     user: dict[str, Any] = Depends(require_agent_owner),
@@ -612,7 +652,7 @@ async def list_source_control_integrations(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlIntegrationsResponse:
-    """Return configured/connected state for GitHub and GitLab.com."""
+    """Return configured/connected state for source control and MCP servers."""
     job_store = _require_store(store)
     return SourceControlIntegrationsResponse(
         providers=await _source_control_providers(
@@ -620,7 +660,55 @@ async def list_source_control_integrations(
             store=job_store,
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
+        ),
+        mcp=await _mcp_integrations(user_id=user["user_id"], store=job_store),
+    )
+
+
+@router.delete("/integrations/mcp/{server}", response_model=SourceControlIntegrationsResponse)
+async def disconnect_mcp_integration(
+    server: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+) -> SourceControlIntegrationsResponse:
+    """Remove this user's credential for one server.
+
+    Scoped to the caller in the delete itself rather than by looking the row up
+    first: there is no ordering of two statements that makes "check it is mine,
+    then delete it" as hard to get wrong as a ``WHERE user_id`` that cannot be
+    forgotten.
+
+    Running jobs are not cancelled. Their next tool call to this server fails
+    with the server reported as unavailable, because the relay resolves the
+    owner's connections per call rather than at job start — so disconnecting
+    takes effect immediately without anything having to hunt down live jobs.
+    """
+    job_store = _require_store(store)
+    removed = await job_store.delete_mcp_connection(user_id=user["user_id"], server=server)
+    if not removed:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "type": "not_found",
+                    "message": f"You have no {server!r} MCP connection.",
+                }
+            },
         )
+    logger.info(
+        "agent_mcp_disconnected",
+        extra={"event": "agent_mcp_disconnected", "server": server},
+    )
+    return SourceControlIntegrationsResponse(
+        providers=await _source_control_providers(
+            user_id=user["user_id"],
+            store=job_store,
+            app_credentials=app_credentials,
+            gitlab_oauth=gitlab_oauth,
+        ),
+        mcp=await _mcp_integrations(user_id=user["user_id"], store=job_store),
     )
 
 
@@ -738,7 +826,11 @@ async def disconnect_gitlab_integration(
             store=job_store,
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
-        )
+        ),
+        # This response replaces the page's whole state, so it has to carry the
+        # part this endpoint did not touch. Omitted, it would default to an
+        # empty list and read as "you have no MCP connections".
+        mcp=await _mcp_integrations(user_id=user["user_id"], store=job_store),
     )
 
 
@@ -891,19 +983,24 @@ async def _require_resolvable_model(
     )
 
 
-def _mcp_registry() -> list[dict[str, Any]]:
-    """The MCP servers on offer, which is none until per-user connections land.
+async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict[str, Any]]:
+    """The MCP servers *this user* has connected, for the composer.
 
-    Kept rather than inlined as ``[]``: the composer's contract already carries
-    this field, and a future per-user source fills it in here. The empty list
-    is what makes the picker render nothing and job creation refuse every name.
+    Names and display metadata only. A server's URL and its credential never
+    leave this process: the sandbox reaches an upstream through the relay,
+    which is the entire reason resolution lives beside the relay rather than
+    beside the picker. :class:`McpServerSummary` has no field either could land
+    in, so that stays true without a filter at this call site.
 
-    Names and display metadata only. A server's URL and headers never leave
-    this process: the sandbox reaches an upstream through the relay, which is
-    the entire reason resolution lives beside the relay rather than beside the
-    picker.
+    A deployment with no encryption key cannot hold anybody's credential, and
+    therefore has nothing to offer: that reads as an empty picker rather than a
+    failed page, which is what an operator who has not finished configuring
+    this should see.
     """
-    registry = get_registry()
+    try:
+        registry = await registry_for_user(store, user_id=user_id)
+    except SourceControlError:
+        return []
     servers: list[dict[str, Any]] = []
     for name in registry.names:
         server = registry.get(name)
@@ -922,37 +1019,43 @@ def _mcp_registry() -> list[dict[str, Any]]:
 
 
 async def _resolve_mcp_servers(
-    requested: list[str] | None, *, runtime: str, gateway: Any
+    requested: list[str] | None, *, runtime: str, store: AgentJobStore, user_id: str
 ) -> list[str]:
     """Settle which MCP servers a new job runs with, or refuse to create it.
+
+    Resolved against the *creating user's* connections. That is the signature
+    this whole feature turns on: a server someone else connected is unknown
+    here, and there is no deployment-wide list to fall back to.
 
     Both failures are refusals rather than silent drops, and for the same
     reason: a job is submitted because someone wants a task done, and a task
     written around a tool the agent turns out not to have does not fail — it
     quietly produces the wrong work, having spent the budget.
     """
-    configured = _mcp_registry()
-    names = sorted(str(entry.get("name") or "") for entry in configured)
+    connected = await _mcp_servers_for_user(store, user_id)
+    names = sorted(str(entry.get("name") or "") for entry in connected)
     if requested is None:
-        # ``None`` means the job did not choose and takes the deployment's
-        # defaults; an explicit ``[]`` means it wants none.
+        # ``None`` means the job did not choose, and takes everything its owner
+        # connected — connecting a server is the opt-in. An explicit ``[]``
+        # means it wants none.
         servers = sorted(
-            str(entry.get("name") or "") for entry in configured if entry.get("default")
+            str(entry.get("name") or "") for entry in connected if entry.get("default")
         )
     else:
         # Unknown names fail at creation rather than let the job discover
         # mid-run that the agent is missing the one capability it needed.
         unknown = sorted(set(requested) - set(names))
         if unknown:
-            known = ", ".join(names) or "none configured"
+            known = ", ".join(names) or "none yet"
             raise HTTPException(
                 status_code=400,
                 detail={
                     "error": {
                         "type": "invalid_request",
                         "message": (
-                            f"unknown MCP server(s): {', '.join(unknown)}. "
-                            f"This deployment offers: {known}"
+                            f"you have not connected these MCP server(s): "
+                            f"{', '.join(unknown)}. Connected: {known}. "
+                            "Connect a server on the Integrations page."
                         ),
                     }
                 },
@@ -1031,7 +1134,7 @@ async def create_agent_job(
     if body.base_ref:
         metadata[BASE_REF_METADATA_KEY] = body.base_ref
     mcp_servers = await _resolve_mcp_servers(
-        body.mcp_servers, runtime=body.runtime, gateway=gateway
+        body.mcp_servers, runtime=body.runtime, store=job_store, user_id=user["user_id"]
     )
     job = await job_store.create_job(
         user_id=user["user_id"],
@@ -1262,7 +1365,10 @@ async def create_agent_follow_up(
     # was very likely written expecting them.
     if body.runtime and parent.get("mcp_servers"):
         await _resolve_mcp_servers(
-            list(parent["mcp_servers"]), runtime=body.runtime, gateway=gateway
+            list(parent["mcp_servers"]),
+            runtime=body.runtime,
+            store=job_store,
+            user_id=user["user_id"],
         )
     job = await job_store.create_follow_up(
         parent_job_id=job_id,

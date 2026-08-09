@@ -29,6 +29,7 @@ and mean exactly what they did before.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 from datetime import datetime, timezone
 from typing import Any, ClassVar
@@ -38,15 +39,19 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent import broker_routing
+from cloud_agent import broker_routing, mcp_catalogue
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.mcp_catalogue import McpProvider
+from cloud_agent.mcp_registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
 
 pytestmark = pytest.mark.asyncio
 
 _OWNER = "user-owner"
 _OTHER = "user-other"
+_MCP_ENCRYPTION_KEY = "api-test-mcp-encryption-key"
+_MCP_CIPHER = mcp_cipher(_MCP_ENCRYPTION_KEY)
 
 
 class FakeAgentJobStore:
@@ -65,8 +70,34 @@ class FakeAgentJobStore:
         self.released: list[tuple[str, int]] = []
         self.runner_hosts: dict[str, dict[str, Any]] = {}
         self.active_host: str | None = None
+        self.mcp_connections: dict[str, list[dict[str, Any]]] = {}
         self._next_event_id = 1
         self._next_job = 1
+
+    # -- MCP connections --
+    #
+    # Keyed by user, because that is the only way the real store can be asked.
+
+    async def list_mcp_connections(self, *, user_id: str) -> list[dict[str, Any]]:
+        return sorted(self.mcp_connections.get(user_id, []), key=lambda row: row["server"])
+
+    async def delete_mcp_connection(self, *, user_id: str, server: str) -> bool:
+        rows = self.mcp_connections.get(user_id, [])
+        remaining = [row for row in rows if row["server"] != server]
+        self.mcp_connections[user_id] = remaining
+        return len(remaining) != len(rows)
+
+    def connect_mcp(self, *, user_id: str, server: str, token: str = "ghu_owner_secret") -> None:
+        """Seed a connection the way the OAuth flow will once it lands."""
+        self.mcp_connections.setdefault(user_id, []).append(
+            {
+                "server": server,
+                "account_label": "octocat",
+                "access_token_ciphertext": _MCP_CIPHER.encrypt(token),
+                "refresh_token_ciphertext": None,
+                "expires_at": None,
+            }
+        )
 
     # -- owner surface --
     async def create_job(self, **kwargs: Any) -> dict[str, Any]:
@@ -694,6 +725,10 @@ def _api_key_secret(monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "api-test-secret")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
+    # The key stored MCP credentials are wrapped under. Without it a deployment
+    # can hold nobody's credential, and the composer legitimately offers
+    # nothing — which would make every MCP case here pass for the wrong reason.
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _MCP_ENCRYPTION_KEY)
     yield
 
 
@@ -3356,57 +3391,86 @@ async def test_branches_are_only_listed_for_an_entitled_repo(store: FakeAgentJob
 # ── MCP server selection ──────────────────────────────────────────────
 
 
-def _mcp_registry():
-    """A registry with one default server and one opt-in server.
+_UPSTREAM_URL = "https://mcp.example.com/mcp/readonly"
+_UPSTREAM_TOKEN = "ghu_owner_secret"
 
-    The registry is this service's own now — the ownership amendment moved it
-    here with its credentials and its relay — so this is what
-    ``routes._mcp_registry()`` returns: name-ordered records, one per server.
+#: Two providers for the mechanism's sake, not the real catalogue's. Pinning
+#: these cases to the shipped entries would make them fail whenever a provider
+#: is added or withdrawn — a fact about somebody else's service, tested where it
+#: belongs in ``test_mcp_catalogue.py``.
+_TEST_PROVIDERS = (
+    McpProvider(
+        name="deepwiki",
+        label="DeepWiki",
+        description="",
+        url="https://wiki.example.com/mcp",
+        read_scope="allowlist",
+        scope_note="test double",
+        tools=frozenset({"read_wiki"}),
+    ),
+    McpProvider(
+        name="github",
+        label="GitHub",
+        description="",
+        url=_UPSTREAM_URL,
+        read_scope="endpoint",
+        scope_note="test double",
+    ),
+)
 
-    The URL and the credential are deliberately still in these records even
-    though the real contract strips them. Nothing this service does *needs*
-    them, which is exactly why leaving them in keeps the two "never leaks the
-    address or the token" assertions load-bearing: they now bite on this
-    router's own projection through ``McpServerSummary`` rather than on a fake
-    that had already removed the evidence.
+
+def _catalogue(monkeypatch, *names: str) -> None:
+    """Install a catalogue for one test.
+
+    Patched on the module rather than at each import site because both
+    ``catalogue()`` and ``get_provider()`` read these globals when called, so
+    every consumer sees the same list — which is the point: a provider that is
+    on offer to the composer must be the one job creation resolves against.
     """
-    return [
-        {
-            "name": "deepwiki",
-            "description": "",
-            "tools": [],
-            "default": False,
-            "url": "https://wiki.example.com/mcp",
-            "headers": {},
-        },
-        {
-            "name": "github",
-            "description": "",
-            "tools": ["get_issue"],
-            "default": True,
-            "url": "https://mcp.example.com/mcp",
-            "headers": {"Authorization": "Bearer ghs_secret"},
-        },
-    ]
+    providers = tuple(entry for entry in _TEST_PROVIDERS if not names or entry.name in names)
+    monkeypatch.setattr(mcp_catalogue, "CATALOGUE", providers)
+    monkeypatch.setattr(mcp_catalogue, "_BY_NAME", {entry.name: entry for entry in providers})
 
 
 async def test_the_composer_is_told_which_servers_and_which_runtimes(
-    client: AsyncClient, monkeypatch
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
     """A picker built from anything but the create endpoint's rules is decoration."""
-    monkeypatch.setattr(agent_jobs_router, "_mcp_registry", _mcp_registry)
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github", token=_UPSTREAM_TOKEN)
+    store.connect_mcp(user_id=_OWNER, server="deepwiki", token=_UPSTREAM_TOKEN)
     config = (await client.get("/v1/agent/config")).json()
 
     assert [entry["name"] for entry in config["mcp_servers"]] == ["deepwiki", "github"]
     assert config["mcp_runtimes"] == ["claude-code"]
-    # The composer learns what a server exposes, never how to reach it.
-    assert "ghs_secret" not in json.dumps(config)
+    # The composer learns what a server exposes, never how to reach it or what
+    # to present when it gets there.
+    assert _UPSTREAM_TOKEN not in json.dumps(config)
     assert "mcp.example.com" not in json.dumps(config)
 
 
-async def test_omitting_servers_takes_the_deployment_defaults(client: AsyncClient, monkeypatch):
-    """A dogfood deployment gets its issue tracker without asking each time."""
-    monkeypatch.setattr(agent_jobs_router, "_mcp_registry", _mcp_registry)
+async def test_the_composer_offers_only_what_this_user_connected(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """The whole point of #49: another person's connection is not on offer.
+
+    Both users exist and both servers are in the catalogue; only the connection
+    differs, and it is the only thing that may decide what the owner sees.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OTHER, server="github", token="ghu_someone_elses_secret")
+
+    config = (await client.get("/v1/agent/config")).json()
+    assert config["mcp_servers"] == []
+    assert "ghu_someone_elses_secret" not in json.dumps(config)
+
+
+async def test_omitting_servers_takes_everything_the_owner_connected(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """Connecting is the opt-in, so a job that chose nothing still gets them."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
         "/v1/agent/jobs",
         json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
@@ -3415,9 +3479,25 @@ async def test_omitting_servers_takes_the_deployment_defaults(client: AsyncClien
     assert created.json()["mcp_servers"] == ["github"]
 
 
-async def test_an_explicit_empty_list_means_no_servers(client: AsyncClient, monkeypatch):
+async def test_a_user_who_connected_nothing_gets_a_job_that_runs_without_mcp(
+    client: AsyncClient, monkeypatch
+):
+    """No MCP is a supported shape, not an error."""
+    _catalogue(monkeypatch)
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+    )
+    assert created.status_code == 201
+    assert created.json()["mcp_servers"] == []
+
+
+async def test_an_explicit_empty_list_means_no_servers(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
     """Choosing none is a real choice and must not be read as "unset"."""
-    monkeypatch.setattr(agent_jobs_router, "_mcp_registry", _mcp_registry)
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
         "/v1/agent/jobs",
         json={
@@ -3431,9 +3511,12 @@ async def test_an_explicit_empty_list_means_no_servers(client: AsyncClient, monk
     assert created.json()["mcp_servers"] == []
 
 
-async def test_an_unknown_server_is_refused_at_creation(client: AsyncClient, monkeypatch):
+async def test_an_unknown_server_is_refused_at_creation(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
     """Better than discovering mid-run that the task's one tool is missing."""
-    monkeypatch.setattr(agent_jobs_router, "_mcp_registry", _mcp_registry)
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
         "/v1/agent/jobs",
         json={
@@ -3447,9 +3530,40 @@ async def test_an_unknown_server_is_refused_at_creation(client: AsyncClient, mon
     assert "sentry" in created.text
 
 
-async def test_a_runtime_that_cannot_load_mcp_refuses_the_job(client: AsyncClient, monkeypatch):
+async def test_naming_a_server_someone_else_connected_is_refused_at_creation(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """Refused in the same words as one that does not exist.
+
+    A caller must not be able to tell "nobody has this" from "somebody else
+    has this" — the difference is another user's account state, and the reply
+    to a request that may not have it is the same either way.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OTHER, server="github", token="ghu_someone_elses_secret")
+    body = {
+        "repo": "owner/name",
+        "task_prompt": "fix it",
+        "model": "glm-5.1",
+    }
+
+    theirs = await client.post("/v1/agent/jobs", json={**body, "mcp_servers": ["github"]})
+    nobodys = await client.post("/v1/agent/jobs", json={**body, "mcp_servers": ["sentry"]})
+
+    assert theirs.status_code == 400
+    assert (
+        theirs.json()["detail"]["error"]["message"].replace("github", "sentry")
+        == nobodys.json()["detail"]["error"]["message"]
+    )
+    assert "ghu_someone_elses_secret" not in theirs.text
+
+
+async def test_a_runtime_that_cannot_load_mcp_refuses_the_job(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
     """Silently dropping the tools would produce confidently wrong work."""
-    monkeypatch.setattr(agent_jobs_router, "_mcp_registry", _mcp_registry)
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
         "/v1/agent/jobs",
         json={
@@ -3464,11 +3578,133 @@ async def test_a_runtime_that_cannot_load_mcp_refuses_the_job(client: AsyncClien
     assert "codex" in created.text
 
 
+@contextlib.asynccontextmanager
+async def _integrations_client(store: FakeAgentJobStore):
+    """A client for the Integrations page, which reads more of the store.
+
+    The page answers for source control as well as MCP, so the fake needs the
+    grant surface and a GitLab lookup before it can be asked at all — neither
+    of which any assertion here is about.
+    """
+    equipped = _store_with_grants(store)
+
+    async def get_gitlab_connection(*, user_id: str):
+        return None
+
+    equipped.get_gitlab_connection = get_gitlab_connection
+    app = _build_app(equipped)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+        yield api
+
+
+async def test_the_integrations_page_lists_the_catalogue_with_connection_state(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """The whole catalogue, marked — not just the part already connected.
+
+    Someone with no connections is asking "what can I connect?", and a list of
+    their connections is empty exactly when that question matters most.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github", token=_UPSTREAM_TOKEN)
+
+    async with _integrations_client(store) as api:
+        body = (await api.get("/v1/agent/integrations")).json()
+    rows = {entry["name"]: entry for entry in body["mcp"]}
+
+    assert set(rows) == {"github", "deepwiki"}
+    assert rows["github"]["connected"] is True
+    assert rows["github"]["account_label"] == "octocat"
+    assert rows["deepwiki"]["connected"] is False
+    # Connecting is not possible until the OAuth flow lands, and the row says
+    # so rather than offering a button that cannot work.
+    assert rows["github"]["configured"] is False
+    assert rows["github"]["connect_url"] is None
+    assert _UPSTREAM_TOKEN not in json.dumps(body)
+
+
+async def test_the_integrations_page_never_shows_another_users_connection(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Connected is a fact about the caller, and only the caller."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OTHER, server="github", token="ghu_someone_elses_secret")
+
+    async with _integrations_client(store) as api:
+        body = (await api.get("/v1/agent/integrations")).json()
+    rows = {entry["name"]: entry for entry in body["mcp"]}
+
+    assert rows["github"]["connected"] is False
+    assert rows["github"]["account_label"] is None
+    assert "ghu_someone_elses_secret" not in json.dumps(body)
+
+
+async def test_disconnecting_removes_only_the_callers_credential(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Two users connected the same server; one disconnects."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    store.connect_mcp(user_id=_OTHER, server="github", token="ghu_someone_elses_secret")
+
+    async with _integrations_client(store) as api:
+        response = await api.delete("/v1/agent/integrations/mcp/github")
+
+    assert response.status_code == 200
+    rows = {entry["name"]: entry for entry in response.json()["mcp"]}
+    assert rows["github"]["connected"] is False
+    assert [row["server"] for row in store.mcp_connections[_OTHER]] == ["github"]
+
+
+async def test_disconnecting_a_server_that_was_never_connected_is_a_404(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Not an error worth hiding, and not a silent success either."""
+    _catalogue(monkeypatch)
+    async with _integrations_client(store) as api:
+        response = await api.delete("/v1/agent/integrations/mcp/github")
+    assert response.status_code == 404
+
+
+async def test_disconnecting_leaves_a_running_jobs_server_list_alone(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """A job keeps the name it was created with and loses the credential.
+
+    Nothing hunts down live jobs on disconnect: the relay resolves the owner's
+    connections per call, so the job's own ``mcp_servers`` list stays as it was
+    and the server simply stops resolving — which is what
+    ``test_a_server_the_owner_no_longer_has_reports_it_as_unavailable`` pins at
+    the relay.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github"],
+        },
+    )
+    assert created.json()["mcp_servers"] == ["github"]
+
+    async with _integrations_client(store) as api:
+        assert (await api.delete("/v1/agent/integrations/mcp/github")).status_code == 200
+
+    job = (await client.get(f"/v1/agent/jobs/{created.json()['id']}")).json()
+    assert job["mcp_servers"] == ["github"]
+    assert await store.list_mcp_connections(user_id=_OWNER) == []
+
+
 async def test_the_claim_hands_the_runner_the_job_s_servers(
     client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
     """The runner passes names to the adapter; it never learns the addresses."""
-    monkeypatch.setattr(agent_jobs_router, "_mcp_registry", _mcp_registry)
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github", token=_UPSTREAM_TOKEN)
+    store.connect_mcp(user_id=_OWNER, server="deepwiki", token=_UPSTREAM_TOKEN)
     created = await client.post(
         "/v1/agent/jobs",
         json={

@@ -93,6 +93,22 @@ def _registry(tools: frozenset[str] = frozenset({"get_issue"})) -> McpRegistry:
     )
 
 
+def _patch_registry(monkeypatch, registry: McpRegistry, resolved_for: list[str] | None = None):
+    """Resolve every user to ``registry``, recording who was asked about.
+
+    Servers resolve per user now, so the relay has to name one — and these
+    tests care *which*: the caller is a sandbox, and the credential it spends
+    must be the job owner's. ``resolved_for`` is how that is observed.
+    """
+
+    async def _resolve(store, *, user_id, cipher=None):
+        if resolved_for is not None:
+            resolved_for.append(user_id)
+        return registry
+
+    monkeypatch.setattr(agent_mcp_router, "registry_for_user", _resolve)
+
+
 @pytest.fixture()
 def upstream():
     """The stand-in MCP server."""
@@ -108,7 +124,7 @@ def store():
 @pytest_asyncio.fixture()
 async def client(monkeypatch, store, upstream):
     """Mount the proxy router with a mocked upstream and a fixed registry."""
-    monkeypatch.setattr(agent_mcp_router, "get_registry", _registry)
+    _patch_registry(monkeypatch, _registry())
     monkeypatch.setattr(
         agent_mcp_router,
         "build_upstream_client",
@@ -179,7 +195,7 @@ async def test_a_registry_header_replaces_the_sandbox_header_rather_than_joining
             )
         }
     )
-    monkeypatch.setattr(agent_mcp_router, "get_registry", lambda: registry)
+    _patch_registry(monkeypatch, registry)
     monkeypatch.setattr(
         agent_mcp_router,
         "build_upstream_client",
@@ -260,7 +276,7 @@ async def test_the_catalogue_is_filtered_on_the_way_back(monkeypatch, store, ups
             "result": {"tools": [{"name": "get_issue"}, {"name": "create_issue"}]},
         }
     ).encode()
-    monkeypatch.setattr(agent_mcp_router, "get_registry", _registry)
+    _patch_registry(monkeypatch, _registry())
     monkeypatch.setattr(
         agent_mcp_router,
         "build_upstream_client",
@@ -277,11 +293,35 @@ async def test_the_catalogue_is_filtered_on_the_way_back(monkeypatch, store, ups
     assert [tool["name"] for tool in response.json()["result"]["tools"]] == ["get_issue"]
 
 
-async def test_a_server_removed_from_the_registry_reports_a_deployment_fault(
+async def test_tools_resolve_against_the_job_owner_not_the_caller(monkeypatch, store, upstream):
+    """The sandbox does not get to say whose tools it is spending.
+
+    The caller here is a sandbox holding a job token; the owner is whoever the
+    fence says the job belongs to. Resolution must ask about the owner, because
+    a per-user registry asked about anyone else is one user's credential
+    spending on another user's job.
+    """
+    resolved_for: list[str] = []
+    _patch_registry(monkeypatch, _registry(), resolved_for)
+    monkeypatch.setattr(
+        agent_mcp_router,
+        "build_upstream_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler)),
+    )
+    app = FastAPI()
+    app.include_router(agent_mcp_router.router)
+    app.dependency_overrides[get_agent_job_store] = lambda: store
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+        response = await api.post("/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth())
+    assert response.status_code == 200
+    assert resolved_for == ["owner-1"]
+
+
+async def test_a_server_the_owner_no_longer_has_reports_it_as_unavailable(
     monkeypatch, client, upstream
 ):
-    """Granted at creation, gone since: a 503, not a permission error."""
-    monkeypatch.setattr(agent_mcp_router, "get_registry", McpRegistry)
+    """Granted at creation, disconnected since: a 503, not a permission error."""
+    _patch_registry(monkeypatch, McpRegistry())
     response = await client.post("/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth())
     assert response.status_code == 503
     assert upstream.requests == []

@@ -43,18 +43,23 @@ class OAuthStateError(SourceControlError):
     """An OAuth state is missing, expired, replayed, or owned by another user."""
 
 
+#: Domain separator for source-control credentials. Any other kind of
+#: user-owned credential this service stores derives its key under a different
+#: domain from the *same* secret: one key to deploy and rotate, while a
+#: ciphertext from one table cannot be decrypted — or planted — as another's.
+SOURCE_CONTROL_DOMAIN = b"hybridinference/source-control/v1"
+
+
 class SourceControlCipher:
     """Encrypt provider secrets with a domain-separated server key."""
 
-    def __init__(self, secret: str | None = None) -> None:
+    def __init__(self, secret: str | None = None, *, domain: bytes = SOURCE_CONTROL_DOMAIN) -> None:
         material = secret if secret is not None else os.getenv(ENV_ENCRYPTION_KEY, "")
         if not material:
             raise SourceControlError(
                 f"{ENV_ENCRYPTION_KEY} must be set before source-control credentials can be stored"
             )
-        digest = hashlib.sha256(
-            b"hybridinference/source-control/v1\0" + material.encode("utf-8")
-        ).digest()
+        digest = hashlib.sha256(domain + b"\0" + material.encode("utf-8")).digest()
         self._fernet = Fernet(base64.urlsafe_b64encode(digest))
 
     def encrypt(self, value: str) -> str:
@@ -394,6 +399,7 @@ class GitLabOAuthClient:
 
 
 __all__ = [
+    "SOURCE_CONTROL_DOMAIN",
     "GitLabOAuthClient",
     "GitLabOAuthConfig",
     "OAuthStateError",
