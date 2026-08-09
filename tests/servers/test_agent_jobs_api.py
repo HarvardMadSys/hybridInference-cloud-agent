@@ -31,7 +31,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar
 
 import pytest
@@ -87,7 +87,14 @@ class FakeAgentJobStore:
         self.mcp_connections[user_id] = remaining
         return len(remaining) != len(rows)
 
-    def connect_mcp(self, *, user_id: str, server: str, token: str = "ghu_owner_secret") -> None:
+    def connect_mcp(
+        self,
+        *,
+        user_id: str,
+        server: str,
+        token: str = "ghu_owner_secret",
+        expires_at: datetime | None = None,
+    ) -> None:
         """Seed a connection the way the OAuth flow will once it lands."""
         self.mcp_connections.setdefault(user_id, []).append(
             {
@@ -95,7 +102,7 @@ class FakeAgentJobStore:
                 "account_label": "octocat",
                 "access_token_ciphertext": _MCP_CIPHER.encrypt(token),
                 "refresh_token_ciphertext": None,
-                "expires_at": None,
+                "expires_at": expires_at,
             }
         )
 
@@ -3664,6 +3671,125 @@ async def test_disconnecting_a_server_that_was_never_connected_is_a_404(
     async with _integrations_client(store) as api:
         response = await api.delete("/v1/agent/integrations/mcp/github")
     assert response.status_code == 404
+
+
+async def test_a_follow_up_is_refused_when_its_thread_s_server_was_disconnected(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """Fail fast at creation, on **every** turn — not only a runtime switch.
+
+    A thread's servers are inherited by each turn, and whether they are still
+    connected changes on its own, from the Integrations page, between turns.
+    Validating only when the caller also switched runtime left the ordinary
+    follow-up — same harness, next prompt — returning 201 and discovering at
+    its first tool call that the tools the prompt was written around are gone.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github"],
+        },
+    )
+    job_id = created.json()["id"]
+
+    async with _integrations_client(store) as api:
+        assert (await api.delete("/v1/agent/integrations/mcp/github")).status_code == 200
+
+    # No runtime in the body: the plain "keep going" follow-up.
+    follow_up = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "again"})
+
+    assert follow_up.status_code == 400
+    assert "github" in follow_up.text
+
+
+async def test_a_follow_up_still_runs_while_its_thread_s_server_is_connected(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """The check must not refuse the ordinary case it now runs on."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github"],
+        },
+    )
+
+    follow_up = await client.post(
+        f"/v1/agent/jobs/{created.json()['id']}/follow-ups", json={"prompt": "again"}
+    )
+
+    assert follow_up.status_code == 201
+
+
+async def test_an_expired_connection_is_neither_offered_nor_usable(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """A stored expiry in the past is a token we already know will be refused.
+
+    Offering it would put the server in the composer, let a job be created
+    around it, and send a dead bearer token upstream — with the answer sitting
+    in the row all three read.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(
+        user_id=_OWNER,
+        server="github",
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    config = (await client.get("/v1/agent/config")).json()
+    assert config["mcp_servers"] == []
+
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github"],
+        },
+    )
+    assert created.status_code == 400
+
+    # And a job that named nothing does not silently pick it up either.
+    default = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+    )
+    assert default.json()["mcp_servers"] == []
+
+
+async def test_the_integrations_page_says_why_a_connection_buys_nothing(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Connected and unusable is a real state, and the page must name it.
+
+    Reporting it as simply connected puts *Connected (octocat)* beside a
+    composer offering nothing, with no way for the owner to tell which of the
+    two is wrong or what to do about it.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(
+        user_id=_OWNER,
+        server="github",
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    async with _integrations_client(store) as api:
+        body = (await api.get("/v1/agent/integrations")).json()
+    row = {entry["name"]: entry for entry in body["mcp"]}["github"]
+
+    assert row["connected"] is True
+    assert "expired" in row["error"]
 
 
 async def test_disconnecting_leaves_a_running_jobs_server_list_alone(

@@ -31,13 +31,17 @@ pipe.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp_catalogue import get_provider
-from cloud_agent.source_control import SourceControlCipher
+from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore
+
+logger = get_logger(__name__)
 
 
 class McpRegistryError(Exception):
@@ -162,62 +166,202 @@ def mcp_cipher(secret: str | None = None) -> SourceControlCipher:
     return SourceControlCipher(secret, domain=MCP_CREDENTIAL_DOMAIN)
 
 
+def _has_expired(connection: dict[str, Any]) -> bool:
+    """Whether the stored credential is one we already know to be dead.
+
+    ``NULL`` means "no expiry we were told about", not "never expires", so it
+    reads as live: such a connection fails at its next tool call if the upstream
+    has revoked it, which is the best a provider that issues no expiry allows. A
+    *known* expiry in the past is a different thing — that token is one we know
+    will be refused, offered to the composer as though it worked and then sent
+    upstream anyway.
+
+    No refresh margin. Refreshing arrives with the connect flow; until then a
+    margin would only disconnect still-valid credentials early.
+    """
+    expires_at = connection.get("expires_at")
+    if expires_at is None:
+        return False
+    if expires_at.tzinfo is None:
+        # asyncpg returns tz-aware values for TIMESTAMPTZ, so a naive one can
+        # only come from a fixture; reading it as UTC matches how it was written.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc)
+
+
+@dataclass(frozen=True)
+class McpConnectionState:
+    """One stored connection, and whether it can currently be used.
+
+    The single answer to "is this connection live", so the composer, job
+    creation, the relay and the Integrations page cannot disagree — which they
+    would the moment each applied its own subset of the checks. A page saying
+    *Connected* beside a picker offering nothing is the shape that produces.
+    """
+
+    server: str
+    account_label: str | None
+    #: The reachable server, or ``None`` when this connection buys nothing.
+    resolved: McpServer | None
+    #: Why it buys nothing, in the owner's terms. ``None`` when it works.
+    error: str | None
+
+
+async def connection_states(
+    store: AgentJobStore,
+    *,
+    user_id: str,
+    cipher: SourceControlCipher | None = None,
+) -> list[McpConnectionState]:
+    """Read every connection ``user_id`` has: resolved, or with its reason.
+
+    Never raises because a connection cannot be used. A missing encryption key,
+    a credential that will not decrypt, an expiry already past, a provider
+    withdrawn from the catalogue — each disables *that* connection and leaves
+    the others alone.
+
+    The missing key used to be the exception: it propagated, and had to be
+    caught identically at every call site. The relay's catch was missing, so a
+    key rotated away turned every tool call of every running job into a 500 with
+    a stack trace rather than the 503 the relay documents. Handling it here
+    means no call site can forget.
+    """
+    connections = await store.list_mcp_connections(user_id=user_id)
+    if not connections:
+        return []
+
+    resolved_cipher = cipher
+    if resolved_cipher is None:
+        try:
+            resolved_cipher = mcp_cipher()
+        except SourceControlError:
+            # Rows exist and not one of them can be opened: a deployment-level
+            # fault, and the only failure here that is nobody's connection's
+            # own. Logged once rather than per row, and at error, because it is
+            # the earliest signal that a key rotation went wrong.
+            logger.error(
+                "agent_mcp_encryption_key_missing",
+                extra={
+                    "event": "agent_mcp_encryption_key_missing",
+                    "user_id": user_id,
+                    "connections": len(connections),
+                },
+            )
+            return [
+                McpConnectionState(
+                    server=connection["server"],
+                    account_label=connection.get("account_label"),
+                    resolved=None,
+                    error="MCP is not configured on this deployment.",
+                )
+                for connection in connections
+            ]
+
+    states: list[McpConnectionState] = []
+    for connection in connections:
+        server_name = connection["server"]
+        label = connection.get("account_label")
+        provider = get_provider(server_name)
+        if provider is None:
+            # Withdrawn after someone connected it: our decision, not their
+            # mistake. Not logged — ordinary operation, not a fault.
+            states.append(
+                McpConnectionState(
+                    server=server_name,
+                    account_label=label,
+                    resolved=None,
+                    error="This server is no longer offered.",
+                )
+            )
+            continue
+        if _has_expired(connection):
+            states.append(
+                McpConnectionState(
+                    server=server_name,
+                    account_label=label,
+                    resolved=None,
+                    error="This connection has expired. Connect it again.",
+                )
+            )
+            continue
+        try:
+            token = resolved_cipher.decrypt(connection["access_token_ciphertext"])
+        except Exception:
+            # The earliest signal that a re-key left rows behind; without it the
+            # first sign is a job failing a tool call much later. The ciphertext
+            # is deliberately not in the record.
+            logger.warning(
+                "agent_mcp_credential_unreadable",
+                extra={
+                    "event": "agent_mcp_credential_unreadable",
+                    "user_id": user_id,
+                    "server": server_name,
+                },
+            )
+            states.append(
+                McpConnectionState(
+                    server=server_name,
+                    account_label=label,
+                    resolved=None,
+                    error="This connection could not be read. Connect it again.",
+                )
+            )
+            continue
+        states.append(
+            McpConnectionState(
+                server=server_name,
+                account_label=label,
+                resolved=McpServer(
+                    name=provider.name,
+                    # The user's own credential. It reaches the upstream and
+                    # nothing else: `public()` has nowhere to put it, and the
+                    # relay strips it from everything travelling back toward
+                    # the sandbox.
+                    headers={"Authorization": f"Bearer {token}"},
+                    url=provider.url,
+                    tools=provider.tools,
+                    description=provider.description,
+                    # Connecting is the opt-in, so everything connected is on
+                    # by default for a job that did not choose. See
+                    # `McpRegistry.resolve`.
+                    default=True,
+                ),
+                error=None,
+            )
+        )
+    return states
+
+
 async def registry_for_user(
     store: AgentJobStore,
     *,
     user_id: str,
     cipher: SourceControlCipher | None = None,
 ) -> McpRegistry:
-    """Resolve the servers ``user_id`` has connected, with their credentials.
+    """Resolve the servers ``user_id`` can reach right now, with their credentials.
 
     Two independent inputs, and a server needs both: a catalogue entry, which
     says the provider is on offer and how its tool surface is bounded, and this
-    user's connection row, which supplies the credential. A connection whose
-    catalogue entry has since been retired resolves to nothing — the row is
-    inert rather than an error, because a provider withdrawn after someone
-    connected it is our decision, not their mistake, and a job holding one
-    should hear "no longer available" from the relay rather than crash here.
-
-    A credential that will not decrypt is treated the same way: skipped, so one
-    unreadable row cannot take out every other server the user connected. The
-    relay reports the specific server as unavailable when the job actually
-    reaches for it.
+    user's connection row, which supplies a credential that still works. A
+    connection failing any of those tests is absent rather than fatal, so one
+    dead row cannot take out the servers beside it — :func:`connection_states`
+    holds which tests those are and what each one reports.
     """
-    connections = await store.list_mcp_connections(user_id=user_id)
-    if not connections:
-        return McpRegistry()
-    resolved_cipher = cipher if cipher is not None else mcp_cipher()
-
-    servers: dict[str, McpServer] = {}
-    for connection in connections:
-        provider = get_provider(connection["server"])
-        if provider is None:
-            continue
-        try:
-            token = resolved_cipher.decrypt(connection["access_token_ciphertext"])
-        except Exception:
-            continue
-        servers[provider.name] = McpServer(
-            name=provider.name,
-            # The user's own credential. It reaches the upstream and nothing
-            # else: `public()` has nowhere to put it, and the relay strips it
-            # from everything travelling back toward the sandbox.
-            headers={"Authorization": f"Bearer {token}"},
-            url=provider.url,
-            tools=provider.tools,
-            description=provider.description,
-            # Connecting is the opt-in, so everything connected is on by
-            # default for a job that did not choose. See `McpRegistry.resolve`.
-            default=True,
-        )
-    return McpRegistry(servers=servers)
+    states = await connection_states(store, user_id=user_id, cipher=cipher)
+    return McpRegistry(
+        servers={
+            state.resolved.name: state.resolved for state in states if state.resolved is not None
+        }
+    )
 
 
 __all__ = [
     "MCP_CREDENTIAL_DOMAIN",
+    "McpConnectionState",
     "McpRegistry",
     "McpRegistryError",
     "McpServer",
+    "connection_states",
     "mcp_cipher",
     "registry_for_user",
 ]

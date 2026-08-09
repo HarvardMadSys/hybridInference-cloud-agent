@@ -150,6 +150,30 @@ async def test_a_connection_may_carry_no_refresh_token_or_expiry(store: AgentJob
     assert row["expires_at"] is None
 
 
+async def test_a_stored_expiry_round_trips_as_an_aware_timestamp(store: AgentJobStore) -> None:
+    """Resolution compares this against ``now``; a naive value there raises.
+
+    The column is ``TIMESTAMPTZ`` and asyncpg gives back an aware datetime, so
+    the comparison in ``_has_expired`` is safe — but that is a property of the
+    column type, which is exactly the kind of thing a unit test with a
+    hand-built dict cannot check.
+    """
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    await store.upsert_mcp_connection(
+        user_id=_OWNER,
+        server="github",
+        account_label="octocat",
+        access_token_ciphertext="ciphertext",
+        refresh_token_ciphertext="refresh-ciphertext",
+        expires_at=expires_at,
+    )
+
+    row = (await store.list_mcp_connections(user_id=_OWNER))[0]
+    assert row["expires_at"].tzinfo is not None
+    assert abs((row["expires_at"] - expires_at).total_seconds()) < 1
+    assert row["refresh_token_ciphertext"] == "refresh-ciphertext"
+
+
 async def test_oauth_state_accepts_an_mcp_provider_name(store: AgentJobStore) -> None:
     """The widened check, tested against the constraint rather than its name.
 

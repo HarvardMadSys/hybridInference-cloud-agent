@@ -60,6 +60,18 @@ class FakeJobStore:
             "model": "glm-5.1",
         }
 
+    async def list_mcp_connections(self, *, user_id: str) -> list[dict[str, Any]]:
+        """The owner's stored connections, for cases that use real resolution."""
+        return [
+            {
+                "server": "github",
+                "account_label": "octocat",
+                "access_token_ciphertext": "ciphertext-that-needs-a-key",
+                "refresh_token_ciphertext": None,
+                "expires_at": None,
+            }
+        ]
+
 
 class Upstream:
     """A stand-in MCP server that records what the gateway sent it."""
@@ -315,6 +327,34 @@ async def test_tools_resolve_against_the_job_owner_not_the_caller(monkeypatch, s
         response = await api.post("/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth())
     assert response.status_code == 200
     assert resolved_for == ["owner-1"]
+
+
+async def test_a_lost_encryption_key_is_a_503_and_not_an_unhandled_error(
+    monkeypatch, store, upstream
+):
+    """Real resolution, no key: the documented 503, not a 500 with a stack trace.
+
+    Deliberately does **not** patch ``registry_for_user`` — the bug this pins
+    was in the real one, which raised on a missing key while only the composer
+    caught it. A deployment that had the key, has connections, and then loses it
+    (a rotation gone wrong, a partial rollout) would turn every tool call of
+    every running job into a 500. Fail-closed either way; the difference is
+    whether the alerts say what happened.
+    """
+    monkeypatch.delenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setattr(
+        agent_mcp_router,
+        "build_upstream_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler)),
+    )
+    app = FastAPI()
+    app.include_router(agent_mcp_router.router)
+    app.dependency_overrides[get_agent_job_store] = lambda: store
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+        response = await api.post("/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth())
+
+    assert response.status_code == 503
+    assert upstream.requests == []
 
 
 async def test_a_server_the_owner_no_longer_has_reports_it_as_unavailable(

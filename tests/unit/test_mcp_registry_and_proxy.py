@@ -18,6 +18,7 @@ to *that* user.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -26,6 +27,7 @@ from cloud_agent.mcp_registry import (
     McpRegistry,
     McpRegistryError,
     McpServer,
+    connection_states,
     mcp_cipher,
     registry_for_user,
 )
@@ -170,6 +172,99 @@ async def test_an_undecryptable_credential_drops_only_its_own_server():
     store = FakeConnectionStore({"owner": [broken]})
     registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
     assert registry.names == []
+
+
+@pytest.mark.asyncio
+async def test_a_credential_we_know_has_expired_is_not_offered():
+    """A stored expiry in the past is a token we know will be refused.
+
+    Resolving it anyway puts the server in the composer, lets a job be created
+    around it, and then sends a dead bearer token upstream — three places that
+    all had the answer in the row they were reading.
+    """
+    expired = _connection()
+    expired["expires_at"] = datetime.now(timezone.utc) - timedelta(minutes=1)
+    store = FakeConnectionStore({"owner": [expired]})
+
+    registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    assert registry.names == []
+    with pytest.raises(McpRegistryError, match="have not connected"):
+        registry.resolve(["github"])
+
+
+@pytest.mark.asyncio
+async def test_an_expiry_still_ahead_resolves_normally():
+    """The boundary is the expiry itself, with no margin taken off it."""
+    live = _connection()
+    live["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=30)
+    store = FakeConnectionStore({"owner": [live]})
+
+    registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    assert registry.names == ["github"]
+
+
+@pytest.mark.asyncio
+async def test_no_stored_expiry_means_no_expiry_we_know_of():
+    """``NULL`` is "the provider told us nothing", not "already dead"."""
+    store = FakeConnectionStore({"owner": [_connection()]})
+    registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    assert registry.names == ["github"]
+
+
+@pytest.mark.asyncio
+async def test_a_naive_stored_expiry_is_read_as_utc():
+    """A comparison against a naive datetime raises; it must not reach one."""
+    expired = _connection()
+    expired["expires_at"] = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=1)
+    store = FakeConnectionStore({"owner": [expired]})
+
+    registry = await registry_for_user(store, user_id="owner", cipher=_CIPHER)
+    assert registry.names == []
+
+
+@pytest.mark.asyncio
+async def test_a_missing_encryption_key_disables_mcp_rather_than_raising(monkeypatch):
+    """The failure that used to reach the relay as a 500.
+
+    A deployment that had a key, has connections, and then loses the key —
+    a rotation gone wrong, or a partial rollout — must degrade to "no servers"
+    at every call site. It used to propagate, and the relay had no catch: every
+    tool call of every running job became a 500 with a stack trace instead of
+    the 503 the relay documents.
+    """
+    store = FakeConnectionStore({"owner": [_connection()]})
+
+    # With the key, the connection resolves — so the assertion below is about
+    # the key and not about some other reason this row might not resolve.
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "unit-test-encryption-key")
+    assert (await registry_for_user(store, user_id="owner")).names == ["github"]
+
+    monkeypatch.delenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", raising=False)
+    assert (await registry_for_user(store, user_id="owner")).names == []
+
+    states = await connection_states(store, user_id="owner")
+    assert [state.error for state in states] == ["MCP is not configured on this deployment."]
+
+
+@pytest.mark.asyncio
+async def test_every_unusable_connection_says_why():
+    """The page and the picker read one answer, so they cannot disagree."""
+    expired = _connection(server="github")
+    expired["expires_at"] = datetime.now(timezone.utc) - timedelta(minutes=1)
+    unreadable = _connection(server="withdrawn")
+    unreadable["access_token_ciphertext"] = "not-fernet-ciphertext"
+    store = FakeConnectionStore({"owner": [expired, unreadable]})
+
+    states = {
+        state.server: state
+        for state in await connection_states(store, user_id="owner", cipher=_CIPHER)
+    }
+
+    assert states["github"].resolved is None
+    assert "expired" in states["github"].error
+    # Withdrawn is checked before the credential: a row for a provider that is
+    # gone should not be reported as a credential problem the owner can fix.
+    assert states["withdrawn"].error == "This server is no longer offered."
 
 
 @pytest.mark.asyncio

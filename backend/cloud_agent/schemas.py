@@ -707,6 +707,11 @@ class McpIntegrationResponse(BaseModel):
     connected: bool = False
     account_label: str | None = None
     connect_url: str | None = None
+    #: Why a connection that exists buys nothing — expired, unreadable, or a
+    #: provider withdrawn since. ``connected`` stays true because the row is
+    #: really there and disconnecting it is the way out; this says what the
+    #: owner has to do about it. Mirrors ``SourceControlProviderResponse``.
+    error: str | None = None
 
 
 class SourceControlIntegrationsResponse(BaseModel):

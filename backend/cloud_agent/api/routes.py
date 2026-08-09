@@ -62,7 +62,7 @@ from cloud_agent.host_pool import hash_secret
 from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp_catalogue import catalogue as mcp_catalogue
-from cloud_agent.mcp_registry import registry_for_user
+from cloud_agent.mcp_registry import connection_states, registry_for_user
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     EVENT_TYPE_PATTERN,
@@ -627,10 +627,14 @@ async def _mcp_integrations(*, user_id: str, store: AgentJobStore) -> list[McpIn
     "Coming soon" the UI already renders for a provider in this state. What is
     live here is everything *after* connecting: a row that exists resolves,
     scopes a job and authorizes tool calls, and can be removed.
+
+    Read through ``connection_states`` rather than straight from the store, so
+    a connection that exists but buys nothing says why. Reporting ``connected``
+    from the row alone would put *Connected (octocat)* on this page beside a
+    composer offering nothing — same data, two answers, and no way for the
+    owner to tell which one is wrong.
     """
-    connected: dict[str, dict[str, Any]] = {}
-    for connection in await store.list_mcp_connections(user_id=user_id):
-        connected[connection["server"]] = connection
+    states = {state.server: state for state in await connection_states(store, user_id=user_id)}
     return [
         McpIntegrationResponse(
             name=provider.name,
@@ -638,8 +642,11 @@ async def _mcp_integrations(*, user_id: str, store: AgentJobStore) -> list[McpIn
             description=provider.description,
             capabilities=list(provider.capabilities),
             configured=False,
-            connected=provider.name in connected,
-            account_label=(connected.get(provider.name) or {}).get("account_label"),
+            connected=provider.name in states,
+            account_label=(
+                states[provider.name].account_label if provider.name in states else None
+            ),
+            error=states[provider.name].error if provider.name in states else None,
         )
         for provider in mcp_catalogue()
     ]
@@ -992,15 +999,13 @@ async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict
     beside the picker. :class:`McpServerSummary` has no field either could land
     in, so that stays true without a filter at this call site.
 
-    A deployment with no encryption key cannot hold anybody's credential, and
-    therefore has nothing to offer: that reads as an empty picker rather than a
-    failed page, which is what an operator who has not finished configuring
-    this should see.
+    Only connections that currently work: an expired credential, an unreadable
+    one, or a deployment with no encryption key all leave the picker empty
+    rather than offering a server whose first tool call is already known to
+    fail. ``connection_states`` decides that, and the Integrations page reports
+    the reason from the same source.
     """
-    try:
-        registry = await registry_for_user(store, user_id=user_id)
-    except SourceControlError:
-        return []
+    registry = await registry_for_user(store, user_id=user_id)
     servers: list[dict[str, Any]] = []
     for name in registry.names:
         server = registry.get(name)
@@ -1012,7 +1017,6 @@ async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict
                 "description": server.description,
                 "default": server.default,
                 "tools": sorted(server.tools),
-                "unfiltered": server.unfiltered,
             }
         )
     return servers
@@ -1359,14 +1363,25 @@ async def create_agent_follow_up(
             status_code=403,
             detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
         ) from exc
-    # A thread's MCP servers are inherited by every turn, so switching harness
-    # mid-thread can land tools on a runtime that cannot load them. Refuse,
-    # rather than run a turn whose tools silently vanish — the follow-up prompt
-    # was very likely written expecting them.
-    if body.runtime and parent.get("mcp_servers"):
+    # A thread's MCP servers are inherited by every turn, so a turn can end up
+    # with tools it will not get two ways: switching harness mid-thread to a
+    # runtime that cannot load them, or having disconnected the server since the
+    # thread started. Refuse either, rather than run a turn whose tools silently
+    # vanish — the follow-up prompt was very likely written expecting them.
+    #
+    # **Checked on every turn, not only when the runtime changes.** That
+    # narrower guard was right when the only question was runtime compatibility,
+    # which cannot change while the runtime does not. Resolution now also
+    # answers "is this still connected", which changes on its own, from the
+    # Integrations page, between turns — leaving a plain follow-up to return 201
+    # and fail at its first tool call, which is exactly the fail-fast this
+    # function exists to provide.
+    if parent.get("mcp_servers"):
         await _resolve_mcp_servers(
             list(parent["mcp_servers"]),
-            runtime=body.runtime,
+            # The runtime this turn will actually run on: the switched-to one,
+            # or the parent's when the caller did not switch.
+            runtime=body.runtime or parent["runtime"],
             store=job_store,
             user_id=user["user_id"],
         )

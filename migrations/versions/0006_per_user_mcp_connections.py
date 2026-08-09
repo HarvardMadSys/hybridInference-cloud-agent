@@ -81,8 +81,11 @@ def upgrade() -> None:
             FOR constraint_name IN
                 SELECT con.conname
                 FROM pg_constraint con
-                JOIN pg_class rel ON rel.oid = con.conrelid
-                WHERE rel.relname = 'agent_oauth_states'
+                -- Resolved through the search path rather than matched by
+                -- name: `relname = '...'` finds a same-named table in any
+                -- schema, and the ALTER below would then be aimed at a table
+                -- this migration was not talking about.
+                WHERE con.conrelid = 'agent_oauth_states'::regclass
                   AND con.contype = 'c'
                   AND pg_get_constraintdef(con.oid) ILIKE '%provider%'
             LOOP
