@@ -1,6 +1,6 @@
 # The control plane and its database — one machine, no runners.
 #
-# Runners live in `deploy/host/docker-compose.agent-remote-runner.yml` and are
+# Runners live in `deploy/host/docker-compose.sandbox.yml` and are
 # deliberately not here. They are a different trust tier (they execute
 # untrusted code and mount a docker socket) and a different scaling unit; a
 # single file that started both would make "add a runner host" mean "add a
@@ -116,10 +116,12 @@ services:
       AGENT_GITLAB_OAUTH_REDIRECT_URI: ${AGENT_GITLAB_OAUTH_REDIRECT_URI:-}
 
       # --- MCP --------------------------------------------------------------
-      # A path, mounted read-only: the file carries each upstream's credential,
-      # and a credential in an environment variable is readable by anything
-      # that can list the process environment.
-      AGENT_MCP_CONFIG: ${AGENT_MCP_CONFIG:-/etc/cloud-agent/mcp.yaml}
+      # There is no registry variable here any more: a deployment-configured
+      # server list is the team-MCP feature this product does not offer, and
+      # its credentials were one identity shared by every user who could create
+      # a job. The relay below stays for the per-user connections that replace
+      # it; until those exist it resolves nothing.
+      #
       # Where a *sandbox* reaches the relay — a host-local alias, not this
       # container's own address, which is why it cannot be derived here.
       AGENT_SANDBOX_MCP_URL: ${AGENT_SANDBOX_MCP_URL:-}
@@ -141,9 +143,6 @@ services:
       # at the first publish. Points at /dev/null when unconfigured so the
       # stack still renders without a key.
       - ${AGENT_GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/etc/cloud-agent/github-app.pem:ro
-      # The MCP registry, same reasoning: `AGENT_MCP_CONFIG` is a container
-      # path, and a path with no file behind it means no servers.
-      - ${AGENT_MCP_CONFIG_FILE:-/dev/null}:/etc/cloud-agent/mcp.yaml:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -180,11 +179,7 @@ services:
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
-      # The registry it proxies to, and the credentials in it.
-      AGENT_MCP_CONFIG: ${AGENT_MCP_CONFIG:-/etc/cloud-agent/mcp.yaml}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
-    volumes:
-      - ${AGENT_MCP_CONFIG_FILE:-/dev/null}:/etc/cloud-agent/mcp.yaml:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

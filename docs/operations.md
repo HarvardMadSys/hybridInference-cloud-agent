@@ -110,7 +110,7 @@ Be precise about these when reporting status:
   `deploy/host/setup_kata_runtime.sh` installs and links a pinned Kata release,
   and the runner's own preflight refuses to claim jobs until one real container
   comes back reporting a kernel that is *not* the host's;
-  `deploy/host/agent_remote_runner.sh up` surfaces that verdict before it
+  `deploy/host/sandbox_host.sh up` surfaces that verdict before it
   returns. Both are covered by unit tests, including the case where the runtime
   is accepted and the sandbox still lands on the host kernel.
 
@@ -422,10 +422,10 @@ One command per host makes the runner standing; compose's
 crashes and reboots:
 
 ```bash
-deploy/host/agent_remote_runner.sh up 4    # build images, tunnel + 4 runners
-deploy/host/agent_remote_runner.sh check   # probe the gateway from the closed network
-deploy/host/agent_remote_runner.sh status  # replicas + recent log tail
-deploy/host/agent_remote_runner.sh down    # stop them
+deploy/host/sandbox_host.sh up 4    # build images, tunnel + 4 runners
+deploy/host/sandbox_host.sh check   # probe the gateway from the closed network
+deploy/host/sandbox_host.sh status  # replicas + recent log tail
+deploy/host/sandbox_host.sh down    # stop them
 ```
 
 There is one script now, not two. The co-located `agent_runner.sh` was an
@@ -465,7 +465,7 @@ Requirements: an x86_64 Linux host, bare metal or with nested virtualization
 enabled. Kata cannot run without KVM.
 
 Afterwards, drop `AGENT_SANDBOX_BACKEND=container` from the host's `.env` and
-redeploy. `deploy/host/agent_remote_runner.sh up` then gates on it (as does
+redeploy. `deploy/host/sandbox_host.sh up` then gates on it (as does
 whatever pipeline deploys the gateway, on its own side):
 
 - with the default `kata` backend, the shim must be installed, **and** one real
@@ -507,8 +507,8 @@ docker build -f deploy/sandbox/Dockerfile.agent-sandbox \
              -t hybridinference-agent-sandbox:latest .
 
 AGENT_SANDBOX_IMAGE=hybridinference-agent-sandbox:latest \
-  docker compose -f deploy/host/docker-compose.agent-remote-runner.yml \
-               up -d --scale agent-runner=4
+  docker compose -f deploy/host/docker-compose.sandbox.yml \
+               up -d --scale runner=4
 ```
 
 Scaling is only `--scale`: `claim_job` uses `FOR UPDATE SKIP LOCKED`, so
@@ -525,7 +525,7 @@ runners share one queue with no leader and no sharding.
 | `AGENT_SNAPSHOT_TTL_S` | `604800` | Seven days, as the design specifies. A stale entry means a wrong dependency tree |
 | `AGENT_EGRESS_ALLOWLIST` | — | Checked at startup: it may not contain an agent vendor's telemetry domain, which would let a "closed" sandbox report on the repository it was given |
 | `AGENT_WORKDIR_ROOT` | `/var/lib/hybridinference/agent-jobs` | **A host path, bind-mounted at the same path inside the runner.** Preflight test-mounts it and fails at startup if not — otherwise every job dies at spawn with an opaque exit 125 |
-| `AGENT_RUNNER_HOST` | — | Names the *machine*, shared by its replicas: the unit the admin host switch picks between. `deploy/host/agent_remote_runner.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. Unset keeps the machine out of the pool and changes nothing else |
+| `AGENT_RUNNER_HOST` | — | Names the *machine*, shared by its replicas: the unit the admin host switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. Unset keeps the machine out of the pool and changes nothing else |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
 | `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
@@ -613,7 +613,7 @@ The answer is a **fixed-destination tunnel on the closed network**:
 runner host                                    gateway host
 ┌───────────────────────────────────┐
 │ [sandbox] ─┐                      │
-│            ├→ agent-gateway-tunnel│──ssh──→ 127.0.0.1:8080
+│            ├→ gateway-tunnel      │──ssh──→ 127.0.0.1:8080
 │ [runner] ──┘        ↑             │
 │   ✗ internet   one address, fixed │
 └───────────────────────────────────┘
@@ -630,13 +630,13 @@ segment. The tunnel keeps the gateway listening on loopback, which is where it
 already listens.
 
 ```bash
-deploy/host/agent_remote_runner.sh up 4     # tunnel + 4 runners
-deploy/host/agent_remote_runner.sh check    # probe the gateway from the closed network
-deploy/host/agent_remote_runner.sh status
-deploy/host/agent_remote_runner.sh down
+deploy/host/sandbox_host.sh up 4     # tunnel + 4 runners
+deploy/host/sandbox_host.sh check    # probe the gateway from the closed network
+deploy/host/sandbox_host.sh status
+deploy/host/sandbox_host.sh down
 ```
 
-`deploy/host/docker-compose.agent-remote-runner.yml` is standalone and contains
+`deploy/host/docker-compose.sandbox.yml` is standalone and contains
 only the runners, their workspace broker, the tunnel, and the two networks —
 no `backend` service. That was the point of it in the source repository, where
 the alternative overlay declared `depends_on: backend` and, pointed at a
@@ -657,7 +657,7 @@ Generate the known_hosts entry deliberately, and look at it:
 ssh-keyscan -p 22 <gateway-host> > /etc/agent-tunnel/known_hosts
 ```
 
-Then `agent_remote_runner.sh check` answers the only question that matters, from
+Then `sandbox_host.sh check` answers the only question that matters, from
 the only vantage point whose answer means anything — a container on the closed
 network, asking the gateway for `/health`. Reaching the gateway from the host's
 own shell proves nothing about what a sandbox can reach.
@@ -674,7 +674,7 @@ Every file listing, terminal keystroke and `git status` for a job goes **control
 plane → workspace broker**, and the broker runs here, beside the runner that
 owns the worktree. The control plane resolves which broker from the host row,
 which holds whatever the runner reported at enrolment. On a co-located
-deployment that report is `http://agent-workspace-broker:8092` and it works,
+deployment that report is `http://workspace-broker:8092` and it works,
 because the control plane is on this network too.
 
 On a separate machine it is a name that resolves nowhere. The control plane
@@ -691,7 +691,7 @@ already opens — a reverse forward on the control-plane tunnel:
 ```text
   runner host                                control plane host
 ┌──────────────────────────┐              ┌──────────────────────────┐
-│ agent-workspace-broker   │◀─── -R ──────│ 172.24.0.1:18092         │
+│ workspace-broker         │◀─── -R ──────│ 172.24.0.1:18092         │
 │        :8092             │              │  (docker bridge gateway) │
 │                          │              │        ▲                 │
 │ control-plane-tunnel ────┼──── ssh ────▶│        │ control-plane   │
@@ -803,7 +803,7 @@ jobs unless the setup tier is genuinely enforcing:
 
 **Where a denied request is visible.** Only in the proxy's log — an internal
 network refuses a connection silently, so before this there was nowhere to
-observe a blocked attempt from. `deploy/host/agent_remote_runner.sh status`
+observe a blocked attempt from. `deploy/host/sandbox_host.sh status`
 tails it;
 a denial is the line with `verdict=TCP_DENIED/403`.
 
@@ -868,10 +868,10 @@ up to date. Every deviation from the source text:
 | Source | Here | Why |
 |---|---|---|
 | `ops/setup/setup_kata_runtime.sh` | `deploy/host/setup_kata_runtime.sh` | D7 |
-| `ops/deploy/agent_remote_runner.sh` | `deploy/host/agent_remote_runner.sh` | D7 |
+| `ops/deploy/sandbox_host.sh` | `deploy/host/sandbox_host.sh` | D7 |
 | `deploy/docker/Dockerfile.agent-sandbox` | `deploy/sandbox/Dockerfile.agent-sandbox` | D7 |
 | `ops/deploy/agent_runner.sh up/preflight/status/down` | the standalone script's `up/check/status/down` | The co-located overlay was dropped (MIGRATION.md, open decisions, decided 2026-08-04). It has no `preflight` verb; the runner preflights at startup and `up` prints the verdict. |
-| `docker compose -f docker-compose.yml -f docker-compose.agent-runner.yml` | `docker compose -f deploy/host/docker-compose.agent-remote-runner.yml` | Same decision. There is no base compose here and no `backend` service. |
+| `docker compose -f docker-compose.yml -f docker-compose.agent-runner.yml` | `docker compose -f deploy/host/docker-compose.sandbox.yml` | Same decision. There is no base compose here and no `backend` service. |
 | "Use that script, not `agent_runner.sh`" | a note that the standalone compose is the only topology | Same decision. |
 | The staging deploy-pipeline paragraph (`deploy_staging.sh`, the same-invocation requirement, the overlay attaching `backend` to the agent-egress network) | removed | It describes the *gateway's* deploy pipeline driving the overlay that did not move. Keeping it would be an instruction nobody here can follow. |
 | `AGENT_RUNNER_HOST` row naming `agent_runner.sh` and `deploy_staging.sh` | names the standalone script | Same. |

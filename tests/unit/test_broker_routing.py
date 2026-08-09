@@ -13,7 +13,9 @@ from typing import Any
 
 import pytest
 
+from cloud_agent import broker_routing
 from cloud_agent.broker_routing import broker_for_attempt, broker_for_job
+from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
 
 BROKER_TOKEN_ENV = "AGENT_WORKSPACE_BROKER_TOKEN"
 BROKER_URL_ENV = "AGENT_WORKSPACE_BROKER_URL"
@@ -170,15 +172,15 @@ class TestAdvertisedBrokerUrl:
         from cloud_agent_host import runner
 
         monkeypatch.delenv("AGENT_WORKSPACE_BROKER_ADVERTISE_URL", raising=False)
-        monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://agent-workspace-broker:8092")
+        monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://workspace-broker:8092")
 
-        assert runner._broker_url_from_env() == "http://agent-workspace-broker:8092"
+        assert runner._broker_url_from_env() == "http://workspace-broker:8092"
 
     def test_an_advertised_url_wins(self, monkeypatch) -> None:
         """The remote shape: dial locally, advertise the tunnel's far end."""
         from cloud_agent_host import runner
 
-        monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://agent-workspace-broker:8092")
+        monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://workspace-broker:8092")
         monkeypatch.setenv("AGENT_WORKSPACE_BROKER_ADVERTISE_URL", "http://172.24.0.1:18092")
 
         assert runner._broker_url_from_env() == "http://172.24.0.1:18092"
@@ -192,7 +194,103 @@ class TestAdvertisedBrokerUrl:
         """
         from cloud_agent_host import runner
 
-        monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://agent-workspace-broker:8092")
+        monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://workspace-broker:8092")
         monkeypatch.setenv("AGENT_WORKSPACE_BROKER_ADVERTISE_URL", "   ")
 
-        assert runner._broker_url_from_env() == "http://agent-workspace-broker:8092"
+        assert runner._broker_url_from_env() == "http://workspace-broker:8092"
+
+
+class TestBrokerProbe:
+    """Finding out at enrolment instead of at the first job.
+
+    Both ways the first remote host was misconfigured were invisible until a
+    job needed the broker: an address that resolved nowhere, and a shared token
+    that did not match. Six minutes and three attempts to surface, with `503`
+    as the only clue.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _token_and_clean_cache(self, monkeypatch):
+        monkeypatch.setenv(BROKER_TOKEN_ENV, "shared-broker-token")
+        broker_routing._PROBE_CACHE.clear()
+        yield
+        broker_routing._PROBE_CACHE.clear()
+
+    @staticmethod
+    def _health(monkeypatch, outcome):
+        calls = {"n": 0}
+
+        async def health(self, *, timeout: float = 3) -> None:
+            calls["n"] += 1
+            if outcome is not None:
+                raise outcome
+
+        monkeypatch.setattr(broker_routing.WorkspaceBrokerClient, "health", health)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_a_reachable_broker_is_no_error(self, monkeypatch) -> None:
+        self._health(monkeypatch, None)
+        assert await broker_routing.probe_broker("h1", "http://broker:8092") is None
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_broker_is_reported_with_its_address(self, monkeypatch) -> None:
+        """The address is in the message because the address is the mistake."""
+        self._health(monkeypatch, WorkspaceBrokerError(503, "unreachable: [Errno -3] no DNS"))
+
+        error = await broker_routing.probe_broker("h1", "http://workspace-broker:8092")
+
+        assert error is not None
+        assert "workspace-broker" in error
+
+    @pytest.mark.asyncio
+    async def test_a_refused_credential_is_reported_too(self, monkeypatch) -> None:
+        """Why the probe uses an authenticated endpoint.
+
+        The second misconfiguration was a broker token that did not match. A
+        probe against something unauthenticated would have answered "fine" and
+        left it to the first job to find out.
+        """
+        self._health(monkeypatch, WorkspaceBrokerError(401, "invalid workspace broker credential"))
+
+        error = await broker_routing.probe_broker("h1", "http://broker:8092")
+
+        assert error is not None
+        assert "credential" in error
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_probe_on_every_heartbeat(self, monkeypatch) -> None:
+        """Heartbeats are liveness. They must not wait on a second service."""
+        calls = self._health(monkeypatch, None)
+
+        for _ in range(5):
+            assert await broker_routing.probe_broker("h1", "http://broker:8092") is None
+
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_changed_address_is_probed_again_immediately(self, monkeypatch) -> None:
+        """The cooldown must not outlive the thing it cached an answer about."""
+        calls = self._health(monkeypatch, None)
+
+        await broker_routing.probe_broker("h1", "http://broker:8092")
+        await broker_routing.probe_broker("h1", "http://somewhere-else:8092")
+
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_failure_is_not_cached(self, monkeypatch) -> None:
+        """A broker still starting must be able to become healthy again."""
+        calls = self._health(monkeypatch, WorkspaceBrokerError(503, "starting"))
+
+        await broker_routing.probe_broker("h1", "http://broker:8092")
+        await broker_routing.probe_broker("h1", "http://broker:8092")
+
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_no_broker_url_is_not_a_fault(self, monkeypatch) -> None:
+        """The pre-pool single-host shape reports none and reads the env."""
+        calls = self._health(monkeypatch, None)
+        assert await broker_routing.probe_broker("h1", None) is None
+        assert calls["n"] == 0

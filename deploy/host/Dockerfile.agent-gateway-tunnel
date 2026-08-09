@@ -19,6 +19,6 @@ RUN chmod +x /usr/local/bin/agent-gateway-tunnel
 # probe would need a TCP-testing tool in the image, and the only one available
 # in this base is BusyBox's nc, whose flags vary by build — a healthcheck that
 # is wrong about its own tooling reports a working tunnel as unhealthy forever.
-# What actually answers the question is `agent_remote_runner.sh check`, which
+# What actually answers the question is `sandbox_host.sh check`, which
 # asks from inside the closed network where it matters.
 ENTRYPOINT ["/usr/local/bin/agent-gateway-tunnel"]

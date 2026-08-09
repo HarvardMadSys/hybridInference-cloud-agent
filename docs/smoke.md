@@ -113,7 +113,7 @@ credential bound to the name an admin chose for it.
 - [ ] `POST /admin/agent/runner-hosts/enroll-token` with the host's name,
       using `ADMIN_TOKEN`.
 - [ ] Start the host stack from
-      `deploy/host/docker-compose.agent-remote-runner.yml` with that token.
+      `deploy/host/docker-compose.sandbox.yml` with that token.
 - [ ] `GET /admin/agent/runner-hosts` shows the host `online` with a broker URL.
 - [ ] Confirm the token cannot be reused under a different name — register a
       second machine under a typo of the first and watch it be refused

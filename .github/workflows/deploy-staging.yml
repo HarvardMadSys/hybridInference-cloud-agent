@@ -45,7 +45,7 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.conclusion == 'success') }}
-    runs-on: [self-hosted, Linux, deploy-cloud-agent]
+    runs-on: [self-hosted, Linux, deploy-cloud-agent-control-staging]
     timeout-minutes: 30
 
     steps:
@@ -69,15 +69,24 @@ jobs:
           fetch-depth: 0
 
       - name: Deploy
+        env:
+          # Unset falls back to the script's own default, which is this
+          # machine's path. Named here so production and staging are configured
+          # the same way rather than one by variable and one by default.
+          DEPLOY_ROOT: ${{ vars.STAGING_CONTROL_DEPLOY_ROOT }}
         run: bash deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
         if: always()
+        env:
+          DEPLOY_ROOT: ${{ vars.STAGING_CONTROL_DEPLOY_ROOT }}
+          COMPOSE_PROJECT: ${{ vars.STAGING_CONTROL_COMPOSE_PROJECT }}
         run: |
-          echo "deployed sha on host: $(cat /srv/freeinference-cloud-agent/.deployed-sha 2>/dev/null || echo unknown)"
-          docker compose -p cloudagent \
-            --env-file /srv/freeinference-cloud-agent/.env \
-            -f /srv/freeinference-cloud-agent/deploy/control-plane/docker-compose.yml \
+          root="${DEPLOY_ROOT:-/srv/freeinference-cloud-agent}"
+          echo "deployed sha on host: $(cat "${root}/.deployed-sha" 2>/dev/null || echo unknown)"
+          docker compose -p "${COMPOSE_PROJECT:-cloudagent}" \
+            --env-file "${root}/.env" \
+            -f "${root}/deploy/control-plane/docker-compose.yml" \
             ps 2>/dev/null || true
 
   deploy-host:
@@ -90,7 +99,7 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.conclusion == 'success') }}
-    runs-on: [self-hosted, Linux, deploy-agent-host]
+    runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-staging]
     timeout-minutes: 45
     concurrency:
       group: cloud-agent-host-deploy
@@ -119,14 +128,20 @@ jobs:
           # machine (the host user has no write access to /srv there) and a
           # deployment path does not belong in a repository that is going to be
           # public.
-          DEPLOY_ROOT: ${{ vars.AGENT_HOST_DEPLOY_ROOT }}
+          DEPLOY_ROOT: ${{ vars.STAGING_SANDBOX_DEPLOY_ROOT }}
+          # Which stack on that machine. It runs production's too, so this is
+          # what says whose containers this deploy owns; `deploy.sh` refuses
+          # rather than guessing when it is empty.
+          COMPOSE_PROJECT: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
+          SIBLING_COMPOSE_PROJECTS: ${{ vars.PROD_SANDBOX_COMPOSE_PROJECT }}
         run: bash deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
         if: always()
         env:
-          DEPLOY_ROOT: ${{ vars.AGENT_HOST_DEPLOY_ROOT }}
+          DEPLOY_ROOT: ${{ vars.STAGING_SANDBOX_DEPLOY_ROOT }}
+          COMPOSE_PROJECT: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
         run: |
           echo "deployed sha on host: $(cat "${DEPLOY_ROOT}/.deployed-sha" 2>/dev/null || echo unknown)"
-          docker ps --filter label=com.docker.compose.project=hybridinference-agent-remote \
+          docker ps --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" \
             --format '  {{.Names}}  {{.Status}}' 2>/dev/null || true

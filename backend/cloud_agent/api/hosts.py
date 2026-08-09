@@ -27,12 +27,13 @@ minutes.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from cloud_agent.api.deps import get_agent_job_store
-from cloud_agent.broker_routing import BrokerUrlRefused, validate_broker_url
+from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
@@ -44,6 +45,8 @@ from cloud_agent.schemas import (
     HostRegisterResponse,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore
@@ -181,7 +184,15 @@ async def register_host(
         runner_version=body.runner_version,
         labels=dict(body.labels),
     )
-    return HostRegisterResponse(host=host["host"], credential=credential, status=host["status"])
+    return HostRegisterResponse(
+        host=host["host"],
+        credential=credential,
+        status=host["status"],
+        # Forced: enrolment is the one moment an operator is watching, and the
+        # answer costs one request. Everything downstream of a wrong address
+        # here is a job failing minutes later with `503` as its only clue.
+        broker_error=await _probed_broker_error(host["host"], body.broker_url, force=True),
+    )
 
 
 @router.post("/heartbeat", response_model=HostHeartbeatResponse)
@@ -217,4 +228,38 @@ async def heartbeat_host(
         slots_total=updated["slots_total"],
         slots_used=updated["slots_used"],
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_S,
+        # Rate-limited inside the probe. Heartbeats are this host's liveness
+        # signal and must not come to depend on a second service answering, but
+        # probing only at enrolment would never catch a credential that was
+        # already wrong when the host enrolled — which is how the first remote
+        # host was misconfigured, and it stayed invisible for a day.
+        broker_error=await _probed_broker_error(updated["host"], body.broker_url),
     )
+
+
+async def _probed_broker_error(
+    host: str, broker_url: str | None, *, force: bool = False
+) -> str | None:
+    """Probe the reported broker, log a failure, and hand it back to the host.
+
+    Two audiences, because they notice different things. The log is where an
+    operator looks after something is already wrong. The response is what the
+    runner prints on the machine being deployed — which `sandbox_host.sh
+    up` tails, so a misconfigured deploy says so while somebody is still
+    watching it.
+
+    Never raises and never refuses the registration. A broker that is slow to
+    start is normal — compose brings it up beside the runner — and a control
+    plane that rejected a host for it would turn a warning into an outage.
+    """
+    error = await probe_broker(host, broker_url, force=force)
+    if error is not None:
+        logger.warning(
+            "agent_host_broker_unreachable",
+            extra={
+                "event": "agent_host_broker_unreachable",
+                "host": host,
+                "broker_error": error,
+            },
+        )
+    return error

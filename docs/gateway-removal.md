@@ -239,8 +239,8 @@ admin router.
 | `deploy/docker/Dockerfile.agent-egress-proxy` | `deploy/host/` |
 | `deploy/docker/Dockerfile.agent-gateway-tunnel` | `deploy/host/` |
 | `deploy/docker/agent-gateway-tunnel.sh` | `deploy/host/` |
-| `deploy/docker/docker-compose.agent-remote-runner.yml` | `deploy/host/` |
-| `ops/deploy/agent_remote_runner.sh` | `deploy/host/` |
+| `deploy/docker/docker-compose.sandbox.yml` | `deploy/host/` |
+| `ops/deploy/sandbox_host.sh` | `deploy/host/` |
 | `ops/setup/setup_kata_runtime.sh` | `deploy/host/setup_kata_runtime.sh` |
 | `tests/unit/ops/test_setup_kata_runtime.py` | `tests/unit/test_setup_kata_runtime.py` |
 

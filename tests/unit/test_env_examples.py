@@ -32,7 +32,7 @@ STACKS = [
         id="control-plane",
     ),
     pytest.param(
-        REPO / "deploy/host/docker-compose.agent-remote-runner.yml",
+        REPO / "deploy/host/docker-compose.sandbox.yml",
         REPO / "deploy/host/.env.example",
         id="host",
     ),
@@ -43,6 +43,25 @@ _REQUIRED = re.compile(r"\$\{([A-Z_][A-Z0-9_]*):\?")
 
 #: `${VAR:-default}` — everything else the file reads.
 _OPTIONAL = re.compile(r"\$\{([A-Z_][A-Z0-9_]*):-")
+
+#: The scripts that stand in front of each stack and read the same `.env`.
+#:
+#: Not everything an operator must set reaches compose as an interpolation.
+#: `COMPOSE_PROJECT` is passed as `-p`, so a check that read only the compose
+#: file would call the one variable this deploy refuses to run without an
+#: invention.
+FRONTENDS = {
+    "deploy/control-plane/docker-compose.yml": ("deploy/control-plane/deploy.sh",),
+    "deploy/host/docker-compose.sandbox.yml": (
+        "deploy/host/deploy.sh",
+        "deploy/host/sandbox_host.sh",
+    ),
+}
+
+#: Only the explicit lookups — `env_or_dotenv NAME` and `from_env NAME`. Any
+#: `${NAME}` would count every shell local as configuration and leave this test
+#: asserting nothing.
+_SCRIPT_READ = re.compile(r"(?:env_or_dotenv|from_env)\s+([A-Z_][A-Z0-9_]*)")
 
 
 def _assigned(example: Path) -> set[str]:
@@ -76,6 +95,8 @@ def test_the_example_invents_nothing(compose: Path, example: Path) -> None:
     """
     text = compose.read_text()
     known = set(_REQUIRED.findall(text)) | set(_OPTIONAL.findall(text))
+    for script in FRONTENDS[str(compose.relative_to(REPO))]:
+        known |= set(_SCRIPT_READ.findall((REPO / script).read_text()))
     unread = _assigned(example) - known
     assert not unread, (
         f"{example.relative_to(REPO)} assigns {sorted(unread)}, which {compose.name} never reads"

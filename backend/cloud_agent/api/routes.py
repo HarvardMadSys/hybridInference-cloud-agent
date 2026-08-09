@@ -892,17 +892,16 @@ async def _require_resolvable_model(
 
 
 def _mcp_registry() -> list[dict[str, Any]]:
-    """The MCP servers this deployment offers, read from its own registry.
+    """The MCP servers on offer, which is none until per-user connections land.
 
-    This asked the *gateway* until the ownership amendment moved MCP here. The
-    endpoint it called no longer exists, so the call returned nothing and the
-    composer offered no servers at all — a feature that stopped working with a
-    log line and no error.
+    Kept rather than inlined as ``[]``: the composer's contract already carries
+    this field, and a future per-user source fills it in here. The empty list
+    is what makes the picker render nothing and job creation refuse every name.
 
     Names and display metadata only. A server's URL and headers never leave
     this process: the sandbox reaches an upstream through the relay, which is
-    the entire reason the registry lives beside the relay rather than beside
-    the picker.
+    the entire reason resolution lives beside the relay rather than beside the
+    picker.
     """
     registry = get_registry()
     servers: list[dict[str, Any]] = []

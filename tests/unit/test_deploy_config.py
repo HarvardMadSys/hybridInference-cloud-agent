@@ -23,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 from cloud_agent_host.runner import build_parser
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-_COMPOSE = REPO_ROOT / "deploy/host/docker-compose.agent-remote-runner.yml"
+_COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
 _DOCKERFILE = Path(__file__).resolve().parents[2] / "deploy/sandbox/Dockerfile.agent-sandbox"
 _CODEX_REQUIREMENTS = Path(__file__).resolve().parents[2] / "deploy/sandbox/codex-requirements.toml"
 
@@ -46,7 +46,7 @@ def test_egress_network_is_internal(compose: dict):
 
 def test_runner_mounts_the_docker_socket_read_only(compose: dict):
     """The runner starts sandboxes; it has no business reconfiguring the daemon."""
-    volumes = compose["services"]["agent-runner"]["volumes"]
+    volumes = compose["services"]["runner"]["volumes"]
     socket_mounts = [v for v in volumes if "docker.sock" in v]
     assert socket_mounts, "the runner needs the daemon to spawn sandboxes"
     assert all(v.endswith(":ro") for v in socket_mounts)
@@ -54,19 +54,19 @@ def test_runner_mounts_the_docker_socket_read_only(compose: dict):
 
 def test_default_backend_is_vm_isolated(compose: dict):
     """Self-hosted defaults to a kernel boundary per job, not a shared one."""
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
     assert "kata" in env["AGENT_SANDBOX_BACKEND"]
 
 
 def test_dispatcher_credential_is_required_not_defaulted(compose: dict):
     """Starting a runner without a dispatcher credential must fail loudly."""
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
     assert ":?" in env["AGENT_DISPATCHER_TOKEN"]
 
 
 def test_compose_only_uses_flags_the_runner_implements(compose: dict):
     """Every flag in the compose command must exist, or the container crash-loops."""
-    command = compose["services"]["agent-runner"]["command"]
+    command = compose["services"]["runner"]["command"]
     flags = {arg for arg in command if isinstance(arg, str) and arg.startswith("--")}
     known = {
         action_option
@@ -186,7 +186,7 @@ def test_something_answers_on_the_sandbox_network(compose: dict):
     # non-empty set" is the natural way to make it pass after adding a service,
     # and it would let the next addition put anything at all on the closed
     # network without a word.
-    assert on_egress == {"agent-gateway-tunnel", "agent-mcp-tunnel"}
+    assert on_egress == {"gateway-tunnel", "mcp-tunnel"}
 
 
 def test_the_gateway_name_resolves_on_every_network_that_is_given_it(compose: dict):
@@ -203,7 +203,7 @@ def test_the_gateway_name_resolves_on_every_network_that_is_given_it(compose: di
     *given* against the networks it can resolve it on, so both halves looked
     right in isolation.
     """
-    tunnel = compose["services"]["agent-gateway-tunnel"]
+    tunnel = compose["services"]["gateway-tunnel"]
     hostname = "${AGENT_GATEWAY_HOSTNAME:-agent-gateway}"
 
     # Which networks can resolve the name.
@@ -225,7 +225,7 @@ def test_the_gateway_name_resolves_on_every_network_that_is_given_it(compose: di
     # The sandbox is not a compose service — the runner starts it on the egress
     # network and passes the same URL down, so that network counts too.
     needs_it.add(
-        compose["services"]["agent-runner"]["environment"]["AGENT_EGRESS_NETWORK_PLATFORM_ONLY"]
+        compose["services"]["runner"]["environment"]["AGENT_EGRESS_NETWORK_PLATFORM_ONLY"]
         .split(":-")[-1]
         .rstrip("}")
     )
@@ -250,7 +250,7 @@ def test_the_tunnel_key_is_allowed_the_one_thing_it_exists_to_do(compose: dict):
     # the migration; a test that assumed the whole stack was present would fail
     # on the very branch that owns the script.
     candidates = [
-        REPO_ROOT / "deploy/host/agent_remote_runner.sh",
+        REPO_ROOT / "deploy/host/sandbox_host.sh",
         REPO_ROOT / "docs/operations.md",
     ]
     checked = 0
@@ -275,7 +275,7 @@ def test_a_failed_tunnel_probe_is_not_reported_as_a_successful_start() -> None:
     what explain the failure — but discarding its status meant the diagnosis
     scrolled past and the last line said the deploy worked.
     """
-    script = (REPO_ROOT / "deploy/host/agent_remote_runner.sh").read_text()
+    script = (REPO_ROOT / "deploy/host/sandbox_host.sh").read_text()
     assert "( cmd_check ) || true" not in script, (
         "the tunnel probe's verdict is discarded; a failed check still reports success"
     )
@@ -289,7 +289,7 @@ def test_job_worktrees_are_a_host_path_at_the_same_path_inside(compose: dict):
     every `docker run --mount` with an opaque exit 125, because the path exists
     only inside the runner container.
     """
-    volumes = compose["services"]["agent-runner"]["volumes"]
+    volumes = compose["services"]["runner"]["volumes"]
     workdir_mounts = [v for v in volumes if "agent-jobs" in v]
     assert workdir_mounts, "the runner needs somewhere to put job worktrees"
     for mount in workdir_mounts:
@@ -302,11 +302,9 @@ def test_job_worktrees_are_a_host_path_at_the_same_path_inside(compose: dict):
 def test_workspace_broker_and_runner_share_the_same_worktrees(compose: dict):
     """Files, Terminal, and Git must inspect the runner's live job directory."""
     services = compose["services"]
-    runner_mounts = {
-        mount for mount in services["agent-runner"]["volumes"] if "agent-jobs" in mount
-    }
+    runner_mounts = {mount for mount in services["runner"]["volumes"] if "agent-jobs" in mount}
     broker_mounts = {
-        mount for mount in services["agent-workspace-broker"]["volumes"] if "agent-jobs" in mount
+        mount for mount in services["workspace-broker"]["volumes"] if "agent-jobs" in mount
     }
 
     assert broker_mounts == runner_mounts
@@ -319,7 +317,7 @@ def test_workspace_broker_and_runner_share_the_same_worktrees(compose: dict):
 def test_workspace_broker_keeps_execution_off_the_public_gateway(compose: dict):
     """Only the private broker may spawn an isolated workspace command."""
     services = compose["services"]
-    broker = services["agent-workspace-broker"]
+    broker = services["workspace-broker"]
     socket_mounts = [mount for mount in broker["volumes"] if "docker.sock" in mount]
 
     assert socket_mounts and all(mount.endswith(":ro") for mount in socket_mounts)
@@ -327,12 +325,12 @@ def test_workspace_broker_keeps_execution_off_the_public_gateway(compose: dict):
     # gateway service here, so the equivalent guarantee is that the socket
     # holders are exactly the two that need it — asserted as a set in
     # test_deploy_security.py, which fails if a third service acquires one.
-    assert broker["networks"] == ["hybridinference"]
+    assert broker["networks"] == ["internal"]
 
 
 def test_runner_retains_live_worktrees_for_workspace_tools(compose: dict):
     """A finished run must outlive the process long enough to remain inspectable."""
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
 
     assert int(_expand(env["AGENT_WORKSPACE_TTL_S"])) > 0
 
@@ -350,7 +348,7 @@ def test_the_runner_image_can_check_a_repository_out():
 
 def test_the_runner_service_uses_the_runner_image(compose: dict):
     """Built from the backend image, the runner has neither docker nor git."""
-    dockerfile = compose["services"]["agent-runner"]["build"]["dockerfile"]
+    dockerfile = compose["services"]["runner"]["build"]["dockerfile"]
     assert dockerfile.endswith("Dockerfile.agent-runner")
 
 
@@ -390,7 +388,7 @@ def test_the_agent_phase_is_closed_in_the_shipped_configuration(compose: dict):
     decided to do stays on a network with no route. A default that opened it
     would be the one change here nobody would notice from the outside.
     """
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
     # And the spawn network tracks the same variable the network block names.
     assert _expand(env["AGENT_EGRESS_NETWORK_PLATFORM_ONLY"]) == _expand(
         compose["networks"]["agent-egress"]["name"]
@@ -406,7 +404,7 @@ def test_the_setup_tier_the_overlay_selects_is_one_it_actually_ships(compose: di
     script then dies at DNS, and nothing in the compose file looks wrong. The
     tier needs three things present together, so they are asserted together.
     """
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
     if "trusted" not in _expand(env["AGENT_EGRESS_SETUP_TIER"]):
         pytest.skip("this overlay does not select the trusted tier")
 
@@ -446,7 +444,7 @@ def test_the_proxy_url_names_the_port_the_generated_config_listens_on(compose: d
     """
     from cloud_agent_host.egress_proxy import DEFAULT_PROXY_PORT
 
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
     assert _expand(env["AGENT_EGRESS_PROXY_URL_TRUSTED"]).endswith(f":{DEFAULT_PROXY_PORT}")
 
 
@@ -464,7 +462,7 @@ def test_the_proxy_cannot_reach_the_rest_of_the_stack(compose: dict):
     for convenience would mean a Squid compromise reaches Postgres.
     """
     proxy = compose["services"]["agent-egress-proxy"]
-    assert "hybridinference" not in proxy["networks"]
+    assert "internal" not in proxy["networks"]
     assert not proxy.get("volumes") or all(
         "docker.sock" not in volume for volume in proxy["volumes"]
     )
@@ -561,7 +559,7 @@ def test_the_runner_reads_the_bounds_the_overlay_configures(monkeypatch, compose
     ran on the built-in defaults no matter what the operator wrote — a setting
     that looks applied and is not.
     """
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
     assert "AGENT_LEASE_TTL" in env and "AGENT_TIMEOUT_S" in env
 
     monkeypatch.setenv("AGENT_LEASE_TTL", "45")
@@ -608,7 +606,7 @@ def test_every_tier_the_overlay_lets_you_select_is_passed_through(compose: dict)
     with "names no network" for a variable they had plainly set. Found by
     running the overlay, not by reading it.
     """
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
     selectable = {
         "platform_only": "PLATFORM_ONLY",
         "trusted": "TRUSTED",
@@ -972,9 +970,9 @@ def test_concurrency_is_declared_not_typed_at_deploy_time(compose: dict):
     "every user is queueing" long after anyone remembers scaling it. The count
     therefore belongs in the file the deploy reads.
     """
-    runner = compose["services"]["agent-runner"]
+    runner = compose["services"]["runner"]
     replicas = (runner.get("deploy") or {}).get("replicas")
-    assert replicas, "agent-runner declares no replica count, so a deploy resets concurrency to 1"
+    assert replicas, "runner declares no replica count, so a deploy resets concurrency to 1"
     assert "AGENT_RUNNER_REPLICAS" in str(replicas), "the replica count is not operator-tunable"
 
 
@@ -985,7 +983,7 @@ def test_replicas_are_distinguishable_in_the_lease_ledger(compose: dict):
     it just makes "which runner is stuck" unanswerable exactly when a second
     replica makes it worth asking.
     """
-    command = " ".join(compose["services"]["agent-runner"].get("command") or [])
+    command = " ".join(compose["services"]["runner"].get("command") or [])
     assert "--worker-id" not in command, (
         "a literal --worker-id pins every replica to the same lease_owner; "
         "let the runner derive one that includes its hostname"
@@ -1006,7 +1004,7 @@ def test_runner_derives_a_distinct_worker_id_per_container(monkeypatch):
 
 # ── Remote runner host (no gateway on this machine) ────────────────────
 
-_REMOTE_COMPOSE = REPO_ROOT / "deploy/host/docker-compose.agent-remote-runner.yml"
+_REMOTE_COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
 _TUNNEL_ENTRYPOINT = Path(__file__).resolve().parents[2] / "deploy/host/agent-gateway-tunnel.sh"
 
 
@@ -1028,11 +1026,11 @@ def test_remote_compose_starts_no_gateway(remote_compose: dict):
         # MCP relay for tools, the control plane for claims. Splitting them is
         # what keeps "may call models" and "may create jobs" separate
         # permissions; see `test_deploy_security.py` for which reaches what.
-        "agent-gateway-tunnel",
-        "agent-mcp-tunnel",
-        "agent-control-plane-tunnel",
-        "agent-workspace-broker",
-        "agent-runner",
+        "gateway-tunnel",
+        "mcp-tunnel",
+        "control-plane-tunnel",
+        "workspace-broker",
+        "runner",
     }
     for name, service in remote_compose["services"].items():
         assert "backend" not in (service.get("depends_on") or []), name
@@ -1057,7 +1055,7 @@ def test_only_the_two_relays_are_on_both_networks(remote_compose: dict):
         for name, service in remote_compose["services"].items()
         if "agent-egress" in (service.get("networks") or {})
     }
-    assert on_egress == {"agent-gateway-tunnel", "agent-mcp-tunnel"}
+    assert on_egress == {"gateway-tunnel", "mcp-tunnel"}
 
 
 def test_runner_and_sandbox_are_pointed_at_the_same_name(remote_compose: dict):
@@ -1067,16 +1065,14 @@ def test_runner_and_sandbox_are_pointed_at_the_same_name(remote_compose: dict):
     that only the runner can resolve means jobs are claimed and then die at
     their first model call.
     """
-    alias = remote_compose["services"]["agent-gateway-tunnel"]["networks"]["agent-egress"][
-        "aliases"
-    ]
+    alias = remote_compose["services"]["gateway-tunnel"]["networks"]["agent-egress"]["aliases"]
     assert alias == ["${AGENT_GATEWAY_HOSTNAME:-agent-gateway}"]
-    url = remote_compose["services"]["agent-runner"]["environment"]["AGENT_GATEWAY_URL"]
+    url = remote_compose["services"]["runner"]["environment"]["AGENT_GATEWAY_URL"]
     assert "${AGENT_GATEWAY_HOSTNAME:-agent-gateway}" in url
 
 
 def test_the_tunnel_credential_is_mounted_read_only(remote_compose: dict):
-    volumes = remote_compose["services"]["agent-gateway-tunnel"]["volumes"]
+    volumes = remote_compose["services"]["gateway-tunnel"]["volumes"]
     assert all(volume.endswith(":ro") for volume in volumes), volumes
 
 

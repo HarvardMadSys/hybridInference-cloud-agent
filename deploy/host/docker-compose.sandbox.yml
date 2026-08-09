@@ -9,18 +9,18 @@
 # networks.
 #
 #   sandbox ─┐
-#            ├─→ agent-gateway-tunnel ──ssh──→ gateway host, 127.0.0.1:8080
+#            ├─→ gateway-tunnel ──ssh──→ gateway host, 127.0.0.1:8080
 #   runner  ─┘
 #
 # Both sides address the tunnel by the same name, because they have to: the
 # runner claims over AGENT_GATEWAY_URL and the sandbox is handed that same
 # value for its model calls. The alias resolves on both networks.
 #
-# Start it with deploy/host/agent_remote_runner.sh, which checks the pieces that
+# Start it with deploy/host/sandbox_host.sh, which checks the pieces that
 # fail confusingly when missing.
 
 services:
-  agent-gateway-tunnel:
+  gateway-tunnel:
     build:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
@@ -45,12 +45,12 @@ services:
       - ${AGENT_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the gateway host}:/etc/agent-tunnel/known_hosts:ro
     networks:
       # The alias is declared on BOTH networks, and it has to be. The runner is
-      # only on `hybridinference` and is handed AGENT_GATEWAY_URL pointing at
-      # this name; the sandbox is only on `agent-egress` and is handed the same
+      # only on `internal` and is handed AGENT_GATEWAY_URL pointing at
+      # this name; the sandbox is only on the egress network and is handed the same
       # value. An alias on one network resolves for one of them and NXDOMAINs
       # for the other — which is what this file did until it was caught in
       # review, while the comment above already claimed both.
-      hybridinference:
+      internal:
         aliases:
           - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
       # On the closed network too — that is the whole trick. The sandbox can
@@ -66,7 +66,7 @@ services:
   # "the sandbox may reach the control plane" is a much bigger permission than
   # "the sandbox may reach the MCP relay" — and the control plane is where jobs
   # are created and cancelled.
-  agent-mcp-tunnel:
+  mcp-tunnel:
     build:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
@@ -93,9 +93,9 @@ services:
       - ${AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the control-plane host}:/etc/agent-tunnel/known_hosts:ro
     networks:
       # On both, and aliased on both, for the same reason the gateway tunnel
-      # is: the runner resolves this name on `hybridinference` and the sandbox
-      # on `agent-egress`, and an alias declared on one NXDOMAINs on the other.
-      hybridinference:
+      # is: the runner resolves this name on `internal` and the sandbox
+      # on the egress network, and an alias declared on one NXDOMAINs on the other.
+      internal:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
       agent-egress:
@@ -106,12 +106,12 @@ services:
   # jobs, registers this host and heartbeats against the control plane's main
   # listener — the same 8000 the MCP tunnel deliberately stopped pointing at.
   #
-  # **Not on `agent-egress`, and that is the entire point.** Splitting the MCP
+  # **Not on the egress network, and that is the entire point.** Splitting the MCP
   # relay onto 8001 was worth nothing if a second alias put 8000 back on the
   # closed network under a different name. A sandbox reaches the gateway and
   # the MCP relay; the machine that runs it reaches the control plane; those
   # are three permissions and three tunnels.
-  agent-control-plane-tunnel:
+  control-plane-tunnel:
     build:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
@@ -142,7 +142,7 @@ services:
       # shared token away from anyone on it.
       TUNNEL_REVERSE_BIND: ${AGENT_BROKER_REVERSE_BIND:-}
       TUNNEL_REVERSE_PORT: ${AGENT_BROKER_REVERSE_PORT:-}
-      TUNNEL_REVERSE_TARGET_HOST: ${AGENT_BROKER_REVERSE_TARGET_HOST:-agent-workspace-broker}
+      TUNNEL_REVERSE_TARGET_HOST: ${AGENT_BROKER_REVERSE_TARGET_HOST:-workspace-broker}
       TUNNEL_REVERSE_TARGET_PORT: ${AGENT_BROKER_REVERSE_TARGET_PORT:-8092}
     volumes:
       # Its own key again. One key that opens both this and the MCP tunnel
@@ -150,11 +150,11 @@ services:
       - ${AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY:?path to the control-plane tunnel's ssh private key}:/etc/agent-tunnel/id:ro
       - ${AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS:?path to a known_hosts for the control-plane host}:/etc/agent-tunnel/known_hosts:ro
     networks:
-      hybridinference:
+      internal:
         aliases:
           - ${AGENT_CONTROL_PLANE_HOSTNAME:-agent-control-plane}
 
-  agent-workspace-broker:
+  workspace-broker:
     build:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-runner
@@ -185,9 +185,19 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}:${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}
     networks:
-      - hybridinference
+      - internal
 
-  agent-runner:
+  runner:
+    # How long docker waits after SIGTERM before SIGKILL, and therefore how
+    # long a job gets to finish when this container is replaced. The runner
+    # stops claiming on SIGTERM and exits after the job in hand.
+    #
+    # Bounded on purpose. A job may run up to AGENT_TIMEOUT_S (an hour by
+    # default) and a deploy cannot wait that long, so past this the container
+    # is killed, the lease expires and the control plane supersedes the
+    # attempt — the behaviour every job through a deploy used to get, now
+    # narrowed to the jobs that genuinely outlast the window.
+    stop_grace_period: ${AGENT_RUNNER_STOP_GRACE:-5m}
     deploy:
       replicas: ${AGENT_RUNNER_REPLICAS:-3}
     build:
@@ -236,12 +246,12 @@ services:
       AGENT_HOST_SLOTS: ${AGENT_HOST_SLOTS:-}
       # How this runner reaches its own broker: a service name on this stack's
       # network, which is exactly right here and meaningless anywhere else.
-      AGENT_WORKSPACE_BROKER_URL: http://agent-workspace-broker:8092
+      AGENT_WORKSPACE_BROKER_URL: http://workspace-broker:8092
       # How the *control plane* reaches it, when that is somewhere else. This
       # is the address the runner reports at enrolment and the one stored on
       # the host row, so it has to be resolvable from the control plane's
       # machine — the far end of the reverse forward configured on
-      # `agent-control-plane-tunnel` above.
+      # `control-plane-tunnel` above.
       #
       # Unset on a co-located deployment: there the line above is already an
       # address the control plane can use, and reporting anything else would
@@ -275,7 +285,7 @@ services:
       AGENT_LEASE_TTL: ${AGENT_LEASE_TTL:-120}
       AGENT_TIMEOUT_S: ${AGENT_TIMEOUT_S:-3600}
       # Which machine this is, for the admin host switch. Filled in by
-      # agent_remote_runner.sh from the host's own name — the whole reason a
+      # sandbox_host.sh from the host's own name — the whole reason a
       # second machine is worth adding is being able to select it.
       AGENT_RUNNER_HOST: ${AGENT_RUNNER_HOST:-}
     command:
@@ -296,15 +306,15 @@ services:
       # lock work — it is taken on this directory.
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}:${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}
     networks:
-      - hybridinference
+      - internal
     depends_on:
       # Not a correctness barrier — the runner's own preflight is, and it fails
       # loudly if the tunnel is not up. This only spares an operator the first
       # crash-loop while the forward is still being established.
-      - agent-gateway-tunnel
+      - gateway-tunnel
 
 networks:
-  hybridinference:
+  internal:
     # Local to this host. Nothing here talks to the gateway's compose network;
     # the tunnel is the only path off the machine.
     driver: bridge

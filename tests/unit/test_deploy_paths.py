@@ -112,7 +112,7 @@ def test_the_runner_image_runs_the_host_package() -> None:
 
 def test_the_remote_compose_builds_from_files_that_exist() -> None:
     """Every build context/dockerfile pair in the compose must resolve."""
-    compose = yaml.safe_load((HOST / "docker-compose.agent-remote-runner.yml").read_text())
+    compose = yaml.safe_load((HOST / "docker-compose.sandbox.yml").read_text())
     checked = 0
     for name, service in compose["services"].items():
         build = service.get("build")
@@ -127,7 +127,7 @@ def test_the_remote_compose_builds_from_files_that_exist() -> None:
 
 def test_the_remote_compose_invokes_host_modules() -> None:
     """The commands must name the moved package, not the gateway's."""
-    text = (HOST / "docker-compose.agent-remote-runner.yml").read_text(encoding="utf-8")
+    text = (HOST / "docker-compose.sandbox.yml").read_text(encoding="utf-8")
     assert "cloud_agent_host.workspace_broker" in text
     assert "cloud_agent_host.runner" in text
 

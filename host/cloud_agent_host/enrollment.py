@@ -34,6 +34,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sys
 import threading
 import time
 import urllib.error
@@ -239,11 +240,41 @@ def register(
         status=str(answer.get("status") or "enrolling"),
     )
     store_credential(credential)
+    _warn_broker_error(answer, identity.host)
     logger.info(
         "agent_host_registered",
         extra={"event": "agent_host_registered", "host": identity.host, "status": identity.status},
     )
     return identity
+
+
+def _warn_broker_error(answer: dict[str, Any], host: str) -> None:
+    """Surface the control plane's verdict on the address we just reported.
+
+    It is the only party that can answer "is this address usable", because it
+    is the one that will dial it — and it is on another machine, which is
+    exactly when the answer stops being obvious. Printed to stderr as well as
+    logged because `sandbox_host.sh up` tails these logs after starting
+    the stack: a deploy that misconfigured the reverse tunnel or the shared
+    broker token says so while somebody is still watching, instead of at the
+    first terminal request of the first job.
+    """
+    error = answer.get("broker_error")
+    if not error:
+        return
+    logger.warning(
+        "agent_host_broker_unusable",
+        extra={"event": "agent_host_broker_unusable", "host": host, "broker_error": error},
+    )
+    print(
+        f"agent runner: the control plane cannot use this host's broker address: {error}\n"
+        "  Files, terminals and git for every job on this host will fail until this is fixed.\n"
+        "  On a remote runner host, check AGENT_WORKSPACE_BROKER_ADVERTISE_URL, the reverse\n"
+        "  forward on the control-plane tunnel, and that AGENT_WORKSPACE_BROKER_TOKEN matches\n"
+        "  the control plane's.",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def heartbeat(
@@ -271,6 +302,7 @@ def heartbeat(
         },
         bearer=identity.credential,
     )
+    _warn_broker_error(answer, identity.host)
     identity.status = str(answer.get("status") or identity.status)
     interval = answer.get("heartbeat_interval_seconds")
     if isinstance(interval, (int, float)) and interval > 0:

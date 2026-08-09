@@ -92,6 +92,28 @@ class WorkspaceBrokerClient:
             raise WorkspaceBrokerError(502, "The live workspace returned an invalid response.")
         return body
 
+    async def health(self, *, timeout: float = 3) -> None:
+        """Reach the broker and be recognised by it, or raise.
+
+        Not part of a job's path — this is what lets the control plane find out
+        at enrolment whether the address a host reported is one it can actually
+        use, rather than at the first terminal or file read of the first job.
+
+        `/health` is authenticated, which is why it is the right probe: it
+        answers reachability and credential in one call, and those were the two
+        ways this was misconfigured on the first remote host. An unauthenticated
+        endpoint would have said everything was fine while the token was wrong.
+
+        Deliberately short: a hanging broker must not hold up a heartbeat.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(f"{self._base_url}/health", headers=self._headers)
+        except httpx.HTTPError as exc:
+            raise WorkspaceBrokerError(503, f"unreachable: {exc}") from exc
+        if response.is_error:
+            raise self._response_error(response)
+
     async def files(self, workspace_id: str, path: str) -> dict[str, Any]:
         """Read one file or directory from a live workspace."""
         return await self._request("GET", workspace_id, "files", params={"path": path})

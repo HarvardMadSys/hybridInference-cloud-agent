@@ -1,8 +1,14 @@
-"""Unit tests for the MCP registry, the proxy's filters, and runtime wiring.
+"""Unit tests for MCP resolution, the proxy's filters, and runtime wiring.
 
 The properties pinned here are the ones the feature's safety rests on: a
 credential never reaching the sandbox, a repository never supplying its own MCP
 servers, and a tool outside the allowlist being neither advertised nor callable.
+
+Since the deployment-configured registry was retired, one more property joins
+them: **no configuration can put a server back on offer.** The tests that used
+to exercise the YAML loader are gone with it; what replaces them asserts the
+absence, because "we deleted the parser" and "a deployment cannot supply
+servers" are different claims and only the second one is the product decision.
 """
 
 from __future__ import annotations
@@ -16,18 +22,11 @@ from cloud_agent.mcp_registry import (
     McpRegistry,
     McpRegistryError,
     McpServer,
-    load_registry,
+    get_registry,
 )
 
 _GATEWAY = "https://gateway.example.com"
 _TOKEN = "ajt.job.attempt.signature"
-
-
-def _write(tmp_path, body: str):
-    """Write a registry YAML file and return its path."""
-    path = tmp_path / "mcp.yaml"
-    path.write_text(body)
-    return path
 
 
 def _server(**overrides) -> McpServer:
@@ -40,107 +39,49 @@ def _server(**overrides) -> McpServer:
     )
 
 
-# ── registry ──────────────────────────────────────────────────────────
+# ── nothing is on offer ───────────────────────────────────────────────
 
 
-def test_missing_file_means_no_servers(tmp_path):
-    """A deployment that configures nothing keeps working, with no MCP."""
-    assert load_registry(tmp_path / "absent.yaml").servers == {}
-    assert load_registry(None).servers == {}
+def test_no_deployment_configuration_can_offer_servers(tmp_path, monkeypatch):
+    """A registry file and the variable that used to name it change nothing.
 
-
-def test_servers_load_with_env_interpolated_credentials(tmp_path, monkeypatch):
-    """A ${VAR} header resolves from the environment at load time."""
-    monkeypatch.setenv("GITHUB_MCP_TOKEN", "ghs_secret")
-    registry = load_registry(
-        _write(
-            tmp_path,
-            """
+    This is the test that distinguishes retiring the feature from unwiring it.
+    A deployment upgrading from a version that had the registry keeps its file
+    and its variable; both must now be inert rather than quietly honoured.
+    """
+    config = tmp_path / "mcp.yaml"
+    config.write_text(
+        """
 servers:
   - name: github
     url: https://api.githubcopilot.com/mcp/
     default: true
     headers:
       Authorization: "Bearer ${GITHUB_MCP_TOKEN}"
-    tools: [get_issue]
-""",
-        )
+"""
     )
-    server = registry.get("github")
-    assert server is not None
-    assert server.headers == {"Authorization": "Bearer ghs_secret"}
-    assert registry.defaults == ["github"]
+    monkeypatch.setenv("AGENT_MCP_CONFIG", str(config))
+    monkeypatch.setenv("AGENT_MCP_CONFIG_FILE", str(config))
+    monkeypatch.setenv("GITHUB_MCP_TOKEN", "ghs_secret")
+
+    assert get_registry().servers == {}
+    assert get_registry().names == []
+    assert get_registry().defaults == []
 
 
-def test_unset_credential_refuses_rather_than_sending_a_blank_header(tmp_path, monkeypatch):
-    """An unset ${VAR} is a startup error naming it, not an empty Bearer."""
-    monkeypatch.delenv("GITHUB_MCP_TOKEN", raising=False)
-    with pytest.raises(McpRegistryError, match="GITHUB_MCP_TOKEN"):
-        load_registry(
-            _write(
-                tmp_path,
-                """
-servers:
-  - name: github
-    url: https://api.githubcopilot.com/mcp/
-    headers:
-      Authorization: "Bearer ${GITHUB_MCP_TOKEN}"
-""",
-            )
-        )
+def test_a_job_cannot_name_a_server_because_none_are_on_offer():
+    """Naming one fails at creation, and says so in the owner's language."""
+    with pytest.raises(McpRegistryError, match="not available yet"):
+        get_registry().resolve(["github"])
 
 
-def test_stdio_servers_are_refused(tmp_path):
-    """A ``command:`` server has nowhere to run and is rejected by name."""
-    with pytest.raises(McpRegistryError, match=r"stdio"):
-        load_registry(
-            _write(
-                tmp_path,
-                """
-servers:
-  - name: local
-    command: npx some-server
-    url: https://example.com/mcp
-""",
-            )
-        )
+def test_a_job_that_names_nothing_still_runs():
+    """No MCP is a supported shape, not an error: the job just gets no tools."""
+    assert get_registry().resolve(None) == []
+    assert get_registry().resolve([]) == []
 
 
-def test_plaintext_endpoints_are_refused_off_loopback(tmp_path):
-    """The proxy attaches a credential, so the hop may not be plaintext."""
-    with pytest.raises(McpRegistryError, match="plaintext"):
-        load_registry(
-            _write(tmp_path, "servers:\n  - name: bad\n    url: http://mcp.example.com/mcp\n")
-        )
-
-
-def test_loopback_http_is_allowed_for_development(tmp_path):
-    """A server on the developer's own machine needs no certificate."""
-    registry = load_registry(
-        _write(tmp_path, "servers:\n  - name: dev\n    url: http://localhost:9000/mcp\n")
-    )
-    assert registry.names == ["dev"]
-
-
-def test_reserved_headers_cannot_be_configured(tmp_path):
-    """A registry may not override headers the proxy owns."""
-    with pytest.raises(McpRegistryError, match="proxy"):
-        load_registry(
-            _write(
-                tmp_path,
-                "servers:\n  - name: x\n    url: https://e.com/mcp\n"
-                '    headers:\n      Host: "elsewhere"\n',
-            )
-        )
-
-
-@pytest.mark.parametrize("name", ["Has-Caps", "with space", "a/b", "", "x" * 60])
-def test_invalid_server_names_are_refused(tmp_path, name):
-    """A name reaches a URL path and every tool name; keep it inert."""
-    with pytest.raises(McpRegistryError):
-        load_registry(
-            _write(tmp_path, f'servers:\n  - name: "{name}"\n    url: https://e.com/mcp\n')
-        )
+# ── the shapes the relay and proxy resolve against ────────────────────
 
 
 def test_public_view_never_carries_the_url_or_the_credential():

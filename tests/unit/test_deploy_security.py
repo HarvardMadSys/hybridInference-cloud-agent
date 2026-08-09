@@ -18,7 +18,7 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-COMPOSE_PATH = REPO / "deploy/host/docker-compose.agent-remote-runner.yml"
+COMPOSE_PATH = REPO / "deploy/host/docker-compose.sandbox.yml"
 SANDBOX_DOCKERFILE = REPO / "deploy/sandbox/Dockerfile.agent-sandbox"
 CODEX_REQUIREMENTS = REPO / "deploy/sandbox/codex-requirements.toml"
 WORKFLOW = REPO / ".github/workflows/agent-job-runner.yml"
@@ -111,7 +111,7 @@ def test_each_address_reaches_the_listener_it_names(
     Resolving the *defaults* is the point — a deployment that sets every
     variable by hand would have papered over it.
     """
-    env = compose["services"]["agent-runner"]["environment"]
+    env = compose["services"]["runner"]["environment"]
     address = _defaults(env[variable]).removeprefix("http://").removeprefix("https://")
     tunnel = _tunnels(compose).get(address)
     assert tunnel is not None, f"{variable} defaults to {address}, which no tunnel answers"
@@ -159,14 +159,14 @@ def test_every_docker_socket_holder_is_known_and_read_only(compose: dict) -> Non
         for name, svc in compose["services"].items()
         if any("docker.sock" in m for m in _mounts(svc))
     }
-    assert set(holders) == {"agent-runner", "agent-workspace-broker"}, sorted(holders)
+    assert set(holders) == {"runner", "workspace-broker"}, sorted(holders)
     for name, mounts in holders.items():
         assert all(m.endswith(":ro") for m in mounts), f"{name}: {mounts}"
 
 
 def test_the_sandbox_image_is_required_not_defaulted(compose: dict) -> None:
     """A defaulted image name is how a host silently runs something else."""
-    assert ":?" in compose["services"]["agent-runner"]["environment"]["AGENT_SANDBOX_IMAGE"]
+    assert ":?" in compose["services"]["runner"]["environment"]["AGENT_SANDBOX_IMAGE"]
 
 
 # ---------------------------------------------------------------------------

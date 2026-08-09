@@ -1,7 +1,7 @@
 """The runner host's isolation preflight.
 
 Ported from the gateway's ``tests/unit/ops/test_agent_runner_preflight.py`` at
-H4, against ``deploy/host/agent_remote_runner.sh``. The gateway had two runner
+H4, against ``deploy/host/sandbox_host.sh``. The gateway had two runner
 scripts and only the remote one was migrated — the one carrying this check was
 not — so the sweep that deleted the gateway's agent tooling found that after
 the split **no runner script anywhere verified its own isolation boundary**,
@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNNER_SCRIPT = REPO_ROOT / "deploy/host/agent_remote_runner.sh"
+RUNNER_SCRIPT = REPO_ROOT / "deploy/host/sandbox_host.sh"
 
 HOST_KERNEL = "6.8.0-51-generic"
 GUEST_KERNEL = "6.12.0-kata"

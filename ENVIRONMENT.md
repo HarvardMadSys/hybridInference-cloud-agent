@@ -100,7 +100,7 @@ gateway serves models and answers nothing about MCP.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
-| `AGENT_MCP_CONFIG` | **NEW** | **Path** to the MCP registry file, mounted read-only. A path and not the servers themselves: the file carries each upstream's credential, and a credential in an environment variable is readable by anything that can list the process environment and lands in `docker inspect`, crash dumps and most log shippers. Unset means this deployment offers no MCP servers — a supported shape, distinct from a file that fails to parse. |
+| ~~`AGENT_MCP_CONFIG`~~ | **removed** | There is no deployment-wide MCP registry. It named a file of remote servers with their credentials, and every user who could create a job could use them under that one identity — the team-MCP shape this product does not offer. Per-user connections replace it; the relay, the proxy and the sandbox boundary stay. Listed here rather than deleted because an existing deployment has this set, and a variable that silently stops meaning anything is worse than one recorded as gone. |
 | `AGENT_SANDBOX_MCP_URL` | **NEW** | The MCP relay **as a sandbox reaches it** — a host-local relay alias, not this service's own bind address, which is why it is configured rather than derived. Handed to the runner at claim time and passed into the sandbox beside `AGENT_GATEWAY_URL`. Unset means jobs get no MCP, and a runtime asked for servers anyway refuses rather than resolving them against the inference gateway. |
 | `AGENT_MCP_TUNNEL_*` | **NEW** | The remote-runner host's second relay: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`, and the optional `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT` / `LISTEN_PORT`. Its own key, restricted the same way as the gateway tunnel's — one key that opens both would make the two-destination split cosmetic. |
 | `AGENT_MCP_HOSTNAME` | **NEW** | The relay's alias on both container networks. Defaults to `agent-mcp`. |
@@ -115,7 +115,7 @@ gateway serves models and answers nothing about MCP.
 | `AGENT_HOST_CREDENTIAL` | **NEW** | What `/v1/agent/host/register` hands back (task G2). Authenticates this machine's heartbeats and its claims, and names it — unlike the shared `AGENT_DISPATCHER_TOKEN`, which says "a runner" and not "which". Revoked by removing the host. Read by the same not-yet-written host client as `AGENT_ENROLL_TOKEN`. |
 | `AGENT_LEASE_TTL` | existing | Attempt lease horizon. Grant TTL is derived from this (task E9) — changing one without the other creates either dead grants or grants outliving their attempt. |
 | `AGENT_TIMEOUT_S` | existing | |
-| `AGENT_RUNNER_HOST` | existing | The name this runner reports at claim time. Phase G extends the `agent_runner_hosts` row it creates with status, capacity and capabilities rather than replacing it with a second table, so a runner that only sets this keeps working exactly as before — unmetered, online, and claimable. |
+| `AGENT_RUNNER_HOST` | existing | The name this runner reports at claim time. **Only until the host enrols.** After enrolment the control plane reads the host from the runner's credential, not from the claim body, so editing this renames nothing — what keeps two stacks on one machine apart is a separate `AGENT_HOST_STATE_ROOT` each, since the credential lives there. Phase G extends the `agent_runner_hosts` row it creates with status, capacity and capabilities rather than replacing it with a second table, so a runner that only sets this keeps working exactly as before — unmetered, online, and claimable. |
 
 ### Cutover migration (`deploy/migrate/`, read once and never again)
 
@@ -129,6 +129,16 @@ neither belongs in any unit file, `.env`, or image.
 | `AGENT_MIGRATION_OLD_KEY_FILE` | **NEW** | **Path**, not a value: the file holding the gateway's old key material, which the script reads once to decrypt credentials before re-encrypting them under `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`. Deleted immediately afterwards. The script deliberately refuses to read `API_KEY_SECRET` from its own environment — see [the one rule](#the-one-rule); this is the narrowest shape that still lets a re-key happen at all, and MIGRATION.md's open-decisions register says which machine may run it. |
 
 ## Host agent (`host/cloud_agent_host`)
+
+### The stack's own identity
+
+Read by `deploy/host/deploy.sh` and `deploy/host/sandbox_host.sh` rather than by
+compose, because they name the stack rather than configure it.
+
+| Variable | New? | Value / who provisions |
+|---|---|---|
+| `COMPOSE_PROJECT` | **NEW** | This stack's compose project — the prefix on every container, image and network it creates, and therefore what keeps two environments on one machine apart. **Required, no default.** Sharing it is silent: the second `up` does not refuse, it adopts the first stack's containers and recreates them with its own configuration. `freeinference-cloud-agent-sandbox-staging` / `-prod`. |
+| `SIBLING_COMPOSE_PROJECTS` | **NEW** | Comma-separated projects on this machine that are the *other* environment rather than a stray copy of this one. Setting it also makes `AGENT_HOST_STATE_ROOT`, `AGENT_WORKDIR_ROOT` and `AGENT_SNAPSHOT_ROOT` required: they are host paths that default to the same directories for every stack, and sharing them means shared enrolment credentials and shared job workspaces. The deploy's guard reports containers of this stack's shape under any project it does not know — which is what caught six runners and two brokers here once — and a legitimate sibling has to be named or it trips that guard forever. |
 
 | Variable | New? | Notes |
 |---|---|---|
@@ -157,7 +167,7 @@ neither belongs in any unit file, `.env`, or image.
 |---|---|---|
 | `AGENT_SANDBOX_BACKEND` | existing | |
 | `AGENT_SANDBOX_RUNTIME` | existing | `runc` for trusted internal repos; Kata/gVisor required for public multi-tenant use. |
-| `AGENT_SANDBOX_IMAGE` | existing | |
+| `AGENT_SANDBOX_IMAGE` | existing | Tag it per environment (`freeinference-cloud-agent-job:staging` / `:prod`) on a machine that runs both, or a rebuild on one side replaces the image the other is running. `-job` and not `-sandbox`, so it cannot be read as `…-sandbox-<env>-runner`, the image the runner container itself is built from. |
 | `AGENT_SANDBOX_NETWORK` | existing | |
 | `AGENT_SANDBOX_DOCKER` | existing | |
 | `AGENT_SANDBOX_HOME` | existing | |

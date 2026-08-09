@@ -334,8 +334,8 @@ export function IntegrationsView({
           <div className="min-w-0 flex-1">
             <h3 className="font-medium text-gray-900">Your own MCP servers</h3>
             <p className="mt-0.5 text-sm text-gray-500">
-              Servers your deployment configures are already available to agent tasks. Connecting
-              your own, with your own credentials, is coming soon.
+              Connect MCP servers with your own credentials to give your agents more tools. Coming
+              soon.
             </p>
           </div>
           <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-500">

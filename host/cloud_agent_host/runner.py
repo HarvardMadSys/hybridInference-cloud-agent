@@ -30,6 +30,7 @@ import os
 import pathlib
 import queue
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -1186,6 +1187,46 @@ def run_once(
         control.close()
 
 
+#: Set by SIGTERM. A container being replaced gets one, and until this existed
+#: it killed the process outright — Python's default handler terminates, and
+#: only ``KeyboardInterrupt`` (SIGINT) was caught. Every `docker compose up -d`
+#: that recreated a runner therefore abandoned whatever job it was running.
+#:
+#: That is not only a deploy problem, but the deploy is where it bites on a
+#: schedule: since CD, every merge to dev recreates these containers.
+_STOPPING = threading.Event()
+
+
+def _drain_on_sigterm() -> None:
+    """Finish the job in hand on SIGTERM, then exit; SIGINT still stops now.
+
+    The split is deliberate. `docker stop` and `compose up -d` send SIGTERM and
+    then wait `stop_grace_period` — that wait is exactly the room to let a job
+    end, and the container is being replaced anyway, so exiting after it is
+    right. A person pressing Ctrl-C means *now*, and turning that into a
+    several-minute wait would be its own surprise.
+
+    The lease machinery remains the backstop, not the plan: a job outlasting
+    the grace period is SIGKILLed, its lease expires, and the control plane
+    supersedes the attempt — which is what happened to every job through a
+    deploy before this, and is exactly the outcome this narrows to the rare
+    case.
+    """
+
+    def handler(signum: int, frame: object) -> None:
+        _STOPPING.set()
+        print(
+            "agent runner: SIGTERM received; finishing the current job, then exiting",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    # Only the main thread may install one; tests and embedders that call
+    # `serve` from elsewhere get the old behaviour rather than an exception.
+    with contextlib.suppress(ValueError):
+        signal.signal(signal.SIGTERM, handler)
+
+
 def _broker_url_from_env() -> str | None:
     """This host's broker address, **as the control plane will reach it**.
 
@@ -1315,12 +1356,23 @@ def run_forever(
         pool.start()
         where = f" on host {identity.host} (enrolled)"
 
+    _drain_on_sigterm()
+
     print(
         f"agent runner {worker_id} started{where} (sandbox backend: {backend.name})",
         flush=True,
     )
 
     while True:
+        # Checked here, at the top, for the same reason the pool's answer is:
+        # between jobs is the only moment leaving costs nothing. A job already
+        # running is not interrupted — the signal handler only sets the flag.
+        if _STOPPING.is_set():
+            print("agent runner: stopping after the current job", file=sys.stderr, flush=True)
+            if pool is not None:
+                pool.stop()
+            return 0
+
         # **Read the pool's answer before asking for work, not after.** A
         # runner that claims first and checks second spends an attempt the
         # operator has already said should not start. `draining` is a human

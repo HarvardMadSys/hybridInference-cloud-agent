@@ -183,8 +183,9 @@ def test_every_configured_file_path_is_actually_mounted(compose: dict) -> None:
 
     Setting `AGENT_GITHUB_APP_PRIVATE_KEY_PATH` without mounting anything
     produces a service that starts, offers Integrations, and fails at the first
-    publish; the same shape for `AGENT_MCP_CONFIG` produces a picker with no
-    servers. Both were exactly that until review caught them.
+    publish. It was exactly that until review caught it. `AGENT_MCP_CONFIG` had
+    the same shape and is no longer here at all — see
+    `test_no_mcp_registry_is_configurable` below.
     """
     service = compose["services"]["control-plane"]
     env = service["environment"]
@@ -198,6 +199,23 @@ def test_every_configured_file_path_is_actually_mounted(compose: dict) -> None:
             continue
         parts = str(mount).rsplit(":", 2)
         mounted.add(parts[1] if len(parts) == 3 else parts[-1])
-    for name in ("AGENT_GITHUB_APP_PRIVATE_KEY_PATH", "AGENT_MCP_CONFIG"):
+    for name in ("AGENT_GITHUB_APP_PRIVATE_KEY_PATH",):
         default = env[name].split(":-", 1)[1].rstrip("}")
         assert default in mounted, f"{name} defaults to {default}, which nothing mounts"
+
+
+def test_no_mcp_registry_is_configurable(compose: dict) -> None:
+    """The stack offers no way to supply a deployment-wide MCP server list.
+
+    Checked at the compose layer as well as in the loader, because this is
+    where an operator would look for the knob: a variable left behind here
+    would read as "configurable, just undocumented", and the mount is what
+    made the old registry reachable at all.
+    """
+    for name, service in compose["services"].items():
+        env = service.get("environment") or {}
+        offenders = sorted(key for key in env if "MCP_CONFIG" in key)
+        assert not offenders, f"{name} still takes {offenders}"
+        for mount in service.get("volumes") or []:
+            target = mount.get("target") if isinstance(mount, dict) else str(mount)
+            assert "mcp" not in str(target).lower(), f"{name} still mounts {target}"

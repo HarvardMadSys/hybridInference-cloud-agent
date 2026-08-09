@@ -580,7 +580,7 @@ jobs:
           AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS=/dev/null
           ENVFILE
           docker compose \
-            -f deploy/host/docker-compose.agent-remote-runner.yml \
+            -f deploy/host/docker-compose.sandbox.yml \
             --env-file .env \
             config > ${RUNNER_TEMP}/rendered.yml
           echo "--- rendered services ---"
@@ -639,7 +639,7 @@ jobs:
           }
 
           CP=deploy/control-plane/docker-compose.yml
-          HOST=deploy/host/docker-compose.agent-remote-runner.yml
+          HOST=deploy/host/docker-compose.sandbox.yml
           for required in AGENT_SESSION_SECRET AGENT_DISPATCHER_TOKEN; do
             check "$CP" .env.control-plane "$required"
           done
@@ -672,7 +672,7 @@ jobs:
               for name, svc in stack["services"].items()
               if "agent-egress" in (svc.get("networks") or {})
           }
-          if on_egress != {"agent-gateway-tunnel", "agent-mcp-tunnel"}:
+          if on_egress != {"gateway-tunnel", "mcp-tunnel"}:
               failures.append(f"unexpected services on the closed network: {sorted(on_egress)}")
 
           for name, svc in stack["services"].items():

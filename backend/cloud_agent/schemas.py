@@ -907,6 +907,16 @@ class HostRegisterResponse(BaseModel):  # type: ignore[no-any-unimported]
         ),
     )
     status: str
+    broker_error: str | None = Field(
+        None,
+        description=(
+            "Set when the control plane could not use the broker_url this host "
+            "reported: unreachable from here, or refusing the shared broker "
+            "credential. Enrolment still succeeds — a broker is often still "
+            "starting — but every file, terminal and git request for this "
+            "host's jobs will fail until it is fixed."
+        ),
+    )
 
 
 class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
@@ -930,6 +940,14 @@ class HostHeartbeatResponse(BaseModel):  # type: ignore[no-any-unimported]
     status: str
     slots_total: int | None = None
     slots_used: int = 0
+    broker_error: str | None = Field(
+        None,
+        description=(
+            "Set when the control plane could not use the broker_url this host "
+            "reported. Checked at most once a minute, and always when the "
+            "reported address changes."
+        ),
+    )
     heartbeat_interval_seconds: float = Field(
         ...,
         description=(

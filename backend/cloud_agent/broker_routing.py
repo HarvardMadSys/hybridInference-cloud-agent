@@ -35,11 +35,13 @@ opens every other host's broker.
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from cloud_agent_host.workspace_broker_client import (
     WorkspaceBrokerClient,
+    WorkspaceBrokerError,
     workspace_broker_from_env,
 )
 
@@ -134,3 +136,63 @@ async def broker_for_job(
         if host is not None:
             return _client_for(host)
     return workspace_broker_from_env()
+
+
+#: How long a probe result is reused before the next heartbeat re-checks.
+#: Heartbeats arrive every 30s per host; probing each one would make the
+#: control plane's liveness path depend on a second service's, and probing only
+#: at enrolment would never notice a token that was already wrong when the host
+#: enrolled — which is how the first remote host was misconfigured.
+BROKER_PROBE_INTERVAL_S = 60.0
+
+#: `{host: (monotonic_deadline, url_probed)}`. In-process and deliberately not
+#: persisted: a control plane that restarts should re-probe, and the answer is
+#: about right now rather than about history.
+_PROBE_CACHE: dict[str, tuple[float, str]] = {}
+
+
+async def probe_broker(host: str, broker_url: str | None, *, force: bool = False) -> str | None:
+    """Check that this deployment can actually use ``broker_url``.
+
+    Returns ``None`` when it can, or a short reason when it cannot.
+
+    The reason this exists: a runner reports the address *it* uses, and until
+    something tries it from here, nothing knows whether it means anything on
+    this machine. On the first remote host it did not — a compose service name
+    that resolved nowhere — and the way that surfaced was a job failing at its
+    first terminal call, three attempts, six minutes, with `503` as the only
+    clue. The same probe also catches a broker token that does not match,
+    because `/health` is authenticated.
+
+    Re-probes at most every ``BROKER_PROBE_INTERVAL_S`` per host, and always
+    when the reported URL changes — a changed address is exactly when the
+    answer is most likely to be different.
+    """
+    url = (broker_url or "").strip()
+    if not url:
+        # No broker URL is a deployment shape, not a fault: the pre-pool
+        # single-host setup has none and reads the environment instead.
+        return None
+
+    now = time.monotonic()
+    cached = _PROBE_CACHE.get(host)
+    if not force and cached is not None and cached[0] > now and cached[1] == url:
+        return None
+
+    client = _client_for({"broker_url": url})
+    if client is None:
+        # No token configured on this side. Not the host's fault and not
+        # something its operator can fix from over there.
+        return None
+
+    try:
+        await client.health()
+    except WorkspaceBrokerError as exc:
+        _PROBE_CACHE.pop(host, None)
+        return f"{exc.message} ({url})"
+    except Exception as exc:  # pragma: no cover - defensive
+        _PROBE_CACHE.pop(host, None)
+        return f"{type(exc).__name__}: {exc} ({url})"
+
+    _PROBE_CACHE[host] = (now + BROKER_PROBE_INTERVAL_S, url)
+    return None

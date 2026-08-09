@@ -117,9 +117,9 @@ def test_the_sandbox_tunnel_lands_on_the_relay_listener() -> None:
 
     root = Path(__file__).resolve().parents[2]
     host_stack = yaml.safe_load(
-        (root / "deploy" / "host" / "docker-compose.agent-remote-runner.yml").read_text()
+        (root / "deploy" / "host" / "docker-compose.sandbox.yml").read_text()
     )
-    tunnel = host_stack["services"]["agent-mcp-tunnel"]["environment"]["TUNNEL_REMOTE_PORT"]
+    tunnel = host_stack["services"]["mcp-tunnel"]["environment"]["TUNNEL_REMOTE_PORT"]
     default = re.search(r":-(\d+)", str(tunnel))
     assert default, f"the MCP tunnel's remote port has no default: {tunnel!r}"
 
