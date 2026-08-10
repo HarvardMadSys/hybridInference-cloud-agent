@@ -76,16 +76,23 @@ class FakeJobStore:
 class Upstream:
     """A stand-in MCP server that records what the gateway sent it."""
 
-    def __init__(self, *, body: bytes | None = None, content_type: str = "application/json"):
+    def __init__(
+        self,
+        *,
+        body: bytes | None = None,
+        content_type: str = "application/json",
+        status_code: int = 200,
+    ):
         self.requests: list[httpx.Request] = []
         self.body = body if body is not None else b'{"jsonrpc":"2.0","id":1,"result":{}}'
         self.content_type = content_type
+        self.status_code = status_code
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         """Record the request and answer with the canned body."""
         self.requests.append(request)
         return httpx.Response(
-            200,
+            self.status_code,
             content=self.body,
             headers={"content-type": self.content_type, "mcp-session-id": "sess-1"},
         )
@@ -327,6 +334,51 @@ async def test_tools_resolve_against_the_job_owner_not_the_caller(monkeypatch, s
         response = await api.post("/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth())
     assert response.status_code == 200
     assert resolved_for == ["owner-1"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_an_upstream_refusing_the_credential_is_attributed_to_the_server(
+    client, upstream, caplog, status
+):
+    """The third way a connection dies, and the only one visible from here.
+
+    Expiry and an unreadable credential are caught during resolution; an
+    upstream that has stopped accepting a live-looking token can only be found
+    by asking it. Unattributed, that reads as the sandbox misbehaving — which
+    is how an hour of silent 401s went unnoticed before the gateway's route
+    learned to name the server (hybridInference#1199).
+
+    The status still reaches the agent unchanged: it is the answer to the
+    agent's own request, and rewriting it would hide a real reply from the CLI.
+    """
+    upstream.status_code = status
+
+    with caplog.at_level("WARNING"):
+        response = await client.post(
+            "/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth()
+        )
+
+    assert response.status_code == status
+    rejected = [
+        record
+        for record in caplog.records
+        if record.__dict__.get("event") == "agent_mcp_upstream_rejected_credential"
+    ]
+    assert [(record.server, record.job_id, record.status) for record in rejected] == [
+        ("github", _FENCE["job_id"], status)
+    ]
+
+
+async def test_an_upstream_answering_normally_logs_no_credential_warning(client, upstream, caplog):
+    """A warning on every reply would be noise nobody reads."""
+    with caplog.at_level("WARNING"):
+        await client.post("/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth())
+
+    assert not [
+        record
+        for record in caplog.records
+        if record.__dict__.get("event") == "agent_mcp_upstream_rejected_credential"
+    ]
 
 
 async def test_a_lost_encryption_key_is_a_503_and_not_an_unhandled_error(

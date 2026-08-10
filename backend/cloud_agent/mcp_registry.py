@@ -286,7 +286,10 @@ async def connection_states(
             continue
         try:
             token = resolved_cipher.decrypt(connection["access_token_ciphertext"])
-        except Exception:
+        except SourceControlError:
+            # Narrow deliberately: this is the whole contract of `decrypt`, and
+            # a broader catch would swallow a genuine bug here as "the user's
+            # credential is bad" — the one diagnosis nobody would question.
             # The earliest signal that a re-key left rows behind; without it the
             # first sign is a job failing a tool call much later. The ciphertext
             # is deliberately not in the record.

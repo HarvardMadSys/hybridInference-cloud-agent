@@ -303,6 +303,31 @@ async def _proxy(
             },
         ) from exc
 
+    if upstream.status_code in (401, 403):
+        # The third way a connection dies, and the only one visible from here.
+        # Expiry and an unreadable credential are caught during resolution; an
+        # upstream that has simply stopped accepting a live-looking token can
+        # only be discovered by asking it. Attributed to the server, because
+        # unattributed it reads as the sandbox misbehaving when the truth is
+        # that this owner's connection needs re-authorizing — the shape the
+        # gateway's route learned after an hour of silent 401s
+        # (hybridInference#1199) and which came across with this surface.
+        #
+        # Logged, not converted: the status belongs to the agent's own request
+        # and rewriting it would hide a real answer from the CLI. Feeding this
+        # back into `connection_states()`, so Integrations says "connect it
+        # again" before the next job fails, needs a place to record it and
+        # belongs with the connect flow that writes the row.
+        logger.warning(
+            "agent_mcp_upstream_rejected_credential",
+            extra={
+                "event": "agent_mcp_upstream_rejected_credential",
+                "job_id": job_id,
+                "server": server.name,
+                "status": upstream.status_code,
+            },
+        )
+
     content_type = upstream.headers.get("content-type", "")
     if content_type.startswith("text/event-stream"):
         return StreamingResponse(
