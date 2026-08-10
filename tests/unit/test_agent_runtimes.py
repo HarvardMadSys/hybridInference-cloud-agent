@@ -97,6 +97,119 @@ def test_error_result_maps_to_error():
     assert event.payload["subtype"] == "error_max_turns"
 
 
+def _pi_contract_lines() -> list[str]:
+    """Return the sanitized pi ``--mode json`` stream, line by line."""
+    return (_FIXTURES / "pi_stream_contract.jsonl").read_text().splitlines()
+
+
+def test_pi_contract_stream_maps_to_the_normalized_kinds():
+    """pi's stream normalizes, and the deltas that built each block do not.
+
+    The fixture's 27 lines carry one thinking block, one tool call, its
+    result, and one answer. Anything that emits per delta — or that emits the
+    same block again from ``turn_end`` — shows up here as extra events.
+    """
+    runtime = PiRuntime()
+    kinds = [
+        event.event_type
+        for line in _pi_contract_lines()
+        if (event := runtime.parse_event(line)) is not None
+    ]
+    assert kinds == [
+        "lifecycle",  # session
+        "thinking",
+        "tool_use",
+        "usage",  # end of the assistant message that made the call
+        "tool_result",
+        "message",  # the answer
+        "usage",
+        "lifecycle",  # agent_end
+    ]
+    assert "raw" not in kinds, "the recorded pi format should be fully recognized"
+
+
+def test_pi_answer_becomes_a_message_event():
+    """The answer arrives as ``message``, which is what reaches the thread.
+
+    ``agent_thread_messages`` is populated from ``message`` events alone, so
+    this is the difference between a visible reply — and the next turn having
+    any context — and a conversation that looks empty.
+    """
+    runtime = PiRuntime()
+    events = [runtime.parse_event(line) for line in _pi_contract_lines()]
+    messages = [e for e in events if e and e.event_type == "message"]
+    assert len(messages) == 1
+    assert messages[0].payload["text"] == "PWD_OK: synthetic agent loop round trip complete."
+
+
+def test_pi_tool_call_and_result_carry_what_the_runner_reads():
+    """Tool events keep the keys the runner and the UI look for."""
+    runtime = PiRuntime()
+    events = [runtime.parse_event(line) for line in _pi_contract_lines()]
+
+    tool_use = next(e for e in events if e and e.event_type == "tool_use")
+    assert tool_use.payload["name"] == "bash"
+    assert tool_use.payload["id"] == "synthetic-tool-call-1"
+    assert tool_use.payload["input"] == {"command": "pwd"}
+
+    tool_result = next(e for e in events if e and e.event_type == "tool_result")
+    assert tool_result.payload["tool_use_id"] == "synthetic-tool-call-1"
+    # The runner's blocked-egress detection reads exactly these two.
+    assert tool_result.payload["is_error"] is False
+    assert "/workspace" in tool_result.payload["content"]
+
+
+def test_pi_failed_tool_result_reports_the_error_flag():
+    """A failing tool call is flagged, so the runner can count and report it."""
+    line = json.dumps(
+        {
+            "type": "message_end",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "synthetic-tool-call-9",
+                "toolName": "bash",
+                "content": [{"type": "text", "text": "curl: (7) Failed to connect"}],
+                "isError": True,
+            },
+        }
+    )
+    event = PiRuntime().parse_event(line)
+    assert event.event_type == "tool_result"
+    assert event.payload["is_error"] is True
+
+
+def test_pi_usage_reports_tokens_without_claiming_a_cost():
+    """Token counts are surfaced; the zero-filled cost block is not."""
+    runtime = PiRuntime()
+    events = [runtime.parse_event(line) for line in _pi_contract_lines()]
+    usage = [e for e in events if e and e.event_type == "usage"][-1]
+    assert usage.payload["input_tokens"] == 12
+    assert usage.payload["output_tokens"] == 8
+    assert usage.payload["cache_read_tokens"] == 4
+    assert "cost" not in usage.payload
+    assert runtime.capabilities().cost_report is False
+
+
+def test_pi_unknown_block_kind_is_reported_once_not_per_token():
+    """A new sub-event degrades to one diagnostic, not one row per delta."""
+    runtime = PiRuntime()
+    line = json.dumps({"type": "message_update", "assistantMessageEvent": {"type": "citation_end"}})
+    first = runtime.parse_event(line)
+    assert first is not None and first.event_type == "raw"
+    assert runtime.parse_event(line) is None
+    # A fresh job starts over: the suppression is per-run state.
+    assert PiRuntime().parse_event(line).event_type == "raw"
+
+
+def test_pi_unknown_line_types_still_become_raw():
+    """Promotion to Tier 1 keeps the never-drop-a-line contract."""
+    runtime = PiRuntime()
+    for line in ('{"type":"brand_new_thing","x":1}', "not json at all", "[1,2,3]"):
+        event = runtime.parse_event(line)
+        assert event is not None and event.event_type == "raw"
+    assert runtime.parse_event("   ") is None
+
+
 def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
     """The agent talks to our gateway with the job's token and phones nobody."""
     argv, env = ClaudeCodeRuntime().prepare(
@@ -263,9 +376,9 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     assert env["OPENAI_BASE_URL"] == "http://backend:8080/v1"
     assert env["OPENAI_API_KEY"] == "ajt.a.b"
     assert env["PI_GATEWAY_MODEL"] == "glm-5.1"
-    # Tier 2: structured or not, pi's output is passed through as raw.
-    assert runtime.parse_event('{"type":"turn_start"}').event_type == "raw"
-    assert runtime.capabilities().tier == 2
+    # Tier 1 since the recorded staging runs pinned the format.
+    assert runtime.capabilities().tier == 1
+    assert runtime.capabilities().normalized_events is True
 
 
 @pytest.mark.parametrize(

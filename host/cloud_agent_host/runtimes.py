@@ -21,10 +21,10 @@ and cost attribution; Tier 2 is a generic headless runner whose output flows
 through as raw events, so a new agent costs nothing to support badly and can
 be promoted when it earns it.
 
-The Claude Code mappings below were derived from observed
-``claude -p --output-format stream-json`` output, not from documentation. The
-corresponding test data is a sanitized, synthetic contract fixture — see
-``tests/fixtures/agent_runtime_streams/``.
+The Claude Code and pi mappings below were derived from observed output —
+``claude -p --output-format stream-json`` and ``pi --mode json`` — not from
+documentation. The corresponding test data is a sanitized, synthetic contract
+fixture per runtime; see ``tests/fixtures/agent_runtime_streams/``.
 """
 
 from __future__ import annotations
@@ -600,7 +600,7 @@ class GenericRuntime(AgentRuntime):
 
 
 class PiRuntime(GenericRuntime):
-    """Tier 2: the pi coding agent, streamed as raw JSON lines.
+    """Tier 1: the pi coding agent, ``--mode json`` normalized.
 
     pi ignores ``OPENAI_BASE_URL`` — its built-in ``openai`` provider goes
     straight to api.openai.com (verified against a local fake: zero hits, a
@@ -610,13 +610,39 @@ class PiRuntime(GenericRuntime):
     and then ``exec``s the real CLI. The prompt stays in argv end to end;
     nothing user-controlled passes through a shell.
 
-    ``--mode json`` output is structured (turn/message/usage events) but is
-    deliberately passed through as ``raw``: promotion to a normalizing Tier 1
-    adapter happens once real jobs prove the format worth pinning with
-    recorded fixtures, per the tier design.
+    Promoted from Tier 2 on the condition the tier design set: real jobs
+    proved the format. Passing the stream through as ``raw`` was not a quiet
+    downgrade but a silent one — ``raw`` renders nowhere in the thread and
+    only ``message`` events reach ``agent_thread_messages``, so five finished
+    staging runs (thinking, a bash call, a full answer each) showed the owner
+    an empty conversation and "completed (no changes)". The mapping below is
+    derived from those recorded runs, not from documentation; the fixture is a
+    sanitized replay of one.
     """
 
     name = "pi"
+
+    # pi streams a completed block twice: once as deltas, then whole. Only the
+    # ``*_end`` sub-events are mapped — the recorded run's 300 ``message_update``
+    # lines carry 4 completed blocks between them, and emitting per delta would
+    # be the thinking_tokens flood again with a different name.
+    _BLOCK_END_KINDS = frozenset({"thinking_end", "text_end", "toolcall_end"})
+
+    # Recognized and deliberately not emitted. ``turn_end`` and ``agent_end``
+    # repeat the whole assistant message that ``*_end`` already reported, and
+    # the ``tool_execution_*`` trio repeats the tool call and its output; the
+    # authoritative copies carry ``isError``, which those do not.
+    _SILENT_KINDS = frozenset(
+        {
+            "agent_start",
+            "turn_start",
+            "turn_end",
+            "message_start",
+            "tool_execution_start",
+            "tool_execution_update",
+            "tool_execution_end",
+        }
+    )
 
     def __init__(self) -> None:
         """Fix the wrapper invocation; Tier 2 mechanics come from Generic."""
@@ -629,6 +655,9 @@ class PiRuntime(GenericRuntime):
             "--mode json --no-session --no-extensions -p {prompt}",
             binary="pi-freeinference",
         )
+        # One adapter instance per job (see get_runtime), so the suppression
+        # in _from_message_update is per-run and cannot leak across jobs.
+        self._reported_subtypes: set[str] = set()
 
     def prepare(
         self,
@@ -656,6 +685,133 @@ class PiRuntime(GenericRuntime):
         # option handling, so hand it over explicitly.
         env["PI_GATEWAY_MODEL"] = model
         return argv, env
+
+    def parse_event(self, line: str) -> NormalizedEvent | None:
+        """Normalize one ``--mode json`` line (session format v3)."""
+        line = line.strip()
+        if not line:
+            return None
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return self._raw(line, "not json")
+        if not isinstance(event, dict):
+            return self._raw(line, "not an object")
+
+        kind = event.get("type")
+        if kind == "session":
+            return NormalizedEvent(
+                LIFECYCLE,
+                {
+                    "phase": "init",
+                    "session_id": event.get("id"),
+                    # pi's own version is not on the wire; this is the session
+                    # format's, and naming it as such keeps it from being read
+                    # as the CLI version the way Claude Code's line supplies.
+                    "session_format": event.get("version"),
+                },
+            )
+        if kind == "message_update":
+            return self._from_message_update(event, line)
+        if kind == "message_end":
+            return self._from_message_end(event, line)
+        if kind == "agent_end":
+            return NormalizedEvent(LIFECYCLE, {"phase": "result"})
+        if kind in self._SILENT_KINDS:
+            return None
+        return self._raw(line, f"unknown type {kind!r}")
+
+    def _from_message_update(self, event: dict[str, Any], line: str) -> NormalizedEvent | None:
+        """Map a completed content block; drop the deltas that built it."""
+        update = event.get("assistantMessageEvent")
+        if not isinstance(update, dict):
+            return self._raw(line, "message_update without an assistantMessageEvent")
+        subtype = str(update.get("type") or "")
+        if subtype.endswith(("_start", "_delta")):
+            return None
+        if subtype not in self._BLOCK_END_KINDS:
+            # Same treatment as an unclassified Claude Code subtype: keep the
+            # first as a diagnostic so a new block kind is discoverable, drop
+            # the repeats so it cannot flood the log at one row per token.
+            if subtype in self._reported_subtypes:
+                return None
+            self._reported_subtypes.add(subtype)
+            return self._raw(line, f"unclassified message_update subtype {subtype!r}")
+
+        if subtype == "thinking_end":
+            return NormalizedEvent(THINKING, {"text": _truncate(update.get("content"))})
+        if subtype == "text_end":
+            # The one event the owner is actually waiting for: `message` is
+            # what the control plane copies into agent_thread_messages, which
+            # is both the visible reply and the next turn's context.
+            return NormalizedEvent(MESSAGE, {"text": _truncate(update.get("content"))})
+        tool_call = update.get("toolCall")
+        if not isinstance(tool_call, dict):
+            return self._raw(line, "toolcall_end without a toolCall")
+        return NormalizedEvent(
+            TOOL_USE,
+            {
+                "name": tool_call.get("name"),
+                "id": tool_call.get("id"),
+                # Keyed `input` like every other adapter, because that is what
+                # the UI reads to render the command.
+                "input": tool_call.get("arguments"),
+            },
+        )
+
+    def _from_message_end(self, event: dict[str, Any], line: str) -> NormalizedEvent | None:
+        """Map the end of a message: a tool result, or a turn's token usage."""
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return self._raw(line, "message_end without a message")
+        role = message.get("role")
+        if role == "toolResult":
+            return NormalizedEvent(
+                TOOL_RESULT,
+                {
+                    "tool_use_id": message.get("toolCallId"),
+                    "name": message.get("toolName"),
+                    # The runner reads both of these to spot a blocked egress
+                    # host and to count failed calls, so a Tier 2 pi job had
+                    # neither. `isError` appears here and nowhere else in the
+                    # stream, which is why this is the authoritative copy.
+                    "is_error": bool(message.get("isError")),
+                    "content": _truncate(message.get("content")),
+                },
+            )
+        if role == "assistant":
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                return None
+            return NormalizedEvent(
+                USAGE,
+                {
+                    "input_tokens": usage.get("input"),
+                    "output_tokens": usage.get("output"),
+                    "cache_read_tokens": usage.get("cacheRead"),
+                    "cache_write_tokens": usage.get("cacheWrite"),
+                    "total_tokens": usage.get("totalTokens"),
+                    "model": message.get("model"),
+                    "text": (f"{usage.get('input', 0)} in / {usage.get('output', 0)} out tokens"),
+                },
+            )
+        # role="user" is the prompt echoed back; the owner wrote it, and the
+        # thread already has it.
+        if role == "user":
+            return None
+        return self._raw(line, f"message_end with unknown role {role!r}")
+
+    def capabilities(self) -> RuntimeCapabilities:
+        """Tier 1 events; no resume (``--no-session``) and no trusted cost.
+
+        pi reports a per-turn ``cost`` block, but it is computed from a price
+        table the gateway does not populate — every field came back zero in
+        the recorded runs. ``api_logs`` is the billing authority regardless,
+        so this claims no cost report rather than surfacing a confident zero.
+        """
+        return RuntimeCapabilities(
+            resume=False, cost_report=False, normalized_events=True, tier=1, mcp=False
+        )
 
 
 class OpencodeRuntime(GenericRuntime):
