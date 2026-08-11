@@ -77,6 +77,12 @@ services:
       # the queue simply never drains — with nothing in the control plane's own
       # logs saying why, because the refusal is correct.
       AGENT_DISPATCHER_TOKEN: ${AGENT_DISPATCHER_TOKEN:?the credential runners claim with}
+      # The gateway alert relay's door (/v1/agent/service/oncall/*). Optional
+      # as a pair: a deployment without on-call sets neither, the door answers
+      # 401/503, and nothing else changes. The user id decides whose role and
+      # quota every on-call analysis runs under.
+      AGENT_ONCALL_DISPATCH_TOKEN: ${AGENT_ONCALL_DISPATCH_TOKEN:-}
+      AGENT_ONCALL_USER_ID: ${AGENT_ONCALL_USER_ID:-}
 
       # --- Behaviour switches ----------------------------------------------
       # Both default to the safe answer, so an operator who sets neither gets a
