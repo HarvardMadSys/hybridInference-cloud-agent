@@ -28,6 +28,7 @@ meaningful with the live-input transport and arrive with it.
 from __future__ import annotations
 
 import io
+import json
 import pathlib
 import tarfile
 from dataclasses import dataclass, field
@@ -281,6 +282,11 @@ class HarnessSession:
         """The dialect adapter this session speaks through."""
         return self._driver.runtime
 
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`close` has ended this session."""
+        return self._closed
+
     def start_turn(self, turn_input: TurnInput) -> HarnessTurn:
         """Spawn the harness for this turn inside the platform's sandbox."""
         if self._closed:
@@ -505,6 +511,16 @@ class ClaudeCodeLiveTurn(HarnessTurn):
         return self._result
 
 
+#: Where a resident session's inference credential lives, relative to the
+#: state dir on the host and the state mount in the sandbox. A live process
+#: cannot be re-keyed through its environment; a file can be rewritten under
+#: it — which is what keeps every turn on its own attempt's grant (design §8:
+#: idle windows hold an expired credential, i.e. nothing).
+CREDENTIAL_FILE = "claude/credential"
+_SETTINGS_FILE = "claude/settings.json"
+_HELPER_REFRESH_MS = "60000"
+
+
 class ClaudeCodeLiveSession(ClaudeCodeSession):
     """The resident session (HOT): one process, many turns, stdin-fed."""
 
@@ -518,6 +534,8 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
         super().__init__(driver, context, resume_session_id=resume_session_id)
         if context.spawn_live is None:
             raise DriverError("a live session needs a live-input spawn")
+        if context.state_dir is None:
+            raise DriverError("a resident session needs a state mount")
         argv, extra_env = self.runtime.prepare_live(
             workdir=context.workdir,
             model="",  # pinned per session below, chosen by the first turn's model
@@ -527,12 +545,40 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
             mcp_config=context.mcp_config,
             **self._extra_prepare_kwargs(),
         )
+        # The resident process reads its key through the helper below, never
+        # from a baked env var: an env var is fixed for the process's life,
+        # and turn N+1 must run on turn N+1's grant.
+        extra_env.pop("ANTHROPIC_API_KEY", None)
+        extra_env["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"] = _HELPER_REFRESH_MS
         self._argv_template = argv
         self._extra_env = extra_env
         self._process: SandboxProcess | None = None
         self._lines: Iterator[str] | None = None
         self._model: str | None = None
         self._live_turn: ClaudeCodeLiveTurn | None = None
+        self._write_helper_settings()
+        self.rotate_credential(context.credential)
+
+    def _write_helper_settings(self) -> None:
+        assert self._context.state_dir is not None
+        settings = pathlib.Path(self._context.state_dir) / _SETTINGS_FILE
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        helper = f"{STATE_MOUNT_TARGET}/{CREDENTIAL_FILE}"
+        settings.write_text(json.dumps({"apiKeyHelper": f"/bin/cat {helper}"}) + "\n")
+
+    def rotate_credential(self, token: str) -> None:
+        """Point the resident process at this turn's grant (design §8).
+
+        Written before the turn is injected; the helper re-reads it on its
+        refresh interval. Between turns the file still names the previous
+        attempt's grant — which the platform has stopped renewing, so what an
+        idle sandbox holds is a credential that resolves to nothing.
+        """
+        assert self._context.state_dir is not None
+        credential = pathlib.Path(self._context.state_dir) / CREDENTIAL_FILE
+        credential.parent.mkdir(parents=True, exist_ok=True)
+        credential.write_text(token + "\n")
+        credential.chmod(0o600)
 
     def shared_lines(self) -> Iterator[str]:
         """The session's single stdout reader, borrowed by the current turn."""
@@ -567,7 +613,13 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
                 f"this resident session runs {self._model!r}; switching to "
                 f"{turn_input.model!r} takes a restart (model_switch=restart)"
             )
-        self._process.write_line(self.runtime.user_message_line(turn_input.prompt))
+        try:
+            self._process.write_line(self.runtime.user_message_line(turn_input.prompt))
+        except OSError as exc:
+            # A broken pipe is the resident process having died idle. One
+            # typed refusal, so the caller's fallback ladder catches it the
+            # same way it catches every other driver refusal.
+            raise DriverError(f"resident process is gone: {exc}") from exc
         self._live_turn = ClaudeCodeLiveTurn(self, self._process)
         return self._live_turn
 

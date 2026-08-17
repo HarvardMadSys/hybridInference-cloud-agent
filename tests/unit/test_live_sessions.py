@@ -61,7 +61,7 @@ class _LiveProcess:
 
 
 def _live(
-    process: _LiveProcess,
+    process: _LiveProcess, state_dir
 ) -> tuple[LaunchContext, list[tuple[list[str], dict[str, str]]]]:
     spawned: list[tuple[list[str], dict[str, str]]] = []
 
@@ -76,6 +76,7 @@ def _live(
         provides_isolation=True,
         spawn=lambda argv, env: (_ for _ in ()).throw(AssertionError("one-shot spawn used")),
         mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
+        state_dir=str(state_dir),
         spawn_live=spawn_live,
     )
     return context, spawned
@@ -85,10 +86,10 @@ def _turn_lines(*events: dict) -> list[str]:
     return [json.dumps(event) for event in events]
 
 
-def test_two_turns_ride_one_process():
+def test_two_turns_ride_one_process(tmp_path):
     """The point of HOT: the second turn is a stdin line, not a sandbox."""
     process = _LiveProcess()
-    context, spawned = _live(process)
+    context, spawned = _live(process, tmp_path)
     session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
 
     process.feed = _turn_lines(_ANSWER, _RESULT)
@@ -114,9 +115,9 @@ def test_two_turns_ride_one_process():
     assert not process.killed  # settling a turn never costs the residency
 
 
-def test_a_model_switch_mid_session_is_a_restart_not_a_lie():
+def test_a_model_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process)[0])
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="a")).wait()
 
@@ -124,10 +125,10 @@ def test_a_model_switch_mid_session_is_a_restart_not_a_lie():
         session.start_turn(TurnInput(prompt="p", model="b"))
 
 
-def test_a_process_dying_mid_turn_settles_as_failed():
+def test_a_process_dying_mid_turn_settles_as_failed(tmp_path):
     """The stream ending without a result event is a death, not a success."""
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process)[0])
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_ANSWER)  # no result: the process died
     process._exit = 0  # even a clean exit code must not read as a settled turn
 
@@ -137,9 +138,9 @@ def test_a_process_dying_mid_turn_settles_as_failed():
     assert turn.wait().status == "failed"
 
 
-def test_close_ends_the_residency():
+def test_close_ends_the_residency(tmp_path):
     process = _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process)[0])
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="m")).wait()
 
@@ -150,8 +151,28 @@ def test_close_ends_the_residency():
         session.start_turn(TurnInput(prompt="again", model="m"))
 
 
-def test_launch_live_without_the_live_spawn_refuses():
-    context, _ = _live(_LiveProcess())
+def test_launch_live_without_the_live_spawn_refuses(tmp_path):
+    context, _ = _live(_LiveProcess(), tmp_path)
     object.__setattr__(context, "spawn_live", None)
     with pytest.raises(DriverError, match="live-input spawn"):
         ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+
+
+def test_the_resident_credential_is_a_file_not_an_env_var(tmp_path):
+    """A live process cannot be re-keyed through env; the helper file can."""
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+
+    settings = json.loads((tmp_path / "claude" / "settings.json").read_text())
+    assert settings["apiKeyHelper"] == "/bin/cat /agent-state/claude/credential"
+    assert (tmp_path / "claude" / "credential").read_text().strip() == "agr"
+
+    process.feed = _turn_lines(_RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m")).wait()
+    ((_argv, env),) = spawned
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"] == "60000"
+
+    session.rotate_credential("agr-turn-2")
+    assert (tmp_path / "claude" / "credential").read_text().strip() == "agr-turn-2"

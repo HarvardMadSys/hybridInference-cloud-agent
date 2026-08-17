@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import dataclasses
 import hashlib
 import json
 import os
@@ -51,9 +52,15 @@ from cloud_agent_host.drivers import (
     TurnInput,
     driver_for,
 )
-from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
+from cloud_agent_host.enrollment import (
+    HostHeartbeat,
+    ensure_enrolled,
+    establish_residency,
+    release_residency,
+)
 from cloud_agent_host.logging_utils import configure_process_logging
 from cloud_agent_host.patch_gate import branch_name_for, validate_patch
+from cloud_agent_host.residency import ResidentEntry, ResidentPool
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
     AgentRuntime,
@@ -61,7 +68,12 @@ from cloud_agent_host.runtimes import (
     RuntimeMCPConfig,
     get_runtime,
 )
-from cloud_agent_host.sandbox import SandboxBackend, SandboxSpec, build_backend_from_env
+from cloud_agent_host.sandbox import (
+    SandboxBackend,
+    SandboxError,
+    SandboxSpec,
+    build_backend_from_env,
+)
 from cloud_agent_host.setup import build_cache_from_env, run_setup
 from cloud_agent_host.workspace_paths import purge_stale_workspaces, workspace_path
 from cloud_agent_host.workspace_snapshot import build_workspace_snapshot
@@ -832,6 +844,94 @@ def _export_checkpoint(
     )
 
 
+def _promote_to_resident(
+    control: ControlPlane,
+    *,
+    driver: Any,
+    session: Any,
+    context: LaunchContext,
+    job: ClaimedJob,
+    backend: Any,
+    workdir: str,
+    state_dir: str,
+    residents: ResidentPool | None,
+) -> None:
+    """Keep this thread hot: prepare a resident session over the turn's state.
+
+    The resident spawns lazily — no idle process exists until the follow-up
+    arrives, at which point it starts with ``--resume`` in the same workspace
+    (no clone, no setup) and stays alive for the turns after it. MCP turns are
+    not promoted yet: the resident's per-turn credential rotation covers
+    inference only, and a hot turn whose tools silently ran on the previous
+    attempt's token would be exactly the billing lie design §8 forbids.
+    """
+    if residents is None or not job.thread_id or job.mcp_servers:
+        return
+    launch_live = getattr(driver, "launch_live", None)
+    if launch_live is None:
+        return
+    try:
+        exported = session.export_state()
+        live_context = dataclasses.replace(
+            context,
+            spawn_live=lambda argv, env: backend.spawn(
+                SandboxSpec(
+                    argv=argv, workdir=workdir, env=env, state_dir=state_dir, live_input=True
+                )
+            ),
+        )
+        live = launch_live(live_context, state=exported)
+    except DriverError as exc:
+        control.append_event(
+            NormalizedEvent("lifecycle", {"phase": "residency_declined", "detail": str(exc)[:200]})
+        )
+        return
+    stamper = getattr(backend, "version_stamp", None)
+    stamp: dict[str, Any] = stamper() if stamper is not None else {}
+    runtime_id = getattr(session.runtime, "name", "generic")
+    kept = residents.offer(
+        thread_id=job.thread_id,
+        session=live,
+        workdir=workdir,
+        state_dir=state_dir,
+        runtime_id=runtime_id,
+        runtime_version=(stamp.get("runtime_versions") or {}).get(runtime_id),
+        model=job.model,
+    )
+    control.append_event(
+        NormalizedEvent(
+            "lifecycle",
+            {"phase": "residency_established" if kept else "residency_declined"},
+        )
+    )
+
+
+def _resident_base_ready(workdir: str, job: ClaimedJob) -> bool:
+    """Make the turn's pinned base resolvable in the resident tree.
+
+    A publish since the last turn moved ``base_sha`` to a commit this tree
+    has never fetched; ``build_patch`` diffs against it later, so it must
+    exist locally before the turn is allowed to run hot.
+    """
+    if not job.base_sha:
+        return True
+    if not _COMMIT_SHA.fullmatch(job.base_sha):
+        return False
+    probe = _run_git(["cat-file", "-e", f"{job.base_sha}^{{commit}}"], cwd=workdir)
+    if probe.returncode == 0:
+        return True
+    url = f"https://github.com/{job.repo}.git"
+    fetch = _run_git(
+        ["fetch", "--quiet", "--depth", "1", url, "--end-of-options", job.base_sha],
+        cwd=workdir,
+        env_extra=_auth_env(job.clone_token),
+    )
+    if fetch.returncode != 0:
+        return False
+    _assert_no_credential_on_disk(workdir, job.clone_token)
+    return _run_git(["cat-file", "-e", f"{job.base_sha}^{{commit}}"], cwd=workdir).returncode == 0
+
+
 def state_from_checkpoint(envelope: dict[str, Any]) -> HarnessState | None:
     """Decode a claim's checkpoint envelope; ``None`` on any defect (replay)."""
     harness = envelope.get("harness_state") or {}
@@ -861,6 +961,8 @@ def run_agent(
     mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
     state: HarnessState | None = None,
     state_dir: str | None = None,
+    resident: ResidentEntry | None = None,
+    residents: ResidentPool | None = None,
 ) -> tuple[int, str, list[str]]:
     """Run the agent, streaming its output back as normalized events.
 
@@ -911,7 +1013,29 @@ def run_agent(
         state_dir=state_dir,
     )
     session = None
-    if state is not None:
+    turn = None
+    turn_input: TurnInput | None = None
+    if resident is not None:
+        # The top rung (design §7): the thread's resident session takes the
+        # turn — full memory, live workspace, at most a process (re)start.
+        try:
+            resident.session.rotate_credential(job.sandbox_token)
+            if state_dir is not None:
+                backend.adopt_workdir(state_dir)
+            turn = resident.session.start_turn(TurnInput(prompt=job.task_prompt, model=job.model))
+            session = resident.session
+            control.report_continuity("hot")
+        except (DriverError, SandboxError, OSError) as exc:
+            # The resident died idle. Its workspace is still this turn's —
+            # fall through to a fresh launch in the same tree, on the ladder.
+            control.append_event(
+                NormalizedEvent("lifecycle", {"phase": "hot_fallback", "detail": str(exc)[:200]})
+            )
+            with contextlib.suppress(Exception):
+                resident.session.close()
+            session = None
+            turn = None
+    if session is None and state is not None:
         try:
             session = driver.launch(context, state)
         except DriverError as exc:
@@ -921,20 +1045,23 @@ def run_agent(
                 NormalizedEvent("lifecycle", {"phase": "cold_fallback", "detail": str(exc)[:200]})
             )
             session = None
-    if session is not None:
-        # The restored session *is* the memory: only the new prompt goes in.
-        turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
-        control.report_continuity("cold_native")
-    else:
+        else:
+            # The restored session *is* the memory: only the new prompt goes in.
+            turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
+            control.report_continuity("cold_native")
+    if session is None:
         session = driver.launch(context)
         turn_input = TurnInput(prompt=conversation_prompt(job), model=job.model)
         control.report_continuity("replay")
-    if state_dir is not None:
-        # After restore, before spawn: whatever the driver just wrote (and the
-        # empty dir on a fresh turn) must be writable by the sandbox user, or
-        # the CLI cannot record the very session the next turn would resume.
-        backend.adopt_workdir(state_dir)
-    turn = session.start_turn(turn_input)
+    if turn is None:
+        assert turn_input is not None
+        if state_dir is not None:
+            # After restore, before spawn: whatever the driver just wrote (and
+            # the empty dir on a fresh turn) must be writable by the sandbox
+            # user, or the CLI cannot record the very session the next turn
+            # would resume.
+            backend.adopt_workdir(state_dir)
+        turn = session.start_turn(turn_input)
 
     deadline = time.monotonic() + timeout_s
     tail: list[str] = []
@@ -1011,6 +1138,20 @@ def run_agent(
         # it is a first-class row, because a thread that quietly went
         # forgetful is the old bug wearing a new face.
         _export_checkpoint(control, session=session, job=job, backend=backend)
+        if resident is None:
+            _promote_to_resident(
+                control,
+                driver=driver,
+                session=session,
+                context=context,
+                job=job,
+                backend=backend,
+                workdir=workdir,
+                state_dir=state_dir,
+                residents=residents,
+            )
+        elif residents is not None and job.thread_id:
+            residents.touch(job.thread_id)
     stderr = turn.stderr_text()
     if stderr.strip():
         tail.append(stderr[-2000:])
@@ -1039,6 +1180,7 @@ def run_once(
     backend: SandboxBackend | None = None,
     workspace_root: str | None = None,
     host: str | None = None,
+    residents: ResidentPool | None = None,
 ) -> int:
     """Claim one job, run it, and report the outcome. Returns a process exit code.
 
@@ -1116,6 +1258,32 @@ def run_once(
         if job.context_checkpoint:
             context_state = state_from_checkpoint(job.context_checkpoint)
 
+    # The top rung: this thread may already be resident here (design §7). The
+    # entry must match what this turn asks for — same harness, same model
+    # (D6: switching is a restart), no MCP (its tokens do not rotate yet) —
+    # and the turn's pinned base must resolve in the resident tree, or the
+    # eventual patch would diff against a commit the tree has never seen.
+    resident: ResidentEntry | None = None
+    if residents is not None and job.thread_id:
+        entry = residents.lookup(job.thread_id)
+        if entry is not None:
+            usable = (
+                entry.runtime_id == job.runtime
+                and entry.model == job.model
+                and not job.mcp_servers
+                and _resident_base_ready(entry.workdir, job)
+            )
+            if usable:
+                resident = entry
+                workdir = entry.workdir
+                state_dir = entry.state_dir
+                context_state = None
+            else:
+                # A restart-shaped turn (model switch, MCP, unfetchable base):
+                # end the residency and run the ladder from COLD — the
+                # checkpoint it exported is the memory this turn resumes.
+                residents.drop(job.thread_id, release=True)
+
     # Ask the backend, not this host: with an isolated backend the agent CLIs
     # live in the sandbox image, so probing the runner's own PATH would refuse
     # every job on a correctly configured machine.
@@ -1151,10 +1319,18 @@ def run_once(
         # Give the agent something to work on. Without this the self-hosted
         # runner ran every job in an empty directory: the agent had no code to
         # read, and the patch it produced was necessarily empty.
+        #
+        # A resident turn skips all of it: the live tree *is* the state the
+        # conversation has been building, its base was verified resolvable at
+        # lookup, and re-running checkout, context patch or setup over it
+        # would be repaving a road with traffic on it.
         try:
-            checked_out = existing_checkout_sha(workdir, job.repo)
-            reused_workspace = checked_out is not None
-            if checked_out is None:
+            if resident is not None:
+                base_sha = job.base_sha
+                reused_workspace = True
+                checked_out = None
+            elif (checked_out := existing_checkout_sha(workdir, job.repo)) is None:
+                reused_workspace = False
                 base_sha = prepare_worktree(
                     workdir=workdir,
                     repo=job.repo,
@@ -1164,6 +1340,7 @@ def run_once(
                 if workspace_root is not None:
                     checkout_output_branch(workdir, job.thread_id or job.job_id)
             else:
+                reused_workspace = True
                 if workspace_root is not None:
                     # A retry of this same job must preserve edits (and local
                     # commits) already made in its durable worktree.  Fresh
@@ -1209,7 +1386,7 @@ def run_once(
         # Setup runs before the agent and under its own egress tier: it needs
         # a package registry, and the turn that follows — the one driven by
         # untrusted model output — does not.
-        if job.setup_script:
+        if job.setup_script and resident is None:
             setup = run_setup(
                 script=job.setup_script,
                 workdir=workdir,
@@ -1269,7 +1446,20 @@ def run_once(
             ),
             state=context_state,
             state_dir=state_dir,
+            resident=resident,
+            residents=residents,
         )
+        # A hot turn that broke its process — a nonzero exit, a cancel's kill,
+        # a mid-turn death — leaves nothing worth keeping resident; the
+        # checkpoint it exported (or the previous turn's) carries the thread
+        # COLD from here. A clean turn already refreshed the entry.
+        if (
+            resident is not None
+            and residents is not None
+            and job.thread_id
+            and (exit_code != 0 or resident.session.closed)
+        ):
+            residents.drop(job.thread_id, release=True)
 
         # Freeze both interactive input and already-running terminal process
         # trees before taking the patch and workspace snapshot. The finish
@@ -1506,6 +1696,7 @@ def run_forever(
         runner_version=_runner_version(),
     )
     pool: HostHeartbeat | None = None
+    residents: ResidentPool | None = None
     if identity is not None:
         # Collected once — the image and runtime are pinned for this process's
         # lifetime — and repeated on every beat so a control plane that lost
@@ -1514,6 +1705,20 @@ def run_forever(
         # a deployment-owned backend that predates the hook must keep running.
         stamper = getattr(backend, "version_stamp", None)
         stamp: dict[str, Any] = stamper() if stamper is not None else {}
+        # Residency needs an enrolled identity twice over: establish/release
+        # authenticate with the host credential, and the beats ride the same
+        # heartbeat. A pool-less runner (the pre-enrollment shape) simply
+        # never keeps a sandbox — every turn is the ladder from COLD.
+        residents = ResidentPool(
+            establish=lambda **kw: establish_residency(base_url=base_url, identity=identity, **kw),
+            release=lambda thread_id, generation: release_residency(
+                base_url=base_url,
+                identity=identity,
+                thread_id=thread_id,
+                generation=generation,
+            ),
+            ttl_s=float(os.environ.get("AGENT_RESIDENCY_TTL_S") or 1800.0),
+        )
         pool = HostHeartbeat(
             base_url=base_url,
             identity=identity,
@@ -1523,6 +1728,8 @@ def run_forever(
             sandbox_runtime=stamp.get("sandbox_runtime"),
             sandbox_image_digest=stamp.get("sandbox_image_digest"),
             runtime_versions=stamp.get("runtime_versions"),
+            residency_beats=residents.beats,
+            on_residencies_lost=residents.handle_lost,
         )
         pool.start()
         where = f" on host {identity.host} (enrolled)"
@@ -1540,6 +1747,8 @@ def run_forever(
         # running is not interrupted — the signal handler only sets the flag.
         if _STOPPING.is_set():
             print("agent runner: stopping after the current job", file=sys.stderr, flush=True)
+            if residents is not None:
+                residents.close_all()
             if pool is not None:
                 pool.stop()
             return 0
@@ -1550,6 +1759,11 @@ def run_forever(
         # saying "finish what you have"; a removed credential is the pool
         # saying this machine is gone.
         if pool is not None and not pool.claimable:
+            # Draining or gone either way: hot sandboxes are the opposite of
+            # "finish what you have and stop", so quiesce them now. Idempotent
+            # — after the first pass there is nothing left to close.
+            if residents is not None:
+                residents.close_all()
             if pool.removed.is_set():
                 print(
                     "agent runner: this host's credential was rejected; not claiming further work",
@@ -1590,6 +1804,7 @@ def run_forever(
                 backend=backend,
                 workspace_root=str(root),
                 host=host,
+                residents=residents,
             )
         except KeyboardInterrupt:
             # Stop reporting before returning. The heartbeat is a daemon
@@ -1597,6 +1812,8 @@ def run_forever(
             # keeps saying "still here" while its runner shuts down stays
             # `active` in the pool until the reaper's timeout, and jobs are
             # dispatched to it in the meantime.
+            if residents is not None:
+                residents.close_all()
             if pool is not None:
                 pool.stop()
             return 0
@@ -1613,6 +1830,11 @@ def run_forever(
             # Keep serving: the store owns this job's outcome, and one bad
             # repository must not stop every other queued job.
             print(f"agent runner: job failed unexpectedly: {exc}", file=sys.stderr, flush=True)
+        if residents is not None:
+            # Local TTL, beside the other housekeeping: an idle resident past
+            # its lease is released and torn down without waiting for a beat
+            # to be refused.
+            residents.sweep()
         _housekeeping(root, workspace_ttl_s)
 
         # `run_once` returns 0 with nothing claimed too; sleeping only when the
