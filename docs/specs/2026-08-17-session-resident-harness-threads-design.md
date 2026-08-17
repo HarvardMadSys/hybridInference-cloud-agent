@@ -438,3 +438,37 @@ Per driver, against the pinned image (extends the existing
 5. TTL default and per-host hot-sandbox memory budget.
 6. Per-driver shell-state behavior tests (what layer-4 sub-state each driver
    may additionally promise).
+
+## 13. Implementation notes (v1, PR #58)
+
+Recorded per this document's own rule: divergences are decisions, and
+decisions get written down.
+
+1. **The inference credential rotates per turn instead of living per
+   residency generation.** §8 called for a per-generation handle resolved
+   per call. The implementation reaches the same properties by a shorter
+   road: the resident process reads its key through claude's
+   ``apiKeyHelper`` from a file under the state mount, and the runner
+   rewrites that file with **each attempt's own grant** before injecting the
+   turn. Billing attribution is therefore exactly today's per-attempt story;
+   an idle sandbox holds a grant whose renewal stopped when its attempt
+   settled — a credential that resolves to nothing — and a takeover needs no
+   handle rotation because there is no long-lived handle at all.
+2. **MCP turns are not promoted to hot.** The MCP token is env-borne and
+   cannot rotate under a live process, so a hot MCP turn would run its tools
+   on the previous attempt's credential — the exact lie §8 forbids. Rather
+   than build relay-side generation tokens in v1, hot excludes MCP threads;
+   they ride COLD, which is correct on every axis and merely colder. The
+   relay-token work remains the path to lifting the exclusion.
+3. **Promotion spawns lazily, folding WARM into HOT.** Establishing
+   residency prepares the session but starts no process; the first follow-up
+   spawns with ``--resume`` in the preserved workspace (no clone, no setup —
+   §2's WARM semantics) and the process then persists for later turns
+   (§2's HOT). The idle cost of a fresh residency is a workspace and a row,
+   not a process; the budget's LRU pressure applies to spawned ones.
+4. **Contract-test coverage** (§10) lives in the unit and dbtest suites for
+   every branch exercisable without a real CLI: fencing (4, 9, 10, 13),
+   consistency (12), floor/TurnResult (2), fork refusal (6), model-switch
+   restart (7), degradation branches (3, partial). The memory fixture (1)
+   and cancel-against-a-real-process (5) need the pinned image and belong
+   to the staging acceptance run before public exposure.
