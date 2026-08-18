@@ -1092,11 +1092,13 @@ class HostHeartbeatResponse(BaseModel):  # type: ignore[no-any-unimported]
     status: str
     slots_total: int | None = None
     slots_used: int = 0
-    residencies_lost: list[str] = Field(
+    residencies_lost: list[ResidencyBeat] = Field(
         default_factory=list,
         description=(
-            "Thread ids whose reported generation no longer holds its "
-            "residency. The host tears those sandboxes down; their threads "
+            "The reported beats whose generation no longer holds its "
+            "residency — echoed back with the generation, so a late answer "
+            "to an old beat cannot end the successor the host has since "
+            "established. The host retires those workspaces; their threads "
             "continue COLD off their checkpoints."
         ),
     )

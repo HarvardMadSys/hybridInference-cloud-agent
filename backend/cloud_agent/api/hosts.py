@@ -47,6 +47,7 @@ from cloud_agent.schemas import (
     HostResidencyEstablishRequest,
     HostResidencyEstablishResponse,
     HostResidencyReleaseRequest,
+    ResidencyBeat,
     WorkerAckResponse,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
@@ -238,7 +239,7 @@ async def heartbeat_host(
     # says "I am here" and "these sandboxes are still mine", generation-scoped
     # so a beat from a taken-over residency extends nothing — it comes back in
     # residencies_lost and the host tears that sandbox down.
-    lost: list[str] = []
+    lost: list[ResidencyBeat] = []
     for beat in body.residencies or []:
         extended = await job_store.heartbeat_residency(
             thread_id=beat.thread_id,
@@ -247,7 +248,11 @@ async def heartbeat_host(
             ttl_seconds=RESIDENCY_TTL_S,
         )
         if not extended:
-            lost.append(beat.thread_id)
+            # Echo the generation back (review finding 5): a beat carrying
+            # gen N can be answered after the host re-established gen N+1,
+            # and a thread-id-only loss would let the stale answer kill the
+            # successor. The host drops only on an exact generation match.
+            lost.append(beat)
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
@@ -278,7 +283,18 @@ async def establish_thread_residency(
     other machines' conversations toward itself through claim affinity.
     """
     job_store = _require_store(store)
-    if not await job_store.host_runs_thread(host=host["host"], thread_id=body.thread_id):
+    row = await job_store.establish_residency(
+        thread_id=body.thread_id,
+        host=host["host"],
+        runtime_id=body.runtime_id,
+        runtime_version=body.runtime_version,
+        sandbox_id=body.sandbox_id,
+        ttl_seconds=RESIDENCY_TTL_S,
+    )
+    if row is None:
+        # The gate lives inside the write's own transaction (store): running
+        # attempt, this host, lease unexpired — checked under a shared lock,
+        # so this answer cannot be stale by the time the row would exist.
         raise HTTPException(
             status_code=409,
             detail={
@@ -288,14 +304,6 @@ async def establish_thread_residency(
                 }
             },
         )
-    row = await job_store.establish_residency(
-        thread_id=body.thread_id,
-        host=host["host"],
-        runtime_id=body.runtime_id,
-        runtime_version=body.runtime_version,
-        sandbox_id=body.sandbox_id,
-        ttl_seconds=RESIDENCY_TTL_S,
-    )
     return HostResidencyEstablishResponse(
         thread_id=row["thread_id"],
         generation=row["generation"],

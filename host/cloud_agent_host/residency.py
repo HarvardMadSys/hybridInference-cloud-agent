@@ -1,11 +1,14 @@
 """The runner's resident-sandbox pool (HOT, design §7).
 
-One entry per hot thread on this host: the live session, its workdir and
-state dir, and the generation the control plane fenced it with. The pool is
-the runner-side half of residency — the control plane's ledger is authority,
-and this cache follows it: an establish that fails keeps nothing, a beat that
-comes back in ``residencies_lost`` tears the sandbox down, and every teardown
-closes the session (EOF stdin, then the kill backstop).
+One entry per hot thread on this host: the resident *workspace* — workdir,
+state dir, the last turn's session id — and the generation the control plane
+fenced it with. No process lives between turns: the credential-rotation
+experiments (tests/external) proved the pinned CLI cannot be re-keyed under a
+live process, so a hot turn restarts the CLI with ``--resume`` in this kept
+workspace, each attempt on its own grant. The pool is the runner-side half of
+residency — the control plane's ledger is authority, and this cache follows
+it: an establish that fails keeps nothing, and a beat that comes back in
+``residencies_lost`` retires the entry only if the generation matches.
 
 Threading: the claim loop mutates the pool; the host-heartbeat thread reads
 ``beats()`` and reports ``lost()``. One lock covers both — every operation is
@@ -18,7 +21,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.logging_utils import get_logger
 
@@ -27,15 +30,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: Keep fewer resident processes than the machine has patience for. Each idle
-#: entry is a claude process (hundreds of MB) plus a workspace; the budget is
-#: the eviction pressure valve, LRU because the design says so (§7).
-DEFAULT_RESIDENT_BUDGET = 4
-
-
-class _LiveSession(Protocol):
-    def rotate_credential(self, token: str) -> None: ...
-    def close(self) -> None: ...
+#: Keep fewer resident workspaces than the disk has patience for. Each entry
+#: pins a worktree and its session files; the budget is the eviction pressure
+#: valve, LRU because the design says so (§7).
+DEFAULT_RESIDENT_BUDGET = 8
 
 
 @dataclass
@@ -44,7 +42,9 @@ class ResidentEntry:
 
     thread_id: str
     generation: int
-    session: Any  # ClaudeCodeLiveSession; Any keeps drivers import-light here
+    #: The session the next turn resumes — updated after every settled turn,
+    #: because ``--resume`` writes the continuation under a new id.
+    session_id: str
     workdir: str
     state_dir: str
     runtime_id: str
@@ -93,29 +93,30 @@ class ResidentPool:
         self,
         *,
         thread_id: str,
-        session: Any,
+        session_id: str,
         workdir: str,
         state_dir: str,
         runtime_id: str,
         runtime_version: str | None,
         model: str,
     ) -> bool:
-        """Keep a just-finished turn's session resident, if the CP agrees.
+        """Keep a just-finished turn's workspace resident, if the CP agrees.
 
-        An entry already resident for the thread is refreshed in place. A new
-        thread over budget evicts the least-recently-used entry first — a
-        release and a teardown, exactly what its TTL would eventually do.
+        An entry already resident for the thread is refreshed in place — new
+        session id, fresh idle clock, no second establish. A new thread over
+        budget evicts the least-recently-used entry first — a release, exactly
+        what its TTL would eventually do.
         """
         with self._lock:
             existing = self._entries.get(thread_id)
-            if existing is not None and existing.session is session:
+            if existing is not None:
+                existing.session_id = session_id
                 existing.last_turn_at = time.monotonic()
                 return True
         generation = self._establish(
             thread_id=thread_id, runtime_id=runtime_id, runtime_version=runtime_version
         )
         if generation is None:
-            _close_quietly(session)
             return False
         evicted: list[ResidentEntry] = []
         with self._lock:
@@ -128,7 +129,7 @@ class ResidentPool:
             self._entries[thread_id] = ResidentEntry(
                 thread_id=thread_id,
                 generation=generation,
-                session=session,
+                session_id=session_id,
                 workdir=workdir,
                 state_dir=state_dir,
                 runtime_id=runtime_id,
@@ -153,15 +154,35 @@ class ResidentPool:
                 for entry in self._entries.values()
             ]
 
-    def handle_lost(self, thread_ids: list[str]) -> None:
-        """The control plane said these generations no longer hold anything."""
-        for thread_id in thread_ids:
+    def handle_lost(self, lost: list[dict[str, Any]]) -> None:
+        """The control plane said these *generations* no longer hold anything.
+
+        Generation-matched on purpose: a heartbeat request carrying gen N can
+        be answered after this host has already re-established gen N+1, and a
+        thread-id-only drop would let that stale answer kill the successor.
+        A loss that names no generation is ignored for the same reason — an
+        answer that cannot say *which* residency it means cannot end one.
+        """
+        for item in lost:
+            thread_id = str(item.get("thread_id") or "")
+            generation = item.get("generation")
+            if not thread_id or not isinstance(generation, int):
+                continue
+            with self._lock:
+                entry = self._entries.get(thread_id)
+                if entry is None or entry.generation != generation:
+                    continue
+                del self._entries[thread_id]
             logger.info(
                 "agent_residency_lost",
-                extra={"event": "agent_residency_lost", "thread_id": thread_id},
+                extra={
+                    "event": "agent_residency_lost",
+                    "thread_id": thread_id,
+                    "generation": generation,
+                },
             )
             # No release call: a lost generation has nothing left to release.
-            self.drop(thread_id, release=False)
+            self._retire(entry, tell_control_plane=False)
 
     def sweep(self) -> None:
         """Local TTL: retire entries idle past the lease the CP granted.
@@ -199,14 +220,3 @@ class ResidentPool:
                         "thread_id": entry.thread_id,
                     },
                 )
-        _close_quietly(entry.session)
-
-
-def _close_quietly(session: Any) -> None:
-    try:
-        session.close()
-    except Exception:
-        logger.warning(
-            "agent_resident_session_close_failed",
-            extra={"event": "agent_resident_session_close_failed"},
-        )

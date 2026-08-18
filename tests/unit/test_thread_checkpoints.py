@@ -197,30 +197,32 @@ def test_without_a_key_everything_fails_closed(monkeypatch):
     assert open_checkpoint("anything") is None
 
 
-def test_the_claim_gate_hands_out_only_the_threads_present():
-    versions = {"claude-code": "1.2.3"}
+def test_the_claim_gate_compares_against_the_attempts_own_stamp():
+    """The stamp the claim wrote, never a fresh host read (review finding 3):
+    a rolling upgrade's heartbeat moving the host row between claim and gate
+    must change nothing about what this attempt may resume."""
     ok = gate_for_claim(
         _envelope(),
         runtime="claude-code",
         parent_job_id="job-parent",
-        host_runtime_versions=versions,
+        stamped_runtime_version="1.2.3",
     )
     assert ok is not None
 
     refusals: list[dict] = [
-        {"runtime": "codex", "parent_job_id": "job-parent", "host_runtime_versions": versions},
+        {"runtime": "codex", "parent_job_id": "job-parent", "stamped_runtime_version": "1.2.3"},
         {
             "runtime": "claude-code",
             "parent_job_id": "job-OTHER",
-            "host_runtime_versions": versions,
+            "stamped_runtime_version": "1.2.3",
         },
         {
             "runtime": "claude-code",
             "parent_job_id": "job-parent",
-            "host_runtime_versions": {"claude-code": "9.9.9"},
+            "stamped_runtime_version": "9.9.9",
         },
-        {"runtime": "claude-code", "parent_job_id": "job-parent", "host_runtime_versions": {}},
-        {"runtime": "claude-code", "parent_job_id": "job-parent", "host_runtime_versions": None},
+        {"runtime": "claude-code", "parent_job_id": "job-parent", "stamped_runtime_version": ""},
+        {"runtime": "claude-code", "parent_job_id": "job-parent", "stamped_runtime_version": None},
     ]
     for kwargs in refusals:
         assert gate_for_claim(_envelope(), **kwargs) is None

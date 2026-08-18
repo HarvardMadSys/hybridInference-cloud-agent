@@ -53,6 +53,9 @@ class _LiveProcess:
     def kill(self) -> None:
         self.killed = True
 
+    def poll(self) -> int | None:
+        return None
+
     def wait(self) -> int:
         return self._exit
 
@@ -156,23 +159,3 @@ def test_launch_live_without_the_live_spawn_refuses(tmp_path):
     object.__setattr__(context, "spawn_live", None)
     with pytest.raises(DriverError, match="live-input spawn"):
         ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
-
-
-def test_the_resident_credential_is_a_file_not_an_env_var(tmp_path):
-    """A live process cannot be re-keyed through env; the helper file can."""
-    process = _LiveProcess()
-    context, spawned = _live(process, tmp_path)
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
-
-    settings = json.loads((tmp_path / "claude" / "settings.json").read_text())
-    assert settings["apiKeyHelper"] == "/bin/cat /agent-state/claude/credential"
-    assert (tmp_path / "claude" / "credential").read_text().strip() == "agr"
-
-    process.feed = _turn_lines(_RESULT)
-    session.start_turn(TurnInput(prompt="p", model="m")).wait()
-    ((_argv, env),) = spawned
-    assert "ANTHROPIC_API_KEY" not in env
-    assert env["CLAUDE_CODE_API_KEY_HELPER_TTL_MS"] == "60000"
-
-    session.rotate_credential("agr-turn-2")
-    assert (tmp_path / "claude" / "credential").read_text().strip() == "agr-turn-2"

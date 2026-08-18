@@ -88,9 +88,14 @@ def gate_for_claim(
     *,
     runtime: str,
     parent_job_id: str,
-    host_runtime_versions: dict[str, Any] | None,
+    stamped_runtime_version: str | None,
 ) -> dict[str, Any] | None:
     """Return the envelope when it describes exactly what is about to run.
+
+    ``stamped_runtime_version`` is the value the claim transaction just wrote
+    onto the attempt — **never** a fresh read of the host row, which a rolling
+    upgrade's heartbeat can move between claim and gate (the TOCTOU the
+    stamping exists to kill; review finding 3).
 
     Every refusal is a silent downgrade to replay, which is the correct
     degradation (design §9) — but each is logged so "why did my thread
@@ -108,11 +113,11 @@ def gate_for_claim(
         reason = "stale through_turn_id"
     else:
         exported_version = str(harness.get("driver_version") or "")
-        host_version = str((host_runtime_versions or {}).get(runtime) or "")
-        if not exported_version or not host_version or exported_version != host_version:
+        stamped = str(stamped_runtime_version or "")
+        if not exported_version or not stamped or exported_version != stamped:
             reason = (
                 f"version mismatch (exported {exported_version or 'unknown'!r}, "
-                f"host {host_version or 'unknown'!r})"
+                f"attempt stamped {stamped or 'unknown'!r})"
             )
     if reason is not None:
         logger.info(

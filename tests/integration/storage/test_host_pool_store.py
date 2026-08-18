@@ -829,37 +829,181 @@ async def test_the_pin_and_the_pool_both_have_to_agree(store):
 # ── P3: thread residency (design §7) ───────────────────────────────────
 
 
-async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store):
-    """Contract tests 10 and 13: one winner, and late writers change nothing."""
-    first = await store.establish_residency(
-        thread_id="t1",
+async def _running_claim(store, host: str, **overrides) -> tuple[dict, dict]:
+    """A job claimed and running on ``host`` — what earns a residency."""
+    job = await _create_job(store, **overrides)
+    claim = await store.claim_job(worker_id=f"w-{host}", lease_ttl_seconds=60, host=host)
+    assert claim is not None and claim["id"] == job["id"]
+    return job, claim
+
+
+async def _age_out_of_affinity_hold(store, job_id: str) -> None:
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET updated_at = NOW() - interval '31 seconds' WHERE id = $1",
+            job_id,
+        )
+
+
+async def test_residency_is_earned_by_the_running_attempt_only(store):
+    """Review finding 4: the gate shares the write's transaction and checks
+    the lease clock — expired, finished, or another host's attempt earns
+    nothing."""
+    await _enrol(store, "runner-a")
+    job, claim = await _running_claim(store, "runner-a")
+
+    # Another machine, even while the attempt runs: nothing.
+    assert (
+        await store.establish_residency(
+            thread_id=job["thread_id"],
+            host="runner-b",
+            runtime_id="claude-code",
+            runtime_version=None,
+            ttl_seconds=60,
+        )
+        is None
+    )
+    # The running host: earned.
+    row = await store.establish_residency(
+        thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
-        runtime_version="1.2.3",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+    assert row is not None and row["generation"] == 1
+
+    # A finished attempt: nothing — even before any reaper pass.
+    await store.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    assert (
+        await store.establish_residency(
+            thread_id=job["thread_id"],
+            host="runner-a",
+            runtime_id="claude-code",
+            runtime_version=None,
+            ttl_seconds=60,
+        )
+        is None
+    )
+
+
+async def test_an_expired_lease_earns_no_residency(store):
+    """Running in name only: the reaper has not passed, the clock has."""
+    await _enrol(store, "runner-a")
+    job = await _create_job(store)
+    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
+    assert claim is not None
+
+    assert (
+        await store.establish_residency(
+            thread_id=job["thread_id"],
+            host="runner-a",
+            runtime_id="claude-code",
+            runtime_version=None,
+            ttl_seconds=60,
+        )
+        is None
+    )
+
+
+async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store):
+    """Contract tests 10 and 13: one winner, and late writers change nothing."""
+    await _enrol(store, "runner-a")
+    await _enrol(store, "runner-b")
+    job, claim = await _running_claim(store, "runner-a")
+    first = await store.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
         ttl_seconds=60,
     )
     assert (first["generation"], first["status"]) == (1, "hot")
 
+    # The host vanishes; the attempt is released, the turn requeues, and the
+    # affinity hold for the dead host is allowed to expire.
+    await store.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
+    await _age_out_of_affinity_hold(store, job["id"])
+    reclaim = await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b")
+    assert reclaim is not None
     second = await store.establish_residency(
-        thread_id="t1",
+        thread_id=job["thread_id"],
         host="runner-b",
         runtime_id="claude-code",
-        runtime_version="1.2.3",
+        runtime_version=None,
         ttl_seconds=60,
     )
     assert second["generation"] == 2
 
-    live = await store.resident_host(thread_id="t1")
+    live = await store.resident_host(thread_id=job["thread_id"])
     assert (live["host"], live["generation"]) == ("runner-b", 2)
     # The previous generation can neither re-promote nor end its successor.
-    assert await store.heartbeat_residency(thread_id="t1", generation=1, ttl_seconds=60) is False
-    assert await store.release_residency(thread_id="t1", generation=1) is False
-    assert await store.heartbeat_residency(thread_id="t1", generation=2, ttl_seconds=60) is True
+    assert (
+        await store.heartbeat_residency(
+            thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
+        )
+        is False
+    )
+    assert (
+        await store.release_residency(thread_id=job["thread_id"], generation=1, host="runner-a")
+        is False
+    )
+    assert (
+        await store.heartbeat_residency(
+            thread_id=job["thread_id"], generation=2, ttl_seconds=60, host="runner-b"
+        )
+        is True
+    )
+
+
+async def test_residency_writes_are_scoped_to_the_holding_host(store):
+    """A guessed (thread, generation) from another machine changes nothing."""
+    await _enrol(store, "runner-a")
+    job, _claim = await _running_claim(store, "runner-a")
+    row = await store.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+    generation = row["generation"]
+
+    assert (
+        await store.heartbeat_residency(
+            thread_id=job["thread_id"], generation=generation, ttl_seconds=60, host="runner-b"
+        )
+        is False
+    )
+    assert (
+        await store.release_residency(
+            thread_id=job["thread_id"], generation=generation, host="runner-b"
+        )
+        is False
+    )
+    assert (
+        await store.release_residency(
+            thread_id=job["thread_id"], generation=generation, host="runner-a"
+        )
+        is True
+    )
 
 
 async def test_the_reaper_lapses_expired_residencies_without_resetting_generations(store):
+    await _enrol(store, "runner-a")
+    job, _claim = await _running_claim(store, "runner-a")
     await store.establish_residency(
-        thread_id="t1",
+        thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -868,11 +1012,11 @@ async def test_the_reaper_lapses_expired_residencies_without_resetting_generatio
 
     lapsed = await store.reap_expired_residencies()
 
-    assert [(row["thread_id"], row["generation"]) for row in lapsed] == [("t1", 1)]
-    assert await store.resident_host(thread_id="t1") is None
+    assert [(row["thread_id"], row["generation"]) for row in lapsed] == [(job["thread_id"], 1)]
+    assert await store.resident_host(thread_id=job["thread_id"]) is None
     # Re-establishing continues the count — a dead generation stays dead.
     revived = await store.establish_residency(
-        thread_id="t1",
+        thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
@@ -881,32 +1025,11 @@ async def test_the_reaper_lapses_expired_residencies_without_resetting_generatio
     assert revived["generation"] == 2
 
 
-async def test_release_ends_the_residency_but_the_row_survives(store):
-    row = await store.establish_residency(
-        thread_id="t1",
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    assert await store.release_residency(thread_id="t1", generation=row["generation"]) is True
-    assert await store.resident_host(thread_id="t1") is None
-
-    again = await store.establish_residency(
-        thread_id="t1",
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    assert again["generation"] == row["generation"] + 1
-
-
 async def test_a_hot_threads_turn_is_held_for_its_resident_host(store):
     """Affinity is a window, not a pin (design §7)."""
     await _enrol(store, "runner-a")
     await _enrol(store, "runner-b")
-    job = await _create_job(store)
+    job, claim = await _running_claim(store, "runner-b")
     await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-b",
@@ -914,16 +1037,22 @@ async def test_a_hot_threads_turn_is_held_for_its_resident_host(store):
         runtime_version=None,
         ttl_seconds=60,
     )
+    await store.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
 
     # Held: the stranger gets nothing while the resident host's window runs.
     assert await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
-    claimed = await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b")
-    assert claimed is not None and claimed["id"] == job["id"]
+    reclaimed = await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b")
+    assert reclaimed is not None and reclaimed["id"] == job["id"]
 
 
 async def test_the_affinity_hold_expires_rather_than_stranding_the_turn(store):
     await _enrol(store, "runner-a")
-    job = await _create_job(store)
+    await _enrol(store, "runner-gone")
+    job, claim = await _running_claim(store, "runner-gone")
     await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-gone",
@@ -931,11 +1060,12 @@ async def test_the_affinity_hold_expires_rather_than_stranding_the_turn(store):
         runtime_version=None,
         ttl_seconds=60,
     )
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_jobs SET updated_at = NOW() - interval '31 seconds' WHERE id = $1",
-            job["id"],
-        )
+    await store.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
+    await _age_out_of_affinity_hold(store, job["id"])
 
     claimed = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
@@ -951,34 +1081,17 @@ async def test_a_thread_without_a_residency_is_anyones(store):
     assert claimed is not None and claimed["id"] == job["id"]
 
 
-async def test_residency_writes_are_scoped_to_the_holding_host(store):
-    """A guessed (thread, generation) from another machine changes nothing."""
-    row = await store.establish_residency(
-        thread_id="t1",
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    generation = row["generation"]
+async def test_the_claim_carries_its_own_stamp_across_a_rolling_upgrade(store):
+    """Review finding 3, at the store: each claim carries the version the
+    host ran *at claim time*; a later heartbeat moving the host row must not
+    rewrite what an earlier claim was stamped with."""
+    await _enrol(store, "runner-a")
+    await store.record_host_heartbeat(host="runner-a", runtime_versions={"claude-code": "1.0.0"})
+    _job_one, claim_one = await _running_claim(store, "runner-a")
+    assert claim_one["runtime_version"] == "1.0.0"
 
-    assert (
-        await store.heartbeat_residency(
-            thread_id="t1", generation=generation, ttl_seconds=60, host="runner-b"
-        )
-        is False
-    )
-    assert (
-        await store.release_residency(thread_id="t1", generation=generation, host="runner-b")
-        is False
-    )
-    assert (
-        await store.heartbeat_residency(
-            thread_id="t1", generation=generation, ttl_seconds=60, host="runner-a"
-        )
-        is True
-    )
-    assert (
-        await store.release_residency(thread_id="t1", generation=generation, host="runner-a")
-        is True
-    )
+    await store.record_host_heartbeat(host="runner-a", runtime_versions={"claude-code": "2.0.0"})
+    _job_two, claim_two = await _running_claim(store, "runner-a")
+
+    assert claim_two["runtime_version"] == "2.0.0"
+    assert claim_one["runtime_version"] == "1.0.0"  # the stamp is the claim's own

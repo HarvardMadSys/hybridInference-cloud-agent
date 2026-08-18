@@ -444,28 +444,35 @@ Per driver, against the pinned image (extends the existing
 Recorded per this document's own rule: divergences are decisions, and
 decisions get written down.
 
-1. **The inference credential rotates per turn instead of living per
-   residency generation.** §8 called for a per-generation handle resolved
-   per call. The implementation reaches the same properties by a shorter
-   road: the resident process reads its key through claude's
-   ``apiKeyHelper`` from a file under the state mount, and the runner
-   rewrites that file with **each attempt's own grant** before injecting the
-   turn. Billing attribution is therefore exactly today's per-attempt story;
-   an idle sandbox holds a grant whose renewal stopped when its attempt
-   settled — a credential that resolves to nothing — and a takeover needs no
-   handle rotation because there is no long-lived handle at all.
+1. **Hot turns restart the process per turn — measured, not assumed.**
+   §8's residency handle and an earlier helper-file rotation idea were both
+   struck by experiment (``tests/external/test_credential_rotation.py``,
+   against the pinned CLI): the ``apiKeyHelper`` result is fetched once per
+   process; ``CLAUDE_CODE_API_KEY_HELPER_TTL_MS`` unset, ``0`` and ``1``
+   behave identically; and a 401 on a revoked key yields an error result
+   with no refetch and no retry. There is **no in-process re-keying** in the
+   pinned CLI's headless mode. What is resident is therefore the workspace,
+   the state mount and the CP-fenced row — never a process — and each hot
+   turn starts a fresh ``--resume`` process whose environment carries its
+   own attempt's grant. Billing stays exactly per-attempt; an idle
+   residency holds no live process and no live credential at all. The
+   stdin multi-turn session machinery remains in-tree, unit-tested and
+   unwired, for the day a residency-scoped credential (server-side
+   per-call resolution) exists; the external test doubles as the tripwire
+   that says when a CLI upgrade makes in-process rotation real.
+
 2. **MCP turns are not promoted to hot.** The MCP token is env-borne and
    cannot rotate under a live process, so a hot MCP turn would run its tools
    on the previous attempt's credential — the exact lie §8 forbids. Rather
    than build relay-side generation tokens in v1, hot excludes MCP threads;
    they ride COLD, which is correct on every axis and merely colder. The
    relay-token work remains the path to lifting the exclusion.
-3. **Promotion spawns lazily, folding WARM into HOT.** Establishing
-   residency prepares the session but starts no process; the first follow-up
-   spawns with ``--resume`` in the preserved workspace (no clone, no setup —
-   §2's WARM semantics) and the process then persists for later turns
-   (§2's HOT). The idle cost of a fresh residency is a workspace and a row,
-   not a process; the budget's LRU pressure applies to spawned ones.
+3. **HOT as implemented is §2's WARM semantics, per turn.** Every resident
+   turn skips clone, context patch and setup, resumes the native session in
+   the preserved workspace, and pays one CLI start. Layer 4 (processes) is
+   not continuous — that is the price of per-attempt credentials until
+   residency-scoped ones exist. The idle cost of a residency is a workspace
+   and a row; the budget's LRU pressure caps the workspaces.
 4. **Contract-test coverage** (§10) lives in the unit and dbtest suites for
    every branch exercisable without a real CLI: fencing (4, 9, 10, 13),
    consistency (12), floor/TurnResult (2), fork refusal (6), model-switch

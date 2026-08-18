@@ -1,22 +1,17 @@
 """The resident pool's ledger-following behaviour (design §7).
 
-The control plane is authority; this pool is a cache that must never disagree
-with it for long: refused establishes keep nothing, lost beats tear down
-without a release call, the budget evicts LRU with a release, and every path
-out closes the session.
+The control plane is authority; this pool is a cache of resident *workspaces*
+(no process lives between turns) that must never disagree with it for long:
+refused establishes keep nothing, a lost beat retires an entry only when the
+generation matches — a late answer to an old beat must not end the successor —
+the budget evicts LRU with a release, and every entry an offer refreshes
+carries the newest session id, because resume writes continuations under new
+ids.
 """
 
 from __future__ import annotations
 
 from cloud_agent_host.residency import ResidentPool
-
-
-class _Session:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
 
 
 class _ControlPlane:
@@ -43,10 +38,10 @@ def _pool(control: _ControlPlane, *, ttl_s: float = 1800.0, budget: int = 2) -> 
     )
 
 
-def _offer(pool: ResidentPool, thread_id: str, session: _Session) -> bool:
+def _offer(pool: ResidentPool, thread_id: str, session_id: str = "sess-1") -> bool:
     return pool.offer(
         thread_id=thread_id,
-        session=session,
+        session_id=session_id,
         workdir=f"/w/{thread_id}",
         state_dir=f"/s/{thread_id}",
         runtime_id="claude-code",
@@ -55,67 +50,94 @@ def _offer(pool: ResidentPool, thread_id: str, session: _Session) -> bool:
     )
 
 
-def test_a_refused_establish_keeps_nothing_and_closes_the_session():
+def test_a_refused_establish_keeps_nothing():
     control = _ControlPlane()
     control.refuse = True
     pool = _pool(control)
-    session = _Session()
 
-    assert _offer(pool, "t1", session) is False
-    assert session.closed is True
+    assert _offer(pool, "t1") is False
     assert pool.lookup("t1") is None
+    assert pool.beats() == []
+
+
+def test_a_refreshed_offer_updates_the_session_id_without_a_second_establish():
+    """Resume writes the continuation under a new id; the entry must follow."""
+    control = _ControlPlane()
+    pool = _pool(control)
+    _offer(pool, "t1", "sess-turn-1")
+
+    assert _offer(pool, "t1", "sess-turn-2") is True
+
+    entry = pool.lookup("t1")
+    assert entry is not None and entry.session_id == "sess-turn-2"
+    assert control.generation == 1  # one establish, refreshed in place
 
 
 def test_the_budget_evicts_lru_with_a_release():
     control = _ControlPlane()
     pool = _pool(control, budget=2)
-    first, second, third = _Session(), _Session(), _Session()
-    _offer(pool, "t1", first)
-    _offer(pool, "t2", second)
+    _offer(pool, "t1")
+    _offer(pool, "t2")
     pool.touch("t1")  # t2 becomes the least recently used
 
-    _offer(pool, "t3", third)
+    _offer(pool, "t3")
 
     assert pool.lookup("t2") is None
-    assert second.closed is True
     assert ("t2", 2) in control.released
     assert pool.lookup("t1") is not None and pool.lookup("t3") is not None
 
 
-def test_a_lost_beat_tears_down_without_a_release_call():
+def test_a_lost_beat_retires_only_its_own_generation():
+    """Review finding 5's race, made deterministic.
+
+    A heartbeat carrying gen 1 can be answered *after* this host already
+    re-established gen 2. The stale answer must not end the successor; the
+    verdict about gen 2 must.
+    """
     control = _ControlPlane()
     pool = _pool(control)
-    session = _Session()
-    _offer(pool, "t1", session)
+    _offer(pool, "t1")  # generation 1
+    pool.drop("t1", release=True)
+    _offer(pool, "t1")  # generation 2 — the successor
 
-    pool.handle_lost(["t1"])
+    pool.handle_lost([{"thread_id": "t1", "generation": 1}])
+    assert pool.lookup("t1") is not None  # the late answer changed nothing
 
-    assert session.closed is True
+    pool.handle_lost([{"thread_id": "t1", "generation": 2}])
     assert pool.lookup("t1") is None
-    assert control.released == []  # a lost generation has nothing to release
+    # A lost generation has nothing left to release.
+    assert ("t1", 2) not in control.released
+
+
+def test_a_generationless_loss_is_ignored():
+    """An answer that cannot say which residency it means cannot end one."""
+    control = _ControlPlane()
+    pool = _pool(control)
+    _offer(pool, "t1")
+
+    pool.handle_lost([{"thread_id": "t1"}, {"generation": 1}, {}])
+
+    assert pool.lookup("t1") is not None
 
 
 def test_sweep_retires_entries_idle_past_the_ttl():
     control = _ControlPlane()
     pool = _pool(control, ttl_s=0.0)  # everything is instantly past its lease
-    session = _Session()
-    _offer(pool, "t1", session)
+    _offer(pool, "t1")
 
     pool.sweep()
 
-    assert session.closed is True
+    assert pool.lookup("t1") is None
     assert ("t1", 1) in control.released
 
 
 def test_close_all_drains_everything_with_releases():
     control = _ControlPlane()
     pool = _pool(control)
-    sessions = [_Session(), _Session()]
-    _offer(pool, "t1", sessions[0])
-    _offer(pool, "t2", sessions[1])
+    _offer(pool, "t1")
+    _offer(pool, "t2")
 
     pool.close_all()
 
-    assert all(session.closed for session in sessions)
     assert sorted(control.released) == [("t1", 1), ("t2", 2)]
     assert pool.beats() == []

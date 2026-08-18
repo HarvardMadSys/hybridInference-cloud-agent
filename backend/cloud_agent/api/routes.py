@@ -2804,20 +2804,22 @@ async def worker_claim(
         clone_token=clone_token,
         context_messages=context["messages"],
         context_patch=context["patch"],
-        context_checkpoint=await _claimable_checkpoint(job_store, claim=claim, host=host),
+        context_checkpoint=await _claimable_checkpoint(job_store, claim=claim),
         mcp_servers=list(claim.get("mcp_servers") or []),
         metadata=claim["metadata"],
     )
 
 
 async def _claimable_checkpoint(
-    job_store: AgentJobStore, *, claim: dict[str, Any], host: str | None
+    job_store: AgentJobStore, *, claim: dict[str, Any]
 ) -> dict[str, Any] | None:
     """The parent turn's checkpoint, when it matches what is about to run.
 
-    Fetch → decrypt → gate (driver, through-turn, CLI version against the
-    claiming host's stamp). Every failure is ``None``: the runner replays,
-    which is the design's degradation ladder, never an error.
+    Fetch → decrypt → gate (driver, through-turn, and the CLI version the
+    claim transaction stamped onto this very attempt — never a re-read of the
+    mutable host row, which a rolling upgrade's heartbeat can move between
+    claim and here). Every failure is ``None``: the runner replays, which is
+    the design's degradation ladder, never an error.
     """
     parent_job_id = claim.get("parent_job_id")
     if not parent_job_id:
@@ -2828,15 +2830,11 @@ async def _claimable_checkpoint(
     envelope = open_checkpoint(stored["content"])
     if envelope is None:
         return None
-    versions = None
-    if host:
-        row = await job_store.get_host(host=host)
-        versions = (row or {}).get("runtime_versions")
     return gate_for_claim(
         envelope,
         runtime=claim["runtime"],
         parent_job_id=parent_job_id,
-        host_runtime_versions=versions,
+        stamped_runtime_version=claim.get("runtime_version"),
     )
 
 

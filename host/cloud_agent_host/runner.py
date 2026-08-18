@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
-import dataclasses
 import hashlib
 import json
 import os
@@ -70,7 +69,6 @@ from cloud_agent_host.runtimes import (
 )
 from cloud_agent_host.sandbox import (
     SandboxBackend,
-    SandboxError,
     SandboxSpec,
     build_backend_from_env,
 )
@@ -847,51 +845,34 @@ def _export_checkpoint(
 def _promote_to_resident(
     control: ControlPlane,
     *,
-    driver: Any,
     session: Any,
-    context: LaunchContext,
     job: ClaimedJob,
     backend: Any,
     workdir: str,
     state_dir: str,
     residents: ResidentPool | None,
 ) -> None:
-    """Keep this thread hot: prepare a resident session over the turn's state.
+    """Keep this thread's workspace resident for its next turn.
 
-    The resident spawns lazily — no idle process exists until the follow-up
-    arrives, at which point it starts with ``--resume`` in the same workspace
-    (no clone, no setup) and stays alive for the turns after it. MCP turns are
-    not promoted yet: the resident's per-turn credential rotation covers
-    inference only, and a hot turn whose tools silently ran on the previous
-    attempt's token would be exactly the billing lie design §8 forbids.
+    Nothing is spawned: what stays is the worktree, the state mount with the
+    session files the turn just wrote, and the CP-fenced residency row. The
+    follow-up restarts the CLI with ``--resume`` over exactly this — its own
+    process, its own attempt's credential — because the rotation experiments
+    (tests/external) proved the pinned CLI honours no in-process re-keying.
+    MCP turns are not promoted: their relay token is minted per attempt too,
+    and until it is, a hot MCP turn would tool-call on a stale credential.
     """
     if residents is None or not job.thread_id or job.mcp_servers:
         return
-    launch_live = getattr(driver, "launch_live", None)
-    if launch_live is None:
-        return
-    try:
-        exported = session.export_state()
-        live_context = dataclasses.replace(
-            context,
-            spawn_live=lambda argv, env: backend.spawn(
-                SandboxSpec(
-                    argv=argv, workdir=workdir, env=env, state_dir=state_dir, live_input=True
-                )
-            ),
-        )
-        live = launch_live(live_context, state=exported)
-    except DriverError as exc:
-        control.append_event(
-            NormalizedEvent("lifecycle", {"phase": "residency_declined", "detail": str(exc)[:200]})
-        )
+    session_id = getattr(session.runtime, "session_id", None)
+    if not session_id:
         return
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
     runtime_id = getattr(session.runtime, "name", "generic")
     kept = residents.offer(
         thread_id=job.thread_id,
-        session=live,
+        session_id=session_id,
         workdir=workdir,
         state_dir=state_dir,
         runtime_id=runtime_id,
@@ -1016,25 +997,25 @@ def run_agent(
     turn = None
     turn_input: TurnInput | None = None
     if resident is not None:
-        # The top rung (design §7): the thread's resident session takes the
-        # turn — full memory, live workspace, at most a process (re)start.
+        # The top rung (design §7): a fresh process resumed over the thread's
+        # resident workspace. Per turn, per process, per credential — the
+        # rotation experiments (tests/external) proved the pinned CLI honours
+        # nothing weaker, and a fresh env is what keeps every attempt billed
+        # to its own grant.
+        launch_resident = getattr(driver, "launch_resident", None)
         try:
-            resident.session.rotate_credential(job.sandbox_token)
-            if state_dir is not None:
-                backend.adopt_workdir(state_dir)
-            turn = resident.session.start_turn(TurnInput(prompt=job.task_prompt, model=job.model))
-            session = resident.session
-            control.report_continuity("hot")
-        except (DriverError, SandboxError, OSError) as exc:
-            # The resident died idle. Its workspace is still this turn's —
-            # fall through to a fresh launch in the same tree, on the ladder.
+            if launch_resident is None:
+                raise DriverError(f"the {job.runtime!r} driver has no resident turns")
+            session = launch_resident(context, session_id=resident.session_id)
+        except DriverError as exc:
+            # Fall through to the ladder in the same tree.
             control.append_event(
                 NormalizedEvent("lifecycle", {"phase": "hot_fallback", "detail": str(exc)[:200]})
             )
-            with contextlib.suppress(Exception):
-                resident.session.close()
             session = None
-            turn = None
+        else:
+            turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
+            control.report_continuity("hot")
     if session is None and state is not None:
         try:
             session = driver.launch(context, state)
@@ -1094,6 +1075,13 @@ def run_agent(
     while True:
         if heart.lease_lost:
             turn.cancel()
+            if resident is not None and residents is not None and job.thread_id:
+                # The fence just moved: this workspace's residency must stop
+                # being reported the moment the turn aborts, not whenever the
+                # exception finishes unwinding (review finding 2). run_once's
+                # wrapper repeats this for every other exception; drop is
+                # idempotent.
+                residents.drop(job.thread_id, release=True)
             raise LeaseLost("lease lost while the agent was running")
         if heart.cancel_requested:
             turn.cancel()
@@ -1138,20 +1126,18 @@ def run_agent(
         # it is a first-class row, because a thread that quietly went
         # forgetful is the old bug wearing a new face.
         _export_checkpoint(control, session=session, job=job, backend=backend)
-        if resident is None:
-            _promote_to_resident(
-                control,
-                driver=driver,
-                session=session,
-                context=context,
-                job=job,
-                backend=backend,
-                workdir=workdir,
-                state_dir=state_dir,
-                residents=residents,
-            )
-        elif residents is not None and job.thread_id:
-            residents.touch(job.thread_id)
+        # Hot and cold alike: a settled turn's workspace is worth keeping,
+        # and a hot turn must record its *new* session id — resume writes the
+        # continuation under a fresh one.
+        _promote_to_resident(
+            control,
+            session=session,
+            job=job,
+            backend=backend,
+            workdir=workdir,
+            state_dir=state_dir,
+            residents=residents,
+        )
     stderr = turn.stderr_text()
     if stderr.strip():
         tail.append(stderr[-2000:])
@@ -1421,44 +1407,50 @@ def run_once(
         control.resume_terminals()
         terminals_suspended = False
 
-        exit_code, tail, tool_errors = run_agent(
-            runtime,
-            job=job,
-            workdir=workdir,
-            # The gateway, not the control plane. Everything above this line
-            # spoke to the control plane over `base_url`; the sandbox's model
-            # calls go somewhere else entirely, and conflating the two is what
-            # this argument exists to stop.
-            gateway_base_url=gateway_url,
-            control=control,
-            heart=heart,
-            timeout_s=agent_timeout_s,
-            backend=backend,
-            # Opaque ids, straight from the claim. The runner still never
-            # learns where an upstream server is or what credential reaches it
-            # — the relay resolves both. What it does carry now is the relay's
-            # own address and token, which are this deployment's, not an
-            # upstream's.
-            mcp_config=RuntimeMCPConfig(
-                server_ids=tuple(job.mcp_servers),
-                base_url=job.mcp_base_url,
-                credential=job.mcp_token,
-            ),
-            state=context_state,
-            state_dir=state_dir,
-            resident=resident,
-            residents=residents,
-        )
-        # A hot turn that broke its process — a nonzero exit, a cancel's kill,
-        # a mid-turn death — leaves nothing worth keeping resident; the
-        # checkpoint it exported (or the previous turn's) carries the thread
-        # COLD from here. A clean turn already refreshed the entry.
-        if (
-            resident is not None
-            and residents is not None
-            and job.thread_id
-            and (exit_code != 0 or resident.session.closed)
-        ):
+        try:
+            exit_code, tail, tool_errors = run_agent(
+                runtime,
+                job=job,
+                workdir=workdir,
+                # The gateway, not the control plane. Everything above this
+                # line spoke to the control plane over `base_url`; the
+                # sandbox's model calls go somewhere else entirely, and
+                # conflating the two is what this argument exists to stop.
+                gateway_base_url=gateway_url,
+                control=control,
+                heart=heart,
+                timeout_s=agent_timeout_s,
+                backend=backend,
+                # Opaque ids, straight from the claim. The runner still never
+                # learns where an upstream server is or what credential
+                # reaches it — the relay resolves both. What it does carry
+                # now is the relay's own address and token, which are this
+                # deployment's, not an upstream's.
+                mcp_config=RuntimeMCPConfig(
+                    server_ids=tuple(job.mcp_servers),
+                    base_url=job.mcp_base_url,
+                    credential=job.mcp_token,
+                ),
+                state=context_state,
+                state_dir=state_dir,
+                resident=resident,
+                residents=residents,
+            )
+        except BaseException:
+            # A lease lost — or anything else — mid-hot-turn must not leave a
+            # dead residency beating: the pool would keep reporting it, the
+            # control plane would keep its lease alive, and affinity would
+            # keep steering the thread's turns at a workspace whose turn just
+            # aborted. Drop by our own (thread, generation) and re-raise; the
+            # outer handlers own the attempt's fate.
+            if resident is not None and residents is not None and job.thread_id:
+                residents.drop(job.thread_id, release=True)
+            raise
+        # A hot turn that failed — nonzero exit, a cancel's kill — leaves
+        # nothing worth keeping resident; the checkpoint it exported (or the
+        # previous turn's) carries the thread COLD from here. A clean turn
+        # already refreshed the entry inside run_agent.
+        if resident is not None and residents is not None and job.thread_id and exit_code != 0:
             residents.drop(job.thread_id, release=True)
 
         # Freeze both interactive input and already-running terminal process

@@ -209,6 +209,10 @@ class SandboxProcess(ABC):
         """Signal end-of-input to a live process. No-op without live input."""
         return
 
+    def poll(self) -> int | None:
+        """Reap-if-exited: the exit code, or ``None`` while still running."""
+        return None
+
 
 class TerminalProcess(ABC):
     """A byte-oriented interactive terminal living inside one sandbox.
@@ -388,6 +392,10 @@ class _PopenProcess(SandboxProcess):
         if stdin is not None:
             with contextlib.suppress(OSError):
                 stdin.close()
+
+    def poll(self) -> int | None:
+        """Reap-if-exited without blocking."""
+        return self._process.poll()
 
     def lines(self) -> Iterator[str]:
         """Yield stdout lines from the child process."""

@@ -826,3 +826,48 @@ def test_an_enrolled_host_claims_with_its_own_credential(monkeypatch, tmp_path) 
 def test_a_host_with_no_pool_still_claims_with_the_dispatcher_token(monkeypatch, tmp_path) -> None:
     """The single-host shape predates the pool and must keep working."""
     assert _drive_loop(monkeypatch, tmp_path, identity=None) == "pool-wide-dispatcher-token"
+
+
+def test_a_lost_lease_drops_the_residency_before_unwinding(tmp_path):
+    """Review finding 2: a dead residency must stop beating at the kill.
+
+    The drop happens at the moment the lease loss aborts the turn — not
+    after the exception has unwound through outer handlers that may swallow
+    it — so the heartbeat thread can never again report a generation whose
+    workspace just lost its turn.
+    """
+    import dataclasses
+
+    from cloud_agent_host.residency import ResidentEntry
+
+    control, heart = FakeControl(), FakeHeart(lost=True)
+    dropped: list[tuple[str, bool]] = []
+
+    class _Pool:
+        def drop(self, thread_id: str, *, release: bool) -> None:
+            dropped.append((thread_id, release))
+
+    entry = ResidentEntry(
+        thread_id="t-hot",
+        generation=3,
+        session_id="sess-1",
+        workdir=str(tmp_path),
+        state_dir=f"{tmp_path}.state",
+        runtime_id="generic",
+        model="m",
+    )
+    with pytest.raises(LeaseLost):
+        run_agent(
+            _echo_runtime(50, sleep=0.02),
+            job=dataclasses.replace(_JOB, thread_id="t-hot"),
+            workdir=str(tmp_path),
+            gateway_base_url="http://gw",
+            control=control,
+            heart=heart,
+            timeout_s=30,
+            backend=ProcessBackend(acknowledged_unsafe=True),
+            resident=entry,
+            residents=_Pool(),
+        )
+
+    assert dropped == [("t-hot", True)]

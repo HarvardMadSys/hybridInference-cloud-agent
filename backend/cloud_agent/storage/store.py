@@ -1834,7 +1834,8 @@ class AgentJobStore:
                      sandbox_runtime, sandbox_image_digest, runtime_version)
                 VALUES ($1, $2, $3, $4, NOW() + make_interval(secs => $5), $6, $7,
                         $8, $9, $10)
-                RETURNING id, attempt_no, lease_generation
+                RETURNING id, attempt_no, lease_generation,
+                          sandbox_runtime, sandbox_image_digest, runtime_version
                 """,
                 job_id,
                 next_no,
@@ -1859,6 +1860,13 @@ class AgentJobStore:
         claim["attempt_id"] = attempt["id"]
         claim["attempt_no"] = attempt["attempt_no"]
         claim["lease_generation"] = attempt["lease_generation"]
+        # The stamp as *written*, not as the host row reads later: the
+        # checkpoint gate must compare against what this attempt runs, and a
+        # rolling upgrade's heartbeat can move the host row between claim and
+        # gate (review finding: the TOCTOU the stamping existed to kill).
+        claim["sandbox_runtime"] = attempt["sandbox_runtime"]
+        claim["sandbox_image_digest"] = attempt["sandbox_image_digest"]
+        claim["runtime_version"] = attempt["runtime_version"]
         return claim
 
     @staticmethod
@@ -2376,14 +2384,32 @@ class AgentJobStore:
         runtime_version: str | None,
         ttl_seconds: float,
         sandbox_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Take (or take over) a thread's residency; returns the new row.
+    ) -> dict[str, Any] | None:
+        """Take (or take over) a thread's residency; ``None`` = not earned.
 
-        Atomic: two hosts racing serialize on the row, each gets a distinct
-        generation, and the larger one owns the thread — the loser's next
-        generation-scoped call answers ``False`` and it stands down.
+        Residency is something a host earns by *currently* running the
+        thread's turn — attempt on this host, ``running``, lease unexpired —
+        and the check shares a transaction and a row lock with the write, so
+        a finish or a supersede cannot slip between them, and an expired
+        attempt the reaper has not reached yet earns nothing (review
+        finding 4). Atomic across racers: two hosts serialize on the row,
+        each gets a distinct generation, and the larger one owns the thread.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            earns = await conn.fetchval(
+                """
+                SELECT 1 FROM agent_jobs j
+                JOIN agent_attempts a ON a.id = j.current_attempt_id
+                WHERE j.thread_id = $1 AND a.host_id = $2
+                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                LIMIT 1
+                FOR SHARE OF a
+                """,
+                thread_id,
+                host,
+            )
+            if not earns:
+                return None
             row = await conn.fetchrow(
                 """
                 INSERT INTO agent_thread_residencies
@@ -2475,28 +2501,6 @@ class AgentJobStore:
                     thread_id,
                     generation,
                     turn_id,
-                )
-            )
-
-    async def host_runs_thread(self, *, host: str, thread_id: str) -> bool:
-        """Whether ``host`` currently runs an attempt of ``thread_id``.
-
-        The establish gate: residency is something a host earns by actually
-        running the thread's turn, not something it may assert about arbitrary
-        threads — a compromised machine must not be able to pull other
-        machines' conversations toward itself via affinity.
-        """
-        async with self._pool.acquire() as conn:
-            return bool(
-                await conn.fetchval(
-                    """
-                    SELECT 1 FROM agent_jobs j
-                    JOIN agent_attempts a ON a.id = j.current_attempt_id
-                    WHERE j.thread_id = $2 AND a.host_id = $1 AND a.status = 'running'
-                    LIMIT 1
-                    """,
-                    host,
-                    thread_id,
                 )
             )
 

@@ -322,10 +322,11 @@ def heartbeat(
     _warn_broker_error(answer, identity.host)
     lost = answer.get("residencies_lost")
     if lost and on_residencies_lost is not None:
-        # The control plane's side of the fence, delivered: these generations
-        # hold nothing any more, and the resident sandboxes behind them are
-        # torn down rather than kept as processes no turn will ever reach.
-        on_residencies_lost([str(thread_id) for thread_id in lost])
+        # The control plane's side of the fence, delivered with the
+        # generation each verdict is about: the pool retires an entry only on
+        # an exact (thread, generation) match, so a late answer to an old
+        # beat cannot end a successor residency.
+        on_residencies_lost([item for item in lost if isinstance(item, dict)])
     identity.status = str(answer.get("status") or identity.status)
     interval = answer.get("heartbeat_interval_seconds")
     if isinstance(interval, (int, float)) and interval > 0:
