@@ -344,12 +344,14 @@ def establish_residency(
     runtime_id: str,
     runtime_version: str | None = None,
     sandbox_id: str | None = None,
-) -> int | None:
+) -> dict[str, Any] | None:
     """Take residency for a thread this host is running; ``None`` = refused.
 
+    Returns ``{generation, credential, model}`` — ``credential`` may be None
+    (workspace-only residency; turns ride warm_native on per-attempt grants).
     Every failure is ``None`` rather than an exception: a runner that cannot
-    take residency simply does not keep the sandbox, and the thread's next
-    turn goes COLD off the checkpoint it already exported — the designed
+    take residency simply does not keep the workspace hot, and the thread's
+    next turn goes COLD off the checkpoint it already exported — the designed
     degradation, never an error worth crashing a turn over.
     """
     try:
@@ -366,7 +368,13 @@ def establish_residency(
     except (HostRemoved, EnrollmentError):
         return None
     generation = answer.get("generation")
-    return generation if isinstance(generation, int) and generation >= 1 else None
+    if not (isinstance(generation, int) and generation >= 1):
+        return None
+    return {
+        "generation": generation,
+        "credential": answer.get("credential") or None,
+        "model": answer.get("model") or None,
+    }
 
 
 def release_residency(

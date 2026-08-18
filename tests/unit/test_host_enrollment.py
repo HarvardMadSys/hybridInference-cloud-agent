@@ -426,3 +426,48 @@ def test_the_heartbeat_thread_survives_an_unexpected_exception(monkeypatch) -> N
 
     assert calls["n"] >= 2, "an unexpected exception ended the heartbeat thread"
     assert not beat.removed.is_set(), "an unexpected exception must not look like removal"
+
+
+def test_establish_residency_hands_back_the_generation_and_the_grant(monkeypatch) -> None:
+    """The wire boundary of design §14: the fence and the thread-attributed
+    credential arrive together, and a workspace-only answer (no credential)
+    collapses to ``credential=None`` rather than an empty string."""
+    identity = enrollment.HostIdentity(host="h1", credential="aht.h1.secret")
+    answers = [{"generation": 3, "credential": "tok-1", "model": "glm-5.1"}]
+    monkeypatch.setattr(enrollment, "_post", lambda *a, **kw: answers.pop(0))
+
+    got = enrollment.establish_residency(
+        base_url="http://cp", identity=identity, thread_id="t1", runtime_id="claude-code"
+    )
+    assert got == {"generation": 3, "credential": "tok-1", "model": "glm-5.1"}
+
+    answers.append({"generation": 4, "credential": None, "model": None})
+    got = enrollment.establish_residency(
+        base_url="http://cp", identity=identity, thread_id="t1", runtime_id="claude-code"
+    )
+    assert got == {"generation": 4, "credential": None, "model": None}
+
+
+def test_a_refused_or_malformed_establish_is_none(monkeypatch) -> None:
+    """Refusal keeps nothing — and an answer without a real generation is a
+    refusal, because an unfenced residency cannot be beaten for or dropped."""
+    identity = enrollment.HostIdentity(host="h1", credential="aht.h1.secret")
+
+    def refused(*_a, **_kw):
+        raise enrollment.EnrollmentError("409 from establish")
+
+    monkeypatch.setattr(enrollment, "_post", refused)
+    assert (
+        enrollment.establish_residency(
+            base_url="http://cp", identity=identity, thread_id="t1", runtime_id="claude-code"
+        )
+        is None
+    )
+
+    monkeypatch.setattr(enrollment, "_post", lambda *a, **kw: {"credential": "tok"})
+    assert (
+        enrollment.establish_residency(
+            base_url="http://cp", identity=identity, thread_id="t1", runtime_id="claude-code"
+        )
+        is None
+    )

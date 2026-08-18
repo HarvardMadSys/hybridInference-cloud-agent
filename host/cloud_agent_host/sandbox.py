@@ -464,7 +464,9 @@ class ProcessBackend(SandboxBackend):
                 spec.argv,
                 cwd=spec.workdir,
                 env=spec.env,
-                stdin=subprocess.DEVNULL,
+                # Same contract as the container backend: a live spawn keeps
+                # stdin open for follow-up turns; everything else sees EOF.
+                stdin=subprocess.PIPE if spec.live_input else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

@@ -1082,6 +1082,20 @@ class HostResidencyEstablishResponse(BaseModel):  # type: ignore[no-any-unimport
     thread_id: str
     generation: int
     ttl_seconds: float
+    credential: str | None = Field(
+        None,
+        description=(
+            "The residency's inference grant (design §14): thread-attributed, "
+            "renewed by this host's beats, revoked when the residency ends. "
+            "It is what a live resident process runs on. Null degrades the "
+            "residency to workspace-only — turns then ride warm_native on "
+            "their own per-attempt grants."
+        ),
+    )
+    model: str | None = Field(
+        None,
+        description="The model the grant is scoped to (the establishing turn's).",
+    )
 
 
 class HostResidencyReleaseRequest(BaseModel):  # type: ignore[no-any-unimported]

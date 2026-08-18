@@ -1,7 +1,8 @@
 """The resident pool's ledger-following behaviour (design §7).
 
-The control plane is authority; this pool is a cache of resident *workspaces*
-(no process lives between turns) that must never disagree with it for long:
+The control plane is authority; this pool is a cache of resident workspaces —
+and, once a live turn has run, their processes — that must never disagree
+with it for long:
 refused establishes keep nothing, a lost beat retires an entry only when the
 generation matches — a late answer to an old beat must not end the successor —
 the budget evicts LRU with a release, and every entry an offer refreshes
@@ -20,13 +21,14 @@ class _ControlPlane:
     def __init__(self) -> None:
         self.generation = 0
         self.refuse = False
+        self.credential: str | None = "grant-token"
         self.released: list[tuple[str, int]] = []
 
-    def establish(self, **_kwargs) -> int | None:
+    def establish(self, **_kwargs) -> dict | None:
         if self.refuse:
             return None
         self.generation += 1
-        return self.generation
+        return {"generation": self.generation, "credential": self.credential, "model": "m"}
 
     def release(self, thread_id: str, generation: int) -> None:
         self.released.append((thread_id, generation))
@@ -158,3 +160,115 @@ def test_a_generation_scoped_drop_never_ends_a_successor():
 
     entry = pool.lookup("t1")
     assert entry is not None and entry.generation == 2
+
+
+class _Session:
+    """A live process stand-in that records whether the pool closed it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_offer_records_the_residency_grant():
+    control = _ControlPlane()
+    pool = _pool(control)
+
+    _offer(pool, "t1")
+    entry = pool.lookup("t1")
+    assert entry is not None
+    assert entry.credential == "grant-token"
+    assert entry.grant_model == "m"
+    assert entry.live_session is None  # no live turn has run yet
+
+
+def test_a_grantless_establish_keeps_a_workspace_only_entry():
+    control = _ControlPlane()
+    control.credential = None
+    pool = _pool(control)
+
+    _offer(pool, "t1")
+    entry = pool.lookup("t1")
+    assert entry is not None and entry.credential is None
+
+
+def test_attach_session_is_generation_scoped_and_closes_on_mismatch():
+    control = _ControlPlane()
+    pool = _pool(control)
+    _offer(pool, "t1")  # generation 1
+
+    stale = _Session()
+    assert pool.attach_session("t1", 2, stale) is False
+    assert stale.closed  # refused sessions must not leak their process
+
+    live = _Session()
+    assert pool.attach_session("t1", 1, live) is True
+    entry = pool.lookup("t1")
+    assert entry is not None and entry.live_session is live and not live.closed
+
+
+def test_reattaching_the_same_session_does_not_close_it():
+    control = _ControlPlane()
+    pool = _pool(control)
+    _offer(pool, "t1")
+
+    live = _Session()
+    assert pool.attach_session("t1", 1, live)
+    # The next settled turn re-attaches the session it borrowed; closing the
+    # "stale" one would kill the process that was just handed back.
+    assert pool.attach_session("t1", 1, live)
+    assert not live.closed
+
+
+def test_attach_replaces_and_closes_a_previous_session():
+    control = _ControlPlane()
+    pool = _pool(control)
+    _offer(pool, "t1")
+
+    first, second = _Session(), _Session()
+    pool.attach_session("t1", 1, first)
+    pool.attach_session("t1", 1, second)
+    assert first.closed and not second.closed
+
+
+def test_detach_closes_the_process_but_keeps_the_workspace():
+    control = _ControlPlane()
+    pool = _pool(control)
+    _offer(pool, "t1")
+
+    live = _Session()
+    pool.attach_session("t1", 1, live)
+    pool.detach_session("t1")
+    assert live.closed
+    entry = pool.lookup("t1")
+    assert entry is not None and entry.live_session is None
+
+
+def test_every_retirement_path_closes_an_attached_session():
+    control = _ControlPlane()
+    pool = _pool(control, budget=1)
+
+    dropped = _Session()
+    _offer(pool, "t1")
+    pool.attach_session("t1", 1, dropped)
+    pool.drop("t1", release=True)
+    assert dropped.closed
+
+    evicted = _Session()
+    _offer(pool, "t2")
+    pool.attach_session("t2", 2, evicted)
+    _offer(pool, "t3")  # budget 1: t2 is evicted
+    assert evicted.closed
+
+    lost = _Session()
+    pool.attach_session("t3", 3, lost)
+    pool.handle_lost([{"thread_id": "t3", "generation": 3}])
+    assert lost.closed
+
+    drained = _Session()
+    _offer(pool, "t4")
+    pool.attach_session("t4", 4, drained)
+    pool.close_all()
+    assert drained.closed

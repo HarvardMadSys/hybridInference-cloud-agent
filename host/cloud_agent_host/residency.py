@@ -1,14 +1,17 @@
 """The runner's resident-sandbox pool (HOT, design §7).
 
-One entry per hot thread on this host: the resident *workspace* — workdir,
-state dir, the last turn's session id — and the generation the control plane
-fenced it with. No process lives between turns: the credential-rotation
+One entry per resident thread on this host: the *workspace* — workdir, state
+dir, the last turn's session id — the generation the control plane fenced it
+with, the residency's thread-attributed grant (design §14), and, once a live
+turn has run, the *process* itself, taking follow-up turns on stdin. A thread
+whose residency carries no grant still keeps the workspace: its turns restart
+the CLI with ``--resume`` (warm_native), because the credential-rotation
 experiments (tests/external) proved the pinned CLI cannot be re-keyed under a
-live process, so a hot turn restarts the CLI with ``--resume`` in this kept
-workspace, each attempt on its own grant. The pool is the runner-side half of
-residency — the control plane's ledger is authority, and this cache follows
-it: an establish that fails keeps nothing, and a beat that comes back in
-``residencies_lost`` retires the entry only if the generation matches.
+live process — the grant is what makes a long-lived process billable at all.
+The pool is the runner-side half of residency — the control plane's ledger is
+authority, and this cache follows it: an establish that fails keeps nothing,
+and a beat that comes back in ``residencies_lost`` retires the entry only if
+the generation matches.
 
 Threading: the claim loop mutates the pool; the host-heartbeat thread reads
 ``beats()`` and reports ``lost()``. One lock covers both — every operation is
@@ -38,7 +41,7 @@ DEFAULT_RESIDENT_BUDGET = 8
 
 @dataclass
 class ResidentEntry:
-    """One thread hot on this host."""
+    """One thread resident on this host."""
 
     thread_id: str
     generation: int
@@ -49,6 +52,16 @@ class ResidentEntry:
     state_dir: str
     runtime_id: str
     model: str
+    #: The residency's thread-attributed inference grant (design §14), or
+    #: ``None`` for a workspace-only residency whose turns ride warm_native.
+    credential: str | None = None
+    #: The model the credential is scoped to — a turn naming another model
+    #: cannot ride the live process (D6: restart) but still reuses the
+    #: workspace on its own per-attempt grant.
+    grant_model: str | None = None
+    #: The live process between turns (true HOT), attached after a settled
+    #: turn when the residency has a credential. ``None`` = workspace only.
+    live_session: Any | None = None
     last_turn_at: float = field(default_factory=time.monotonic)
 
 
@@ -58,14 +71,15 @@ class ResidentPool:
     def __init__(
         self,
         *,
-        establish: Callable[..., int | None],
+        establish: Callable[..., dict[str, Any] | None],
         release: Callable[[str, int], None],
         ttl_s: float,
         budget: int = DEFAULT_RESIDENT_BUDGET,
     ) -> None:
         #: ``establish(thread_id=..., runtime_id=..., runtime_version=...)``
-        #: returns the generation the control plane fenced, or ``None`` when
-        #: residency was refused — refusal keeps nothing resident.
+        #: returns ``{generation, credential, model}`` — the fence and the
+        #: thread-attributed grant — or ``None`` when residency was refused;
+        #: refusal keeps nothing resident.
         self._establish = establish
         #: ``release(thread_id, generation)`` tells the control plane this
         #: host is done; best-effort, because the reaper is the backstop.
@@ -116,11 +130,12 @@ class ResidentPool:
                 existing.session_id = session_id
                 existing.last_turn_at = time.monotonic()
                 return existing.generation
-        generation = self._establish(
+        granted = self._establish(
             thread_id=thread_id, runtime_id=runtime_id, runtime_version=runtime_version
         )
-        if generation is None:
+        if granted is None:
             return None
+        generation = granted["generation"]
         evicted: list[ResidentEntry] = []
         with self._lock:
             stale = self._entries.pop(thread_id, None)
@@ -137,6 +152,8 @@ class ResidentPool:
                 state_dir=state_dir,
                 runtime_id=runtime_id,
                 model=model,
+                credential=granted.get("credential"),
+                grant_model=granted.get("model"),
             )
         for entry in evicted:
             self._retire(entry, tell_control_plane=True)
@@ -222,7 +239,39 @@ class ResidentPool:
         for entry in entries:
             self._retire(entry, tell_control_plane=True)
 
+    def attach_session(self, thread_id: str, generation: int, session: Any) -> bool:
+        """Hand the entry its live process — only its own generation.
+
+        The previous live session, if any, is closed: two processes over one
+        workspace would interleave writes into the same session tree.
+        """
+        with self._lock:
+            entry = self._entries.get(thread_id)
+            if entry is None or entry.generation != generation:
+                stale = None
+            else:
+                stale = entry.live_session
+                entry.live_session = session
+        if entry is None or entry.generation != generation:
+            _close_quietly(session)
+            return False
+        if stale is not None and stale is not session:
+            _close_quietly(stale)
+        return True
+
+    def detach_session(self, thread_id: str) -> None:
+        """Drop the live process but keep the workspace resident (warm)."""
+        with self._lock:
+            entry = self._entries.get(thread_id)
+            stale = entry.live_session if entry is not None else None
+            if entry is not None:
+                entry.live_session = None
+        if stale is not None:
+            _close_quietly(stale)
+
     def _retire(self, entry: ResidentEntry, *, tell_control_plane: bool) -> None:
+        if entry.live_session is not None:
+            _close_quietly(entry.live_session)
         if tell_control_plane:
             try:
                 self._release(entry.thread_id, entry.generation)
@@ -234,3 +283,13 @@ class ResidentPool:
                         "thread_id": entry.thread_id,
                     },
                 )
+
+
+def _close_quietly(session: Any) -> None:
+    try:
+        session.close()
+    except Exception:  # teardown must not take the runner down
+        logger.warning(
+            "agent_resident_session_close_failed",
+            extra={"event": "agent_resident_session_close_failed"},
+        )

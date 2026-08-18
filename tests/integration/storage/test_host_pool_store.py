@@ -952,17 +952,17 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store):
         await store.heartbeat_residency(
             thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
         )
-        is False
+        is None
     )
     assert (
         await store.release_residency(thread_id=job["thread_id"], generation=1, host="runner-a")
-        is False
+        is None
     )
     assert (
         await store.heartbeat_residency(
             thread_id=job["thread_id"], generation=2, ttl_seconds=60, host="runner-b"
         )
-        is True
+        is not None
     )
 
 
@@ -983,19 +983,19 @@ async def test_residency_writes_are_scoped_to_the_holding_host(store):
         await store.heartbeat_residency(
             thread_id=job["thread_id"], generation=generation, ttl_seconds=60, host="runner-b"
         )
-        is False
+        is None
     )
     assert (
         await store.release_residency(
             thread_id=job["thread_id"], generation=generation, host="runner-b"
         )
-        is False
+        is None
     )
     assert (
         await store.release_residency(
             thread_id=job["thread_id"], generation=generation, host="runner-a"
         )
-        is True
+        is not None
     )
 
 
@@ -1023,6 +1023,140 @@ async def test_the_reaper_lapses_expired_residencies_without_resetting_generatio
         ttl_seconds=60,
     )
     assert revived["generation"] == 2
+
+
+async def test_establish_returns_what_the_grant_mint_needs(store):
+    """Design §14: the endpoint mints a thread-attributed grant from exactly
+    what the earn-gate already proved — the establishing claim's user, model
+    and attempt — so the row must carry all three."""
+    await _enrol(store, "runner-a")
+    job, claim = await _running_claim(store, "runner-a")
+
+    row = await store.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+    assert row["user_id"] == "u1"
+    assert row["model"] == "glm-5.1"
+    assert row["establishing_job_id"] == job["id"]
+    assert row["establishing_attempt_id"] == claim["attempt_id"]
+    assert row["previous_grant_id"] is None
+
+
+async def test_the_residency_grant_link_is_generation_scoped(store):
+    await _enrol(store, "runner-a")
+    job, _claim = await _running_claim(store, "runner-a")
+    await store.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+
+    # A link named for a generation that does not hold the row is refused —
+    # the one way it happens is a takeover between mint and link, and the
+    # caller must revoke the orphan grant rather than hand it over.
+    assert (
+        await store.link_residency_grant(
+            thread_id=job["thread_id"], generation=2, grant_id="agr-orphan"
+        )
+        is False
+    )
+    assert (
+        await store.link_residency_grant(thread_id=job["thread_id"], generation=1, grant_id="agr-1")
+        is True
+    )
+
+
+async def test_beats_and_release_carry_the_grant_they_keep_alive(store):
+    """The beat that extends the lease renews the grant; the release that ends
+    it revokes the grant — so both hand their caller the grant id, and an
+    unlinked residency answers with the empty string, not a loss."""
+    await _enrol(store, "runner-a")
+    job, _claim = await _running_claim(store, "runner-a")
+    await store.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+
+    assert (
+        await store.heartbeat_residency(
+            thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
+        )
+        == ""
+    )
+    await store.link_residency_grant(thread_id=job["thread_id"], generation=1, grant_id="agr-1")
+    assert (
+        await store.heartbeat_residency(
+            thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
+        )
+        == "agr-1"
+    )
+    assert (
+        await store.release_residency(thread_id=job["thread_id"], generation=1, host="runner-a")
+        == "agr-1"
+    )
+
+
+async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store):
+    """A takeover is a credential rotation: the new establish must name the
+    old generation's grant so the endpoint can kill it now, not at TTL."""
+    await _enrol(store, "runner-a")
+    await _enrol(store, "runner-b")
+    job, claim = await _running_claim(store, "runner-a")
+    await store.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+    await store.link_residency_grant(thread_id=job["thread_id"], generation=1, grant_id="agr-old")
+
+    await store.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
+    await _age_out_of_affinity_hold(store, job["id"])
+    assert await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b")
+    second = await store.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-b",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=60,
+    )
+    assert second["generation"] == 2
+    assert second["previous_grant_id"] == "agr-old"
+
+
+async def test_reaped_residencies_carry_their_grant_id(store):
+    """The reaper revokes what the lapse orphans — it needs the id to do it."""
+    await _enrol(store, "runner-a")
+    job, _claim = await _running_claim(store, "runner-a")
+    await store.establish_residency(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        runtime_id="claude-code",
+        runtime_version=None,
+        ttl_seconds=-1,
+    )
+    await store.link_residency_grant(
+        thread_id=job["thread_id"], generation=1, grant_id="agr-lapsed"
+    )
+
+    lapsed = await store.reap_expired_residencies()
+    assert [(row["thread_id"], row["grant_id"]) for row in lapsed] == [
+        (job["thread_id"], "agr-lapsed")
+    ]
 
 
 async def test_a_hot_threads_turn_is_held_for_its_resident_host(store):

@@ -159,3 +159,45 @@ def test_launch_live_without_the_live_spawn_refuses(tmp_path):
     object.__setattr__(context, "spawn_live", None)
     with pytest.raises(DriverError, match="live-input spawn"):
         ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+
+
+def test_process_alive_tracks_spawn_death_and_close(tmp_path):
+    """What the platform labels ``hot`` hangs off this: unspawned and closed
+    sessions are not alive, and a process that died idle stops counting."""
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    assert session.process_alive() is False  # lazy spawn: nothing yet
+
+    process.feed = _turn_lines(_RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m")).wait()
+    assert session.process_alive() is True
+
+    process.poll = lambda: 1  # died while idle
+    assert session.process_alive() is False
+
+    process.poll = lambda: None
+    session.close()
+    assert session.process_alive() is False
+
+
+def test_launch_resident_live_resumes_the_threads_session(tmp_path):
+    """The HOT mirror of launch_resident: same on-disk resume, live process."""
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(
+        context, session_id="sess-prev"
+    )
+
+    process.feed = _turn_lines(_RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m")).wait()
+
+    (argv, _env), *rest = spawned
+    assert not rest
+    assert argv[argv.index("--resume") + 1] == "sess-prev"
+
+
+def test_launch_resident_live_needs_the_state_mount(tmp_path):
+    context, _ = _live(_LiveProcess(), tmp_path)
+    object.__setattr__(context, "state_dir", None)
+    with pytest.raises(DriverError, match="state mount"):
+        ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(context, session_id="s")

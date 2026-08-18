@@ -57,10 +57,10 @@ This document is the reviewed decision.
 > infrastructure event.
 
 Non-goals (v1): mid-turn interject/steering (enabled by this architecture,
-separate project), true HOT — a live process receiving injected turns —
-which waits on residency-scoped credentials (§13; ``warm_native`` is the
-implemented resident rung), cross-harness threads, driver plugin frameworks,
-unifying every harness's raw event vocabulary.
+separate project), cross-harness threads, driver plugin frameworks,
+unifying every harness's raw event vocabulary. (True HOT sat here while it
+waited on residency-scoped credentials; the §14 amendment un-deferred it and
+it is implemented — the live process rides the residency's grant.)
 
 ## 3. Decision record
 
@@ -136,9 +136,12 @@ Continuity ladder (automatic and observable degradation):
 
 ```text
 hot          process alive, next turn injected via live input   layers 1-4¹
-             (deferred: needs residency-scoped credentials, §13)
+             (on the residency's thread-attributed grant, §14)
 warm_native  resident workspace + per-turn --resume restart     layers 1-3
-             (the implemented resident rung)
+             (the restart rung: grantless residencies, model
+             switches, MCP turns, and the turn that spawns the
+             live process — the process must predate a turn for
+             that turn to be ``hot``)
 cold_native  new sandbox + ThreadCheckpoint import              layers 1-2
 replay       new sandbox + transcript prompt (today's path)     layer 2 only
 ```
@@ -465,20 +468,26 @@ decisions get written down.
    per-call resolution) exists; the external test doubles as the tripwire
    that says when a CLI upgrade makes in-process rotation real.
 
-2. **The MCP and model-switch exclusions are lifted.** Both were
-   live-process-era constraints. Under per-turn restart every resident turn
-   carries a fresh environment — this attempt's relay token, this turn's
-   model — so MCP threads and model switches reuse the resident workspace
-   like any other turn. What still ends a residency is a harness switch
+2. **The MCP and model-switch exclusions are lifted — for the workspace.**
+   Both were live-process-era constraints; under restart every resident turn
+   carries a fresh environment, so MCP threads and model switches reuse the
+   resident workspace like any other turn. With §14 the live process is
+   back, and so are its gates, now scoped to the process alone: an MCP turn
+   rides warm (the relay token is still per-attempt), and a model switch
+   restarts — and re-keys the residency at promotion, because the grant is
+   model-scoped. What still ends a residency outright is a harness switch
    (another CLI cannot read this session) and a base the tree cannot fetch.
 
-3. **The implemented resident rung is §2's WARM semantics, recorded as
-   ``warm_native``, per turn.** Every resident
+3. **The first implemented resident rung was §2's WARM semantics, recorded
+   as ``warm_native``, per turn.** Every resident
    turn skips clone, context patch and setup, resumes the native session in
-   the preserved workspace, and pays one CLI start. Layer 4 (processes) is
-   not continuous — that is the price of per-attempt credentials until
-   residency-scoped ones exist. The idle cost of a residency is a workspace
-   and a row; the budget's LRU pressure caps the workspaces.
+   the preserved workspace, and pays one CLI start. Layer 4 (processes) was
+   not continuous — the price of per-attempt credentials, paid until the
+   §14 amendment made the residency itself the credential's subject. The
+   restart rung remains, as the path for grantless residencies, model
+   switches, MCP turns and live-process death. The idle cost of a residency
+   is a workspace, a row — and with a grant, a live TTL-capped credential
+   (§14); the budget's LRU pressure caps the workspaces.
 4. **Contract-test coverage** (§10) lives in the unit and dbtest suites for
    every branch exercisable without a real CLI: fencing (4, 9, 10, 13),
    consistency (12), floor/TurnResult (2), fork refusal (6), model-switch
@@ -513,3 +522,26 @@ turns. Consequences, accepted explicitly:
 This unblocks true HOT with agent-side work only: §13's item 1 stands as
 the record of *why* per-turn restart was built, and the live-input session
 it kept in-tree is what this amendment finally wires in.
+
+**Implemented (2026-08-18).** The shape that shipped, where it is stricter
+than the text above:
+
+- Establish mints the grant (attributed ``thread:<thread_id>``, scoped to
+  the establishing turn's model) and returns it with the generation; the
+  beat that extends a lease renews its grant; release, lapse and takeover
+  revoke it. A mint or link failure degrades to a workspace-only residency
+  — turns ride ``warm_native`` on their own per-attempt grants, never an
+  outage.
+- ``hot`` is recorded only when the process predates the turn. The turn
+  that *spawns* the live process (over the resident workspace, on the
+  residency credential) is ``warm_native``: same fresh-process semantics,
+  honestly labelled. The next turn is hot.
+- MCP turns do not ride the live process — the relay token in a resident
+  environment would be the establishing attempt's, and stale mid-thread.
+  They ride warm; lifting this needs a residency-lifetime relay token.
+- A model switch restarts (D6) and re-keys: promotion drops the old
+  generation and establishes a successor whose grant is scoped to the new
+  model, so the thread is hot again from the following turn.
+- A live session that fails its turn, loses its lease, or is evicted is
+  closed at the same points the residency drops; a survivor without a
+  residency to live in is closed rather than leaked.

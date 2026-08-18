@@ -38,7 +38,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -851,15 +851,15 @@ def _promote_to_resident(
     workdir: str,
     state_dir: str,
     residents: ResidentPool | None,
+    session_id: str | None = None,
 ) -> int | None:
     """Keep this thread's workspace resident; return the generation held.
 
-    Nothing is spawned: what stays is the worktree, the state mount with the
-    session files the turn just wrote, and the CP-fenced residency row. The
-    follow-up restarts the CLI with ``--resume`` over exactly this — its own
-    process, its own attempt's credential, and equally its own MCP token and
-    model: every restart carries a fresh environment, so the live-process
-    era's MCP and model restrictions no longer apply.
+    Nothing is spawned here: what stays is the worktree, the state mount with
+    the session files the turn just wrote, and the CP-fenced residency row —
+    plus, when the turn ran live, the process the caller attaches right after
+    this with the generation returned here. A follow-up the process cannot
+    serve restarts the CLI with ``--resume`` over the same tree.
 
     The return value is run_once's receipt: a residency this attempt
     established or refreshed is dropped unless the attempt confirms success,
@@ -868,9 +868,20 @@ def _promote_to_resident(
     """
     if residents is None or not job.thread_id:
         return None
-    session_id = getattr(runtime, "session_id", None)
+    # A turn on a borrowed live session parses its events through *that*
+    # session's runtime instance, so the caller passes the announced id in;
+    # every restart-shaped path still reads this turn's own runtime.
+    session_id = session_id or getattr(runtime, "session_id", None)
     if not session_id:
         return None
+    held = residents.lookup(job.thread_id)
+    if held is not None and held.grant_model is not None and held.grant_model != job.model:
+        # A model switch re-keys the residency (D6 restart + design §14): the
+        # grant is model-scoped, so refreshing in place would pin the thread
+        # to a credential no further turn can use — warm forever. Dropping
+        # first makes the offer below establish a successor generation, whose
+        # mint is scoped to this turn's model.
+        residents.drop(job.thread_id, release=True, generation=held.generation)
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
     runtime_id = getattr(runtime, "name", "generic")
@@ -953,6 +964,7 @@ def run_agent(
     state_dir: str | None = None,
     resident: ResidentEntry | None = None,
     residents: ResidentPool | None = None,
+    live_out: dict[str, Any] | None = None,
 ) -> tuple[int, str, list[str]]:
     """Run the agent, streaming its output back as normalized events.
 
@@ -965,6 +977,13 @@ def run_agent(
     falls back to the transcript replay this function always ran, inside the
     same attempt (design §9). ``state_dir`` is the host directory the sandbox
     persists session files into; without it nothing is exported or restored.
+
+    ``live_out`` is how a surviving process leaves this function: a completed
+    turn on a live session puts ``{"session", "session_id"}`` there, and the
+    caller either attaches the session to the resident pool (which owns its
+    teardown from then on) or closes it. A turn that ends any other way closes
+    a live session it created itself; one borrowed from the pool is closed by
+    the pool teardown its failure triggers.
     """
     # Hermetic environment, and the *backend's* idea of it rather than the
     # runner's. For an isolated backend the runner's PATH and HOME name paths
@@ -1005,12 +1024,90 @@ def run_agent(
     session = None
     turn = None
     turn_input: TurnInput | None = None
-    if resident is not None:
-        # The top rung (design §7): a fresh process resumed over the thread's
-        # resident workspace. Per turn, per process, per credential — the
-        # rotation experiments (tests/external) proved the pinned CLI honours
-        # nothing weaker, and a fresh env is what keeps every attempt billed
-        # to its own grant.
+    #: A live session this turn spawned and still owns — closed on every exit
+    #: except the completed hand-off to ``live_out``. One borrowed from the
+    #: pool is the pool's to close, via the entry drop its failure triggers.
+    fresh_live = None
+    hot_ok = (
+        resident is not None
+        and resident.credential is not None
+        and job.model == resident.grant_model
+        and not mcp_config.server_ids
+    )
+    stale_process = resident is not None and not hot_ok and resident.live_session is not None
+    if stale_process and residents is not None and job.thread_id:
+        # This turn will advance the thread past the idle process's memory —
+        # another model (D6: restart), or an MCP turn whose relay token a
+        # resident environment cannot carry yet. The process is stale the
+        # moment the turn runs; the workspace stays resident.
+        residents.detach_session(job.thread_id)
+    if hot_ok:
+        assert resident is not None
+        # True HOT (design §7 + §14): the thread's own live process, running
+        # on the residency's thread-attributed grant — minted at establish,
+        # renewed by host beats, revoked at release/lapse/takeover. The
+        # per-attempt token never enters this environment.
+        live = resident.live_session
+        was_alive = live is not None and bool(getattr(live, "process_alive", lambda: False)())
+        if live is not None and not was_alive:
+            # Died idle (or never spawned): not this turn's transport, but
+            # the workspace is intact — respawn below, resume on disk.
+            if residents is not None and job.thread_id:
+                residents.detach_session(job.thread_id)
+            live = None
+        if live is None:
+            launch_resident_live = getattr(driver, "launch_resident_live", None)
+            if launch_resident_live is not None:
+                hot_context = replace(
+                    context,
+                    credential=resident.credential,
+                    spawn_live=lambda argv, env: backend.spawn(
+                        SandboxSpec(
+                            argv=argv,
+                            workdir=workdir,
+                            env=env,
+                            state_dir=state_dir,
+                            live_input=True,
+                        )
+                    ),
+                )
+                try:
+                    live = launch_resident_live(hot_context, session_id=resident.session_id)
+                except DriverError:
+                    live = None
+                else:
+                    fresh_live = live
+        if live is not None:
+            if state_dir is not None:
+                backend.adopt_workdir(state_dir)
+            try:
+                turn = live.start_turn(TurnInput(prompt=job.task_prompt, model=job.model))
+            except DriverError as exc:
+                # The process is gone, or refused the turn. Close what we
+                # hold and run the ladder from warm in the same tree.
+                if fresh_live is None and residents is not None and job.thread_id:
+                    residents.detach_session(job.thread_id)
+                else:
+                    with contextlib.suppress(Exception):
+                        live.close()
+                fresh_live = None
+                control.append_event(
+                    NormalizedEvent(
+                        "lifecycle", {"phase": "hot_fallback", "detail": str(exc)[:200]}
+                    )
+                )
+            else:
+                session = live
+                turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
+                # ``hot`` only when the process predates the turn — a fresh
+                # spawn is warm_native whatever transport it runs on, and a
+                # label that overclaims makes the hit-rate lie.
+                control.report_continuity("hot" if was_alive else "warm_native")
+    if session is None and resident is not None:
+        # The restart rung over the resident workspace (design §7): a fresh
+        # process resumed with ``--resume``, on this attempt's own token —
+        # the path for threads whose residency has no grant, model switches,
+        # and MCP turns.
         launch_resident = getattr(driver, "launch_resident", None)
         try:
             if launch_resident is None:
@@ -1024,11 +1121,6 @@ def run_agent(
             session = None
         else:
             turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
-            # warm_native, not hot: workspace and native session are
-            # continuous, the process is not (design §13 — measured; "hot"
-            # stays reserved for a live process, which needs residency-scoped
-            # credentials first). A label that overclaims would make the
-            # hit-rate, the audit and the capability matrix lie together.
             control.report_continuity("warm_native")
     if session is None and state is not None:
         try:
@@ -1058,101 +1150,119 @@ def run_agent(
             backend.adopt_workdir(state_dir)
         turn = session.start_turn(turn_input)
 
-    deadline = time.monotonic() + timeout_s
-    tail: list[str] = []
-    # Tool failures the agent may or may not acknowledge. A model that says "I
-    # added the docstring" after its Edit was denied is a real behaviour we
-    # observed, so the runner reports what the tools did rather than trusting
-    # the agent's summary.
-    tool_errors: list[str] = []
-    # One row per host, not per retry: an agent that retries a blocked address
-    # ten times tried to reach one place.
-    denied_hosts: set[str] = set()
+    try:
+        deadline = time.monotonic() + timeout_s
+        tail: list[str] = []
+        # Tool failures the agent may or may not acknowledge. A model that says "I
+        # added the docstring" after its Edit was denied is a real behaviour we
+        # observed, so the runner reports what the tools did rather than trusting
+        # the agent's summary.
+        tool_errors: list[str] = []
+        # One row per host, not per retry: an agent that retries a blocked address
+        # ten times tried to reach one place.
+        denied_hosts: set[str] = set()
 
-    # Read stdout on a separate thread and poll for it here, so cancellation
-    # and the deadline are honoured even when the agent goes quiet. Iterating
-    # the stream directly meant a hung or long-thinking agent — which produces
-    # no lines — was never checked, and ignored an owner's cancel until it
-    # happened to print something.
-    lines: queue.Queue[str | None] = queue.Queue()
+        # Read stdout on a separate thread and poll for it here, so cancellation
+        # and the deadline are honoured even when the agent goes quiet. Iterating
+        # the stream directly meant a hung or long-thinking agent — which produces
+        # no lines — was never checked, and ignored an owner's cancel until it
+        # happened to print something.
+        lines: queue.Queue[str | None] = queue.Queue()
 
-    def _pump() -> None:
-        try:
-            for line in turn.raw_lines():
-                lines.put(line)
-        finally:
-            lines.put(None)
+        def _pump() -> None:
+            try:
+                for line in turn.raw_lines():
+                    lines.put(line)
+            finally:
+                lines.put(None)
 
-    pump = threading.Thread(target=_pump, daemon=True, name="agent-stdout")
-    pump.start()
+        pump = threading.Thread(target=_pump, daemon=True, name="agent-stdout")
+        pump.start()
 
-    while True:
-        if heart.lease_lost:
-            turn.cancel()
-            if resident is not None and residents is not None and job.thread_id:
-                # The fence just moved: this workspace's residency must stop
-                # being reported the moment the turn aborts, not whenever the
-                # exception finishes unwinding (review finding 2). run_once's
-                # wrapper repeats this for every other exception; drop is
-                # idempotent and generation-scoped.
-                residents.drop(job.thread_id, release=True, generation=resident.generation)
-            raise LeaseLost("lease lost while the agent was running")
-        if heart.cancel_requested:
-            turn.cancel()
-            control.append_event(NormalizedEvent("lifecycle", {"phase": "cancelled_by_owner"}))
-            return 130, "".join(tail), tool_errors
-        if time.monotonic() > deadline:
-            turn.cancel()
+        while True:
+            if heart.lease_lost:
+                turn.cancel()
+                if resident is not None and residents is not None and job.thread_id:
+                    # The fence just moved: this workspace's residency must stop
+                    # being reported the moment the turn aborts, not whenever the
+                    # exception finishes unwinding (review finding 2). run_once's
+                    # wrapper repeats this for every other exception; drop is
+                    # idempotent and generation-scoped.
+                    residents.drop(job.thread_id, release=True, generation=resident.generation)
+                raise LeaseLost("lease lost while the agent was running")
+            if heart.cancel_requested:
+                turn.cancel()
+                control.append_event(NormalizedEvent("lifecycle", {"phase": "cancelled_by_owner"}))
+                return 130, "".join(tail), tool_errors
+            if time.monotonic() > deadline:
+                turn.cancel()
+                control.append_event(
+                    NormalizedEvent("error", {"text": f"agent exceeded {timeout_s:.0f}s"})
+                )
+                return 124, "".join(tail), tool_errors
+
+            try:
+                line = lines.get(timeout=_POLL_INTERVAL_S)
+            except queue.Empty:
+                # No output yet; loop so the checks above keep running.
+                continue
+            if line is None:
+                break
+
+            tail.append(line)
+            del tail[:-40]
+            item = turn.event_for_line(line)
+            if item.event_type != LINE:
+                if item.event_type == "tool_result" and (item.payload or {}).get("is_error"):
+                    content = str((item.payload or {}).get("content", ""))
+                    tool_errors.append(content[:200])
+                    blocked = detect_blocked_egress(content)
+                    if blocked and blocked not in denied_hosts:
+                        denied_hosts.add(blocked)
+                        # `host` is what makes this a first-class egress row in the
+                        # owner's stream rather than one more failed command.
+                        control.append_event(NormalizedEvent("error", {"host": blocked}))
+                control.append_event(NormalizedEvent(item.event_type, item.payload))
+
+        result = turn.wait()
+        exit_code = result.exit_code
+        if live_out is not None and result.status == "completed":
+            # What the caller needs to keep the thread resident: the announced
+            # session id (captured by the session's own runtime — for a borrowed
+            # live session that is a previous turn's instance, not this turn's),
+            # and the process itself when it survived its turn.
+            live_out["session_id"] = getattr(session.runtime, "session_id", None)
+            if bool(getattr(session, "process_alive", lambda: False)()):
+                live_out["session"] = session
+        if result.status == "completed" and state_dir is not None:
+            # Every settled turn exports (design §6): this is COLD's substrate and
+            # HOT's crash insurance. Failure is non-fatal — the user's work is the
+            # patch, and losing a checkpoint costs one replay, not the turn — but
+            # it is a first-class row, because a thread that quietly went
+            # forgetful is the old bug wearing a new face.
+            _export_checkpoint(control, session=session, job=job, backend=backend)
+        stderr = turn.stderr_text()
+        if stderr.strip():
+            tail.append(stderr[-2000:])
+        if tool_errors:
+            # Surfaced as an event so the owner sees it in the stream, not only in
+            # the final detail string.
             control.append_event(
-                NormalizedEvent("error", {"text": f"agent exceeded {timeout_s:.0f}s"})
+                NormalizedEvent(
+                    "error",
+                    {"detail": f"{len(tool_errors)} tool call(s) failed", "first": tool_errors[0]},
+                )
             )
-            return 124, "".join(tail), tool_errors
-
-        try:
-            line = lines.get(timeout=_POLL_INTERVAL_S)
-        except queue.Empty:
-            # No output yet; loop so the checks above keep running.
-            continue
-        if line is None:
-            break
-
-        tail.append(line)
-        del tail[:-40]
-        item = turn.event_for_line(line)
-        if item.event_type != LINE:
-            if item.event_type == "tool_result" and (item.payload or {}).get("is_error"):
-                content = str((item.payload or {}).get("content", ""))
-                tool_errors.append(content[:200])
-                blocked = detect_blocked_egress(content)
-                if blocked and blocked not in denied_hosts:
-                    denied_hosts.add(blocked)
-                    # `host` is what makes this a first-class egress row in the
-                    # owner's stream rather than one more failed command.
-                    control.append_event(NormalizedEvent("error", {"host": blocked}))
-            control.append_event(NormalizedEvent(item.event_type, item.payload))
-
-    result = turn.wait()
-    exit_code = result.exit_code
-    if result.status == "completed" and state_dir is not None:
-        # Every settled turn exports (design §6): this is COLD's substrate and
-        # HOT's crash insurance. Failure is non-fatal — the user's work is the
-        # patch, and losing a checkpoint costs one replay, not the turn — but
-        # it is a first-class row, because a thread that quietly went
-        # forgetful is the old bug wearing a new face.
-        _export_checkpoint(control, session=session, job=job, backend=backend)
-    stderr = turn.stderr_text()
-    if stderr.strip():
-        tail.append(stderr[-2000:])
-    if tool_errors:
-        # Surfaced as an event so the owner sees it in the stream, not only in
-        # the final detail string.
-        control.append_event(
-            NormalizedEvent(
-                "error",
-                {"detail": f"{len(tool_errors)} tool call(s) failed", "first": tool_errors[0]},
-            )
-        )
-    return exit_code, "".join(tail), tool_errors
+        return exit_code, "".join(tail), tool_errors
+    finally:
+        # Every exit but the completed hand-off closes a live session this
+        # turn spawned: a leaked resident process would keep running — and
+        # keep holding its grant-scoped key — with no entry owning it.
+        if fresh_live is not None and not (
+            live_out is not None and live_out.get("session") is fresh_live
+        ):
+            with contextlib.suppress(Exception):
+                fresh_live.close()
 
 
 def run_once(
@@ -1246,11 +1356,11 @@ def run_once(
         if job.context_checkpoint:
             context_state = state_from_checkpoint(job.context_checkpoint)
 
-    # The top rung: this thread may already be resident here (design §7). The
-    # entry must match what this turn asks for — same harness, same model
-    # (D6: switching is a restart), no MCP (its tokens do not rotate yet) —
-    # and the turn's pinned base must resolve in the resident tree, or the
-    # eventual patch would diff against a commit the tree has never seen.
+    # The top rung: this thread may already be resident here (design §7).
+    # Reusing the *workspace* needs the same harness and a base the tree can
+    # resolve; riding the *live process* additionally needs the residency's
+    # grant, its model and an MCP-less turn — run_agent gates that part and
+    # falls to a restart in the same tree when it fails.
     resident: ResidentEntry | None = None
     if residents is not None and job.thread_id:
         entry = residents.lookup(job.thread_id)
@@ -1421,6 +1531,7 @@ def run_once(
         control.resume_terminals()
         terminals_suspended = False
 
+        live_out: dict[str, Any] = {}
         try:
             exit_code, tail, tool_errors = run_agent(
                 runtime,
@@ -1449,6 +1560,7 @@ def run_once(
                 state_dir=state_dir,
                 resident=resident,
                 residents=residents,
+                live_out=live_out,
             )
         except BaseException:
             # A lease lost — or anything else — mid-hot-turn must not leave a
@@ -1474,9 +1586,21 @@ def run_once(
                 workdir=workdir,
                 state_dir=state_dir,
                 residents=residents,
+                session_id=live_out.get("session_id"),
             )
             if promoted is not None:
                 residency_generation_held = promoted
+            live = live_out.pop("session", None)
+            if live is not None:
+                if promoted is not None and residents is not None and job.thread_id:
+                    # The pool owns the process from here: retire, evict,
+                    # sweep and shutdown all close it. Attach is generation-
+                    # scoped and closes the session itself on a mismatch.
+                    residents.attach_session(job.thread_id, promoted, live)
+                else:
+                    # Survived its turn but has no residency to live in.
+                    with contextlib.suppress(Exception):
+                        live.close()
         elif resident is not None and residents is not None and job.thread_id:
             residents.drop(job.thread_id, release=True, generation=residency_generation_held)
 

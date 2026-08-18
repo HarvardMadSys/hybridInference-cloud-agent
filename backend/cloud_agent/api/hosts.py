@@ -27,13 +27,14 @@ minutes.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_agent_job_store, get_grant_client
 from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
@@ -59,8 +60,10 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
 
-#: How long a hot sandbox's lease lives between beats (design §7). The cap on
-#: how long an idle resident process may hold its (idle-inert) credentials.
+#: How long a residency's lease lives between beats (design §7) — and, since
+#: the lease and the thread-attributed grant are renewed by the same beat and
+#: revoked together (design §14), the cap on how long an idle resident
+#: process keeps a live credential after its host goes quiet.
 RESIDENCY_TTL_S = float(os.environ.get("AGENT_RESIDENCY_TTL_S") or 1800.0)
 
 
@@ -210,6 +213,7 @@ async def heartbeat_host(
     body: HostHeartbeatRequest,
     host: dict[str, Any] = Depends(authenticate_host),
     store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
 ) -> HostHeartbeatResponse:
     """Report liveness, and whatever about this machine has changed.
 
@@ -247,7 +251,13 @@ async def heartbeat_host(
             host=updated["host"],
             ttl_seconds=RESIDENCY_TTL_S,
         )
-        if not extended:
+        if extended and grants is not None:
+            # The credential lives exactly as long as the residency: the beat
+            # that extends the lease extends the grant. Best-effort — a missed
+            # renewal starves hot turns into warm, never into an outage.
+            with contextlib.suppress(Exception):
+                await grants.renew(extended)
+        if extended is None:
             # Echo the generation back (review finding 5): a beat carrying
             # gen N can be answered after the host re-established gen N+1,
             # and a thread-id-only loss would let the stale answer kill the
@@ -274,6 +284,7 @@ async def establish_thread_residency(
     body: HostResidencyEstablishRequest,
     host: dict[str, Any] = Depends(authenticate_host),
     store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
 ) -> HostResidencyEstablishResponse:
     """Take (or take over) residency for a thread this host is running.
 
@@ -304,11 +315,69 @@ async def establish_thread_residency(
                 }
             },
         )
+    # A takeover is a credential rotation (design §14): the predecessor's
+    # grant dies now, not at its TTL, so a zombie host starves promptly.
+    previous_grant = row.get("previous_grant_id")
+    if previous_grant and grants is not None:
+        await grants.revoke(previous_grant)
+    credential = await _mint_residency_grant(job_store, grants, row=row)
     return HostResidencyEstablishResponse(
         thread_id=row["thread_id"],
         generation=row["generation"],
         ttl_seconds=RESIDENCY_TTL_S,
+        credential=credential,
+        model=row.get("model"),
     )
+
+
+async def _mint_residency_grant(
+    job_store: AgentJobStore, grants: Any, *, row: dict[str, Any]
+) -> str | None:
+    """The residency's inference credential, or ``None`` for workspace-only.
+
+    Attribution is the *thread* (design §14): the grant's external job id
+    names it, so the gateway's ledger bills every resident turn to the
+    conversation rather than to whichever turn happened to establish. Every
+    failure degrades rather than refuses — a residency without a credential
+    still keeps the workspace, and turns ride warm_native on their own
+    per-attempt grants.
+
+    A grant that cannot be linked is revoked, not handed over: the link is
+    the only thing that will ever renew or revoke it, and the one way linking
+    fails is a takeover between mint and link — whose new owner must not be
+    starved by an orphan credential it cannot see.
+    """
+    if grants is None:
+        return None
+    try:
+        grant = await grants.mint(
+            user_id=row["user_id"],
+            job_id=f"thread:{row['thread_id']}",
+            attempt_id=str(row["establishing_attempt_id"]),
+            models=[row["model"]],
+            ttl_seconds=int(RESIDENCY_TTL_S),
+        )
+    except Exception:  # degrade to workspace-only residency
+        logger.warning(
+            "agent_residency_grant_unavailable",
+            exc_info=True,
+            extra={
+                "event": "agent_residency_grant_unavailable",
+                "thread_id": row["thread_id"],
+            },
+        )
+        return None
+    grant_id = str(grant.get("grant_id") or "")
+    token = str(grant.get("token") or "")
+    if not grant_id or not token:
+        return None
+    linked = await job_store.link_residency_grant(
+        thread_id=row["thread_id"], generation=row["generation"], grant_id=grant_id
+    )
+    if not linked:
+        await grants.revoke(grant_id)
+        return None
+    return token
 
 
 @router.post("/residencies/release", response_model=WorkerAckResponse)
@@ -316,6 +385,7 @@ async def release_thread_residency(
     body: HostResidencyReleaseRequest,
     host: dict[str, Any] = Depends(authenticate_host),
     store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
 ) -> WorkerAckResponse:
     """End a residency this host holds (teardown, eviction, drain).
 
@@ -327,7 +397,9 @@ async def release_thread_residency(
     released = await job_store.release_residency(
         thread_id=body.thread_id, generation=body.generation, host=host["host"]
     )
-    return WorkerAckResponse(ok=released)
+    if released and grants is not None:
+        await grants.revoke(released)
+    return WorkerAckResponse(ok=released is not None)
 
 
 async def _probed_broker_error(

@@ -39,7 +39,7 @@ from typing import Any
 import pytest
 
 from cloud_agent import app, app as control_plane, grants as grant_client, grants as grants_mod
-from cloud_agent.app import _renew_live_grants, _revoke_dead_grants
+from cloud_agent.app import _reap_lapsed_residencies, _renew_live_grants, _revoke_dead_grants
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
 
@@ -639,3 +639,40 @@ async def test_a_cancelled_renewal_does_not_forget_its_refusal_count(monkeypatch
     assert failures == {"grant_1": 2, "grant_2": 1}, (
         "a cancelled renewal reset a refusal count the give-up rule needs"
     )
+
+
+# ── The residency's grant dies with its lease (design §14) ─────────────
+
+
+class _ResidencyStore:
+    def __init__(self, lapsed: list[dict[str, Any]]) -> None:
+        self.lapsed = lapsed
+
+    async def reap_expired_residencies(self) -> list[dict[str, Any]]:
+        rows, self.lapsed = self.lapsed, []
+        return rows
+
+
+async def test_a_lapsed_residency_takes_its_grant_with_it() -> None:
+    """A host that stopped beating must starve promptly: the reaper revokes
+    the lapsed residency's credential rather than letting it spend until its
+    own TTL. Workspace-only residencies lapse with nothing to revoke."""
+    grants = _Grants()
+    store = _ResidencyStore(
+        [
+            {"thread_id": "t1", "generation": 2, "grant_id": "agr-1"},
+            {"thread_id": "t2", "generation": 1, "grant_id": None},
+        ]
+    )
+
+    await _reap_lapsed_residencies(store, grants)
+
+    assert grants.revoked == ["agr-1"]
+
+
+async def test_a_deployment_without_grants_still_lapses_residencies() -> None:
+    store = _ResidencyStore([{"thread_id": "t1", "generation": 1, "grant_id": "agr-1"}])
+
+    await _reap_lapsed_residencies(store, None)
+
+    assert store.lapsed == []  # the reap itself happened
