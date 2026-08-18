@@ -485,3 +485,31 @@ decisions get written down.
    restart (7), degradation branches (3, partial). The memory fixture (1)
    and cancel-against-a-real-process (5) need the pinned image and belong
    to the staging acceptance run before public exposure.
+
+## 14. Amendment — D5 relaxed to thread-level attribution (2026-08-18, Murphy)
+
+Per-attempt cost **attribution** was a declared invariant, not an accounting
+necessity: every turn of a thread is the same user, the same account, the
+same model, so total billing and quota enforcement are identical either way.
+What per-attempt granularity bought — per-turn cost display, direct audit
+lookup, a minutes-scale zombie cut-off — is worth less than what it blocked:
+the live process, which the pinned CLI permits only under a
+process-lifetime credential.
+
+**Amended invariant:** inference attribution is per **thread** for resident
+turns. Consequences, accepted explicitly:
+
+- The residency grant lives for the residency: minted at establish
+  (attributed to the thread), renewed on beats, revoked at release, lapse
+  and takeover — generation rotation is credential rotation. An idle hot
+  sandbox holds a live, TTL-capped credential (the original §8 v1
+  concession, reinstated knowingly).
+- Per-turn cost display, where wanted, is derived by bracketing
+  ``api_logs`` timestamps with attempt start/end — a view, not a ledger
+  change.
+- The zombie cut-off becomes reaper-plus-revocation latency rather than
+  renewal starvation; comparable magnitude, now explicit.
+
+This unblocks true HOT with agent-side work only: §13's item 1 stands as
+the record of *why* per-turn restart was built, and the live-input session
+it kept in-tree is what this amendment finally wires in.
