@@ -566,9 +566,15 @@ class WorkerArtifactResponse(BaseModel):
 
 
 class WorkerContinuityRequest(BaseModel):
-    """Which continuity rung this attempt is running on (design §9)."""
+    """Which continuity rung this attempt is running on (design §9).
 
-    mode: Literal["hot", "cold_native", "replay"]
+    ``warm_native`` is the implemented resident rung: native session and
+    workspace continuous, process restarted per turn. ``hot`` is reserved for
+    a live process receiving injected turns and stays unreported until
+    residency-scoped credentials make one possible (design §13).
+    """
+
+    mode: Literal["hot", "warm_native", "cold_native", "replay"]
 
 
 class WorkerFinishRequest(BaseModel):

@@ -845,32 +845,36 @@ def _export_checkpoint(
 def _promote_to_resident(
     control: ControlPlane,
     *,
-    session: Any,
+    runtime: AgentRuntime,
     job: ClaimedJob,
     backend: Any,
     workdir: str,
     state_dir: str,
     residents: ResidentPool | None,
-) -> None:
-    """Keep this thread's workspace resident for its next turn.
+) -> int | None:
+    """Keep this thread's workspace resident; return the generation held.
 
     Nothing is spawned: what stays is the worktree, the state mount with the
     session files the turn just wrote, and the CP-fenced residency row. The
     follow-up restarts the CLI with ``--resume`` over exactly this — its own
-    process, its own attempt's credential — because the rotation experiments
-    (tests/external) proved the pinned CLI honours no in-process re-keying.
-    MCP turns are not promoted: their relay token is minted per attempt too,
-    and until it is, a hot MCP turn would tool-call on a stale credential.
+    process, its own attempt's credential, and equally its own MCP token and
+    model: every restart carries a fresh environment, so the live-process
+    era's MCP and model restrictions no longer apply.
+
+    The return value is run_once's receipt: a residency this attempt
+    established or refreshed is dropped unless the attempt confirms success,
+    so a retry can never resume a session a failed attempt already advanced
+    (review: the post-promotion lease-loss leak).
     """
-    if residents is None or not job.thread_id or job.mcp_servers:
-        return
-    session_id = getattr(session.runtime, "session_id", None)
+    if residents is None or not job.thread_id:
+        return None
+    session_id = getattr(runtime, "session_id", None)
     if not session_id:
-        return
+        return None
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
-    runtime_id = getattr(session.runtime, "name", "generic")
-    kept = residents.offer(
+    runtime_id = getattr(runtime, "name", "generic")
+    generation = residents.offer(
         thread_id=job.thread_id,
         session_id=session_id,
         workdir=workdir,
@@ -882,9 +886,14 @@ def _promote_to_resident(
     control.append_event(
         NormalizedEvent(
             "lifecycle",
-            {"phase": "residency_established" if kept else "residency_declined"},
+            {
+                "phase": (
+                    "residency_established" if generation is not None else "residency_declined"
+                )
+            },
         )
     )
+    return generation
 
 
 def _resident_base_ready(workdir: str, job: ClaimedJob) -> bool:
@@ -1010,12 +1019,17 @@ def run_agent(
         except DriverError as exc:
             # Fall through to the ladder in the same tree.
             control.append_event(
-                NormalizedEvent("lifecycle", {"phase": "hot_fallback", "detail": str(exc)[:200]})
+                NormalizedEvent("lifecycle", {"phase": "warm_fallback", "detail": str(exc)[:200]})
             )
             session = None
         else:
             turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
-            control.report_continuity("hot")
+            # warm_native, not hot: workspace and native session are
+            # continuous, the process is not (design §13 — measured; "hot"
+            # stays reserved for a live process, which needs residency-scoped
+            # credentials first). A label that overclaims would make the
+            # hit-rate, the audit and the capability matrix lie together.
+            control.report_continuity("warm_native")
     if session is None and state is not None:
         try:
             session = driver.launch(context, state)
@@ -1126,18 +1140,6 @@ def run_agent(
         # it is a first-class row, because a thread that quietly went
         # forgetful is the old bug wearing a new face.
         _export_checkpoint(control, session=session, job=job, backend=backend)
-        # Hot and cold alike: a settled turn's workspace is worth keeping,
-        # and a hot turn must record its *new* session id — resume writes the
-        # continuation under a fresh one.
-        _promote_to_resident(
-            control,
-            session=session,
-            job=job,
-            backend=backend,
-            workdir=workdir,
-            state_dir=state_dir,
-            residents=residents,
-        )
     stderr = turn.stderr_text()
     if stderr.strip():
         tail.append(stderr[-2000:])
@@ -1253,12 +1255,13 @@ def run_once(
     if residents is not None and job.thread_id:
         entry = residents.lookup(job.thread_id)
         if entry is not None:
-            usable = (
-                entry.runtime_id == job.runtime
-                and entry.model == job.model
-                and not job.mcp_servers
-                and _resident_base_ready(entry.workdir, job)
-            )
+            # Every resident turn is a fresh process with a fresh environment
+            # (design §13, measured), so a model switch or an MCP grant needs
+            # nothing the restart does not already provide — the live-process
+            # era's gates on both are gone. What still ends a residency is a
+            # harness switch (another CLI cannot read this session) and a
+            # base the tree cannot fetch.
+            usable = entry.runtime_id == job.runtime and _resident_base_ready(entry.workdir, job)
             if usable:
                 resident = entry
                 workdir = entry.workdir
@@ -1284,6 +1287,13 @@ def run_once(
         return 2
 
     heart.start()
+    # Set only by the succeeded finish. The finally below redeems it: a
+    # residency this attempt established, refreshed or borrowed survives
+    # *only* a confirmed success — every other exit (failure, cancel, a lease
+    # lost anywhere between promotion and finish, an exception a handler
+    # swallows) drops it, so a retry can never resume a session this attempt
+    # already advanced (review: the post-promotion lease-loss leak).
+    residency_confirmed = False
     try:
         # A replacement attempt may inherit live user shells from the expired
         # owner. Freeze their complete process trees before checkout or setup;
@@ -1446,11 +1456,22 @@ def run_once(
             if resident is not None and residents is not None and job.thread_id:
                 residents.drop(job.thread_id, release=True)
             raise
-        # A hot turn that failed — nonzero exit, a cancel's kill — leaves
-        # nothing worth keeping resident; the checkpoint it exported (or the
-        # previous turn's) carries the thread COLD from here. A clean turn
-        # already refreshed the entry inside run_agent.
-        if resident is not None and residents is not None and job.thread_id and exit_code != 0:
+        # A settled turn's workspace is worth keeping — and only a settled
+        # one: promotion happens here, before finish, while the attempt still
+        # earns the residency; the receipt is redeemed in the finally below.
+        # A failed turn keeps nothing; its thread continues COLD off its
+        # checkpoint (or the previous turn's).
+        if exit_code == 0 and state_dir is not None:
+            _promote_to_resident(
+                control,
+                runtime=runtime,
+                job=job,
+                backend=backend,
+                workdir=workdir,
+                state_dir=state_dir,
+                residents=residents,
+            )
+        elif resident is not None and residents is not None and job.thread_id:
             residents.drop(job.thread_id, release=True)
 
         # Freeze both interactive input and already-running terminal process
@@ -1499,9 +1520,11 @@ def run_once(
                 )
                 return 1
             finish_attempt("succeeded", "agent completed (no changes)", base_sha=base_sha)
+            residency_confirmed = True
             return 0
 
         finish_attempt("succeeded", "agent completed", base_sha=base_sha)
+        residency_confirmed = True
         return 0
     except WorktreeError as exc:
         # Patch generation raises this on a Git failure, timeout or byte cap.
@@ -1517,6 +1540,9 @@ def run_once(
         print(f"lease lost, stopping: {exc}", file=sys.stderr)
         return 3
     finally:
+        if not residency_confirmed and residents is not None and job.thread_id:
+            with contextlib.suppress(Exception):
+                residents.drop(job.thread_id, release=True)
         # A surprising runner-side exception must not strand retained user
         # terminals in a suspended state. A stale attempt cannot resume them:
         # the worker endpoint fences this call against its live lease.

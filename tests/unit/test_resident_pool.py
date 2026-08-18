@@ -55,7 +55,7 @@ def test_a_refused_establish_keeps_nothing():
     control.refuse = True
     pool = _pool(control)
 
-    assert _offer(pool, "t1") is False
+    assert _offer(pool, "t1") is None
     assert pool.lookup("t1") is None
     assert pool.beats() == []
 
@@ -66,7 +66,7 @@ def test_a_refreshed_offer_updates_the_session_id_without_a_second_establish():
     pool = _pool(control)
     _offer(pool, "t1", "sess-turn-1")
 
-    assert _offer(pool, "t1", "sess-turn-2") is True
+    assert _offer(pool, "t1", "sess-turn-2") == 1
 
     entry = pool.lookup("t1")
     assert entry is not None and entry.session_id == "sess-turn-2"

@@ -871,3 +871,77 @@ def test_a_lost_lease_drops_the_residency_before_unwinding(tmp_path):
         )
 
     assert dropped == [("t-hot", True)]
+
+
+def test_a_lease_lost_at_finish_still_drops_the_residency(tmp_path, monkeypatch):
+    """Review (second pass): the post-run_agent leak.
+
+    The turn succeeds, the agent's session has advanced — and then the lease
+    is lost during finish. Without the finish-confirmation guard the
+    residency survived, and the retry resumed a session the failed attempt
+    had already advanced, re-executing the same prompt. The guard drops it on
+    every unconfirmed exit.
+    """
+    import dataclasses
+
+    from cloud_agent_host.residency import ResidentEntry
+
+    job = dataclasses.replace(_JOB, thread_id="t-hot", base_sha=None)
+    dropped: list[tuple[str, bool]] = []
+
+    class _Pool:
+        def lookup(self, thread_id):
+            return entry if thread_id == "t-hot" else None
+
+        def drop(self, thread_id: str, *, release: bool) -> None:
+            dropped.append((thread_id, release))
+
+    entry = ResidentEntry(
+        thread_id="t-hot",
+        generation=5,
+        session_id="sess-1",
+        workdir=str(tmp_path),
+        state_dir=f"{tmp_path}.state",
+        runtime_id="generic",
+        model="m",
+    )
+
+    class _FinishLosesLease(FakeControl):
+        def __init__(self) -> None:
+            super().__init__()
+            self.job_id = job.job_id
+
+        def finish(self, state: str, detail: str | None = None, **_kw) -> None:
+            raise LeaseLost("superseded during finish")
+
+        def suspend_terminals(self, phase: str) -> None:
+            pass
+
+        def resume_terminals(self) -> None:
+            pass
+
+    class _EchoBackend(ProcessBackend):
+        def has_binary(self, name: str) -> bool:
+            return True
+
+    monkeypatch.setattr(runner_mod, "claim", lambda **_kw: job)
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *a, **k: _FinishLosesLease())
+    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *a, **k: FakeHeart(), raising=True)
+    monkeypatch.setattr(runner_mod, "existing_checkout_sha", lambda *a, **k: "abc")
+    monkeypatch.setattr(runner_mod, "align_existing_checkout", lambda *a, **k: "abc")
+    monkeypatch.setattr(runner_mod, "build_patch", lambda *a, **k: "")
+    monkeypatch.setattr(runner_mod, "save_workspace_snapshot", lambda *a, **k: True)
+    runtime = _echo_runtime(2)
+    monkeypatch.setattr(runner_mod, "get_runtime", lambda *a, **k: runtime)
+
+    code = runner_mod.run_once(
+        base_url="http://cp",
+        dispatcher_token="tok",
+        worker_id="w1",
+        workdir=str(tmp_path),
+        backend=_EchoBackend(acknowledged_unsafe=True),
+        residents=_Pool(),  # type: ignore[arg-type]
+    )
+
+    assert code == 3  # the LeaseLost exit
+    assert ("t-hot", True) in dropped

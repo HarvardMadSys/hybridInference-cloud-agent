@@ -316,3 +316,100 @@ def test_per_turn_restart_carries_each_attempts_own_grant(tmp_path, gateway):
 
     assert gateway.keys[boundary:], "the resumed turn made no model calls"
     assert set(gateway.keys[boundary:]) == {"grant-ATTEMPT-2"}
+
+
+def test_production_driver_wiring_carries_per_turn_grants(tmp_path, gateway, monkeypatch):
+    """The same two-grant property, through the production seam.
+
+    Not a hand-built argv: turn one runs ``ClaudeCodeDriver.launch`` and turn
+    two ``launch_resident``, so ``prepare``'s flags, the adapter's session-id
+    capture and the driver's resume path are what is under test. A future
+    runner rewiring that regresses per-turn credentials fails here, not in
+    staging.
+    """
+    import os
+
+    from cloud_agent_host import drivers as drivers_mod
+    from cloud_agent_host.drivers import LaunchContext, TurnInput, driver_for
+    from cloud_agent_host.runtimes import EMPTY_RUNTIME_MCP_CONFIG, ClaudeCodeRuntime
+
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "claude"
+    shim.write_text(
+        f'#!/bin/sh\nexec npx --yes "@anthropic-ai/claude-code@{_pinned_cli_version()}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}:{os.environ['PATH']}")
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    workdir = tmp_path / "ws"
+    workdir.mkdir()
+    # The container constant points at the state mount; locally the state dir
+    # *is* the mount.
+    monkeypatch.setattr(drivers_mod, "CLAUDE_STATE_CONFIG_DIR", str(state_dir / "claude"))
+
+    class _LocalProcess:
+        def __init__(self, argv, env):
+            self.process = subprocess.Popen(
+                argv,
+                cwd=workdir,
+                env={**os.environ, **env},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+
+        def lines(self):
+            assert self.process.stdout is not None
+            yield from self.process.stdout
+
+        def kill(self):
+            self.process.kill()
+
+        def poll(self):
+            return self.process.poll()
+
+        def wait(self):
+            return self.process.wait()
+
+        def stderr_text(self):
+            return ""
+
+    def _context(credential: str) -> LaunchContext:
+        return LaunchContext(
+            workdir=str(workdir),
+            gateway_base_url=f"http://127.0.0.1:{gateway.port}",
+            credential=credential,
+            provides_isolation=True,
+            spawn=lambda argv, env: _LocalProcess(argv, env),
+            mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
+            state_dir=str(state_dir),
+        )
+
+    def _drive(turn) -> None:
+        for event in turn.iter_events():
+            del event
+        assert turn.wait().status == "completed"
+
+    runtime = ClaudeCodeRuntime()
+    driver = driver_for(runtime)
+    first = driver.launch(_context("grant-ATTEMPT-1"))
+    _drive(first.start_turn(TurnInput(prompt="say ok", model="fake-model")))
+    session_id = runtime.session_id
+    assert session_id, "the adapter never captured the CLI's session id"
+    boundary = len(gateway.keys)
+    assert set(gateway.keys[:boundary]) == {"grant-ATTEMPT-1"}
+
+    resumed_runtime = ClaudeCodeRuntime()
+    resumed = driver_for(resumed_runtime).launch_resident(
+        _context("grant-ATTEMPT-2"), session_id=session_id
+    )
+    _drive(resumed.start_turn(TurnInput(prompt="say ok again", model="fake-model")))
+
+    assert gateway.keys[boundary:], "the resumed turn made no model calls"
+    assert set(gateway.keys[boundary:]) == {"grant-ATTEMPT-2"}
+    assert resumed_runtime.session_id, "the resumed turn announced no session id"

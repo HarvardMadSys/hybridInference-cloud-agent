@@ -99,25 +99,28 @@ class ResidentPool:
         runtime_id: str,
         runtime_version: str | None,
         model: str,
-    ) -> bool:
+    ) -> int | None:
         """Keep a just-finished turn's workspace resident, if the CP agrees.
 
-        An entry already resident for the thread is refreshed in place — new
-        session id, fresh idle clock, no second establish. A new thread over
-        budget evicts the least-recently-used entry first — a release, exactly
-        what its TTL would eventually do.
+        Returns the generation now held for the thread — the caller's receipt,
+        which run_once redeems at finish: a residency established (or
+        refreshed) by an attempt that never confirms success is dropped, so a
+        retry can never resume a session the failed attempt already advanced.
+        An entry already resident is refreshed in place — new session id,
+        fresh idle clock, no second establish. A new thread over budget
+        evicts the least-recently-used entry first.
         """
         with self._lock:
             existing = self._entries.get(thread_id)
             if existing is not None:
                 existing.session_id = session_id
                 existing.last_turn_at = time.monotonic()
-                return True
+                return existing.generation
         generation = self._establish(
             thread_id=thread_id, runtime_id=runtime_id, runtime_version=runtime_version
         )
         if generation is None:
-            return False
+            return None
         evicted: list[ResidentEntry] = []
         with self._lock:
             stale = self._entries.pop(thread_id, None)
@@ -137,7 +140,7 @@ class ResidentPool:
             )
         for entry in evicted:
             self._retire(entry, tell_control_plane=True)
-        return True
+        return generation
 
     def drop(self, thread_id: str, *, release: bool) -> None:
         """Tear a residency down now (restart path, lost beat, mismatch)."""

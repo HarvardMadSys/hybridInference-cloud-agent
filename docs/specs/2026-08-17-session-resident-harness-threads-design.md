@@ -467,7 +467,8 @@ decisions get written down.
    than build relay-side generation tokens in v1, hot excludes MCP threads;
    they ride COLD, which is correct on every axis and merely colder. The
    relay-token work remains the path to lifting the exclusion.
-3. **HOT as implemented is §2's WARM semantics, per turn.** Every resident
+3. **The implemented resident rung is §2's WARM semantics, recorded as
+   ``warm_native``, per turn.** Every resident
    turn skips clone, context patch and setup, resumes the native session in
    the preserved workspace, and pays one CLI start. Layer 4 (processes) is
    not continuous — that is the price of per-attempt credentials until
