@@ -907,30 +907,42 @@ def _promote_to_resident(
     return generation
 
 
-def _resident_base_ready(workdir: str, job: ClaimedJob) -> bool:
-    """Make the turn's pinned base resolvable in the resident tree.
+def _resident_base_ready(workdir: str, job: ClaimedJob, backend: SandboxBackend) -> bool:
+    """Is the turn's pinned base resolvable in the resident tree?
 
-    A publish since the last turn moved ``base_sha`` to a commit this tree
-    has never fetched; ``build_patch`` diffs against it later, so it must
-    exist locally before the turn is allowed to run hot.
+    Probed **inside the sandbox**, exactly like ``build_patch`` and for the
+    same reason: this tree — ``.git/config`` included — has belonged to the
+    agent since adopt, and trusted-runner git against it would execute
+    whatever the agent left in ``diff.external`` or ``core.fsmonitor`` with
+    the runner's privileges. git's dubious-ownership refusal enforces the
+    same boundary from the other side — the tree was chowned to the sandbox
+    user at adopt, so runner-side git refuses it outright, which is how the
+    staging acceptance caught the first version of this gate running in the
+    wrong place (every resident turn silently demoted to cold).
+
+    A base the tree cannot resolve ends the residency rather than fetching
+    into it: the fetch would need the clone credential inside a filesystem
+    the agent controlled, and the cold restart this degrades to clones
+    runner-side, before the tree is handed over — where that credential
+    already lives. A publish moving the base mid-thread is rare enough that
+    one honest cold turn is the right price.
     """
     if not job.base_sha:
         return True
     if not _COMMIT_SHA.fullmatch(job.base_sha):
         return False
-    probe = _run_git(["cat-file", "-e", f"{job.base_sha}^{{commit}}"], cwd=workdir)
-    if probe.returncode == 0:
-        return True
-    url = f"https://github.com/{job.repo}.git"
-    fetch = _run_git(
-        ["fetch", "--quiet", "--depth", "1", url, "--end-of-options", job.base_sha],
-        cwd=workdir,
-        env_extra=_auth_env(job.clone_token),
+    process = backend.spawn(
+        SandboxSpec(
+            argv=["git", "cat-file", "-e", f"{job.base_sha}^{{commit}}"],
+            workdir=workdir,
+            env=dict(_SAFE_DIRECTORY_ENV),
+        )
     )
-    if fetch.returncode != 0:
+    try:
+        _read_bounded(process, deadline_s=_GIT_TIMEOUT_S, max_bytes=65536)
+    except WorktreeError:
         return False
-    _assert_no_credential_on_disk(workdir, job.clone_token)
-    return _run_git(["cat-file", "-e", f"{job.base_sha}^{{commit}}"], cwd=workdir).returncode == 0
+    return True
 
 
 def state_from_checkpoint(envelope: dict[str, Any]) -> HarnessState | None:
@@ -1365,21 +1377,31 @@ def run_once(
     if residents is not None and job.thread_id:
         entry = residents.lookup(job.thread_id)
         if entry is not None:
-            # Every resident turn is a fresh process with a fresh environment
-            # (design §13, measured), so a model switch or an MCP grant needs
-            # nothing the restart does not already provide — the live-process
-            # era's gates on both are gone. What still ends a residency is a
-            # harness switch (another CLI cannot read this session) and a
-            # base the tree cannot fetch.
-            usable = entry.runtime_id == job.runtime and _resident_base_ready(entry.workdir, job)
-            if usable:
+            # What ends a residency at lookup is a harness switch (another
+            # CLI cannot read this session) and a base the tree cannot
+            # resolve; model switches and MCP turns reuse the workspace and
+            # are gated off the live process further down, in run_agent.
+            if entry.runtime_id != job.runtime:
+                unusable_reason = "harness_switch"
+            elif not _resident_base_ready(entry.workdir, job, backend):
+                unusable_reason = "base_unresolvable"
+            else:
+                unusable_reason = None
                 resident = entry
                 workdir = entry.workdir
                 state_dir = entry.state_dir
                 context_state = None
-            else:
-                # A restart-shaped turn (model switch, MCP, unfetchable base):
-                # end the residency and run the ladder from COLD — the
+            if unusable_reason is not None:
+                # First-class row, not a silent demotion: the staging
+                # acceptance spent an hour blind on exactly this branch —
+                # every turn quietly cold with promotion still succeeding.
+                control.append_event(
+                    NormalizedEvent(
+                        "lifecycle",
+                        {"phase": "residency_unusable", "reason": unusable_reason},
+                    )
+                )
+                # End the residency and run the ladder from COLD — the
                 # checkpoint it exported is the memory this turn resumes.
                 residents.drop(job.thread_id, release=True)
 
