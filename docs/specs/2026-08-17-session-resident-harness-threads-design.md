@@ -57,8 +57,9 @@ This document is the reviewed decision.
 > infrastructure event.
 
 Non-goals (v1): mid-turn interject/steering (enabled by this architecture,
-separate project), a WARM tier (workspace kept after process death — decide
-from HOT/COLD telemetry), cross-harness threads, driver plugin frameworks,
+separate project), true HOT — a live process receiving injected turns —
+which waits on residency-scoped credentials (§13; ``warm_native`` is the
+implemented resident rung), cross-harness threads, driver plugin frameworks,
 unifying every harness's raw event vocabulary.
 
 ## 3. Decision record
@@ -134,8 +135,11 @@ ThreadCheckpoint storage         checkpoint export/restore
 Continuity ladder (automatic and observable degradation):
 
 ```text
-HOT          process alive, next turn injected via live input   layers 1-4¹
-COLD-native  new sandbox + ThreadCheckpoint import              layers 1-2
+hot          process alive, next turn injected via live input   layers 1-4¹
+             (deferred: needs residency-scoped credentials, §13)
+warm_native  resident workspace + per-turn --resume restart     layers 1-3
+             (the implemented resident rung)
+cold_native  new sandbox + ThreadCheckpoint import              layers 1-2
 replay       new sandbox + transcript prompt (today's path)     layer 2 only
 ```
 
@@ -461,12 +465,13 @@ decisions get written down.
    per-call resolution) exists; the external test doubles as the tripwire
    that says when a CLI upgrade makes in-process rotation real.
 
-2. **MCP turns are not promoted to hot.** The MCP token is env-borne and
-   cannot rotate under a live process, so a hot MCP turn would run its tools
-   on the previous attempt's credential — the exact lie §8 forbids. Rather
-   than build relay-side generation tokens in v1, hot excludes MCP threads;
-   they ride COLD, which is correct on every axis and merely colder. The
-   relay-token work remains the path to lifting the exclusion.
+2. **The MCP and model-switch exclusions are lifted.** Both were
+   live-process-era constraints. Under per-turn restart every resident turn
+   carries a fresh environment — this attempt's relay token, this turn's
+   model — so MCP threads and model switches reuse the resident workspace
+   like any other turn. What still ends a residency is a harness switch
+   (another CLI cannot read this session) and a base the tree cannot fetch.
+
 3. **The implemented resident rung is §2's WARM semantics, recorded as
    ``warm_native``, per turn.** Every resident
    turn skips clone, context patch and setup, resumes the native session in

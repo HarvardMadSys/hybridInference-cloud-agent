@@ -142,12 +142,23 @@ class ResidentPool:
             self._retire(entry, tell_control_plane=True)
         return generation
 
-    def drop(self, thread_id: str, *, release: bool) -> None:
-        """Tear a residency down now (restart path, lost beat, mismatch)."""
+    def drop(self, thread_id: str, *, release: bool, generation: int | None = None) -> None:
+        """Tear a residency down now (restart path, lost beat, mismatch).
+
+        With ``generation``, the drop redeems a specific receipt: it removes
+        the entry only while that generation still holds it, so a stale
+        cleanup path can never end a successor another turn has since
+        established (review: the receipt must be generation-scoped all the
+        way down, not just returned).
+        """
         with self._lock:
-            entry = self._entries.pop(thread_id, None)
-        if entry is not None:
-            self._retire(entry, tell_control_plane=release)
+            entry = self._entries.get(thread_id)
+            if entry is None:
+                return
+            if generation is not None and entry.generation != generation:
+                return
+            del self._entries[thread_id]
+        self._retire(entry, tell_control_plane=release)
 
     def beats(self) -> list[dict[str, int | str]]:
         """What the host heartbeat reports still alive here."""

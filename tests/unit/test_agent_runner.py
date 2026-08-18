@@ -841,11 +841,11 @@ def test_a_lost_lease_drops_the_residency_before_unwinding(tmp_path):
     from cloud_agent_host.residency import ResidentEntry
 
     control, heart = FakeControl(), FakeHeart(lost=True)
-    dropped: list[tuple[str, bool]] = []
+    dropped: list[tuple[str, bool, int | None]] = []
 
     class _Pool:
-        def drop(self, thread_id: str, *, release: bool) -> None:
-            dropped.append((thread_id, release))
+        def drop(self, thread_id: str, *, release: bool, generation: int | None = None) -> None:
+            dropped.append((thread_id, release, generation))
 
     entry = ResidentEntry(
         thread_id="t-hot",
@@ -870,7 +870,7 @@ def test_a_lost_lease_drops_the_residency_before_unwinding(tmp_path):
             residents=_Pool(),
         )
 
-    assert dropped == [("t-hot", True)]
+    assert dropped == [("t-hot", True, 3)]
 
 
 def test_a_lease_lost_at_finish_still_drops_the_residency(tmp_path, monkeypatch):
@@ -887,14 +887,14 @@ def test_a_lease_lost_at_finish_still_drops_the_residency(tmp_path, monkeypatch)
     from cloud_agent_host.residency import ResidentEntry
 
     job = dataclasses.replace(_JOB, thread_id="t-hot", base_sha=None)
-    dropped: list[tuple[str, bool]] = []
+    dropped: list[tuple[str, bool, int | None]] = []
 
     class _Pool:
         def lookup(self, thread_id):
             return entry if thread_id == "t-hot" else None
 
-        def drop(self, thread_id: str, *, release: bool) -> None:
-            dropped.append((thread_id, release))
+        def drop(self, thread_id: str, *, release: bool, generation: int | None = None) -> None:
+            dropped.append((thread_id, release, generation))
 
     entry = ResidentEntry(
         thread_id="t-hot",
@@ -944,4 +944,5 @@ def test_a_lease_lost_at_finish_still_drops_the_residency(tmp_path, monkeypatch)
     )
 
     assert code == 3  # the LeaseLost exit
-    assert ("t-hot", True) in dropped
+    # The receipt is redeemed generation-scoped: exactly the borrowed one.
+    assert ("t-hot", True, 5) in dropped

@@ -1094,8 +1094,8 @@ def run_agent(
                 # being reported the moment the turn aborts, not whenever the
                 # exception finishes unwinding (review finding 2). run_once's
                 # wrapper repeats this for every other exception; drop is
-                # idempotent.
-                residents.drop(job.thread_id, release=True)
+                # idempotent and generation-scoped.
+                residents.drop(job.thread_id, release=True, generation=resident.generation)
             raise LeaseLost("lease lost while the agent was running")
         if heart.cancel_requested:
             turn.cancel()
@@ -1294,6 +1294,10 @@ def run_once(
     # swallows) drops it, so a retry can never resume a session this attempt
     # already advanced (review: the post-promotion lease-loss leak).
     residency_confirmed = False
+    # The receipt: the generation this attempt borrowed or established. The
+    # finally redeems exactly it — a stale cleanup must never end a successor
+    # generation another turn established after ours.
+    residency_generation_held: int | None = resident.generation if resident else None
     try:
         # A replacement attempt may inherit live user shells from the expired
         # owner. Freeze their complete process trees before checkout or setup;
@@ -1454,7 +1458,7 @@ def run_once(
             # aborted. Drop by our own (thread, generation) and re-raise; the
             # outer handlers own the attempt's fate.
             if resident is not None and residents is not None and job.thread_id:
-                residents.drop(job.thread_id, release=True)
+                residents.drop(job.thread_id, release=True, generation=residency_generation_held)
             raise
         # A settled turn's workspace is worth keeping — and only a settled
         # one: promotion happens here, before finish, while the attempt still
@@ -1462,7 +1466,7 @@ def run_once(
         # A failed turn keeps nothing; its thread continues COLD off its
         # checkpoint (or the previous turn's).
         if exit_code == 0 and state_dir is not None:
-            _promote_to_resident(
+            promoted = _promote_to_resident(
                 control,
                 runtime=runtime,
                 job=job,
@@ -1471,8 +1475,10 @@ def run_once(
                 state_dir=state_dir,
                 residents=residents,
             )
+            if promoted is not None:
+                residency_generation_held = promoted
         elif resident is not None and residents is not None and job.thread_id:
-            residents.drop(job.thread_id, release=True)
+            residents.drop(job.thread_id, release=True, generation=residency_generation_held)
 
         # Freeze both interactive input and already-running terminal process
         # trees before taking the patch and workspace snapshot. The finish
@@ -1540,9 +1546,14 @@ def run_once(
         print(f"lease lost, stopping: {exc}", file=sys.stderr)
         return 3
     finally:
-        if not residency_confirmed and residents is not None and job.thread_id:
+        if (
+            not residency_confirmed
+            and residency_generation_held is not None
+            and residents is not None
+            and job.thread_id
+        ):
             with contextlib.suppress(Exception):
-                residents.drop(job.thread_id, release=True)
+                residents.drop(job.thread_id, release=True, generation=residency_generation_held)
         # A surprising runner-side exception must not strand retained user
         # terminals in a suspended state. A stale attempt cannot resume them:
         # the worker endpoint fences this call against its live lease.

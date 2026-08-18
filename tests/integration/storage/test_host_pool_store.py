@@ -1095,3 +1095,57 @@ async def test_the_claim_carries_its_own_stamp_across_a_rolling_upgrade(store):
 
     assert claim_two["runtime_version"] == "2.0.0"
     assert claim_one["runtime_version"] == "1.0.0"  # the stamp is the claim's own
+
+
+async def test_warm_native_survives_a_downgrade_by_folding_into_cold_native(store):
+    """Migration 0011 must be able to leave with its data (review, round 3).
+
+    A downgrade with real warm_native rows maps them to cold_native before
+    restoring the three-value CHECK — and the constraint it restores actually
+    enforces. The database is returned to head before the test ends.
+    """
+    import os as _os
+
+    import asyncpg
+
+    from tests.support.migrations import apply_migrations, downgrade_to
+
+    await _enrol(store, "runner-a")
+    _job, claim = await _running_claim(store, "runner-a")
+    assert await store.record_continuity_mode(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        mode="warm_native",
+    )
+
+    base_db_name = _os.getenv("TEST_DB_NAME", "hybridinference_test_db")
+    worker_id = _os.environ.get("PYTEST_XDIST_WORKER", "master")
+    db_config = {
+        "host": _os.getenv("TEST_DB_HOST", "localhost"),
+        "port": int(_os.getenv("TEST_DB_PORT", "5432")),
+        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
+        "user": _os.getenv("TEST_DB_USER", "postgres"),
+        "password": _os.getenv("TEST_DB_PASSWORD", "postgres"),
+    }
+    try:
+        downgrade_to(db_config, "0010_continuity_mode")
+        async with store._pool.acquire() as conn:
+            folded = await conn.fetchval(
+                "SELECT continuity_mode FROM agent_attempts WHERE id = $1",
+                claim["attempt_id"],
+            )
+            assert folded == "cold_native"
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(
+                    "UPDATE agent_attempts SET continuity_mode = 'warm_native' WHERE id = $1",
+                    claim["attempt_id"],
+                )
+    finally:
+        apply_migrations(db_config)
+
+    # Back at head: the four-value vocabulary holds again.
+    assert await store.record_continuity_mode(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        mode="warm_native",
+    )

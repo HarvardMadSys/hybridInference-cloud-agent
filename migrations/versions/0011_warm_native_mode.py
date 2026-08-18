@@ -33,10 +33,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Restore the three-value vocabulary."""
+    """Restore the three-value vocabulary — mapping the data first.
+
+    ``warm_native`` rows fold into ``cold_native``: it is the nearest truthful
+    old-vocabulary claim (native session continuity; the workspace bonus is
+    unsayable there), and mapping before re-adding the constraint is what
+    keeps a downgrade with real data from failing on its own CHECK (review).
+    """
     op.execute(
         "ALTER TABLE agent_attempts DROP CONSTRAINT IF EXISTS "
         "agent_attempts_continuity_mode_check"
+    )
+    op.execute(
+        "UPDATE agent_attempts SET continuity_mode = 'cold_native' "
+        "WHERE continuity_mode = 'warm_native'"
     )
     op.execute(
         "ALTER TABLE agent_attempts ADD CONSTRAINT agent_attempts_continuity_mode_check "

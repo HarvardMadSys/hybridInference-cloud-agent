@@ -141,3 +141,20 @@ def test_close_all_drains_everything_with_releases():
 
     assert sorted(control.released) == [("t1", 1), ("t2", 2)]
     assert pool.beats() == []
+
+
+def test_a_generation_scoped_drop_never_ends_a_successor():
+    """The receipt, redeemed all the way down (review, round 3): a cleanup
+    holding generation N's receipt is a no-op once generation N+1 owns the
+    thread — only an unscoped drop may end whatever currently holds it."""
+    control = _ControlPlane()
+    pool = _pool(control)
+    _offer(pool, "t1")  # generation 1
+    pool.drop("t1", release=True, generation=1)
+    assert pool.lookup("t1") is None
+    _offer(pool, "t1")  # generation 2 — the successor
+
+    pool.drop("t1", release=True, generation=1)  # a stale receipt
+
+    entry = pool.lookup("t1")
+    assert entry is not None and entry.generation == 2
