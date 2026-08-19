@@ -4360,6 +4360,7 @@ async def test_effort_is_offered_only_where_runtime_and_model_both_deliver(clien
     # claude-code can express effort; the Tier 2 runtimes cannot, and are
     # absent rather than listed with an empty vocabulary.
     assert config["runtime_reasoning_efforts"]["claude-code"] == ["low", "medium", "high", "max"]
+    assert config["runtime_reasoning_efforts"]["codex"][:3] == ["none", "minimal", "low"]
     assert "pi" not in config["runtime_reasoning_efforts"]
     assert config["model_reasoning_efforts"] == {"glm-5.1": ["low", "high", "max"]}
 
@@ -4502,10 +4503,10 @@ async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
 async def test_a_runtime_that_cannot_express_effort_is_refused_at_create(client: AsyncClient):
     """The other half of the intersection: the model takes it, the CLI cannot say it.
 
-    pi, opencode, kilo and codex are all registered and perfectly runnable —
-    they just have no verified flag for this. Accepting the value and dropping
-    it in the adapter would produce a turn that reports a depth nobody could
-    have delivered, so the refusal belongs here, before the job exists.
+    pi, opencode and kilo are registered and perfectly runnable — they just
+    have no verified flag for this. Accepting the value and dropping it in the
+    adapter would produce a turn that reports a depth nobody could have
+    delivered, so the refusal belongs here, before the job exists.
     """
     response = await client.post(
         "/v1/agent/jobs",
@@ -4524,7 +4525,7 @@ async def test_a_runtime_that_cannot_express_effort_is_refused_at_create(client:
 
 async def test_those_runtimes_still_take_ordinary_turns(client: AsyncClient):
     """And nothing else about them changed: Auto is every turn they ever ran."""
-    for runtime in ("pi", "opencode", "kilo", "codex"):
+    for runtime in ("pi", "opencode", "kilo"):
         response = await client.post(
             "/v1/agent/jobs",
             json={

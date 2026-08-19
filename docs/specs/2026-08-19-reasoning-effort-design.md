@@ -69,9 +69,15 @@ fallback**.
   No silent drop, no nearest-value clamping: glm-5.3 has no `medium`,
   and a `medium` that quietly becomes `high` is the `--effort` lie again
   with extra steps.
-- **Null means auto.** Unset preserves today's behavior bit-for-bit: no
-  flag on the argv, no parameter injected, upstream default. Every
-  deployed thread is a null thread; the migration backfills nothing.
+- **Null means auto — "the platform does not instruct", not "nothing is
+  instructed".** No flag on the argv, nothing stored, and the migration
+  backfills nothing. The draft claimed this preserved today's behaviour
+  bit-for-bit, and the §7.1 capture disproved it: **claude-code 2.1.220
+  sends `output_config: {effort: "high"}` whether or not `--effort` was
+  passed**, so for that runtime our Auto and our `high` are the same
+  request. The honest statement is the one above; the operational
+  consequence is in §7.1 and belongs in the gateway PR, not in a
+  surprise.
 
 ## 3. Vocabulary and capability model
 
@@ -106,8 +112,8 @@ reasoning_efforts: tuple[str, ...] = ()   # empty = cannot express effort
 
 | Runtime | v1 declaration | How it is expressed | Status |
 |---|---|---|---|
-| claude-code | `("low", "medium", "high", "max")` | `--effort <v>` on the argv, one-shot and `prepare_live` alike | Flag verified against 2.1.90 help; **capture the pinned 2.1.220 wire shape before merge** (§7) — the one link still unverified |
-| codex | `()` until flag verified, then `("low", "medium", "high")` expected | `-c model_reasoning_effort="<v>"` alongside the existing `-c` provider flags | Same discipline the adapter's docstring already applies to MCP flags: verify against `CODEX_VERSION`, don't ship a guess. Gateway side is already done — `wire_api = "responses"` → `reasoning.effort` → `reasoning_effort` |
+| claude-code | `("low", "medium", "high", "max")` | `--effort <v>` on the argv, one-shot and `prepare_live` alike | **Verified against the pinned 2.1.220**: reaches the wire as `output_config.effort`. See §7.1 for what that capture also revealed |
+| codex | `("none", "minimal", "low", "medium", "high", "xhigh", "max")` | `-c model_reasoning_effort="<v>"` alongside the existing `-c` provider flags | **Verified against the pinned 0.145.0**: reaches the wire as `reasoning.effort` in the `/v1/responses` body, which the gateway's Responses translation already maps. The draft deferred this as unverified; verifying took one local capture and the answer was yes |
 | pi | `()` | request-side `reasoning_effort` (gateway chat surface accepts it today) if pi's config can inject it — unverified | Promotion path, not v1 |
 | opencode / kilo | `()` | — | Tier 2 stays Tier 2 |
 
@@ -194,14 +200,28 @@ pointed at the gateway, not just sandbox jobs.
 
 ## 7. Verification
 
-The claude-code path's one unverified link is the pinned CLI's wire
-shape. Same fixture discipline as `pi_stream_contract.jsonl`:
+### 7.1 Wire shapes — done, and one of them changed the design
 
-1. **Capture** 2.1.220 (the image's pin) request bodies at `--effort
-   low` and unset, against a recording endpoint. Assert
-   `output_config.effort` present/absent. Record as a contract note next
-   to the runtime's fixtures. A CLI bump that moves the field fails this
-   before it fails a user.
+Both pinned CLIs were captured against a local recording endpoint on
+2026-08-19; the results are in
+`tests/fixtures/agent_runtime_streams/effort_wire_shapes.md`.
+
+- **codex 0.145.0** emits `reasoning: {effort: …}` on `/v1/responses`
+  exactly as expected, so it is wired in v1 rather than deferred. It does
+  *not* validate the value locally (`--strict-config` catches an unknown
+  key, not a nonsense level), which is why the model's declared domain is
+  the constraint that matters.
+- **claude-code 2.1.220 always sends an effort, defaulting to `high`.**
+  This was not expected and is the finding with operational weight: the
+  gateway learning to translate `output_config.effort` changes existing
+  claude-code traffic to every model declaring `reasoning_effort`, not
+  only turns that opt in. It is not a reason to hold the change — dropping
+  the field was never "no instruction", it was "the instruction the
+  harness sent, discarded" — but it must be stated on the gateway PR and
+  watched on the first deploy.
+
+Remaining, unchanged in kind: a CLI bump that moves either field should
+fail a test before it fails a user, so re-capture on version bumps.
 2. **Unit, agent repo:** argv contains `--effort` iff set (one-shot and
    live); 400 on out-of-set values and on effort-with-empty-set;
    follow-up inherit / `"auto"` reset; config maps empty-safe.
@@ -220,7 +240,7 @@ shape. Same fixture discipline as `pi_stream_contract.jsonl`:
 |---|---|---|
 | P0 | gateway | §6a facade translation + §6b catalog metadata (+ models.yaml values, DeepSeek domain verified) |
 | P1 | agent | §4 schema/store/validation/TurnInput + claude-code `--effort` + §5 UI + §7.1 capture |
-| P2 | agent | codex flag verification → declare its set; pi promotion if its config proves out |
+| P2 | agent | ~~codex flag verification~~ (done, in P1); pi promotion if its config proves out |
 
 P0 merges first; P1 degrades to invisible against an old gateway.
 

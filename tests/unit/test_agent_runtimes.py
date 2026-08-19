@@ -718,6 +718,24 @@ def test_a_level_the_cli_does_not_have_is_refused_not_passed_through():
         _prepare(ClaudeCodeRuntime(), reasoning_effort="xhigh")
 
 
+def test_codex_expresses_effort_as_a_config_override():
+    """Verified against the pinned 0.145.0, not assumed — see the wire fixture.
+
+    The CLI turns this into ``reasoning.effort`` in its /v1/responses body,
+    which is the field the gateway's Responses translation already reads.
+    """
+    argv, _env = _prepare(CodexRuntime(), reasoning_effort="high")
+
+    at = argv.index('model_reasoning_effort="high"')
+    assert argv[at - 1] == "-c"
+
+
+def test_codex_auto_adds_no_override():
+    argv, _env = _prepare(CodexRuntime())
+
+    assert not any(part.startswith("model_reasoning_effort") for part in argv)
+
+
 def test_a_runtime_that_cannot_express_effort_refuses_rather_than_ignores():
     """Ignoring it is the lie: the turn would run at a depth nobody chose.
 
@@ -725,7 +743,7 @@ def test_a_runtime_that_cannot_express_effort_refuses_rather_than_ignores():
     runtimes — which is exactly why it must raise rather than shrug: a silent
     drop here would be invisible in a way the refusal is not.
     """
-    for runtime in (CodexRuntime(), PiRuntime(), OpencodeRuntime(), KiloRuntime()):
+    for runtime in (PiRuntime(), OpencodeRuntime(), KiloRuntime()):
         with pytest.raises(RuntimeEffortUnsupportedError):
             _prepare(runtime, reasoning_effort="high")
 
@@ -751,7 +769,9 @@ def test_only_runtimes_with_a_verified_flag_are_advertised():
     advertised = runtime_reasoning_efforts()
 
     assert advertised["claude-code"] == ["low", "medium", "high", "max"]
-    # Codex can take one and the gateway end is done; the flag is unverified
-    # against the pinned CLI, so it is not offered yet.
-    assert "codex" not in advertised
+    assert advertised["codex"] == ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    # Tier 2 wrappers have no verified way to say this, and absence is how the
+    # composer learns to render no control rather than a broken one.
     assert "pi" not in advertised
+    assert "opencode" not in advertised
+    assert "kilo" not in advertised

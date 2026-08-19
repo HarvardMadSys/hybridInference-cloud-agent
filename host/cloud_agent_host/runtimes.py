@@ -583,17 +583,12 @@ class CodexRuntime(AgentRuntime):
     ) -> tuple[list[str], dict[str, str]]:
         """Build the headless invocation and its environment.
 
-        ``reasoning_effort`` is refused rather than ignored, and
-        :meth:`capabilities` declares none, so the platform never offers the
-        control for this runtime. Codex *can* take one --
-        ``-c model_reasoning_effort="<level>"`` alongside the provider flags
-        below, and the gateway end is already done (this adapter speaks
-        ``wire_api = "responses"``, and the Responses translation maps
-        ``reasoning.effort`` onto the parameter the model sees). What is
-        missing is the same thing missing for MCP here: the flag verified
-        against the pinned ``CODEX_VERSION`` in ``Dockerfile.agent-sandbox``,
-        and the level names that build accepts. Declaring it before then would
-        offer a control whose values are a guess.
+        ``reasoning_effort`` becomes ``-c model_reasoning_effort="<level>"``
+        among the provider flags below. Verified against the pinned
+        ``CODEX_VERSION`` (0.145.0) rather than assumed: the CLI puts it on the
+        wire as ``reasoning.effort`` in the ``/v1/responses`` body, which is
+        exactly where the gateway's Responses translation reads it. See the
+        recorded capture in ``tests/fixtures/agent_runtime_streams``.
 
         A non-empty ``mcp_config`` is refused, and :meth:`capabilities`
         reports ``mcp=False`` so the platform turns such a job away at creation
@@ -622,7 +617,6 @@ class CodexRuntime(AgentRuntime):
           behind. ``--ignore-user-config`` keeps the operator's own config out.
         """
         self._require_empty_mcp_config(mcp_config)
-        self.effort_args(reasoning_effort)
         base = gateway_base_url.rstrip("/").removesuffix("/v1")
         provider = "hybridinference"
         argv = [
@@ -641,6 +635,9 @@ class CodexRuntime(AgentRuntime):
             "danger-full-access" if provides_isolation else "workspace-write",
             "--model",
             model,
+            # Beside the other -c overrides, and built by the dialect helper so
+            # the one-shot path cannot spell it differently from anywhere else.
+            *self.effort_args(reasoning_effort),
             "-c",
             f'model_provider="{provider}"',
             "-c",
@@ -714,9 +711,33 @@ class CodexRuntime(AgentRuntime):
             return NormalizedEvent(ERROR, {"text": _truncate(event.get("error") or event)})
         return self._raw(line, f"unknown type {kind!r}")
 
+    #: What ``model_reasoning_effort`` may be set to. Codex 0.145.0 does **not**
+    #: validate this locally -- ``--strict-config`` checks the key's name and
+    #: nothing else, and a nonsense value reaches the wire unchallenged -- so
+    #: this list is not the CLI enforcing anything. It is the vocabulary the
+    #: CLI is documented to use, and the real constraint is the intersection
+    #: with the model's own declared domain, which is where a level the model
+    #: never heard of gets refused.
+    EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+    def effort_args(self, effort: str | None) -> list[str]:
+        """Express effort as a ``-c model_reasoning_effort`` override."""
+        if effort is None:
+            return []
+        if effort not in self.EFFORT_LEVELS:
+            raise RuntimeEffortUnsupportedError(
+                f"codex takes {list(self.EFFORT_LEVELS)}, not {effort!r}"
+            )
+        return ["-c", f'model_reasoning_effort="{effort}"']
+
     def capabilities(self) -> RuntimeCapabilities:
         """Codex is Tier 1 for events; cost comes from the gateway ledger."""
-        return RuntimeCapabilities(cost_report=False, normalized_events=True, tier=1)
+        return RuntimeCapabilities(
+            cost_report=False,
+            normalized_events=True,
+            tier=1,
+            reasoning_efforts=self.EFFORT_LEVELS,
+        )
 
 
 class GenericRuntime(AgentRuntime):
