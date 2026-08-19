@@ -114,13 +114,21 @@ reasoning_efforts: tuple[str, ...] = ()   # empty = cannot express effort
 |---|---|---|---|
 | claude-code | `("low", "medium", "high", "max")` | `--effort <v>` on the argv, one-shot and `prepare_live` alike | **Verified against the pinned 2.1.220**: reaches the wire as `output_config.effort`. See §7.1 for what that capture also revealed |
 | codex | `("none", "minimal", "low", "medium", "high", "xhigh", "max")` | `-c model_reasoning_effort="<v>"` alongside the existing `-c` provider flags | **Verified against the pinned 0.145.0**: reaches the wire as `reasoning.effort` in the `/v1/responses` body, which the gateway's Responses translation already maps. The draft deferred this as unverified; verifying took one local capture and the answer was yes |
-| pi | `()` | request-side `reasoning_effort` (gateway chat surface accepts it today) if pi's config can inject it — unverified | Promotion path, not v1 |
-| opencode / kilo | `()` | — | Tier 2 stays Tier 2 |
+| pi | `("minimal", "low", "medium", "high")` | `--thinking <v>` **plus** `"reasoning": true` in the provider entry the wrapper writes | **Verified against the pinned 0.73.1.** Two of its six flag levels are dropped from the declaration: `xhigh` arrives as `high`, `off` sends nothing. The flag is inert without the provider declaration, which is why the wrapper changed too |
+| opencode / kilo | `("none", "minimal", "low", "medium", "high", "xhigh", "max")` | `models.<id>.options.reasoningEffort` in the wrapper's config — no CLI flag exists | **Verified against the pinned 1.18.9 / 7.4.17.** Tier 2 for events, which says nothing about this: expressing a documented config option is not the normalization work tiering is about |
 
 **The offered set** for a composer selection is
 `runtime.reasoning_efforts ∩ model.reasoning_efforts`. For
 claude-code × glm-5.3 that is `{low, high, max}`; for anything × a
 non-reasoning model it is empty and the control disappears.
+
+**All five runtimes express it, and the draft was wrong to assume
+otherwise.** This table said `()` for three of them on the strength of
+"unverified", which is a statement about our knowledge, not about the
+CLIs. Capturing all five took one afternoon and every one of them could
+already do this. The rule that survives is the *declaration* discipline —
+pi's `xhigh` is dropped because it demonstrably becomes `high` — not the
+habit of deferring whatever had not been looked at yet.
 
 ## 4. Control plane and storage
 
@@ -240,7 +248,7 @@ fail a test before it fails a user, so re-capture on version bumps.
 |---|---|---|
 | P0 | gateway | §6a facade translation + §6b catalog metadata (+ models.yaml values, DeepSeek domain verified) |
 | P1 | agent | §4 schema/store/validation/TurnInput + claude-code `--effort` + §5 UI + §7.1 capture |
-| P2 | agent | ~~codex flag verification~~ (done, in P1); pi promotion if its config proves out |
+| P2 | agent | ~~codex / pi / opencode / kilo verification~~ — all done, all in P1. Nothing is deferred |
 
 P0 merges first; P1 degrades to invisible against an old gateway.
 

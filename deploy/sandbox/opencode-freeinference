@@ -37,6 +37,16 @@ def main() -> None:
         raise SystemExit(64) from None
 
     config_path = os.path.expanduser("~/.opencode-freeinference.json")
+    # No command-line flag exists for the reasoning effort, so it arrives in
+    # the environment and belongs here. Verified against the pinned CLI:
+    # `options.reasoningEffort` is the one shape that reaches the wire as
+    # `reasoning_effort`; `options.reasoning_effort` and a top-level key both
+    # silently do nothing. Absent means no option at all, which is the request
+    # this wrapper has always produced.
+    model_entry: dict[str, object] = {"name": model}
+    effort = os.environ.get("OPENCODE_GATEWAY_REASONING_EFFORT")
+    if effort:
+        model_entry["options"] = {"reasoningEffort": effort}
     config = {
         "provider": {
             "freeinference": {
@@ -47,7 +57,7 @@ def main() -> None:
                 "options": {"baseURL": base_url, "apiKey": api_key},
                 # The catalog is off, so the model must be declared or every
                 # run dies with ProviderModelNotFoundError.
-                "models": {model: {"name": model}},
+                "models": {model: model_entry},
             }
         }
     }

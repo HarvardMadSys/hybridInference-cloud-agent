@@ -153,31 +153,40 @@ class AgentRuntime:
         """
         raise NotImplementedError
 
+    def _check_effort(self, effort: str | None) -> str | None:
+        """Refuse a level this runtime never declared; return it otherwise.
+
+        Fails closed the way :meth:`_require_empty_mcp_config` does. The
+        control plane validates the same set at create time, so reaching this
+        is a platform bug rather than a user's — which is exactly why it raises
+        instead of dropping: a silently ignored effort is the CLI-flag lie this
+        whole feature exists to end, and it would be indistinguishable from a
+        turn that ran at the requested depth.
+        """
+        if effort is None:
+            return None
+        declared = self.capabilities().reasoning_efforts
+        if effort not in declared:
+            raise RuntimeEffortUnsupportedError(
+                f"runtime {self.name!r} cannot express reasoning effort {effort!r} "
+                f"(declares {list(declared)})"
+            )
+        return effort
+
     def effort_args(self, effort: str | None) -> list[str]:
-        """The flag pair expressing ``effort``, or nothing at all.
+        """The argv fragment expressing ``effort``, or nothing at all.
 
         Public because the resident session assembles its own argv and must ask
         the dialect layer how to spell this, exactly as it asks
         :meth:`ClaudeCodeRuntime.user_message_line` how to spell a user turn.
 
-        Fails closed on a value this runtime never declared, the way
-        :meth:`_require_empty_mcp_config` fails closed on MCP. The control
-        plane validates the same set at create time, so reaching this is a
-        platform bug rather than a user's — which is exactly why it raises
-        instead of dropping: a silently ignored effort is the CLI-flag lie this
-        whole feature exists to end, and it would be indistinguishable from a
-        turn that ran at the requested depth.
-
-        Subclasses that can express effort override this with their dialect;
-        the default cannot, so any value is refused.
+        Empty is not "unsupported": three of the five runtimes express this in
+        a config file their wrapper writes rather than on the command line, and
+        they carry it in the environment instead. :meth:`_check_effort` is what
+        refuses; this only renders.
         """
-        if effort is None:
-            return []
-        declared = self.capabilities().reasoning_efforts
-        raise RuntimeEffortUnsupportedError(
-            f"runtime {self.name!r} cannot express reasoning effort {effort!r} "
-            f"(declares {list(declared)})"
-        )
+        self._check_effort(effort)
+        return []
 
     @staticmethod
     def _mcp_endpoints(
@@ -540,13 +549,9 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     def effort_args(self, effort: str | None) -> list[str]:
         """Express effort as ``--effort <level>``."""
-        if effort is None:
+        if self._check_effort(effort) is None:
             return []
-        if effort not in self.EFFORT_LEVELS:
-            raise RuntimeEffortUnsupportedError(
-                f"claude-code takes {list(self.EFFORT_LEVELS)}, not {effort!r}"
-            )
-        return ["--effort", effort]
+        return ["--effort", str(effort)]
 
     def capabilities(self) -> RuntimeCapabilities:
         """Claude Code is Tier 1: normalized events, a cost report, and MCP."""
@@ -722,12 +727,8 @@ class CodexRuntime(AgentRuntime):
 
     def effort_args(self, effort: str | None) -> list[str]:
         """Express effort as a ``-c model_reasoning_effort`` override."""
-        if effort is None:
+        if self._check_effort(effort) is None:
             return []
-        if effort not in self.EFFORT_LEVELS:
-            raise RuntimeEffortUnsupportedError(
-                f"codex takes {list(self.EFFORT_LEVELS)}, not {effort!r}"
-            )
         return ["-c", f'model_reasoning_effort="{effort}"']
 
     def capabilities(self) -> RuntimeCapabilities:
@@ -885,6 +886,15 @@ class PiRuntime(GenericRuntime):
         # cannot parse it back out of pi's argv without reimplementing pi's
         # option handling, so hand it over explicitly.
         env["PI_GATEWAY_MODEL"] = model
+        if self._check_effort(reasoning_effort) is not None:
+            argv += ["--thinking", str(reasoning_effort)]
+            # `--thinking` alone is a no-op: verified against 0.73.1, pi emits
+            # no `reasoning_effort` at all unless the provider entry declares
+            # the model as a reasoning model. The wrapper writes that entry, so
+            # it has to be told — and only when an effort was asked for, since
+            # declaring it unconditionally makes pi send `medium` on every turn
+            # and Auto would stop meaning "as before".
+            env["PI_GATEWAY_REASONING"] = "1"
         return argv, env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -1002,6 +1012,24 @@ class PiRuntime(GenericRuntime):
             return None
         return self._raw(line, f"message_end with unknown role {role!r}")
 
+    #: pi's own flag vocabulary, minus the two that do not survive the trip.
+    #: Verified against 0.73.1 against a recording endpoint: `off` sends no
+    #: parameter at all (which is Auto by another name, and Auto is already
+    #: spelled by not choosing), and **`xhigh` arrives as `high`** — offering
+    #: it would let someone pick a depth this runtime cannot actually ask for,
+    #: which is the whole failure this control exists to end.
+    EFFORT_LEVELS = ("minimal", "low", "medium", "high")
+
+    def effort_args(self, effort: str | None) -> list[str]:
+        """Rendered in :meth:`prepare`, because the flag is only half of it.
+
+        pi needs the provider entry to declare the model as a reasoning model
+        as well, and that is the wrapper's file rather than this argv — so both
+        halves are set together where the environment is also being built.
+        """
+        self._check_effort(effort)
+        return []
+
     def capabilities(self) -> RuntimeCapabilities:
         """Tier 1 events; no resume (``--no-session``) and no trusted cost.
 
@@ -1010,7 +1038,13 @@ class PiRuntime(GenericRuntime):
         the recorded runs. ``api_logs`` is the billing authority regardless,
         so this claims no cost report rather than surfacing a confident zero.
         """
-        return RuntimeCapabilities(cost_report=False, normalized_events=True, tier=1, mcp=False)
+        return RuntimeCapabilities(
+            cost_report=False,
+            normalized_events=True,
+            tier=1,
+            mcp=False,
+            reasoning_efforts=self.EFFORT_LEVELS,
+        )
 
 
 class OpencodeRuntime(GenericRuntime):
@@ -1063,7 +1097,24 @@ class OpencodeRuntime(GenericRuntime):
             reasoning_effort=reasoning_effort,
         )
         env["OPENCODE_GATEWAY_MODEL"] = model
+        if self._check_effort(reasoning_effort) is not None:
+            # No command-line flag exists for this: the level belongs in the
+            # provider config the wrapper writes, so it travels as environment
+            # rather than argv. Absent means the wrapper writes no option at
+            # all, which is the request shape this runtime already sent.
+            env["OPENCODE_GATEWAY_REASONING_EFFORT"] = str(reasoning_effort)
         return argv, env
+
+    #: Passed through to the AI SDK provider verbatim, which does not validate
+    #: it — same posture as codex. The real constraint is the intersection with
+    #: the model's own declared domain. Verified against the pinned CLI: the
+    #: config's ``options.reasoningEffort`` arrives as ``reasoning_effort`` in
+    #: the chat-completions body, and nothing else in the config does.
+    EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+    def capabilities(self) -> RuntimeCapabilities:
+        """Tier 2 mechanics, but this one control is verified and wired."""
+        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS)
 
 
 class KiloRuntime(GenericRuntime):
@@ -1117,7 +1168,24 @@ class KiloRuntime(GenericRuntime):
             reasoning_effort=reasoning_effort,
         )
         env["KILO_GATEWAY_MODEL"] = model
+        if self._check_effort(reasoning_effort) is not None:
+            # No command-line flag exists for this: the level belongs in the
+            # provider config the wrapper writes, so it travels as environment
+            # rather than argv. Absent means the wrapper writes no option at
+            # all, which is the request shape this runtime already sent.
+            env["KILO_GATEWAY_REASONING_EFFORT"] = str(reasoning_effort)
         return argv, env
+
+    #: Passed through to the AI SDK provider verbatim, which does not validate
+    #: it — same posture as codex. The real constraint is the intersection with
+    #: the model's own declared domain. Verified against the pinned CLI: the
+    #: config's ``options.reasoningEffort`` arrives as ``reasoning_effort`` in
+    #: the chat-completions body, and nothing else in the config does.
+    EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+    def capabilities(self) -> RuntimeCapabilities:
+        """Tier 2 mechanics, but this one control is verified and wired."""
+        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS)
 
 
 _REGISTRY: dict[str, type[AgentRuntime]] = {

@@ -38,13 +38,23 @@ def main() -> None:
 
     config_dir = os.path.expanduser("~/.pi/agent")
     os.makedirs(config_dir, exist_ok=True)
+    entry: dict[str, object] = {"id": model}
+    if os.environ.get("PI_GATEWAY_REASONING"):
+        # `--thinking` on its own does nothing. Verified against pi 0.73.1
+        # against a recording endpoint: with the model entry as written above,
+        # every level produced a request with no `reasoning_effort` at all;
+        # adding this made the flag land. The runner sets the variable only
+        # for a turn that asked for a depth, because declaring it always would
+        # make pi send `medium` on every turn — which would quietly change
+        # what every existing job does.
+        entry["reasoning"] = True
     config = {
         "providers": {
             "freeinference": {
                 "baseUrl": base_url,
                 "api": "openai-completions",
                 "apiKey": api_key,
-                "models": [{"id": model}],
+                "models": [entry],
             }
         }
     }

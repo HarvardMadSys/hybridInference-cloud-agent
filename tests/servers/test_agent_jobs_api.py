@@ -4361,7 +4361,7 @@ async def test_effort_is_offered_only_where_runtime_and_model_both_deliver(clien
     # absent rather than listed with an empty vocabulary.
     assert config["runtime_reasoning_efforts"]["claude-code"] == ["low", "medium", "high", "max"]
     assert config["runtime_reasoning_efforts"]["codex"][:3] == ["none", "minimal", "low"]
-    assert "pi" not in config["runtime_reasoning_efforts"]
+    assert config["runtime_reasoning_efforts"]["pi"] == ["minimal", "low", "medium", "high"]
     assert config["model_reasoning_efforts"] == {"glm-5.1": ["low", "high", "max"]}
 
 
@@ -4500,13 +4500,13 @@ async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
     assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
 
 
-async def test_a_runtime_that_cannot_express_effort_is_refused_at_create(client: AsyncClient):
+async def test_a_level_the_runtime_cannot_express_is_refused_at_create(client: AsyncClient):
     """The other half of the intersection: the model takes it, the CLI cannot say it.
 
-    pi, opencode and kilo are registered and perfectly runnable — they just
-    have no verified flag for this. Accepting the value and dropping it in the
-    adapter would produce a turn that reports a depth nobody could have
-    delivered, so the refusal belongs here, before the job exists.
+    pi reaches the wire with four of its six flag levels — `xhigh` arrives as
+    `high` and `off` sends nothing — so offering `xhigh` would hand someone a
+    depth this runtime cannot actually ask for. The refusal belongs here,
+    before the job exists.
     """
     response = await client.post(
         "/v1/agent/jobs",
@@ -4515,7 +4515,7 @@ async def test_a_runtime_that_cannot_express_effort_is_refused_at_create(client:
             "task_prompt": "fix it",
             "runtime": "pi",
             "model": "glm-5.1",
-            "reasoning_effort": "high",
+            "reasoning_effort": "xhigh",
         },
     )
 
@@ -4523,9 +4523,9 @@ async def test_a_runtime_that_cannot_express_effort_is_refused_at_create(client:
     assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
 
 
-async def test_those_runtimes_still_take_ordinary_turns(client: AsyncClient):
+async def test_every_runtime_still_takes_ordinary_turns(client: AsyncClient):
     """And nothing else about them changed: Auto is every turn they ever ran."""
-    for runtime in ("pi", "opencode", "kilo"):
+    for runtime in ("pi", "opencode", "kilo", "codex"):
         response = await client.post(
             "/v1/agent/jobs",
             json={

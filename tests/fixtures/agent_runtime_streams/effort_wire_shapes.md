@@ -45,3 +45,46 @@ model was given no instruction". Two consequences, both real:
 
 Every turn also carries `thinking: {"type": "adaptive"}`, which the OpenAI
 sanitizer drops. That predates this work and is unchanged.
+
+## pi 0.73.1 → `POST /v1/chat/completions`
+
+`--thinking <level>`, and the level maps onto `reasoning_effort` directly —
+no gateway translation involved, the chat surface already forwards it.
+
+| `--thinking` | `reasoning_effort` on the wire |
+|---|---|
+| (unset) | absent, but see below |
+| `off` | field absent |
+| `minimal` / `low` / `medium` / `high` | the same word |
+| **`xhigh`** | **`high`** |
+
+Two findings, both load-bearing:
+
+1. **`xhigh` collapses to `high`.** `PiRuntime.EFFORT_LEVELS` therefore omits
+   it: offering a level that silently becomes another one is the failure this
+   control exists to end, in miniature.
+2. **The flag does nothing on its own.** With the provider entry the wrapper
+   used to write — `{"id": model}` — *every* level produced a request with no
+   `reasoning_effort` at all. The entry must also carry `"reasoning": true`,
+   which is why `pi-freeinference` now writes it and why the runner sets
+   `PI_GATEWAY_REASONING` only for a turn that asked for a depth: declaring it
+   unconditionally makes pi send `medium` on every turn, and Auto would stop
+   meaning "as before".
+
+## opencode 1.18.9 and kilo 7.4.17 → `POST /v1/chat/completions`
+
+No command-line flag exists. The level goes in the provider config the wrapper
+writes, and exactly one shape works:
+
+| Config shape | `reasoning_effort` on the wire |
+|---|---|
+| `models.<id>.options.reasoningEffort` | the value |
+| `models.<id>.options.reasoning_effort` | absent (silently ignored) |
+| `models.<id>.options.providerOptions.*` | absent (`providerOptions` is forwarded verbatim as a body field, which the model will not read) |
+| `models.<id>.reasoningEffort` | absent |
+
+Both CLIs pass the value through without validating it, like codex.
+
+Verified end to end through the patched wrappers themselves, not only the raw
+CLIs: with the runner's environment variable set the option appears, and
+without it the request is byte-identical to what these runtimes sent before.

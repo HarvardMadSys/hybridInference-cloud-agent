@@ -736,16 +736,58 @@ def test_codex_auto_adds_no_override():
     assert not any(part.startswith("model_reasoning_effort") for part in argv)
 
 
-def test_a_runtime_that_cannot_express_effort_refuses_rather_than_ignores():
-    """Ignoring it is the lie: the turn would run at a depth nobody chose.
+def test_pi_needs_both_the_flag_and_the_provider_declaration():
+    """`--thinking` alone is a no-op — verified against 0.73.1, not assumed.
 
-    Unreachable in practice — the control plane offers nothing for these
-    runtimes — which is exactly why it must raise rather than shrug: a silent
-    drop here would be invisible in a way the refusal is not.
+    Without the provider entry declaring the model as a reasoning model, pi
+    emits no ``reasoning_effort`` whatsoever, so the flag would look set and
+    change nothing. The wrapper writes that entry, hence the environment half.
     """
-    for runtime in (PiRuntime(), OpencodeRuntime(), KiloRuntime()):
+    argv, env = _prepare(PiRuntime(), reasoning_effort="low")
+
+    assert argv[argv.index("--thinking") + 1] == "low"
+    assert env["PI_GATEWAY_REASONING"] == "1"
+
+
+def test_pi_auto_leaves_the_provider_entry_alone():
+    """Declaring the model as reasoning would make pi send `medium` always."""
+    argv, env = _prepare(PiRuntime())
+
+    assert "--thinking" not in argv
+    assert "PI_GATEWAY_REASONING" not in env
+
+
+def test_pi_does_not_offer_the_levels_that_do_not_survive():
+    """`xhigh` reaches the wire as `high`, so offering it would be a lie."""
+    for level in ("xhigh", "off"):
         with pytest.raises(RuntimeEffortUnsupportedError):
-            _prepare(runtime, reasoning_effort="high")
+            _prepare(PiRuntime(), reasoning_effort=level)
+
+
+def test_config_file_runtimes_carry_the_level_in_the_environment():
+    """opencode and kilo have no flag for this; their wrapper's config does."""
+    for runtime, var in (
+        (OpencodeRuntime(), "OPENCODE_GATEWAY_REASONING_EFFORT"),
+        (KiloRuntime(), "KILO_GATEWAY_REASONING_EFFORT"),
+    ):
+        argv, env = _prepare(runtime, reasoning_effort="high")
+        assert env[var] == "high"
+        # Nothing lands on the command line, so a wrapper that ignored the
+        # variable would produce a turn with no effort rather than a broken one.
+        assert not any("reasoning" in part.lower() for part in argv)
+
+        _argv, auto_env = _prepare(runtime)
+        assert var not in auto_env
+
+
+def test_an_unknown_runtime_still_refuses_rather_than_ignores():
+    """The base class stays fail-closed for whatever gets registered next."""
+
+    class Newcomer(GenericRuntime):
+        name = "newcomer"
+
+    with pytest.raises(RuntimeEffortUnsupportedError):
+        _prepare(Newcomer("newcomer {prompt}"), reasoning_effort="high")
 
 
 def test_the_live_invocation_carries_the_same_effort_as_the_one_shot():
@@ -768,10 +810,10 @@ def test_only_runtimes_with_a_verified_flag_are_advertised():
     """Absent, not empty-listed: the composer reads absence as "no control"."""
     advertised = runtime_reasoning_efforts()
 
+    # Every registered runtime was captured against the pinned CLI; see
+    # tests/fixtures/agent_runtime_streams/effort_wire_shapes.md.
+    assert set(advertised) == {"claude-code", "codex", "pi", "opencode", "kilo"}
     assert advertised["claude-code"] == ["low", "medium", "high", "max"]
-    assert advertised["codex"] == ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-    # Tier 2 wrappers have no verified way to say this, and absence is how the
-    # composer learns to render no control rather than a broken one.
-    assert "pi" not in advertised
-    assert "opencode" not in advertised
-    assert "kilo" not in advertised
+    # pi is the short list, and deliberately: two of its six flag levels do not
+    # survive the trip to the wire.
+    assert advertised["pi"] == ["minimal", "low", "medium", "high"]
