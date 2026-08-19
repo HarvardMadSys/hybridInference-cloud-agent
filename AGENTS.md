@@ -5,15 +5,18 @@ agent. Read this first.
 
 ## 1. What this is
 
-FreeInference Cloud Agent runs coding agents (Claude Code, Codex, Kilo, …) in
-sandboxed containers against a user's repository and publishes results as pull
-requests. It is being **extracted from the HybridInference monorepo**
-(`HarvardMadSys/hybridInference`) into this repository as an independent service.
+FreeInference Cloud Agent runs coding agents (Claude Code, Codex, pi, OpenCode,
+Kilo) in sandboxed containers against a user's repository and publishes results
+as pull requests.
 
-The extraction plan is the source of truth for what to build and in what order:
-`docs/agents/plans/2026-08-03-cloud-agent-repo-split.md` in the HybridInference
-repo, with the file-level manifest in `cloud-agent-split-manifest.md` beside it.
-[MIGRATION.md](MIGRATION.md) records what has actually landed here.
+It **was** extracted from the HybridInference monorepo
+(`HarvardMadSys/hybridInference`): production cut over on 2026-08-07 and the
+gateway's own agent code was deleted on 2026-08-09, so this repository is now
+the only implementation. [MIGRATION.md](MIGRATION.md) records what moved and
+what was decided along the way, and names the paths still unproven on this
+stack. The extraction plan in the HybridInference repo
+(`docs/agents/plans/2026-08-03-cloud-agent-repo-split.md`) is history now, not a
+to-do list; new work tracks in this repository's issues.
 
 ## 2. Repo map
 
@@ -25,7 +28,7 @@ web/                    Next.js user UI + admin dashboard
 contracts/              OpenAPI mirrors of the gateway contracts we consume
 migrations/             Alembic migrations (agent-owned database only)
 deploy/{control-plane,host,sandbox}/
-tests/{unit,servers,integration}/
+tests/{unit,servers,integration,external}/  # plus fixtures/ and support/
 docs/
 ```
 
@@ -47,11 +50,19 @@ Database-backed tests are opt-in: `make test-db` (needs Postgres; see
 - Never commit secrets. This repository will be made public; treat every commit
   as already public.
 
-## 5. Migration rules — in force until the split completes
+## 5. Migration rules — expired 2026-08-09, except 4 and 5
 
-These override normal engineering instincts. They exist because a migration
-whose diff mixes moves with edits cannot be reviewed, and because a parity claim
-needs an unchanged baseline to be worth anything.
+Rules 1-3 applied **only while the split was running**, and by their own terms
+they lapsed when it completed. They are kept here so old pull requests still
+read correctly. They do not constrain new work: cleanups, renames and refactors
+are ordinary pull requests now.
+
+**Rules 4 and 5 are not migration rules and stay in force permanently** — they
+are the architecture of the split, not the hygiene of performing it.
+
+They existed because a migration whose diff mixes moves with edits cannot be
+reviewed, and because a parity claim needs an unchanged baseline to be worth
+anything.
 
 1. **Move as-is.** When a task says "move" a file, change imports and paths
    only. No renames, no splitting large files, no reformatting, no dead-code
@@ -78,8 +89,10 @@ needs an unchanged baseline to be worth anything.
   generation — a superseded attempt's writes are rejected by the store, which
   is what makes retries safe and stops duplicate pull requests.
 - **Grant.** A short-lived, per-attempt capability token minted by the gateway,
-  scoped to a user, a job, and a model/MCP allowlist. It is the only credential
-  that enters the sandbox. Revoked when the attempt is superseded.
+  scoped to a user, a job, and a model allowlist. It is the only credential that
+  enters the sandbox. Revoked when the attempt is superseded. It carried an MCP
+  scope until server ownership moved to the user; MCP servers are now resolved
+  per user by the control plane, not named in the grant.
   **There is no per-task dollar budget** — that design was considered and
   rejected. All inference spend stays subject to the gateway's existing
   per-user quota; a grant narrows *what* can be called, never re-implements

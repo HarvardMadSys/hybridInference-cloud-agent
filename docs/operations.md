@@ -409,13 +409,14 @@ Opting a host in is a one-time `.env` edit:
 
 ```bash
 AGENT_DISPATCHER_TOKEN=<openssl rand -hex 32>   # same value gates /worker/claim
-AGENT_SANDBOX_BACKEND=container                  # host has no Kata shim yet
+AGENT_SANDBOX_BACKEND=container                  # accept a shared kernel
 ```
 
 That second line is a **deliberate downgrade**, and the runner says so on every
 start: it puts every job on the host's own kernel. It was the price of getting a
 standing runner up before any host had Kata. Remove it once the host is
-provisioned — see below — and the boundary is verified instead of warned about.
+provisioned **and the sandbox network is verified from inside a Kata guest** —
+see below — and the boundary is verified instead of warned about.
 
 One command per host makes the runner standing; compose's
 `restart: unless-stopped` plus an enabled Docker daemon carries it across
@@ -475,6 +476,27 @@ whatever pipeline deploys the gateway, on its own side):
 - there is no automatic fallback to a shared kernel. Accepting one stays
   possible and stays explicit: set `AGENT_SANDBOX_BACKEND=container`, and every
   deploy restates what it costs.
+
+**Installing the shim is necessary, not sufficient.** A host can pass
+`setup_kata_runtime.sh --check`, pass `kata-runtime check`, and start a Kata
+container that really does report a kernel of its own — and still be unusable,
+because the guest can come up with **no network interface at all**, only `lo`.
+Nothing in that sandbox can resolve the gateway relay, so every job fails at its
+first model call. Every cheap signal says the runtime is fine; only pulling a
+container onto the sandbox network finds it. Check before you drop the override:
+
+```bash
+NET=<the stack's sandbox network>          # ..._internal
+docker run --rm --network "$NET" alpine getent hosts agent-gateway
+docker run --rm --runtime io.containerd.kata.v2 \
+    --network "$NET" alpine getent hosts agent-gateway
+```
+
+The `runc` line is the control. If it resolves the relay and the Kata line does
+not, the runtime is installed but the sandbox is not usable, and
+`AGENT_SANDBOX_BACKEND=container` has to stay until the guest's networking is
+fixed. `internetworking_model` and whether the guest kernel carries `virtio-net`
+are the first two things to look at.
 
 ### How many runners
 
