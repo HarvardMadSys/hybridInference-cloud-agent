@@ -195,6 +195,11 @@ class ClaimedJob:
     # inference address.
     mcp_token: str = ""
     mcp_base_url: str = ""
+    # How hard the model should think on this turn, in the runtime's own
+    # vocabulary. None is Auto: no flag, whatever the CLI and model default to.
+    # Defaulted rather than required, because absent and Auto are the same
+    # state — there is nothing a caller could pass to mean "unknown".
+    reasoning_effort: str | None = None
     # Shell run before the agent, under the setup egress tier. Optional, so it
     # carries a default rather than forcing every caller to pass one.
     setup_script: str | None = None
@@ -235,6 +240,9 @@ class ClaimedJob:
             setup_script=body.get("setup_script"),
             runtime=body["runtime"],
             model=body["model"],
+            # Absent from a control plane that predates the control, which is
+            # the same thing as Auto — no separate "unknown" state to carry.
+            reasoning_effort=body.get("reasoning_effort"),
             worker_token=body["worker_token"],
             # Older gateways return only worker_token; fall back so a
             # runner can still talk to one that predates scoped tokens.
@@ -1165,7 +1173,13 @@ def run_agent(
             if state_dir is not None:
                 backend.adopt_workdir(state_dir)
             try:
-                turn = live.start_turn(TurnInput(prompt=job.task_prompt, model=job.model))
+                turn = live.start_turn(
+                    TurnInput(
+                        prompt=job.task_prompt,
+                        model=job.model,
+                        reasoning_effort=job.reasoning_effort,
+                    )
+                )
             except DriverError as exc:
                 # The process is gone, or refused the turn. Close what we
                 # hold and run the ladder from warm in the same tree.
@@ -1182,7 +1196,11 @@ def run_agent(
                 )
             else:
                 session = live
-                turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
+                turn_input = TurnInput(
+                    prompt=job.task_prompt,
+                    model=job.model,
+                    reasoning_effort=job.reasoning_effort,
+                )
                 # ``hot`` only when the process predates the turn — a fresh
                 # spawn is warm_native whatever transport it runs on, and a
                 # label that overclaims makes the hit-rate lie.
@@ -1204,7 +1222,11 @@ def run_agent(
             )
             session = None
         else:
-            turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
+            turn_input = TurnInput(
+                prompt=job.task_prompt,
+                model=job.model,
+                reasoning_effort=job.reasoning_effort,
+            )
             control.report_continuity("warm_native")
     if session is None and state is not None:
         try:
@@ -1218,11 +1240,19 @@ def run_agent(
             session = None
         else:
             # The restored session *is* the memory: only the new prompt goes in.
-            turn_input = TurnInput(prompt=job.task_prompt, model=job.model)
+            turn_input = TurnInput(
+                prompt=job.task_prompt,
+                model=job.model,
+                reasoning_effort=job.reasoning_effort,
+            )
             control.report_continuity("cold_native")
     if session is None:
         session = driver.launch(context)
-        turn_input = TurnInput(prompt=conversation_prompt(job), model=job.model)
+        turn_input = TurnInput(
+            prompt=conversation_prompt(job),
+            model=job.model,
+            reasoning_effort=job.reasoning_effort,
+        )
         control.report_continuity("replay")
     if turn is None:
         assert turn_input is not None

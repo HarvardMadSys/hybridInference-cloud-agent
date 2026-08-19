@@ -46,6 +46,8 @@ export interface AgentJobApi {
   task_prompt: string;
   runtime: string;
   model: string;
+  /** How hard the model was asked to think. Null is Auto — nobody chose. */
+  reasoning_effort?: string | null;
   /** Requested branch/ref before the backend pinned it to base_sha. */
   base_ref?: string | null;
   base_sha: string | null;
@@ -191,6 +193,17 @@ export interface AgentConfigApi {
   mcp_servers?: AgentMcpServerApi[];
   /** Runtimes that can be given MCP servers; others refuse such a job. */
   mcp_runtimes?: string[];
+  /**
+   * Effort levels each runtime can express, in its own vocabulary. A runtime
+   * absent here cannot express one at all.
+   */
+  runtime_reasoning_efforts?: Record<string, string[]>;
+  /**
+   * Effort levels each model accepts. Offer the intersection with the chosen
+   * runtime's, and no control when it is empty — which is also what a backend
+   * too old to answer these produces.
+   */
+  model_reasoning_efforts?: Record<string, string[]>;
   setup_egress_tier: string | null;
   agent_egress_tier: string | null;
   github_connected: boolean;
@@ -319,6 +332,8 @@ export interface CreateAgentJobRequest {
   task_prompt: string;
   model: string;
   runtime?: string;
+  /** Omitted is Auto: the runtime and model decide for themselves. */
+  reasoning_effort?: string;
   /** A branch. The platform pins it to a commit at creation. */
   base_ref?: string;
   base_sha?: string;
@@ -459,6 +474,12 @@ export interface FollowUpAgentJobRequest {
   /** Omitted values inherit the parent run's harness and model. */
   runtime?: string;
   model?: string;
+  /**
+   * Omitted inherits the previous turn's effort; the literal `'auto'` (the
+   * components' `AUTO_EFFORT`) clears it back to Auto. Null cannot mean
+   * "clear" — it is already what "inherit" sends.
+   */
+  reasoning_effort?: string;
 }
 
 /** Queue another turn in the same thread, after its currently active run. */

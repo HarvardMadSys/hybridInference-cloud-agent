@@ -206,6 +206,40 @@ class GatewayClient:
         }
         return models, aliases
 
+    async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
+        """Which models accept a reasoning effort, and which values.
+
+        A gateway that predates the field answers nothing, which reads as "no
+        model here takes one" — the composer then offers no such control, its
+        behaviour before this existed. Failing closed on absence is the same
+        choice :func:`agent_visible_models` makes about the catalog itself: a
+        control the platform cannot honour must not be offered.
+
+        Args:
+            user_id: The gateway's user identifier.
+
+        Returns:
+            ``{model_id: [values]}``, empty-safe, restricted to models this
+            user can actually reach.
+
+        Raises:
+            GatewayError: If the catalog cannot be read.
+        """
+        body = await self._get("/internal/model-catalog", {"user_id": user_id})
+        raw_models = body.get("models")
+        visible = {str(model) for model in raw_models} if isinstance(raw_models, list) else set()
+        raw = body.get("reasoning_efforts")
+        if not isinstance(raw, dict):
+            return {}
+        efforts: dict[str, list[str]] = {}
+        for model, values in raw.items():
+            if str(model) not in visible or not isinstance(values, list):
+                continue
+            levels = [str(value) for value in values]
+            if levels:
+                efforts[str(model)] = levels
+        return efforts
+
     async def user_status(self, user_id: str) -> dict[str, Any]:
         """Report whether a user exists, may sign in, and with what role.
 

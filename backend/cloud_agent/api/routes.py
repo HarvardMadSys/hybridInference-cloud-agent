@@ -74,6 +74,7 @@ from cloud_agent.mcp_registry import connection_states, registry_for_user
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     EVENT_TYPE_PATTERN,
+    RESET_REASONING_EFFORT,
     AgentConfigResponse,
     AgentFollowUpRequest,
     AgentGitWorkspaceResponse,
@@ -144,13 +145,21 @@ from cloud_agent.tokens import (
     parse_host_token,
     parse_worker_token,
 )
-from cloud_agent.visible_models import agent_canonical_model, agent_visible_models
+from cloud_agent.visible_models import (
+    agent_canonical_model,
+    agent_model_reasoning_efforts,
+    agent_visible_models,
+)
 from cloud_agent_host.egress import (
     EgressPolicyError,
     build_policy_from_env as build_egress_policy,
 )
 from cloud_agent_host.patch_gate import branch_name_for
-from cloud_agent_host.runtimes import registered_runtimes, runtimes_supporting_mcp
+from cloud_agent_host.runtimes import (
+    registered_runtimes,
+    runtime_reasoning_efforts,
+    runtimes_supporting_mcp,
+)
 from cloud_agent_host.workspace_broker_client import (
     WorkspaceBrokerClient,
     WorkspaceBrokerError,
@@ -386,6 +395,7 @@ def _job_response(
         task_prompt=job["task_prompt"],
         runtime=job["runtime"],
         model=job["model"],
+        reasoning_effort=job.get("reasoning_effort"),
         base_ref=base_ref,
         base_sha=job["base_sha"],
         output_branch=branch_name_for(job.get("thread_id") or job["id"]),
@@ -472,6 +482,13 @@ async def get_agent_config(
         # will hit — not /v1/models, which answers for the *browsing* user and
         # offered models whose first agent call then 404ed.
         models=await agent_visible_models(gateway, user_id=user["user_id"]),
+        # Two halves of one control. The composer offers their intersection per
+        # (runtime, model) pair and no control when it is empty — which is also
+        # what an older gateway, answering no domains, produces.
+        runtime_reasoning_efforts=runtime_reasoning_efforts(),
+        model_reasoning_efforts=await agent_model_reasoning_efforts(
+            gateway, user_id=user["user_id"]
+        ),
         # This user's connected servers, not the deployment's: same reason the
         # repository list above is theirs. Public fields only — McpServerSummary
         # has nowhere to put a URL or a credential, which is how it stays that
@@ -1157,6 +1174,62 @@ def _require_registered_runtime(runtime: str) -> None:
         )
 
 
+async def _require_offered_effort(
+    effort: str | None,
+    *,
+    runtime: str,
+    model: str,
+    gateway: Any,
+    user: dict[str, Any],
+) -> str | None:
+    """400 unless ``effort`` is one this runtime *and* this model both accept.
+
+    The offered set is the intersection, and it is checked rather than clamped.
+    Clamping looks kinder and is worse: glm-5.3 has no ``medium``, so a
+    ``medium`` quietly served as ``high`` would bill and behave as a depth
+    nobody chose while reporting the one they did — the same lie as a flag that
+    resolves to nothing, which is what this whole control exists to end.
+
+    Args:
+        effort: The requested level, or ``None`` for Auto.
+        runtime: The harness this turn will run on.
+        model: The canonical model id, already resolved.
+        gateway: Client for the gateway's internal contracts.
+        user: The authenticated owner.
+
+    Returns:
+        The value to store: ``None`` for Auto, else the validated level.
+
+    Raises:
+        HTTPException: 400 when the pair does not offer this value.
+    """
+    if effort is None or effort == RESET_REASONING_EFFORT:
+        # The sentinel means Auto wherever it appears. On a follow-up it also
+        # has to be told apart from "inherit" (that caller checks it before
+        # getting here); on a create there is nothing to inherit, so the two
+        # spellings of Auto are the same answer and neither is a 400.
+        return None
+    runtime_levels = runtime_reasoning_efforts().get(runtime, [])
+    model_levels = (await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])).get(
+        model, []
+    )
+    offered = [level for level in runtime_levels if level in model_levels]
+    if effort in offered:
+        return effort
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": {
+                "type": "reasoning_effort_not_available",
+                "message": (
+                    f"Reasoning effort {effort!r} is not available for {runtime!r} "
+                    f"with {model!r}. Available: {', '.join(offered) or 'none'}."
+                ),
+            }
+        },
+    )
+
+
 async def _create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
@@ -1187,6 +1260,11 @@ async def _create_job_as(
     # ids, so a job that stored the alias would carry a scope matching
     # nothing — created successfully, dead at its first inference call.
     model = await _require_resolvable_model(body.model, gateway=gateway, user=user)
+    # Checked against the *resolved* model, not the requested spelling: the
+    # domain belongs to the model the turn will actually call.
+    reasoning_effort = await _require_offered_effort(
+        body.reasoning_effort, runtime=body.runtime, model=model, gateway=gateway, user=user
+    )
     # The requester chooses the repository and the platform later mints a real
     # installation token for it. Without this the two combine into a confused
     # deputy: name any repository the App reaches, and read it back through
@@ -1239,6 +1317,7 @@ async def _create_job_as(
         task_prompt=body.task_prompt,
         runtime=body.runtime,
         model=model,
+        reasoning_effort=reasoning_effort,
         base_sha=base_sha,
         setup_script=body.setup_script,
         metadata=metadata or None,
@@ -1489,6 +1568,21 @@ async def create_agent_follow_up(
     model = None
     if body.model:
         model = await _require_resolvable_model(body.model, gateway=gateway, user=user)
+    # Effort is per turn, like the model, and inherits when omitted. Unlike the
+    # model it needs a way *back*: null already means "no override, inherit", so
+    # clearing an inherited effort takes the explicit reset sentinel. Validated
+    # against the model this turn will run — which may be the switched-to one,
+    # and a pair that was offered last turn need not be offered this one.
+    reasoning_effort: str | None = None
+    reset_effort = body.reasoning_effort == RESET_REASONING_EFFORT
+    if body.reasoning_effort is not None and not reset_effort:
+        reasoning_effort = await _require_offered_effort(
+            body.reasoning_effort,
+            runtime=parent["runtime"],
+            model=model or parent["model"],
+            gateway=gateway,
+            user=user,
+        )
     try:
         await require_entitled_repo(
             parent["repo"],
@@ -1531,6 +1625,8 @@ async def create_agent_follow_up(
         # Canonical, or the parent's when omitted — never the alias the caller
         # typed, which the gateway's grant would not match.
         model=model if body.model else None,
+        reasoning_effort=reasoning_effort,
+        reset_reasoning_effort=reset_effort,
     )
     if job is None:
         raise HTTPException(
@@ -2904,6 +3000,7 @@ async def worker_claim(
         setup_script=claim.get("setup_script"),
         runtime=claim["runtime"],
         model=claim["model"],
+        reasoning_effort=claim.get("reasoning_effort"),
         worker_token=token,
         sandbox_token=sandbox_token,
         mcp_token=mcp_token,

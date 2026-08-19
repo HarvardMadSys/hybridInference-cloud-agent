@@ -843,3 +843,96 @@ describe('JobDetail', () => {
     expect(sessionStorage.getItem('agent-rewind-draft-ajob_1')).toBeNull();
   });
 });
+
+describe('JobDetail reasoning effort', () => {
+  const THINKING_CONFIG = {
+    ...AGENT_CONFIG,
+    runtime_reasoning_efforts: { 'claude-code': ['low', 'medium', 'high', 'max'] },
+    // No `medium` on the model, matching the real glm-5.3 entry.
+    model_reasoning_efforts: { 'qwen-test': ['low', 'high', 'max'] },
+  };
+
+  beforeEach(() => {
+    navigation.push.mockReset();
+    vi.mocked(followUpAgentJob).mockReset();
+    vi.mocked(getAgentConfig).mockReset();
+    vi.mocked(getAgentConfig).mockResolvedValue(THINKING_CONFIG);
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+  });
+
+  afterEach(() => cleanup());
+
+  it('offers the intersection for the turn the follow-up would run', async () => {
+    render(<JobDetail job={makeJob()} />);
+
+    const picker = await screen.findByLabelText('Reasoning for this turn');
+    const offered = Array.from(picker.querySelectorAll('option')).map((o) => o.textContent);
+    expect(offered).toEqual(['auto', 'low', 'high', 'max']);
+  });
+
+  it('shows the effort a turn ran at, and nothing when it was Auto', () => {
+    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'max' })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    expect(screen.getByText('Reasoning')).toBeInTheDocument();
+    expect(screen.getByText('max')).toBeInTheDocument();
+    unmount();
+
+    render(<JobDetail job={makeJob()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    // Auto renders no row: an absent row is the honest display of "nobody
+    // chose", where a "Reasoning: auto" row would imply someone did.
+    expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
+  });
+
+  it('sends only an actual change, and the reset when clearing to Auto', async () => {
+    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
+
+    // Inherited and untouched: the field is absent, which the backend reads as
+    // "inherit" rather than "clear".
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
+    );
+    unmount();
+
+    vi.mocked(followUpAgentJob).mockClear();
+    render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
+    fireEvent.change(await screen.findByLabelText('Reasoning for this turn'), {
+      target: { value: 'auto' },
+    });
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'easy one' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'easy one',
+        reasoning_effort: 'auto',
+      }),
+    );
+  });
+
+  it('drops a level the switched-to model does not offer', async () => {
+    render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
+
+    // glm-test takes no effort, so the control disappears and the inherited
+    // level must not ride along to a model that would refuse it.
+    fireEvent.change(await screen.findByLabelText('Model for this turn'), {
+      target: { value: 'glm-test' },
+    });
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Reasoning for this turn')).not.toBeInTheDocument(),
+    );
+
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'switch' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'switch',
+        model: 'glm-test',
+        reasoning_effort: 'auto',
+      }),
+    );
+  });
+});

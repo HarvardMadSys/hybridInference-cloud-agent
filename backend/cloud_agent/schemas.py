@@ -41,6 +41,12 @@ EVENT_TYPE_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 # publisher targets the PR at it, so a caller must not be able to forge one.
 BASE_REF_METADATA_KEY = "_agent_base_ref"
 
+#: What a follow-up sends to clear an inherited effort back to Auto. A plain
+#: null cannot mean this: null is what "no override, inherit" already sends,
+#: and the two have to be distinguishable or a thread that once chose an
+#: effort could never stop choosing one.
+RESET_REASONING_EFFORT = "auto"
+
 
 class AgentJobCreate(BaseModel):
     """Request body for creating an agent job."""
@@ -57,6 +63,17 @@ class AgentJobCreate(BaseModel):
     task_prompt: str = Field(..., description="What the agent should do.")
     runtime: str = Field("claude-code", description="Agent runtime id.")
     model: str = Field(..., description="Gateway model id the runtime should use.")
+    reasoning_effort: str | None = Field(
+        None,
+        max_length=32,
+        description=(
+            "How hard the model should think. Null is Auto — no instruction, "
+            "whatever the runtime and model do by default. A value must be one "
+            "both the runtime and the chosen model accept (the intersection "
+            "reported by /config); anything else is a 400 rather than a "
+            "silently dropped or nearest-value setting."
+        ),
+    )
     setup_script: str | None = Field(
         None,
         max_length=8000,
@@ -129,6 +146,10 @@ class AgentJobResponse(BaseModel):
     task_prompt: str
     runtime: str
     model: str
+    #: Null means Auto, which is also what every turn created before this
+    #: control existed reports. The UI renders nothing for it: an absent chip
+    #: is the honest display of "nobody chose".
+    reasoning_effort: str | None = None
     base_ref: str | None = None
     base_sha: str | None = None
     output_branch: str | None = None
@@ -253,6 +274,17 @@ class AgentFollowUpRequest(BaseModel):
         ),
     )
     model: str | None = Field(None, description="Optional model override for this turn.")
+    reasoning_effort: str | None = Field(
+        None,
+        max_length=32,
+        description=(
+            "Optional reasoning-effort override for this turn. Omitted inherits "
+            "the previous turn's, as an omitted model does. The literal "
+            f"{RESET_REASONING_EFFORT!r} resets to Auto — effort needs a way "
+            "back that model never did, because null is a value a turn can "
+            "legitimately hold rather than the absence of one."
+        ),
+    )
 
     @field_validator("prompt")
     @classmethod
@@ -498,6 +530,9 @@ class WorkerClaimResponse(BaseModel):
     setup_script: str | None = None
     runtime: str
     model: str
+    #: Null is Auto. A runner too old to read it simply runs at the CLI's
+    #: default, which is what the field means anyway.
+    reasoning_effort: str | None = None
     worker_token: str
     sandbox_token: str = Field(
         "",
@@ -734,6 +769,22 @@ class AgentConfigResponse(BaseModel):
         description=(
             "Model ids an agent job can actually call for this user — the same "
             "predicate the create endpoint enforces, not the /v1/models list."
+        ),
+    )
+    runtime_reasoning_efforts: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Effort levels each runtime can express, in its own vocabulary. A "
+            "runtime absent here cannot express one at all."
+        ),
+    )
+    model_reasoning_efforts: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Effort levels each model accepts, from the gateway's registry. The "
+            "composer offers the intersection with the chosen runtime's, and no "
+            "control at all when that is empty — which is also what it shows "
+            "against a gateway too old to answer this."
         ),
     )
     mcp_servers: list[McpServerSummary] = Field(

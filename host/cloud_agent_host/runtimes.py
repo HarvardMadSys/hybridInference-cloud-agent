@@ -72,6 +72,14 @@ class RuntimeCapabilities:
     cost_report: bool = False
     normalized_events: bool = False
     tier: int = 2
+    #: The reasoning-effort levels this adapter can actually put on the wire,
+    #: in the CLI's own vocabulary. Empty means "cannot express effort", which
+    #: is what every runtime whose flag nobody has verified declares — the
+    #: platform then never offers the control for it. Declared here rather than
+    #: assumed from the model, because both halves have to be able to deliver:
+    #: a model that takes an effort is no use behind a CLI with no way to say
+    #: one, and the intersection is what gets offered.
+    reasoning_efforts: tuple[str, ...] = ()
     # Whether this adapter can point the CLI at the gateway's MCP proxy *and*
     # shut out every other MCP config source. Both halves or neither: a runtime
     # that could be given servers but not stopped from picking up the
@@ -114,6 +122,10 @@ class RuntimeMCPUnavailableError(RuntimeError):
     """Raised when MCP is requested before a runtime has a mediated path."""
 
 
+class RuntimeEffortUnsupportedError(RuntimeError):
+    """Raised when an effort is requested of a runtime that cannot express it."""
+
+
 class AgentRuntime:
     """Base adapter. Subclasses override the three questions."""
 
@@ -130,9 +142,42 @@ class AgentRuntime:
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
-        """Return ``(argv, extra_env)`` to run this task headlessly."""
+        """Return ``(argv, extra_env)`` to run this task headlessly.
+
+        ``reasoning_effort`` is ``None`` for "let the CLI and the model decide",
+        which is every turn that predates the control and every pair that
+        cannot offer it. A non-``None`` value must be one this runtime
+        declared; see :meth:`effort_args`.
+        """
         raise NotImplementedError
+
+    def effort_args(self, effort: str | None) -> list[str]:
+        """The flag pair expressing ``effort``, or nothing at all.
+
+        Public because the resident session assembles its own argv and must ask
+        the dialect layer how to spell this, exactly as it asks
+        :meth:`ClaudeCodeRuntime.user_message_line` how to spell a user turn.
+
+        Fails closed on a value this runtime never declared, the way
+        :meth:`_require_empty_mcp_config` fails closed on MCP. The control
+        plane validates the same set at create time, so reaching this is a
+        platform bug rather than a user's — which is exactly why it raises
+        instead of dropping: a silently ignored effort is the CLI-flag lie this
+        whole feature exists to end, and it would be indistinguishable from a
+        turn that ran at the requested depth.
+
+        Subclasses that can express effort override this with their dialect;
+        the default cannot, so any value is refused.
+        """
+        if effort is None:
+            return []
+        declared = self.capabilities().reasoning_efforts
+        raise RuntimeEffortUnsupportedError(
+            f"runtime {self.name!r} cannot express reasoning effort {effort!r} "
+            f"(declares {list(declared)})"
+        )
 
     @staticmethod
     def _mcp_endpoints(
@@ -235,6 +280,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
         config_dir: str | None = None,
         resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
@@ -256,6 +302,10 @@ class ClaudeCodeRuntime(AgentRuntime):
         argv += [
             "--model",
             model,
+            # Kept adjacent to --model deliberately: the resident session finds
+            # the model slot by index and rebuilds the effort beside it, so the
+            # two settings a turn can carry stay in one place in the argv.
+            *self.effort_args(reasoning_effort),
             "--output-format",
             "stream-json",
             "--verbose",
@@ -317,6 +367,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
         config_dir: str | None = None,
         resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
@@ -336,6 +387,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             credential=credential,
             provides_isolation=provides_isolation,
             mcp_config=mcp_config,
+            reasoning_effort=reasoning_effort,
             config_dir=config_dir,
             resume_session_id=resume_session_id,
         )
@@ -479,9 +531,32 @@ class ClaudeCodeRuntime(AgentRuntime):
             },
         )
 
+    #: The CLI's own vocabulary, from ``claude --help`` on the pinned build:
+    #: "Effort level for the current session (low, medium, high, max)". Not
+    #: the platform's scale and not the models' — the offered set is this
+    #: intersected with what the chosen model declares, which is how a model
+    #: with no ``medium`` never gets offered one.
+    EFFORT_LEVELS = ("low", "medium", "high", "max")
+
+    def effort_args(self, effort: str | None) -> list[str]:
+        """Express effort as ``--effort <level>``."""
+        if effort is None:
+            return []
+        if effort not in self.EFFORT_LEVELS:
+            raise RuntimeEffortUnsupportedError(
+                f"claude-code takes {list(self.EFFORT_LEVELS)}, not {effort!r}"
+            )
+        return ["--effort", effort]
+
     def capabilities(self) -> RuntimeCapabilities:
         """Claude Code is Tier 1: normalized events, a cost report, and MCP."""
-        return RuntimeCapabilities(cost_report=True, normalized_events=True, tier=1, mcp=True)
+        return RuntimeCapabilities(
+            cost_report=True,
+            normalized_events=True,
+            tier=1,
+            mcp=True,
+            reasoning_efforts=self.EFFORT_LEVELS,
+        )
 
 
 class CodexRuntime(AgentRuntime):
@@ -504,8 +579,21 @@ class CodexRuntime(AgentRuntime):
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Build the headless invocation and its environment.
+
+        ``reasoning_effort`` is refused rather than ignored, and
+        :meth:`capabilities` declares none, so the platform never offers the
+        control for this runtime. Codex *can* take one --
+        ``-c model_reasoning_effort="<level>"`` alongside the provider flags
+        below, and the gateway end is already done (this adapter speaks
+        ``wire_api = "responses"``, and the Responses translation maps
+        ``reasoning.effort`` onto the parameter the model sees). What is
+        missing is the same thing missing for MCP here: the flag verified
+        against the pinned ``CODEX_VERSION`` in ``Dockerfile.agent-sandbox``,
+        and the level names that build accepts. Declaring it before then would
+        offer a control whose values are a guess.
 
         A non-empty ``mcp_config`` is refused, and :meth:`capabilities`
         reports ``mcp=False`` so the platform turns such a job away at creation
@@ -534,6 +622,7 @@ class CodexRuntime(AgentRuntime):
           behind. ``--ignore-user-config`` keeps the operator's own config out.
         """
         self._require_empty_mcp_config(mcp_config)
+        self.effort_args(reasoning_effort)
         base = gateway_base_url.rstrip("/").removesuffix("/v1")
         provider = "hybridinference"
         argv = [
@@ -655,14 +744,18 @@ class GenericRuntime(AgentRuntime):
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Expand the template into argv without ever invoking a shell.
 
         A Tier 2 runtime is any headless CLI, so there is no flag this adapter
         could know to pass and no way to shut out a repository's own config.
-        A non-empty set is refused rather than dropped.
+        A non-empty set is refused rather than dropped, and so is a reasoning
+        effort: the same argument, since the template says nothing about how
+        this CLI spells one.
         """
         self._require_empty_mcp_config(mcp_config)
+        self.effort_args(reasoning_effort)
         argv = [
             part.replace("{prompt}", task_prompt).replace("{model}", model)
             for part in shlex.split(self.command_template)
@@ -754,6 +847,7 @@ class PiRuntime(GenericRuntime):
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper writes into pi's provider config."""
         argv, env = super().prepare(
@@ -764,6 +858,7 @@ class PiRuntime(GenericRuntime):
             credential=credential,
             provides_isolation=provides_isolation,
             mcp_config=mcp_config,
+            reasoning_effort=reasoning_effort,
         )
         # models.json wants the model listed under the provider; the wrapper
         # cannot parse it back out of pi's argv without reimplementing pi's
@@ -933,6 +1028,7 @@ class OpencodeRuntime(GenericRuntime):
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper declares in OpenCode's config."""
         argv, env = super().prepare(
@@ -943,6 +1039,7 @@ class OpencodeRuntime(GenericRuntime):
             credential=credential,
             provides_isolation=provides_isolation,
             mcp_config=mcp_config,
+            reasoning_effort=reasoning_effort,
         )
         env["OPENCODE_GATEWAY_MODEL"] = model
         return argv, env
@@ -985,6 +1082,7 @@ class KiloRuntime(GenericRuntime):
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper declares in Kilo's config."""
         argv, env = super().prepare(
@@ -995,6 +1093,7 @@ class KiloRuntime(GenericRuntime):
             credential=credential,
             provides_isolation=provides_isolation,
             mcp_config=mcp_config,
+            reasoning_effort=reasoning_effort,
         )
         env["KILO_GATEWAY_MODEL"] = model
         return argv, env
@@ -1027,6 +1126,25 @@ def runtimes_supporting_mcp() -> list[str]:
     return sorted(
         name for name, runtime_cls in _REGISTRY.items() if runtime_cls().capabilities().mcp
     )
+
+
+def runtime_reasoning_efforts() -> dict[str, list[str]]:
+    """Effort levels each registered runtime can express, in its own words.
+
+    A runtime that cannot express one is absent rather than empty-listed, so
+    the composer reaches "no control here" the same way whether the runtime
+    cannot say it or the platform is talking to something too old to answer.
+
+    Used by the composer and by job creation, so a turn is never created
+    carrying a depth its harness has no flag for — the MCP argument applied to
+    the other thing a runtime either can or cannot do.
+    """
+    efforts: dict[str, list[str]] = {}
+    for name, runtime_cls in _REGISTRY.items():
+        declared = runtime_cls().capabilities().reasoning_efforts
+        if declared:
+            efforts[name] = list(declared)
+    return efforts
 
 
 def get_runtime(name: str, *, generic_command: str | None = None) -> AgentRuntime:

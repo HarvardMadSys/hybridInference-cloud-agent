@@ -113,3 +113,32 @@ async def agent_model_resolvable(model: str, gateway: GatewayClient, *, user_id:
         Whether the model resolves in this user's catalog.
     """
     return await agent_canonical_model(model, gateway, user_id=user_id) is not None
+
+
+async def agent_model_reasoning_efforts(
+    gateway: GatewayClient, *, user_id: str
+) -> dict[str, list[str]]:
+    """The reasoning-effort domain of each model this user's jobs can call.
+
+    Same failure posture as :func:`agent_visible_models`: a gateway that
+    cannot be reached yields *no* domains, so the composer offers no effort
+    control and every create validates against an empty set. Getting this
+    backwards would offer a knob during an outage and produce turns that die
+    at their first model call.
+
+    Args:
+        gateway: Client for the gateway's internal contracts.
+        user_id: The gateway's user identifier.
+
+    Returns:
+        ``{model_id: [values]}``, empty when unavailable.
+    """
+    try:
+        return await gateway.model_reasoning_efforts(user_id)
+    except GatewayError:
+        logger.warning(
+            "agent_model_efforts_unavailable",
+            exc_info=True,
+            extra={"event": "agent_model_efforts_unavailable", "user_id": user_id},
+        )
+        return {}

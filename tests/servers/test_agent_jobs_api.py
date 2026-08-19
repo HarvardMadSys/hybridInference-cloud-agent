@@ -131,6 +131,7 @@ class FakeAgentJobStore:
         }
         job.setdefault("base_sha", None)
         job.setdefault("metadata", None)
+        job.setdefault("reasoning_effort", None)
         self.jobs[job_id] = job
         self.messages.append(
             {
@@ -152,6 +153,8 @@ class FakeAgentJobStore:
         prompt: str,
         runtime: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
+        reset_reasoning_effort: bool = False,
     ) -> dict[str, Any] | None:
         requested = self.jobs.get(parent_job_id)
         if requested is None or requested["user_id"] != user_id:
@@ -179,6 +182,13 @@ class FakeAgentJobStore:
             "task_prompt": prompt,
             "runtime": runtime or parent["runtime"],
             "model": model or parent["model"],
+            # Mirrors the store: inherit when omitted, and only the explicit
+            # reset clears an effort the thread already carries.
+            "reasoning_effort": (
+                None
+                if reset_reasoning_effort
+                else (reasoning_effort or parent.get("reasoning_effort"))
+            ),
             "state": (
                 "queued"
                 if parent["state"] in {"failed", "cancelled"}
@@ -797,6 +807,11 @@ def store() -> FakeAgentJobStore:
 
 # Every model id the tests submit must resolve, or create fails fast by design.
 _TEST_MODELS = ("glm-5.1", "qwen-next", "m")
+#: One model that takes an effort and one that does not, so the intersection
+#: is exercised in both directions. No ``medium``, matching the real registry's
+#: glm-5.3 entry: a fixture that offered the intuitive three would pass against
+#: an implementation that assumed them.
+_TEST_MODEL_EFFORTS = {"glm-5.1": ["low", "high", "max"]}
 
 
 class _FakeGateway:
@@ -824,6 +839,15 @@ class _FakeGateway:
         `AttributeError` the moment the caller started asking for the table.
         """
         return list(_TEST_MODELS), dict(self.aliases)
+
+    async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
+        """Which models take a reasoning effort, and which values.
+
+        Same reason the alias method exists here: the real client asks, so a
+        fake that does not answer sends every composer and create path into an
+        ``AttributeError`` rather than the behaviour under test.
+        """
+        return {model: list(values) for model, values in _TEST_MODEL_EFFORTS.items()}
 
 
 class _FakeGrants:
@@ -4324,3 +4348,152 @@ async def test_an_unmeasured_turn_reports_nothing_rather_than_zero(
     assert job["resources"] is None
     assert job["continuity_mode"] is None
     assert job["duration_ms"] is None
+
+
+# ── Reasoning effort ───────────────────────────────────────────────────
+
+
+async def test_effort_is_offered_only_where_runtime_and_model_both_deliver(client: AsyncClient):
+    """The composer is told both halves; it offers their intersection."""
+    config = (await client.get("/v1/agent/config")).json()
+
+    # claude-code can express effort; the Tier 2 runtimes cannot, and are
+    # absent rather than listed with an empty vocabulary.
+    assert config["runtime_reasoning_efforts"]["claude-code"] == ["low", "medium", "high", "max"]
+    assert "pi" not in config["runtime_reasoning_efforts"]
+    assert config["model_reasoning_efforts"] == {"glm-5.1": ["low", "high", "max"]}
+
+
+async def test_a_turn_records_the_effort_it_was_created_with(client: AsyncClient):
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "reasoning_effort": "high",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["reasoning_effort"] == "high"
+
+
+async def test_a_turn_without_an_effort_is_auto(client: AsyncClient):
+    """Auto is null, and null is what every turn before this control reports."""
+    job_id = await _create_job(client)
+
+    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
+
+    assert job["reasoning_effort"] is None
+
+
+async def test_an_effort_outside_the_intersection_is_refused(client: AsyncClient):
+    """``medium`` is a real claude-code level and not one this model takes.
+
+    Refused rather than clamped to a neighbour: a turn served at a depth
+    nobody chose, while reporting the one they did, is the same lie as a flag
+    that resolves to nothing.
+    """
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "reasoning_effort": "medium",
+        },
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]["error"]
+    assert detail["type"] == "reasoning_effort_not_available"
+    # The refusal names what *is* available, so the caller can retry once.
+    assert "low, high, max" in detail["message"]
+
+
+async def test_an_effort_on_a_model_that_takes_none_is_refused(client: AsyncClient):
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "qwen-next",
+            "reasoning_effort": "high",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["message"].endswith("Available: none.")
+
+
+async def test_a_follow_up_inherits_the_efforts_of_the_turn_before_it(client: AsyncClient):
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "reasoning_effort": "high",
+        },
+    )
+    parent_id = created.json()["id"]
+
+    inherited = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups", json={"prompt": "keep going"}
+    )
+    assert inherited.status_code == 201
+    assert inherited.json()["reasoning_effort"] == "high"
+
+    switched = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "now the easy bit", "reasoning_effort": "low"},
+    )
+    assert switched.status_code == 201
+    assert switched.json()["reasoning_effort"] == "low"
+
+
+async def test_a_follow_up_can_reset_an_inherited_effort_to_auto(client: AsyncClient):
+    """Null already means "inherit", so clearing takes the explicit sentinel."""
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "reasoning_effort": "max",
+        },
+    )
+    parent_id = created.json()["id"]
+
+    reset = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "back to normal", "reasoning_effort": "auto"},
+    )
+
+    assert reset.status_code == 201
+    assert reset.json()["reasoning_effort"] is None
+
+
+async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
+    client: AsyncClient,
+):
+    """A pair offered last turn need not be offered this one."""
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "reasoning_effort": "high",
+        },
+    )
+    parent_id = created.json()["id"]
+
+    response = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "switch", "model": "qwen-next", "reasoning_effort": "high"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"

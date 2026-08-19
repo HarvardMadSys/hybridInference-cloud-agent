@@ -112,6 +112,11 @@ export interface AgentJob {
   runtime: string;
   runtimeVersion?: string;
   model: string;
+  /**
+   * How hard this turn asked the model to think. Undefined is Auto — nobody
+   * chose — which is every turn created before the control existed.
+   */
+  reasoningEffort?: string;
   /** Set when the model is served on our own hardware, e.g. "H200". */
   modelLocal?: string;
   spentUsd: number;

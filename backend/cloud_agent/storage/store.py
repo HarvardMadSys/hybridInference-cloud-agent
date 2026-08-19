@@ -115,6 +115,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "setup_script": row["setup_script"],
         "runtime": row["runtime"],
         "model": row["model"],
+        "reasoning_effort": row["reasoning_effort"],
         "state": row["state"],
         "cancel_requested": row["cancel_requested"],
         "terminal_resume_pending": row["terminal_resume_pending"],
@@ -137,7 +138,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
 
 _JOB_COLUMNS = (
     "id, thread_id, parent_job_id, turn_no, user_id, repo, base_sha, task_prompt, "
-    "setup_script, runtime, model, state, "
+    "setup_script, runtime, model, reasoning_effort, state, "
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
     "metadata, fork_source_job_id, mcp_servers, "
@@ -479,6 +480,7 @@ class AgentJobStore:
         task_prompt: str,
         runtime: str,
         model: str,
+        reasoning_effort: str | None = None,
         base_sha: str | None = None,
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -502,8 +504,9 @@ class AgentJobStore:
                 f"""
                 INSERT INTO agent_jobs
                     (id, thread_id, turn_no, user_id, repo, base_sha, task_prompt,
-                     setup_script, runtime, model, metadata, mcp_servers)
-                VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+                     setup_script, runtime, model, reasoning_effort, metadata,
+                     mcp_servers)
+                VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
                 RETURNING {_JOB_COLUMNS}
                 """,
                 job_id,
@@ -515,6 +518,7 @@ class AgentJobStore:
                 setup_script,
                 runtime,
                 model,
+                reasoning_effort,
                 json.dumps(metadata) if metadata is not None else None,
                 list(mcp_servers or []),
             )
@@ -599,8 +603,15 @@ class AgentJobStore:
         prompt: str,
         runtime: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
+        reset_reasoning_effort: bool = False,
     ) -> dict[str, Any] | None:
         """Append a user turn and create the run that will answer it.
+
+        ``reasoning_effort`` overrides the inherited depth; omitting it keeps
+        the parent's, as an omitted model does. ``reset_reasoning_effort``
+        clears it back to Auto — the one thing a null override cannot express,
+        since null is what "inherit" already sends.
 
         A follow-up submitted while the latest turn is active is stored as
         ``waiting``. The thread row is locked before selecting that turn, so
@@ -645,9 +656,10 @@ class AgentJobStore:
                 f"""
                 INSERT INTO agent_jobs
                     (id, thread_id, parent_job_id, turn_no, user_id, repo, base_sha,
-                     task_prompt, setup_script, runtime, model, state, metadata,
-                     mcp_servers)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
+                     task_prompt, setup_script, runtime, model, reasoning_effort,
+                     state, metadata, mcp_servers)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                        $14::jsonb, $15)
                 RETURNING {_JOB_COLUMNS}
                 """,
                 job_id,
@@ -661,6 +673,9 @@ class AgentJobStore:
                 parent["setup_script"],
                 runtime or parent["runtime"],
                 model or parent["model"],
+                None
+                if reset_reasoning_effort
+                else (reasoning_effort or parent["reasoning_effort"]),
                 state,
                 json.dumps(_load_json(parent["metadata"]))
                 if parent["metadata"] is not None

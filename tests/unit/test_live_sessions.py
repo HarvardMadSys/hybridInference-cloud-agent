@@ -201,3 +201,56 @@ def test_launch_resident_live_needs_the_state_mount(tmp_path):
     object.__setattr__(context, "state_dir", None)
     with pytest.raises(DriverError, match="state mount"):
         ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(context, session_id="s")
+
+
+def test_the_first_turn_fixes_the_sessions_effort(tmp_path):
+    """Effort is a launch flag, so the resident process carries the first one."""
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+
+    process.feed = _turn_lines(_RESULT)
+    session.start_turn(
+        TurnInput(prompt="think hard", model="glm-5.1", reasoning_effort="max")
+    ).wait()
+
+    (argv, _env), *rest = spawned
+    assert not rest
+    assert argv[argv.index("--effort") + 1] == "max"
+    # Beside the model, where the one-shot invocation puts it too.
+    assert argv.index("--effort") == argv.index("--model") + 2
+
+
+def test_an_effort_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
+    """Silently serving the old depth would be indistinguishable from success."""
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    process.feed = _turn_lines(_RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort="low")).wait()
+
+    with pytest.raises(DriverError, match="restart"):
+        session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort="high"))
+
+
+def test_dropping_back_to_auto_mid_session_is_also_a_restart(tmp_path):
+    """Auto is a depth like any other, not "no opinion" the process can absorb."""
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    process.feed = _turn_lines(_RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort="high")).wait()
+
+    with pytest.raises(DriverError, match="restart"):
+        session.start_turn(TurnInput(prompt="p", model="m"))
+
+
+def test_an_auto_session_spawns_without_the_flag(tmp_path):
+    """Auto adds nothing to the argv — today's behaviour, bit for bit."""
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+
+    process.feed = _turn_lines(_RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m")).wait()
+
+    (argv, _env) = spawned[0]
+    assert "--effort" not in argv

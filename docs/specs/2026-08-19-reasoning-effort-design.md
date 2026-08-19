@@ -87,13 +87,15 @@ reasoning_efforts: [low, high, max]   # glm-5.3
 ```
 
 Meaningful only when `reasoning_effort` is already in
-`supported_params`. When the param is supported but the list is absent,
-the loader defaults it to `[low, medium, high]`. Known values to encode
-at rollout: glm-5.3 `[low, high, max]` (from the registry's own comment;
-the ZAI doc is the authority). deepseek-v4-flash/-pro: **verify the
-accepted values against the DeepSeek API before listing them** — the
-registry currently asserts the param exists but nothing records its
-domain, and a wrong list here becomes a 400 factory.
+`supported_params`. **An absent list means "not offered", with no
+default** — v1 changed this from the draft's `[low, medium, high]`
+fallback, which contradicted the paragraph after it: deepseek's domain
+is unverified, so the fallback would have handed it exactly the guessed
+values this field exists to prevent. Declaring the domain is how a
+deployment says it checked. Encoded at rollout: glm-5.3 `[low, high,
+max]` (from the registry's own comment; the ZAI doc is the authority).
+deepseek-v4-flash/-pro stay unlisted, with a comment naming what to
+verify before listing them.
 
 **Runtime side — `RuntimeCapabilities`.** One new field, following the
 `mcp` precedent (declare only what is verified, both halves or neither):
@@ -104,7 +106,7 @@ reasoning_efforts: tuple[str, ...] = ()   # empty = cannot express effort
 
 | Runtime | v1 declaration | How it is expressed | Status |
 |---|---|---|---|
-| claude-code | `("low", "medium", "high", "max")` | `--effort <v>` on the argv, one-shot and `prepare_live` alike | Flag verified against 2.1.90 help; **capture the pinned 2.1.220 wire shape before merge** (§7) |
+| claude-code | `("low", "medium", "high", "max")` | `--effort <v>` on the argv, one-shot and `prepare_live` alike | Flag verified against 2.1.90 help; **capture the pinned 2.1.220 wire shape before merge** (§7) — the one link still unverified |
 | codex | `()` until flag verified, then `("low", "medium", "high")` expected | `-c model_reasoning_effort="<v>"` alongside the existing `-c` provider flags | Same discipline the adapter's docstring already applies to MCP flags: verify against `CODEX_VERSION`, don't ship a guess. Gateway side is already done — `wire_api = "responses"` → `reasoning.effort` → `reasoning_effort` |
 | pi | `()` | request-side `reasoning_effort` (gateway chat surface accepts it today) if pi's config can inject it — unverified | Promotion path, not v1 |
 | opencode / kilo | `()` | — | Tier 2 stays Tier 2 |
@@ -120,7 +122,10 @@ non-reasoning model it is empty and the control disappears.
   Follow-up: `reasoning_effort: str | None` where absent inherits the
   parent turn (mirror of `model`), and the literal string `"auto"`
   clears back to null — effort needs a way home that `model` never
-  needed, because null is a legitimate stored value.
+  needed, because null is a legitimate stored value. On *create* the
+  sentinel is also accepted as Auto (v1 addition): there is nothing to
+  inherit, so both spellings are the same answer, and 400-ing a caller
+  who typed the value the UI shows would be gratuitous.
 - **Validation** at create and follow-up, fail-fast like the model
   check: value must be in the pair's offered set, else 400 naming the
   set. The offered set is computed from the runtime registry plus the

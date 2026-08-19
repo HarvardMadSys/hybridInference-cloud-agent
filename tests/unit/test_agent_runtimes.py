@@ -20,9 +20,11 @@ from cloud_agent_host.runtimes import (
     KiloRuntime,
     OpencodeRuntime,
     PiRuntime,
+    RuntimeEffortUnsupportedError,
     RuntimeMCPConfig,
     RuntimeMCPUnavailableError,
     get_runtime,
+    runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
 
@@ -684,3 +686,72 @@ def test_only_runtimes_that_can_also_shut_out_repo_config_report_mcp():
     assert runtimes_supporting_mcp() == ["claude-code"]
     assert ClaudeCodeRuntime().capabilities().mcp is True
     assert CodexRuntime().capabilities().mcp is False
+
+
+def _prepare(runtime, **kwargs):
+    return runtime.prepare(
+        workdir="/w",
+        task_prompt="do it",
+        model="glm-5.3",
+        gateway_base_url="https://gw.test/v1",
+        credential="tok",
+        **kwargs,
+    )
+
+
+def test_claude_code_puts_the_effort_on_the_argv():
+    argv, _env = _prepare(ClaudeCodeRuntime(), reasoning_effort="max")
+
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_auto_adds_no_flag():
+    """The whole compatibility story: an unset effort invokes exactly as before."""
+    argv, _env = _prepare(ClaudeCodeRuntime())
+
+    assert "--effort" not in argv
+
+
+def test_a_level_the_cli_does_not_have_is_refused_not_passed_through():
+    """Fail closed. A level the CLI rejects would die inside the sandbox."""
+    with pytest.raises(RuntimeEffortUnsupportedError):
+        _prepare(ClaudeCodeRuntime(), reasoning_effort="xhigh")
+
+
+def test_a_runtime_that_cannot_express_effort_refuses_rather_than_ignores():
+    """Ignoring it is the lie: the turn would run at a depth nobody chose.
+
+    Unreachable in practice — the control plane offers nothing for these
+    runtimes — which is exactly why it must raise rather than shrug: a silent
+    drop here would be invisible in a way the refusal is not.
+    """
+    for runtime in (CodexRuntime(), PiRuntime(), OpencodeRuntime(), KiloRuntime()):
+        with pytest.raises(RuntimeEffortUnsupportedError):
+            _prepare(runtime, reasoning_effort="high")
+
+
+def test_the_live_invocation_carries_the_same_effort_as_the_one_shot():
+    """Built by the same code, so HOT and COLD cannot drift apart."""
+    runtime = ClaudeCodeRuntime()
+    one_shot, _ = _prepare(runtime, reasoning_effort="low")
+    live, _ = runtime.prepare_live(
+        workdir="/w",
+        model="glm-5.3",
+        gateway_base_url="https://gw.test/v1",
+        credential="tok",
+        reasoning_effort="low",
+    )
+
+    assert one_shot[one_shot.index("--effort") + 1] == "low"
+    assert live[live.index("--effort") + 1] == "low"
+
+
+def test_only_runtimes_with_a_verified_flag_are_advertised():
+    """Absent, not empty-listed: the composer reads absence as "no control"."""
+    advertised = runtime_reasoning_efforts()
+
+    assert advertised["claude-code"] == ["low", "medium", "high", "max"]
+    # Codex can take one and the gateway end is done; the flag is unverified
+    # against the pinned CLI, so it is not offered yet.
+    assert "codex" not in advertised
+    assert "pi" not in advertised

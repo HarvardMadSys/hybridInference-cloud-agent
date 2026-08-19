@@ -138,3 +138,103 @@ describe('TaskComposer source-control onboarding', () => {
     expect(listRepoBranches).toHaveBeenCalledWith('owner/default');
   });
 });
+
+describe('TaskComposer reasoning effort', () => {
+  beforeEach(() => {
+    navigation.push.mockReset();
+    vi.mocked(createAgentJob).mockReset();
+    vi.mocked(getAgentConfig).mockReset();
+    vi.mocked(listRepoBranches).mockReset();
+    vi.mocked(listRepoBranches).mockResolvedValue({ default: 'dev', branches: ['dev'] });
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+  });
+
+  afterEach(() => cleanup());
+
+  const thinking = config({
+    models: ['model-a', 'model-plain'],
+    runtime_reasoning_efforts: { 'claude-code': ['low', 'medium', 'high', 'max'] },
+    // No `medium`, as the real registry's glm-5.3 has none: the intersection
+    // has to drop a level the runtime can say but the model cannot take.
+    model_reasoning_efforts: { 'model-a': ['low', 'high', 'max'] },
+  });
+
+  it('offers only the levels both the runtime and the model accept', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
+
+    render(<TaskComposer />);
+
+    const picker = await screen.findByLabelText('Reasoning');
+    const offered = Array.from(picker.querySelectorAll('option')).map((o) => o.textContent);
+    expect(offered).toEqual(['auto', 'low', 'high', 'max']);
+  });
+
+  it('shows no control when the model takes no effort', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({
+        models: ['model-plain'],
+        runtime_reasoning_efforts: { 'claude-code': ['low', 'high'] },
+        model_reasoning_efforts: {},
+      }),
+    );
+
+    render(<TaskComposer />);
+
+    await screen.findByLabelText('Model');
+    expect(screen.queryByLabelText('Reasoning')).not.toBeInTheDocument();
+  });
+
+  it('shows no control against a backend that does not report efforts', async () => {
+    // The upgrade path: an older control plane answers neither map, and the
+    // composer must look exactly as it did before the control existed.
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+
+    render(<TaskComposer />);
+
+    await screen.findByLabelText('Model');
+    expect(screen.queryByLabelText('Reasoning')).not.toBeInTheDocument();
+  });
+
+  // A successful submit navigates away, so each of these is its own render
+  // rather than two clicks on one composer.
+  async function submit(effort?: string) {
+    render(<TaskComposer />);
+    const textarea = await screen.findByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'do it' } });
+    if (effort) {
+      fireEvent.change(screen.getByLabelText('Reasoning'), { target: { value: effort } });
+    }
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    return vi.mocked(createAgentJob).mock.calls[0][0];
+  }
+
+  it('sends nothing for Auto', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
+
+    expect(await submit()).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('sends the chosen level', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
+
+    expect(await submit('max')).toMatchObject({ reasoning_effort: 'max' });
+  });
+
+  it('falls back to Auto when the chosen model stops offering the level', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(thinking);
+
+    render(<TaskComposer />);
+    fireEvent.change(await screen.findByLabelText('Reasoning'), { target: { value: 'high' } });
+    // model-plain takes no effort at all, so the control goes away entirely —
+    // and the pending selection must not survive to be submitted.
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'model-plain' } });
+
+    await waitFor(() => expect(screen.queryByLabelText('Reasoning')).not.toBeInTheDocument());
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'do it' } });
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('reasoning_effort');
+  });
+});
