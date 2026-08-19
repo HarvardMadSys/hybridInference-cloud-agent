@@ -4497,3 +4497,42 @@ async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
 
     assert response.status_code == 400
     assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
+
+
+async def test_a_runtime_that_cannot_express_effort_is_refused_at_create(client: AsyncClient):
+    """The other half of the intersection: the model takes it, the CLI cannot say it.
+
+    pi, opencode, kilo and codex are all registered and perfectly runnable —
+    they just have no verified flag for this. Accepting the value and dropping
+    it in the adapter would produce a turn that reports a depth nobody could
+    have delivered, so the refusal belongs here, before the job exists.
+    """
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "runtime": "pi",
+            "model": "glm-5.1",
+            "reasoning_effort": "high",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
+
+
+async def test_those_runtimes_still_take_ordinary_turns(client: AsyncClient):
+    """And nothing else about them changed: Auto is every turn they ever ran."""
+    for runtime in ("pi", "opencode", "kilo", "codex"):
+        response = await client.post(
+            "/v1/agent/jobs",
+            json={
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "runtime": runtime,
+                "model": "glm-5.1",
+            },
+        )
+        assert response.status_code == 201, f"{runtime}: {response.text}"
+        assert response.json()["reasoning_effort"] is None
