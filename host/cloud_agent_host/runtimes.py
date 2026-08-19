@@ -14,7 +14,7 @@ An adapter answers three questions:
   normalized event kinds? **Unrecognized lines are never dropped**: they come
   back as a ``raw`` event so the UI degrades to a log tail instead of going
   silent when a CLI changes its format.
-- ``capabilities`` — what can this runtime actually do (resume, report cost)?
+- ``capabilities`` — what can this runtime actually do (report cost, speak MCP)?
 
 Tiering (per the adjudicated design): Tier 1 runtimes get full normalization
 and cost attribution; Tier 2 is a generic headless runner whose output flows
@@ -62,9 +62,13 @@ class NormalizedEvent:
 
 @dataclass(frozen=True)
 class RuntimeCapabilities:
-    """What a runtime can do, so the platform does not assume."""
+    """What a runtime can do, so the platform does not assume.
 
-    resume: bool = False
+    Session continuity is deliberately not declared here: it belongs to
+    ``drivers.HarnessCapabilities.continuity``, the only value the runner
+    consults when picking a turn's continuity path.
+    """
+
     cost_report: bool = False
     normalized_events: bool = False
     tier: int = 2
@@ -477,9 +481,7 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     def capabilities(self) -> RuntimeCapabilities:
         """Claude Code is Tier 1: normalized events, a cost report, and MCP."""
-        return RuntimeCapabilities(
-            resume=True, cost_report=True, normalized_events=True, tier=1, mcp=True
-        )
+        return RuntimeCapabilities(cost_report=True, normalized_events=True, tier=1, mcp=True)
 
 
 class CodexRuntime(AgentRuntime):
@@ -625,7 +627,7 @@ class CodexRuntime(AgentRuntime):
 
     def capabilities(self) -> RuntimeCapabilities:
         """Codex is Tier 1 for events; cost comes from the gateway ledger."""
-        return RuntimeCapabilities(resume=False, cost_report=False, normalized_events=True, tier=1)
+        return RuntimeCapabilities(cost_report=False, normalized_events=True, tier=1)
 
 
 class GenericRuntime(AgentRuntime):
@@ -892,9 +894,7 @@ class PiRuntime(GenericRuntime):
         the recorded runs. ``api_logs`` is the billing authority regardless,
         so this claims no cost report rather than surfacing a confident zero.
         """
-        return RuntimeCapabilities(
-            resume=False, cost_report=False, normalized_events=True, tier=1, mcp=False
-        )
+        return RuntimeCapabilities(cost_report=False, normalized_events=True, tier=1, mcp=False)
 
 
 class OpencodeRuntime(GenericRuntime):

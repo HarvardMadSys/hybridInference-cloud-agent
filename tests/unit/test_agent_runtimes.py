@@ -539,7 +539,6 @@ def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
 def test_capabilities_declare_tiers():
     """Tiering is explicit so the platform never assumes support."""
     assert ClaudeCodeRuntime().capabilities().tier == 1
-    assert ClaudeCodeRuntime().capabilities().resume is True
     assert GenericRuntime("x").capabilities().tier == 2
     assert GenericRuntime("x").capabilities().normalized_events is False
 
