@@ -391,6 +391,32 @@ async def _reap_offline_hosts(store: AgentJobStore) -> None:
         )
 
 
+async def _reap_lapsed_residencies(store: AgentJobStore, grants: Any | None) -> None:
+    """Lapse residencies whose lease ran out — and kill their credentials.
+
+    A lapsed residency's grant dies with it (design §14): the credential
+    lives exactly as long as the lease, so a host that stopped beating must
+    starve promptly rather than keep spending until the grant's own TTL.
+    ``revoke()`` never raises, and a deployment without a grant client simply
+    has nothing to revoke — the lapse itself already happened in the store.
+    """
+    lapsed = await store.reap_expired_residencies()
+    if not lapsed:
+        return
+    logger.info(
+        "agent_residencies_lapsed",
+        extra={
+            "event": "agent_residencies_lapsed",
+            "threads": [row["thread_id"] for row in lapsed],
+        },
+    )
+    if grants is None:
+        return
+    for row in lapsed:
+        if row.get("grant_id"):
+            await grants.revoke(row["grant_id"])
+
+
 async def reap_expired_attempts(
     store: AgentJobStore,
     *,
@@ -433,6 +459,14 @@ async def reap_expired_attempts(
             await _reap_offline_hosts(store)
         except Exception:
             logger.warning("Host reaper pass failed", exc_info=True)
+        # Residencies after hosts, before attempts: a lapsed hot sandbox must
+        # lose its generation (heartbeats, credentials, affinity) before the
+        # attempt pass requeues anything that might route back to it. Its own
+        # try, for the same reason as the host pass above.
+        try:
+            await _reap_lapsed_residencies(store, grants)
+        except Exception:
+            logger.warning("Residency reaper pass failed", exc_info=True)
         try:
             actions = await store.reap_expired(max_attempts=max_attempts)
             await _reconcile_settled_terminals(store)

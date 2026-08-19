@@ -216,7 +216,14 @@ class AgentFollowUpRequest(BaseModel):
     """A new user turn appended to an existing task thread."""
 
     prompt: str = Field(..., min_length=1, max_length=100_000)
-    runtime: str | None = Field(None, description="Optional harness override for this turn.")
+    runtime: str | None = Field(
+        None,
+        description=(
+            "Accepted only when it names the thread's own harness — a thread's "
+            "harness is fixed (its session is the unit of continuity; design "
+            "D2). Any other value is a 400; fork the thread to switch."
+        ),
+    )
     model: str | None = Field(None, description="Optional model override for this turn.")
 
     @field_validator("prompt")
@@ -478,6 +485,15 @@ class WorkerClaimResponse(BaseModel):
         None,
         description="Successful parent patch to rehydrate before this follow-up runs.",
     )
+    context_checkpoint: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "The parent turn's ThreadCheckpoint envelope, decrypted and gated "
+            "(same driver, same CLI version, exported by exactly the turn this "
+            "follow-up continues). Null means replay — the always-available, "
+            "merely forgetful path."
+        ),
+    )
     mcp_servers: list[str] = Field(
         default_factory=list,
         description=(
@@ -511,6 +527,17 @@ class WorkerEventRequest(BaseModel):
         description="thinking|message|tool_use|...|lifecycle",
     )
     payload: dict[str, Any] | None = None
+    event_seq: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "The worker's own monotonically increasing number for this upload "
+            "within its attempt. A replayed number is answered with the "
+            "already-stored event's id instead of a duplicate row, which is "
+            "what makes retrying a dropped response safe. Omitted by workers "
+            "that predate it; those keep today's at-least-once behaviour."
+        ),
+    )
 
 
 class WorkerEventResponse(BaseModel):
@@ -536,6 +563,18 @@ class WorkerArtifactResponse(BaseModel):
     """Stored artifact id."""
 
     artifact_id: int
+
+
+class WorkerContinuityRequest(BaseModel):
+    """Which continuity rung this attempt is running on (design §9).
+
+    ``warm_native`` is the implemented resident rung: native session and
+    workspace continuous, process restarted per turn. ``hot`` is reserved for
+    a live process receiving injected turns and stays unreported until
+    residency-scoped credentials make one possible (design §13).
+    """
+
+    mode: Literal["hot", "warm_native", "cold_native", "replay"]
 
 
 class WorkerFinishRequest(BaseModel):
@@ -799,6 +838,21 @@ class AgentRunnerHost(BaseModel):  # type: ignore[no-any-unimported]
         description="Where this host's workspace broker listens, as the control plane reaches it.",
     )
     last_heartbeat_at: datetime | None = None
+    sandbox_runtime: str | None = Field(
+        None,
+        description=(
+            "Attested container runtime for this host's jobs. '' = "
+            "shared-kernel runc; null = the host has never reported one."
+        ),
+    )
+    sandbox_image_digest: str | None = Field(
+        None,
+        description="Digest of the sandbox image this host launches, as last reported.",
+    )
+    runtime_versions: dict[str, str] | None = Field(
+        None,
+        description="CLI versions baked into the sandbox image, keyed by runtime id.",
+    )
 
 
 class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported]
@@ -951,6 +1005,13 @@ class HostRegisterResponse(BaseModel):  # type: ignore[no-any-unimported]
     )
 
 
+class ResidencyBeat(BaseModel):  # type: ignore[no-any-unimported]
+    """One hot sandbox a host reports alive."""
+
+    thread_id: str = Field(..., min_length=1, max_length=128)
+    generation: int = Field(..., ge=1)
+
+
 class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
     """A host reporting that it is still there, and what it now looks like.
 
@@ -963,6 +1024,85 @@ class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
     runner_version: str | None = Field(None, max_length=128)
     broker_url: str | None = Field(None, max_length=2048)
     capabilities: list[str] | None = Field(None, max_length=64)
+    sandbox_runtime: str | None = Field(
+        None,
+        max_length=128,
+        description=(
+            "The container runtime jobs actually execute under, e.g. "
+            "'io.containerd.kata.v2'. Empty string is a positive statement — "
+            "shared-kernel runc — where omitting the field means 'not "
+            "reported' and keeps the last known value. This is the isolation "
+            "attestation the scheduler and admin read; it must say what runs, "
+            "not what the deployment intended."
+        ),
+    )
+    sandbox_image_digest: str | None = Field(
+        None,
+        max_length=512,
+        description=(
+            "Content digest of the sandbox image this host launches, from the "
+            "local image store (RepoDigest, or the local image Id for a "
+            "never-pushed build). Stamped onto attempts at claim so a retry "
+            "can know exactly what executed the original."
+        ),
+    )
+    runtime_versions: dict[str, str] | None = Field(
+        None,
+        max_length=64,
+        description=(
+            "CLI version baked into the sandbox image, keyed by runtime id "
+            "(e.g. {'claude-code': '1.2.3'}), read from image labels. An "
+            "empty dict means 'inspected, image carries no version labels'."
+        ),
+    )
+    residencies: list[ResidencyBeat] | None = Field(
+        None,
+        max_length=128,
+        description=(
+            "The hot sandboxes this host still holds, generation-scoped. Each "
+            "listed residency's lease is extended; one that no longer holds "
+            "its generation comes back in residencies_lost and the host tears "
+            "that sandbox down (design §7)."
+        ),
+    )
+
+
+class HostResidencyEstablishRequest(BaseModel):  # type: ignore[no-any-unimported]
+    """A host taking residency for a thread it is running (design §7)."""
+
+    thread_id: str = Field(..., min_length=1, max_length=128)
+    runtime_id: str = Field(..., min_length=1, max_length=64)
+    runtime_version: str | None = Field(None, max_length=128)
+    sandbox_id: str | None = Field(None, max_length=253)
+
+
+class HostResidencyEstablishResponse(BaseModel):  # type: ignore[no-any-unimported]
+    """The residency the host now holds — the generation is its fence."""
+
+    thread_id: str
+    generation: int
+    ttl_seconds: float
+    credential: str | None = Field(
+        None,
+        description=(
+            "The residency's inference grant (design §14): thread-attributed, "
+            "renewed by this host's beats, revoked when the residency ends. "
+            "It is what a live resident process runs on. Null degrades the "
+            "residency to workspace-only — turns then ride warm_native on "
+            "their own per-attempt grants."
+        ),
+    )
+    model: str | None = Field(
+        None,
+        description="The model the grant is scoped to (the establishing turn's).",
+    )
+
+
+class HostResidencyReleaseRequest(BaseModel):  # type: ignore[no-any-unimported]
+    """A host ending a residency it holds (teardown, eviction, drain)."""
+
+    thread_id: str = Field(..., min_length=1, max_length=128)
+    generation: int = Field(..., ge=1)
 
 
 class HostHeartbeatResponse(BaseModel):  # type: ignore[no-any-unimported]
@@ -972,6 +1112,16 @@ class HostHeartbeatResponse(BaseModel):  # type: ignore[no-any-unimported]
     status: str
     slots_total: int | None = None
     slots_used: int = 0
+    residencies_lost: list[ResidencyBeat] = Field(
+        default_factory=list,
+        description=(
+            "The reported beats whose generation no longer holds its "
+            "residency — echoed back with the generation, so a late answer "
+            "to an old beat cannot end the successor the host has since "
+            "established. The host retires those workspaces; their threads "
+            "continue COLD off their checkpoints."
+        ),
+    )
     broker_error: str | None = Field(
         None,
         description=(

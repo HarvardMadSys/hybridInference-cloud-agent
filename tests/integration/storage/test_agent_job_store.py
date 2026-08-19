@@ -1697,3 +1697,44 @@ async def test_the_pool_and_the_pinned_host_come_from_one_read(store: AgentJobSt
 
     assert active == "runner-b"
     assert [h["host"] for h in hosts if h["is_active"]] == ["runner-b"]
+
+
+async def test_a_replayed_event_seq_is_answered_with_the_stored_row(store: AgentJobStore):
+    """A retry after a dropped response duplicates neither event nor message."""
+    await _create_job(store)
+    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60)
+
+    first = await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="message",
+        payload={"text": "the answer"},
+        event_seq=1,
+    )
+    replay = await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="message",
+        payload={"text": "the answer"},
+        event_seq=1,
+    )
+    second = await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="tool_use",
+        payload={"name": "ls"},
+        event_seq=2,
+    )
+
+    assert replay == first
+    assert second is not None and second != first
+    async with store._pool.acquire() as conn:
+        events = await conn.fetchval(
+            "SELECT COUNT(*) FROM agent_job_events WHERE attempt_id = $1", claim["attempt_id"]
+        )
+        messages = await conn.fetchval(
+            "SELECT COUNT(*) FROM agent_thread_messages WHERE job_id = $1 AND role = 'assistant'",
+            claim["id"],
+        )
+    assert events == 2
+    assert messages == 1

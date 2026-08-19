@@ -25,6 +25,19 @@ Copy this file into the cutover ticket and tick the boxes there, with real
 timestamps. The blank log at the bottom is what the acceptance criterion asks
 for.
 
+> **Status, 2026-08-09: the cutover this runbook was written for has
+> happened.** Staging served its first end-to-end job on 2026-08-06,
+> production followed on 2026-08-07 (gateway network fix
+> HarvardMadSys/hybridInference#1229 was the last piece), and H4
+> (HarvardMadSys/hybridInference#1235) removed the gateway's agent code on
+> 2026-08-09 — deployed to both environments the same day, old routes answer
+> 404 on both. DR5 was then **amended by its owner: the old job history was
+> deleted, not archived** (single-user payload; final `pg_dump` kept on each
+> host as the undo net — hybridInference#1235 has the record). The run did not
+> follow this file step by step — the log at the bottom records what actually
+> happened, including the steps that were skipped and why. The runbook stays
+> as the template for any future stack-to-stack move.
+
 ---
 
 ## 0. Preconditions
@@ -61,7 +74,8 @@ the token is read from the environment and never from `argv`, which is
 readable by every process on the host. Exit code is 0 only when everything
 passes, so it can gate a deploy step.
 
-It exists because all four preconditions fail as a 404 today, and reading the
+It exists because all four preconditions failed as a 404 when this runbook was
+written (they pass on both environments as of 2026-08-07), and reading the
 status code alone is how the routing gap was first misdiagnosed here.
 
 ### Blockers to check before scheduling
@@ -72,13 +86,14 @@ blocker that vanishes without a record reads as one that was never real.
 
 | Blocker | Where | Why it stops this runbook |
 |---|---|---|
-| **Neither gateway has identity configured.** `GET /v1/identity/jwks` answers `identity_not_configured` on **both** `freeinference.org` and `staging.freeinference.org` (checked 2026-08-04). The code is deployed — that 404 is the "no key configured" answer, deliberately distinct from the 500 a broken key gives — but `IDENTITY_JWT_PRIVATE_KEY` is unset. | The gateway's own environment | **Step 3 cannot start.** Sign-in is the first thing the smoke does and the whole session flow hangs off it. Needs an RSA key generated *on the host* (`openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`) in `IDENTITY_JWT_PRIVATE_KEY`, plus `IDENTITY_ALLOWED_REDIRECTS` containing this service's callback — matched exactly, not by prefix. |
-| **`GATEWAY_GRANT_DISPATCH_TOKEN` needs setting — still unverified from outside.** The routing half of this is now resolved: the gateway's #1202 added the `/internal/*` rewrites, and as of 2026-08-05 `staging.freeinference.org` answers the gateway's **JSON** at `/internal/model-catalog` while production still answers the frontend's **HTML** — production deploys by manual dispatch and has not carried it yet. Whether a token is set on either host cannot be told from outside without holding one; `deploy/preflight/check_gateway.py` reports it in one call when run with the token. | Both sides' environments | Every lookup and every mint fails closed, so no models resolve and job creation is refused. The same random value (`openssl rand -hex 32`) must be set on the gateway *and* this service, and must differ between staging and production — one value shared across both makes a staging compromise a production one. |
-| ~~**`AGENT_MCP_CONFIG` has no file yet.**~~ | ~~The control-plane host~~ | ✅ **no longer a blocker — the deployment-wide registry was retired.** Jobs run without MCP tools by design until per-user connections land, so there is no file to copy and nothing to configure before the cutover. Job creation refuses any server a caller names rather than silently running without it. |
+| ~~**Identity is not configured on production**~~ | ~~The gateway's own environment~~ | ✅ **resolved on both sides.** Staging was configured 2026-08-05 (RSA key generated on the host into `IDENTITY_JWT_PRIVATE_KEY`, `IDENTITY_ALLOWED_REDIRECTS` matched exactly); production followed with the 2026-08-07 deploy — `GET /v1/identity/jwks` answers a key on both, re-verified 2026-08-09. Each host holds its **own** key; staging's was never copied. |
+| ~~**`GATEWAY_GRANT_DISPATCH_TOKEN` is not set on production**~~ | ~~Both sides' environments~~ | ✅ **resolved on both sides, and both are proven by traffic rather than inference.** Staging: a real job minted, renewed ×4 and revoked a grant on 2026-08-06. Production: `/internal/agent-grants` answers 401 JSON from outside (route live, auth enforced) and its gateway has minted a real grant since the 2026-08-07 cutover. The values differ between the two environments, as required. |
+| ~~**`AGENT_MCP_CONFIG` has no file yet.**~~ | ~~The control-plane host~~ | ✅ **no longer a blocker — the deployment-wide registry was retired** (#48). Jobs run without MCP tools by design until per-user connections land (#50 is the first half), so there is no file to copy and nothing to configure before the cutover. Job creation refuses any server a caller names rather than silently running without it. |
 | ~~The runner sends control-plane calls and the sandbox's inference calls to one base URL~~ | ~~`runner.py` `TODO(E9)`~~ | ✅ **resolved** — the sandbox now carries two addresses and two credentials (`AGENT_GATEWAY_URL` + `agr`, `AGENT_SANDBOX_MCP_URL` + an `mcp`-scoped token), and a runtime asked for MCP with no relay address refuses rather than resolving it against the inference host. |
 | ~~Inference grants (C5–C8) are not on the gateway~~ | ~~unmerged #1180~~ | ✅ **resolved** — #1180 through #1183, #1191 and #1195 are all on the gateway's `dev`. |
 | ~~`/internal/model-catalog`, `/internal/users/{id}/status`, `/internal/mcp-registry` do not exist upstream~~ | ~~`gateway.py`~~ | ✅ **resolved for two of the three, and the third was removed by design.** The catalog and user-status routes exist and carry an alias table; `/internal/mcp-registry` is gone — MCP belongs to this service now, so there is nothing to ask the gateway about. |
-| Host enrollment exists on the control plane but **the runner does not use it** | `backend/cloud_agent/api/hosts.py::register_host` and `::heartbeat_host`; `grep -rn AGENT_ENROLL_TOKEN host/` still returns nothing | Step 6 re-points the runner with the environment variables it reads today. Rewrite step 6 around enrolment once the host half lands. |
+| ~~Host enrollment exists on the control plane but **the runner does not use it**~~ | ~~`grep -rn AGENT_ENROLL_TOKEN host/` returns nothing~~ | ✅ **resolved** — `host/cloud_agent_host/enrollment.py` redeems the token and `runner.py` calls `ensure_enrolled` at startup. Staging's runner host carries a stored credential and heartbeats as `online`, so step 6 is enrolment, not environment variables. |
+| **The pool's broker token must be the *same value* on the control plane and on every host** — and nothing checks that it is. Discovered 2026-08-06: with the reverse tunnel up and the address advertised correctly, every broker call still failed, because the two machines had been configured with two different 64-character secrets. | Each host's `.env` and the control plane's | `broker_routing.py` states the design — one shared `AGENT_WORKSPACE_BROKER_TOKEN` for the whole pool — but a mismatch is not refused anywhere, it is a **401 on every file listing, terminal and git status** for jobs on that host. It reads like the tunnel is broken, and it is not; nothing distinguishes the two from the control plane's logs. Compare fingerprints (`sha256` of the value, never the value) on both machines before step 6, and re-check after any host is re-provisioned. |
 
 ---
 
@@ -86,7 +101,8 @@ blocker that vanishes without a record reads as one that was never real.
 
 - [ ] Post to the team channel: date, window, and that **task history does not
       move**. Users keep their GitHub/GitLab connections and lose their job,
-      thread and event history (decision DR5).
+      thread and event history (decision DR5 — later amended to outright
+      deletion, 2026-08-09).
 - [ ] Say that open terminal sessions will be closed and any unfinished job
       will not be resumed on the other side.
 - [ ] Ask that no long job be started inside the six hours before the window —
@@ -311,6 +327,11 @@ each step is the precondition for the next:
 
 ## Rollback
 
+> **The rollback window closed on 2026-08-09.** H4 deleted the gateway's agent
+> routes and the amended DR5 dropped the old tables, so there is no old stack
+> left to flip back to. The section stands as written for the next migration
+> that needs one.
+
 Rollback is available for as long as the old stack's data is untouched, and it
 stays untouched: step 5 opens the gateway database with
 `default_transaction_read_only = on` and never writes to it. There is nothing
@@ -349,17 +370,21 @@ idempotent, so the second forward pass is a no-op on the data).
 
 ## Log
 
+Filled retroactively on 2026-08-09. The cutover ran ahead of this runbook, so
+the honest record is what happened, what was skipped, and why — a blank row
+would read as "not yet" when the truth is "never, deliberately".
+
 | Step | Planned | Actual (UTC) | By | Notes |
 |---|---|---|---|---|
-| 1. Announce | T−24h | | | |
-| 2. Freeze creation | T+0 | | | |
-| 3. Drain complete | | | | duration: |
-| 4. Backups | | | | paths: |
-| 5. Migration dry run | | | | conflicts: |
-| 5. Migration applied | | | | rows: / checksums: |
-| 5. Idempotency re-run | | | | |
-| 6. Runner re-pointed | | | | |
-| 7. Domain switched | | | | |
-| 8. Smoke passed | | | | |
-| 9. Banner up | | | | |
-| Rollback rehearsed | before the run | | | |
+| 1. Announce | T−24h | skipped | — | single-user deployment; the only user ran the cutover |
+| 2. Freeze creation | T+0 | never applied; closed 2026-08-09 by deletion | Murphy + Claude | no edge rule was ever put up — the old routes stayed answerable (401) until H4 removed them; production's tables held zero rows, so nothing leaked through the gap |
+| 3. Drain complete | | n/a | — | no live attempts existed on the old stack; the co-located staging runner had been failing preflight for weeks and rtx6000b was already enrolled with the new control plane |
+| 4. Backups | | 2026-08-09 | Claude | final `pg_dump` of the 11 tables on both gateways before the DR5-amended deletion; kept in the operator's home directory on each host |
+| 5. Migration dry run | | skipped | — | payload was 1 GitHub connection + 0 GitLab rows |
+| 5. Migration applied | | skipped — fallback taken, then deletion | Murphy | the one GitHub connection was re-made by hand on 2026-08-06 (DR5's reconnect fallback); DR5 was amended 2026-08-09 and the source tables dropped |
+| 5. Idempotency re-run | | n/a | — | nothing was migrated |
+| 6. Runner re-pointed | | 2026-08-06 | Murphy + Claude | by enrolment, not env edit: rtx6000b redeemed an enrol token, heartbeats `online`; broker reachability needed #41 plus aligning the two hosts' `AGENT_WORKSPACE_BROKER_TOKEN` values |
+| 7. Domain switched | | staging 2026-08-06, production 2026-08-07 16:59 | Murphy | same-origin `/agents` rewrites through the console (no separate domain — DR4 as deployed); production needed hybridInference#1229 |
+| 8. Smoke passed | | 2026-08-06, partial | Claude | `ajob_8b0be5f9e7ff9ad5`: create → remote claim → broker workspace → tool-calling run → succeeded, with grant mint / renew ×4 / revoke. **Still unproven: publish, mid-run cancel, the fail-closed trio (smoke.md § 6).** |
+| 9. Banner up | | n/a | — | the rewrite made the old UI unreachable the moment it deployed, and H4 then deleted it; no banner ever shipped |
+| Rollback rehearsed | before the run | never — window closed 2026-08-09 | — | see the note at the top of the Rollback section |

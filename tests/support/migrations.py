@@ -49,15 +49,31 @@ def dsn_from(db_config: dict[str, Any]) -> str:
     )
 
 
-def apply_migrations(db_config: dict[str, Any]) -> None:
-    """Run ``alembic upgrade head`` against the test database."""
-    from alembic import command
+def _alembic_config(db_config: dict[str, Any]):
     from alembic.config import Config
 
     config = Config(str(REPO / "alembic.ini"))
     config.set_main_option("script_location", str(REPO / "migrations"))
     config.set_main_option("sqlalchemy.url", dsn_from(db_config))
-    command.upgrade(config, "head")
+    return config
+
+
+def apply_migrations(db_config: dict[str, Any]) -> None:
+    """Run ``alembic upgrade head`` against the test database."""
+    from alembic import command
+
+    command.upgrade(_alembic_config(db_config), "head")
+
+
+def downgrade_to(db_config: dict[str, Any], revision: str) -> None:
+    """Run ``alembic downgrade <revision>`` — for down/up round-trip tests.
+
+    A caller must upgrade back to head before its test ends: the shared
+    per-worker database is expected at head by every other test.
+    """
+    from alembic import command
+
+    command.downgrade(_alembic_config(db_config), revision)
 
 
 async def run_baseline_statements(pool: Any) -> None:

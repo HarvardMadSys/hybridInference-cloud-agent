@@ -80,9 +80,13 @@ class FakeControl:
         self.artifacts: dict[str, str] = {}
         self.finished: tuple[str, str | None] | None = None
         self.job_id = "ajob_1"
+        self.continuity: str | None = None
 
     def append_event(self, event) -> None:
         self.events.append((event.event_type, event.payload))
+
+    def report_continuity(self, mode: str) -> None:
+        self.continuity = mode
 
     def save_artifact(self, kind: str, content: str) -> None:
         self.artifacts[kind] = content
@@ -822,3 +826,678 @@ def test_an_enrolled_host_claims_with_its_own_credential(monkeypatch, tmp_path) 
 def test_a_host_with_no_pool_still_claims_with_the_dispatcher_token(monkeypatch, tmp_path) -> None:
     """The single-host shape predates the pool and must keep working."""
     assert _drive_loop(monkeypatch, tmp_path, identity=None) == "pool-wide-dispatcher-token"
+
+
+def test_a_lost_lease_drops_the_residency_before_unwinding(tmp_path):
+    """Review finding 2: a dead residency must stop beating at the kill.
+
+    The drop happens at the moment the lease loss aborts the turn — not
+    after the exception has unwound through outer handlers that may swallow
+    it — so the heartbeat thread can never again report a generation whose
+    workspace just lost its turn.
+    """
+    import dataclasses
+
+    from cloud_agent_host.residency import ResidentEntry
+
+    control, heart = FakeControl(), FakeHeart(lost=True)
+    dropped: list[tuple[str, bool, int | None]] = []
+
+    class _Pool:
+        def drop(self, thread_id: str, *, release: bool, generation: int | None = None) -> None:
+            dropped.append((thread_id, release, generation))
+
+    entry = ResidentEntry(
+        thread_id="t-hot",
+        generation=3,
+        session_id="sess-1",
+        workdir=str(tmp_path),
+        state_dir=f"{tmp_path}.state",
+        runtime_id="generic",
+        model="m",
+    )
+    with pytest.raises(LeaseLost):
+        run_agent(
+            _echo_runtime(50, sleep=0.02),
+            job=dataclasses.replace(_JOB, thread_id="t-hot"),
+            workdir=str(tmp_path),
+            gateway_base_url="http://gw",
+            control=control,
+            heart=heart,
+            timeout_s=30,
+            backend=ProcessBackend(acknowledged_unsafe=True),
+            resident=entry,
+            residents=_Pool(),
+        )
+
+    assert dropped == [("t-hot", True, 3)]
+
+
+def test_a_lease_lost_at_finish_still_drops_the_residency(tmp_path, monkeypatch):
+    """Review (second pass): the post-run_agent leak.
+
+    The turn succeeds, the agent's session has advanced — and then the lease
+    is lost during finish. Without the finish-confirmation guard the
+    residency survived, and the retry resumed a session the failed attempt
+    had already advanced, re-executing the same prompt. The guard drops it on
+    every unconfirmed exit.
+    """
+    import dataclasses
+
+    from cloud_agent_host.residency import ResidentEntry
+
+    job = dataclasses.replace(_JOB, thread_id="t-hot", base_sha=None)
+    dropped: list[tuple[str, bool, int | None]] = []
+
+    class _Pool:
+        def lookup(self, thread_id):
+            return entry if thread_id == "t-hot" else None
+
+        def drop(self, thread_id: str, *, release: bool, generation: int | None = None) -> None:
+            dropped.append((thread_id, release, generation))
+
+    entry = ResidentEntry(
+        thread_id="t-hot",
+        generation=5,
+        session_id="sess-1",
+        workdir=str(tmp_path),
+        state_dir=f"{tmp_path}.state",
+        runtime_id="generic",
+        model="m",
+    )
+
+    class _FinishLosesLease(FakeControl):
+        def __init__(self) -> None:
+            super().__init__()
+            self.job_id = job.job_id
+
+        def finish(self, state: str, detail: str | None = None, **_kw) -> None:
+            raise LeaseLost("superseded during finish")
+
+        def suspend_terminals(self, phase: str) -> None:
+            pass
+
+        def resume_terminals(self) -> None:
+            pass
+
+    class _EchoBackend(ProcessBackend):
+        def has_binary(self, name: str) -> bool:
+            return True
+
+    monkeypatch.setattr(runner_mod, "claim", lambda **_kw: job)
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *a, **k: _FinishLosesLease())
+    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *a, **k: FakeHeart(), raising=True)
+    monkeypatch.setattr(runner_mod, "existing_checkout_sha", lambda *a, **k: "abc")
+    monkeypatch.setattr(runner_mod, "align_existing_checkout", lambda *a, **k: "abc")
+    monkeypatch.setattr(runner_mod, "build_patch", lambda *a, **k: "")
+    monkeypatch.setattr(runner_mod, "save_workspace_snapshot", lambda *a, **k: True)
+    runtime = _echo_runtime(2)
+    monkeypatch.setattr(runner_mod, "get_runtime", lambda *a, **k: runtime)
+
+    code = runner_mod.run_once(
+        base_url="http://cp",
+        dispatcher_token="tok",
+        worker_id="w1",
+        workdir=str(tmp_path),
+        backend=_EchoBackend(acknowledged_unsafe=True),
+        residents=_Pool(),  # type: ignore[arg-type]
+    )
+
+    assert code == 3  # the LeaseLost exit
+    # The receipt is redeemed generation-scoped: exactly the borrowed one.
+    assert ("t-hot", True, 5) in dropped
+
+
+# ── true HOT: the live process between turns (design §7 + §14) ─────────
+
+
+class _ResidentProcess:
+    """A live resident process: scripted stdout, recorded stdin."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.feed: list[str] = []
+        self.killed = False
+        self.stdin_closed = False
+        self._exit = 0
+
+    def write_line(self, text: str) -> None:
+        self.sent.append(text)
+
+    def close_stdin(self) -> None:
+        self.stdin_closed = True
+
+    def lines(self):
+        while self.feed:
+            yield self.feed.pop(0)
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def poll(self) -> int | None:
+        return 1 if self.killed else None
+
+    def wait(self) -> int:
+        return self._exit
+
+    def stderr_text(self) -> str:
+        return ""
+
+
+class _LiveSpawnBackend:
+    """The backend surface run_agent touches, spawning a scripted process."""
+
+    provides_isolation = True
+
+    def __init__(self, process: _ResidentProcess) -> None:
+        self.process = process
+        self.specs: list = []
+
+    def base_env(self) -> dict[str, str]:
+        return {"PATH": "/usr/bin"}
+
+    def adopt_workdir(self, path: str) -> None:
+        return None
+
+    def spawn(self, spec):
+        self.specs.append(spec)
+        return self.process
+
+
+class _DetachPool:
+    """Records pool calls the hot path makes."""
+
+    def __init__(self) -> None:
+        self.detached: list[str] = []
+        self.dropped: list[tuple[str, bool, int | None]] = []
+
+    def detach_session(self, thread_id: str) -> None:
+        self.detached.append(thread_id)
+
+    def drop(self, thread_id: str, *, release: bool, generation: int | None = None) -> None:
+        self.dropped.append((thread_id, release, generation))
+
+
+def _result_line() -> str:
+    return json.dumps({"type": "result", "subtype": "success"})
+
+
+def _init_line(session_id: str) -> str:
+    # The CLI announces its session id in the ``system/init`` event — the one
+    # place the runtime adapter captures it from.
+    return json.dumps({"type": "system", "subtype": "init", "session_id": session_id})
+
+
+def _answer_line(text: str = "done") -> str:
+    return json.dumps(
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": text}], "usage": {}}}
+    )
+
+
+def _resident_entry(tmp_path, **overrides):
+    from cloud_agent_host.residency import ResidentEntry
+
+    state = Path(f"{tmp_path}/state")
+    state.mkdir(parents=True, exist_ok=True)
+    fields = {
+        "thread_id": "t-hot",
+        "generation": 3,
+        "session_id": "sess-prev",
+        "workdir": str(tmp_path),
+        "state_dir": str(state),
+        "runtime_id": "claude-code",
+        "model": "glm-5.1",
+        "credential": "residency-grant-token",
+        "grant_model": "glm-5.1",
+    }
+    fields.update(overrides)
+    return ResidentEntry(**fields)
+
+
+def _spawned_live_session(runtime: ClaudeCodeRuntime, process: _ResidentProcess, state_dir: str):
+    """A live session that already ran a turn — the process predates this one."""
+    from cloud_agent_host.drivers import ClaudeCodeDriver, LaunchContext, TurnInput
+
+    context = LaunchContext(
+        workdir="/w",
+        gateway_base_url="http://gw",
+        credential="residency-grant-token",
+        provides_isolation=True,
+        spawn=lambda argv, env: (_ for _ in ()).throw(AssertionError("one-shot spawn used")),
+        state_dir=state_dir,
+        spawn_live=lambda argv, env: process,
+    )
+    session = ClaudeCodeDriver(runtime).launch_live(context)
+    process.feed = [_result_line()]
+    session.start_turn(TurnInput(prompt="first", model="glm-5.1")).wait()
+    return session
+
+
+def _hot_job(**overrides):
+    import dataclasses
+
+    fields = {"thread_id": "t-hot", "runtime": "claude-code", **overrides}
+    return dataclasses.replace(_JOB, **fields)
+
+
+def test_a_turn_on_the_surviving_process_reports_hot(tmp_path):
+    """The product point of #57: the follow-up is a stdin line into the same
+    process, labelled ``hot`` only because the process predates the turn —
+    and the survivor is handed out for the pool to keep."""
+    runtime = ClaudeCodeRuntime()
+    process = _ResidentProcess()
+    entry = _resident_entry(tmp_path)
+    entry.live_session = _spawned_live_session(runtime, process, entry.state_dir)
+    control = FakeControl()
+    live_out: dict = {}
+
+    process.feed = [_init_line("sess-live"), _answer_line(), _result_line()]
+    exit_code, _tail, _errors = run_agent(
+        runtime,
+        job=_hot_job(),
+        workdir=entry.workdir,
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=_LiveSpawnBackend(process),
+        state_dir=entry.state_dir,
+        resident=entry,
+        residents=_DetachPool(),
+        live_out=live_out,
+    )
+
+    assert exit_code == 0
+    assert control.continuity == "hot"
+    # The turn crossed as stdin, not as a new process.
+    assert json.loads(process.sent[-1])["message"]["content"][0]["text"] == "do it"
+    assert live_out["session"] is entry.live_session
+    assert live_out["session_id"] == "sess-live"
+    assert not process.killed
+
+
+def test_the_first_live_turn_spawns_on_the_residency_grant(tmp_path):
+    """No process yet: the turn spawns one over the resident workspace, on the
+    residency's credential and with a live stdin — warm_native this turn
+    (the process is fresh), hot from the next."""
+    runtime = ClaudeCodeRuntime()
+    process = _ResidentProcess()
+    process.feed = [_init_line("sess-new"), _answer_line(), _result_line()]
+    entry = _resident_entry(tmp_path)
+    backend = _LiveSpawnBackend(process)
+    control = FakeControl()
+    live_out: dict = {}
+
+    exit_code, _tail, _errors = run_agent(
+        runtime,
+        job=_hot_job(),
+        workdir=entry.workdir,
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=backend,
+        state_dir=entry.state_dir,
+        resident=entry,
+        residents=_DetachPool(),
+        live_out=live_out,
+    )
+
+    assert exit_code == 0
+    assert control.continuity == "warm_native"
+    (spec,) = backend.specs
+    assert spec.live_input is True
+    assert spec.argv[spec.argv.index("--resume") + 1] == "sess-prev"
+    assert live_out["session"] is not None
+    assert live_out["session_id"] == "sess-new"
+    assert not process.killed  # alive for the next turn
+
+
+def test_a_model_switch_detaches_the_live_process_and_rides_warm(tmp_path):
+    """The idle process answers for another model and this turn will advance
+    the session past its memory: it goes now, the workspace stays."""
+
+    class _Stale:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    entry = _resident_entry(tmp_path, runtime_id="generic", grant_model="other-model")
+    entry.live_session = _Stale()
+    pool = _DetachPool()
+    control = FakeControl()
+
+    exit_code, _tail, _errors = run_agent(
+        _echo_runtime(2),
+        job=_hot_job(runtime="generic"),
+        workdir=entry.workdir,
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        state_dir=entry.state_dir,
+        resident=entry,
+        residents=pool,
+    )
+
+    assert exit_code == 0
+    assert pool.detached == ["t-hot"]
+    assert control.continuity != "hot"
+
+
+def test_a_fresh_live_session_is_closed_when_its_turn_fails(tmp_path):
+    """The stream ends without a result: the process died mid-turn. A spawn
+    this turn owns must not outlive its failure as an orphan holding a key."""
+    runtime = ClaudeCodeRuntime()
+    process = _ResidentProcess()
+    process.feed = [_answer_line()]  # no result line: death
+    entry = _resident_entry(tmp_path)
+    control = FakeControl()
+    live_out: dict = {}
+
+    exit_code, _tail, _errors = run_agent(
+        runtime,
+        job=_hot_job(),
+        workdir=entry.workdir,
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=_LiveSpawnBackend(process),
+        state_dir=entry.state_dir,
+        resident=entry,
+        residents=_DetachPool(),
+        live_out=live_out,
+    )
+
+    assert exit_code != 0
+    assert "session" not in live_out
+    assert process.killed and process.stdin_closed
+
+
+def test_promotion_attaches_the_surviving_session_under_the_new_generation(tmp_path, monkeypatch):
+    """run_once's half of the hand-off: whatever run_agent left in live_out is
+    attached with the promoted generation — and closed when promotion
+    declines, because a process without a residency has no owner."""
+    import dataclasses
+
+    job = dataclasses.replace(_JOB, thread_id="t-hot", base_sha=None)
+
+    class _Session:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _Pool:
+        def __init__(self, generation) -> None:
+            self.generation = generation
+            self.offered: list[dict] = []
+            self.attached: list[tuple] = []
+
+        def lookup(self, thread_id):
+            return None
+
+        def offer(self, **kw):
+            self.offered.append(kw)
+            return self.generation
+
+        def attach_session(self, thread_id, generation, session):
+            self.attached.append((thread_id, generation, session))
+            return True
+
+        def drop(self, *a, **kw):
+            pass
+
+    class _Control(FakeControl):
+        def __init__(self) -> None:
+            super().__init__()
+            self.job_id = job.job_id
+
+        def finish(self, state, detail=None, **_kw):
+            self.finished = (state, detail)
+
+    class _EchoBackend(ProcessBackend):
+        def has_binary(self, name: str) -> bool:
+            return True
+
+    session = _Session()
+
+    def _fake_run_agent(*_args, **kwargs):
+        kwargs["live_out"]["session"] = session
+        kwargs["live_out"]["session_id"] = "sess-9"
+        return 0, "", []
+
+    monkeypatch.setattr(runner_mod, "claim", lambda **_kw: job)
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *a, **k: _Control())
+    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *a, **k: FakeHeart())
+    monkeypatch.setattr(runner_mod, "existing_checkout_sha", lambda *a, **k: "abc")
+    monkeypatch.setattr(runner_mod, "align_existing_checkout", lambda *a, **k: "abc")
+    monkeypatch.setattr(runner_mod, "build_patch", lambda *a, **k: "")
+    monkeypatch.setattr(runner_mod, "save_workspace_snapshot", lambda *a, **k: True)
+    monkeypatch.setattr(runner_mod, "run_agent", _fake_run_agent)
+    runtime = ClaudeCodeRuntime()
+    monkeypatch.setattr(runner_mod, "get_runtime", lambda *a, **k: runtime)
+
+    pool = _Pool(generation=7)
+    code = runner_mod.run_once(
+        base_url="http://cp",
+        dispatcher_token="tok",
+        worker_id="w1",
+        workdir=str(tmp_path),
+        backend=_EchoBackend(acknowledged_unsafe=True),
+        residents=pool,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    assert pool.offered and pool.offered[0]["session_id"] == "sess-9"
+    assert pool.attached == [("t-hot", 7, session)]
+    assert not session.closed
+
+    # Promotion declined: the survivor is closed, not leaked.
+    orphan = _Session()
+
+    def _fake_run_agent_orphan(*_args, **kwargs):
+        kwargs["live_out"]["session"] = orphan
+        kwargs["live_out"]["session_id"] = "sess-10"
+        return 0, "", []
+
+    monkeypatch.setattr(runner_mod, "run_agent", _fake_run_agent_orphan)
+    declined = _Pool(generation=None)
+    code = runner_mod.run_once(
+        base_url="http://cp",
+        dispatcher_token="tok",
+        worker_id="w1",
+        workdir=str(tmp_path),
+        backend=_EchoBackend(acknowledged_unsafe=True),
+        residents=declined,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    assert declined.attached == []
+    assert orphan.closed
+
+
+def test_promotion_rekeys_the_residency_on_a_model_switch(tmp_path):
+    """D6 restart + §14: the grant is model-scoped, so refreshing in place
+    after a model switch would pin the thread warm forever. The switch drops
+    the old generation and establishes a successor keyed to the new model."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    entry = _resident_entry(tmp_path, grant_model="old-model", generation=4)
+
+    class _Pool:
+        def __init__(self) -> None:
+            self.dropped: list[tuple[str, bool, int | None]] = []
+            self.offered: list[dict] = []
+
+        def lookup(self, thread_id):
+            return entry if thread_id == "t-hot" else None
+
+        def drop(self, thread_id, *, release, generation=None):
+            self.dropped.append((thread_id, release, generation))
+
+        def offer(self, **kw):
+            self.offered.append(kw)
+            return 5
+
+    pool = _Pool()
+    generation = runner_mod._promote_to_resident(
+        FakeControl(),
+        runtime=SimpleNamespace(name="claude-code", session_id="sess-2"),
+        job=dataclasses.replace(_JOB, thread_id="t-hot", model="new-model"),
+        backend=SimpleNamespace(),
+        workdir=str(tmp_path),
+        state_dir=f"{tmp_path}/state",
+        residents=pool,  # type: ignore[arg-type]
+    )
+
+    assert pool.dropped == [("t-hot", True, 4)]
+    assert generation == 5
+
+    # A workspace-only residency (no grant) is refreshed, never re-keyed:
+    # there is no model-scoped credential to go stale.
+    entry = _resident_entry(tmp_path, credential=None, grant_model=None, generation=4)
+    pool = _Pool()
+    runner_mod._promote_to_resident(
+        FakeControl(),
+        runtime=SimpleNamespace(name="claude-code", session_id="sess-2"),
+        job=dataclasses.replace(_JOB, thread_id="t-hot", model="new-model"),
+        backend=SimpleNamespace(),
+        workdir=str(tmp_path),
+        state_dir=f"{tmp_path}/state",
+        residents=pool,  # type: ignore[arg-type]
+    )
+    assert pool.dropped == []
+
+
+# ── the resident base probe runs inside the sandbox, never in the runner ─
+
+
+class _ProbeProcess:
+    def __init__(self, exit_code: int) -> None:
+        self._exit = exit_code
+
+    def lines(self):
+        return iter(())
+
+    def kill(self) -> None:
+        pass
+
+    def wait(self) -> int:
+        return self._exit
+
+    def stderr_text(self) -> str:
+        return "" if self._exit == 0 else "fatal: not a valid object name"
+
+
+class _ProbeBackend:
+    def __init__(self, exit_code: int) -> None:
+        self.exit_code = exit_code
+        self.specs: list = []
+
+    def spawn(self, spec):
+        self.specs.append(spec)
+        return _ProbeProcess(self.exit_code)
+
+
+def test_the_base_probe_is_sandboxed_git_with_no_fetch(tmp_path):
+    """Staging acceptance regression: the first version ran runner-side git
+    against the agent-owned tree — git's dubious-ownership refusal failed the
+    probe on every real deployment and silently demoted every resident turn
+    to cold. The probe must run through the backend (inside the boundary the
+    agent already owned, like build_patch), with the safe-directory config
+    the sandbox side gets — and it must not fetch: that would put the clone
+    credential inside an agent-controlled filesystem."""
+    import dataclasses
+
+    from cloud_agent_host.runner import _resident_base_ready
+
+    job = dataclasses.replace(_JOB, base_sha="a" * 40)
+    backend = _ProbeBackend(exit_code=0)
+    assert _resident_base_ready(str(tmp_path), job, backend) is True
+    (spec,) = backend.specs
+    assert spec.argv == ["git", "cat-file", "-e", f"{'a' * 40}^{{commit}}"]
+    assert spec.workdir == str(tmp_path)
+    assert spec.env == {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "*",
+    }
+
+    missing = _ProbeBackend(exit_code=1)
+    assert _resident_base_ready(str(tmp_path), job, missing) is False
+    (spec,) = missing.specs
+    assert "fetch" not in " ".join(spec.argv)  # cold restart, never a fetch
+
+    # No pinned base short-circuits without spawning anything.
+    lazy = _ProbeBackend(exit_code=0)
+    assert _resident_base_ready(str(tmp_path), dataclasses.replace(_JOB, base_sha=None), lazy)
+    assert lazy.specs == []
+    # A malformed sha is refused before any process runs.
+    assert not _resident_base_ready(str(tmp_path), dataclasses.replace(_JOB, base_sha="HEAD"), lazy)
+    assert lazy.specs == []
+
+
+def test_an_unusable_residency_is_a_first_class_event(tmp_path, monkeypatch):
+    """The demotion must say so in the owner's stream: the staging acceptance
+    debugged the silent version of this branch blind, from CP access logs."""
+    import dataclasses
+
+    job = dataclasses.replace(_JOB, thread_id="t-hot", base_sha=None, runtime="generic")
+    entry = _resident_entry(tmp_path, runtime_id="claude-code")  # thread ran another harness
+
+    class _Pool:
+        def __init__(self) -> None:
+            self.dropped: list = []
+
+        def lookup(self, thread_id):
+            return entry if thread_id == "t-hot" else None
+
+        def drop(self, thread_id, *, release, generation=None):
+            self.dropped.append((thread_id, release, generation))
+
+        def offer(self, **_kw):
+            return None
+
+    class _Control(FakeControl):
+        def __init__(self) -> None:
+            super().__init__()
+            self.job_id = job.job_id
+
+        def finish(self, state, detail=None, **_kw):
+            self.finished = (state, detail)
+
+    class _EchoBackend(ProcessBackend):
+        def has_binary(self, name: str) -> bool:
+            return True
+
+    control = _Control()
+    monkeypatch.setattr(runner_mod, "claim", lambda **_kw: job)
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *a, **k: control)
+    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *a, **k: FakeHeart())
+    monkeypatch.setattr(runner_mod, "existing_checkout_sha", lambda *a, **k: "abc")
+    monkeypatch.setattr(runner_mod, "align_existing_checkout", lambda *a, **k: "abc")
+    monkeypatch.setattr(runner_mod, "build_patch", lambda *a, **k: "")
+    monkeypatch.setattr(runner_mod, "save_workspace_snapshot", lambda *a, **k: True)
+    runtime = _echo_runtime(2)
+    monkeypatch.setattr(runner_mod, "get_runtime", lambda *a, **k: runtime)
+
+    pool = _Pool()
+    code = runner_mod.run_once(
+        base_url="http://cp",
+        dispatcher_token="tok",
+        worker_id="w1",
+        workdir=str(tmp_path),
+        backend=_EchoBackend(acknowledged_unsafe=True),
+        residents=pool,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert pool.dropped and pool.dropped[0][0] == "t-hot"
+    assert ("lifecycle", {"phase": "residency_unusable", "reason": "harness_switch"}) in [
+        (kind, payload) for kind, payload in control.events
+    ]

@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import json
 import os
 import secrets
 import shlex
@@ -39,7 +40,7 @@ import time
 import tty
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.egress import (
     PHASES,
@@ -103,6 +104,13 @@ if getent hosts "$host" >/dev/null 2>&1; then echo dns-only; else echo unresolve
 # same mechanism with a different isolation boundary underneath.
 KATA_RUNTIME = "io.containerd.kata.v2"
 
+# Image labels carrying the CLI versions baked into a sandbox image, e.g.
+# ``org.freeinference.runtime.claude-code.version=1.2.3``. The image build
+# writes them; the runner only reads. Unlabeled images report no versions
+# rather than guessing — a stamp that might be wrong is worse than none.
+RUNTIME_VERSION_LABEL_PREFIX = "org.freeinference.runtime."
+RUNTIME_VERSION_LABEL_SUFFIX = ".version"
+
 # Must match `useradd --uid` in deploy/sandbox/Dockerfile.agent-sandbox. The
 # runner chowns each job worktree to this id before mounting it, so a drift
 # between the two means the agent cannot write to its own working tree.
@@ -136,6 +144,13 @@ def _walk_entries(path: str) -> Iterator[tuple[str, bool]]:
             yield os.path.join(root, name), False
 
 
+#: Where a job's durable harness state (agent session files) is mounted inside
+#: the sandbox. Constant on purpose: Claude Code derives its session-file path
+#: from CWD and config dir, and a path that moved between turns would strand
+#: the session a checkpoint restored (design §6, workdir/HOME stability).
+STATE_MOUNT_TARGET = "/agent-state"
+
+
 @dataclass
 class SandboxSpec:
     """Everything a backend needs to run one job's agent."""
@@ -143,6 +158,14 @@ class SandboxSpec:
     argv: list[str]
     workdir: str
     env: dict[str, str] = field(default_factory=dict)
+    #: Host directory bind-mounted at :data:`STATE_MOUNT_TARGET` so harness
+    #: session files survive the container. ``None`` mounts nothing — the
+    #: pre-checkpoint behaviour, and what every non-session phase uses.
+    state_dir: str | None = None
+    #: Keep stdin open for a resident session (HOT, design §7): follow-up
+    #: turns are written to the process instead of spawning a new one. The
+    #: default is the one-shot world every other phase runs in.
+    live_input: bool = False
     # Which lifecycle phase this spawn belongs to. The two get different egress
     # tiers: setup installs dependencies and needs a registry, the agent turn
     # afterwards does not — and the agent turn is the one running untrusted
@@ -172,6 +195,23 @@ class SandboxProcess(ABC):
     @abstractmethod
     def stderr_text(self) -> str:
         """Return whatever the agent wrote to stderr."""
+
+    def write_line(self, text: str) -> None:
+        """Write one line to the agent's stdin (HOT live input, design §7).
+
+        Only meaningful for a process spawned with ``live_input``; the
+        default refuses, because writing into a closed pipe should be a
+        driver bug surfaced loudly, not a silent drop.
+        """
+        raise SandboxError("this sandbox process was not spawned with live input")
+
+    def close_stdin(self) -> None:
+        """Signal end-of-input to a live process. No-op without live input."""
+        return
+
+    def poll(self) -> int | None:
+        """Reap-if-exited: the exit code, or ``None`` while still running."""
+        return None
 
 
 class TerminalProcess(ABC):
@@ -233,6 +273,16 @@ class SandboxBackend(ABC):
     def sandbox_metadata(self) -> dict[str, str]:
         """Return trusted, owner-visible metadata for this execution backend."""
         return {"sandbox_backend": self.name}
+
+    def version_stamp(self) -> dict[str, Any]:
+        """What actually runs here, for the host heartbeat to report.
+
+        Empty for backends with nothing to attest. The container backend
+        reports its isolation runtime, image digest and the CLI versions baked
+        into the image, so the control plane can stamp attempts with what
+        executed them (issue #54) instead of trusting documentation.
+        """
+        return {}
 
     @abstractmethod
     def spawn(self, spec: SandboxSpec) -> SandboxProcess:
@@ -328,6 +378,25 @@ class _PopenProcess(SandboxProcess):
             # out-of-memory on the runner.
             del self._stderr_chunks[:-200]
 
+    def write_line(self, text: str) -> None:
+        """Write one line to the child's stdin, flushed immediately."""
+        stdin = self._process.stdin
+        if stdin is None:
+            raise SandboxError("this sandbox process was not spawned with live input")
+        stdin.write(text.rstrip("\n") + "\n")
+        stdin.flush()
+
+    def close_stdin(self) -> None:
+        """EOF the child's stdin; harmless when there is none."""
+        stdin = self._process.stdin
+        if stdin is not None:
+            with contextlib.suppress(OSError):
+                stdin.close()
+
+    def poll(self) -> int | None:
+        """Reap-if-exited without blocking."""
+        return self._process.poll()
+
     def lines(self) -> Iterator[str]:
         """Yield stdout lines from the child process."""
         assert self._process.stdout is not None
@@ -395,7 +464,9 @@ class ProcessBackend(SandboxBackend):
                 spec.argv,
                 cwd=spec.workdir,
                 env=spec.env,
-                stdin=subprocess.DEVNULL,
+                # Same contract as the container backend: a live spawn keeps
+                # stdin open for follow-up turns; everything else sees EOF.
+                stdin=subprocess.PIPE if spec.live_input else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -664,6 +735,9 @@ class ContainerBackend(SandboxBackend):
         # starts. The ephemeral value prevents accidental broad cleanup if a
         # backend is constructed outside that broker-owned lifecycle.
         self._terminal_owner_id = "unscoped-" + secrets.token_hex(12)
+        # Filled by the first version_stamp() call. The image is pinned for
+        # this backend's lifetime, so one inspect answers for every heartbeat.
+        self._version_stamp: dict[str, Any] | None = None
 
     @property
     def provides_isolation(self) -> bool:
@@ -679,6 +753,73 @@ class ContainerBackend(SandboxBackend):
         if self.runtime:
             metadata["sandbox_runtime"] = self.runtime
         return metadata
+
+    def version_stamp(self) -> dict[str, Any]:
+        """Report isolation runtime, image digest and baked CLI versions.
+
+        ``sandbox_runtime`` is always present and ``""`` is a positive
+        statement — a container backend with no VM runtime is runc on the
+        shared kernel. ``None``/absent would read as "not reported", and the
+        difference between "attested runc" and "silent" is exactly what the
+        control plane needs to stop trusting documentation about isolation.
+
+        Digest and versions degrade to empty on inspect failure rather than
+        failing the heartbeat: liveness reporting must not come to depend on
+        the local image store answering.
+        """
+        if self._version_stamp is None:
+            self._version_stamp = self._collect_version_stamp()
+        return dict(self._version_stamp)
+
+    def _collect_version_stamp(self) -> dict[str, Any]:
+        stamp: dict[str, Any] = {
+            "sandbox_runtime": self.runtime or "",
+            "sandbox_image_digest": "",
+            "runtime_versions": {},
+        }
+        try:
+            proc = subprocess.run(
+                [self.docker_binary, "image", "inspect", self.image, "--format", "{{json .}}"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return stamp
+        if proc.returncode != 0:
+            return stamp
+        try:
+            info = json.loads(proc.stdout.strip() or "{}")
+        except json.JSONDecodeError:
+            return stamp
+        if not isinstance(info, dict):
+            return stamp
+        # RepoDigests names the registry content address — stable across hosts
+        # pulling the same image. A locally built, never-pushed image has none;
+        # its local Id still pins *what* ran, just not where it came from.
+        digests = info.get("RepoDigests")
+        if isinstance(digests, list) and digests and isinstance(digests[0], str):
+            stamp["sandbox_image_digest"] = digests[0]
+        elif isinstance(info.get("Id"), str):
+            stamp["sandbox_image_digest"] = info["Id"]
+        labels = (info.get("Config") or {}).get("Labels") or {}
+        if isinstance(labels, dict):
+            versions: dict[str, str] = {}
+            for key, value in labels.items():
+                if (
+                    isinstance(key, str)
+                    and isinstance(value, str)
+                    and key.startswith(RUNTIME_VERSION_LABEL_PREFIX)
+                    and key.endswith(RUNTIME_VERSION_LABEL_SUFFIX)
+                ):
+                    runtime_id = key[
+                        len(RUNTIME_VERSION_LABEL_PREFIX) : -len(RUNTIME_VERSION_LABEL_SUFFIX)
+                    ]
+                    if runtime_id:
+                        versions[runtime_id] = value
+            stamp["runtime_versions"] = versions
+        return stamp
 
     @property
     def is_vm_isolated(self) -> bool:
@@ -1206,6 +1347,15 @@ class ContainerBackend(SandboxBackend):
             f"type=bind,source={spec.workdir},target=/workspace",
             "--workdir",
             "/workspace",
+        ]
+        if spec.state_dir is not None:
+            # Deliberately outside /workspace: session files must never be
+            # able to leak into the patch the publisher pushes.
+            argv += [
+                "--mount",
+                f"type=bind,source={spec.state_dir},target={STATE_MOUNT_TARGET}",
+            ]
+        argv += [
             # Stated rather than inherited from the image: the runner chowns
             # the worktree to exactly this id, and a silent drift between the
             # two leaves the agent unable to write to its own working tree.
@@ -1268,7 +1418,11 @@ class ContainerBackend(SandboxBackend):
                 # certs); the agent's environment is passed via --env above and
                 # does not leak into the client's.
                 env={**os.environ},
-                stdin=subprocess.DEVNULL,
+                # `docker run --interactive` forwards the client's stdin, so a
+                # live pipe here is a live pipe inside the sandbox (HOT). The
+                # one-shot world keeps DEVNULL: a CLI that would block on a
+                # silent open pipe must see EOF immediately.
+                stdin=subprocess.PIPE if spec.live_input else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

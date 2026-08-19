@@ -47,6 +47,9 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent_host.logging_utils import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+if TYPE_CHECKING:
     from collections.abc import Iterator
 
 logger = get_logger(__name__)
@@ -285,12 +288,22 @@ def heartbeat(
     broker_url: str | None = None,
     capabilities: list[str] | None = None,
     runner_version: str | None = None,
+    sandbox_runtime: str | None = None,
+    sandbox_image_digest: str | None = None,
+    runtime_versions: dict[str, str] | None = None,
+    residencies: list[dict[str, Any]] | None = None,
+    on_residencies_lost: Callable[[list[str]], None] | None = None,
 ) -> HostIdentity:
     """Report liveness and capacity, and read back what the pool decided.
 
     The answer carries the operator's side of the conversation — ``draining``,
     ``offline``, a changed interval — which is the only way a runner learns
     that a human asked it to stop taking work.
+
+    The version stamp travels with every beat (issue #54): ``sandbox_runtime``
+    (``""`` = shared-kernel runc, a positive statement), the sandbox image
+    digest, and the CLI versions baked into that image. ``None`` means "not
+    reported" and leaves the control plane's last knowledge in place.
     """
     answer = _post(
         f"{base_url.rstrip('/')}/v1/agent/host/heartbeat",
@@ -299,10 +312,21 @@ def heartbeat(
             "broker_url": broker_url,
             "capabilities": capabilities,
             "runner_version": runner_version,
+            "sandbox_runtime": sandbox_runtime,
+            "sandbox_image_digest": sandbox_image_digest,
+            "runtime_versions": runtime_versions,
+            "residencies": residencies,
         },
         bearer=identity.credential,
     )
     _warn_broker_error(answer, identity.host)
+    lost = answer.get("residencies_lost")
+    if lost and on_residencies_lost is not None:
+        # The control plane's side of the fence, delivered with the
+        # generation each verdict is about: the pool retires an entry only on
+        # an exact (thread, generation) match, so a late answer to an old
+        # beat cannot end a successor residency.
+        on_residencies_lost([item for item in lost if isinstance(item, dict)])
     identity.status = str(answer.get("status") or identity.status)
     interval = answer.get("heartbeat_interval_seconds")
     if isinstance(interval, (int, float)) and interval > 0:
@@ -310,6 +334,67 @@ def heartbeat(
     reported = answer.get("slots_total")
     identity.slots_total = int(reported) if isinstance(reported, int) else identity.slots_total
     return identity
+
+
+def establish_residency(
+    *,
+    base_url: str,
+    identity: HostIdentity,
+    thread_id: str,
+    runtime_id: str,
+    runtime_version: str | None = None,
+    sandbox_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Take residency for a thread this host is running; ``None`` = refused.
+
+    Returns ``{generation, credential, model}`` — ``credential`` may be None
+    (workspace-only residency; turns ride warm_native on per-attempt grants).
+    Every failure is ``None`` rather than an exception: a runner that cannot
+    take residency simply does not keep the workspace hot, and the thread's
+    next turn goes COLD off the checkpoint it already exported — the designed
+    degradation, never an error worth crashing a turn over.
+    """
+    try:
+        answer = _post(
+            f"{base_url.rstrip('/')}/v1/agent/host/residencies",
+            {
+                "thread_id": thread_id,
+                "runtime_id": runtime_id,
+                "runtime_version": runtime_version,
+                "sandbox_id": sandbox_id,
+            },
+            bearer=identity.credential,
+        )
+    except (HostRemoved, EnrollmentError):
+        return None
+    generation = answer.get("generation")
+    if not (isinstance(generation, int) and generation >= 1):
+        return None
+    return {
+        "generation": generation,
+        "credential": answer.get("credential") or None,
+        "model": answer.get("model") or None,
+    }
+
+
+def release_residency(
+    *, base_url: str, identity: HostIdentity, thread_id: str, generation: int
+) -> None:
+    """Tell the control plane this host is done with a residency.
+
+    Best-effort: the reaper lapses whatever a lost release leaves behind.
+    """
+    try:
+        _post(
+            f"{base_url.rstrip('/')}/v1/agent/host/residencies/release",
+            {"thread_id": thread_id, "generation": generation},
+            bearer=identity.credential,
+        )
+    except (HostRemoved, EnrollmentError):
+        logger.info(
+            "agent_residency_release_unacknowledged",
+            extra={"event": "agent_residency_release_unacknowledged", "thread_id": thread_id},
+        )
 
 
 def ensure_enrolled(
@@ -422,6 +507,11 @@ class HostHeartbeat:
         broker_url: str | None = None,
         capabilities: list[str] | None = None,
         runner_version: str | None = None,
+        sandbox_runtime: str | None = None,
+        sandbox_image_digest: str | None = None,
+        runtime_versions: dict[str, str] | None = None,
+        residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
+        on_residencies_lost: Callable[[list[str]], None] | None = None,
     ) -> None:
         self._base_url = base_url
         self._identity = identity
@@ -429,6 +519,13 @@ class HostHeartbeat:
         self._broker_url = broker_url
         self._capabilities = capabilities
         self._runner_version = runner_version
+        self._sandbox_runtime = sandbox_runtime
+        self._sandbox_image_digest = sandbox_image_digest
+        self._runtime_versions = runtime_versions
+        # Freshly asked on every beat — a static list would report sandboxes
+        # the pool has already torn down.
+        self._residency_beats = residency_beats
+        self._on_residencies_lost = on_residencies_lost
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         #: Set when the control plane says this host is gone. The runner reads
@@ -486,6 +583,13 @@ class HostHeartbeat:
                     broker_url=self._broker_url,
                     capabilities=self._capabilities,
                     runner_version=self._runner_version,
+                    sandbox_runtime=self._sandbox_runtime,
+                    sandbox_image_digest=self._sandbox_image_digest,
+                    runtime_versions=self._runtime_versions,
+                    residencies=(
+                        self._residency_beats() if self._residency_beats is not None else None
+                    ),
+                    on_residencies_lost=self._on_residencies_lost,
                 )
             except HostRemoved:
                 # Definitive: this credential is not one the control plane

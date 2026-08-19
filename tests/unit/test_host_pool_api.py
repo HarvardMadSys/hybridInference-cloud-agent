@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import admin_hosts, hosts
-from cloud_agent.api.deps import get_agent_job_store, verify_admin_access
+from cloud_agent.api.deps import get_agent_job_store, get_grant_client, verify_admin_access
 from cloud_agent.broker_routing import (
     ENV_BROKER_HOSTS,
     BrokerUrlRefused,
@@ -56,6 +56,11 @@ class FakeHostPoolStore:
         self.rows: dict[str, dict[str, Any]] = {}
         self.tokens: dict[str, dict[str, Any]] = {}
         self.active_host: str | None = None
+        self.establish_answer: dict[str, Any] | None = None
+        self.linked: list[tuple[str, int, str]] = []
+        self.link_ok = True
+        self.beat_answers: dict[tuple[str, int], str | None] = {}
+        self.release_answer: str | None = None
 
     # -- enrollment tokens
 
@@ -94,6 +99,9 @@ class FakeHostPoolStore:
             "runner_version": None,
             "broker_url": None,
             "last_heartbeat_at": None,
+            "sandbox_runtime": None,
+            "sandbox_image_digest": None,
+            "runtime_versions": None,
             "enrolled": False,
             "credential_hash": None,
         }
@@ -140,6 +148,9 @@ class FakeHostPoolStore:
         runner_version: str | None = None,
         broker_url: str | None = None,
         capabilities: list[str] | None = None,
+        sandbox_runtime: str | None = None,
+        sandbox_image_digest: str | None = None,
+        runtime_versions: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
@@ -151,6 +162,11 @@ class FakeHostPoolStore:
             ("slots_total", slots_total),
             ("runner_version", runner_version),
             ("broker_url", broker_url),
+            # "" and {} overwrite — only None means "not reported", exactly
+            # the COALESCE the real store applies.
+            ("sandbox_runtime", sandbox_runtime),
+            ("sandbox_image_digest", sandbox_image_digest),
+            ("runtime_versions", runtime_versions),
         ):
             if value is not None:
                 row[field] = value
@@ -186,6 +202,54 @@ class FakeHostPoolStore:
         rows = [{**row, "is_active": row["host"] == self.active_host} for row in self.rows.values()]
         return rows, self.active_host
 
+    # -- thread residencies
+    #
+    # Scripted, not simulated: the earn-gate, generation fencing and host
+    # scoping are SQL decisions pinned by the ``dbtest`` tier. What these
+    # answers exercise is the endpoint's *grant choreography* around whatever
+    # the store said — mint on establish, revoke the predecessor, renew on the
+    # beat that extends, revoke on release.
+
+    async def establish_residency(self, **_kwargs: Any) -> dict[str, Any] | None:
+        return self.establish_answer
+
+    async def link_residency_grant(self, *, thread_id: str, generation: int, grant_id: str) -> bool:
+        self.linked.append((thread_id, generation, grant_id))
+        return self.link_ok
+
+    async def heartbeat_residency(
+        self, *, thread_id: str, generation: int, host: str, ttl_seconds: float
+    ) -> str | None:
+        return self.beat_answers.get((thread_id, generation))
+
+    async def release_residency(self, *, thread_id: str, generation: int, host: str) -> str | None:
+        return self.release_answer
+
+
+class RecordingGrants:
+    """The grant client's shape, recording every call; mint can be scripted."""
+
+    def __init__(self) -> None:
+        self.minted: list[dict[str, Any]] = []
+        self.renewed: list[str] = []
+        self.revoked: list[str] = []
+        self.fail_mint = False
+
+    async def mint(self, **kwargs: Any) -> dict[str, Any]:
+        if self.fail_mint:
+            raise RuntimeError("gateway is down")
+        self.minted.append(kwargs)
+        n = len(self.minted)
+        return {"grant_id": f"agr-{n}", "token": f"tok-{n}"}
+
+    async def renew(self, grant_id: str) -> dict[str, Any]:
+        self.renewed.append(grant_id)
+        return {}
+
+    async def revoke(self, grant_id: str) -> bool:
+        self.revoked.append(grant_id)
+        return True
+
 
 def _build_app(store: FakeHostPoolStore) -> FastAPI:
     app = FastAPI()
@@ -212,6 +276,26 @@ async def client(monkeypatch):
     transport = ASGITransport(app=_build_app(store))
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
         yield async_client, store
+
+
+@pytest_asyncio.fixture()
+async def residency_client(monkeypatch):
+    """Like ``client``, plus a recording grant client behind the dependency."""
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
+
+    async def _no_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(admin_hosts, "log_admin_action", _no_audit)
+    monkeypatch.setattr(admin_hosts, "get_client_ip", lambda _request: "127.0.0.1")
+
+    store = FakeHostPoolStore()
+    grants = RecordingGrants()
+    app = _build_app(store)
+    app.dependency_overrides[get_grant_client] = lambda: grants
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        yield async_client, store, grants
 
 
 async def _enroll(client, store, name="runner-a", **body) -> str:
@@ -513,6 +597,54 @@ async def test_a_heartbeat_can_update_capacity_and_version(client):
     assert response.json()["slots_total"] == 6
     assert store.rows["runner-a"]["runner_version"] == "1.4.0"
     assert store.rows["runner-a"]["broker_url"] == "http://broker-a:8092"
+
+
+async def test_a_heartbeat_carries_the_version_stamp_to_the_admin_page(client):
+    """What runs on a host — runtime, image, CLI versions — is heartbeat-borne.
+
+    ``sandbox_runtime: ""`` is the interesting value: it is the host positively
+    attesting shared-kernel runc, and it must survive to the admin surface
+    rather than collapsing into "never reported".
+    """
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "sandbox_runtime": "",
+            "sandbox_image_digest": "sha256:abc123",
+            "runtime_versions": {"claude-code": "1.2.3"},
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert store.rows["runner-a"]["sandbox_runtime"] == ""
+    assert store.rows["runner-a"]["sandbox_image_digest"] == "sha256:abc123"
+    assert store.rows["runner-a"]["runtime_versions"] == {"claude-code": "1.2.3"}
+    listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+    (shown,) = [h for h in listed["hosts"] if h["host"] == "runner-a"]
+    assert shown["sandbox_runtime"] == ""
+    assert shown["sandbox_image_digest"] == "sha256:abc123"
+    assert shown["runtime_versions"] == {"claude-code": "1.2.3"}
+
+
+async def test_a_stampless_heartbeat_keeps_the_last_stamp(client):
+    """A runner predating the stamp fields must not blank a recorded one."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"sandbox_runtime": "io.containerd.kata.v2", "runtime_versions": {}},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    await async_client.post(
+        "/v1/agent/host/heartbeat", json={}, headers={"Authorization": f"Bearer {credential}"}
+    )
+
+    assert store.rows["runner-a"]["sandbox_runtime"] == "io.containerd.kata.v2"
+    assert store.rows["runner-a"]["runtime_versions"] == {}
 
 
 async def test_a_heartbeat_without_a_credential_is_refused(client):
@@ -865,3 +997,175 @@ def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
 
     monkeypatch.delenv(ENV_BROKER_HOSTS)
     assert validate_broker_url("http://anything:8081") == "http://anything:8081"
+
+
+# ── residency grant choreography (design §14) ──────────────────────────
+
+
+def _establish_row(**overrides: Any) -> dict[str, Any]:
+    row = {
+        "thread_id": "th-1",
+        "generation": 1,
+        "status": "hot",
+        "previous_grant_id": None,
+        "establishing_job_id": "job-1",
+        "establishing_attempt_id": "att-1",
+        "user_id": "u1",
+        "model": "glm-5.1",
+    }
+    row.update(overrides)
+    return row
+
+
+async def test_establish_mints_a_thread_attributed_grant(residency_client):
+    """The credential in the answer is the residency's own: minted against the
+    thread (not the establishing attempt's job), linked under the generation
+    the row was fenced with, and scoped to the establishing turn's model."""
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.establish_answer = _establish_row()
+
+    response = await client.post(
+        "/v1/agent/host/residencies",
+        json={"thread_id": "th-1", "runtime_id": "claude-code"},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["credential"] == "tok-1"
+    assert body["model"] == "glm-5.1"
+    assert store.linked == [("th-1", 1, "agr-1")]
+    (mint,) = grants.minted
+    assert mint["job_id"] == "thread:th-1"
+    assert mint["user_id"] == "u1"
+    assert mint["models"] == ["glm-5.1"]
+    assert mint["attempt_id"] == "att-1"
+    assert grants.revoked == []
+
+
+async def test_a_takeover_revokes_the_predecessors_grant(residency_client):
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.establish_answer = _establish_row(generation=2, previous_grant_id="agr-old")
+
+    response = await client.post(
+        "/v1/agent/host/residencies",
+        json={"thread_id": "th-1", "runtime_id": "claude-code"},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    # The zombie's credential dies at takeover, not at its TTL.
+    assert "agr-old" in grants.revoked
+
+
+async def test_a_failed_mint_degrades_to_a_workspace_only_residency(residency_client):
+    """No grant is no outage: the residency stands, the credential is null,
+    and turns ride warm_native on their own per-attempt grants."""
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.establish_answer = _establish_row()
+    grants.fail_mint = True
+
+    response = await client.post(
+        "/v1/agent/host/residencies",
+        json={"thread_id": "th-1", "runtime_id": "claude-code"},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["credential"] is None
+    assert store.linked == []
+
+
+async def test_a_grant_that_cannot_be_linked_is_revoked_not_handed_over(residency_client):
+    """The link is the only thing that will ever renew or revoke the grant;
+    a takeover between mint and link must leave no orphan credential."""
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.establish_answer = _establish_row()
+    store.link_ok = False
+
+    response = await client.post(
+        "/v1/agent/host/residencies",
+        json={"thread_id": "th-1", "runtime_id": "claude-code"},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["credential"] is None
+    assert grants.revoked == ["agr-1"]
+
+
+async def test_the_earn_gate_refusal_is_a_409_and_mints_nothing(residency_client):
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.establish_answer = None
+
+    response = await client.post(
+        "/v1/agent/host/residencies",
+        json={"thread_id": "th-1", "runtime_id": "claude-code"},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 409
+    assert grants.minted == []
+
+
+async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_client):
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.beat_answers = {
+        ("th-linked", 1): "agr-1",  # extended, grant linked → renew
+        ("th-grantless", 1): "",  # extended, workspace-only → nothing to renew
+        # th-lost absent → not extended → reported lost
+    }
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "residencies": [
+                {"thread_id": "th-linked", "generation": 1},
+                {"thread_id": "th-grantless", "generation": 1},
+                {"thread_id": "th-lost", "generation": 3},
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert grants.renewed == ["agr-1"]
+    assert response.json()["residencies_lost"] == [{"thread_id": "th-lost", "generation": 3}]
+
+
+async def test_release_revokes_the_grant_it_returns(residency_client):
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.release_answer = "agr-1"
+
+    response = await client.post(
+        "/v1/agent/host/residencies/release",
+        json={"thread_id": "th-1", "generation": 1},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert grants.revoked == ["agr-1"]
+
+
+async def test_a_stale_release_is_ok_false_and_revokes_nothing(residency_client):
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.release_answer = None
+
+    response = await client.post(
+        "/v1/agent/host/residencies/release",
+        json={"thread_id": "th-1", "generation": 1},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert grants.revoked == []

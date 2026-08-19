@@ -145,6 +145,12 @@ _JOB_COLUMNS = (
 )
 _QUALIFIED_JOB_COLUMNS = ", ".join(f"j.{column.strip()}" for column in _JOB_COLUMNS.split(","))
 
+#: How long a queued turn is reserved for its thread's resident host before
+#: any host may claim it (design §7). Long enough to survive a busy runner's
+#: poll cycle; short enough that a vanished host costs one COLD start, not a
+#: stuck queue.
+RESIDENCY_AFFINITY_HOLD_S = 30.0
+
 # Everything a caller may see about a host. ``credential_hash`` is deliberately
 # not in it — reading it back out would make the row as good as the credential
 # — and is reported only as the boolean ``enrolled``.
@@ -161,6 +167,9 @@ _HOST_COLUMN_NAMES = (
     "runner_version",
     "broker_url",
     "last_heartbeat_at",
+    "sandbox_runtime",
+    "sandbox_image_digest",
+    "runtime_versions",
 )
 _HOST_COLUMNS = ", ".join(_HOST_COLUMN_NAMES) + ", (credential_hash IS NOT NULL) AS enrolled"
 # The same list qualified with ``h.``. Required wherever the query joins
@@ -1282,6 +1291,8 @@ class AgentJobStore:
         host = dict(row)
         host["labels"] = _load_json(host.get("labels")) or {}
         host["capabilities"] = _load_json(host.get("capabilities")) or []
+        # None (never reported) and {} (reported: no labels) stay distinct.
+        host["runtime_versions"] = _load_json(host.get("runtime_versions"))
         return host
 
     async def issue_enroll_token(
@@ -1443,6 +1454,9 @@ class AgentJobStore:
         runner_version: str | None = None,
         broker_url: str | None = None,
         capabilities: list[str] | None = None,
+        sandbox_runtime: str | None = None,
+        sandbox_image_digest: str | None = None,
+        runtime_versions: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -1470,7 +1484,10 @@ class AgentJobStore:
                     slots_total = COALESCE($2, slots_total),
                     runner_version = COALESCE($3, runner_version),
                     broker_url = COALESCE($4, broker_url),
-                    capabilities = COALESCE($5::jsonb, capabilities)
+                    capabilities = COALESCE($5::jsonb, capabilities),
+                    sandbox_runtime = COALESCE($6, sandbox_runtime),
+                    sandbox_image_digest = COALESCE($7, sandbox_image_digest),
+                    runtime_versions = COALESCE($8::jsonb, runtime_versions)
                 WHERE host = $1
                 RETURNING {_HOST_COLUMNS}
                 """,
@@ -1479,6 +1496,11 @@ class AgentJobStore:
                 runner_version,
                 broker_url,
                 None if capabilities is None else json.dumps(normalize_capabilities(capabilities)),
+                # "" survives COALESCE deliberately: an empty runtime is the
+                # host attesting shared-kernel runc, not declining to answer.
+                sandbox_runtime,
+                sandbox_image_digest,
+                None if runtime_versions is None else json.dumps(runtime_versions),
             )
         return None if row is None else self._host_row_to_dict(row)
 
@@ -1688,9 +1710,11 @@ class AgentJobStore:
                 # to claim is the one outcome that makes the switch a lie.
                 return None
             capabilities = "[]"
+            host_stamp: dict[str, Any] = {}
             if host is not None:
                 host_row = await conn.fetchrow(
-                    "SELECT status, capabilities, slots_total, slots_used "
+                    "SELECT status, capabilities, slots_total, slots_used, "
+                    "sandbox_runtime, sandbox_image_digest, runtime_versions "
                     "FROM agent_runner_hosts WHERE host = $1",
                     host,
                 )
@@ -1707,6 +1731,11 @@ class AgentJobStore:
                 ):
                     return None
                 capabilities = host_row["capabilities"]
+                host_stamp = {
+                    "sandbox_runtime": host_row["sandbox_runtime"],
+                    "sandbox_image_digest": host_row["sandbox_image_digest"],
+                    "runtime_versions": _load_json(host_row["runtime_versions"]) or {},
+                }
             # Follow-ups may be submitted while a run is active. Promote only
             # those whose direct parent has settled; a chain therefore
             # advances one turn at a time even with multiple waiting messages.
@@ -1729,16 +1758,37 @@ class AgentJobStore:
                 """,
                 list(TERMINAL_STATES),
             )
+            # Affinity (design §7): a job whose thread is hot on another host
+            # is *held* for that host — its live process has the whole
+            # conversation in memory, and any other machine would demote the
+            # turn to COLD for no reason. The hold is a window, not a pin: if
+            # the resident host does not collect within it (busy, gone,
+            # draining), anyone may take the job and the ladder degrades one
+            # rung, exactly as designed. ``updated_at`` is when the job last
+            # became claimable, so waiting follow-ups time out from promotion,
+            # not creation. FOR UPDATE OF j: the residency row is read, never
+            # locked — claims must not serialize behind heartbeats.
             job_row = await conn.fetchrow(
                 f"""
-                SELECT {_JOB_COLUMNS} FROM agent_jobs
-                WHERE state = 'queued' AND cancel_requested = FALSE
-                  AND COALESCE(metadata->'requires', '[]'::jsonb) <@ $1::jsonb
-                ORDER BY created_at
+                SELECT {_QUALIFIED_JOB_COLUMNS} FROM agent_jobs j
+                LEFT JOIN agent_thread_residencies r
+                  ON r.thread_id = j.thread_id
+                 AND r.status = 'hot'
+                 AND r.lease_expires_at > NOW()
+                WHERE j.state = 'queued' AND j.cancel_requested = FALSE
+                  AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
+                  AND (
+                        r.thread_id IS NULL
+                        OR r.host = $2
+                        OR j.updated_at <= NOW()
+                            - make_interval(secs => {RESIDENCY_AFFINITY_HOLD_S})
+                  )
+                ORDER BY j.created_at
                 LIMIT 1
-                FOR UPDATE SKIP LOCKED
+                FOR UPDATE OF j SKIP LOCKED
                 """,
                 capabilities,
+                host,
             )
             if job_row is None:
                 return None
@@ -1770,13 +1820,22 @@ class AgentJobStore:
                 "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM agent_attempts WHERE job_id = $1",
                 job_id,
             )
+            # The stamp is copied from the host row at claim time, not joined at
+            # read time: the question a retry or an audit asks is "what ran the
+            # attempt", and the host's *current* image answers a different
+            # question once the machine upgrades (issue #54).
+            runtime_versions = host_stamp.get("runtime_versions") or {}
+            runtime_version = runtime_versions.get(job_row["runtime"])
             attempt = await conn.fetchrow(
                 """
                 INSERT INTO agent_attempts
                     (job_id, attempt_no, lease_owner, lease_generation,
-                     lease_expires_at, base_sha, host_id)
-                VALUES ($1, $2, $3, $4, NOW() + make_interval(secs => $5), $6, $7)
-                RETURNING id, attempt_no, lease_generation
+                     lease_expires_at, base_sha, host_id,
+                     sandbox_runtime, sandbox_image_digest, runtime_version)
+                VALUES ($1, $2, $3, $4, NOW() + make_interval(secs => $5), $6, $7,
+                        $8, $9, $10)
+                RETURNING id, attempt_no, lease_generation,
+                          sandbox_runtime, sandbox_image_digest, runtime_version
                 """,
                 job_id,
                 next_no,
@@ -1785,6 +1844,9 @@ class AgentJobStore:
                 lease_ttl_seconds,
                 job_row["base_sha"],
                 host,
+                host_stamp.get("sandbox_runtime"),
+                host_stamp.get("sandbox_image_digest"),
+                runtime_version,
             )
             await conn.execute(
                 "UPDATE agent_jobs SET state = 'running', current_attempt_id = $2, "
@@ -1798,6 +1860,13 @@ class AgentJobStore:
         claim["attempt_id"] = attempt["id"]
         claim["attempt_no"] = attempt["attempt_no"]
         claim["lease_generation"] = attempt["lease_generation"]
+        # The stamp as *written*, not as the host row reads later: the
+        # checkpoint gate must compare against what this attempt runs, and a
+        # rolling upgrade's heartbeat can move the host row between claim and
+        # gate (review finding: the TOCTOU the stamping existed to kill).
+        claim["sandbox_runtime"] = attempt["sandbox_runtime"]
+        claim["sandbox_image_digest"] = attempt["sandbox_image_digest"]
+        claim["runtime_version"] = attempt["runtime_version"]
         return claim
 
     @staticmethod
@@ -2021,6 +2090,7 @@ class AgentJobStore:
         lease_generation: int,
         event_type: str,
         payload: dict[str, Any] | None = None,
+        event_seq: int | None = None,
     ) -> int | None:
         """Append one event, fenced by the live lease.
 
@@ -2059,6 +2129,27 @@ class AgentJobStore:
                 attempt_id=attempt_id,
                 event_type=event_type,
                 payload=payload,
+                client_seq=event_seq,
+            )
+
+    async def record_continuity_mode(
+        self, *, attempt_id: int, lease_generation: int, mode: str
+    ) -> bool:
+        """Stamp which continuity rung this attempt runs on, lease-fenced."""
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    UPDATE agent_attempts
+                    SET continuity_mode = $3
+                    WHERE id = $1 AND lease_generation = $2
+                      AND status = 'running' AND lease_expires_at > NOW()
+                    RETURNING id
+                    """,
+                    attempt_id,
+                    lease_generation,
+                    mode,
+                )
             )
 
     async def terminal_workspace_ready(self, *, attempt_id: int) -> bool:
@@ -2180,15 +2271,29 @@ class AgentJobStore:
         attempt_id: int,
         event_type: str,
         payload: dict[str, Any] | None,
+        client_seq: int | None = None,
     ) -> int:
-        """Insert one event row inside the caller's transaction."""
+        """Insert one event row inside the caller's transaction.
+
+        A ``client_seq`` the attempt has already stored is a retry of a
+        response that never arrived: answer with the stored row's id and do
+        not run the thread-message mirror again — it ran when the row landed.
+        """
+        if client_seq is not None:
+            existing = await conn.fetchval(
+                "SELECT id FROM agent_job_events WHERE attempt_id = $1 AND client_seq = $2",
+                attempt_id,
+                client_seq,
+            )
+            if existing is not None:
+                return int(existing)
         event_id = await conn.fetchval(
             """
-            INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload)
+            INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload, client_seq)
             VALUES (
                 $1, $2,
                 (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_job_events WHERE attempt_id = $2),
-                $3, $4::jsonb
+                $3, $4::jsonb, $5
             )
             RETURNING id
             """,
@@ -2196,6 +2301,7 @@ class AgentJobStore:
             attempt_id,
             event_type,
             json.dumps(payload) if payload is not None else None,
+            client_seq,
         )
         text = (payload or {}).get("text")
         if event_type == "message" and isinstance(text, str) and text.strip():
@@ -2261,6 +2367,240 @@ class AgentJobStore:
                 kind,
                 content,
             )
+
+    # ── Thread residency (design §7, issue #57) ────────────────────────
+    #
+    # One row per thread, never deleted, generation strictly increasing —
+    # see migration 0009 for why deletion is forbidden. Every mutation is
+    # generation-scoped so a late writer from a previous residency changes
+    # nothing: heartbeats cannot re-promote, releases cannot end a successor.
+
+    async def establish_residency(
+        self,
+        *,
+        thread_id: str,
+        host: str,
+        runtime_id: str,
+        runtime_version: str | None,
+        ttl_seconds: float,
+        sandbox_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Take (or take over) a thread's residency; ``None`` = not earned.
+
+        Residency is something a host earns by *currently* running the
+        thread's turn — attempt on this host, ``running``, lease unexpired —
+        and the check shares a transaction and a row lock with the write, so
+        a finish or a supersede cannot slip between them, and an expired
+        attempt the reaper has not reached yet earns nothing (review
+        finding 4). Atomic across racers: two hosts serialize on the row,
+        each gets a distinct generation, and the larger one owns the thread.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            earns = await conn.fetchrow(
+                """
+                SELECT j.id AS job_id, j.user_id, j.model, a.id AS attempt_id
+                FROM agent_jobs j
+                JOIN agent_attempts a ON a.id = j.current_attempt_id
+                WHERE j.thread_id = $1 AND a.host_id = $2
+                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                LIMIT 1
+                FOR SHARE OF a
+                """,
+                thread_id,
+                host,
+            )
+            if earns is None:
+                return None
+            # The predecessor's grant, captured under the same transaction: a
+            # takeover is a credential rotation, and the old generation's
+            # grant must be revocable by the caller that just superseded it.
+            previous_grant_id = await conn.fetchval(
+                "SELECT grant_id FROM agent_thread_residencies WHERE thread_id = $1 FOR UPDATE",
+                thread_id,
+            )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO agent_thread_residencies
+                    (thread_id, host, sandbox_id, runtime_id, runtime_version,
+                     status, lease_expires_at)
+                VALUES ($1, $2, $3, $4, $5, 'hot',
+                        NOW() + make_interval(secs => $6))
+                ON CONFLICT (thread_id) DO UPDATE SET
+                    generation = agent_thread_residencies.generation + 1,
+                    host = EXCLUDED.host,
+                    sandbox_id = EXCLUDED.sandbox_id,
+                    runtime_id = EXCLUDED.runtime_id,
+                    runtime_version = EXCLUDED.runtime_version,
+                    status = 'hot',
+                    lease_expires_at = EXCLUDED.lease_expires_at,
+                    established_at = NOW(),
+                    last_active_at = NOW()
+                RETURNING *
+                """,
+                thread_id,
+                host,
+                sandbox_id,
+                runtime_id,
+                runtime_version,
+                ttl_seconds,
+            )
+        result = dict(row)
+        result["previous_grant_id"] = previous_grant_id
+        result["establishing_job_id"] = earns["job_id"]
+        result["establishing_attempt_id"] = earns["attempt_id"]
+        result["user_id"] = earns["user_id"]
+        result["model"] = earns["model"]
+        return result
+
+    async def link_residency_grant(self, *, thread_id: str, generation: int, grant_id: str) -> bool:
+        """Record the grant a residency runs on — only its own generation.
+
+        A link that matched nothing means the residency was taken over between
+        mint and link; the caller revokes the orphan grant rather than handing
+        out a credential nothing owns.
+        """
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    UPDATE agent_thread_residencies
+                    SET grant_id = $3
+                    WHERE thread_id = $1 AND generation = $2 AND status = 'hot'
+                    RETURNING thread_id
+                    """,
+                    thread_id,
+                    generation,
+                    grant_id,
+                )
+            )
+
+    async def heartbeat_residency(
+        self, *, thread_id: str, generation: int, ttl_seconds: float, host: str | None = None
+    ) -> str | None:
+        """Extend a residency's lease — only the generation that holds it.
+
+        Returns ``None`` when nothing was extended (lost/taken over), else the
+        residency's grant id — ``""`` when it runs without one — so the caller
+        can renew the credential in the same pass. ``host`` narrows the write
+        to the machine the row names: a beat is a holder's statement, and a
+        guessed (thread, generation) from anywhere else must extend nothing.
+        """
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                UPDATE agent_thread_residencies
+                SET lease_expires_at = NOW() + make_interval(secs => $3),
+                    last_active_at = NOW()
+                WHERE thread_id = $1 AND generation = $2 AND status = 'hot'
+                  AND ($4::text IS NULL OR host = $4)
+                RETURNING COALESCE(grant_id, '')
+                """,
+                thread_id,
+                generation,
+                ttl_seconds,
+                host,
+            )
+
+    async def release_residency(
+        self, *, thread_id: str, generation: int, host: str | None = None
+    ) -> str | None:
+        """End a residency (teardown/eviction) — only its own generation.
+
+        Returns ``None`` when nothing was released, else the grant id to
+        revoke (``""`` when the residency ran without one).
+        """
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                UPDATE agent_thread_residencies
+                SET status = 'none', last_active_at = NOW()
+                WHERE thread_id = $1 AND generation = $2 AND status <> 'none'
+                  AND ($3::text IS NULL OR host = $3)
+                RETURNING COALESCE(grant_id, '')
+                """,
+                thread_id,
+                generation,
+                host,
+            )
+
+    async def record_residency_checkpoint(
+        self, *, thread_id: str, generation: int, turn_id: str
+    ) -> bool:
+        """Note the newest turn whose checkpoint this residency exported."""
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    UPDATE agent_thread_residencies
+                    SET last_checkpoint_turn_id = $3, last_active_at = NOW()
+                    WHERE thread_id = $1 AND generation = $2
+                    RETURNING thread_id
+                    """,
+                    thread_id,
+                    generation,
+                    turn_id,
+                )
+            )
+
+    async def resident_host(self, *, thread_id: str) -> dict[str, Any] | None:
+        """The live hot residency for a thread, or ``None``.
+
+        Live means unexpired: the reaper marks expiry on its own schedule,
+        and scheduling decisions between passes must not trust a lease the
+        clock has already taken away.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM agent_thread_residencies
+                WHERE thread_id = $1 AND status = 'hot' AND lease_expires_at > NOW()
+                """,
+                thread_id,
+            )
+        return None if row is None else dict(row)
+
+    async def reap_expired_residencies(self) -> list[dict[str, Any]]:
+        """Mark every hot residency whose lease lapsed as ``none``.
+
+        The control plane's unilateral half of the fence: the host may still
+        be running the sandbox, but its generation no longer opens anything —
+        not heartbeats, not credentials — and the next turn goes COLD.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                UPDATE agent_thread_residencies
+                SET status = 'none'
+                WHERE status = 'hot' AND lease_expires_at <= NOW()
+                RETURNING thread_id, generation, host, grant_id
+                """
+            )
+        return [dict(row) for row in rows]
+
+    async def prune_thread_checkpoints(self, *, keep_job_id: str) -> int:
+        """Keep only ``keep_job_id``'s checkpoint within its thread.
+
+        Latest-per-thread retention (design §6): the newest checkpoint is the
+        only one the claim gate could ever hand out — an older one would fail
+        ``through_turn_id`` — so keeping it would be pure storage cost. Rows
+        are deleted, not archived; the transcript remains the durable record.
+        """
+        async with self._pool.acquire() as conn:
+            deleted = await conn.fetch(
+                """
+                DELETE FROM agent_job_artifacts a
+                USING agent_jobs sibling, agent_jobs kept
+                WHERE a.kind = 'checkpoint'
+                  AND kept.id = $1
+                  AND sibling.id = a.job_id
+                  AND sibling.thread_id = kept.thread_id
+                  AND sibling.thread_id IS NOT NULL
+                  AND a.job_id <> $1
+                RETURNING a.id
+                """,
+                keep_job_id,
+            )
+        return len(deleted)
 
     async def get_artifact(self, *, job_id: str, kind: str) -> dict[str, Any] | None:
         """Fetch the most recent artifact of a kind for a job."""

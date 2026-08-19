@@ -1046,3 +1046,94 @@ def test_a_base_url_with_no_host_is_not_probed(monkeypatch):
     backend.check_gateway_reachable("not-a-url")
 
     assert calls == []
+
+
+# ── Version stamp (issue #54) ──────────────────────────────────────────
+
+
+def _inspect_json(**overrides):
+    import json as _json
+
+    info = {
+        "Id": "sha256:localid",
+        "RepoDigests": ["registry.example/sandbox@sha256:pinned"],
+        "Config": {
+            "Labels": {
+                "org.freeinference.runtime.claude-code.version": "1.2.3",
+                "org.freeinference.runtime.codex.version": "0.5.0",
+                "org.freeinference.runtime..version": "nameless",
+                "org.opencontainers.image.source": "irrelevant",
+            }
+        },
+    }
+    info.update(overrides)
+    return _json.dumps(info)
+
+
+def test_version_stamp_reads_runtime_digest_and_baked_versions(monkeypatch):
+    """One inspect answers every heartbeat: digest, runtime, CLI versions."""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr="")
+
+    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    backend = ContainerBackend(image="img:1", runtime="io.containerd.kata.v2")
+
+    stamp = backend.version_stamp()
+
+    assert stamp["sandbox_runtime"] == "io.containerd.kata.v2"
+    assert stamp["sandbox_image_digest"] == "registry.example/sandbox@sha256:pinned"
+    # Only well-formed version labels count; a nameless runtime id is dropped.
+    assert stamp["runtime_versions"] == {"claude-code": "1.2.3", "codex": "0.5.0"}
+    backend.version_stamp()
+    assert len(calls) == 1  # cached — the image is pinned for this process
+
+
+def test_version_stamp_attests_runc_with_an_empty_string(monkeypatch):
+    """No VM runtime is a positive statement, not a missing one."""
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox.subprocess.run",
+        lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr=""),
+    )
+    backend = ContainerBackend(image="img:1")
+
+    assert backend.version_stamp()["sandbox_runtime"] == ""
+
+
+def test_version_stamp_falls_back_to_the_local_image_id(monkeypatch):
+    """A built-but-never-pushed image still pins what ran."""
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox.subprocess.run",
+        lambda argv, **kwargs: SimpleNamespace(
+            returncode=0, stdout=_inspect_json(RepoDigests=[]), stderr=""
+        ),
+    )
+    backend = ContainerBackend(image="img:1")
+
+    assert backend.version_stamp()["sandbox_image_digest"] == "sha256:localid"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("docker unavailable"), subprocess.TimeoutExpired([], 30)],
+)
+def test_version_stamp_degrades_without_failing_the_heartbeat(monkeypatch, failure):
+    """Liveness reporting must not depend on the image store answering."""
+
+    def fail(argv, **kwargs):
+        raise failure
+
+    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fail)
+    backend = ContainerBackend(image="img:1", runtime="io.containerd.kata.v2")
+
+    stamp = backend.version_stamp()
+
+    assert stamp["sandbox_runtime"] == "io.containerd.kata.v2"
+    assert stamp["sandbox_image_digest"] == ""
+    assert stamp["runtime_versions"] == {}
+
+
+def test_the_process_backend_has_nothing_to_stamp():
+    assert ProcessBackend(acknowledged_unsafe=True).version_stamp() == {}

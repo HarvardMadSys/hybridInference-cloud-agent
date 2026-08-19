@@ -64,6 +64,18 @@ RUN npm install -g \
         "@kilocode/cli@${KILO_VERSION}" \
     && npm cache clean --force
 
+# The version stamp the runner reads (issue #54): image labels, keyed by
+# registry id, derived from the pins above so a label can never disagree with
+# what is installed. The heartbeat reports them, the claim copies them onto
+# each attempt, and the checkpoint gate compares them before handing a session
+# to a resumed turn — an unlabeled image degrades every one of those to
+# "unknown", which is a replay, not an error.
+LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
+      org.freeinference.runtime.codex.version="${CODEX_VERSION}" \
+      org.freeinference.runtime.pi.version="${PI_VERSION}" \
+      org.freeinference.runtime.opencode.version="${OPENCODE_VERSION}" \
+      org.freeinference.runtime.kilo.version="${KILO_VERSION}"
+
 # pi, OpenCode, and Kilo all ignore OPENAI_BASE_URL; each one's supported
 # route to a custom gateway is a provider config file whose content (gateway
 # address, per-job credential, model) is only known at run time. These

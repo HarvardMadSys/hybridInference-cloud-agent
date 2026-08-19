@@ -269,6 +269,22 @@ async def test_unresolvable_model_fails_fast(client):
     assert response.json()["detail"]["error"]["type"] == "model_not_available"
 
 
+async def test_unregistered_runtime_is_refused(client):
+    """The registry check guards this door too, not only the owner route.
+
+    It lives in the shared ``_create_job_as`` helper for exactly that reason:
+    a check only the owner route ran would let the relay queue a job that dies
+    at claim time — the drift the shared helper exists to prevent.
+    """
+    response = await client.post(
+        "/v1/agent/service/oncall/jobs",
+        json=_create_body(runtime="not-a-registered-harness"),
+        headers=_auth(),
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["type"] == "invalid_request"
+
+
 async def test_unentitled_repo_is_refused(client):
     """The allowlist is the headless account's only entitlement — no wider."""
     response = await client.post(

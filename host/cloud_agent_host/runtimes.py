@@ -14,7 +14,7 @@ An adapter answers three questions:
   normalized event kinds? **Unrecognized lines are never dropped**: they come
   back as a ``raw`` event so the UI degrades to a log tail instead of going
   silent when a CLI changes its format.
-- ``capabilities`` — what can this runtime actually do (resume, report cost)?
+- ``capabilities`` — what can this runtime actually do (report cost, speak MCP)?
 
 Tiering (per the adjudicated design): Tier 1 runtimes get full normalization
 and cost attribution; Tier 2 is a generic headless runner whose output flows
@@ -62,9 +62,13 @@ class NormalizedEvent:
 
 @dataclass(frozen=True)
 class RuntimeCapabilities:
-    """What a runtime can do, so the platform does not assume."""
+    """What a runtime can do, so the platform does not assume.
 
-    resume: bool = False
+    Session continuity is deliberately not declared here: it belongs to
+    ``drivers.HarnessCapabilities.continuity``, the only value the runner
+    consults when picking a turn's continuity path.
+    """
+
     cost_report: bool = False
     normalized_events: bool = False
     tier: int = 2
@@ -216,6 +220,10 @@ class ClaudeCodeRuntime(AgentRuntime):
         # One adapter instance per job (see get_runtime), so this is per-run
         # state — the suppression below cannot leak across jobs.
         self._reported_subtypes: set[str] = set()
+        #: The CLI's own session id, captured from the ``init`` event. This is
+        #: the name of the session file a checkpoint exports and a later turn
+        #: resumes (design §6); ``None`` until the CLI has announced itself.
+        self.session_id: str | None = None
 
     def prepare(
         self,
@@ -227,12 +235,25 @@ class ClaudeCodeRuntime(AgentRuntime):
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        config_dir: str | None = None,
+        resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
-        """Build the headless invocation and its environment."""
+        """Build the headless invocation and its environment.
+
+        ``config_dir`` relocates the CLI's config/session storage (the state
+        mount, so session files outlive the container); ``resume_session_id``
+        continues an earlier session with only the new prompt — the COLD
+        restore of design §6. Both are claude-specific and passed only by the
+        claude driver; the generic session never sets them.
+        """
         argv = [
             self.binary,
             "-p",
             task_prompt,
+        ]
+        if resume_session_id:
+            argv += ["--resume", resume_session_id]
+        argv += [
             "--model",
             model,
             "--output-format",
@@ -280,7 +301,68 @@ class ClaudeCodeRuntime(AgentRuntime):
             "DISABLE_TELEMETRY": "1",
             "DISABLE_AUTOUPDATER": "1",
         }
+        if config_dir:
+            # Session files land under the state mount instead of the
+            # container's throwaway HOME, which is what makes them exportable
+            # after exit and restorable before the next turn.
+            env["CLAUDE_CONFIG_DIR"] = config_dir
         return argv, env
+
+    def prepare_live(
+        self,
+        *,
+        workdir: str,
+        model: str,
+        gateway_base_url: str,
+        credential: str,
+        provides_isolation: bool = False,
+        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        config_dir: str | None = None,
+        resume_session_id: str | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """The resident invocation (HOT): prompts arrive on stdin, not argv.
+
+        ``--input-format stream-json`` keeps the process alive between turns,
+        reading user messages from stdin — the terminal-never-closed shape the
+        design's HOT tier is. Everything else (flags, env, MCP pairing) is the
+        one-shot invocation verbatim, built by the same code so the two can
+        never drift.
+        """
+        argv, env = self.prepare(
+            workdir=workdir,
+            task_prompt="",
+            model=model,
+            gateway_base_url=gateway_base_url,
+            credential=credential,
+            provides_isolation=provides_isolation,
+            mcp_config=mcp_config,
+            config_dir=config_dir,
+            resume_session_id=resume_session_id,
+        )
+        # Drop the empty positional prompt (`-p ""`), add the input format.
+        prompt_at = argv.index("-p")
+        del argv[prompt_at : prompt_at + 2]
+        argv[1:1] = ["-p", "--input-format", "stream-json"]
+        return argv, env
+
+    @staticmethod
+    def user_message_line(text: str) -> str:
+        """One stdin line carrying one user turn, in the CLI's wire shape."""
+        return json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            }
+        )
+
+    @staticmethod
+    def turn_settled(line: str) -> bool:
+        """Whether this stdout line is the CLI's end-of-turn result event."""
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(event, dict) and event.get("type") == "result"
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
         """Normalize one stream-json line."""
@@ -306,12 +388,17 @@ class ClaudeCodeRuntime(AgentRuntime):
                     return None
                 self._reported_subtypes.add(subtype)
                 return self._raw(line, f"unclassified system subtype {subtype!r}")
+            if subtype == "init":
+                captured = str(event.get("session_id") or "").strip()
+                if captured:
+                    self.session_id = captured
             return NormalizedEvent(
                 LIFECYCLE,
                 {
                     "phase": subtype,
                     "model": event.get("model"),
                     "runtime_version": event.get("claude_code_version"),
+                    "session_id": self.session_id,
                 },
             )
         if kind == "assistant":
@@ -394,9 +481,7 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     def capabilities(self) -> RuntimeCapabilities:
         """Claude Code is Tier 1: normalized events, a cost report, and MCP."""
-        return RuntimeCapabilities(
-            resume=True, cost_report=True, normalized_events=True, tier=1, mcp=True
-        )
+        return RuntimeCapabilities(cost_report=True, normalized_events=True, tier=1, mcp=True)
 
 
 class CodexRuntime(AgentRuntime):
@@ -542,7 +627,7 @@ class CodexRuntime(AgentRuntime):
 
     def capabilities(self) -> RuntimeCapabilities:
         """Codex is Tier 1 for events; cost comes from the gateway ledger."""
-        return RuntimeCapabilities(resume=False, cost_report=False, normalized_events=True, tier=1)
+        return RuntimeCapabilities(cost_report=False, normalized_events=True, tier=1)
 
 
 class GenericRuntime(AgentRuntime):
@@ -809,9 +894,7 @@ class PiRuntime(GenericRuntime):
         the recorded runs. ``api_logs`` is the billing authority regardless,
         so this claims no cost report rather than surfacing a confident zero.
         """
-        return RuntimeCapabilities(
-            resume=False, cost_report=False, normalized_events=True, tier=1, mcp=False
-        )
+        return RuntimeCapabilities(cost_report=False, normalized_events=True, tier=1, mcp=False)
 
 
 class OpencodeRuntime(GenericRuntime):

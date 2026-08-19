@@ -73,6 +73,9 @@ services:
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32+ random bytes, unique per environment}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # How long a hot sandbox's residency lease lives between beats (design
+      # §7). Also the cap on how long an idle resident process is kept at all.
+      AGENT_RESIDENCY_TTL_S: ${AGENT_RESIDENCY_TTL_S:-1800}
       # What a runner presents to claim work. Without it every claim is 401 and
       # the queue simply never drains — with nothing in the control plane's own
       # logs saying why, because the refusal is correct.

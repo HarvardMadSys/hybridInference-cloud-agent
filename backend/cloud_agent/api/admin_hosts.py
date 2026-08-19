@@ -101,6 +101,9 @@ def _to_item(row: dict) -> AgentRunnerHost:
         runner_version=row.get("runner_version"),
         broker_url=row.get("broker_url"),
         last_heartbeat_at=row.get("last_heartbeat_at"),
+        sandbox_runtime=row.get("sandbox_runtime"),
+        sandbox_image_digest=row.get("sandbox_image_digest"),
+        runtime_versions=row.get("runtime_versions"),
     )
 
 

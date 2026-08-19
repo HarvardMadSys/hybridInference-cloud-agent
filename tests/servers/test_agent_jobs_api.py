@@ -607,15 +607,22 @@ class FakeAgentJobStore:
         lease_generation: int,
         event_type: str,
         payload: dict[str, Any] | None = None,
+        event_seq: int | None = None,
     ) -> int | None:
         if not self._fenced(attempt_id, lease_generation):
             return None
+        if event_seq is not None:
+            # Mirror the store: a replayed number answers with the stored row.
+            for stored in self.events:
+                if stored["attempt_id"] == attempt_id and stored.get("client_seq") == event_seq:
+                    return stored["id"]
         job = next(job for job in self.jobs.values() if job["current_attempt_id"] == attempt_id)
         event = {
             "id": self._next_event_id,
             "job_id": job["id"],
             "attempt_id": attempt_id,
             "seq": len(self.events) + 1,
+            "client_seq": event_seq,
             "event_type": event_type,
             "payload": payload,
             "created_at": None,
@@ -1147,6 +1154,49 @@ async def test_follow_up_model_switch_gets_the_same_fail_fast(client: AsyncClien
     )
     assert response.status_code == 400
     assert response.json()["detail"]["error"]["type"] == "model_not_available"
+
+
+async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient):
+    """An arbitrary runtime string dies here, not as a claimed-then-dead job."""
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "runtime": "no-such-harness",
+        },
+    )
+    assert response.status_code == 400
+    assert "no-such-harness" in response.json()["detail"]["error"]["message"]
+
+
+async def test_a_follow_up_cannot_switch_the_threads_harness(client: AsyncClient):
+    """The harness is fixed per thread (design D2); its session is the memory.
+
+    Echoing the thread's own runtime stays a 201 — existing callers do that —
+    and a *different* registered runtime is the refusal, pointing at fork.
+    """
+    parent_id = await _create_job(client)
+
+    switched = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "continue on another harness", "runtime": "codex"},
+    )
+    assert switched.status_code == 400
+    assert "fork" in switched.json()["detail"]["error"]["message"]
+
+    echoed = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "continue here", "runtime": "claude-code"},
+    )
+    assert echoed.status_code == 201
+
+    invented = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "continue on nothing", "runtime": "no-such-harness"},
+    )
+    assert invented.status_code == 400
 
 
 async def test_config_offers_the_models_the_create_endpoint_accepts(client: AsyncClient):
@@ -2419,6 +2469,20 @@ async def test_worker_flow_claim_event_artifact_finish(
     )
     assert finish.status_code == 200
     assert store.jobs[job_id]["state"] == "succeeded"
+
+
+async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: FakeAgentJobStore):
+    """A retry of a dropped response gets the stored id, not a duplicate row."""
+    job_id = await _create_job(client)
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    body = {"event_type": "message", "payload": {"text": "hello"}, "event_seq": 1}
+
+    first = await client.post(f"/v1/agent/worker/jobs/{job_id}/events", json=body, headers=auth)
+    replay = await client.post(f"/v1/agent/worker/jobs/{job_id}/events", json=body, headers=auth)
+
+    assert first.json()["event_id"] == replay.json()["event_id"]
+    assert len(store.events) == 1
 
 
 async def test_empty_queue_claim_returns_null(client: AsyncClient):

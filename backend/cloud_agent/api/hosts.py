@@ -27,12 +27,14 @@ minutes.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_agent_job_store, get_grant_client
 from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
@@ -43,6 +45,11 @@ from cloud_agent.schemas import (
     HostHeartbeatResponse,
     HostRegisterRequest,
     HostRegisterResponse,
+    HostResidencyEstablishRequest,
+    HostResidencyEstablishResponse,
+    HostResidencyReleaseRequest,
+    ResidencyBeat,
+    WorkerAckResponse,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 
@@ -52,6 +59,12 @@ if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore
 
 router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
+
+#: How long a residency's lease lives between beats (design §7) — and, since
+#: the lease and the thread-attributed grant are renewed by the same beat and
+#: revoked together (design §14), the cap on how long an idle resident
+#: process keeps a live credential after its host goes quiet.
+RESIDENCY_TTL_S = float(os.environ.get("AGENT_RESIDENCY_TTL_S") or 1800.0)
 
 
 def _require_store(store: AgentJobStore | None) -> AgentJobStore:
@@ -200,6 +213,7 @@ async def heartbeat_host(
     body: HostHeartbeatRequest,
     host: dict[str, Any] = Depends(authenticate_host),
     store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
 ) -> HostHeartbeatResponse:
     """Report liveness, and whatever about this machine has changed.
 
@@ -216,17 +230,45 @@ async def heartbeat_host(
         runner_version=body.runner_version,
         broker_url=_checked_broker_url(body.broker_url),
         capabilities=body.capabilities,
+        sandbox_runtime=body.sandbox_runtime,
+        sandbox_image_digest=body.sandbox_image_digest,
+        runtime_versions=body.runtime_versions,
     )
     if updated is None:
         # The row vanished between authentication and the write — a forget
         # landing mid-request. Refusing is right: this credential now names
         # nothing.
         raise _unauthorized("This host credential is no longer valid.")
+    # Residency beats ride the host heartbeat (design §7): one wire message
+    # says "I am here" and "these sandboxes are still mine", generation-scoped
+    # so a beat from a taken-over residency extends nothing — it comes back in
+    # residencies_lost and the host tears that sandbox down.
+    lost: list[ResidencyBeat] = []
+    for beat in body.residencies or []:
+        extended = await job_store.heartbeat_residency(
+            thread_id=beat.thread_id,
+            generation=beat.generation,
+            host=updated["host"],
+            ttl_seconds=RESIDENCY_TTL_S,
+        )
+        if extended and grants is not None:
+            # The credential lives exactly as long as the residency: the beat
+            # that extends the lease extends the grant. Best-effort — a missed
+            # renewal starves hot turns into warm, never into an outage.
+            with contextlib.suppress(Exception):
+                await grants.renew(extended)
+        if extended is None:
+            # Echo the generation back (review finding 5): a beat carrying
+            # gen N can be answered after the host re-established gen N+1,
+            # and a thread-id-only loss would let the stale answer kill the
+            # successor. The host drops only on an exact generation match.
+            lost.append(beat)
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
         slots_total=updated["slots_total"],
         slots_used=updated["slots_used"],
+        residencies_lost=lost,
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_S,
         # Rate-limited inside the probe. Heartbeats are this host's liveness
         # signal and must not come to depend on a second service answering, but
@@ -235,6 +277,129 @@ async def heartbeat_host(
         # host was misconfigured, and it stayed invisible for a day.
         broker_error=await _probed_broker_error(updated["host"], body.broker_url),
     )
+
+
+@router.post("/residencies", response_model=HostResidencyEstablishResponse)
+async def establish_thread_residency(
+    body: HostResidencyEstablishRequest,
+    host: dict[str, Any] = Depends(authenticate_host),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
+) -> HostResidencyEstablishResponse:
+    """Take (or take over) residency for a thread this host is running.
+
+    Residency is earned, not asserted: the host must hold the thread's
+    *running* attempt right now, which is why the runner establishes at turn
+    end, before finish. Without the gate, a compromised machine could pull
+    other machines' conversations toward itself through claim affinity.
+    """
+    job_store = _require_store(store)
+    row = await job_store.establish_residency(
+        thread_id=body.thread_id,
+        host=host["host"],
+        runtime_id=body.runtime_id,
+        runtime_version=body.runtime_version,
+        sandbox_id=body.sandbox_id,
+        ttl_seconds=RESIDENCY_TTL_S,
+    )
+    if row is None:
+        # The gate lives inside the write's own transaction (store): running
+        # attempt, this host, lease unexpired — checked under a shared lock,
+        # so this answer cannot be stale by the time the row would exist.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "not_running_thread",
+                    "message": "residency belongs to the host running the thread's turn",
+                }
+            },
+        )
+    # A takeover is a credential rotation (design §14): the predecessor's
+    # grant dies now, not at its TTL, so a zombie host starves promptly.
+    previous_grant = row.get("previous_grant_id")
+    if previous_grant and grants is not None:
+        await grants.revoke(previous_grant)
+    credential = await _mint_residency_grant(job_store, grants, row=row)
+    return HostResidencyEstablishResponse(
+        thread_id=row["thread_id"],
+        generation=row["generation"],
+        ttl_seconds=RESIDENCY_TTL_S,
+        credential=credential,
+        model=row.get("model"),
+    )
+
+
+async def _mint_residency_grant(
+    job_store: AgentJobStore, grants: Any, *, row: dict[str, Any]
+) -> str | None:
+    """The residency's inference credential, or ``None`` for workspace-only.
+
+    Attribution is the *thread* (design §14): the grant's external job id
+    names it, so the gateway's ledger bills every resident turn to the
+    conversation rather than to whichever turn happened to establish. Every
+    failure degrades rather than refuses — a residency without a credential
+    still keeps the workspace, and turns ride warm_native on their own
+    per-attempt grants.
+
+    A grant that cannot be linked is revoked, not handed over: the link is
+    the only thing that will ever renew or revoke it, and the one way linking
+    fails is a takeover between mint and link — whose new owner must not be
+    starved by an orphan credential it cannot see.
+    """
+    if grants is None:
+        return None
+    try:
+        grant = await grants.mint(
+            user_id=row["user_id"],
+            job_id=f"thread:{row['thread_id']}",
+            attempt_id=str(row["establishing_attempt_id"]),
+            models=[row["model"]],
+            ttl_seconds=int(RESIDENCY_TTL_S),
+        )
+    except Exception:  # degrade to workspace-only residency
+        logger.warning(
+            "agent_residency_grant_unavailable",
+            exc_info=True,
+            extra={
+                "event": "agent_residency_grant_unavailable",
+                "thread_id": row["thread_id"],
+            },
+        )
+        return None
+    grant_id = str(grant.get("grant_id") or "")
+    token = str(grant.get("token") or "")
+    if not grant_id or not token:
+        return None
+    linked = await job_store.link_residency_grant(
+        thread_id=row["thread_id"], generation=row["generation"], grant_id=grant_id
+    )
+    if not linked:
+        await grants.revoke(grant_id)
+        return None
+    return token
+
+
+@router.post("/residencies/release", response_model=WorkerAckResponse)
+async def release_thread_residency(
+    body: HostResidencyReleaseRequest,
+    host: dict[str, Any] = Depends(authenticate_host),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
+) -> WorkerAckResponse:
+    """End a residency this host holds (teardown, eviction, drain).
+
+    Generation-scoped like every other residency write: releasing with a
+    stale generation is a no-op ``ok=false``, never an error — the successor
+    it would otherwise end belongs to someone else now.
+    """
+    job_store = _require_store(store)
+    released = await job_store.release_residency(
+        thread_id=body.thread_id, generation=body.generation, host=host["host"]
+    )
+    if released and grants is not None:
+        await grants.revoke(released)
+    return WorkerAckResponse(ok=released is not None)
 
 
 async def _probed_broker_error(

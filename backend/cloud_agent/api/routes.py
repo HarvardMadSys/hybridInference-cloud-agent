@@ -50,6 +50,13 @@ from cloud_agent.api.deps import (
     verify_admin_access,
 )
 from cloud_agent.broker_routing import broker_for_attempt, broker_for_job
+from cloud_agent.checkpoints import (
+    CHECKPOINT_KIND,
+    MAX_CHECKPOINT_CONTENT_BYTES,
+    checkpoint_cipher,
+    gate_for_claim,
+    open_checkpoint,
+)
 from cloud_agent.entitlement import (
     REPO_PATTERN,
     RepoNotAllowed,
@@ -106,6 +113,7 @@ from cloud_agent.schemas import (
     WorkerArtifactResponse,
     WorkerClaimRequest,
     WorkerClaimResponse,
+    WorkerContinuityRequest,
     WorkerEventRequest,
     WorkerEventResponse,
     WorkerFinishRequest,
@@ -1082,6 +1090,28 @@ async def _resolve_mcp_servers(
     return servers
 
 
+def _require_registered_runtime(runtime: str) -> None:
+    """400 unless ``runtime`` names a registered harness.
+
+    The registry is the trust boundary (design D2): what may run is what this
+    deployment registered, never whatever string a request carried.
+    """
+    known = registered_runtimes()
+    if runtime not in known:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "type": "invalid_request",
+                    "message": (
+                        f"unknown runtime {runtime!r}; this deployment registers: "
+                        + ", ".join(known)
+                    ),
+                }
+            },
+        )
+
+
 async def _create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
@@ -1100,6 +1130,14 @@ async def _create_job_as(
     same reason ``BASE_REF_METADATA_KEY`` is popped first: a display fact the
     platform asserts must not be spoofable by the request body.
     """
+    # Fail here, not at claim time. An unregistered runtime used to travel all
+    # the way into a queued row and burn a claim before anything noticed —
+    # the composer only offers registered ids, so an arbitrary string can only
+    # arrive from a direct API caller, and it deserves a 400, not a dead job.
+    # The check lives in the helper rather than in the owner route because the
+    # service door creates jobs through here too: a check only one door runs
+    # is precisely the drift this extraction exists to prevent.
+    _require_registered_runtime(body.runtime)
     # Canonical from here on. The grant the gateway mints names canonical
     # ids, so a job that stored the alias would carry a scope matching
     # nothing — created successfully, dead at its first inference call.
@@ -1375,6 +1413,27 @@ async def create_agent_follow_up(
     """Append a turn to a task thread and queue its next isolated run."""
     job_store = _require_store(store)
     parent = await _owned_job(job_store, job_id, user)
+    # The harness is fixed per thread (design D2): continuity is the harness
+    # session, and no other harness can continue it. The field survives as an
+    # explicit no-op so existing callers that echo the thread's runtime keep
+    # working; a *different* runtime is refused rather than silently starting
+    # a turn the thread's memory cannot follow.
+    if body.runtime is not None:
+        _require_registered_runtime(body.runtime)
+        if body.runtime != parent["runtime"]:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "type": "invalid_request",
+                        "message": (
+                            f"this thread runs on {parent['runtime']!r} and a thread's "
+                            "harness is fixed; fork the thread to continue on "
+                            f"{body.runtime!r}"
+                        ),
+                    }
+                },
+            )
     # A follow-up may switch models; the switched-to model gets the same
     # fail-fast as a fresh job. An omitted model inherits the parent's, which
     # was validated when it was chosen.
@@ -2778,8 +2837,37 @@ async def worker_claim(
         clone_token=clone_token,
         context_messages=context["messages"],
         context_patch=context["patch"],
+        context_checkpoint=await _claimable_checkpoint(job_store, claim=claim),
         mcp_servers=list(claim.get("mcp_servers") or []),
         metadata=claim["metadata"],
+    )
+
+
+async def _claimable_checkpoint(
+    job_store: AgentJobStore, *, claim: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The parent turn's checkpoint, when it matches what is about to run.
+
+    Fetch → decrypt → gate (driver, through-turn, and the CLI version the
+    claim transaction stamped onto this very attempt — never a re-read of the
+    mutable host row, which a rolling upgrade's heartbeat can move between
+    claim and here). Every failure is ``None``: the runner replays, which is
+    the design's degradation ladder, never an error.
+    """
+    parent_job_id = claim.get("parent_job_id")
+    if not parent_job_id:
+        return None
+    stored = await job_store.get_artifact(job_id=parent_job_id, kind=CHECKPOINT_KIND)
+    if stored is None:
+        return None
+    envelope = open_checkpoint(stored["content"])
+    if envelope is None:
+        return None
+    return gate_for_claim(
+        envelope,
+        runtime=claim["runtime"],
+        parent_job_id=parent_job_id,
+        stamped_runtime_version=claim.get("runtime_version"),
     )
 
 
@@ -2822,10 +2910,36 @@ async def worker_append_event(
         lease_generation=claims["lease_generation"],
         event_type=body.event_type,
         payload=body.payload,
+        event_seq=body.event_seq,
     )
     if event_id is None:
         raise _lease_lost()
     return WorkerEventResponse(event_id=event_id)
+
+
+@router.post("/worker/jobs/{job_id}/continuity", response_model=WorkerAckResponse)
+async def worker_report_continuity(
+    job_id: str,
+    body: WorkerContinuityRequest,
+    authorization: str | None = Header(None),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> WorkerAckResponse:
+    """Record which continuity rung this attempt runs on (design §9).
+
+    Observability, deliberately fenced like every other worker write: a
+    superseded attempt must not be able to relabel how the live one ran.
+    """
+    job_store = _require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    recorded = await job_store.record_continuity_mode(
+        attempt_id=claims["attempt_id"],
+        lease_generation=claims["lease_generation"],
+        mode=body.mode,
+    )
+    if not recorded:
+        raise _lease_lost()
+    return WorkerAckResponse(ok=True)
 
 
 @router.post("/worker/jobs/{job_id}/terminals/suspend", response_model=WorkerAckResponse)
@@ -2938,19 +3052,53 @@ async def worker_save_artifact(
     authorization: str | None = Header(None),
     store: AgentJobStore | None = Depends(get_agent_job_store),
 ) -> WorkerArtifactResponse:
-    """Store (or replace) an artifact produced by this attempt."""
+    """Store (or replace) an artifact produced by this attempt.
+
+    Checkpoints are special-cased twice: sealed (encrypted) before they touch
+    the table, and pruned to latest-per-thread after they land. A checkpoint
+    this deployment cannot seal — no key — or that exceeds the size cap is
+    *discarded*, answered with ``artifact_id=0``: losing a checkpoint costs
+    one thread a replay, which is the designed degradation, while failing the
+    attempt over it would cost the user a finished turn.
+    """
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
+    content = body.content
+    if body.kind == CHECKPOINT_KIND:
+        sealed = _sealed_checkpoint(job_id, body.content)
+        if sealed is None:
+            return WorkerArtifactResponse(artifact_id=0)
+        content = sealed
     artifact_id = await job_store.save_artifact(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
         kind=body.kind,
-        content=body.content,
+        content=content,
     )
     if artifact_id is None:
         raise _lease_lost()
+    if body.kind == CHECKPOINT_KIND:
+        await job_store.prune_thread_checkpoints(keep_job_id=job_id)
     return WorkerArtifactResponse(artifact_id=artifact_id)
+
+
+def _sealed_checkpoint(job_id: str, content: str) -> str | None:
+    """Encrypt a checkpoint for storage; ``None`` discards it, with the reason."""
+    if len(content.encode("utf-8")) > MAX_CHECKPOINT_CONTENT_BYTES:
+        logger.info(
+            "agent_checkpoint_discarded",
+            extra={
+                "event": "agent_checkpoint_discarded",
+                "job_id": job_id,
+                "detail": f"over the {MAX_CHECKPOINT_CONTENT_BYTES} byte cap",
+            },
+        )
+        return None
+    cipher = checkpoint_cipher()
+    if cipher is None:
+        return None
+    return cipher.encrypt(content)
 
 
 @router.post("/worker/jobs/{job_id}/finish", response_model=WorkerAckResponse)
