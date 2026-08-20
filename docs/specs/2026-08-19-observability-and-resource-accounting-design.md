@@ -131,8 +131,9 @@ honest window model of §6.
   don't have: **resources** — periodic samples rolled up into per-window
   facts. Resources are measurements, not events: they become metrics and
   rollup rows, never ledger entries.
-- **O3 — Resource accounting is sandbox-scoped at source.** The runner
-  samples each live sandbox at 1 Hz from the host side: cgroup v2
+- **O3 — Resource accounting is sandbox-scoped at source.** *(Mechanism
+  amended 2026-08-19 — see the amendment at the end of this section.)* The
+  runner samples each live sandbox at 1 Hz from the host side: cgroup v2
   (`cpu.stat` usage, `memory.current`/`memory.peak`, `pids.current`,
   `io.stat`) resolved from the container's PID, plus the container's veth
   byte counters. No agent-visible process is involved; the sandbox cannot
@@ -186,13 +187,68 @@ honest window model of §6.
   runner-side ring buffer only — rollups are computed at window close and
   the samples discarded. One retention tier, no second estate (O1).
 
+### O3 amendment — measured through the daemon, not through cgroupfs (2026-08-19)
+
+Recorded per this project's rule that a divergence is a decision and a
+decision gets written down.
+
+O3 as written above says the runner reads cgroup v2 and the container's
+namespace counters directly, resolved from a pid. That assumed the runner is
+a host process. It is not: `deploy/host/docker-compose.sandbox.yml` runs the
+runner as a container (three replicas) beside the sandboxes it supervises,
+with only the Docker socket and three data directories mounted — no
+`pid: host`, no host `/proc`, no cgroupfs. The daemon reports a host pid
+correctly; that pid then does not exist in the runner's own pid namespace,
+every read fails, and the feature reports `coverage = 0` on every turn of
+every real deployment. It shipped that way and was caught in the UI, not by
+a test — the fixtures supplied a procfs, and the one host without cgroupfs
+(macOS) looked like expected behaviour.
+
+**Amended mechanism:** counters come from the Docker daemon's own accounting
+(`GET /containers/{id}/stats?stream=false&one-shot=true`) over the socket the
+runner already holds.
+
+Granting the runner `pid: host` + `cgroup: host` + a cgroupfs mount would
+also work, and was rejected: it *manages* the topology assumption with three
+deployment knobs instead of removing it, and each knob fails exactly the way
+the original bug did — silently, and identically. `/proc/<pid>/cgroup` is
+relativized to the reader's cgroup namespace, so with the default private
+namespace the path read back is not even resolvable against a mounted host
+cgroupfs. The daemon route has no such assumption: it answers the same
+whether the runner is on the host, in a container, or on a machine that
+joins the pool later.
+
+**The invariant is unchanged**, which is why this is an amendment and not a
+new decision: nothing is asked of the sandbox, nothing runs inside it, no
+agent-visible process participates, and a turn can neither see, refuse, nor
+forge its own measurement. What changed is which process outside the sandbox
+does the reading.
+
+Consequences:
+
+- `sampler_version` becomes `2`. Stored rows keep the semantics they were
+  written under, which is what that column is for.
+- The pid-reuse guard is deleted rather than fixed: identity is now a
+  container id, so a released pid handed to a host process — whose interface
+  counters would have arrived as this turn's network — cannot arise.
+- Block io is reported as **unmeasured** when the daemon returns no rows,
+  not as zero. Reading `io.stat` directly, an empty file is written by the
+  kernel and means no io; through the daemon the same emptiness is ambiguous
+  (some Docker versions never populate it on cgroup v2). Ambiguity resolves
+  to "not measured", never to a fabricated zero.
+- Memory subtracts `inactive_file` as the `docker stats` CLI does, so an
+  operator comparing the two sees one answer rather than two.
+- The runner's preflight now checks that the daemon answers and warns
+  loudly, without failing, when it does not. The first version's whole
+  failure was a deployment assumption nothing verified; this is that check.
+
 ## 5. Architecture
 
 ```text
-sandbox (docker, per residency)      runner host                        control plane host
-─────────────────────────────       ───────────                        ──────────────────
-harness + tool children              ResourceSampler (1 Hz, host-side    worker API (exists):
-  [claude: hook markers ——►          cgroupfs + veth reads)               events, continuity,
+sandbox (docker, per residency)      runner (a container beside it)     control plane host
+─────────────────────────────       ───────────────────────────        ──────────────────
+harness + tool children              ResourceSampler (1 Hz, via the      worker API (exists):
+  [claude: hook markers ——►          daemon's /containers/{id}/stats)     events, continuity,
    state mount, append-only]         │                                    + NEW resource rollups
                                      ├─► window rollup at turn/idle close ─► Postgres rows
 squid egress                         │                                    agent_job_events (exists)

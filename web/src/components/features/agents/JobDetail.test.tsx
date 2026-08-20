@@ -290,6 +290,61 @@ describe('JobDetail', () => {
     expect(navigation.push).toHaveBeenCalledWith('/ajob_child');
   });
 
+  it('sends the follow-up on Enter and keeps Shift+Enter a newline', async () => {
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    render(<JobDetail job={makeJob()} />);
+
+    const composer = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(composer, { target: { value: 'Now add a regression test' } });
+
+    // Shift+Enter and Alt+Enter stay the newline, so the browser keeps them.
+    expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(composer, { key: 'Enter', altKey: true })).toBe(true);
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+
+    // An IME commits its candidate with Enter; that keypress is the word, not
+    // the send.
+    fireEvent.keyDown(composer, { key: 'Enter', isComposing: true });
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(composer, { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Now add a regression test',
+      }),
+    );
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_child');
+  });
+
+  it('swallows Enter on an empty follow-up rather than growing a blank line', async () => {
+    render(<JobDetail job={makeJob()} />);
+
+    const composer = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(composer, { target: { value: '   ' } });
+
+    // Enter is the send key on this composer and never the newline, so with
+    // nothing to send it does nothing at all. Shift+Enter still breaks the line.
+    expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false);
+    expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true);
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('accepts the other send chord people arrive with', async () => {
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    render(<JobDetail job={makeJob()} />);
+
+    const composer = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(composer, { target: { value: 'Now add a regression test' } });
+    fireEvent.keyDown(composer, { key: 'Enter', metaKey: true });
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Now add a regression test',
+      }),
+    );
+  });
+
   it('switches the model for the next turn without leaving the thread', async () => {
     vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
     render(<JobDetail job={makeJob()} />);
@@ -934,5 +989,47 @@ describe('JobDetail reasoning effort', () => {
         reasoning_effort: 'auto',
       }),
     );
+  });
+});
+
+describe('the trajectory tab', () => {
+  afterEach(() => cleanup());
+
+  it('switches between the reading of the stream and the stream itself', () => {
+    const job = makeJob({ events: [{ kind: 'message', text: 'the build passes' }] });
+    const stored = [
+      {
+        id: 1,
+        attempt_id: 1,
+        seq: 1,
+        event_type: 'tool_use',
+        payload: { id: 't1', name: 'Bash', detail: 'cargo build' },
+        created_at: '2026-08-19T10:00:00.000Z',
+      },
+    ] as never;
+
+    render(<JobDetail job={job} events={stored} />);
+
+    // Chat first: the reading, with no trajectory chrome.
+    expect(screen.queryByLabelText('Search events')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+
+    expect(screen.getByLabelText('Search events')).toBeInTheDocument();
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+
+    expect(screen.queryByLabelText('Search events')).toBeNull();
+  });
+
+  it('still renders when no stored stream was handed down', () => {
+    // Fixtures and older callers pass no events; the tab must degrade to its
+    // empty state rather than throwing on an undefined list.
+    render(<JobDetail job={makeJob()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+
+    expect(screen.getByText(/stored no events/)).toBeInTheDocument();
   });
 });

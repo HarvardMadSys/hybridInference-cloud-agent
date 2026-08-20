@@ -1567,3 +1567,51 @@ def test_a_sampler_that_cannot_start_never_costs_the_turn(tmp_path, monkeypatch)
     assert code == 0, "a failing sampler took the turn down with it"
     assert [payload["text"] for _kind, payload in control.events] == ["line 0", "line 1"]
     assert control.resources[0]["coverage"] == 0.0
+
+
+def test_a_turn_that_fails_before_it_starts_still_stops_its_sampler(tmp_path, monkeypatch):
+    """The sampling thread must not outlive the turn that created it.
+
+    The sampler starts deep inside the turn, at whichever spawn the turn
+    actually uses, while the frame that stops it used to be a `finally`
+    further down. Anything raised in between — a driver error, a lost lease,
+    a workspace that will not open — left the thread sampling for the life of
+    the runner process, one leak per failed turn.
+    """
+    import threading
+
+    before = threading.active_count()
+
+    class _Exploding:
+        """A backend whose spawn raises after the sampler is already live."""
+
+        name = "process"
+        provides_isolation = False
+        is_vm_isolated = False
+
+        def spawn(self, spec):
+            raise RuntimeError("the sandbox could not be created")
+
+        def base_env(self):
+            return {}
+
+        def adopt_workdir(self, path):
+            return None
+
+    control, heart = FakeControl(), FakeHeart()
+    with pytest.raises(RuntimeError, match="could not be created"):
+        run_agent(
+            _echo_runtime(1),
+            job=_JOB,
+            workdir=str(tmp_path),
+            gateway_base_url="http://gw",
+            control=control,
+            heart=heart,
+            timeout_s=30,
+            backend=_Exploding(),
+        )
+
+    # The rollup is still filed — a turn that died is still a turn nobody
+    # measured — and no sampler thread is left behind.
+    assert control.resources and control.resources[0]["coverage"] == 0.0
+    assert threading.active_count() <= before, "a sampler thread outlived its turn"

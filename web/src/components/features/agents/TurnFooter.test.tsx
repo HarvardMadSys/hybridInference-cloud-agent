@@ -150,15 +150,51 @@ describe('TurnFooter', () => {
     expect(screen.getByText('1.2GB')).toBeInTheDocument();
   });
 
-  it('explains a replay turn, which is why the badge exists', () => {
+  it('explains a replay turn on demand, which is why the badge exists', () => {
+    // A native `title` was the first delivery and it was the wrong one: it
+    // wants a second of motionless hover and cannot be read on a touch
+    // screen, so the footer's most important explanation was the least
+    // likely to be seen. Clicking always works.
     render(<TurnFooter job={job({ continuityMode: 'replay' })} />);
-    expect(screen.getByText('replay').getAttribute('title')).toMatch(/working memory/i);
+
+    expect(screen.queryByText(/working memory/i)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'replay' }));
+
+    expect(screen.getByText(/working memory/i)).toBeInTheDocument();
+    expect(screen.getByText(/written transcript/i)).toBeInTheDocument();
+  });
+
+  it('closes an explanation when its chip is clicked again', () => {
+    render(<TurnFooter job={job({ continuityMode: 'replay' })} />);
+    const badge = screen.getByRole('button', { name: 'replay' });
+
+    fireEvent.click(badge);
+    fireEvent.click(badge);
+
+    expect(screen.queryByText(/working memory/i)).toBeNull();
+  });
+
+  it('shows one explanation at a time', () => {
+    render(
+      <TurnFooter
+        job={job({ continuityMode: 'replay', resources: { ...RESOURCES, coverage: 0.4 } })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'replay' }));
+    fireEvent.click(screen.getByRole('button', { name: 'partial' }));
+
+    expect(screen.getByText(/40% of this turn was sampled/)).toBeInTheDocument();
+    expect(screen.queryByText(/working memory/i)).toBeNull();
   });
 
   it('calls a partly sampled turn a floor, not a total', () => {
     render(<TurnFooter job={job({ resources: { ...RESOURCES, coverage: 0.4 } })} />);
-    const partial = screen.getByText('partial');
-    expect(partial.getAttribute('title')).toMatch(/40% of this turn was sampled/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'partial' }));
+
+    expect(screen.getByText(/40% of this turn was sampled/)).toBeInTheDocument();
+    expect(screen.getByText(/lower bounds rather than totals/)).toBeInTheDocument();
   });
 
   it('says nothing was measured rather than showing zeros', () => {
@@ -176,6 +212,9 @@ describe('TurnFooter', () => {
     render(<TurnFooter job={job({ resources: unmeasured })} />);
     expect(screen.getByText('resource data unavailable')).toBeInTheDocument();
     expect(screen.queryByText(/^0/)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'resource data unavailable' }));
+    expect(screen.getByText(/not the same as a turn that consumed nothing/)).toBeInTheDocument();
   });
 
   it('renders nothing at all when there is nothing honest to say', () => {

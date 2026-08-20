@@ -11,70 +11,17 @@ from __future__ import annotations
 
 import time
 
+import httpx
+
 from cloud_agent_host.resources import (
     SAMPLER_VERSION,
-    ContainerCounters,
+    ContainerStats,
     ResourceSampler,
     Sample,
-    _parse_io_stat,
-    _parse_keyed,
-    _parse_net_dev,
+    daemon_reachable,
     rollup,
+    sample_from_stats,
 )
-
-
-def _write_container(tmp_path, *, pid: int = 4242, cgroup: str = "/docker/abc"):
-    """Lay out a fake procfs/cgroupfs for one container."""
-    proc = tmp_path / "proc" / str(pid)
-    (proc / "net").mkdir(parents=True)
-    (proc / "cgroup").write_text(f"0::{cgroup}\n")
-    cg = tmp_path / "cgroup" / cgroup.lstrip("/")
-    cg.mkdir(parents=True)
-    return proc, cg
-
-
-def test_parses_cpu_io_and_network_counters():
-    """Each backend's format is read as the kernel writes it."""
-    assert _parse_keyed("usage_usec 500\nuser_usec 300\n", "usage_usec") == 500
-    assert _parse_io_stat("8:0 rbytes=1024 wbytes=2048\n8:16 rbytes=1 wbytes=2\n") == (1025, 2050)
-    dev = "Inter-|Receive\n face |bytes\n    lo: 999 0 0 0 0 0 0 0 999 0\n  eth0: 1000 0 0 0 0 0 0 0 2000 0\n"
-    assert _parse_net_dev(dev) == (1000, 2000)
-
-
-def test_loopback_is_not_network_the_platform_carried():
-    """Traffic that never left the sandbox must not inflate a user's number."""
-    only_lo = "    lo: 5000 0 0 0 0 0 0 0 5000 0\n"
-    assert _parse_net_dev(only_lo) == (None, None)
-
-
-def test_reads_a_container_through_procfs(tmp_path):
-    """A readable layout yields a sample with every backend populated."""
-    proc, cg = _write_container(tmp_path)
-    (cg / "cpu.stat").write_text("usage_usec 1000\n")
-    (cg / "memory.current").write_text("2048\n")
-    (cg / "io.stat").write_text("8:0 rbytes=10 wbytes=20\n")
-    (proc / "net" / "dev").write_text("  eth0: 30 0 0 0 0 0 0 0 40 0\n")
-
-    counters = ContainerCounters(4242, proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup")
-    assert counters.readable
-    sample = counters.read()
-    assert (sample.cpu_usec, sample.mem_bytes) == (1000, 2048)
-    assert (sample.io_read_bytes, sample.io_write_bytes) == (10, 20)
-    assert (sample.net_rx_bytes, sample.net_tx_bytes) == (30, 40)
-
-
-def test_unreadable_backend_yields_none_not_zero(tmp_path):
-    """A cgroup we cannot see is not a container that used nothing."""
-    proc = tmp_path / "proc" / "7"
-    (proc / "net").mkdir(parents=True)
-    (proc / "cgroup").write_text("0::/nowhere\n")
-    (proc / "net" / "dev").write_text("  eth0: 5 0 0 0 0 0 0 0 6 0\n")
-
-    counters = ContainerCounters(7, proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup")
-    sample = counters.read()
-    assert sample.cpu_usec is None and sample.mem_bytes is None
-    # The namespace's own counters are still readable, and still reported.
-    assert (sample.net_rx_bytes, sample.net_tx_bytes) == (5, 6)
 
 
 def test_rollup_reports_deltas_so_a_resident_sandbox_is_not_double_charged():
@@ -140,70 +87,6 @@ def test_a_sampler_without_a_container_is_inert_rather_than_failing():
     assert not ResourceSampler.for_container(None).active
 
 
-def test_sampling_collects_and_stops_cleanly(tmp_path):
-    """The live loop gathers samples and the stop is bounded."""
-    proc, cg = _write_container(tmp_path, pid=99)
-    (cg / "cpu.stat").write_text("usage_usec 10\n")
-    (cg / "memory.current").write_text("64\n")
-    (proc / "net" / "dev").write_text("  eth0: 1 0 0 0 0 0 0 0 2 0\n")
-
-    counters = ContainerCounters(99, proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup")
-    sampler = ResourceSampler(counters, interval_s=0.01)
-    sampler.start()
-    time.sleep(0.05)
-    result = sampler.stop()
-    assert result["sample_count"] >= 2
-    assert result["sampler_version"] == SAMPLER_VERSION
-
-
-def test_a_read_that_raises_never_escapes_the_sampler(tmp_path):
-    """An observer that can break its subject is not worth having."""
-
-    class Exploding(ContainerCounters):
-        def read(self):
-            raise OSError("counter vanished")
-
-    counters = Exploding(1, proc_root=tmp_path, cgroup_root=tmp_path)
-    sampler = ResourceSampler(counters, interval_s=0.01)
-    sampler.start()
-    time.sleep(0.03)
-    # No exception reaches the caller, and the window is honestly empty.
-    assert sampler.stop()["coverage"] == 0.0
-
-
-def test_binding_waits_for_a_container_that_does_not_exist_yet(tmp_path):
-    """The race that made this feature measure almost nothing.
-
-    ``docker run`` returns its client process long before the daemon has
-    created the container, so the first ask reliably finds nothing. Binding
-    at spawn time therefore produced an inert sampler on every cold turn —
-    the common case — while every test that pre-resolved a pid passed.
-    """
-    proc, cg = _write_container(tmp_path, pid=555)
-    (cg / "cpu.stat").write_text("usage_usec 10\n")
-    (cg / "memory.current").write_text("64\n")
-    (proc / "net" / "dev").write_text("  eth0: 1 0 0 0 0 0 0 0 2 0\n")
-
-    attempts = {"n": 0}
-
-    def _resolve():
-        # Absent for the first two asks, exactly as a starting container is.
-        attempts["n"] += 1
-        if attempts["n"] < 3:
-            return None
-        return ContainerCounters(555, proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup")
-
-    sampler = ResourceSampler(resolver=_resolve, interval_s=0.01)
-    assert sampler.active, "a sampler that has not bound yet must still be live"
-    sampler.start()
-    time.sleep(0.1)
-    result = sampler.stop()
-
-    assert attempts["n"] >= 3, "the sampler gave up on the first ask"
-    assert result["sample_count"] >= 2
-    assert result["coverage"] > 0
-
-
 def test_a_sampler_that_never_binds_reports_zero_coverage(tmp_path):
     """A host that can never be read says so, and stops asking."""
     sampler = ResourceSampler(resolver=lambda: None, interval_s=0.01, bind_timeout_s=0.05)
@@ -235,46 +118,135 @@ def test_coverage_counts_readings_not_heartbeats():
     assert result["coverage"] == 0.1
 
 
-def test_a_container_that_exits_ends_the_window_instead_of_reading_a_stranger(tmp_path):
-    """The pid a container releases is handed to the next host process.
+def _stats(*, cpu_ns=1_000_000, mem=1000, inactive=0, io=None, net=None) -> dict:
+    """One daemon stats document, in the shape the API actually returns."""
+    doc: dict = {
+        "cpu_stats": {"cpu_usage": {"total_usage": cpu_ns}},
+        "memory_stats": {"usage": mem, "stats": {"inactive_file": inactive}},
+    }
+    if io is not None:
+        doc["blkio_stats"] = {"io_service_bytes_recursive": io}
+    if net is not None:
+        doc["networks"] = net
+    return doc
 
-    Reading ``/proc/<pid>/net/dev`` after that reports the *host's*
-    interfaces — the machine's traffic since boot, arriving as this turn's
-    network as a large, plausible, entirely wrong number.
+
+def _client(handler) -> httpx.Client:
+    """A client whose transport answers from `handler`, so no daemon is needed."""
+    return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://docker")
+
+
+def test_cpu_arrives_in_nanoseconds_and_is_stored_as_microseconds():
+    """The daemon's unit is not the column's unit, and the gap is 1000x."""
+    sample = sample_from_stats(_stats(cpu_ns=12_000_000_000), mono=0.0)
+    assert sample.cpu_usec == 12_000_000
+
+
+def test_memory_matches_what_docker_stats_shows_a_person():
+    """Page cache is subtracted, as the CLI does on cgroup v2.
+
+    An operator who runs `docker stats` against the same container while
+    reading our number must not be shown two different answers to the same
+    question.
     """
-    proc, cg = _write_container(tmp_path, pid=777)
-    (cg / "cpu.stat").write_text("usage_usec 10\n")
-    (proc / "net" / "dev").write_text("  eth0: 1 0 0 0 0 0 0 0 2 0\n")
-    counters = ContainerCounters(777, proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup")
-    assert counters.read() is not None
-
-    # The container exits: its cgroup goes away, the pid does not.
-    for child in cg.iterdir():
-        child.unlink()
-    cg.rmdir()
-
-    assert counters.read() is None, "a released pid was still read as this container"
+    assert sample_from_stats(_stats(mem=1000, inactive=400), mono=0.0).mem_bytes == 600
 
 
-def test_a_full_window_is_covered_end_to_end(tmp_path):
-    """A healthy turn must not be labelled partial by its own sampling rate.
+def test_an_unpopulated_blkio_is_unmeasured_rather_than_zero():
+    """The one place the direct-cgroup rule must NOT be carried over.
 
-    Sampling on a tick alone leaves the window's first and last fractions
-    unobserved, which at one sample a second made a healthy twelve-second
-    turn report 0.96 — under any sane threshold, a permanent "partial" badge
-    on turns that were measured fine.
+    Reading `io.stat` directly, an empty file is written by the kernel and
+    means no io happened. Through the daemon the same emptiness is
+    ambiguous — Docker has shipped versions that never populate this on
+    cgroup v2, whatever the container did — so it is reported as unmeasured.
+    Losing an occasional true zero is a smaller harm than inventing one.
     """
-    proc, cg = _write_container(tmp_path, pid=888)
-    (cg / "cpu.stat").write_text("usage_usec 10\n")
-    (proc / "net" / "dev").write_text("  eth0: 1 0 0 0 0 0 0 0 2 0\n")
-    counters = ContainerCounters(888, proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup")
+    for empty in ([], None):
+        sample = sample_from_stats(_stats(io=empty), mono=0.0)
+        assert sample.io_read_bytes is None
+        assert sample.io_write_bytes is None
 
-    sampler = ResourceSampler(counters, interval_s=0.05)
-    sampler.start()
-    time.sleep(0.12)
-    result = sampler.stop()
 
-    assert result["coverage"] > 0.95, (
-        f"a fully observed window reported coverage {result['coverage']}, which "
-        "would show the user a partial-measurement warning on a healthy turn"
+def test_block_io_sums_every_device_and_reads_either_case():
+    """Docker has spelled the op both ways across versions."""
+    sample = sample_from_stats(
+        _stats(
+            io=[
+                {"op": "read", "value": 100},
+                {"op": "Write", "value": 200},
+                {"op": "read", "value": 5},
+            ]
+        ),
+        mono=0.0,
     )
+    assert (sample.io_read_bytes, sample.io_write_bytes) == (105, 200)
+
+
+def test_network_sums_interfaces_and_is_absent_when_there_are_none():
+    """A closed-network sandbox has nothing to report, which is not zero."""
+    with_net = sample_from_stats(_stats(net={"eth0": {"rx_bytes": 5, "tx_bytes": 6}}), mono=0.0)
+    assert (with_net.net_rx_bytes, with_net.net_tx_bytes) == (5, 6)
+
+    without = sample_from_stats(_stats(net={}), mono=0.0)
+    assert (without.net_rx_bytes, without.net_tx_bytes) == (None, None)
+
+
+def test_the_stats_request_asks_for_one_shot():
+    """Without it the daemon pre-reads for a CPU percentage we never use.
+
+    That pre-read costs about a second of waiting per tick — at one sample a
+    second, the sampler would spend its whole life inside one request.
+    """
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, json=_stats())
+
+    ContainerStats("hyi-job-abc", _client(handler)).read()
+
+    assert seen.get("one-shot") == "true"
+    assert seen.get("stream") == "false"
+
+
+def test_a_container_the_daemon_has_forgotten_ends_the_window():
+    """404 is terminal: later numbers would belong to something else."""
+    stats = ContainerStats("gone", _client(lambda _r: httpx.Response(404, json={})))
+    assert stats.read() is None
+
+
+def test_a_transient_daemon_error_costs_coverage_but_not_the_window():
+    """A hiccup is a missing reading, not the end of the measurement."""
+    stats = ContainerStats("flaky", _client(lambda _r: httpx.Response(500, text="boom")))
+    sample = stats.read()
+    assert sample is not None
+    assert sample.cpu_usec is None
+
+
+def test_a_daemon_that_cannot_be_reached_is_reported_by_preflight():
+    """The check that the first sampler's whole failure did not have.
+
+    An assumption about the deployment that nothing verifies is how a
+    measurement feature ships dead and stays dead until somebody happens to
+    read the UI.
+    """
+    reason = daemon_reachable(timeout_s=0.05)
+    # On a host with a live daemon this is None; without one it names the
+    # reason. Either way it must answer rather than raise.
+    assert reason is None or isinstance(reason, str)
+
+
+def test_rebinding_discards_the_previous_container_s_numbers():
+    """Every spawn is a new container; the old window is not this turn's."""
+    sampler = ResourceSampler(
+        ContainerStats("first", _client(lambda _r: httpx.Response(200, json=_stats())))
+    )
+    sampler.start()
+    time.sleep(0.02)
+
+    sampler.rebind(None)
+
+    result = sampler.stop()
+    assert result["sample_count"] == 0
+    assert result["coverage"] == 0.0
+    assert result["sampler_version"] == SAMPLER_VERSION

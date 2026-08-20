@@ -329,3 +329,61 @@ def test_codex_lifecycle_usage_is_read_when_its_keys_are_recognizable() -> None:
     assert stats.input_tokens == 42
     assert stats.output_tokens == 7
     assert stats.tokens_source == "runtime"
+
+
+def test_a_zero_output_count_is_withheld_when_the_thread_plainly_produced_text() -> None:
+    """A count we can prove wrong is worse than no count.
+
+    Runtimes report their own usage, and a CLI talking to a model whose
+    response does not carry usage in the shape it reads reports **zero**
+    rather than nothing — which is what happens to every gateway-served
+    model this deployment actually runs. A thread that visibly produced
+    assistant text did not produce zero output tokens, and rendering that
+    figure states something false with the same confidence as a real number.
+    """
+    stats = summarize_thread(
+        job_ids=["job-1"],
+        attempts=[_attempt()],
+        events=[
+            _event(
+                seq=1,
+                event_type="message",
+                payload={
+                    "text": "here is the summary",
+                    "usage": {"input_tokens": 58_000, "output_tokens": 0},
+                },
+                offset=1,
+            ),
+            _event(seq=2, event_type="lifecycle", payload={"phase": "succeeded"}, offset=10),
+        ],
+    )
+
+    assert stats.input_tokens == 58_000, "the count the runtime does know is still reported"
+    assert stats.output_tokens is None, "a provably false zero was rendered as fact"
+    assert stats.output_tokens_per_second is None, "a rate derived from a false zero"
+
+
+def test_a_genuine_zero_output_survives_when_nothing_was_produced() -> None:
+    """Silence is for counts we disbelieve, not for every zero.
+
+    A turn that emitted no assistant text and reports zero output tokens is
+    reporting the truth, and withholding it would be its own dishonesty.
+    """
+    stats = summarize_thread(
+        job_ids=["job-1"],
+        attempts=[_attempt()],
+        events=[
+            _event(
+                seq=1,
+                event_type="tool_use",
+                payload={
+                    "name": "Bash",
+                    "id": "t1",
+                    "usage": {"input_tokens": 100, "output_tokens": 0},
+                },
+                offset=1,
+            ),
+        ],
+    )
+
+    assert stats.output_tokens == 0

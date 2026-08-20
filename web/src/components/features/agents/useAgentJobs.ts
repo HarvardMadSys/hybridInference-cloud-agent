@@ -212,6 +212,8 @@ export function useProjectJobs(limit = 200): {
 /** One job, its event log, and its patch — kept live over SSE. */
 export function useAgentJob(jobId: string): {
   job: AgentJob | null;
+  /** The stored stream, unfolded — what the trajectory view reads. */
+  events: AgentJobEventApi[];
   loading: boolean;
   error: string | null;
   reload: () => void;
@@ -302,7 +304,10 @@ export function useAgentJob(jobId: string): {
   }, [jobId, isLive, reload]);
 
   const job = api ? toDisplayJob(api, { events, patch, thread }) : null;
-  return { job, loading, error, reload };
+  // Both shapes, deliberately: `job.events` is the chat view's *reading* of
+  // the stream — folded, deduplicated, unknown kinds dropped — while the
+  // trajectory needs the rows the platform actually stored.
+  return { job, events, loading, error, reload };
 }
 
 /** One directory of the workspace tree, as far as it has been loaded. */

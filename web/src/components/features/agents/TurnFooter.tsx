@@ -31,25 +31,25 @@ const CONTINUITY_LABEL: Record<string, { text: string; tone: string; title: stri
     text: 'hot',
     tone: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
     title:
-      'Continued in the live process from the previous turn — the agent kept its full working memory, and the workspace was never rebuilt.',
+      'Continued in the same live process as the previous turn. The agent kept everything it had in mind, and its workspace was never rebuilt.',
   },
   warm_native: {
     text: 'warm',
     tone: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
     title:
-      'Resumed the agent’s own session in the workspace this thread already had — memory and files continuous, the agent process restarted for this turn.',
+      'Reopened the agent\u2019s own saved session in the workspace this thread already had. Its memory of earlier turns and the files it was working on are both intact; only its process was restarted.',
   },
   cold_native: {
     text: 'cold',
     tone: 'bg-amber-50 text-amber-700 ring-amber-600/20',
     title:
-      'Rebuilt in a fresh sandbox from the saved session and patch — the agent’s memory was restored, but anything it had installed by hand was not.',
+      'Rebuilt in a fresh sandbox from the saved session and the saved code. The agent still remembers earlier turns, but anything it had installed or generated outside version control is gone.',
   },
   replay: {
     text: 'replay',
     tone: 'bg-rose-50 text-rose-700 ring-rose-600/20',
     title:
-      'Rebuilt from the written transcript: the agent’s working memory from earlier turns was not available, so it may not recall why it did something. This happens when the session could not be saved or the thread moved hosts.',
+      'The agent\u2019s working memory of earlier turns was not available for this turn, so it was given the written transcript instead. It can read what was said, but it may not recall why it did something, and it will not know about anything it set up that the transcript does not mention. This happens when the previous turn\u2019s session could not be saved, or when the thread moved to another machine.',
   },
 };
 
@@ -209,8 +209,16 @@ function ToolTimingTable({ timings }: { timings: ToolTiming[] }) {
   );
 }
 
+type Explained = 'continuity' | 'partial' | 'unmeasured' | null;
+
 export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: number }) {
   const [open, setOpen] = useState(false);
+  // Which chip the reader asked about. A native `title` was the first
+  // delivery for these, and it is the wrong one: it wants a second of
+  // motionless hover, cannot be read on a touch screen, and holds three
+  // sentences badly. The one thing this footer most needs to explain — why a
+  // turn forgot — was the least likely to be seen.
+  const [explained, setExplained] = useState<Explained>(null);
   // Scoped to the attempt the reader is looking at: the body above already
   // switches with the attempt picker, and a footer that did not would label
   // one attempt's transcript with another's numbers.
@@ -222,7 +230,23 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // A sampler that reported at all but covered only part of the window makes
   // every number below a floor. Saying so is the difference between a partial
   // measurement and a wrong one.
-  const partial = Boolean(resources && resources.coverage < 0.99 && stats.length > 0);
+  // Warn only when the gap is material. Binding to a container the daemon
+  // has not finished creating costs a fraction of a second that no threshold
+  // can recover, so a warning at "anything short of perfect" fires on every
+  // healthy turn — and a warning that always fires is one nobody reads.
+  // Missing a tenth of a turn is worth saying; missing two percent is not.
+  const partial = Boolean(resources && resources.coverage < 0.9 && stats.length > 0);
+  const explanation =
+    explained === 'continuity'
+      ? badge?.title
+      : explained === 'partial'
+        ? `Only ${Math.round((resources?.coverage ?? 0) * 100)}% of this turn was sampled, so the ` +
+          'numbers above are lower bounds rather than totals. This happens when the sandbox ' +
+          'took a while to appear, or ended before the turn did.'
+        : explained === 'unmeasured'
+          ? 'This turn ran where the platform could not read the sandbox\u2019s counters, so ' +
+            'nothing was measured. That is not the same as a turn that consumed nothing.'
+          : null;
   const unmeasured = Boolean(resources && stats.length === 0);
 
   // `unmeasured` counts as something to say: a sampler that ran and could
@@ -236,12 +260,15 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
     <section className="mt-3 rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-[12px]">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-600">
         {badge ? (
-          <span
+          <button
+            type="button"
+            onClick={() => setExplained(explained === 'continuity' ? null : 'continuity')}
+            aria-expanded={explained === 'continuity'}
             title={badge.title}
-            className={`inline-flex cursor-help items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset ${badge.tone}`}
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset transition-opacity hover:opacity-80 ${badge.tone}`}
           >
             {badge.text}
-          </span>
+          </button>
         ) : null}
         {duration ? <span className="tabular-nums">{duration}</span> : null}
         {stats.map((stat) => (
@@ -251,20 +278,24 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
           </span>
         ))}
         {partial ? (
-          <span
-            className="cursor-help text-amber-700"
-            title={`Only ${Math.round((resources?.coverage ?? 0) * 100)}% of this turn was sampled, so these are lower bounds rather than totals.`}
+          <button
+            type="button"
+            onClick={() => setExplained(explained === 'partial' ? null : 'partial')}
+            aria-expanded={explained === 'partial'}
+            className="text-amber-700 underline-offset-2 hover:underline"
           >
             partial
-          </span>
+          </button>
         ) : null}
         {unmeasured ? (
-          <span
-            className="cursor-help text-gray-400"
-            title="This turn ran on a host whose resource counters could not be read, so nothing was measured. This is not a measurement of zero."
+          <button
+            type="button"
+            onClick={() => setExplained(explained === 'unmeasured' ? null : 'unmeasured')}
+            aria-expanded={explained === 'unmeasured'}
+            className="text-gray-400 underline-offset-2 hover:underline"
           >
             resource data unavailable
-          </span>
+          </button>
         ) : null}
         {timings.length > 0 ? (
           <button
@@ -276,6 +307,11 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
           </button>
         ) : null}
       </div>
+      {explanation ? (
+        <p className="mt-2 border-t border-gray-200 pt-2 text-[12px] leading-relaxed text-gray-600">
+          {explanation}
+        </p>
+      ) : null}
       {open && timings.length > 0 ? (
         <div className="mt-2 border-t border-gray-200 pt-2">
           <ToolTimingTable timings={timings} />

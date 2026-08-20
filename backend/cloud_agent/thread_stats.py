@@ -129,6 +129,7 @@ def summarize_thread(
     tool_seconds = 0.0
     ttft_samples: list[float] = []
     totals = _TokenTotals()
+    produced_text = False
 
     for job_id, job_events in by_job.items():
         ordered = sorted(job_events, key=_event_sort_key)
@@ -153,8 +154,24 @@ def summarize_thread(
 
         for event in ordered:
             totals.add(_usage_of(event))
+            if (
+                event.get("event_type") == _MESSAGE
+                and str(_payload(event).get("text") or "").strip()
+            ):
+                produced_text = True
 
     model_seconds = max(0.0, wall_seconds - tool_seconds)
+    output_tokens = totals.output_tokens
+    if output_tokens == 0 and produced_text:
+        # A count we can prove wrong is worse than no count. Runtimes report
+        # their own usage, and a CLI talking to a model whose response does
+        # not carry usage in the shape it reads reports zero rather than
+        # nothing — which is what happens to every gateway-served model we
+        # actually run. The thread plainly produced assistant text, so zero
+        # output tokens is false on its face, and the honest surface is
+        # silence until the gateway's ledger backs this figure (CHAT-5, #57),
+        # which is the billing authority for it anyway.
+        output_tokens = None
 
     return ThreadStats(
         turns=len(job_ids),
@@ -165,10 +182,10 @@ def summarize_thread(
         model_seconds=model_seconds,
         ttft_seconds=(sum(ttft_samples) / len(ttft_samples)) if ttft_samples else None,
         input_tokens=totals.input_tokens,
-        output_tokens=totals.output_tokens,
+        output_tokens=output_tokens,
         cache_read_tokens=totals.cache_read_tokens,
         cache_hit_ratio=totals.cache_hit_ratio(),
-        output_tokens_per_second=_rate(totals.output_tokens, model_seconds),
+        output_tokens_per_second=_rate(output_tokens, model_seconds),
         tokens_source="runtime" if totals.saw_usage else "unavailable",
     )
 

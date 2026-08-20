@@ -60,7 +60,7 @@ from cloud_agent_host.enrollment import (
 from cloud_agent_host.logging_utils import configure_process_logging
 from cloud_agent_host.patch_gate import branch_name_for, validate_patch
 from cloud_agent_host.residency import ResidentEntry, ResidentPool
-from cloud_agent_host.resources import ResourceSampler
+from cloud_agent_host.resources import ResourceSampler, daemon_reachable
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
     AgentRuntime,
@@ -1003,6 +1003,61 @@ def run_agent(
 ) -> tuple[int, str, list[str]]:
     """Run the agent, streaming its output back as normalized events.
 
+    This frame exists to own the resource sampler. It is the only one every
+    exit passes: the sampler starts deep inside the turn, at whichever spawn
+    the turn actually uses, and an exception raised while preparing that turn
+    used to leave its thread sampling for the life of the runner process.
+
+    The rollup is reported whether or not anything was read. A window with
+    coverage 0 is the row that says "this turn was not measured", and
+    withholding it is what makes an unmeasured turn indistinguishable from
+    one that consumed nothing — the single distinction this whole signal
+    exists to preserve.
+    """
+    sampler = ResourceSampler(None)
+    try:
+        return _run_agent(
+            runtime,
+            job=job,
+            workdir=workdir,
+            gateway_base_url=gateway_base_url,
+            control=control,
+            heart=heart,
+            timeout_s=timeout_s,
+            backend=backend,
+            mcp_config=mcp_config,
+            state=state,
+            state_dir=state_dir,
+            resident=resident,
+            residents=residents,
+            live_out=live_out,
+            sampler=sampler,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            control.report_resources(sampler.stop())
+
+
+def _run_agent(
+    runtime: AgentRuntime,
+    *,
+    job: ClaimedJob,
+    workdir: str,
+    gateway_base_url: str,
+    control: ControlPlane,
+    heart: Heartbeater,
+    timeout_s: float,
+    backend: SandboxBackend,
+    mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+    state: HarnessState | None = None,
+    state_dir: str | None = None,
+    resident: ResidentEntry | None = None,
+    residents: ResidentPool | None = None,
+    live_out: dict[str, Any] | None = None,
+    sampler: ResourceSampler,
+) -> tuple[int, str, list[str]]:
+    """Run the agent, streaming its output back as normalized events.
+
     Returns ``(exit_code, tail, tool_errors)``. Raises :class:`LeaseLost` if this attempt
     stops owning the job mid-run.
 
@@ -1020,44 +1075,29 @@ def run_agent(
     a live session it created itself; one borrowed from the pool is closed by
     the pool teardown its failure triggers.
     """
-    #: This turn's resource sampler. It starts with whichever sandbox process
-    #: the turn actually uses — the one spawned below on a cold or restarting
-    #: turn, or the resident process a hot turn inherits — and is stopped in
-    #: this function's ``finally``, which is the only place every exit passes.
-    sampler = ResourceSampler(None)
 
     def _spawn_sampled(process: SandboxProcess) -> SandboxProcess:
         """Point the sampler at the sandbox this turn is about to use.
 
         Rebinding rather than binding once: every spawn is a *new* container,
         so a sampler still holding the previous one would keep reporting a
-        process this turn does not own — and, on the hot fallback path, one
-        that is already dead. Whatever it had measured is discarded with it,
-        which is correct: those numbers belong to a container this turn no
-        longer runs in.
+        container this turn does not own — and, on the hot fallback path, one
+        that is already dead.
 
         Everything here is contained. This sits directly in the path that
         starts the agent, so a sampler that raised would not degrade a
         measurement — it would cost the user their turn.
         """
-        nonlocal sampler
         try:
-            sampler.stop()
-            # A VM-isolated runtime (kata) puts the workload inside a guest
-            # kernel. What the host can see under that container's pid is the
-            # VMM shim: its cgroup accounts for the hypervisor process, not
-            # for the agent. Measuring it would report confident numbers about
-            # the wrong thing, so this backend is honestly not measured.
-            container = (
+            # A VM-isolated runtime (kata) runs the workload inside a guest
+            # kernel; the daemon's accounting for that container describes the
+            # hypervisor, not the agent. Confident numbers about the wrong
+            # thing are worse than none, so it is honestly not measured.
+            sampler.rebind(
                 None
                 if getattr(backend, "is_vm_isolated", False)
                 else getattr(process, "container", None)
             )
-            sampler = ResourceSampler.for_container(
-                container,
-                docker_binary=getattr(backend, "docker_binary", "docker"),
-            )
-            sampler.start()
         except Exception as exc:
             print(f"resource sampler unavailable: {exc}", file=sys.stderr)
         return process
@@ -1116,11 +1156,7 @@ def run_agent(
         # rung that reuses a process is exactly the rung whose consumption is
         # least obvious, so it is measured through the session it inherits.
         with contextlib.suppress(Exception):
-            sampler = ResourceSampler.for_container(
-                getattr(resident.live_session, "container", None),
-                docker_binary=getattr(backend, "docker_binary", "docker"),
-            )
-            sampler.start()
+            sampler.rebind(getattr(resident.live_session, "container", None))
     stale_process = resident is not None and not hot_ok and resident.live_session is not None
     if stale_process and residents is not None and job.thread_id:
         # This turn will advance the thread past the idle process's memory —
@@ -1369,16 +1405,6 @@ def run_agent(
             )
         return exit_code, "".join(tail), tool_errors
     finally:
-        # Observability is reported before the session teardown below: the
-        # rollup describes a window that has already closed, and a teardown
-        # failure must not cost the turn its numbers.
-        with contextlib.suppress(Exception):
-            # Reported whether or not anything was read. A window with
-            # coverage 0 is the row that says "this turn was not measured",
-            # and withholding it is what makes an unmeasured turn
-            # indistinguishable from one that consumed nothing — the single
-            # distinction this whole signal exists to preserve.
-            control.report_resources(sampler.stop())
         # Every exit but the completed hand-off closes a live session this
         # turn spawned: a leaked resident process would keep running — and
         # keep holding its grant-scoped key — with no entry owning it.
@@ -1959,6 +1985,21 @@ def run_forever(
     # Pass the workdir root so a backend that bind-mounts it can prove the
     # mount works now, rather than failing every job with an opaque error.
     backend.preflight(workdir_root=str(root))
+    # Whether this runner can measure at all, checked once and said out loud.
+    # The first sampler assumed it ran on the host and read cgroupfs through a
+    # pid; deployed as a container beside its sandboxes, every read failed and
+    # the only symptom was grey text under every turn. An assumption about the
+    # deployment that nothing checks is how that happens twice, so this is the
+    # check. It is a warning, never fatal: a runner that cannot measure must
+    # still run jobs.
+    if getattr(backend, "measurable", True):
+        unmeasurable = daemon_reachable()
+        if unmeasurable:
+            print(
+                f"resource measurement is unavailable: {unmeasurable}. Turns will run "
+                "normally and report no resource usage.",
+                file=sys.stderr,
+            )
     # The sandbox must be able to reach the gateway it will be handed —
     # `gateway_url`, not the control plane this runner claims against. Checking
     # the wrong one proves the runner's own connectivity and says nothing about

@@ -178,7 +178,15 @@ class AgentJobResponse(BaseModel):
     # How this turn was continued and how long it took — recorded per attempt
     # since the resident design landed, exposed here so the owner can see why
     # a thread forgot (a ``replay`` turn was rebuilt from transcript) rather
-    # than guess. Null on turns that predate the stamp or never ran.
+    # than guess.
+    #
+    # **Populated only by the single-job read** (``GET /jobs/{id}``), which is
+    # the one the turn view renders from. List and thread reads leave all
+    # three null rather than paying a per-row lookup for a field nothing on
+    # those paths displays — so a null here means "not fetched on this path",
+    # which is NOT the same statement as ``resources.coverage == 0``
+    # ("fetched, and nothing could be measured"). A future consumer that
+    # wants these in a listing needs a batched read, not a loop.
     continuity_mode: str | None = None
     duration_ms: int | None = None
     resources: AttemptResources | None = None

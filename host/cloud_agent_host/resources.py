@@ -3,29 +3,39 @@
 The platform runs every turn on a machine its user cannot see, so "why was
 that slow" and "what did that cost in CPU" have had no answer but ssh. This
 module is the measurement half of the observability design's third signal
-class: a periodic sampler that reads one sandbox's kernel counters from the
-host and rolls a closed window up into one set of numbers.
+class: a periodic sampler that reads one sandbox's counters and rolls a
+closed window up into one set of numbers.
 
-**Why from the host, and never from inside.** Every counter here comes from
-the runner's own reads of ``cgroupfs`` and ``/proc``. Nothing is asked of the
-sandbox, nothing runs inside it, and no agent-visible process participates —
-so a turn cannot see that it is measured, cannot refuse, and cannot report
-numbers of its own choosing.
+**Why through the daemon, and not through cgroupfs.** The first version read
+``/proc/<pid>/cgroup`` and ``/sys/fs/cgroup`` directly, having assumed the
+runner is a host process. It is not: the runner is a container beside the
+sandboxes it supervises, so a host pid the daemon reports does not exist in
+its own pid namespace and every read failed. Granting it ``pid: host``,
+``cgroup: host`` and a cgroupfs mount would work, but it manages that
+assumption rather than removing it — and each of the three knobs fails
+exactly the way the original bug did, silently. Asking the daemon over the
+socket the runner already holds has no such assumption: it is the same
+answer whether the runner runs on the host, in a container, or on a machine
+that joins the pool later.
 
-**Why deltas, never absolutes.** A cgroup's counters are cumulative from its
-creation, and a resident thread's sandbox can outlive the turn being measured.
-Every value reported is the difference between the window's last and first
-sample, so a second turn in the same sandbox is never charged for the first.
-Peak memory is the maximum of *our own* samples for the same reason: the
-kernel's ``memory.peak`` is a high-water mark since cgroup creation, which
-would attribute an earlier turn's spike to this one.
+**Why still from outside.** The invariant is unchanged. Nothing is asked of
+the sandbox, nothing runs inside it, and no agent-visible process
+participates — so a turn cannot see that it is measured, cannot refuse, and
+cannot report numbers of its own choosing.
 
-**Why a missing number is not a zero.** A host whose backend cannot be read
-(no cgroup v2, a container the runner cannot resolve, a Docker daemon inside
-a VM as on macOS) yields counters of ``None`` and ``coverage`` of 0. A turn
-too short to sample twice yields the same. Reporting zeros there would be a
+**Why deltas, never absolutes.** These counters are cumulative from the
+container's creation, and a resident thread's sandbox can outlive the turn
+being measured. Every value reported is the difference between the window's
+last and first sample, so a second turn in the same sandbox is never charged
+for the first. Peak memory is the maximum of *our own* samples for the same
+reason: a high-water mark since creation would attribute an earlier turn's
+spike to this one.
+
+**Why a missing number is not a zero.** A daemon that cannot be reached, a
+container that has gone, a field this Docker version does not populate — all
+yield ``None`` and a ``coverage`` below 1. Reporting zeros there would be a
 lie a dashboard cannot detect, so the honest shape is carried all the way to
-the row: `coverage` says how much of the window was actually observed.
+the row: ``coverage`` says how much of the window was actually observed.
 
 Nothing here may fail a turn. Every read is defensive and every failure
 degrades to a missing counter, because a measurement problem must never
@@ -35,12 +45,13 @@ become the user's problem.
 from __future__ import annotations
 
 import contextlib
-import subprocess
+import os
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from cloud_agent_host.logging_utils import get_logger
 
@@ -50,24 +61,37 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 #: Bumped when the meaning of a reported number changes, so a stored rollup
-#: can always be read back with the semantics it was written under.
-SAMPLER_VERSION = "1"
+#: can always be read back with the semantics it was written under. ``2`` is
+#: the move from host cgroupfs reads to the daemon's own accounting.
+SAMPLER_VERSION = "2"
 
-#: One sample per second. The reads are a handful of small files — microseconds
-#: of work — and a turn is measured in tens of seconds, so this is fine-grained
-#: enough for per-tool windows (design §6) without being a load of its own.
+#: One sample per second. A turn is measured in tens of seconds, so this is
+#: fine-grained enough for per-tool windows (design §6) without being a load
+#: of its own — one small request per sandbox per second, on a connection
+#: that stays open.
 SAMPLE_INTERVAL_S = 1.0
 
-#: How long to keep asking the daemon where a container is before giving up.
-#: `docker run` returns its client process well before the container exists,
-#: and on a host that must first pull an image that gap is seconds, not
-#: milliseconds — asking once at spawn time is asking too early, every time.
+#: How long to keep asking the daemon about a container before giving up.
+#: ``docker run`` returns its client process well before the container
+#: exists, and on a host that must first pull an image that gap is seconds,
+#: not milliseconds — asking once at spawn time is asking too early, every
+#: time.
 BIND_TIMEOUT_S = 30.0
+
+#: How often to re-ask while waiting for the container to appear. Much
+#: shorter than the sampling interval on purpose: every millisecond between
+#: the sandbox starting and the sampler binding is consumption nobody
+#: measured, and at the sampling interval a container that was not ready on
+#: the first ask cost a full second of a turn that often lasts ten. The extra
+#: asks happen only during startup and stop the moment one succeeds.
+BIND_POLL_S = 0.1
+
+_DEFAULT_SOCKET = "/var/run/docker.sock"
 
 
 @dataclass(frozen=True)
 class Sample:
-    """One instant's counters. ``None`` means that backend was unreadable."""
+    """One instant's counters. ``None`` means that counter was unavailable."""
 
     mono: float
     cpu_usec: int | None = None
@@ -78,190 +102,177 @@ class Sample:
     net_tx_bytes: int | None = None
 
 
-def _read_text(path: Path) -> str | None:
-    """Read one counter file, or None if it cannot be read.
-
-    Absence is routine rather than exceptional: cgroup files appear and vanish
-    with the container, and a sampler that raised on a exiting container would
-    turn an ordinary race into a failed turn.
-    """
-    try:
-        return path.read_text()
-    except (OSError, ValueError):
+def _as_int(value: Any) -> int | None:
+    """Coerce a JSON number to a non-negative int, or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
+    number = int(value)
+    return number if number >= 0 else None
 
 
-def _parse_keyed(text: str, key: str) -> int | None:
-    """Pull one ``key value`` line out of a cgroup stat file."""
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] == key:
-            try:
-                return int(parts[1])
-            except ValueError:
-                return None
-    return None
+def _parse_cpu(stats: dict[str, Any]) -> int | None:
+    """Cumulative CPU time in microseconds.
 
-
-def _parse_io_stat(text: str) -> tuple[int | None, int | None]:
-    """Total read and written bytes across every device in ``io.stat``.
-
-    Per-device rows are summed because the sandbox's io is one workload; which
-    block device served it is a host fact, not something a turn's owner asked.
+    The daemon reports nanoseconds on Linux; the rest of this module speaks
+    microseconds because that is what the stored column holds.
     """
-    # Zero, not None: a file the kernel wrote with no device rows means this
-    # cgroup did no block io, which is a measurement. Returning "unreadable"
-    # here would turn the commonest honest zero into a hole in the row.
-    read_total: int | None = 0
-    write_total: int | None = 0
-    for line in text.splitlines():
-        for field in line.split()[1:]:
-            key, _, raw = field.partition("=")
-            if key not in ("rbytes", "wbytes"):
-                continue
-            try:
-                value = int(raw)
-            except ValueError:
-                continue
-            if key == "rbytes":
-                read_total += value
-            else:
-                write_total += value
-    return read_total, write_total
+    total = _as_int(((stats.get("cpu_stats") or {}).get("cpu_usage") or {}).get("total_usage"))
+    return None if total is None else total // 1000
 
 
-def _parse_net_dev(text: str) -> tuple[int | None, int | None]:
-    """Received and transmitted bytes for a namespace's real interfaces.
+def _parse_memory(stats: dict[str, Any]) -> int | None:
+    """Current memory, matching what ``docker stats`` shows a person.
 
-    ``lo`` is excluded: loopback is the sandbox talking to itself, which is
-    not network the platform carries and would inflate a user-facing number
-    with traffic that never left the machine.
+    Page cache is subtracted the way the CLI does it, because an operator
+    comparing our number against ``docker stats`` on the same container must
+    not find two different answers to the same question.
     """
-    rx_total: int | None = None
-    tx_total: int | None = None
-    for line in text.splitlines():
-        name, _, rest = line.partition(":")
-        name = name.strip()
-        if not rest or name in ("", "lo") or "|" in name:
-            continue
-        fields = rest.split()
-        if len(fields) < 9:
-            continue
-        try:
-            rx, tx = int(fields[0]), int(fields[8])
-        except ValueError:
-            continue
-        rx_total = (rx_total or 0) + rx
-        tx_total = (tx_total or 0) + tx
-    return rx_total, tx_total
-
-
-class ContainerCounters:
-    """Reads one container's counters, given the pid the host sees for it.
-
-    The cgroup path is resolved once from ``/proc/<pid>/cgroup``: it does not
-    change for the life of the container, and re-deriving it every second
-    would be a syscall spent to learn the same answer.
-    """
-
-    def __init__(
-        self,
-        pid: int,
-        *,
-        proc_root: Path | str = "/proc",
-        cgroup_root: Path | str = "/sys/fs/cgroup",
-    ) -> None:
-        self._proc = Path(proc_root) / str(pid)
-        self._cgroup_root = Path(cgroup_root)
-        self._cgroup_line = _read_text(self._proc / "cgroup")
-        self._cgroup_dir = self._resolve_cgroup()
-
-    def _resolve_cgroup(self) -> Path | None:
-        """Find this pid's cgroup v2 directory, or None where there is none.
-
-        The v2 line is the one with an empty controller field (``0::<path>``).
-        A v1-only host has no such line, and rather than half-measure across
-        the two hierarchies the sampler reports nothing and says so through
-        coverage.
-        """
-        text = _read_text(self._proc / "cgroup")
-        if text is None:
-            return None
-        for line in text.splitlines():
-            parts = line.split(":", 2)
-            if len(parts) == 3 and parts[0] == "0" and parts[1] == "":
-                candidate = self._cgroup_root / parts[2].lstrip("/")
-                return candidate if candidate.is_dir() else None
+    memory = stats.get("memory_stats") or {}
+    usage = _as_int(memory.get("usage"))
+    if usage is None:
         return None
+    inactive = _as_int((memory.get("stats") or {}).get("inactive_file")) or 0
+    return max(0, usage - inactive)
 
-    @property
-    def readable(self) -> bool:
-        """Whether anything at all can be measured for this container."""
-        return self._cgroup_dir is not None or (self._proc / "net" / "dev").exists()
 
-    def alive(self) -> bool:
-        """Whether the pid still belongs to the container we resolved.
+def _parse_io(stats: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Cumulative block io, or ``None`` where this daemon does not report it.
 
-        A container that exits releases its pid, and the kernel hands that
-        number to the next process the host starts — at which point
-        ``/proc/<pid>/net/dev`` describes the *host's* interfaces. Reading it
-        would report the machine's traffic since boot as this turn's network,
-        a wrong number large enough to look deliberate. The cgroup directory
-        disappears with the container, so its presence is the check; where
-        there is no cgroup to watch, the pid's own cgroup line must still
-        name the one we started from.
-        """
-        if self._cgroup_dir is not None:
-            return self._cgroup_dir.is_dir()
-        text = _read_text(self._proc / "cgroup")
-        return text is not None and text == self._cgroup_line
+    Deliberately NOT zero when the list is empty or missing. Reading a cgroup
+    file directly, an empty file is written by the kernel and means no io
+    happened; here the same emptiness is ambiguous — Docker has shipped
+    versions that never populate this on cgroup v2, whatever the container
+    did. An ambiguous emptiness is reported as unmeasured, because losing an
+    occasional true zero is a smaller harm than inventing one.
+    """
+    entries = (stats.get("blkio_stats") or {}).get("io_service_bytes_recursive")
+    if not entries or not isinstance(entries, list):
+        return None, None
+    read_total = write_total = 0
+    seen = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        value = _as_int(entry.get("value"))
+        op = str(entry.get("op") or "").lower()
+        if value is None or op not in ("read", "write"):
+            continue
+        seen = True
+        if op == "read":
+            read_total += value
+        else:
+            write_total += value
+    return (read_total, write_total) if seen else (None, None)
+
+
+def _parse_network(stats: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Cumulative bytes across the container's interfaces.
+
+    Absent when the container has no network of its own to report — which is
+    a real state for a sandbox on a closed network, and not the same as
+    having sent nothing.
+    """
+    networks = stats.get("networks")
+    if not isinstance(networks, dict) or not networks:
+        return None, None
+    rx_total = tx_total = 0
+    seen = False
+    for interface in networks.values():
+        if not isinstance(interface, dict):
+            continue
+        rx, tx = _as_int(interface.get("rx_bytes")), _as_int(interface.get("tx_bytes"))
+        if rx is None and tx is None:
+            continue
+        seen = True
+        rx_total += rx or 0
+        tx_total += tx or 0
+    return (rx_total, tx_total) if seen else (None, None)
+
+
+def sample_from_stats(stats: dict[str, Any], *, mono: float) -> Sample:
+    """Project one daemon stats document into one sample."""
+    io_read, io_write = _parse_io(stats)
+    net_rx, net_tx = _parse_network(stats)
+    return Sample(
+        mono=mono,
+        cpu_usec=_parse_cpu(stats),
+        mem_bytes=_parse_memory(stats),
+        io_read_bytes=io_read,
+        io_write_bytes=io_write,
+        net_rx_bytes=net_rx,
+        net_tx_bytes=net_tx,
+    )
+
+
+def daemon_client(*, timeout_s: float = 5.0) -> httpx.Client:
+    """Open a keep-alive client onto the Docker API.
+
+    One connection for the life of a sampler: a fresh TCP or unix connection
+    per tick would spend more time on the handshake than on the measurement.
+    ``DOCKER_HOST`` is honoured so a deployment that talks to a remote or
+    non-default daemon is measured through the same daemon it spawns
+    through — measuring a different one would be worse than not measuring.
+    """
+    host = os.environ.get("DOCKER_HOST", "")
+    if host.startswith("tcp://"):
+        return httpx.Client(base_url=host.replace("tcp://", "http://", 1), timeout=timeout_s)
+    socket = host[len("unix://") :] if host.startswith("unix://") else _DEFAULT_SOCKET
+    transport = httpx.HTTPTransport(uds=socket)
+    return httpx.Client(transport=transport, base_url="http://docker", timeout=timeout_s)
+
+
+class ContainerStats:
+    """Reads one container's counters from the daemon.
+
+    Identity is the container name the platform generated, so there is no pid
+    to go stale: the pid-reuse hazard the cgroupfs reader had to guard
+    against — a released pid handed to a host process, whose interface
+    counters would arrive as this turn's network — cannot arise here.
+    """
+
+    def __init__(self, container: str, client: httpx.Client) -> None:
+        self._container = container
+        self._client = client
 
     def read(self) -> Sample | None:
         """Take one sample, or None once the container is gone.
 
-        None is a terminal answer, not a failed read: it means the thing
-        being measured no longer exists, and every later number would belong
-        to something else.
+        None is terminal, not a failed read: a 404 means the container no
+        longer exists, and every later number would belong to something else.
+        A transient error is not terminal and yields an empty sample, which
+        counts against coverage without ending the window.
         """
-        if not self.alive():
+        try:
+            response = self._client.get(
+                f"/containers/{self._container}/stats",
+                # `one-shot` skips the daemon's initial pre-read, which exists
+                # only to compute a CPU percentage from two samples. We take
+                # our own deltas, so without it every tick would pay about a
+                # second of the daemon waiting on our behalf.
+                params={"stream": "false", "one-shot": "true"},
+            )
+        except httpx.HTTPError:
+            return Sample(mono=time.monotonic())
+        if response.status_code == 404:
             return None
-        cpu = mem = io_read = io_write = None
-        if self._cgroup_dir is not None:
-            cpu_text = _read_text(self._cgroup_dir / "cpu.stat")
-            if cpu_text is not None:
-                cpu = _parse_keyed(cpu_text, "usage_usec")
-            mem_text = _read_text(self._cgroup_dir / "memory.current")
-            if mem_text is not None:
-                try:
-                    mem = int(mem_text.strip())
-                except ValueError:
-                    mem = None
-            io_text = _read_text(self._cgroup_dir / "io.stat")
-            if io_text is not None:
-                io_read, io_write = _parse_io_stat(io_text)
-        rx = tx = None
-        net_text = _read_text(self._proc / "net" / "dev")
-        if net_text is not None:
-            rx, tx = _parse_net_dev(net_text)
-        return Sample(
-            mono=time.monotonic(),
-            cpu_usec=cpu,
-            mem_bytes=mem,
-            io_read_bytes=io_read,
-            io_write_bytes=io_write,
-            net_rx_bytes=rx,
-            net_tx_bytes=tx,
-        )
+        if response.status_code >= 400:
+            return Sample(mono=time.monotonic())
+        try:
+            stats = response.json()
+        except ValueError:
+            return Sample(mono=time.monotonic())
+        if not isinstance(stats, dict):
+            return Sample(mono=time.monotonic())
+        return sample_from_stats(stats, mono=time.monotonic())
 
 
 def _delta(samples: list[Sample], field: str) -> int | None:
     """Last minus first for one cumulative counter.
 
     ``None`` when fewer than two samples carried it: one reading of a
-    cumulative counter says how much the cgroup has ever used, which is not
-    what this window consumed. A counter that went backwards (a cgroup
-    replaced under a resident sandbox) reports ``None`` rather than a
-    negative or a wildly large number.
+    cumulative counter says how much the container has ever used, which is
+    not what this window consumed. A counter that went backwards reports
+    ``None`` rather than a negative or a wildly large number.
     """
     values = [getattr(s, field) for s in samples if getattr(s, field) is not None]
     if len(values) < 2:
@@ -271,7 +282,7 @@ def _delta(samples: list[Sample], field: str) -> int | None:
 
 
 def _readable(sample: Sample) -> bool:
-    """Whether this sample actually read something from the kernel.
+    """Whether this sample actually carried a counter.
 
     A sample whose every counter is ``None`` is a heartbeat, not a reading.
     Counting heartbeats as coverage is how a sampler watching a container
@@ -311,7 +322,7 @@ def rollup(samples: list[Sample], *, window_s: float) -> dict[str, object]:
     return {
         "cpu_usec": _delta(read, "cpu_usec"),
         # Peak and mean come from our own samples, so both describe this
-        # window; the kernel's high-water mark would not.
+        # window; a since-creation high-water mark would not.
         "mem_peak_bytes": max(memory) if memory else None,
         "mem_avg_bytes": int(sum(memory) / len(memory)) if memory else None,
         "io_read_bytes": _delta(read, "io_read_bytes"),
@@ -324,32 +335,25 @@ def rollup(samples: list[Sample], *, window_s: float) -> dict[str, object]:
     }
 
 
-def container_pid(container: str, *, docker_binary: str = "docker") -> int | None:
-    """Ask the daemon for the host pid of a running container.
+def daemon_reachable(*, timeout_s: float = 5.0) -> str | None:
+    """Check that the daemon answers, returning a reason when it does not.
 
-    Returns None on every failure — a container that has not been created
-    yet reports nothing, one that has exited reports 0, and a daemon
-    answering from inside a VM (macOS, colima) reports a pid this host
-    cannot resolve. All three are "not measurable *yet* or at all", which the
-    sampler resolves by retrying rather than by giving up at the first ask.
+    The runner's preflight calls this so a deployment where measurement
+    cannot work says so at startup, in the log, rather than by rendering
+    "resource data unavailable" under every turn until somebody notices. The
+    first version's whole failure was an assumption about the deployment that
+    nothing checked; this is that check.
     """
     try:
-        result = subprocess.run(
-            [docker_binary, "inspect", "--format", "{{.State.Pid}}", container],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        pid = int(result.stdout.strip())
-    except ValueError:
-        return None
-    return pid if pid > 0 else None
+        with daemon_client(timeout_s=timeout_s) as client:
+            response = client.get("/version")
+    except httpx.HTTPError as exc:
+        return f"the Docker API could not be reached ({exc})"
+    except OSError as exc:
+        return f"the Docker socket could not be opened ({exc})"
+    if response.status_code >= 400:
+        return f"the Docker API answered {response.status_code}"
+    return None
 
 
 class ResourceSampler:
@@ -376,16 +380,18 @@ class ResourceSampler:
 
     def __init__(
         self,
-        counters: ContainerCounters | None = None,
+        counters: ContainerStats | None = None,
         *,
-        resolver: Callable[[], ContainerCounters | None] | None = None,
+        resolver: Callable[[], ContainerStats | None] | None = None,
         interval_s: float = SAMPLE_INTERVAL_S,
         bind_timeout_s: float = BIND_TIMEOUT_S,
+        closer: Callable[[], None] | None = None,
     ) -> None:
         self._counters = counters
         self._resolver = resolver
         self._interval = interval_s
         self._bind_timeout = bind_timeout_s
+        self._closer = closer
         self._samples: list[Sample] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -396,9 +402,6 @@ class ResourceSampler:
         cls,
         container: str | None,
         *,
-        docker_binary: str = "docker",
-        proc_root: Path | str = "/proc",
-        cgroup_root: Path | str = "/sys/fs/cgroup",
         interval_s: float = SAMPLE_INTERVAL_S,
     ) -> ResourceSampler:
         """Build a sampler that binds to a named container when it appears.
@@ -406,21 +409,47 @@ class ResourceSampler:
         Resolution is deferred to the sampling thread rather than performed
         here: this is called from the path that launches the agent, where a
         daemon round trip is both too early to succeed and too expensive to
-        spend. A host that can never be read (no container, a daemon in a VM,
-        cgroup v1) simply never binds, and reports coverage 0 — the true
-        statement.
+        spend. A deployment whose daemon cannot be reached simply never
+        binds, and reports coverage 0 — the true statement.
         """
         if not container:
             return cls(None)
+        client = daemon_client()
 
-        def _resolve() -> ContainerCounters | None:
-            pid = container_pid(container, docker_binary=docker_binary)
-            if pid is None:
-                return None
-            counters = ContainerCounters(pid, proc_root=proc_root, cgroup_root=cgroup_root)
-            return counters if counters.readable else None
+        def _resolve() -> ContainerStats | None:
+            stats = ContainerStats(container, client)
+            # A container the daemon has not created yet answers 404, which
+            # `read` reports as terminal. Here that means "not yet", so the
+            # absent case is retried rather than treated as the end.
+            sample = stats.read()
+            return stats if sample is not None and _readable(sample) else None
 
-        return cls(resolver=_resolve, interval_s=interval_s)
+        return cls(resolver=_resolve, interval_s=interval_s, closer=client.close)
+
+    def rebind(self, container: str | None) -> None:
+        """Re-target this sampler at a different container, in place.
+
+        Every spawn is a new container, so a sampler still holding the
+        previous one would report a process this turn does not own — and on
+        the hot fallback path, one that is already dead. Whatever was
+        measured is discarded with it, which is correct: those numbers
+        belong to a container this turn no longer runs in.
+
+        In place rather than by replacement so callers keep one object for
+        the whole turn. The frame that must stop this thread on every exit
+        path is above the frames that re-target it, and a rebindable object
+        is what lets it hold a reference that stays valid.
+        """
+        self.stop()
+        replacement = ResourceSampler.for_container(container, interval_s=self._interval)
+        self._counters = replacement._counters
+        self._resolver = replacement._resolver
+        self._closer = replacement._closer
+        self._samples = []
+        self._stop = threading.Event()
+        self._thread = None
+        self._started_mono = None
+        self.start()
 
     @property
     def active(self) -> bool:
@@ -449,7 +478,7 @@ class ResourceSampler:
             if counters is not None:
                 self._counters = counters
                 return True
-            self._stop.wait(self._interval)
+            self._stop.wait(BIND_POLL_S)
         return False
 
     def _sample_once(self) -> bool:
@@ -498,4 +527,8 @@ class ResourceSampler:
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout=2 * self._interval)
+        if self._closer is not None:
+            with contextlib.suppress(Exception):
+                self._closer()
+            self._closer = None
         return rollup(list(self._samples), window_s=window)
