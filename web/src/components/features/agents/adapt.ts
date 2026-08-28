@@ -12,6 +12,7 @@ import type {
   AgentThreadApi,
   AgentThreadEventApi,
   AgentThreadMessageApi,
+  ToolCallResourcesApi,
 } from '@/lib/api/agents';
 
 import type {
@@ -21,6 +22,7 @@ import type {
   AgentJob,
   AgentJobState,
   DiffLine,
+  ToolCallResources,
   TurnResources,
 } from './types';
 
@@ -427,6 +429,32 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
     netTxBytes: api.net_tx_bytes,
     sampleCount: api.sample_count,
     coverage: api.coverage,
+    toolCalls: (api.tool_calls ?? []).map(toToolCallResources),
+    toolCallsTruncated: api.tool_calls_truncated === true,
+  };
+}
+
+/**
+ * Collapse the exclusive/shared column pair into one number and a flag.
+ *
+ * The pair exists in the database so a shared measurement cannot be read as
+ * an exclusive one by a query that does not know the difference. Here the
+ * difference is carried by `exclusive`, and every renderer of these numbers
+ * has to answer it — a value with no flag beside it is what this shape makes
+ * impossible.
+ */
+function toToolCallResources(api: ToolCallResourcesApi): ToolCallResources {
+  const exclusive = api.cpu_usec_exclusive !== null || api.mem_peak_exclusive_bytes !== null;
+  return {
+    toolUseId: api.tool_use_id,
+    toolName: api.tool_name,
+    durationMs: api.duration_ms,
+    sampleCount: api.sample_count,
+    overlapN: api.overlap_n,
+    measuredSpanMs: api.measured_span_ms,
+    cpuUsec: exclusive ? api.cpu_usec_exclusive : api.cpu_usec_shared,
+    memPeakBytes: exclusive ? api.mem_peak_exclusive_bytes : api.mem_peak_shared_bytes,
+    exclusive,
   };
 }
 

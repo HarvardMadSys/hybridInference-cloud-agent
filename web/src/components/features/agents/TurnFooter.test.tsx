@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 // No user-event dependency in this repo; fireEvent is the house click.
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { toDisplayJob } from './adapt';
+import { toDisplayJob, toTurnResources } from './adapt';
 import { TurnFooter, formatBytes, formatCpu, formatDuration, toolTimings } from './TurnFooter';
 import type { AgentEvent, AgentJob, TurnResources } from './types';
 
@@ -21,6 +21,8 @@ const RESOURCES: TurnResources = {
   netTxBytes: 2_097_152,
   sampleCount: 42,
   coverage: 1,
+  toolCalls: [],
+  toolCallsTruncated: false,
 };
 
 function job(overrides: Partial<AgentJob> = {}): AgentJob {
@@ -225,6 +227,8 @@ describe('TurnFooter', () => {
       netTxBytes: null,
       sampleCount: 0,
       coverage: 0,
+      toolCalls: [],
+      toolCallsTruncated: false,
     };
     render(<TurnFooter job={job({ resources: unmeasured })} />);
     expect(screen.getByText('resource data unavailable')).toBeInTheDocument();
@@ -329,6 +333,180 @@ describe('the per-tool table on real data', () => {
 
     expect(screen.getByText('15s')).toBeInTheDocument();
     expect(screen.queryByText('unfinished')).toBeNull();
+  });
+});
+
+describe('per-call resources, through both real adapters', () => {
+  // Events go through `toDisplayJob` and resources through `toTurnResources`,
+  // because both are where a field is silently lost: a footer fed hand-built
+  // objects passes while the shipped one renders nothing.
+  const apiJob = {
+    id: 'ajob_1',
+    repo: 'o/r',
+    task_prompt: 'build it',
+    runtime: 'claude-code',
+    model: 'glm-4.6',
+    state: 'done',
+    cancel_requested: false,
+    current_attempt_id: 7,
+    published_pr_url: null,
+    detail: null,
+    spent_usd: null,
+    tokens_in: null,
+    tokens_out: null,
+    model_calls: null,
+    setup_egress_tier: null,
+    agent_egress_tier: null,
+    created_at: '2026-08-19T10:00:00.000Z',
+    updated_at: '2026-08-19T10:01:00.000Z',
+  } as never;
+
+  const apiEvents = [
+    {
+      id: 1,
+      attempt_id: 7,
+      seq: 1,
+      event_type: 'tool_use',
+      payload: { id: 'long', name: 'Bash', detail: 'cargo build' },
+      created_at: '2026-08-19T10:00:00.000Z',
+    },
+    {
+      id: 2,
+      attempt_id: 7,
+      seq: 2,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 'long', content: 'compiled' },
+      created_at: '2026-08-19T10:00:09.500Z',
+    },
+    {
+      id: 3,
+      attempt_id: 7,
+      seq: 3,
+      event_type: 'tool_use',
+      payload: { id: 'short', name: 'Read', detail: 'src/main.rs' },
+      created_at: '2026-08-19T10:00:10.000Z',
+    },
+    {
+      id: 4,
+      attempt_id: 7,
+      seq: 4,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 'short', content: 'fn main' },
+      created_at: '2026-08-19T10:00:10.035Z',
+    },
+  ] as never;
+
+  function withCalls(calls: unknown[], truncated = false) {
+    const adapted = toDisplayJob(apiJob, { events: apiEvents });
+    return {
+      ...adapted,
+      resources: toTurnResources({
+        cpu_usec: 5_000_000,
+        mem_peak_bytes: 40_000_000,
+        mem_avg_bytes: null,
+        io_read_bytes: null,
+        io_write_bytes: null,
+        net_rx_bytes: null,
+        net_tx_bytes: null,
+        sample_count: 12,
+        coverage: 1,
+        sampler_version: '2',
+        tool_calls: calls,
+        tool_calls_truncated: truncated,
+      } as never),
+    };
+  }
+
+  const measuredLongCall = {
+    call_seq: 1,
+    tool_use_id: 'long',
+    tool_name: 'Bash',
+    duration_ms: 9_500,
+    sample_count: 9,
+    overlap_n: 1,
+    measured_span_ms: 8_000,
+    cpu_usec_exclusive: 4_400_000,
+    cpu_usec_shared: null,
+    mem_peak_exclusive_bytes: 283_115_520,
+    mem_peak_shared_bytes: null,
+  };
+
+  const unmeasuredShortCall = {
+    call_seq: 2,
+    tool_use_id: 'short',
+    tool_name: 'Read',
+    duration_ms: 35,
+    sample_count: 0,
+    overlap_n: 1,
+    measured_span_ms: null,
+    cpu_usec_exclusive: null,
+    cpu_usec_shared: null,
+    mem_peak_exclusive_bytes: null,
+    mem_peak_shared_bytes: null,
+  };
+
+  function openTable(job: AgentJob) {
+    render(<TurnFooter job={job} />);
+    fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
+  }
+
+  it('shows what the measured call consumed', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.getByText('4.4s')).toBeInTheDocument();
+    expect(screen.getByText('270MB')).toBeInTheDocument();
+  });
+
+  it('shows a dash for the call too short to measure, never a zero', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.getAllByText('—')).toHaveLength(2);
+    expect(screen.getByText(/too short to measure/)).toBeInTheDocument();
+    expect(screen.queryByText('0s')).toBeNull();
+    expect(screen.queryByText('0B')).toBeNull();
+  });
+
+  it('marks a call that shared its reading as an upper bound', () => {
+    const shared = {
+      ...measuredLongCall,
+      overlap_n: 2,
+      cpu_usec_exclusive: null,
+      cpu_usec_shared: 4_400_000,
+      mem_peak_exclusive_bytes: null,
+      mem_peak_shared_bytes: 283_115_520,
+    };
+    openTable(withCalls([shared, unmeasuredShortCall]));
+
+    expect(screen.getByText('4.4s')).toBeInTheDocument();
+    expect(screen.getByText(/upper bound/)).toBeInTheDocument();
+  });
+
+  it('does not claim an upper bound when nothing was shared', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.queryByText(/upper bound/)).toBeNull();
+  });
+
+  it('names the longest call so a 157-row table does not have to be read', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.getByText(/Longest call:/)).toBeInTheDocument();
+    expect(screen.getAllByText('Bash').length).toBeGreaterThan(1);
+  });
+
+  it('says when the list is not every call the turn made', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall], true));
+
+    expect(screen.getByText(/more calls than are listed/)).toBeInTheDocument();
+  });
+
+  it('renders dashes rather than nothing when no measurement was reported', () => {
+    // Every turn recorded before this shipped, and every turn on a host whose
+    // daemon could not be read.
+    openTable(withCalls([]));
+
+    expect(screen.getAllByText('—')).toHaveLength(4);
+    expect(screen.getByText(/too short to measure/)).toBeInTheDocument();
   });
 });
 

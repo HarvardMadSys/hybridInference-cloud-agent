@@ -101,6 +101,7 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
+from cloud_agent_host.tool_windows import ToolWindowTracker, attribute
 from cloud_agent_host.workspace_paths import purge_stale_workspaces, workspace_path
 from cloud_agent_host.workspace_snapshot import (
     build_retained_workspace_snapshot,
@@ -1301,6 +1302,7 @@ def run_agent(
     exists to preserve.
     """
     sampler = ResourceSampler(None)
+    tool_windows = ToolWindowTracker()
     try:
         return _run_agent(
             runtime,
@@ -1321,10 +1323,16 @@ def run_agent(
             strict_native_resume=strict_native_resume,
             export_checkpoint=export_checkpoint,
             sampler=sampler,
+            tool_windows=tool_windows,
         )
     finally:
         with contextlib.suppress(Exception):
-            control.report_resources(sampler.stop())
+            rollup = sampler.stop()
+            # After ``stop``, because it takes the window's closing reading:
+            # attributing before it would hide whatever the last call did.
+            rollup["tool_calls"] = attribute(sampler.samples(), tool_windows.windows())
+            rollup["tool_calls_truncated"] = tool_windows.truncated
+            control.report_resources(rollup)
 
 
 def _run_agent(
@@ -1347,6 +1355,7 @@ def _run_agent(
     strict_native_resume: bool = False,
     export_checkpoint: bool = True,
     sampler: ResourceSampler,
+    tool_windows: ToolWindowTracker,
 ) -> tuple[int, str, list[str]]:
     """Run the agent, streaming its output back as normalized events.
 
@@ -1672,6 +1681,10 @@ def _run_agent(
             tail.append(line)
             del tail[:-40]
             item = turn.event_for_line(line)
+            # Stamped here rather than at the control plane, which is where
+            # every duration the footer shows today is stamped: that clock
+            # includes the runner's upload queue, this one does not.
+            tool_windows.observe(item.event_type, item.payload, mono=time.monotonic())
             if item.event_type != LINE:
                 if item.event_type == "tool_result" and (item.payload or {}).get("is_error"):
                     content = str((item.payload or {}).get("content", ""))

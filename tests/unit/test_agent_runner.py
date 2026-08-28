@@ -955,6 +955,74 @@ def test_failed_tool_calls_are_reported_not_swallowed(tmp_path):
     assert any(kind == "error" for kind, _payload in control.events)
 
 
+def test_the_turn_reports_one_row_per_tool_call_it_actually_made(tmp_path):
+    """The forward wiring: driver events in, per-call rows out.
+
+    Asserted through ``run_agent`` rather than against the tracker, because
+    the tracker being correct is not the thing that broke last time — the
+    thing that broke was nobody calling it. A test that drives the parser and
+    reads what the control plane was handed fails if the seam is removed,
+    which no unit test of the pure function can.
+
+    The counters are null here and that is the assertion, not a gap in it: a
+    process backend has no container to read, so a row carrying numbers would
+    mean the runner had invented them.
+    """
+    lines = [
+        '{"type":"assistant","message":{"content":'
+        '[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}',
+        '{"type":"user","message":{"content":'
+        '[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}',
+    ]
+    script = f"import json;[print(line, flush=True) for line in json.loads({json.dumps(lines)!r})]"
+
+    class _ScriptedClaude(ClaudeCodeRuntime):
+        """Claude Code's event parsing, driven by a scripted stdout."""
+
+        def prepare(self, **_kwargs):
+            return [sys.executable, "-c", script], {}
+
+    control = FakeControl()
+    code, _tail, _errors = run_agent(
+        _ScriptedClaude(),
+        job=_JOB,
+        workdir=str(tmp_path),
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=ProcessBackend(acknowledged_unsafe=True),
+    )
+
+    assert code == 0
+    (rollup,) = control.resources
+    (call,) = rollup["tool_calls"]
+    assert call["tool_name"] == "Bash"
+    assert call["tool_use_id"] == "t1"
+    assert call["duration_ms"] is not None, "the call was never closed against its result"
+    assert call["sample_count"] == 0
+    assert call["cpu_usec_exclusive"] is None
+    assert rollup["tool_calls_truncated"] is False
+
+
+def test_a_turn_that_called_no_tools_reports_an_empty_list_not_a_missing_key(tmp_path):
+    """The reader distinguishes "no calls" from "this runner never reported"."""
+    control = FakeControl()
+    run_agent(
+        _echo_runtime(1),
+        job=_JOB,
+        workdir=str(tmp_path),
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=ProcessBackend(acknowledged_unsafe=True),
+    )
+
+    (rollup,) = control.resources
+    assert rollup["tool_calls"] == []
+
+
 class _CountingBackend:
     """Records how often a supplied backend is preflighted."""
 

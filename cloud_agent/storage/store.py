@@ -3736,9 +3736,17 @@ class AgentJobStore:
 
         Absent counters stay NULL: a backend the sampler could not read is not
         a machine that used nothing, and ``coverage`` says which happened.
+
+        The per-call rows ride the same fence and the same transaction: they
+        describe spans inside this window, so a caller that could not write
+        the window must not be able to write its parts. They are replaced
+        rather than merged, because the list is one statement about the whole
+        attempt — a retry reporting fewer calls than a previous post means
+        fewer calls, not a set to union with.
         """
-        async with self._pool.acquire() as conn:
-            return bool(
+        tool_calls = rollup.get("tool_calls") or []
+        async with self._pool.acquire() as conn, conn.transaction():
+            recorded = bool(
                 await conn.fetchval(
                     """
                     WITH live AS (
@@ -3750,9 +3758,9 @@ class AgentJobStore:
                     INSERT INTO agent_attempt_resources (
                         attempt_id, job_id, cpu_usec, mem_peak_bytes, mem_avg_bytes,
                         io_read_bytes, io_write_bytes, net_rx_bytes, net_tx_bytes,
-                        sample_count, coverage, sampler_version
+                        sample_count, coverage, sampler_version, tool_calls_truncated
                     )
-                    SELECT live.id, live.job_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+                    SELECT live.id, live.job_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
                     FROM live
                     ON CONFLICT (attempt_id) DO UPDATE SET
                         cpu_usec = EXCLUDED.cpu_usec,
@@ -3764,7 +3772,8 @@ class AgentJobStore:
                         net_tx_bytes = EXCLUDED.net_tx_bytes,
                         sample_count = EXCLUDED.sample_count,
                         coverage = EXCLUDED.coverage,
-                        sampler_version = EXCLUDED.sampler_version
+                        sampler_version = EXCLUDED.sampler_version,
+                        tool_calls_truncated = EXCLUDED.tool_calls_truncated
                     RETURNING attempt_id
                     """,
                     attempt_id,
@@ -3779,26 +3788,67 @@ class AgentJobStore:
                     int(rollup.get("sample_count") or 0),
                     float(rollup.get("coverage") or 0.0),
                     str(rollup.get("sampler_version") or "unknown"),
+                    bool(rollup.get("tool_calls_truncated")),
                 )
             )
+            if not recorded:
+                return False
+            await conn.execute(
+                "DELETE FROM agent_tool_call_resources WHERE attempt_id = $1",
+                attempt_id,
+            )
+            if tool_calls:
+                await conn.executemany(
+                    """
+                    INSERT INTO agent_tool_call_resources (
+                        attempt_id, call_seq, tool_use_id, tool_name, duration_ms,
+                        sample_count, overlap_n, measured_span_ms,
+                        cpu_usec_exclusive, cpu_usec_shared,
+                        mem_peak_exclusive_bytes, mem_peak_shared_bytes
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    """,
+                    [
+                        (
+                            attempt_id,
+                            int(call["call_seq"]),
+                            str(call["tool_use_id"]),
+                            str(call["tool_name"]),
+                            call.get("duration_ms"),
+                            int(call.get("sample_count") or 0),
+                            int(call.get("overlap_n") or 1),
+                            call.get("measured_span_ms"),
+                            call.get("cpu_usec_exclusive"),
+                            call.get("cpu_usec_shared"),
+                            call.get("mem_peak_exclusive_bytes"),
+                            call.get("mem_peak_shared_bytes"),
+                        )
+                        for call in tool_calls
+                    ],
+                )
+            return True
 
     async def job_turn_telemetry(self, *, job_id: str) -> dict[str, Any] | None:
         """Read how a job's newest attempt ran: continuity, window, resources.
 
         Newest attempt rather than the current one: a retried turn's earlier
         attempts each have their own window, and the one a reader wants is the
-        one that produced the result in front of them. One round trip, because
-        this rides the job-detail read that the thread view already makes.
+        one that produced the result in front of them. One connection, because
+        this rides the job-detail read that the thread view already makes; the
+        per-call rows are a second statement on it rather than an aggregate in
+        the first, so the counters arrive as numbers rather than as JSON this
+        pool would hand back as text.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT a.continuity_mode, a.context_status,
+                SELECT a.id AS attempt_id, a.continuity_mode, a.context_status,
                        a.started_at, a.finished_at,
                        r.cpu_usec, r.mem_peak_bytes, r.mem_avg_bytes,
                        r.io_read_bytes, r.io_write_bytes,
                        r.net_rx_bytes, r.net_tx_bytes,
-                       r.sample_count, r.coverage, r.sampler_version
+                       r.sample_count, r.coverage, r.sampler_version,
+                       COALESCE(r.tool_calls_truncated, FALSE) AS tool_calls_truncated
                 FROM agent_attempts a
                 LEFT JOIN agent_attempt_resources r ON r.attempt_id = a.id
                 WHERE a.job_id = $1
@@ -3807,7 +3857,23 @@ class AgentJobStore:
                 """,
                 job_id,
             )
-            return dict(row) if row else None
+            if row is None:
+                return None
+            telemetry = dict(row)
+            calls = await conn.fetch(
+                """
+                SELECT call_seq, tool_use_id, tool_name, duration_ms, sample_count,
+                       overlap_n, measured_span_ms,
+                       cpu_usec_exclusive, cpu_usec_shared,
+                       mem_peak_exclusive_bytes, mem_peak_shared_bytes
+                FROM agent_tool_call_resources
+                WHERE attempt_id = $1
+                ORDER BY call_seq
+                """,
+                telemetry.pop("attempt_id"),
+            )
+            telemetry["tool_calls"] = [dict(call) for call in calls]
+            return telemetry
 
     async def terminal_workspace_ready(self, *, attempt_id: int) -> bool:
         """Return whether the live attempt currently permits terminal writes.

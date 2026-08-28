@@ -139,6 +139,39 @@ class AgentJobCreate(BaseModel):
         return value
 
 
+class ToolCallResources(BaseModel):
+    """What one tool call consumed, where its own readings could say.
+
+    Usually they cannot. The sampler reads the sandbox once a second and the
+    median tool call is far shorter than that, so the ordinary row is a name,
+    a duration and ``sample_count = 0`` — the record that this call was too
+    short to measure, which a reader must never render as zero usage.
+
+    A call that ran alongside others could not have its readings separated
+    from theirs, so its numbers arrive in the ``shared`` fields with
+    ``overlap_n`` above one. Those are upper bounds and must be presented as
+    such; a reader that only understands the exclusive fields correctly shows
+    nothing for them.
+    """
+
+    call_seq: int
+    tool_use_id: str
+    tool_name: str
+    #: Null for a call that never returned — an outcome, not a missing number.
+    duration_ms: int | None = None
+    #: Readings taken inside this call's window. Below two, nothing is measured.
+    sample_count: int = 0
+    #: Calls whose windows shared these readings, including this one.
+    overlap_n: int = 1
+    #: How much of the call the readings actually span, so a reader can see
+    #: that the numbers below are a floor rather than the whole call.
+    measured_span_ms: int | None = None
+    cpu_usec_exclusive: int | None = None
+    cpu_usec_shared: int | None = None
+    mem_peak_exclusive_bytes: int | None = None
+    mem_peak_shared_bytes: int | None = None
+
+
 class AttemptResources(BaseModel):
     """What one attempt's sandbox consumed, as measured from the host.
 
@@ -158,6 +191,11 @@ class AttemptResources(BaseModel):
     #: Fraction of the attempt window actually sampled, 0..1.
     coverage: float = 0.0
     sampler_version: str | None = None
+    #: One row per tool call this attempt issued, in the order issued.
+    tool_calls: list[ToolCallResources] = Field(default_factory=list)
+    #: True when the attempt issued more calls than ``tool_calls`` reports. A
+    #: cap nobody is told about reads exactly like a shorter turn.
+    tool_calls_truncated: bool = False
 
 
 class AgentJobResponse(BaseModel):
@@ -926,6 +964,27 @@ class WorkerSandboxAbandonRequest(BaseModel):
     idle_timeout_seconds: float = Field(1800.0, gt=0, le=7 * 24 * 60 * 60)
 
 
+class WorkerToolCallResources(BaseModel):
+    """One tool call's slice of a closed window, reported by the runner.
+
+    Exclusive and shared counters are mutually exclusive by construction, and
+    the store holds that as a constraint: a row carrying both has lost the
+    only distinction these two columns exist to preserve.
+    """
+
+    call_seq: int = Field(..., ge=1)
+    tool_use_id: str = Field(..., max_length=200)
+    tool_name: str = Field(..., max_length=120)
+    duration_ms: int | None = Field(None, ge=0)
+    sample_count: int = Field(0, ge=0)
+    overlap_n: int = Field(1, ge=1)
+    measured_span_ms: int | None = Field(None, ge=0)
+    cpu_usec_exclusive: int | None = Field(None, ge=0)
+    cpu_usec_shared: int | None = Field(None, ge=0)
+    mem_peak_exclusive_bytes: int | None = Field(None, ge=0)
+    mem_peak_shared_bytes: int | None = Field(None, ge=0)
+
+
 class WorkerResourcesRequest(BaseModel):
     """One closed attempt window's resource rollup, reported by the runner.
 
@@ -945,6 +1004,10 @@ class WorkerResourcesRequest(BaseModel):
     sample_count: int = Field(0, ge=0)
     coverage: float = Field(0.0, ge=0.0, le=1.0)
     sampler_version: str = Field(..., max_length=64)
+    #: Bounded so one turn cannot post an unbounded list; the runner caps at
+    #: the same number and says so through ``tool_calls_truncated``.
+    tool_calls: list[WorkerToolCallResources] = Field(default_factory=list, max_length=500)
+    tool_calls_truncated: bool = False
 
 
 class WorkerFinishRequest(BaseModel):

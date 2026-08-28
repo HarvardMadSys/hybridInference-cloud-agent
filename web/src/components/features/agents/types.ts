@@ -84,6 +84,28 @@ export interface AgentGate {
   detail?: string;
 }
 
+/**
+ * What one tool call consumed, as far as the turn's readings can say.
+ *
+ * Usually they cannot say anything. The sandbox is read once a second and
+ * most calls are far shorter than that, so `sampleCount` is normally 0 and
+ * every counter null — which the UI must render as "not measured", never as
+ * zero. `overlapN` above 1 means the call ran alongside others and its
+ * numbers are an upper bound shared with them.
+ */
+export interface ToolCallResources {
+  toolUseId: string;
+  toolName: string;
+  durationMs: number | null;
+  sampleCount: number;
+  overlapN: number;
+  measuredSpanMs: number | null;
+  cpuUsec: number | null;
+  memPeakBytes: number | null;
+  /** Whether the two counters above are this call's alone. */
+  exclusive: boolean;
+}
+
 export interface TurnResources {
   cpuUsec: number | null;
   memPeakBytes: number | null;
@@ -98,6 +120,10 @@ export interface TurnResources {
    * floor, not a total, and the UI says so rather than rounding the gap away.
    */
   coverage: number;
+  /** One entry per tool call the turn issued, in the order it issued them. */
+  toolCalls: ToolCallResources[];
+  /** True when the turn issued more calls than `toolCalls` carries. */
+  toolCallsTruncated: boolean;
 }
 
 export interface AgentJob {

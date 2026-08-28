@@ -16,7 +16,7 @@
 
 import { useMemo, useState } from 'react';
 
-import type { AgentEvent, AgentJob, TurnResources } from './types';
+import type { AgentEvent, AgentJob, ToolCallResources, TurnResources } from './types';
 
 /** One tool call's derived window, paired from the event stream. */
 export interface ToolTiming {
@@ -24,6 +24,8 @@ export interface ToolTiming {
   detail: string;
   ms: number | null;
   isError: boolean;
+  /** Joins this row to the host's measurement of the same call, when there is one. */
+  toolUseId: string | null;
 }
 
 const CONTINUITY_LABEL: Record<string, { text: string; tone: string; title: string }> = {
@@ -179,6 +181,7 @@ export function toolTimings(events: AgentEvent[], attemptNo?: number): ToolTimin
       tool: event.tool,
       detail: event.detail,
       ms,
+      toolUseId: event.id ?? null,
       // Both sources: folding moves the flag onto the call's own row, while
       // a row that was never folded still has its result standing beside it.
       isError: event.outputIsError === true || result?.isError === true,
@@ -205,38 +208,148 @@ function resourceStats(resources: TurnResources): { label: string; value: string
   ].filter((stat): stat is { label: string; value: string } => Boolean(stat.value));
 }
 
-function ToolTimingTable({ timings }: { timings: ToolTiming[] }) {
+/**
+ * The measurement for one row, or null when the sampler never saw the call.
+ *
+ * Two readings is the floor for a number to exist at all: one reading of a
+ * cumulative counter is a level, not a consumption. Below that the call is
+ * unmeasured, which is the ordinary outcome — the sandbox is read once a
+ * second and most calls are far shorter than that.
+ */
+function measurementFor(
+  timing: ToolTiming,
+  calls: Map<string, ToolCallResources>,
+): ToolCallResources | null {
+  const call = timing.toolUseId ? calls.get(timing.toolUseId) : undefined;
+  if (!call || call.sampleCount < 2) return null;
+  return call;
+}
+
+/** A measured cell, or the dash that says nothing was measured here. */
+function MeasuredCell({ value, shared }: { value: string | null; shared: boolean }) {
+  if (value === null) {
+    return <span className="text-gray-400 dark:text-gray-600">—</span>;
+  }
   return (
-    <table className="w-full text-[12px]">
-      <thead>
-        <tr className="text-left text-gray-500 dark:text-gray-400">
-          <th className="py-1 font-medium">Tool</th>
-          <th className="py-1 font-medium">Detail</th>
-          <th className="py-1 text-right font-medium">Duration</th>
-        </tr>
-      </thead>
-      <tbody>
-        {timings.map((timing, index) => (
-          <tr
-            key={`${timing.tool}-${index}`}
-            className="border-t border-gray-100 dark:border-white/5"
-          >
-            <td className="py-1 pr-3 align-top text-gray-800 dark:text-gray-200">
-              {timing.tool}
-              {timing.isError ? (
-                <span className="ml-1 text-rose-600 dark:text-rose-400">failed</span>
-              ) : null}
-            </td>
-            <td className="max-w-0 truncate py-1 pr-3 align-top font-mono text-gray-500 dark:text-gray-400">
-              {timing.detail}
-            </td>
-            <td className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
-              {formatDuration(timing.ms) ?? 'unfinished'}
-            </td>
+    <span className={shared ? 'text-gray-500 dark:text-gray-400' : undefined}>
+      {value}
+      {shared ? <span className="ml-0.5">*</span> : null}
+    </span>
+  );
+}
+
+/**
+ * The longest call in the turn, which is as close to "the expensive one" as
+ * this measurement gets.
+ *
+ * Ranking by what a call consumed would be the question a reader actually
+ * has, and it is not answerable: almost no call is long enough for the
+ * sampler to have measured it, so a CPU ranking would quietly order the
+ * handful that were and ignore the rest. Duration is known for every call
+ * that returned, so that is what this ranks by — and the label says so
+ * rather than implying a cost ranking it did not perform.
+ */
+function longestCall(timings: ToolTiming[]): ToolTiming | null {
+  let longest: ToolTiming | null = null;
+  for (const timing of timings) {
+    if (timing.ms === null) continue;
+    if (longest === null || timing.ms > (longest.ms ?? -1)) longest = timing;
+  }
+  return longest;
+}
+
+function ToolTimingTable({
+  timings,
+  calls,
+  truncated,
+}: {
+  timings: ToolTiming[];
+  calls: ToolCallResources[];
+  truncated: boolean;
+}) {
+  const byId = useMemo(() => {
+    const index = new Map<string, ToolCallResources>();
+    for (const call of calls) index.set(call.toolUseId, call);
+    return index;
+  }, [calls]);
+  const measurements = timings.map((timing) => measurementFor(timing, byId));
+  const longest = longestCall(timings);
+  const anyUnmeasured = measurements.some((call) => call === null);
+  const anyShared = measurements.some((call) => call !== null && !call.exclusive);
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {longest && timings.length > 1 ? (
+        <p className="text-[12px] text-gray-600 dark:text-gray-400">
+          Longest call: <span className="text-gray-800 dark:text-gray-200">{longest.tool}</span>
+          {' · '}
+          <span className="tabular-nums">{formatDuration(longest.ms)}</span>
+        </p>
+      ) : null}
+      <table className="w-full text-[12px]">
+        <thead>
+          <tr className="text-left text-gray-500 dark:text-gray-400">
+            <th className="py-1 font-medium">Tool</th>
+            <th className="py-1 font-medium">Detail</th>
+            <th className="py-1 text-right font-medium">Duration</th>
+            <th className="py-1 text-right font-medium">CPU</th>
+            <th className="py-1 text-right font-medium">Peak mem</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {timings.map((timing, index) => {
+            const call = measurements[index];
+            return (
+              <tr
+                key={`${timing.tool}-${index}`}
+                className="border-t border-gray-100 dark:border-white/5"
+              >
+                <td className="py-1 pr-3 align-top text-gray-800 dark:text-gray-200">
+                  {timing.tool}
+                  {timing.isError ? (
+                    <span className="ml-1 text-rose-600 dark:text-rose-400">failed</span>
+                  ) : null}
+                </td>
+                <td className="max-w-0 truncate py-1 pr-3 align-top font-mono text-gray-500 dark:text-gray-400">
+                  {timing.detail}
+                </td>
+                <td className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                  {formatDuration(timing.ms) ?? 'unfinished'}
+                </td>
+                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                  <MeasuredCell
+                    value={call ? formatCpu(call.cpuUsec) : null}
+                    shared={call ? !call.exclusive : false}
+                  />
+                </td>
+                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                  <MeasuredCell
+                    value={call ? formatBytes(call.memPeakBytes) : null}
+                    shared={call ? !call.exclusive : false}
+                  />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {anyUnmeasured ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          — means the call was too short to measure: the sandbox is read once a second.
+        </p>
+      ) : null}
+      {anyShared ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          * ran alongside other calls, which share the same reading. Those numbers cover all of
+          them, so each is an upper bound.
+        </p>
+      ) : null}
+      {truncated ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          This turn made more calls than are listed here.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -371,7 +484,11 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
       ) : null}
       {open && timings.length > 0 ? (
         <div className="mt-2 border-t border-gray-200 dark:border-white/10 pt-2">
-          <ToolTimingTable timings={timings} />
+          <ToolTimingTable
+            timings={timings}
+            calls={resources?.toolCalls ?? []}
+            truncated={resources?.toolCallsTruncated === true}
+          />
           <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
             Durations are measured from when the model requested each call to when its result
             arrived, so they include the model’s own thinking time. Per-call execution timing

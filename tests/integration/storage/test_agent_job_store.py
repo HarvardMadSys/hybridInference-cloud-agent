@@ -3424,6 +3424,151 @@ async def test_an_unmeasured_window_is_stored_as_such_not_as_zero(store: AgentJo
     assert telemetry["cpu_usec"] is None
     assert telemetry["coverage"] == 0.0
     assert telemetry["sampler_version"] == "1"
+    assert telemetry["tool_calls"] == []
+    assert telemetry["tool_calls_truncated"] is False
+
+
+def _tool_call(seq: int, name: str, **overrides: object) -> dict[str, object]:
+    """One per-call row in the shape the runner's attribution produces."""
+    return {
+        "call_seq": seq,
+        "tool_use_id": f"toolu_{seq}",
+        "tool_name": name,
+        "duration_ms": 20,
+        "sample_count": 0,
+        "overlap_n": 1,
+        "measured_span_ms": None,
+        "cpu_usec_exclusive": None,
+        "cpu_usec_shared": None,
+        "mem_peak_exclusive_bytes": None,
+        "mem_peak_shared_bytes": None,
+        **overrides,
+    }
+
+
+async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobStore):
+    """The rows the footer's expanded table renders, over real SQL."""
+    job = await _create_job(store)
+    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+
+    assert await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        rollup={
+            "sample_count": 12,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls_truncated": True,
+            "tool_calls": [
+                _tool_call(
+                    1,
+                    "Bash",
+                    duration_ms=9_523,
+                    sample_count=9,
+                    measured_span_ms=8_000,
+                    cpu_usec_exclusive=4_400_000,
+                    mem_peak_exclusive_bytes=270_000_000,
+                ),
+                _tool_call(2, "Read"),
+            ],
+        },
+    )
+
+    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    assert telemetry is not None
+    assert telemetry["tool_calls_truncated"] is True
+    first, second = telemetry["tool_calls"]
+    assert [first["tool_name"], second["tool_name"]] == ["Bash", "Read"]
+    assert first["cpu_usec_exclusive"] == 4_400_000
+    # Null rather than zero, in the database itself: this is the row that says
+    # the call was too short for the sampler to have seen anything.
+    assert second["cpu_usec_exclusive"] is None
+    assert second["mem_peak_exclusive_bytes"] is None
+    assert second["sample_count"] == 0
+
+
+async def test_a_retried_post_replaces_the_call_list_rather_than_appending(
+    store: AgentJobStore,
+):
+    """The list is one statement about the attempt, not a set to union with."""
+    job = await _create_job(store)
+    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    base = {"sample_count": 5, "coverage": 1.0, "sampler_version": "2"}
+
+    await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        rollup={**base, "tool_calls": [_tool_call(1, "Bash"), _tool_call(2, "Read")]},
+    )
+    await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        rollup={**base, "tool_calls": [_tool_call(1, "Bash")]},
+    )
+
+    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    assert telemetry is not None
+    assert len(telemetry["tool_calls"]) == 1, "a retried post left a row from the first"
+
+
+async def test_a_superseded_attempt_cannot_write_per_call_rows_either(store: AgentJobStore):
+    """The rows describe spans inside a window this attempt no longer owns."""
+    job = await _create_job(store)
+    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        rollup={
+            "sample_count": 5,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [_tool_call(1, "Bash")],
+        },
+    )
+
+    stale = await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"] + 1,
+        rollup={
+            "sample_count": 1,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [_tool_call(1, "Bash", cpu_usec_exclusive=999_999)],
+        },
+    )
+
+    assert stale is False
+    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    assert telemetry is not None
+    (row,) = telemetry["tool_calls"]
+    assert row["cpu_usec_exclusive"] is None, "a fenced write reached the per-call rows"
+
+
+async def test_a_row_cannot_claim_a_number_is_both_exclusive_and_shared(
+    store: AgentJobStore,
+):
+    """The whole point of two columns is that a reader can tell them apart."""
+    import asyncpg
+
+    job = await _create_job(store)
+    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+
+    with pytest.raises(asyncpg.IntegrityConstraintViolationError):
+        await store.record_attempt_resources(
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            rollup={
+                "sample_count": 5,
+                "coverage": 1.0,
+                "sampler_version": "2",
+                "tool_calls": [_tool_call(1, "Bash", cpu_usec_exclusive=10, cpu_usec_shared=10)],
+            },
+        )
+    assert job["id"]
 
 
 async def test_thread_events_span_every_turn_and_page(store: AgentJobStore):

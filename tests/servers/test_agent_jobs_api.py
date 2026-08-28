@@ -5043,6 +5043,109 @@ async def test_the_owner_sees_what_their_turn_consumed(
     assert job["resources"]["coverage"] == 1.0
 
 
+async def test_per_call_rows_survive_the_wire_in_both_directions(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Posted by the runner, read by the owner, over the real request models.
+
+    Written against the wire rather than the store because that is where this
+    kind of field is lost: a model missing the attribute accepts the post,
+    answers 200, and drops it silently — which no test that hands a dict to
+    the store can see.
+    """
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    ack = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/resources",
+        json={
+            "cpu_usec": 5_000_000,
+            "sample_count": 12,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [
+                {
+                    "call_seq": 1,
+                    "tool_use_id": "toolu_long",
+                    "tool_name": "Bash",
+                    "duration_ms": 9_523,
+                    "sample_count": 9,
+                    "overlap_n": 1,
+                    "measured_span_ms": 8_000,
+                    "cpu_usec_exclusive": 4_400_000,
+                    "mem_peak_exclusive_bytes": 270_000_000,
+                },
+                {
+                    "call_seq": 2,
+                    "tool_use_id": "toolu_short",
+                    "tool_name": "Read",
+                    "duration_ms": 20,
+                    "sample_count": 0,
+                    "overlap_n": 1,
+                },
+            ],
+            "tool_calls_truncated": True,
+        },
+        headers=auth,
+    )
+    assert ack.status_code == 200, ack.text
+
+    resources = (await client.get(f"/v1/agent/jobs/{job_id}")).json()["resources"]
+    assert resources["tool_calls_truncated"] is True
+    long_call, short_call = resources["tool_calls"]
+    assert long_call["tool_name"] == "Bash"
+    assert long_call["cpu_usec_exclusive"] == 4_400_000
+    assert long_call["measured_span_ms"] == 8_000
+    # The 97 % case, all the way to the reader: a row, a duration, and no
+    # counters at all. A zero here would be a number nobody measured.
+    assert short_call["sample_count"] == 0
+    assert short_call["cpu_usec_exclusive"] is None
+    assert short_call["cpu_usec_shared"] is None
+    assert short_call["mem_peak_exclusive_bytes"] is None
+
+
+async def test_a_turn_with_no_per_call_rows_reads_as_an_empty_list(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Every turn recorded before this shipped, and every unmeasured one."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+    await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/resources",
+        json={"sample_count": 0, "coverage": 0.0, "sampler_version": "2"},
+        headers=auth,
+    )
+
+    resources = (await client.get(f"/v1/agent/jobs/{job_id}")).json()["resources"]
+    assert resources["tool_calls"] == []
+    assert resources["tool_calls_truncated"] is False
+
+
+async def test_more_calls_than_the_cap_are_refused_rather_than_truncated_server_side(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """The runner caps and flags; the server must not quietly cap a second time."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/resources",
+        json={
+            "sample_count": 1,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [
+                {"call_seq": i + 1, "tool_use_id": f"t{i}", "tool_name": "Read"} for i in range(501)
+            ],
+        },
+        headers=auth,
+    )
+    assert response.status_code == 422
+
+
 async def test_a_rollup_is_the_same_window_said_twice_not_two_windows(
     client: AsyncClient, store: FakeAgentJobStore
 ):

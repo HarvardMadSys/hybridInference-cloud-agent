@@ -456,6 +456,16 @@ class ResourceSampler:
         """Whether this sampler has something to measure, or may yet bind."""
         return self._counters is not None or self._resolver is not None
 
+    def samples(self) -> list[Sample]:
+        """This window's readings, for attributing spans narrower than it.
+
+        A copy, and only meaningful once :meth:`stop` has taken the closing
+        reading. The list covers the current binding alone: ``rebind`` throws
+        the previous container's readings away with the container, so a call
+        issued before a re-spawn correctly finds nothing to measure it with.
+        """
+        return list(self._samples)
+
     def start(self) -> None:
         """Begin sampling. Safe to call on an inert sampler."""
         self._started_mono = time.monotonic()

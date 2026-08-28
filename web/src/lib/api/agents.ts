@@ -26,6 +26,23 @@ export type AgentJobApiState =
   | 'failed'
   | 'cancelled';
 
+/** One tool call's slice of the turn, where the sampler's readings reach it. */
+export interface ToolCallResourcesApi {
+  call_seq: number;
+  tool_use_id: string;
+  tool_name: string;
+  duration_ms: number | null;
+  /** Readings taken inside this call. Below two, nothing was measured. */
+  sample_count: number;
+  /** Calls that shared these readings, including this one. */
+  overlap_n: number;
+  measured_span_ms: number | null;
+  cpu_usec_exclusive: number | null;
+  cpu_usec_shared: number | null;
+  mem_peak_exclusive_bytes: number | null;
+  mem_peak_shared_bytes: number | null;
+}
+
 export interface AttemptResourcesApi {
   cpu_usec: number | null;
   mem_peak_bytes: number | null;
@@ -38,6 +55,8 @@ export interface AttemptResourcesApi {
   /** Fraction of the attempt window actually sampled, 0..1. */
   coverage: number;
   sampler_version: string | null;
+  tool_calls?: ToolCallResourcesApi[];
+  tool_calls_truncated?: boolean;
 }
 
 export interface AgentJobApi {
