@@ -396,6 +396,7 @@ def _attempt_resources(telemetry: dict[str, Any] | None) -> AttemptResources | N
         sample_count=telemetry.get("sample_count") or 0,
         coverage=float(telemetry.get("coverage") or 0.0),
         sampler_version=telemetry.get("sampler_version"),
+        tool_time_ms=telemetry.get("tool_time_ms"),
         tool_calls=[ToolCallResources(**call) for call in telemetry.get("tool_calls") or []],
         tool_calls_truncated=bool(telemetry.get("tool_calls_truncated")),
     )

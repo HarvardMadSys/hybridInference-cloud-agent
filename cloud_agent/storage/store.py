@@ -3758,9 +3758,11 @@ class AgentJobStore:
                     INSERT INTO agent_attempt_resources (
                         attempt_id, job_id, cpu_usec, mem_peak_bytes, mem_avg_bytes,
                         io_read_bytes, io_write_bytes, net_rx_bytes, net_tx_bytes,
-                        sample_count, coverage, sampler_version, tool_calls_truncated
+                        sample_count, coverage, sampler_version, tool_calls_truncated,
+                        tool_time_ms
                     )
-                    SELECT live.id, live.job_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+                    SELECT live.id, live.job_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                           $13, $14
                     FROM live
                     ON CONFLICT (attempt_id) DO UPDATE SET
                         cpu_usec = EXCLUDED.cpu_usec,
@@ -3773,7 +3775,8 @@ class AgentJobStore:
                         sample_count = EXCLUDED.sample_count,
                         coverage = EXCLUDED.coverage,
                         sampler_version = EXCLUDED.sampler_version,
-                        tool_calls_truncated = EXCLUDED.tool_calls_truncated
+                        tool_calls_truncated = EXCLUDED.tool_calls_truncated,
+                        tool_time_ms = EXCLUDED.tool_time_ms
                     RETURNING attempt_id
                     """,
                     attempt_id,
@@ -3789,6 +3792,7 @@ class AgentJobStore:
                     float(rollup.get("coverage") or 0.0),
                     str(rollup.get("sampler_version") or "unknown"),
                     bool(rollup.get("tool_calls_truncated")),
+                    rollup.get("tool_time_ms"),
                 )
             )
             if not recorded:
@@ -3801,12 +3805,12 @@ class AgentJobStore:
                 await conn.executemany(
                     """
                     INSERT INTO agent_tool_call_resources (
-                        attempt_id, call_seq, tool_use_id, tool_name, duration_ms,
-                        sample_count, overlap_n, measured_span_ms,
+                        attempt_id, call_seq, tool_use_id, tool_name, timing_source,
+                        duration_ms, sample_count, overlap_n, measured_span_ms,
                         cpu_usec_exclusive, cpu_usec_shared,
                         mem_peak_exclusive_bytes, mem_peak_shared_bytes
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     """,
                     [
                         (
@@ -3814,6 +3818,7 @@ class AgentJobStore:
                             int(call["call_seq"]),
                             str(call["tool_use_id"]),
                             str(call["tool_name"]),
+                            str(call.get("timing_source") or "message"),
                             call.get("duration_ms"),
                             int(call.get("sample_count") or 0),
                             int(call.get("overlap_n") or 1),
@@ -3847,7 +3852,7 @@ class AgentJobStore:
                        r.cpu_usec, r.mem_peak_bytes, r.mem_avg_bytes,
                        r.io_read_bytes, r.io_write_bytes,
                        r.net_rx_bytes, r.net_tx_bytes,
-                       r.sample_count, r.coverage, r.sampler_version,
+                       r.sample_count, r.coverage, r.sampler_version, r.tool_time_ms,
                        COALESCE(r.tool_calls_truncated, FALSE) AS tool_calls_truncated
                 FROM agent_attempts a
                 LEFT JOIN agent_attempt_resources r ON r.attempt_id = a.id
@@ -3862,8 +3867,8 @@ class AgentJobStore:
             telemetry = dict(row)
             calls = await conn.fetch(
                 """
-                SELECT call_seq, tool_use_id, tool_name, duration_ms, sample_count,
-                       overlap_n, measured_span_ms,
+                SELECT call_seq, tool_use_id, tool_name, timing_source, duration_ms,
+                       sample_count, overlap_n, measured_span_ms,
                        cpu_usec_exclusive, cpu_usec_shared,
                        mem_peak_exclusive_bytes, mem_peak_shared_bytes
                 FROM agent_tool_call_resources

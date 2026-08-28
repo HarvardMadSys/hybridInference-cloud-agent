@@ -196,15 +196,18 @@ function resourceStats(resources: TurnResources): { label: string; value: string
     formatBytes(resources.netRxBytes) || formatBytes(resources.netTxBytes)
       ? `↓${formatBytes(resources.netRxBytes) ?? '—'} ↑${formatBytes(resources.netTxBytes) ?? '—'}`
       : null;
-  const io =
-    formatBytes(resources.ioReadBytes) || formatBytes(resources.ioWriteBytes)
-      ? `r${formatBytes(resources.ioReadBytes) ?? '—'} w${formatBytes(resources.ioWriteBytes) ?? '—'}`
-      : null;
+  // Disk is deliberately absent. The counter behind it is block io, and a
+  // container that wrote a known 64MiB and called `sync` reported that
+  // exactly on one run and zero on the next — the write absorbed above the
+  // block layer, never reaching the counter (pinned in
+  // tests/external/test_resource_sampler_live.py). A reader shown `disk w0B`
+  // concludes the sandbox wrote nothing, which is the one thing this number
+  // cannot say, and there is no way to tell the two cases apart at read
+  // time. It is still recorded; it is no longer presented as a measurement.
   return [
     { label: 'CPU', value: formatCpu(resources.cpuUsec) },
     { label: 'peak mem', value: formatBytes(resources.memPeakBytes) },
     { label: 'net', value: net },
-    { label: 'disk', value: io },
   ].filter((stat): stat is { label: string; value: string } => Boolean(stat.value));
 }
 
@@ -256,6 +259,64 @@ function longestCall(timings: ToolTiming[]): ToolTiming | null {
     if (longest === null || timing.ms > (longest.ms ?? -1)) longest = timing;
   }
   return longest;
+}
+
+/**
+ * Where the turn's wall clock went.
+ *
+ * The most explanatory number the footer can carry, and it costs no new
+ * measurement: both halves were already recorded. On the production turns
+ * this was built against, the sandbox was busy for around one percent of the
+ * turn and the rest was spent waiting on the model — which is the answer to
+ * "why was this slow" far more often than any tool row is.
+ *
+ * Tool time is the union of the calls' windows, never their sum, so it can
+ * never exceed the turn it belongs to.
+ */
+function TimeSplit({
+  durationMs,
+  toolTimeMs,
+}: {
+  durationMs: number | null;
+  toolTimeMs: number | null;
+}) {
+  if (durationMs === null || toolTimeMs === null) return null;
+  const rest = Math.max(0, durationMs - toolTimeMs);
+  return (
+    <p className="mb-1.5 text-[12px] text-gray-600 dark:text-gray-400">
+      Of <span className="tabular-nums">{formatDuration(durationMs)}</span>:{' '}
+      <span className="tabular-nums text-gray-800 dark:text-gray-200">
+        {formatDuration(toolTimeMs)}
+      </span>{' '}
+      in tools, <span className="tabular-nums">{formatDuration(rest)}</span> waiting on the model.
+    </p>
+  );
+}
+
+/**
+ * One sentence saying what the durations in the table actually measure.
+ *
+ * Two different things can be in one table: a call the sandbox's own hooks
+ * bracketed, and a call timed from when the platform parsed its events. The
+ * second is wider than the execution by however long parsing took, and its
+ * windows overlap far more readily — which is why a third of production's
+ * calls could only be reported as sharing a measurement.
+ */
+export function timingSourceNote(calls: ToolCallResources[], rows: number): string {
+  const exact = calls.filter((call) => call.timingSource === 'exact').length;
+  if (exact === 0) {
+    return (
+      'Durations are measured from when each call\u2019s events were parsed, which brackets the ' +
+      'execution from outside rather than timing it.'
+    );
+  }
+  if (exact >= rows) {
+    return 'Durations are the sandbox\u2019s own tool boundaries, recorded as each call ran.';
+  }
+  return (
+    `${exact} of ${rows} durations are the sandbox\u2019s own tool boundaries; the rest are ` +
+    'bracketed from outside, from when each call\u2019s events were parsed.'
+  );
 }
 
 function ToolTimingTable({
@@ -484,15 +545,17 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
       ) : null}
       {open && timings.length > 0 ? (
         <div className="mt-2 border-t border-gray-200 dark:border-white/10 pt-2">
+          <TimeSplit
+            durationMs={job.durationMs ?? null}
+            toolTimeMs={resources?.toolTimeMs ?? null}
+          />
           <ToolTimingTable
             timings={timings}
             calls={resources?.toolCalls ?? []}
             truncated={resources?.toolCallsTruncated === true}
           />
           <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-            Durations are measured from when the model requested each call to when its result
-            arrived, so they include the model’s own thinking time. Per-call execution timing
-            arrives with the next step of this work.
+            {timingSourceNote(resources?.toolCalls ?? [], timings.length)}
           </p>
         </div>
       ) : null}

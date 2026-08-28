@@ -157,6 +157,10 @@ class ToolCallResources(BaseModel):
     call_seq: int
     tool_use_id: str
     tool_name: str
+    #: ``exact`` when the sandbox's own hooks marked the boundaries,
+    #: ``message`` when the window is only when the platform parsed the
+    #: call's events — which brackets the execution from outside.
+    timing_source: str = "message"
     #: Null for a call that never returned — an outcome, not a missing number.
     duration_ms: int | None = None
     #: Readings taken inside this call's window. Below two, nothing is measured.
@@ -191,6 +195,10 @@ class AttemptResources(BaseModel):
     #: Fraction of the attempt window actually sampled, 0..1.
     coverage: float = 0.0
     sampler_version: str | None = None
+    #: How long the turn spent inside tool calls — the union of their
+    #: windows, never the sum, so it cannot exceed the turn. Null for a turn
+    #: recorded before this was measured, which is not the same as zero.
+    tool_time_ms: int | None = None
     #: One row per tool call this attempt issued, in the order issued.
     tool_calls: list[ToolCallResources] = Field(default_factory=list)
     #: True when the attempt issued more calls than ``tool_calls`` reports. A
@@ -975,6 +983,7 @@ class WorkerToolCallResources(BaseModel):
     call_seq: int = Field(..., ge=1)
     tool_use_id: str = Field(..., max_length=200)
     tool_name: str = Field(..., max_length=120)
+    timing_source: Literal["message", "exact"] = "message"
     duration_ms: int | None = Field(None, ge=0)
     sample_count: int = Field(0, ge=0)
     overlap_n: int = Field(1, ge=1)
@@ -1008,6 +1017,7 @@ class WorkerResourcesRequest(BaseModel):
     #: the same number and says so through ``tool_calls_truncated``.
     tool_calls: list[WorkerToolCallResources] = Field(default_factory=list, max_length=500)
     tool_calls_truncated: bool = False
+    tool_time_ms: int | None = Field(None, ge=0)
 
 
 class WorkerFinishRequest(BaseModel):

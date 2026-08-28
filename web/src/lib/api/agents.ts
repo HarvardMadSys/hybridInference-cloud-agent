@@ -31,6 +31,8 @@ export interface ToolCallResourcesApi {
   call_seq: number;
   tool_use_id: string;
   tool_name: string;
+  /** `exact` = the sandbox's own hooks; `message` = bracketed from outside. */
+  timing_source: string;
   duration_ms: number | null;
   /** Readings taken inside this call. Below two, nothing was measured. */
   sample_count: number;
@@ -55,6 +57,8 @@ export interface AttemptResourcesApi {
   /** Fraction of the attempt window actually sampled, 0..1. */
   coverage: number;
   sampler_version: string | null;
+  /** Union of the turn's tool windows, never their sum. */
+  tool_time_ms?: number | null;
   tool_calls?: ToolCallResourcesApi[];
   tool_calls_truncated?: boolean;
 }

@@ -429,6 +429,7 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
     netTxBytes: api.net_tx_bytes,
     sampleCount: api.sample_count,
     coverage: api.coverage,
+    toolTimeMs: api.tool_time_ms ?? null,
     toolCalls: (api.tool_calls ?? []).map(toToolCallResources),
     toolCallsTruncated: api.tool_calls_truncated === true,
   };
@@ -448,6 +449,7 @@ function toToolCallResources(api: ToolCallResourcesApi): ToolCallResources {
   return {
     toolUseId: api.tool_use_id,
     toolName: api.tool_name,
+    timingSource: api.timing_source === 'exact' ? 'exact' : 'message',
     durationMs: api.duration_ms,
     sampleCount: api.sample_count,
     overlapN: api.overlap_n,

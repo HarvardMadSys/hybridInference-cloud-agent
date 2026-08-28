@@ -101,7 +101,12 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
-from cloud_agent_host.tool_windows import ToolWindowTracker, attribute
+from cloud_agent_host.tool_windows import (
+    ToolMarkReader,
+    ToolWindowTracker,
+    attribute,
+    tool_time_ms,
+)
 from cloud_agent_host.workspace_paths import purge_stale_workspaces, workspace_path
 from cloud_agent_host.workspace_snapshot import (
     build_retained_workspace_snapshot,
@@ -1303,6 +1308,9 @@ def run_agent(
     """
     sampler = ResourceSampler(None)
     tool_windows = ToolWindowTracker()
+    # Constructed before the turn so it remembers where the mark file already
+    # ended: a resident session writes every turn's marks to the same file.
+    tool_marks = ToolMarkReader(state_dir)
     try:
         return _run_agent(
             runtime,
@@ -1328,10 +1336,16 @@ def run_agent(
     finally:
         with contextlib.suppress(Exception):
             rollup = sampler.stop()
+            # Marks first: they narrow the windows the attribution then reads.
+            tool_windows.apply_marks(tool_marks.read())
+            windows = tool_windows.windows()
             # After ``stop``, because it takes the window's closing reading:
             # attributing before it would hide whatever the last call did.
-            rollup["tool_calls"] = attribute(sampler.samples(), tool_windows.windows())
+            rollup["tool_calls"] = attribute(sampler.samples(), windows)
             rollup["tool_calls_truncated"] = tool_windows.truncated
+            # The union, so the reader can see how much of the turn was the
+            # sandbox working and how much was waiting on the model.
+            rollup["tool_time_ms"] = tool_time_ms(windows)
             control.report_resources(rollup)
 
 

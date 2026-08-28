@@ -5064,11 +5064,13 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
             "sample_count": 12,
             "coverage": 1.0,
             "sampler_version": "2",
+            "tool_time_ms": 9_543,
             "tool_calls": [
                 {
                     "call_seq": 1,
                     "tool_use_id": "toolu_long",
                     "tool_name": "Bash",
+                    "timing_source": "exact",
                     "duration_ms": 9_523,
                     "sample_count": 9,
                     "overlap_n": 1,
@@ -5093,8 +5095,11 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
 
     resources = (await client.get(f"/v1/agent/jobs/{job_id}")).json()["resources"]
     assert resources["tool_calls_truncated"] is True
+    assert resources["tool_time_ms"] == 9_543
     long_call, short_call = resources["tool_calls"]
     assert long_call["tool_name"] == "Bash"
+    assert long_call["timing_source"] == "exact"
+    assert short_call["timing_source"] == "message", "an unmarked call claimed precision"
     assert long_call["cpu_usec_exclusive"] == 4_400_000
     assert long_call["measured_span_ms"] == 8_000
     # The 97 % case, all the way to the reader: a row, a duration, and no
@@ -5121,6 +5126,8 @@ async def test_a_turn_with_no_per_call_rows_reads_as_an_empty_list(
     resources = (await client.get(f"/v1/agent/jobs/{job_id}")).json()["resources"]
     assert resources["tool_calls"] == []
     assert resources["tool_calls_truncated"] is False
+    # Null, not zero: a turn nobody measured did not spend no time in tools.
+    assert resources["tool_time_ms"] is None
 
 
 async def test_more_calls_than_the_cap_are_refused_rather_than_truncated_server_side(

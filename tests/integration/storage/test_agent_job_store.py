@@ -3426,6 +3426,7 @@ async def test_an_unmeasured_window_is_stored_as_such_not_as_zero(store: AgentJo
     assert telemetry["sampler_version"] == "1"
     assert telemetry["tool_calls"] == []
     assert telemetry["tool_calls_truncated"] is False
+    assert telemetry["tool_time_ms"] is None
 
 
 def _tool_call(seq: int, name: str, **overrides: object) -> dict[str, object]:
@@ -3434,6 +3435,7 @@ def _tool_call(seq: int, name: str, **overrides: object) -> dict[str, object]:
         "call_seq": seq,
         "tool_use_id": f"toolu_{seq}",
         "tool_name": name,
+        "timing_source": "message",
         "duration_ms": 20,
         "sample_count": 0,
         "overlap_n": 1,
@@ -3460,10 +3462,12 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
             "coverage": 1.0,
             "sampler_version": "2",
             "tool_calls_truncated": True,
+            "tool_time_ms": 9_543,
             "tool_calls": [
                 _tool_call(
                     1,
                     "Bash",
+                    timing_source="exact",
                     duration_ms=9_523,
                     sample_count=9,
                     measured_span_ms=8_000,
@@ -3478,8 +3482,10 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
     telemetry = await store.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
     assert telemetry["tool_calls_truncated"] is True
+    assert telemetry["tool_time_ms"] == 9_543
     first, second = telemetry["tool_calls"]
     assert [first["tool_name"], second["tool_name"]] == ["Bash", "Read"]
+    assert [first["timing_source"], second["timing_source"]] == ["exact", "message"]
     assert first["cpu_usec_exclusive"] == 4_400_000
     # Null rather than zero, in the database itself: this is the row that says
     # the call was too short for the sampler to have seen anything.

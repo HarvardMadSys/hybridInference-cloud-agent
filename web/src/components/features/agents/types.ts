@@ -96,6 +96,12 @@ export interface AgentGate {
 export interface ToolCallResources {
   toolUseId: string;
   toolName: string;
+  /**
+   * Where the window came from. `exact` is the sandbox's own hooks marking
+   * the boundaries; `message` only brackets the call from outside, from when
+   * the platform parsed its events.
+   */
+  timingSource: 'exact' | 'message';
   durationMs: number | null;
   sampleCount: number;
   overlapN: number;
@@ -120,6 +126,12 @@ export interface TurnResources {
    * floor, not a total, and the UI says so rather than rounding the gap away.
    */
   coverage: number;
+  /**
+   * How long the turn spent inside tool calls — the union of their windows,
+   * never the sum, so it cannot exceed the turn. Null where it was never
+   * measured, which is not zero.
+   */
+  toolTimeMs: number | null;
   /** One entry per tool call the turn issued, in the order it issued them. */
   toolCalls: ToolCallResources[];
   /** True when the turn issued more calls than `toolCalls` carries. */

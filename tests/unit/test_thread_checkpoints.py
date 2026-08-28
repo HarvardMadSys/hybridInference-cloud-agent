@@ -241,3 +241,46 @@ def test_state_from_checkpoint_verifies_what_it_decodes():
     tampered["harness_state"]["sha256"] = "0" * 64
     assert state_from_checkpoint(tampered) is None
     assert state_from_checkpoint({"harness_state": {}, "session_id": ""}) is None
+
+
+def test_launching_claude_installs_the_tool_boundary_hooks(tmp_path):
+    """The sandbox is given hooks that mark when each tool call actually ran.
+
+    Without them a call's window is only when the platform parsed its events,
+    which brackets the execution from outside — and leaves calls announced in
+    one assistant message sharing a window they did not really share.
+    """
+    driver = ClaudeCodeDriver(_ClaudeStub())
+    session = driver.launch(_context(tmp_path))
+    session.start_turn(TurnInput(prompt="go", model="m"))
+
+    settings = json.loads((tmp_path / "claude" / "settings.json").read_text())
+    assert set(settings["hooks"]) == {"PreToolUse", "PostToolUse"}
+    for event in settings["hooks"].values():
+        command = event[0]["hooks"][0]["command"]
+        assert command.endswith("exit 0"), "a hook that can fail can fail a tool call"
+        assert "/agent-state/tool-marks.log" in command
+
+
+def test_the_hooks_do_not_replace_settings_the_directory_already_holds(tmp_path):
+    """A restored state mount may carry the CLI's own configuration."""
+    config = tmp_path / "claude"
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text(json.dumps({"model": "keep-me"}))
+
+    driver = ClaudeCodeDriver(_ClaudeStub())
+    session = driver.launch(_context(tmp_path))
+    session.start_turn(TurnInput(prompt="go", model="m"))
+
+    settings = json.loads((config / "settings.json").read_text())
+    assert settings["model"] == "keep-me"
+    assert "PreToolUse" in settings["hooks"]
+
+
+def test_a_turn_without_a_state_mount_installs_nothing(tmp_path):
+    """No mount, no place to write marks, and no attempt to."""
+    driver = ClaudeCodeDriver(_ClaudeStub())
+    session = driver.launch(_context(None))
+    session.start_turn(TurnInput(prompt="go", model="m"))
+
+    assert not (tmp_path / "claude").exists()

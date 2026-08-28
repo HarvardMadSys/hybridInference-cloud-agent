@@ -13,9 +13,13 @@ from __future__ import annotations
 from cloud_agent_host.resources import Sample
 from cloud_agent_host.tool_windows import (
     MAX_TOOL_CALLS,
+    TOOL_MARK_FILE,
+    ToolMarkReader,
     ToolWindow,
     ToolWindowTracker,
     attribute,
+    hook_settings,
+    tool_time_ms,
 )
 
 
@@ -202,3 +206,177 @@ def test_a_hostile_tool_name_cannot_widen_the_row():
     tracker.observe("tool_use", {"id": "t1", "name": "x" * 5_000}, mono=1.0)
     (window,) = tracker.windows()
     assert len(window.tool) == 120
+
+
+# --- hook marks: the exact windows -------------------------------------------
+
+
+def test_marks_narrow_a_window_and_label_it_exact():
+    """The upgrade: the sandbox's own boundaries replace the outside bracket."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
+
+    upgraded = tracker.apply_marks([(2.0, "pre", "t1"), (8.0, "post", "t1")])
+
+    (window,) = tracker.windows()
+    assert upgraded == 1
+    assert window.source == "exact"
+    assert window.duration_ms == 6_000
+
+
+def test_a_mark_outside_the_window_it_would_narrow_is_refused():
+    """A stepped clock must not move a call somewhere it never ran."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
+
+    upgraded = tracker.apply_marks([(0.5, "pre", "t1"), (8.0, "post", "t1")])
+
+    (window,) = tracker.windows()
+    assert upgraded == 0
+    assert window.source == "message"
+    assert window.opened_mono == 1.0
+
+
+def test_half_a_pair_of_marks_leaves_the_call_alone():
+    """Both boundaries or neither; a one-sided window is not a measurement."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
+
+    tracker.apply_marks([(2.0, "pre", "t1")])
+
+    assert tracker.windows()[0].source == "message"
+
+
+def test_exact_windows_stop_parallel_calls_sharing_when_they_did_not_overlap():
+    """Why the hooks are worth their 0.6 ms: a third of production's calls
+    overlap at message level and can only be reported as shared upper bounds.
+    Narrowed to what actually ran, the same two calls are exclusive."""
+    tracker = ToolWindowTracker()
+    # One assistant message announcing both calls: identical message windows.
+    tracker.observe("tool_use", {"id": "a", "name": "Bash"}, mono=0.0)
+    tracker.observe("tool_use", {"id": "b", "name": "Bash"}, mono=0.0)
+    tracker.observe("tool_result", {"tool_use_id": "a"}, mono=12.0)
+    tracker.observe("tool_result", {"tool_use_id": "b"}, mono=12.0)
+    samples = _second_by_second(13)
+
+    before = attribute(samples, tracker.windows())
+    assert all(row["overlap_n"] == 2 for row in before)
+    assert all(row["cpu_usec_exclusive"] is None for row in before)
+
+    tracker.apply_marks(
+        [(0.5, "pre", "a"), (5.0, "post", "a"), (6.0, "pre", "b"), (11.5, "post", "b")]
+    )
+    after = attribute(samples, tracker.windows())
+
+    assert all(row["overlap_n"] == 1 for row in after)
+    assert all(row["cpu_usec_exclusive"] is not None for row in after)
+    assert all(row["timing_source"] == "exact" for row in after)
+
+
+def test_an_unmarked_turn_reports_every_row_as_message_timed():
+    """No hooks, no marks, no claim of precision."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
+    (row,) = attribute([], tracker.windows())
+    assert row["timing_source"] == "message"
+
+
+# --- the mark file -----------------------------------------------------------
+
+
+def test_the_reader_only_takes_marks_written_after_it_was_built(tmp_path):
+    """A resident session appends every turn's marks to the same file."""
+    path = tmp_path / TOOL_MARK_FILE
+    path.write_text("100.0 pre old\n100.5 post old\n")
+
+    reader = ToolMarkReader(str(tmp_path))
+    with path.open("a") as handle:
+        handle.write("101.0 pre new\n")
+
+    assert [mark[2] for mark in reader.read()] == ["new"]
+
+
+def test_a_malformed_mark_is_skipped_not_raised(tmp_path):
+    path = tmp_path / TOOL_MARK_FILE
+    reader = ToolMarkReader(str(tmp_path))
+    path.write_text(
+        "not a mark\n"
+        "abc pre t1\n"
+        "1.0 sideways t1\n"
+        "1.0 pre has space\n"
+        "1.0 pre t1;rm -rf /\n"
+        "1.0 pre good\n"
+    )
+    assert [mark[2] for mark in reader.read()] == ["good"]
+
+
+def test_no_state_mount_means_no_marks_and_no_error():
+    assert ToolMarkReader(None).read() == []
+
+
+def test_a_missing_mark_file_is_simply_no_marks(tmp_path):
+    assert ToolMarkReader(str(tmp_path)).read() == []
+
+
+# --- the hook the sandbox runs -----------------------------------------------
+
+
+def test_the_hook_is_passive_by_construction():
+    """It writes and exits 0; it never inspects a result or blocks a call."""
+    settings = hook_settings("/agent-state/tool-marks.log")
+    commands = [
+        entry["hooks"][0]["command"]
+        for entry in (*settings["hooks"]["PreToolUse"], *settings["hooks"]["PostToolUse"])
+    ]
+    assert len(commands) == 2
+    for command in commands:
+        assert command.endswith("exit 0")
+        assert ">> /agent-state/tool-marks.log" in command
+        assert "rm " not in command
+    assert " pre " in commands[0] and " post " in commands[1]
+
+
+def test_the_hook_takes_its_timestamp_before_it_reads_anything():
+    """Otherwise the mark is the boundary plus however long stdin took."""
+    command = hook_settings("/m")["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert command.index("date +%s.%N") < command.index("sed -n")
+
+
+def test_every_hook_carries_a_timeout():
+    """A hook without one could hold a tool call for as long as it liked."""
+    settings = hook_settings("/m")
+    for event in ("PreToolUse", "PostToolUse"):
+        assert settings["hooks"][event][0]["hooks"][0]["timeout"] == 5
+
+
+# --- where the turn's time went ----------------------------------------------
+
+
+def test_tool_time_is_the_union_so_it_cannot_exceed_the_turn():
+    """Summing parallel calls produces more tool time than there was time."""
+    windows = [
+        ToolWindow("a", "Bash", opened_mono=0.0, closed_mono=10.0),
+        ToolWindow("b", "Bash", opened_mono=2.0, closed_mono=6.0),
+    ]
+    assert tool_time_ms(windows) == 10_000
+
+
+def test_serial_calls_add_up():
+    windows = [
+        ToolWindow("a", "Bash", opened_mono=0.0, closed_mono=2.0),
+        ToolWindow("b", "Bash", opened_mono=5.0, closed_mono=6.0),
+    ]
+    assert tool_time_ms(windows) == 3_000
+
+
+def test_a_call_that_never_returned_contributes_no_time():
+    """Its end is unknown, and guessing it would inflate the split."""
+    assert tool_time_ms([ToolWindow("a", "Bash", opened_mono=0.0)]) == 0
+
+
+def test_a_turn_with_no_calls_spent_no_time_in_them():
+    assert tool_time_ms([]) == 0

@@ -21,6 +21,7 @@ const RESOURCES: TurnResources = {
   netTxBytes: 2_097_152,
   sampleCount: 42,
   coverage: 1,
+  toolTimeMs: null,
   toolCalls: [],
   toolCallsTruncated: false,
 };
@@ -227,6 +228,7 @@ describe('TurnFooter', () => {
       netTxBytes: null,
       sampleCount: 0,
       coverage: 0,
+      toolTimeMs: null,
       toolCalls: [],
       toolCallsTruncated: false,
     };
@@ -266,7 +268,12 @@ describe('TurnFooter', () => {
     fireEvent.click(screen.getByRole('button', { name: '1 tool call' }));
     expect(screen.getByText('cargo build')).toBeInTheDocument();
     expect(screen.getByText('15s')).toBeInTheDocument();
-    expect(screen.getByText(/include the model’s own thinking time/)).toBeInTheDocument();
+    // The note used to say these windows include the model's thinking time.
+    // They do not: the call's event is emitted once the model has finished
+    // producing it, which is why production's median call is 35 ms and not
+    // seconds. What they do include is the platform's own parse latency, so
+    // the note now says they bracket the execution rather than time it.
+    expect(screen.getByText(/brackets the execution from outside/)).toBeInTheDocument();
   });
 });
 
@@ -421,6 +428,7 @@ describe('per-call resources, through both real adapters', () => {
     call_seq: 1,
     tool_use_id: 'long',
     tool_name: 'Bash',
+    timing_source: 'message',
     duration_ms: 9_500,
     sample_count: 9,
     overlap_n: 1,
@@ -435,6 +443,7 @@ describe('per-call resources, through both real adapters', () => {
     call_seq: 2,
     tool_use_id: 'short',
     tool_name: 'Read',
+    timing_source: 'message',
     duration_ms: 35,
     sample_count: 0,
     overlap_n: 1,
@@ -498,6 +507,55 @@ describe('per-call resources, through both real adapters', () => {
     openTable(withCalls([measuredLongCall, unmeasuredShortCall], true));
 
     expect(screen.getByText(/more calls than are listed/)).toBeInTheDocument();
+  });
+
+  it('says where the turn\u2019s time actually went', () => {
+    const withSplit = withCalls([measuredLongCall, unmeasuredShortCall]);
+    render(
+      <TurnFooter
+        job={{
+          ...withSplit,
+          durationMs: 3_559_000,
+          resources: { ...withSplit.resources!, toolTimeMs: 49_600 },
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
+
+    // The most explanatory number on the footer: on the production turns this
+    // was built against, the sandbox was busy for about 1% of the wall clock.
+    expect(screen.getByText(/waiting on the model/)).toBeInTheDocument();
+    expect(screen.getByText('49.6s')).toBeInTheDocument();
+  });
+
+  it('does not invent a split when the tool time was never measured', () => {
+    const withSplit = withCalls([measuredLongCall]);
+    render(<TurnFooter job={{ ...withSplit, durationMs: 3_559_000 }} />);
+    fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
+
+    expect(screen.queryByText(/waiting on the model/)).toBeNull();
+  });
+
+  it('says a message-level duration brackets the call rather than timing it', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.getByText(/brackets the execution from outside/)).toBeInTheDocument();
+  });
+
+  it('says so when the sandbox\u2019s own hooks timed the calls', () => {
+    const exact = { ...measuredLongCall, timing_source: 'exact' };
+    const exactShort = { ...unmeasuredShortCall, timing_source: 'exact' };
+    openTable(withCalls([exact, exactShort]));
+
+    expect(screen.getByText(/own tool boundaries/)).toBeInTheDocument();
+    expect(screen.queryByText(/brackets the execution/)).toBeNull();
+  });
+
+  it('counts them when only some calls carry the sandbox\u2019s boundaries', () => {
+    const exact = { ...measuredLongCall, timing_source: 'exact' };
+    openTable(withCalls([exact, unmeasuredShortCall]));
+
+    expect(screen.getByText(/1 of 2 durations/)).toBeInTheDocument();
   });
 
   it('renders dashes rather than nothing when no measurement was reported', () => {

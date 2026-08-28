@@ -42,6 +42,11 @@ def upgrade() -> None:
             call_seq INTEGER NOT NULL,
             tool_use_id TEXT NOT NULL,
             tool_name TEXT NOT NULL,
+            -- 'message': the window is when the platform parsed the call's
+            -- events, which brackets execution from outside. 'exact': the
+            -- sandbox's own hooks marked the boundaries. A reader must be
+            -- able to tell them apart, so this is stored, not inferred.
+            timing_source TEXT NOT NULL DEFAULT 'message',
             duration_ms BIGINT,
             sample_count INTEGER NOT NULL DEFAULT 0,
             overlap_n INTEGER NOT NULL DEFAULT 1,
@@ -65,9 +70,16 @@ def upgrade() -> None:
         "ALTER TABLE agent_attempt_resources "
         "ADD COLUMN IF NOT EXISTS tool_calls_truncated BOOLEAN NOT NULL DEFAULT FALSE"
     )
+    # The union of the turn's tool windows, never their sum: parallel calls
+    # overlap, and a sum can exceed the turn it belongs to. Nullable because a
+    # turn recorded before this shipped has no answer, which is not zero.
+    op.execute(
+        "ALTER TABLE agent_attempt_resources ADD COLUMN IF NOT EXISTS tool_time_ms BIGINT"
+    )
 
 
 def downgrade() -> None:
     """Drop the per-call rows. The attempt rollup is unaffected."""
+    op.execute("ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS tool_time_ms")
     op.execute("ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS tool_calls_truncated")
     op.execute("DROP TABLE IF EXISTS agent_tool_call_resources")
