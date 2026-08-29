@@ -96,7 +96,10 @@ from cloud_agent_host.session_supervisor_client import (
 from cloud_agent_host.setup import build_cache_from_env, run_setup
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_host.workspace_paths import purge_stale_workspaces, workspace_path
-from cloud_agent_host.workspace_snapshot import build_workspace_snapshot
+from cloud_agent_host.workspace_snapshot import (
+    build_retained_workspace_snapshot,
+    build_workspace_snapshot,
+)
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
@@ -990,7 +993,13 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
     return "".join(chunks)
 
 
-def save_workspace_snapshot(control: ControlPlane, *, workdir: str, patch: str) -> bool:
+def save_workspace_snapshot(
+    control: ControlPlane,
+    *,
+    workdir: str,
+    patch: str,
+    retained_backend: RetainedChatBackend | None = None,
+) -> bool:
     """Store the changed-file overlay without making it job-critical.
 
     The patch remains the authoritative publishing artifact. Files are a
@@ -999,7 +1008,11 @@ def save_workspace_snapshot(control: ControlPlane, *, workdir: str, patch: str) 
     different: the attempt is fenced and must stop immediately.
     """
     try:
-        content = build_workspace_snapshot(workdir, patch)
+        content = (
+            build_retained_workspace_snapshot(retained_backend, patch)
+            if retained_backend is not None
+            else build_workspace_snapshot(workdir, patch)
+        )
         control.save_artifact("workspace_snapshot", content)
     except LeaseLost:
         raise
@@ -1950,6 +1963,18 @@ def _run_retained_attempt(
     manager = ChatSandboxManager(backend)
     stamp = backend.version_stamp()
     existing = job.thread_sandbox or {}
+    if not existing and not str(stamp.get("sandbox_image_digest") or "").strip():
+        # Heartbeats may degrade an unavailable image inspection to an empty
+        # stamp, but a new retained chat cannot: its writable layer is the
+        # only local copy and every retry must recreate from the exact image
+        # that first owned it. Falling back to a mutable tag here would make
+        # the supposedly immutable container identity change across a
+        # pre-creation retry.
+        finish_attempt(
+            "failed",
+            "restartable chat creation requires an inspected sandbox image digest",
+        )
+        return 2
     if existing and existing.get("runtime_id") != job.runtime:
         finish_attempt(
             "failed",
@@ -2269,6 +2294,13 @@ def _run_retained_attempt(
             )
         else:
             control.append_event(NormalizedEvent("diff", {"bytes": 0, "stored": False}))
+
+        save_workspace_snapshot(
+            control,
+            workdir=CHAT_WORKDIR,
+            patch=patch,
+            retained_backend=retained,
+        )
 
         if exit_code != 0:
             failure_detail = f"agent exited {exit_code}: {tail[-500:]}"

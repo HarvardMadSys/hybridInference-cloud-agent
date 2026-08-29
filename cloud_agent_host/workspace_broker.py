@@ -416,7 +416,11 @@ class _TerminalSession:
             if not events and self.state == "running" and not self._closed:
                 self._condition.wait(timeout=wait_s)
                 events = [event for event in self._events if event.seq > after]
-            self.last_active_at = time.monotonic()
+            # Reading buffered events (and, in particular, an SSE keepalive)
+            # is not terminal activity. Input, resize, process output, and
+            # process exit update the clock at their actual source. Treating a
+            # passive viewer as activity would let an abandoned browser tab
+            # keep both the PTY and its retained chat container alive forever.
             return events
 
     async def events_after_async(self, after: int, *, wait_s: float) -> list[_TerminalEvent]:
@@ -425,7 +429,6 @@ class _TerminalSession:
         with self._condition:
             events = [item for item in self._events if item.seq > after]
             if events or self.state != "running" or self._closed:
-                self.last_active_at = time.monotonic()
                 return events
             waiter = loop.create_future()
             self._async_waiters.add(waiter)
@@ -436,7 +439,6 @@ class _TerminalSession:
             with self._condition:
                 self._async_waiters.discard(waiter)
         with self._condition:
-            self.last_active_at = time.monotonic()
             return [item for item in self._events if item.seq > after]
 
     def open_stream(self) -> None:

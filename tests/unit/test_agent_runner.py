@@ -550,6 +550,43 @@ def test_retained_claim_dispatches_without_materializing_a_host_worktree(monkeyp
     assert not (workspace_root / job.job_id).exists()
 
 
+def test_new_retained_chat_refuses_an_unpinned_sandbox_image():
+    """A transient image-inspect failure cannot turn a mutable tag into identity."""
+
+    class Backend(ContainerBackend):
+        def version_stamp(self):
+            return {}
+
+    job = ClaimedJob(
+        **{
+            **_JOB.__dict__,
+            "runtime": "claude-code",
+            "thread_id": "athr_retained",
+        }
+    )
+    finished: list[tuple[str, str | None]] = []
+
+    code = runner_mod._run_retained_attempt(
+        runtime=ClaudeCodeRuntime(),
+        job=job,
+        control=FakeControl(),
+        heart=FakeHeart(),
+        backend=Backend(image="agent:mutable-tag", network="agent-net"),
+        host="host-a",
+        gateway_base_url="http://gateway",
+        agent_timeout_s=30,
+        finish_attempt=lambda state, detail=None, **_kwargs: finished.append((state, detail)),
+    )
+
+    assert code == 2
+    assert finished == [
+        (
+            "failed",
+            "restartable chat creation requires an inspected sandbox image digest",
+        )
+    ]
+
+
 def test_first_activation_keeps_setup_egress_until_admission_is_durable(monkeypatch):
     """A retryable control-plane failure must not consume setup egress forever."""
 

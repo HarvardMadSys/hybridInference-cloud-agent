@@ -1452,6 +1452,53 @@ async def test_failed_preadmission_before_container_creation_can_be_reprovisione
     assert abandoned["idle_deadline"] is None
 
 
+async def test_failed_preadmission_late_container_observation_is_stopped(
+    store: AgentJobStore,
+):
+    """A Docker create that outran /running cannot become an immortal orphan."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    abandoned = await store.abandon_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        sandbox_generation=sandbox["generation"],
+        activation_generation=sandbox["activation_generation"],
+        lost=False,
+        detail="supervisor response was lost",
+        idle_timeout_seconds=1800,
+    )
+    assert abandoned is not None and abandoned["state"] == "provisioning"
+
+    recovered = await store.reconcile_thread_sandbox_observation(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        sandbox_id="asbx_test",
+        container_id="container-created-before-response-loss",
+        sandbox_generation=sandbox["generation"],
+        activation_generation=sandbox["activation_generation"],
+        running=True,
+        # Model the supervisor lease whose acquire response never reached the
+        # runner. Durable ownership is already gone, so it must not block stop.
+        activity_active=True,
+    )
+
+    assert recovered == "stopping"
+    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert durable is not None
+    assert durable["container_id"] == "container-created-before-response-loss"
+    assert durable["state"] == "stopping"
+    due = await store.due_thread_sandbox_stop(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        sandbox_id="asbx_test",
+        container_id="container-created-before-response-loss",
+        sandbox_generation=sandbox["generation"],
+    )
+    assert due is not None
+    assert due["reason"] == "orphaned_attempt"
+    assert due["activation_generation"] == sandbox["activation_generation"]
+
+
 async def test_expired_job_finalization_preserves_an_already_settled_context(
     store: AgentJobStore,
 ):

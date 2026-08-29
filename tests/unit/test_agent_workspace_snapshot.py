@@ -10,7 +10,10 @@ import pytest
 
 from cloud_agent_host import runner as runner_mod, workspace_snapshot as snapshot_mod
 from cloud_agent_host.runner import LeaseLost, build_patch, save_workspace_snapshot
-from cloud_agent_host.workspace_snapshot import build_workspace_snapshot
+from cloud_agent_host.workspace_snapshot import (
+    build_retained_workspace_snapshot,
+    build_workspace_snapshot,
+)
 
 
 def _git(repo, *args: str) -> None:
@@ -56,6 +59,44 @@ def test_snapshot_captures_added_modified_and_deleted_files(tmp_path):
         "status": "deleted",
         "size": 0,
     }
+
+
+def test_retained_snapshot_matches_host_snapshot_in_one_isolated_exec(tmp_path):
+    """Docker-owned workspaces preserve the existing changed-file artifact."""
+    repo = _repo(tmp_path)
+    (repo / "modified.txt").write_text("after\n")
+    (repo / "deleted.txt").unlink()
+    (repo / "added.txt").write_text("new\n")
+    patch = build_patch(str(repo))
+
+    class Manager:
+        def exec_capture(
+            self,
+            _spec,
+            argv,
+            *,
+            workdir,
+            timeout_s,
+            input_bytes,
+        ):
+            assert argv[:2] == ["/usr/bin/python3", "-I"]
+            assert argv[-1] == "/workspace"
+            assert workdir == "/"
+            command = [*argv[:-1], str(repo)]
+            return subprocess.run(
+                command,
+                cwd=workdir,
+                input=input_bytes,
+                capture_output=True,
+                timeout=timeout_s,
+                check=False,
+            )
+
+    retained = SimpleNamespace(manager=Manager(), spec=object())
+    host_snapshot = json.loads(build_workspace_snapshot(str(repo), patch))
+    retained_snapshot = json.loads(build_retained_workspace_snapshot(retained, patch))
+
+    assert retained_snapshot == host_snapshot
 
 
 def test_snapshot_never_follows_final_or_intermediate_symlinks(tmp_path):
@@ -258,6 +299,30 @@ def test_snapshot_upload_still_honours_lease_fencing(tmp_path, monkeypatch):
         save_workspace_snapshot(
             _FailingControl(LeaseLost("superseded")), workdir=str(tmp_path), patch=""
         )
+
+
+def test_snapshot_upload_uses_the_retained_container_reader(monkeypatch):
+    retained = SimpleNamespace()
+    observed: list[tuple[object, str]] = []
+
+    monkeypatch.setattr(
+        runner_mod,
+        "build_retained_workspace_snapshot",
+        lambda backend, patch: observed.append((backend, patch)) or '{"version":1}',
+    )
+
+    class Control:
+        def save_artifact(self, kind: str, content: str) -> None:
+            assert kind == "workspace_snapshot"
+            assert content == '{"version":1}'
+
+    assert save_workspace_snapshot(
+        Control(),
+        workdir="/workspace",
+        patch="diff --git a/x b/x\n",
+        retained_backend=retained,
+    )
+    assert observed == [(retained, "diff --git a/x b/x\n")]
 
 
 def test_runner_stores_snapshot_before_the_terminal_transition(tmp_path, monkeypatch):

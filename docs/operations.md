@@ -539,6 +539,13 @@ actual image while its database row still reports the old one.
 > configuration is separate; no repository, workspace, Agent CLI home, or
 > session file is mapped from the host.
 
+> The checked-in production compose remains mixed-mode while the preview is
+> default-off, so its shared runner/broker still carries the legacy workdir
+> bind. Retained requests do not use that path. The local retained stack uses
+> Docker-managed infrastructure volumes (and chat containers with `Mounts=[]`)
+> so it exercises the Docker-only storage topology; removing the production
+> legacy bind is the later retained-only cutover step.
+
 ### One chat inactivity clock (and separate safety watchdogs)
 
 `AGENT_CHAT_IDLE_TIMEOUT_S` is the restartable chat's sole lifecycle timeout
@@ -702,7 +709,7 @@ runners share one queue with no leader and no sharding.
 | `AGENT_SNAPSHOT_ROOT` | — | Where setup snapshots live. A snapshot holds only what the setup script added to the worktree — never the checkout — and is keyed by repository, script, and sandbox image. Unset disables caching, so every job reinstalls. Bind it at the same path inside and out, like the worktrees |
 | `AGENT_SNAPSHOT_TTL_S` | `604800` | Seven days, as the design specifies. A stale entry means a wrong dependency tree |
 | `AGENT_EGRESS_ALLOWLIST` | — | Checked at startup: it may not contain an agent vendor's telemetry domain, which would let a "closed" sandbox report on the repository it was given |
-| `AGENT_WORKDIR_ROOT` | `/var/lib/hybridinference/agent-jobs` | **A host path, bind-mounted at the same path inside the runner.** Preflight test-mounts it and fails at startup if not — otherwise every job dies at spawn with an opaque exit 125 |
+| `AGENT_WORKDIR_ROOT` | `/var/lib/hybridinference/agent-jobs` | **Legacy/default-off mode only:** a host path bind-mounted at the same path inside the mixed-mode runner/broker. Legacy preflight test-mounts it and fails at startup if unavailable. Restartable chat containers never mount or address it; remove the bind only at retained-only cutover. |
 | `AGENT_RUNNER_HOST` | — | Names the *machine*, shared by its replicas: the unit the admin host switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. Unset keeps the machine out of the pool and changes nothing else |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
 | `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
@@ -1068,9 +1075,11 @@ up to date. Every deviation from the source text:
   The security property the sentence is making — the component holding a
   write-capable GitHub token is outside the sandbox — is unchanged by the move.
 - **`/var/lib/hybridinference/agent-jobs`, `hybridinference-agent-sandbox`, and
-  the other inherited names.** Renaming is a post-cutover pull request, and
-  `AGENT_WORKDIR_ROOT` in particular must not change at cutover: retained
-  worktrees live there (see [cutover.md](cutover.md) step 6).
+  the other inherited names.** Renaming remains a separate pull request.
+  `AGENT_WORKDIR_ROOT` must stay unchanged for legacy worktrees during the
+  mixed-mode service cutover (see [cutover.md](cutover.md) step 6), but
+  restartable chats live only in Docker writable layers and do not depend on
+  it.
 - **Anything the split itself changes** — the control plane's own URL, host
   enrollment, inference grants. Those belong in [cutover.md](cutover.md) and in
   `ENVIRONMENT.md`, not in a page that was moved rather than rewritten.

@@ -271,7 +271,9 @@ something to fold in when the host half lands.
         migration whose whole point was that credentials do not.
       - `AGENT_RUNNER_HOST` → the machine's name, unchanged.
       - `AGENT_WORKSPACE_BROKER_URL` → unchanged; the broker is on the same host.
-      - `AGENT_WORKDIR_ROOT` → **unchanged**, so retained worktrees survive.
+      - `AGENT_WORKDIR_ROOT` → **unchanged while legacy/default-off jobs still
+        run**, so their host worktrees survive. Restartable chats do not use
+        this path; remove the bind only in a later retained-only cutover.
 - [ ] Start the runner and the broker. Confirm the startup line names the new
       host and the sandbox backend, and that preflight passed.
 - [ ] Confirm on the new control plane that the host appears

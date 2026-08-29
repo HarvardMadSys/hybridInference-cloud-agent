@@ -192,10 +192,10 @@ continuation is neither required nor part of this phase.
 
 For local chat filesystem and process state, the host presents one control/data
 boundary to this service: Docker Engine, through a local socket or a mutually
-authenticated remote Engine endpoint. The Session Supervisor itself may run as
-an infrastructure container. It must not receive an `AGENT_WORKDIR_ROOT`,
-Agent CLI state root, repository checkout, or other per-chat host filesystem
-mapping.
+authenticated remote Engine endpoint. In a retained-only deployment the
+Session Supervisor may run as an infrastructure container, but it does not
+receive an `AGENT_WORKDIR_ROOT`, Agent CLI state root, repository checkout, or
+other per-chat host filesystem mapping.
 
 ```text
 host OS
@@ -209,6 +209,16 @@ host OS
 no AGENT_WORKDIR_ROOT -> /workspace bind
 no host Agent CLI state directory -> container bind
 ```
+
+The checked-in production compose is intentionally still a **mixed-mode
+rollout**: the preview flag defaults off, so its shared broker/runner services
+retain `AGENT_WORKDIR_ROOT` for legacy one-shot jobs. Retained requests never
+address chat state through that mount. The local retained stack uses a
+Docker-managed infrastructure volume rather than a host-path bind, and every
+chat container still has an empty `Mounts` list. Removing the legacy bind from
+the production services is a retained-only cutover step after all runtimes
+pass their rollout gates; it cannot land unconditionally while the original
+default-off execution path must remain usable.
 
 For every chat container:
 
@@ -346,7 +356,7 @@ remain rollout work rather than claims about this branch:
 | Claude turns are one-shot processes | Persist the native id from turn 1 and use strict `--resume` for every follow-up |
 | Codex, Pi, OpenCode, and Kilo were generic one-shot invocations | Persist their native locator/state and use `codex exec resume`, Pi `--session`, and OpenCode/Kilo `run --session` on every follow-up |
 | Current follow-ups can restart on model/effort changes | Preserve the API: reconfigure in-band when supported, otherwise replace only the CLI process and resume the same local context in the same container |
-| MCP credentials currently follow an attempt fence | Use an activation credential that remains valid across turns in one running process and is revoked at stop |
+| MCP credentials currently follow an attempt fence | The landed fresh-process baseline keeps that fence and injects fresh turn credentials through activation tmpfs. A future cross-turn live transport would require an activation-scoped credential or stable sandbox-facing relay; it must not stretch an attempt credential past its fence. |
 | Pi/OpenCode/Kilo wrappers write provider credentials into `$HOME` config | Move generated credential material to activation tmpfs and prove it is absent from commit/fork layers |
 | Fork copies database history and later reconstructs files from a patch | At latest settled state, atomically copy database history plus the complete Docker filesystem snapshot; use ordinary resume in the clone and never depend on a runtime fork command |
 
@@ -371,7 +381,7 @@ thread container:
 | File tree/read/write and upload/download | Keep the public file API. The broker validates repository-relative paths as today, then uses Docker exec/archive against `/workspace`; it never resolves a per-chat host path. |
 | Git status/diff view | Run the bounded, unprivileged Git inspection in the retained container and return the existing response schema. Repository-owned Git config is never executed with host privileges. |
 | Bounded commands and interactive terminal create/list/stream/input/resize/delete | Keep the public terminal APIs and SSE behavior, but exec the PTY in the same chat container. Active terminals count as chat activity and block a mid-operation stop; reaping an inactive PTY preserves its last activity deadline instead of starting a second chat timeout. Terminal metadata/transcript is not fabricated as still running after restart. |
-| Patch, workspace snapshot, checkpoint, and other artifacts | Generate them at the settled barrier inside the container and upload through the existing fenced worker artifact endpoint. Checkpoints remain useful for audit and the later persistent-storage phase, but are not the normal same-container resume source. |
+| Patch, workspace snapshot, and other fenced artifacts | Generate patch and changed-file workspace snapshot at the settled barrier inside the container and upload through the existing worker artifact endpoint. Portable Agent CLI checkpoint export is deliberately disabled on the retained path until the persistent-storage phase; it is not the normal same-container resume source. |
 | Draft-PR publishing and source-control entitlement checks | Keep clone/push/PR credentials and the publisher outside the sandbox. The sandbox emits the same validated patch artifact; the trusted publisher revalidates and publishes it as today. |
 | GitHub/GitLab repository access and first-turn setup | A trusted source preparer fetches and scrubs the repository, streams it into the new container, and setup runs once under setup egress. Stop/start and follow-ups neither reclone nor rerun setup. |
 | MCP integrations and gateway inference grants | Preserve fail-fast entitlement/tool checks and egress relay isolation. Credentials are activation/process material in tmpfs, never part of the retained or cloned filesystem. |
@@ -438,8 +448,10 @@ Rules:
   platform-managed Agent CLI process is healthy; a settled process rotation
   may briefly leave zero, but never two, CLI processes. It does not mean a
   turn is active.
-- `STOPPING` begins only after the latest turn's terminal event, output drain,
-  local session-state flush, and attempt outcome are durable.
+- `STOPPING` is the durable containment state for a failed pre-admission or
+  orphaned activation. Ordinary settled-idle stop may be observed as a direct
+  RUNNING -> STOPPED reconciliation because the host-local supervisor performs
+  the Docker stop under its own activity lock.
 - `STOPPED` means the same container exists but no Agent CLI or tool process is
   running. `agent_cli_pid` is null in this state.
 - `STARTING` verifies the retained container and state, starts it, launches one
@@ -750,36 +762,45 @@ state.
 3. No turn is active; the latest turn has a terminal driver event.
 4. Output has been drained and the attempt outcome is durable.
 5. Foreground tool windows are closed.
-6. Native session id/state and the local turn journal are flushed; the journal
-   binds their fingerprint to `last_settled_job_id`.
+6. The native session locator/state and `last_settled_job_id` are durable. The
+   additional non-mutating context fingerprint remains a rollout gate, not a
+   claim about the current preview.
 
 The supervisor then:
 
-1. records RUNNING -> STOPPING;
-2. asks the Agent CLI to close cleanly, with an init shim forwarding signals;
-3. revokes the activation's inference and MCP credentials;
-4. issues `docker stop` with a bounded grace period;
-5. verifies the exact container is stopped and no Agent CLI PID remains;
-6. records STOPPED and releases active CPU/memory/pid capacity.
+1. reaches the host-monotonic idle deadline under the local ownership lock, or
+   after supervisor reconstruction receives an exact generation-fenced stop
+   command from the durable control-plane deadline;
+2. verifies that no turn, terminal, or broker file/Git operation owns the
+   container (the baseline Agent CLI already exited at settlement);
+3. issues `docker stop` with a bounded grace period;
+4. verifies the exact container is stopped and no Agent CLI PID remains;
+5. reports Docker truth on the next heartbeat, which records STOPPED and
+   clears the idle deadline.
 
-A forced kill or failed state flush is not a clean STOPPED result.
+An orphaned failed activation uses the same exact fence but an explicit
+`orphaned_attempt` reason, allowing the supervisor to discard only that dead
+activation's in-memory token before stopping it. A stop failure remains due
+and is retried; it is not reported as STOPPED.
 
 ## 11. Start and native-resume protocol
 
 1. Reserve active host capacity and compare-and-set STOPPED -> STARTING.
 2. Verify container id, labels, stopped state, image/runtime compatibility,
    native session id, state path, and last settled job.
-3. Mint fresh activation-generation inference and MCP credentials.
-4. `docker start` the same container and wait for its init shim to become
-   healthy.
+3. Use the fresh attempt-scoped inference and MCP credentials minted for this
+   activation.
+4. `docker start` the same container and re-inspect its inert init shim as
+   running.
 5. Send the launch command and activation-only credential payload through an
    exec connection. It launches exactly one Agent CLI process using its native
    resume mechanism and the retained state directory.
-6. Verify the reported native session locator, retained context fingerprint,
-   `restored_through_job_id`, and a non-mutating protocol health check before
-   accepting a turn.
-7. Record the new process generation and diagnostic PID, mark RUNNING, open the
-   attempt window, and send the new message once.
+6. Require the CLI's explicit resume operation to succeed and verify that its
+   reported native session locator exactly matches the durable locator before
+   accepting a turn. A non-mutating context fingerprint and explicit
+   `restored_through_job_id` proof remain pre-rollout gates.
+7. Record the new process generation, mark RUNNING, open the attempt window,
+   and send the new message once. A diagnostic PID is later observability work.
 
 If native resume fails, stop the container again, revoke the new credentials,
 and mark LOST or an explicit resume failure. Never inject the prompt into a
@@ -788,18 +809,15 @@ blank session as if it were a successful continuation.
 ## 12. Credentials and configuration
 
 - The runner's worker token remains attempt-scoped and outside the sandbox.
-- A running Agent CLI needs inference and MCP credentials that remain valid
-  while that process accepts turns. A stable sandbox-facing relay token may be
-  scoped to user/thread/container/process generation and resolve the currently
-  admitted job and allowed model on every request. If the deployed grant is
-  model-scoped instead, a model change must rotate the process and credential
-  after the prior turn settles.
-- The supervisor renews them only while RUNNING. Clean stop revokes them;
-  STARTING mints fresh values for the new process.
-- The current attempt-scoped MCP token is incompatible with a multi-turn live
-  process. A distinct activation-scoped MCP token or stable sandbox-facing
-  relay must validate the current residency on every request and must not
-  authorize inference or worker endpoints.
+- The landed baseline uses one fresh attempt-scoped inference grant and MCP
+  token for each activation/CLI process. The runner heartbeat renews the
+  attempt while it owns the turn, and terminal attempt completion revokes that
+  authority; keeping the Docker container RUNNING does not keep credentials
+  alive.
+- A future multi-turn live process cannot reuse the current attempt-scoped MCP
+  token across fences. It would need a distinct activation-scoped credential
+  or stable sandbox-facing relay that validates current residency on every
+  request and cannot authorize inference or worker endpoints on its own.
 - No activation credential is part of the container creation request. The
   container starts only an unprivileged init shim; fresh secrets are supplied
   to the Agent CLI exec and its tmpfs-backed generated configuration. `docker
@@ -902,9 +920,8 @@ resources; a retained chat never falls back to that weaker copy.
 | Follow-up while STOPPED | Start the same container and restore native context before admitting the turn |
 | First turn of a new chat | Create container and native session; NEW |
 | Settled idle timeout | Cleanly stop; retain container/workspace/session files |
-| Active-turn timeout, cleanly cancelled | Keep RUNNING or clean-stop at the verified boundary |
-| Active-turn timeout with ambiguous state | STOPPED_DIRTY/LOST; never auto-inject the next turn |
-| Agent CLI exit while idle | Attempt one fenced process replacement and native restore in the same container |
+| Owner cancellation or turn timeout after admission | Stop the exact activation and report STOPPED_DIRTY/LOST; never reinterpret it as settled idle or auto-inject the next turn |
+| Settled Agent CLI process has exited while the container remains idle | Normal baseline state; the next turn launches one fenced process and natively resumes in the same container |
 | Native resume failure | Stop and report LOST/resume failure; no blank-session fallback |
 | Container missing or host lost | LOST; persistent recovery is not implemented |
 | Disk pressure | Alert/reject new-chat admission; do not silently clean stopped chats |
@@ -916,11 +933,14 @@ resources; a retained chat never falls back to that weaker copy.
 
 ## 15. Acceptance tests
 
-The phase is complete only when all applicable tests pass against every
-advertised pinned CLI and the production sandbox runtime:
+Universal rollout is complete only when all applicable tests pass against
+every advertised pinned CLI and the production sandbox runtime. Items that
+name the explicitly deferred fingerprint, R6, Kata, or live-provider work are
+rollout gates rather than claims about this preview branch:
 
-1. Turn 1 records NEW, and it plus three same-activation follow-ups use one
-   container id with no more than one Agent CLI PID at any instant.
+1. Turn 1 records NEW, and it plus three sequential follow-ups use one
+   container id across four distinct activation generations, with no more
+   than one Agent CLI PID at any instant.
 2. Turn 1 records a native session locator; each follow-up sends only its new
    prompt through that CLI's explicit resume command.
 3. Concurrent follow-ups serialize and never create a second container or
@@ -933,11 +953,12 @@ advertised pinned CLI and the production sandbox runtime:
 7. The next message starts that exact container and proves restoration through
    the latest settled job without transcript injection; PID equality or
    inequality does not affect the result.
-8. Killing and replacing an idle CLI inside a still-running container restores
-   the same context and never overlaps two CLI roots.
+8. Each fresh follow-up CLI process restores the same native context in the
+   still-running container and never overlaps another CLI root; an optional
+   future live transport must also pass forced process replacement.
 9. Setup is not rerun after start, and setup egress never reappears.
-10. Credentials work across two live turns, are revoked at stop/process
-    rotation, and fresh credentials are used after start or required rotation.
+10. Credentials work across two live turns, are revoked at each attempt/process
+    boundary, and fresh credentials are used for every activation.
 11. Runner/supervisor failure around stdin admission never injects a job twice.
     Restarting the supervisor between settled turns reconnects to the exact
     container and either reuses or restores one CLI without losing context.
@@ -984,7 +1005,7 @@ advertised pinned CLI and the production sandbox runtime:
 |---|---|
 | **R0 — contracts** | Define NEW/LIVE/RESTORED plus RUNNING/STOPPED/container, activation, and process generations; preserve per-turn model/effort; specify at-most-once admission, credentials, latest-settled full-sandbox clone, and Docker-only state ownership |
 | **R1 — retained container** | Stable labels; create/start/stop/inspect/exec/archive/commit; inert credential-free PID 1, no `--rm`, no chat-state mounts, sanitized repository import, same-container setup/files/terminal, secret tmpfs |
-| **R2 — supervisor** | Host singleton, per-thread lock, replica RPC, capacity admission, fencing, stopped-container reconciliation |
+| **R2 — supervisor** | Host singleton, serialized per-thread ownership (the current singleton's host-wide lifecycle lock is a conservative superset), replica RPC, capacity admission, fencing, stopped-container reconciliation |
 | **R3 — Claude proof** | Native session from turn 1; local session-id/state flush; process rotation; stop/start same container; `--resume`; context-proof telemetry |
 | **R4 — all CLIs** | Codex `exec resume`, Pi `--session`, OpenCode/Kilo `run --session`; native restart-resume/model-effort contract tests at exact pins; live transport remains optional; promote only after real-Docker/Kata and provider conformance pass |
 | **R5 — full isolated fork** | Latest-settled source lock/flush; Docker commit with pause; new container + DB prefix + ordinary cloned-state resume; no CLI fork; rollback/reconcile transaction |

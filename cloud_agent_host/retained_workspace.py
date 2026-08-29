@@ -266,6 +266,7 @@ def read_retained_file(
         backend.spec,
         [
             "/usr/bin/python3",
+            "-I",
             "-c",
             _READ_PROGRAM,
             CHAT_WORKDIR,
@@ -273,7 +274,10 @@ def read_retained_file(
             str(max_preview_bytes),
             str(max_directory_entries),
         ],
-        workdir=CHAT_WORKDIR,
+        # Never import repository-controlled modules while executing this
+        # trusted broker helper. The explicit root argument still addresses
+        # the workspace, while isolated Python from / keeps sys.path clean.
+        workdir="/",
         timeout_s=60,
     )
     if result.returncode != 0:
@@ -304,13 +308,14 @@ def write_retained_file(
         backend.spec,
         [
             "/usr/bin/python3",
+            "-I",
             "-c",
             _WRITE_PROGRAM,
             CHAT_WORKDIR,
             relative,
             str(max_write_bytes),
         ],
-        workdir=CHAT_WORKDIR,
+        workdir="/",
         timeout_s=60,
         input_bytes=encoded,
     )

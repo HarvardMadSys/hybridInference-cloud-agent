@@ -3685,6 +3685,39 @@ class AgentJobStore:
                 container_id,
                 sandbox_generation,
             )
+            # A runner can fail after the supervisor created/started Docker
+            # but before ``/running`` returned the container id. Its explicit
+            # pre-admission abandon leaves the durable row reprovisionable
+            # (PROVISIONING, no active attempt). If Docker then reports the
+            # exact labelled object, it is no longer a blank provisioning
+            # slot: a running object is an orphan that must be stopped, while
+            # an already-stopped object is safe to reuse. In particular, an
+            # orphaned in-memory supervisor lease must not turn heartbeat
+            # activity into an immortal container.
+            recovered_state = await conn.fetchval(
+                """
+                UPDATE agent_thread_sandboxes
+                SET state = CASE WHEN $7 THEN 'stopping' ELSE 'stopped' END,
+                    idle_deadline = NULL,
+                    updated_at = NOW()
+                WHERE thread_id = $1 AND host = $2 AND sandbox_id = $3
+                  AND container_id = $4 AND generation = $5
+                  AND state = 'provisioning'
+                  AND active_attempt_id IS NULL AND admitted_job_id IS NULL
+                  AND (
+                    ($6 > 0 AND activation_generation = $6)
+                    OR $6 = 0
+                  )
+                RETURNING state
+                """,
+                thread_id,
+                host,
+                sandbox_id,
+                container_id,
+                sandbox_generation,
+                activation_generation,
+                running,
+            )
             if running and activity_active is not None:
                 if activity_active:
                     await conn.execute(
@@ -3761,7 +3794,8 @@ class AgentJobStore:
                 activation_generation,
                 running,
             )
-        return None if state is None else str(state)
+        effective_state = state if state is not None else recovered_state
+        return None if effective_state is None else str(effective_state)
 
     async def due_thread_sandbox_stop(
         self,

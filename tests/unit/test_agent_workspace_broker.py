@@ -629,6 +629,25 @@ def test_retained_terminal_idle_guard_cannot_outlive_the_chat_clock(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_passive_terminal_polling_does_not_refresh_idle_activity(tmp_path):
+    """An open SSE viewer cannot keep an otherwise idle retained chat alive."""
+    session = _TerminalSession(
+        terminal_id="term_test",
+        process=_FakeTerminalProcess(),
+        workdir=tmp_path,
+        rows=24,
+        cols=80,
+        now=100,
+        idle_ttl_s=10,
+    )
+
+    assert session.events_after(0, wait_s=0) == []
+    assert await session.events_after_async(0, wait_s=0) == []
+    assert session.last_active_at == 100
+    assert session.expired(now=110, idle_ttl_s=30, hard_ttl_s=60) is True
+
+
+@pytest.mark.asyncio
 async def test_terminal_output_wakes_every_async_viewer(tmp_path):
     """One viewer cannot clear another viewer's output notification."""
     session = _TerminalSession(
