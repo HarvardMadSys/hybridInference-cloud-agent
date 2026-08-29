@@ -406,7 +406,8 @@ async def remove_agent_runner_host(
         description=(
             "Remove a host that is still running attempts. Those attempts are "
             "not stopped — nothing here can reach them — they are left to their "
-            "leases, which expire and requeue the work exactly once."
+            "leases. Legacy one-shot work may be retried; an indeterminate "
+            "retained-chat activation is marked LOST instead of replayed."
         ),
     ),
     _admin_id: str = Depends(verify_admin_access),
@@ -420,15 +421,16 @@ async def remove_agent_runner_host(
     minutes later. Being told "it is still busy" is the difference between
     draining first and finding out afterwards.
 
-    Forced removal is the deliberate version of the same thing, and it is safe
-    for the reason the fencing design exists: the lease expires, the reaper
-    supersedes the attempt, and the job is requeued once. A superseded
-    attempt's writes are already rejected, so a host that is still alive and
-    unaware cannot publish behind the replacement's back.
+    Forced removal is the deliberate version of the same thing. Lease fencing
+    rejects later writes from the superseded worker. Legacy one-shot work may
+    then follow its normal retry policy; a retained activation is not replayed
+    because the platform cannot know whether its prompt ran, so that chat is
+    marked LOST when the lease expires.
 
     The row survives, disabled. ``agent_attempts.host_id`` points at it, and
     "where did this job run" should not become unanswerable because the machine
-    was retired. Use ``DELETE`` for a host that is genuinely gone.
+    was retired. ``DELETE`` forgets that administrative row; neither action is
+    evidence that the retained container or Docker data-root was deleted.
     """
     job_store = _require_store(store)
     outcome = await job_store.remove_host(host=host, force=force)
@@ -439,7 +441,8 @@ async def remove_agent_runner_host(
             status_code=409,
             detail=(
                 f"{host!r} is still running attempts. Drain it first, or repeat with "
-                "force=true to let their leases expire and requeue the work."
+                "force=true to let their leases expire under the applicable "
+                "one-shot retry or retained-context fail-closed policy."
             ),
         )
     await log_admin_action(

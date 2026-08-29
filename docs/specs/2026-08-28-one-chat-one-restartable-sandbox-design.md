@@ -277,12 +277,23 @@ The one-chat/one-container invariant includes all chat-specific work:
 - Terminal access uses `exec` in the same retained container. If it is stopped,
   the Session Supervisor starts the chat activation before granting terminal
   access. It never creates a terminal sandbox for that chat.
+- Interactive terminal streams are broker-process state, not chat checkpoints.
+  A graceful broker shutdown closes them. After an abrupt broker restart, the
+  supervisor matches each unattachable shell by its unguessable pidfile and
+  exact wrapper argv, kills only that process group, and keeps the retained
+  container/workspace running. It never uses a broad `pkill` or replaces the
+  chat container.
 - Each pinned driver exits at a clean turn boundary and the next turn starts a
   new process using that CLI's explicit native session locator. A reconnectable
   bridge may later reduce startup latency, but it is not required for context
   correctness and does not change NEW/LIVE/RESTORED semantics.
 - File browsing and patch generation run through `exec`; file upload/download
   uses the archive API. The workspace broker never opens a host path.
+- File writes, bounded commands, and terminal create/input/resize are also
+  fenced by the durable thread sandbox row. An active turn must have published
+  `workspace_ready`, and a fork must have released its saga fence; therefore a
+  broker restart or a request through an older turn URL cannot mutate while
+  setup, final capture, or a Docker snapshot owns the workspace.
 - Platform relay/proxy containers are infrastructure and are not chat
   sandboxes.
 - A platform-managed activation has at most one Agent CLI root. Tool
@@ -419,8 +430,10 @@ Other reasons that may use the clean stop path are an explicit user sleep or a
 controlled host drain after every active turn and terminal operation settles.
 A connected or running interactive terminal keeps the activation alive; the
 platform does not claim that `docker stop` preserves its process. CLI crash,
-OOM, missing container, host loss, and forced `SIGKILL` before state flush are
-failure paths, not normal STOPPED continuity.
+OOM, a proven-missing container/data-root, and forced `SIGKILL` before state
+flush are failure paths, not normal STOPPED continuity. Mere heartbeat loss or
+temporary host unreachability remains an unavailable, hard-pinned residency
+until the owning Docker daemon can be reconciled.
 
 ## 6. Lifecycle
 
@@ -854,7 +867,11 @@ clone is a different operation and creates a blank chat instead.
 The coordinated protocol is:
 
 1. Lock the source thread and require no queued/admitted/active turn. Verify
-   that the requested anchor is `last_settled_job_id`.
+   that the requested anchor is `last_settled_job_id`. The trusted publisher
+   takes the same thread lock before changing a succeeded turn to PUBLISHING;
+   it either wins before preparation (and the fork is refused as busy) or
+   waits until the fork saga releases its fence, never mutating publication
+   lineage during the Docker snapshot.
 2. Allocate a fork operation id, new thread and sandbox ids, deterministic
    container name, and generations. Persist a `PREPARING` saga row keyed to the
    source anchor so a crash can resume or remove only the incomplete fork. The
@@ -923,7 +940,8 @@ resources; a retained chat never falls back to that weaker copy.
 | Owner cancellation or turn timeout after admission | Stop the exact activation and report STOPPED_DIRTY/LOST; never reinterpret it as settled idle or auto-inject the next turn |
 | Settled Agent CLI process has exited while the container remains idle | Normal baseline state; the next turn launches one fenced process and natively resumes in the same container |
 | Native resume failure | Stop and report LOST/resume failure; no blank-session fallback |
-| Container missing or host lost | LOST; persistent recovery is not implemented |
+| Exact container or Docker data-root is proven missing on its owning host | LOST; persistent recovery is not implemented |
+| Owning host heartbeat is absent, offline, disabled, or temporarily unreachable | Keep the residency pinned and report it unavailable; host-row state alone is not proof that Docker state was deleted. Re-enrol/recover the same named host and reconcile the exact container before declaring LOST; never replace it on another host. |
 | Disk pressure | Alert/reject new-chat admission; do not silently clean stopped chats |
 | Stale runner/supervisor | Generation fencing rejects every operation |
 | Fork at latest settled state | Full conversation + Docker filesystem snapshot, ordinary resume in an isolated new container; no CLI fork or prompt replay |
@@ -983,7 +1001,10 @@ rollout gates rather than claims about this preview branch:
 19. A historical-anchor fork is rejected before any new resource exists.
 20. A stopped chat survives beyond the old host-workspace TTL and an
     infrastructure `docker compose down/up`, without automatic removal.
-21. Host/container loss is shown as LOST, never as restored continuity.
+21. A definitively missing container or Docker data-root on the owning host is
+    shown as LOST, never as restored continuity. Heartbeat or administrative
+    host-row absence alone leaves the chat unavailable and pinned until that
+    same host can be reconciled; it does not manufacture evidence of data loss.
 22. A follow-up can change model and reasoning effort. The driver either
     applies them in-band or replaces one process and resumes context; the
     sandbox id and prior conversation remain unchanged.

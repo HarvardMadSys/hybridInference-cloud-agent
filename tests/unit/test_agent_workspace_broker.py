@@ -398,6 +398,11 @@ async def test_broker_suspends_and_resumes_terminal_process_trees(tmp_path):
             json={"data": "eA=="},
             headers=headers,
         )
+        blocked_resize = await client.post(
+            f"/workspaces/ajob_test/terminals/{terminal_id}/resize",
+            json={"rows": 42, "cols": 132},
+            headers=headers,
+        )
         blocked_create = await client.post(
             "/workspaces/ajob_test/terminals",
             json={},
@@ -451,6 +456,7 @@ async def test_broker_suspends_and_resumes_terminal_process_trees(tmp_path):
 
     assert suspended.json() == {"ok": True, "suspended": 1}
     assert blocked_input.status_code == 409
+    assert blocked_resize.status_code == 409
     assert blocked_create.status_code == 409
     assert resumed.json() == {"ok": True, "resumed": 1}
     assert accepted_input.status_code == 200
@@ -463,6 +469,49 @@ async def test_broker_suspends_and_resumes_terminal_process_trees(tmp_path):
     assert backend.processes[0].suspensions == [True, False, True, False, True, False]
     assert backend.processes[0].inputs == [b"x", b"y"]
     assert listing.json()["terminals"][0]["id"] == terminal_id
+
+
+@pytest.mark.asyncio
+async def test_partial_terminal_resume_keeps_the_workspace_control_fence_closed(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    backend = _FakeTerminalBackend()
+    app = create_app(backend=backend, workdir_root=str(root), token="broker-secret")
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        first = await client.post("/workspaces/ajob_test/terminals", json={}, headers=headers)
+        await client.post("/workspaces/ajob_test/terminals", json={}, headers=headers)
+        suspended = await client.post(
+            "/workspaces/ajob_test/terminals/suspend",
+            json={"lease_generation": 1},
+            headers=headers,
+        )
+
+        def fail_resume() -> None:
+            raise SandboxError("resume failed")
+
+        backend.processes[1].resume = fail_resume  # type: ignore[method-assign]
+        partial_resume = await client.post(
+            "/workspaces/ajob_test/terminals/resume",
+            json={"lease_generation": 1},
+            headers=headers,
+        )
+        leaked_input = await client.post(
+            f"/workspaces/ajob_test/terminals/{first.json()['id']}/input",
+            json={"data": "eA=="},
+            headers=headers,
+        )
+        leaked_resize = await client.post(
+            f"/workspaces/ajob_test/terminals/{first.json()['id']}/resize",
+            json={"rows": 42, "cols": 132},
+            headers=headers,
+        )
+
+    assert suspended.status_code == 200
+    assert partial_resume.status_code == 503
+    assert leaked_input.status_code == 409
+    assert leaked_resize.status_code == 409
+    assert backend.processes[0].inputs == []
 
 
 @pytest.mark.asyncio
@@ -805,6 +854,47 @@ async def test_broker_lifespan_runs_terminal_cleanup_only_for_its_workdir_root(t
 
     async with app.router.lifespan_context(app):
         assert backend.prepared_roots == [str(root)]
+
+
+@pytest.mark.asyncio
+async def test_failed_retained_reconciliation_does_not_start_terminal_reaper(tmp_path):
+    """A failed ASGI startup must not leak an unowned terminal thread."""
+    root, _repo = _workspace(tmp_path)
+    backend = _RecordingTerminalBackend()
+
+    class FailingSupervisor:
+        idle_timeout_s = 30.0
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def start(self) -> None:
+            raise SandboxError("retained Docker cleanup failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    supervisor = FailingSupervisor()
+    app = create_app(
+        backend=backend,
+        workdir_root=str(root),
+        token="broker-secret",
+        session_supervisor=supervisor,  # type: ignore[arg-type]
+    )
+    terminal_started = False
+
+    def record_terminal_start() -> None:
+        nonlocal terminal_started
+        terminal_started = True
+
+    app.state.terminal_manager.start = record_terminal_start
+
+    with pytest.raises(SandboxError, match="retained Docker cleanup failed"):
+        async with app.router.lifespan_context(app):
+            raise AssertionError("failed reconciliation entered the serving lifespan")
+
+    assert terminal_started is False
+    assert supervisor.closed is False
 
 
 @pytest.mark.asyncio

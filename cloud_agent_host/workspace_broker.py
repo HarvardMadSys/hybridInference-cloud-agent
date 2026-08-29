@@ -749,6 +749,17 @@ class _TerminalManager:
             raise HTTPException(status_code=404, detail="terminal does not exist")
         return session
 
+    def get_for_control(self, workspace_id: str, terminal_id: str) -> _TerminalSession:
+        """Resolve a terminal only while its workspace-level fence is open."""
+        self.reap()
+        with self._lock:
+            session = self._sessions.get(workspace_id, {}).get(terminal_id)
+            if session is None or session.is_closed:
+                raise HTTPException(status_code=404, detail="terminal does not exist")
+            if workspace_id in self._suspended_workspaces:
+                raise HTTPException(status_code=409, detail="terminal workspace is not ready")
+            return session
+
     def delete(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
         """Close a terminal, retaining it when cleanup needs to be retried."""
         with self._lock:
@@ -1324,15 +1335,24 @@ def create_app(
         # A workdir root has one active broker. Container backends use that
         # stable scope to remove only crash leftovers from a previous instance.
         sandbox.prepare_terminal_broker(root)
-        terminals.start()
-        if supervisor is not None:
-            supervisor.start()
+        supervisor_started = False
+        terminals_started = False
         try:
+            # Reconcile/reap retained Docker execs before this process starts
+            # accepting new terminal sessions. Keep startup inside the cleanup
+            # guard: a failed Docker reconciliation must not leak the terminal
+            # manager's background thread from a failed ASGI lifespan.
+            if supervisor is not None:
+                supervisor.start()
+                supervisor_started = True
+            terminals.start()
+            terminals_started = True
             yield
         finally:
-            if supervisor is not None:
+            if terminals_started:
+                terminals.close()
+            if supervisor_started and supervisor is not None:
                 supervisor.close()
-            terminals.close()
 
     app = FastAPI(title="Agent workspace broker", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.terminal_manager = terminals
@@ -1823,7 +1843,7 @@ def create_app(
             ) from exc
         if len(data) > MAX_TERMINAL_INPUT_BYTES:
             raise HTTPException(status_code=413, detail="terminal input is too large")
-        session = terminals.get(workspace_id, terminal_id)
+        session = terminals.get_for_control(workspace_id, terminal_id)
         return await asyncio.to_thread(session.write, data, now=time.monotonic())
 
     @app.post("/workspaces/{workspace_id}/terminals/{terminal_id}/resize")
@@ -1834,7 +1854,7 @@ def create_app(
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         ensure_workspace(workspace_id)
-        session = terminals.get(workspace_id, terminal_id)
+        session = terminals.get_for_control(workspace_id, terminal_id)
         return await asyncio.to_thread(
             session.resize,
             rows=body.rows,

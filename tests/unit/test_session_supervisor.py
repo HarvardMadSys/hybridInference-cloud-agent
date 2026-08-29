@@ -39,6 +39,7 @@ class _Manager:
         self.removed = 0
         self.exec_calls: list[tuple[list[str], bytes | None]] = []
         self.images: dict[str, str] = {}
+        self.stale_terminal_reaps: list[str] = []
 
     @staticmethod
     def _inspection(spec: ChatSandboxSpec, *, running: bool) -> ChatSandboxInspection:
@@ -121,6 +122,9 @@ class _Manager:
         assert phase == "agent"
         assert self.items[spec.container_name][1].networks == ("agent-net",)
 
+    def reap_stale_terminal_processes(self, spec: ChatSandboxSpec) -> None:
+        self.stale_terminal_reaps.append(spec.thread_id)
+
     @staticmethod
     def snapshot_repository(operation_id: str) -> str:
         return f"fork:{operation_id}"
@@ -175,6 +179,21 @@ def _spec(thread: str = "athr_1", sandbox: str = "asbx_1") -> ChatSandboxSpec:
 
 def test_the_product_idle_timeout_defaults_to_thirty_minutes():
     assert DEFAULT_CHAT_IDLE_TIMEOUT_S == 1800.0
+
+
+def test_supervisor_start_reaps_only_reconciled_stale_terminal_execs():
+    manager = _Manager()
+    spec = _spec()
+    manager.create(spec)
+    manager.start(spec)
+    supervisor = ChatSessionSupervisor(manager, sweep_interval_s=60)
+
+    supervisor.start()
+    try:
+        assert manager.stale_terminal_reaps == [spec.thread_id]
+        assert manager.inspect(spec.container_name).running is True
+    finally:
+        supervisor.close()
 
 
 def test_first_acquire_creates_starts_and_reports_new_context():

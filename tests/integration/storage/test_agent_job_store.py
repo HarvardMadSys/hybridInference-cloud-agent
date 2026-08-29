@@ -146,6 +146,7 @@ async def _settle_retained_chat(
     store: AgentJobStore,
     *,
     native_session_id: str = "native-session-one",
+    patch: str | None = None,
 ) -> tuple[dict, dict]:
     """Create a latest-settled retained chat ready for a full fork."""
     job, claim, sandbox = await _reserve_retained_chat(store)
@@ -168,6 +169,13 @@ async def _settle_retained_chat(
         event_type="message",
         payload={"text": "settled answer"},
     )
+    if patch is not None:
+        assert await store.save_artifact(
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            kind="patch",
+            content=patch,
+        )
     assert await store.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
@@ -950,6 +958,72 @@ async def test_terminal_readiness_is_fenced_attempt_state(store: AgentJobStore):
     assert await store.terminal_workspace_ready(attempt_id=claim["attempt_id"]) is False
 
 
+async def test_retained_workspace_readiness_is_a_durable_thread_wide_fence(
+    store: AgentJobStore,
+):
+    """Old turn URLs cannot mutate while an activation or fork owns the chat."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+
+    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is False
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-retained-one",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is False
+
+    assert await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="lifecycle",
+        payload={"phase": "workspace_ready"},
+    )
+    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is True
+    assert await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="lifecycle",
+        payload={"phase": "workspace_finalizing"},
+    )
+    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is False
+
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="new",
+        native_session_id="native-session-one",
+        idle_timeout_seconds=1800,
+    )
+    assert await store.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is True
+
+    operation = await store.prepare_retained_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+    )
+    assert operation is not None and operation.get("error") is None
+    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is False
+    assert await store.abort_retained_fork(
+        operation_id=operation["id"],
+        detail="test releases durable workspace fence",
+    )
+    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is True
+
+
 async def test_zombie_worker_is_fenced_out_after_reap(store: AgentJobStore):
     """After a reap, every write path of the old attempt is rejected."""
     job = await _create_job(store)
@@ -1186,6 +1260,84 @@ async def test_retained_fork_abort_releases_the_source_claim_fence(store: AgentJ
     assert aborted["cleanup_pending"] is False
     sandbox = await store.thread_sandbox(thread_id=source["thread_id"])
     assert sandbox["fork_operation_id"] is None
+
+
+async def test_retained_fork_abort_never_locks_operation_before_source_thread(
+    store: AgentJobStore,
+):
+    """Source-fork writers share one lock order, so retry/abort cannot deadlock."""
+    source, _ = await _settle_retained_chat(store)
+    operation = await store.prepare_retained_fork(
+        source_job_id=source["id"],
+        user_id=source["user_id"],
+    )
+    assert operation is not None and operation.get("error") is None
+
+    async with store._pool.acquire() as conn, conn.transaction():
+        await conn.fetchval(
+            "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE",
+            source["thread_id"],
+        )
+        abort = asyncio.create_task(
+            store.abort_retained_fork(
+                operation_id=operation["id"],
+                detail="concurrent abort",
+            )
+        )
+        # PostgreSQL caches statistics snapshots inside a transaction. Poll
+        # from a separate autocommit connection so the abort connection's new
+        # lock wait becomes visible instead of repeatedly reading that cache.
+        async with store._pool.acquire() as observer:
+            for _ in range(500):
+                waiting_on_thread = await observer.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM pg_stat_activity
+                        WHERE pid <> pg_backend_pid()
+                          AND wait_event_type = 'Lock'
+                          AND query LIKE '%SELECT id FROM agent_threads%FOR UPDATE%'
+                    )
+                    """
+                )
+                if waiting_on_thread:
+                    break
+                await asyncio.sleep(0.01)
+        assert waiting_on_thread, "abort never reached the held source-thread lock"
+
+        # NOWAIT succeeds only if abort did not take the inverse operation
+        # lock before blocking on the thread row.
+        assert (
+            await conn.fetchval(
+                "SELECT id FROM agent_sandbox_forks WHERE id = $1 FOR UPDATE NOWAIT",
+                operation["id"],
+            )
+            == operation["id"]
+        )
+
+    aborted = await asyncio.wait_for(abort, timeout=5)
+    assert aborted is not None and aborted["state"] == "failed"
+
+
+async def test_retained_fork_fences_the_source_publisher(store: AgentJobStore):
+    """Publishing cannot mutate lineage while Docker copies its boundary."""
+    source, _ = await _settle_retained_chat(
+        store,
+        patch="diff --git a/source b/source\n",
+    )
+    operation = await store.prepare_retained_fork(
+        source_job_id=source["id"],
+        user_id=source["user_id"],
+    )
+    assert operation is not None and operation.get("error") is None
+
+    assert await store.claim_for_publish() is None
+
+    assert await store.abort_retained_fork(
+        operation_id=operation["id"],
+        detail="test releases the fork boundary",
+    )
+    published = await store.claim_for_publish()
+    assert published is not None and published["job_id"] == source["id"]
 
 
 async def test_stalled_retained_fork_cleanup_survives_control_plane_restarts(
@@ -1452,6 +1604,83 @@ async def test_failed_preadmission_before_container_creation_can_be_reprovisione
     assert abandoned["idle_deadline"] is None
 
 
+async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost(
+    store: AgentJobStore,
+):
+    """A missing native locator fails closed before any new prompt is sent."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    child = await store.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="do not leave this turn waiting forever",
+    )
+    assert child is not None and child["state"] == "waiting"
+
+    abandoned = await store.abandon_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        sandbox_generation=sandbox["generation"],
+        activation_generation=sandbox["activation_generation"],
+        lost=True,
+        detail="native session locator is missing",
+        idle_timeout_seconds=1800,
+    )
+
+    assert abandoned is not None
+    assert abandoned["state"] == "stopped_dirty"
+    assert abandoned["context_status"] == "lost"
+    queued = await store.get_job(child["id"])
+    assert queued["state"] == "failed"
+    assert "lost the retained sandbox context" in queued["detail"]
+    assert await store.create_follow_up(
+        parent_job_id=child["id"],
+        user_id=job["user_id"],
+        prompt="still must not be accepted",
+    ) == {"error": "sandbox_context_lost"}
+
+
+async def test_failed_admitted_turn_does_not_promote_queued_follow_up(
+    store: AgentJobStore,
+):
+    """A terminal job and a LOST context are different scheduling signals."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-retained-one",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    child = await store.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="this cannot run after an ambiguous turn",
+    )
+    assert child is not None and child["state"] == "waiting"
+
+    assert await store.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+        detail="agent exited after prompt admission",
+    )
+
+    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert durable["context_status"] == "lost"
+    blocked = await store.get_job(child["id"])
+    assert blocked["state"] == "failed"
+    assert "lost the retained sandbox context" in blocked["detail"]
+
+
 async def test_failed_preadmission_late_container_observation_is_stopped(
     store: AgentJobStore,
 ):
@@ -1535,6 +1764,12 @@ async def test_expired_job_finalization_preserves_an_already_settled_context(
         )
         is not None
     )
+    child = await store.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="continue from the already-settled context",
+    )
+    assert child is not None and child["state"] == "waiting"
     await _expire_attempt(store, claim["attempt_id"])
 
     actions = await store.reap_expired(max_attempts=3)
@@ -1551,6 +1786,7 @@ async def test_expired_job_finalization_preserves_an_already_settled_context(
     failed = await store.get_job(job["id"])
     assert failed["state"] == "failed"
     assert "prompt was not replayed" in failed["detail"]
+    assert (await store.get_job(child["id"]))["state"] == "queued"
 
 
 async def test_expired_retained_admission_fails_closed_instead_of_replaying(
@@ -1573,6 +1809,12 @@ async def test_expired_retained_admission_fails_closed_instead_of_replaying(
         is not None
     )
     assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    child = await store.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="must not run after an expired admitted turn",
+    )
+    assert child is not None and child["state"] == "waiting"
     await _expire_attempt(store, claim["attempt_id"])
 
     actions = await store.reap_expired(max_attempts=3)
@@ -1586,6 +1828,9 @@ async def test_expired_retained_admission_fails_closed_instead_of_replaying(
     assert durable["active_attempt_id"] is None
     assert durable["admitted_job_id"] is None
     assert (await store.job_turn_telemetry(job_id=job["id"]))["context_status"] == "lost"
+    failed_child = await store.get_job(child["id"])
+    assert failed_child["state"] == "failed"
+    assert "lost the retained sandbox context" in failed_child["detail"]
 
 
 async def test_reap_fails_job_after_max_attempts(store: AgentJobStore):

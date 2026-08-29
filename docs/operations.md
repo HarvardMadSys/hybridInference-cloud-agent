@@ -575,7 +575,10 @@ Before a prompt reaches Agent CLI stdin, the worker persists its `job_id` as
 the sandbox's admission receipt. If that retained activation's attempt lease
 expires, this preview stops it, marks the context LOST, and fails the job; it
 does not automatically retry even when the crash may have happened just before
-stdin. That conservative choice prevents duplicate prompt/tool execution.
+stdin. Any later messages already waiting behind that turn are failed in the
+same database transaction, and a new follow-up receives
+`sandbox_context_lost` instead of becoming a permanently unclaimable queued
+job. That conservative choice prevents duplicate prompt/tool execution.
 
 The other timeout-looking settings do not form additional chat states and do
 not deactivate a healthy chat:
@@ -658,6 +661,13 @@ storage and cross-host restore remain the explicitly deferred persistent
 checkpoint phase. Until that lands, loss of the Docker data-root is context
 `LOST`, and the control-plane database still supplies the authoritative
 thread→host→container identity needed to locate it.
+
+A missed heartbeat, an offline/disabled host row, or a temporarily unreachable
+broker is not evidence that this Docker state vanished. Keep the chat pinned
+and unavailable, recover or re-enrol the same named host, and reconcile its
+exact labelled container. Only an inspection on that owning Docker daemon that
+proves the expected container/data-root is gone may transition the context to
+`LOST`; never create a blank replacement on another host.
 
 **One runner runs one job at a time.** It claims, runs the job to completion,
 then claims the next — so the replica count *is* how many jobs the deployment

@@ -19,6 +19,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
     RetainedChatBackend,
+    _RetainedTerminalProcess,
 )
 from cloud_agent_host.egress import EgressPolicy, EgressTier
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
@@ -275,6 +276,104 @@ def test_exec_is_bound_to_the_inspected_container_and_workspace(monkeypatch):
     assert exec_command[:2] == ["docker", "exec"]
     assert exec_command[exec_command.index("--workdir") + 1] == CHAT_WORKDIR
     assert exec_command[-4:] == [spec.container_name, "git", "status", "--short"]
+
+
+def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    payload = _inspect_payload(spec, status="running", running=True)
+    popen_calls: list[tuple[list[str], dict]] = []
+
+    class Process:
+        stdout = None
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
+    )
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append((list(argv), kwargs))
+        return Process()
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+
+    terminal = manager.spawn_terminal(spec, rows=31, cols=101)
+    assert terminal.wait() == 0
+
+    command, kwargs = popen_calls[0]
+    script = command[-3]
+    assert "--interactive" in command
+    assert "--tty" in command
+    assert 'printf "%s\\n" "$$" > "$pidfile"' in script
+    assert "/bin/sh +m -i" in script
+    assert "setsid" not in script
+    assert " &" not in script
+    assert kwargs["start_new_session"] is True
+
+
+def test_retained_terminal_signal_must_be_confirmed_while_client_is_live():
+    spec = _spec()
+    calls: list[list[str]] = []
+
+    class Process:
+        stdout = None
+
+        def poll(self):
+            return None
+
+    class Manager:
+        def exec_capture(self, _spec, argv, **_kwargs):
+            calls.append(list(argv))
+            return SimpleNamespace(returncode=3)
+
+    terminal = _RetainedTerminalProcess(
+        Process(),  # type: ignore[arg-type]
+        manager=Manager(),  # type: ignore[arg-type]
+        spec=spec,
+        pidfile=f"{ACTIVATION_TMPFS}/terminal-test.pid",
+        input_fd=None,
+    )
+
+    with pytest.raises(SandboxError, match="terminal cannot receive STOP"):
+        terminal.suspend()
+
+    script = calls[0][2]
+    assert "while [ ! -r" in script
+    assert "sleep 0.05" in script
+    assert "/bin/kill" not in script
+    assert "|| true" not in script
+
+
+def test_stale_terminal_reaper_matches_pidfile_and_wrapper_argv(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    payload = _inspect_payload(spec, status="running", running=True)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[1:3] == ["container", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=payload, stderr="")
+        if argv[1] == "exec":
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+
+    manager.reap_stale_terminal_processes(spec)
+
+    script = calls[-1][-1]
+    assert f"{ACTIVATION_TMPFS}/terminal-*.pid" in script
+    assert 'grep -Fqx -- "$pidfile"' in script
+    assert 'kill -KILL -"$pid"' in script
+    assert "pkill" not in script
 
 
 def test_unsettled_retry_reset_targets_only_the_two_container_owned_roots(monkeypatch):

@@ -584,13 +584,18 @@ class ChatSandboxManager:
         # then signals this terminal tree only; pausing or killing the retained
         # container would also stop the Agent CLI and violate one-chat
         # lifecycle ownership.
+        # Docker's TTY exec already starts this wrapper as the foreground
+        # session/process-group leader.  Keep the interactive shell in that
+        # group: a background shell observes /dev/null, while another
+        # ``setsid`` loses this exec's controlling terminal.  Monitor mode is
+        # disabled so commands launched by the shell remain in the signalable
+        # group recorded in the pidfile.
         script = (
-            'pidfile="$1"; setsid /bin/sh & child=$!; '
-            'printf "%s\\n" "$child" > "$pidfile" || exit 126; '
-            'forward() { /bin/kill -TERM -"$child" 2>/dev/null || true; }; '
+            'pidfile="$1"; '
+            'printf "%s\\n" "$$" > "$pidfile" || exit 126; '
             'cleanup() { rm -f "$pidfile"; }; '
-            "trap 'forward' TERM INT HUP; trap 'cleanup' EXIT; "
-            'wait "$child"; exit $?'
+            "trap 'cleanup' EXIT; "
+            '/bin/sh +m -i; status=$?; exit "$status"'
         )
         command = self.build_exec_command(
             spec,
@@ -627,6 +632,47 @@ class ChatSandboxManager:
             pidfile=pidfile,
             input_fd=master_fd,
         )
+
+    def reap_stale_terminal_processes(self, spec: ChatSandboxSpec) -> None:
+        """Remove PTYs whose broker client disappeared before graceful close.
+
+        Interactive terminal streams are intentionally ephemeral and cannot
+        be reattached after a broker process restart.  The retained container
+        is durable, however, and Docker may leave an exec process alive after
+        its attaching client dies.  Match both the unguessable pidfile and the
+        exact wrapper argv before signalling, so a stale/reused numeric PID
+        can never target the Agent CLI or PID 1.
+        """
+        current = self._require(spec)
+        if not current.running:
+            return
+        script = (
+            "set -eu; command -v tr >/dev/null; command -v grep >/dev/null; "
+            f"for pidfile in {ACTIVATION_TMPFS}/terminal-*.pid; do "
+            '[ -e "$pidfile" ] || continue; '
+            'pid=$(cat "$pidfile" 2>/dev/null || :); '
+            'case "$pid" in ""|*[!0-9]*) rm -f "$pidfile"; continue;; esac; '
+            'if [ -r "/proc/$pid/cmdline" ] '
+            '&& tr "\\000" "\\n" < "/proc/$pid/cmdline" '
+            '| grep -Fqx -- "$pidfile"; then '
+            'kill -CONT -"$pid" 2>/dev/null || :; '
+            'kill -KILL -"$pid" 2>/dev/null || :; '
+            'attempt=0; while kill -0 -"$pid" 2>/dev/null; do '
+            'attempt=$((attempt + 1)); test "$attempt" -lt 100 || exit 124; '
+            "sleep 0.05; done; "
+            'fi; rm -f "$pidfile"; done'
+        )
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script],
+            workdir="/",
+            timeout_s=15,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "stale retained terminal cleanup failed: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
 
     def exec_capture(
         self,
@@ -1149,16 +1195,23 @@ class _RetainedTerminalProcess(TerminalProcess):
 
     def _signal_tree(self, signal_name: str) -> None:
         script = (
-            'test -r "$1" || exit 0; pid=$(cat "$1") || exit 0; '
+            'attempt=0; while [ ! -r "$1" ]; do '
+            'attempt=$((attempt + 1)); test "$attempt" -lt 100 || exit 3; '
+            'sleep 0.05; done; pid=$(cat "$1") || exit 4; '
             'case "$pid" in ""|*[!0-9]*) exit 2;; esac; '
-            f'/bin/kill -{signal_name} -"$pid" 2>/dev/null || true'
+            # The minimal sandbox image intentionally has no /bin/kill. The
+            # POSIX shell builtin supports negative process-group operands.
+            f'kill -{signal_name} -"$pid" 2>/dev/null'
         )
         result = self._manager.exec_capture(
             self._spec,
             ["/bin/sh", "-c", script, "sh", self._pidfile],
             timeout_s=15,
         )
-        if result.returncode != 0:
+        # Natural exit can win the small poll-to-signal race. That is already
+        # the requested end state; a live client without a confirmed signal
+        # must fail closed so protected workspace phases cannot overlap it.
+        if result.returncode != 0 and self._process.poll() is None:
             raise SandboxError(f"terminal cannot receive {signal_name}")
 
     def _set_suspended(self, suspended: bool) -> None:

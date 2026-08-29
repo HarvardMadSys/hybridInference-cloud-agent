@@ -1571,6 +1571,22 @@ async def unpin_agent_thread(
     return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, store=store)
 
 
+def _sandbox_context_lost_error() -> HTTPException:
+    """Return the stable owner-facing error for an unrunnable retained chat."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "sandbox_context_lost",
+                "message": (
+                    "This chat's retained sandbox has an indeterminate or lost "
+                    "context and cannot safely accept another message."
+                ),
+            }
+        },
+    )
+
+
 @router.post("/jobs/{job_id}/follow-ups", response_model=AgentJobResponse, status_code=201)
 async def create_agent_follow_up(
     job_id: str,
@@ -1584,19 +1600,11 @@ async def create_agent_follow_up(
     job_store = _require_store(store)
     parent = await _owned_job(job_store, job_id, user)
     retained = parent.get("thread_sandbox")
-    if isinstance(retained, dict) and retained.get("state") in {"stopped_dirty", "lost"}:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "sandbox_context_lost",
-                    "message": (
-                        "This chat's retained sandbox has an indeterminate or lost "
-                        "context and cannot safely accept another message."
-                    ),
-                }
-            },
-        )
+    if isinstance(retained, dict) and (
+        retained.get("context_status") == "lost"
+        or retained.get("state") in {"stopped_dirty", "lost"}
+    ):
+        raise _sandbox_context_lost_error()
     # The harness is fixed per thread (design D2): continuity is the harness
     # session, and no other harness can continue it. The field survives as an
     # explicit no-op so existing callers that echo the thread's runtime keep
@@ -1689,6 +1697,11 @@ async def create_agent_follow_up(
             status_code=404,
             detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
         )
+    if job.get("error") == "sandbox_context_lost":
+        # The durable store repeats the check under its thread/sandbox locks.
+        # It can legitimately disagree with the advisory read above when the
+        # active attempt becomes indeterminate during entitlement/tool checks.
+        raise _sandbox_context_lost_error()
     # Jobs published before thread support have no recorded commit SHA. Their
     # migrated thread id preserves the old branch name, so resolve that branch
     # once and pin the new turn to it before any worker can claim the turn.
@@ -2125,6 +2138,27 @@ def _terminal_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
     return _workspace_broker_http_error(exc)
 
 
+def _workspace_not_ready() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "workspace_not_ready",
+                "message": "The workspace is temporarily locked while the agent prepares or saves it.",
+            }
+        },
+    )
+
+
+async def _require_mutable_workspace_ready(*, job: dict[str, Any], store: AgentJobStore) -> None:
+    """Fence retained mutations through the durable thread-wide barrier."""
+    if job.get("thread_sandbox") is None:
+        return
+    thread_id = job.get("thread_id")
+    if not thread_id or not await store.thread_workspace_ready(thread_id=str(thread_id)):
+        raise _workspace_not_ready()
+
+
 async def _require_workspace_entitlement(
     *,
     job: dict[str, Any],
@@ -2167,21 +2201,18 @@ async def _terminal_owner_workspace(
     """
     job_store = _require_store(store)
     job = await _owned_job(job_store, job_id, user)
-    if require_ready and job["state"] not in {*TERMINAL_STATES, PUBLISHING}:
-        eligible = job["state"] == RUNNING and job["current_attempt_id"] is not None
-        ready = eligible and await job_store.terminal_workspace_ready(
-            attempt_id=job["current_attempt_id"]
-        )
-        if not ready:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "type": "workspace_not_ready",
-                        "message": "The terminal workspace is still being prepared.",
-                    }
-                },
+    if require_ready:
+        if job.get("thread_sandbox") is not None:
+            ready = await job_store.thread_workspace_ready(thread_id=str(job["thread_id"]))
+        elif job["state"] in {*TERMINAL_STATES, PUBLISHING}:
+            ready = True
+        else:
+            eligible = job["state"] == RUNNING and job["current_attempt_id"] is not None
+            ready = eligible and await job_store.terminal_workspace_ready(
+                attempt_id=job["current_attempt_id"]
             )
+        if not ready:
+            raise _workspace_not_ready()
     if recheck_entitlement:
         await _require_workspace_entitlement(
             job=job,
@@ -2397,6 +2428,7 @@ async def write_agent_job_workspace_file(
     await _require_workspace_entitlement(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
+    await _require_mutable_workspace_ready(job=job, store=job_store)
     broker = await broker_for_job(job_store, job["id"])
     if broker is None:
         raise HTTPException(
@@ -2440,6 +2472,7 @@ async def run_agent_job_terminal_command(
     await _require_workspace_entitlement(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
+    await _require_mutable_workspace_ready(job=job, store=job_store)
     broker = await broker_for_job(job_store, job["id"])
     if broker is None:
         raise HTTPException(status_code=409, detail="This deployment has no live workspace broker.")
@@ -2602,6 +2635,7 @@ async def resize_agent_job_terminal(
         user=user,
         store=store,
         app_credentials=app_credentials,
+        require_ready=True,
         recheck_entitlement=False,
     )
     try:

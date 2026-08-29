@@ -165,6 +165,13 @@ class ChatSessionSupervisor:
             if self._thread is not None and self._thread.is_alive():
                 return
             self.reconcile()
+            # A graceful broker shutdown closes every PTY. After a process or
+            # host crash, Docker may retain an attached exec that this new
+            # broker cannot stream or account for. Reap only exact terminal
+            # wrappers before accepting traffic; chat containers and Agent
+            # processes are otherwise left untouched.
+            for entry in self._entries.values():
+                self._manager.reap_stale_terminal_processes(entry.spec)
             self._stop.clear()
             self._thread = threading.Thread(
                 target=self._sweep_loop,

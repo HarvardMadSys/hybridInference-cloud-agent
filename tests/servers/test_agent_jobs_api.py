@@ -69,6 +69,7 @@ class FakeAgentJobStore:
         self.live_fence: tuple[int, int] | None = None
         self.attempt_grants: dict[int, str] = {}
         self.terminal_readiness: dict[int, bool] = {}
+        self.thread_workspace_readiness: dict[str, bool] = {}
         self.sandbox_admissions: list[dict[str, Any]] = []
         self.released: list[tuple[str, int]] = []
         self.runner_hosts: dict[str, dict[str, Any]] = {}
@@ -668,6 +669,9 @@ class FakeAgentJobStore:
 
     async def terminal_workspace_ready(self, *, attempt_id: int) -> bool:
         return self.terminal_readiness.get(attempt_id, False)
+
+    async def thread_workspace_ready(self, *, thread_id: str) -> bool:
+        return self.thread_workspace_readiness.get(thread_id, True)
 
     async def fence_terminal_workspace(self, *, attempt_id: int, lease_generation: int) -> bool:
         if not self._fenced(attempt_id, lease_generation):
@@ -1630,6 +1634,28 @@ async def test_follow_up_is_refused_when_retained_context_is_lost(
     assert len(store.jobs) == 1
 
 
+async def test_follow_up_handles_context_loss_during_admission_checks(
+    client: AsyncClient,
+    store: FakeAgentJobStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The locked store check closes the gap after the advisory API read."""
+    job_id = await _create_job(client)
+
+    async def _lost_during_create(**_kwargs):
+        return {"error": "sandbox_context_lost"}
+
+    monkeypatch.setattr(store, "create_follow_up", _lost_during_create)
+    response = await client.post(
+        f"/v1/agent/jobs/{job_id}/follow-ups",
+        json={"prompt": "race with a lost activation"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"]["type"] == "sandbox_context_lost"
+    assert len(store.jobs) == 1
+
+
 async def test_fork_copies_settled_history_into_a_new_thread(
     client: AsyncClient, store: FakeAgentJobStore
 ):
@@ -2194,6 +2220,76 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeAgentJobStore
         ("terminal", workspace_id, "pwd", "/workspace"),
         ("git", workspace_id, store.jobs[job_id].get("base_sha")),
     ]
+
+
+async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn_url(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Broker restart cannot bypass a protected latest-turn workspace phase."""
+
+    class Broker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        async def write_file(self, workspace_id: str, path: str, content: str):
+            self.calls.append(("write", workspace_id, path, content))
+            raise AssertionError("durably fenced write reached the broker")
+
+        async def terminal(self, workspace_id: str, **kwargs):
+            self.calls.append(("terminal", workspace_id, kwargs["command"]))
+            raise AssertionError("durably fenced command reached the broker")
+
+        async def terminal_input(self, workspace_id: str, terminal_id: str, *, data: str):
+            self.calls.append(("input", workspace_id, terminal_id, data))
+            raise AssertionError("durably fenced input reached the broker")
+
+        async def resize_terminal(
+            self, workspace_id: str, terminal_id: str, *, rows: int, cols: int
+        ):
+            self.calls.append(("resize", workspace_id, terminal_id, rows, cols))
+            raise AssertionError("durably fenced resize reached the broker")
+
+        async def delete_terminal(self, workspace_id: str, terminal_id: str):
+            self.calls.append(("delete", workspace_id, terminal_id))
+            return _terminal_session_descriptor(state="closed")
+
+    broker = Broker()
+    monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        job = store.jobs[job_id]
+        job["state"] = "succeeded"
+        job["thread_sandbox"] = {
+            "sandbox_id": "asbx_1",
+            "state": "running",
+            "context_status": "live",
+        }
+        store.thread_workspace_readiness[job["thread_id"]] = False
+
+        saved = await client.put(
+            f"/v1/agent/jobs/{job_id}/files?path=README.md",
+            json={"content": "blocked"},
+        )
+        command = await client.post(
+            f"/v1/agent/jobs/{job_id}/terminal",
+            json={"command": "touch blocked", "cwd": "/workspace"},
+        )
+        wrote = await client.post(
+            f"/v1/agent/jobs/{job_id}/terminals/term_1/input",
+            json={"data": "eA=="},
+        )
+        resized = await client.post(
+            f"/v1/agent/jobs/{job_id}/terminals/term_1/resize",
+            json={"rows": 30, "cols": 100},
+        )
+        killed = await client.delete(f"/v1/agent/jobs/{job_id}/terminals/term_1")
+
+    assert {saved.status_code, command.status_code, wrote.status_code, resized.status_code} == {409}
+    for response in (saved, command, wrote, resized):
+        assert response.json()["detail"]["error"]["type"] == "workspace_not_ready"
+    assert killed.status_code == 200
+    assert broker.calls == [("delete", job["thread_id"], "term_1")]
 
 
 def _terminal_session_descriptor(*, state: str = "running") -> dict[str, Any]:
