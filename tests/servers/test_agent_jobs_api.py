@@ -1755,6 +1755,9 @@ async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: Fak
     queued = await client.post(f"/v1/agent/jobs/{job_id}/fork")
     assert queued.status_code == 409
     assert queued.json()["detail"]["error"]["type"] == "not_settled"
+    assert queued.json()["detail"]["error"]["message"] == (
+        "This turn is still active; wait for it to settle before forking it."
+    )
 
     store.jobs[job_id]["state"] = "running"
     running = await client.post(f"/v1/agent/jobs/{job_id}/fork")

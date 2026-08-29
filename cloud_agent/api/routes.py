@@ -1759,7 +1759,7 @@ async def fork_agent_job(
         detail={
             "error": {
                 "type": "not_settled",
-                "message": "This turn is still active; fork an earlier turn or stop the run first.",
+                "message": "This turn is still active; wait for it to settle before forking it.",
             }
         },
     )
