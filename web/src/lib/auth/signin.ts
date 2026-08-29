@@ -5,7 +5,12 @@
 // listed verbatim in `IDENTITY_ALLOWED_REDIRECTS`), how long a code lives. All
 // this side does is generate the PKCE pair, park the verifier, and navigate.
 
-import { basePath, gatewayAuthorizeUrl, OAUTH_CLIENT_ID } from '@/config/env';
+import {
+  basePath,
+  gatewayAuthorizeUrl,
+  OAUTH_CLIENT_ID,
+  resolvedGatewayAuthorizeUrl,
+} from '@/config/env';
 import { challengeFor, createState, createVerifier, rememberPending } from './pkce';
 
 /**
@@ -79,7 +84,16 @@ export async function buildAuthorizeUrl(returnTo: string): Promise<string> {
 
   rememberPending({ verifier, state, returnTo, createdAt: Date.now() });
 
-  const url = new URL(gatewayAuthorizeUrl);
+  // Pass the imported value explicitly so deployment/test overrides remain a
+  // single source of truth rather than the resolver closing over a different
+  // module instance.
+  const resolved = resolvedGatewayAuthorizeUrl(gatewayAuthorizeUrl);
+  if (!resolved) {
+    throw new SignInNotConfigured(
+      'NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL is invalid, so this deployment cannot sign anyone in.',
+    );
+  }
+  const url = new URL(resolved);
   url.searchParams.set('client_id', OAUTH_CLIENT_ID);
   url.searchParams.set('redirect_uri', redirectUri);
   url.searchParams.set('code_challenge', await challengeFor(verifier));

@@ -534,6 +534,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     spentUsd: job.spent_usd ?? 0,
     hasLedger: job.spent_usd !== null,
     ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
+    ...(job.context_status ? { contextStatus: job.context_status } : {}),
     ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
     ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),
     timeoutLabel: '',

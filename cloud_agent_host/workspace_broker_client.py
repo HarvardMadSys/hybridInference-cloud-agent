@@ -92,6 +92,39 @@ class WorkspaceBrokerClient:
             raise WorkspaceBrokerError(502, "The live workspace returned an invalid response.")
         return body
 
+    async def _sandbox_request(
+        self,
+        method: str,
+        thread_id: str,
+        suffix: str = "",
+        *,
+        json: dict[str, Any] | None = None,
+        timeout: float = 60,
+    ) -> dict[str, Any]:
+        """Call the private retained-sandbox supervisor for one thread."""
+        encoded = quote(thread_id, safe="")
+        path = f"/sandboxes/{encoded}"
+        if suffix:
+            path += f"/{suffix}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.request(
+                    method,
+                    f"{self._base_url}{path}",
+                    headers=self._headers,
+                    json=json,
+                )
+        except httpx.HTTPError as exc:
+            raise WorkspaceBrokerError(
+                503, "The chat sandbox supervisor is temporarily unavailable."
+            ) from exc
+        if response.is_error:
+            raise self._response_error(response)
+        body = response.json()
+        if not isinstance(body, dict):
+            raise WorkspaceBrokerError(502, "The chat sandbox supervisor returned invalid data.")
+        return body
+
     async def health(self, *, timeout: float = 3) -> None:
         """Reach the broker and be recognised by it, or raise.
 
@@ -241,6 +274,148 @@ class WorkspaceBrokerClient:
         """Read live status, base-relative diff, and recent commits."""
         params = {"base_sha": base_sha} if base_sha else None
         return await self._request("GET", workspace_id, "git", params=params, timeout=70)
+
+    async def acquire_chat_sandbox(
+        self,
+        thread_id: str,
+        *,
+        sandbox_id: str,
+        generation: int,
+        activation_generation: int,
+        runtime_id: str,
+        runtime_version: str | None,
+        sandbox_image_digest: str | None = None,
+        owner: str,
+        has_settled_context: bool,
+        live_process_proven: bool = False,
+        memory_limit: str = "4g",
+        cpu_limit: str = "2",
+        stop_timeout_s: int = 10,
+    ) -> dict[str, Any]:
+        """Create/start and exclusively reserve a thread's retained container."""
+        return await self._sandbox_request(
+            "POST",
+            thread_id,
+            "acquire",
+            json={
+                "sandbox_id": sandbox_id,
+                "generation": generation,
+                "activation_generation": activation_generation,
+                "runtime_id": runtime_id,
+                "runtime_version": runtime_version,
+                "sandbox_image_digest": sandbox_image_digest,
+                "owner": owner,
+                "has_settled_context": has_settled_context,
+                "live_process_proven": live_process_proven,
+                "memory_limit": memory_limit,
+                "cpu_limit": cpu_limit,
+                "stop_timeout_s": stop_timeout_s,
+            },
+            timeout=150,
+        )
+
+    async def note_chat_process_started(self, thread_id: str, *, token: str) -> dict[str, Any]:
+        """Advance the CLI process generation under an activation lease."""
+        return await self._sandbox_request(
+            "POST", thread_id, "process-started", json={"token": token}
+        )
+
+    async def settle_chat_sandbox(
+        self,
+        thread_id: str,
+        *,
+        token: str,
+        job_id: str,
+        context_status: str,
+    ) -> dict[str, Any]:
+        """Release a successful turn and begin the chat idle timeout."""
+        return await self._sandbox_request(
+            "POST",
+            thread_id,
+            "settle",
+            json={
+                "token": token,
+                "job_id": job_id,
+                "context_status": context_status,
+            },
+        )
+
+    async def abandon_chat_sandbox(
+        self, thread_id: str, *, token: str, lost: bool
+    ) -> dict[str, Any]:
+        """Release a failed turn without claiming a settled context."""
+        return await self._sandbox_request(
+            "POST",
+            thread_id,
+            "abandon",
+            json={"token": token, "lost": lost},
+        )
+
+    async def fork_chat_sandbox(
+        self,
+        source_thread_id: str,
+        *,
+        operation_id: str,
+        source_sandbox_id: str,
+        source_generation: int,
+        source_activation_generation: int,
+        source_container_id: str,
+        source_anchor_job_id: str,
+        source_native_session_id: str,
+        target_thread_id: str,
+        target_sandbox_id: str,
+        target_generation: int = 1,
+    ) -> dict[str, Any]:
+        """Commit and clone one latest-settled retained chat idempotently."""
+        return await self._sandbox_request(
+            "POST",
+            source_thread_id,
+            "fork",
+            json={
+                "operation_id": operation_id,
+                "source_sandbox_id": source_sandbox_id,
+                "source_generation": source_generation,
+                "source_activation_generation": source_activation_generation,
+                "source_container_id": source_container_id,
+                "source_anchor_job_id": source_anchor_job_id,
+                "source_native_session_id": source_native_session_id,
+                "target_thread_id": target_thread_id,
+                "target_sandbox_id": target_sandbox_id,
+                "target_generation": target_generation,
+            },
+            timeout=420,
+        )
+
+    async def rollback_chat_sandbox_fork(
+        self,
+        source_thread_id: str,
+        *,
+        operation_id: str,
+        source_sandbox_id: str,
+        target_thread_id: str,
+        target_sandbox_id: str,
+        target_generation: int = 1,
+        expected_container_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Compensate only the exact incomplete clone owned by a fork saga."""
+        return await self._sandbox_request(
+            "POST",
+            source_thread_id,
+            "fork-rollback",
+            json={
+                "operation_id": operation_id,
+                "source_sandbox_id": source_sandbox_id,
+                "target_thread_id": target_thread_id,
+                "target_sandbox_id": target_sandbox_id,
+                "target_generation": target_generation,
+                "expected_container_id": expected_container_id,
+            },
+            timeout=120,
+        )
+
+    async def chat_sandbox_status(self, thread_id: str) -> dict[str, Any]:
+        """Inspect the exact retained container recorded for a thread."""
+        return await self._sandbox_request("GET", thread_id)
 
 
 def workspace_broker_from_env() -> WorkspaceBrokerClient | None:

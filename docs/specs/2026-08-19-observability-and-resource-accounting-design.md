@@ -8,8 +8,10 @@
   admin layer is picked up.
 - **Date:** 2026-08-19
 - **Companion:** `2026-08-17-session-resident-harness-threads-design.md`
-  (continuity ladder, `continuity_mode` column, §9's promised admin
-  aggregates); issue #57 (residency observability read path)
+  (historical continuity ladder),
+  `2026-08-28-one-chat-one-restartable-sandbox-design.md`
+  (RUNNING/STOPPED lifecycle and host-level Session Supervisor ownership);
+  issue #57 (residency observability read path)
 - **Model:** the DeepSeek harness session-telemetry seam
   (`docs/subsystems/session-telemetry.md`,
   `packages/session/session-telemetry*`, and the Agent Notes
@@ -19,6 +21,25 @@
   what is copied and what is deliberately not.
 
 ---
+
+## 0. Restartable-sandbox amendment (2026-08-28)
+
+For a thread opted into the one-chat/one-restartable-sandbox lifecycle,
+the first turn records `new` because there is no prior session to continue.
+`continuity_mode = hot` may still record that the existing Agent CLI process
+handled a follow-up, and `warm_native` may record a replacement process, but
+these are transport diagnostics rather than product correctness. The required
+facts are `context_status = new | live | restored | lost`, the sandbox-qualified
+session locator, and `restored_through_job_id`. A process replacement after
+model/effort change or `docker stop` / `docker start` is successful only after
+the driver proves it loaded the retained native context. RUNNING-idle and
+STOPPED are residency states. A blank process or lost container must be
+recorded as lost/replay, never as restored.
+
+Checkpoint export metrics and alerts below belong to the explicitly deferred
+persistent-storage phase. They remain documented so that later work preserves
+the telemetry contract, but they are not a prerequisite or implied deliverable
+for the retained-container stop/start phase.
 
 ## 1. Problem
 
@@ -36,9 +57,9 @@ run today:
 There are zero metrics: no counter, no histogram, no dashboard, no alert on
 the agent side. Consequences, concretely:
 
-- Residency knobs ship blind. The TTL default, the per-host hot-sandbox LRU
-  budget, and the #61 replica-dilution question are all tuned by guess; the
-  design's own open questions 4–5 ask for data nobody records.
+- Residency knobs ship blind. The idle deadline, the per-host RUNNING/STOPPED
+  residency budget, and the #61 replica-dilution question are tuned by guess;
+  the design's own open questions 4–5 ask for data nobody records.
 - Incidents are diagnosed by ssh archaeology. "Is the claim loop alive",
   "why did this thread degrade to replay", "which turn OOM-killed the host"
   all require shelling into two machines.
@@ -162,10 +183,13 @@ honest window model of §6.
   alert today, not just a stdout line. Windowed inference display for
   resident turns already works this way (§14 of the resident design brackets
   `api_logs` by attempt window), so this adds no new attribution philosophy.
-- **O6 — Idle residency is a first-class series.** Workspace bytes (sampled
-  at establish/release and daily), idle sandbox memory, and idle share of
-  each host's budget — the data that prices the LRU budget, the TTL default,
-  and #61.
+- **O6 — Running-idle and stopped residency are separate first-class series.**
+  Docker writable-layer bytes (sampled through Engine inspect with size at
+  establish, stop/start, and daily),
+  running-idle sandbox memory, stopped duration, and each state's share of
+  host disk/container budgets price the idle deadline and new-chat admission.
+  STOPPED consumes no workload CPU, memory, or pids but retains disk and the
+  only local copy of workspace/native state in this phase.
 - **O7 — Cardinality budget.** Metric labels are bounded enums only: host,
   runtime, continuity mode, floor event kind, egress verdict, tool *name*
   (bounded per runtime registry). `thread_id`/`attempt_id`/domain names
@@ -224,6 +248,13 @@ agent-visible process participates, and a turn can neither see, refuse, nor
 forge its own measurement. What changed is which process outside the sandbox
 does the reading.
 
+For the later restartable-sandbox target, the same daemon-only rule also
+applies to storage and hook journals: the supervisor has no per-chat host
+filesystem mapping and never opens Docker's data root. It reads container
+size via Engine inspect and streams any container-local journal via Engine
+exec. `/workspace`, native CLI state, and the journal remain in the chat
+container's writable layer.
+
 Consequences:
 
 - `sampler_version` becomes `2`. Stored rows keep the semantics they were
@@ -249,7 +280,7 @@ sandbox (docker, per residency)      runner (a container beside it)     control 
 ─────────────────────────────       ───────────────────────────        ──────────────────
 harness + tool children              ResourceSampler (1 Hz, via the      worker API (exists):
   [claude: hook markers ——►          daemon's /containers/{id}/stats)     events, continuity,
-   state mount, append-only]         │                                    + NEW resource rollups
+   container-local journal]          │                                    + NEW resource rollups
                                      ├─► window rollup at turn/idle close ─► Postgres rows
 squid egress                         │                                    agent_job_events (exists)
   access log (bytes/verdict) ──►     egress log parser ─────────────────► net flow rows
@@ -280,7 +311,8 @@ runtime; an unreadable backend yields `coverage = 0`, honestly, not zeros.
 |---|---|---|
 | Attempt | claim → terminal state (runner-local) | `attempt_resources` row + metrics |
 | Tool call | per O4: hook markers (`exact`) or event arrival (`message`) | `tool_call_resources` rows |
-| Idle residency | residency minus attempt windows | residency series (O6) |
+| Running-idle residency | RUNNING residency minus attempt windows | residency series (O6) |
+| Stopped residency | successful stop → start/manual loss | stopped duration + Docker writable-layer storage series (O6) |
 
 **Per-tool mechanics.** For `message`-level drivers, a call's window is
 [`tool_use` arrival, matching `tool_result` arrival] joined on
@@ -288,11 +320,12 @@ runtime; an unreadable backend yields `coverage = 0`, honestly, not zeros.
 is why it is labelled `message`, not `exact`. For claude-code `exact`: the
 sandbox image's settings gain PreToolUse/PostToolUse hooks that append one
 JSON line `{tool, tool_use_id, phase, t_mono}` to an append-only file on the
-state mount; the runner tails it. Hooks are **passive by contract**: log-only
-command, short timeout, exit 0 always; a hook that cannot write must not
-block the tool (contract test 7). Hook config lives in the sandbox image /
-injected home — platform infrastructure, never the user's repository, and
-patch-gated out of any diff like the rest of the injected home.
+container writable layer; the supervisor tails it through Docker exec. Hooks
+are **passive by contract**: log-only command, short timeout, exit 0 always; a
+hook that cannot write must not block the tool (contract test 7). Hook config
+lives in the sandbox image / injected home — platform infrastructure, never
+the user's repository, and patch-gated out of any diff like the rest of the
+injected home.
 
 **Attribution.** A delta between two samples is assigned to the tool windows
 open during that interval. One open window: exclusive. `n` overlapping
@@ -344,15 +377,18 @@ and a few console pages — zero new services (O1).
 API to the console, watched by the checker; bounded dimensions per O7):
 turn duration histogram ×
 (runtime, continuity_mode); turns total × (terminal state, degradation
-reason); continuity mode counter (the §9 aggregate, finally); checkpoint
-export outcome + size histogram; residency establish/evict/takeover counters
-× reason; claim-loop lag gauge; event upload queue depth; attempt cpu/mem/io/
-net totals as histograms × runtime; egress verdict counter × (allowed |
+reason); continuity mode counter (the §9 aggregate, finally); later persistent
+phase: checkpoint export outcome + size histogram; residency
+establish/loss/takeover counters
+× reason; stop/start/native-resume outcome and duration; running-idle/stopped
+residency gauges; claim-loop lag gauge; event upload queue depth; attempt
+cpu/mem/io/net totals as histograms × runtime; egress verdict counter × (allowed |
 denied); unclassified-bytes gauge; sampler coverage histogram; tool duration
 histogram × (tool_name, source).
 
-**Ops records** (alert-on): attempt terminal failures with error class;
-checkpoint export failure (already an event — projected, not re-emitted);
+**Ops records** (alert-on): attempt terminal failures with error class; later
+persistent phase: checkpoint export failure (already an event — projected,
+not re-emitted);
 `residency_unusable`; grant mint/link degradation; reaper actions; sampler
 start/stop/gap.
 
@@ -363,9 +399,10 @@ dedupe key `(attempt_id, client_seq)` carried in attributes.
 checker over Postgres/CP state, posting to its own Slack webhook — the
 `alert_slack` pattern, deliberately never wired into the status-monitor
 control plane): claim loop silent > 2 min; turn
-failure rate; export failure streak (design §6 says a thread quietly loses
-cold resume — now it pages); denied-CONNECT burst; unclassified-bytes growth;
-sampler coverage < 0.9 sustained; host hot-sandbox budget saturation.
+failure rate; later persistent phase: export failure streak (design §6 says a
+thread quietly loses cold resume — now it pages); denied-CONNECT burst;
+unclassified-bytes growth; sampler coverage < 0.9 sustained; running-capacity
+or stopped-container disk/admission saturation.
 
 ## 8. Degradation matrix
 
@@ -378,7 +415,8 @@ sampler coverage < 0.9 sustained; host hot-sandbox budget saturation.
 | Parallel tool calls | `overlap_n > 1`, shared fields only |
 | Squid log rotation / parse gap | Flow gap; `unclassified` absorbs it; gap counter |
 | Attempt with zero samples (sub-second turn) | `coverage = 0`, `sample_count = 0` — never fabricated zeros |
-| Idle residency (no attempt) | Samples tagged idle; egress flows keep residency ids (idle egress should be ~0 — its growth alerts) |
+| RUNNING residency with no attempt | Samples tagged running-idle; egress flows keep residency ids (idle egress should be ~0 — its growth alerts) |
+| STOPPED residency | No live cgroup samples; stopped duration and retained Docker writable-layer bytes remain charged; workload CPU/memory/pids/egress are zero |
 | Clock skew runner↔CP | Windows are runner-local monotonic; only display joins use wall clock |
 
 ## 9. Contract tests
@@ -402,8 +440,9 @@ sampler coverage < 0.9 sustained; host hot-sandbox budget saturation.
 9. Ledger export: tool arguments/results and prompt text never appear in an
    exported record (deny-body default), while types/sizes/ids do.
 10. Rollup idempotency: re-POSTing a window rollup upserts, never doubles.
-11. Idle series: an established residency with no live attempt still
-    produces idle-tagged samples and zero attempt attribution.
+11. Residency series: RUNNING without an attempt produces running-idle
+    samples; STOPPED records duration and retained storage, with zero workload
+    CPU/memory/pids/egress and zero attempt attribution.
 12. `coverage = 0` (unreadable backend) is distinguishable from "measured
     zero usage" in both row and metric form.
 
@@ -471,8 +510,10 @@ product, not ports.
 user-facing turn views, pointed at the CP aggregate API; no third-party
 dashboard (O1), and the same pages serve future org admins, who would never
 be handed a Grafana anyway: health pulse (claim lag, queues), continuity
-funnel (HOT hit-rate per host — #61's data), capacity (hot-sandbox budget
-water-line, idle cost), consumption leaderboard (outlier turns), security
+funnel (LIVE and RESTORED context rates per host, with same-PID HOT as optional
+transport diagnostics — #61's data), capacity (RUNNING
+slots plus STOPPED container/storage admission water-line), consumption
+leaderboard (outlier turns), security
 (denied-CONNECT bursts, unclassified-bytes growth). Slack alerts from the §7
 checker. Per-attempt detail exposes coverage, sampler version, and
 degradation reason — the support answer to "why did my thread replay".

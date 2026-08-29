@@ -62,6 +62,8 @@ class FakeHostPoolStore:
         self.link_ok = True
         self.beat_answers: dict[tuple[str, int], str | None] = {}
         self.release_answer: str | None = None
+        self.sandbox_observations: list[dict[str, Any]] = []
+        self.sandbox_stop_due: dict[str, Any] | None = None
 
     # -- enrollment tokens
 
@@ -241,6 +243,13 @@ class FakeHostPoolStore:
 
     async def release_residency(self, *, thread_id: str, generation: int, host: str) -> str | None:
         return self.release_answer
+
+    async def reconcile_thread_sandbox_observation(self, **kwargs: Any) -> str | None:
+        self.sandbox_observations.append(dict(kwargs))
+        return "running" if kwargs["running"] else "stopped"
+
+    async def due_thread_sandbox_stop(self, **_kwargs: Any) -> dict[str, Any] | None:
+        return self.sandbox_stop_due
 
 
 class RecordingGrants:
@@ -1204,6 +1213,108 @@ async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_clie
     assert response.status_code == 200, response.text
     assert grants.renewed == ["agr-1"]
     assert response.json()["residencies_lost"] == [{"thread_id": "th-lost", "generation": 3}]
+
+
+async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_1",
+                    "sandbox_id": "asbx_1",
+                    "container_id": "0123456789abcdef",
+                    "generation": 3,
+                    "activation_generation": 7,
+                    "running": True,
+                    "activity_active": False,
+                    "idle_remaining_seconds": 1799.5,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert store.sandbox_observations == [
+        {
+            "thread_id": "athr_1",
+            "host": "runner-a",
+            "sandbox_id": "asbx_1",
+            "container_id": "0123456789abcdef",
+            "sandbox_generation": 3,
+            "activation_generation": 7,
+            "running": True,
+            "activity_active": False,
+            "idle_remaining_seconds": 1799.5,
+        }
+    ]
+
+
+async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residency_client):
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    store.sandbox_stop_due = {
+        "thread_id": "athr_1",
+        "generation": 3,
+        "activation_generation": 8,
+        "reason": "idle",
+    }
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_1",
+                    "sandbox_id": "asbx_1",
+                    "container_id": "0123456789abcdef",
+                    "generation": 3,
+                    "activation_generation": 8,
+                    "running": True,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["retained_sandboxes_stop"] == [store.sandbox_stop_due]
+
+
+async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(residency_client):
+    """A broker-reconstructed pre-turn fork target has no activation yet."""
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    store.sandbox_stop_due = {
+        "thread_id": "athr_fork",
+        "generation": 1,
+        "activation_generation": 0,
+        "reason": "idle",
+    }
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_fork",
+                    "sandbox_id": "asbx_fork",
+                    "container_id": "0123456789abcdef",
+                    "generation": 1,
+                    "activation_generation": 0,
+                    "running": True,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["retained_sandboxes_stop"] == [store.sandbox_stop_due]
 
 
 async def test_release_revokes_the_grant_it_returns(residency_client):

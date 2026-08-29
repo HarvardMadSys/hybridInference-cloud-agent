@@ -53,6 +53,32 @@ const CONTINUITY_LABEL: Record<string, { text: string; tone: string; title: stri
   },
 };
 
+const CONTEXT_LABEL: Record<string, { text: string; tone: string; title: string }> = {
+  new: {
+    text: 'new',
+    tone: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-300 ring-gray-500/20 dark:ring-white/10',
+    title: 'This is the first turn in the chat, so there is no earlier agent context to restore.',
+  },
+  live: {
+    text: 'context live',
+    tone: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400 ring-sky-600/20 dark:ring-sky-500/25',
+    title:
+      'The same running chat sandbox still held the native agent session and workspace. This does not claim that the operating-system process id stayed the same.',
+  },
+  restored: {
+    text: 'restored',
+    tone: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400 ring-sky-600/20 dark:ring-sky-500/25',
+    title:
+      'The stopped chat sandbox was started again and the Agent CLI loaded its native session. The prior transcript was not pasted in as a substitute.',
+  },
+  lost: {
+    text: 'context lost',
+    tone: 'bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-400 ring-rose-600/20 dark:ring-rose-500/25',
+    title:
+      'The platform could not verify the retained native session. It did not silently start a blank session and call that a continuation.',
+  },
+};
+
 /**
  * Round the way the reader will see it, so callers can branch on the printed
  * value rather than the one before rounding — the gap between the two is how
@@ -214,7 +240,7 @@ function ToolTimingTable({ timings }: { timings: ToolTiming[] }) {
   );
 }
 
-type Explained = 'continuity' | 'partial' | 'unmeasured' | null;
+type Explained = 'continuity' | 'context' | 'partial' | 'unmeasured' | null;
 
 export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: number }) {
   const [open, setOpen] = useState(false);
@@ -228,7 +254,13 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // switches with the attempt picker, and a footer that did not would label
   // one attempt's transcript with another's numbers.
   const timings = useMemo(() => toolTimings(job.events, attemptNo), [job.events, attemptNo]);
-  const badge = job.continuityMode ? CONTINUITY_LABEL[job.continuityMode] : undefined;
+  const contextBadge = job.contextStatus ? CONTEXT_LABEL[job.contextStatus] : undefined;
+  // NEW/LIVE/RESTORED/LOST is the user-facing correctness contract. The old
+  // HOT/WARM/COLD/REPLAY ladder remains useful for legacy attempts and admin
+  // diagnostics, but showing both on one turn made one fact look like two
+  // independent states. Fall back to it only for rows that predate context.
+  const badge =
+    !contextBadge && job.continuityMode ? CONTINUITY_LABEL[job.continuityMode] : undefined;
   const duration = formatDuration(job.durationMs);
   const resources = job.resources;
   const stats = resources ? resourceStats(resources) : [];
@@ -244,20 +276,29 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   const explanation =
     explained === 'continuity'
       ? badge?.title
-      : explained === 'partial'
-        ? `Only ${Math.round((resources?.coverage ?? 0) * 100)}% of this turn was sampled, so the ` +
-          'numbers above are lower bounds rather than totals. This happens when the sandbox ' +
-          'took a while to appear, or ended before the turn did.'
-        : explained === 'unmeasured'
-          ? 'This turn ran where the platform could not read the sandbox\u2019s counters, so ' +
-            'nothing was measured. That is not the same as a turn that consumed nothing.'
-          : null;
+      : explained === 'context'
+        ? contextBadge?.title
+        : explained === 'partial'
+          ? `Only ${Math.round((resources?.coverage ?? 0) * 100)}% of this turn was sampled, so the ` +
+            'numbers above are lower bounds rather than totals. This happens when the sandbox ' +
+            'took a while to appear, or ended before the turn did.'
+          : explained === 'unmeasured'
+            ? 'This turn ran where the platform could not read the sandbox\u2019s counters, so ' +
+              'nothing was measured. That is not the same as a turn that consumed nothing.'
+            : null;
   const unmeasured = Boolean(resources && stats.length === 0);
 
   // `unmeasured` counts as something to say: a sampler that ran and could
   // read nothing is a different fact from a turn nobody tried to measure, and
   // only the first of the two has anything to tell the reader.
-  if (!badge && !duration && stats.length === 0 && timings.length === 0 && !unmeasured) {
+  if (
+    !badge &&
+    !contextBadge &&
+    !duration &&
+    stats.length === 0 &&
+    timings.length === 0 &&
+    !unmeasured
+  ) {
     return null;
   }
 
@@ -273,6 +314,17 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
             className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset transition-opacity hover:opacity-80 ${badge.tone}`}
           >
             {badge.text}
+          </button>
+        ) : null}
+        {contextBadge ? (
+          <button
+            type="button"
+            onClick={() => setExplained(explained === 'context' ? null : 'context')}
+            aria-expanded={explained === 'context'}
+            title={contextBadge.title}
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset transition-opacity hover:opacity-80 ${contextBadge.tone}`}
+          >
+            {contextBadge.text}
           </button>
         ) : null}
         {duration ? <span className="tabular-nums">{duration}</span> : null}

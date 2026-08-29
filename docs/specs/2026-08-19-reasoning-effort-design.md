@@ -1,9 +1,13 @@
 # Reasoning effort as a first-class turn attribute
 
-- **Status:** draft v1 — for review (Murphy)
+- **Status:** historical per-turn behavior, amended for the next restartable
+  sandbox phase by `2026-08-28-one-chat-one-restartable-sandbox-design.md` §12
 - **Date:** 2026-08-19
 - **Companion:** `2026-08-17-session-resident-harness-threads-design.md`
   (the `model_switch` capability this design's effort switch rides on);
+  `2026-08-28-one-chat-one-restartable-sandbox-design.md` (the newer invariant
+  that preserves per-turn configuration through in-place control or a
+  context-preserving CLI process rotation);
   gateway repo `hybridInference` (§6 lands there — the two halves ship as
   one gateway PR and one agent PR)
 - **One sentence:** let the owner of a thread choose how hard the model
@@ -12,6 +16,20 @@
   model can honestly deliver it.
 
 ---
+
+## 0. Restartable-sandbox amendment (2026-08-28)
+
+The per-turn effort override below remains the target behavior for a
+restartable chat. PID continuity is not a product invariant: a driver that can
+change effort in-band does so, while a driver whose CLI reads it only at launch
+flushes the settled native state, closes the old process, and resumes exactly
+one replacement process with the requested value in the same sandbox. The
+follow-up sends only its new prompt and retains the same conversation context.
+
+The same rule applies to model. Runtime/compatible CLI version, repository,
+MCP policy, execution profile, and permission identity remain fixed for the
+chat because changing them alters the sandbox/session contract rather than one
+turn's inference configuration.
 
 ## 1. Problem
 
@@ -183,12 +201,12 @@ habit of deferring whatever had not been looked at yet.
   revision. Exposed on job responses; no backfill.
 - **Turn contract.** `TurnInput` grows `reasoning_effort: str | None`.
   Drivers pass it to `prepare` / `prepare_live` verbatim.
-- **Resident sessions.** An effort change is a restart trigger,
-  identical to `model_switch: "restart"` in `HarnessCapabilities` — the
-  flag is fixed at spawn. The replay world switches per-turn for free,
-  as it does for model. No new capability axis: effort rides the
-  existing one, and the comparison the runner already does for "did the
-  model change" gains one field.
+- **Resident sessions.** An effort change remains a restart trigger for a
+  driver with `model_switch: "restart"`. The restartable-sandbox supervisor
+  performs that rotation only after a settled boundary, increments the process
+  generation, restores the same container-local session, proves its context
+  cursor, and then admits the new turn. Drivers with a proven in-band control
+  avoid the restart.
 - **Grants: unchanged.** `grants.py` says it plainly: "Models are the
   whole of it. A grant authorizes model inference and nothing else."
   Effort is a generation parameter, not a scope; it never touches the
@@ -199,9 +217,9 @@ habit of deferring whatever had not been looked at yet.
 - **Composer:** a "Reasoning" picker next to Model. Options: `Auto` plus
   the offered set for the current (runtime, model) selection; hidden
   when the set is empty. Default Auto.
-- **Follow-up composer:** same picker, initialized to the thread's
-  current value; changing it on a resident thread restarts the session
-  exactly as a model switch does (and should say so the same way).
+- **Follow-up composer:** keep the editable per-turn picker. Changing it may
+  rotate the in-sandbox Agent CLI process, but never creates another sandbox,
+  loses context, or changes the public API behavior.
 - **JobDetail header:** show the effort next to the model when non-null.
   Auto renders nothing — absence of a chip is the honest display of
   "nobody chose".

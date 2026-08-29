@@ -27,6 +27,7 @@ from cloud_agent_host.runner import (
     checkout_output_branch,
     existing_checkout_sha,
     prepare_worktree,
+    repo_clone_base_url,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +52,26 @@ def _git(*args: str, cwd: Path) -> str:
             "GIT_COMMITTER_EMAIL": "t@example.com",
         },
     ).stdout
+
+
+def test_clone_origin_defaults_to_github_and_accepts_a_local_git_service():
+    assert repo_clone_base_url({}) == "https://github.com"
+    assert (
+        repo_clone_base_url({"AGENT_REPO_CLONE_BASE_URL": "git://local-repo/"})
+        == "git://local-repo"
+    )
+
+
+def test_clone_origin_never_sends_a_credential_over_plaintext():
+    with pytest.raises(WorktreeError, match="refusing to send a repository credential"):
+        repo_clone_base_url({"AGENT_REPO_CLONE_BASE_URL": "git://local-repo"}, clone_token="secret")
+
+    assert (
+        repo_clone_base_url(
+            {"AGENT_REPO_CLONE_BASE_URL": "https://git.example.test"}, clone_token="secret"
+        )
+        == "https://git.example.test"
+    )
 
 
 def test_follow_up_restores_parent_patch_before_the_next_run(tmp_path: Path):

@@ -587,6 +587,10 @@ class CodexRuntime(AgentRuntime):
     name = "codex"
     binary = "codex"
 
+    def __init__(self) -> None:
+        """Remember the native thread locator announced by ``--json``."""
+        self.session_id: str | None = None
+
     def prepare(
         self,
         *,
@@ -598,6 +602,8 @@ class CodexRuntime(AgentRuntime):
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
         reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Build the headless invocation and its environment.
 
@@ -630,9 +636,11 @@ class CodexRuntime(AgentRuntime):
         - ``wire_api = "responses"``, not ``"chat"``. Codex removed chat wire
           support upstream (openai/codex#7782); our gateway serves
           ``/v1/responses`` and translates southbound.
-        - the provider is configured with ``-c`` flags rather than a config file,
-          so there is no scratch ``CODEX_HOME`` to write and nothing to leave
-          behind. ``--ignore-user-config`` keeps the operator's own config out.
+        - the provider is configured with ``-c`` flags rather than a config file.
+          ``--ignore-user-config`` keeps the operator's own config out, while a
+          supplied ``session_state_dir`` becomes ``CODEX_HOME`` so Codex's
+          rollout files survive a process exit and ``exec resume`` can find
+          them on the next turn.
         """
         self._require_empty_mcp_config(mcp_config)
         base = gateway_base_url.rstrip("/").removesuffix("/v1")
@@ -666,8 +674,14 @@ class CodexRuntime(AgentRuntime):
             f'model_providers.{provider}.env_key="CODEX_API_KEY"',
             "-c",
             f'model_providers.{provider}.wire_api="responses"',
-            task_prompt,
         ]
+        # 0.145.0 accepts the exec-wide flags above before its ``resume``
+        # subcommand. Keeping one option list prevents fresh and resumed turns
+        # from drifting in provider, model, sandbox, or reasoning behaviour.
+        if resume_session_id:
+            argv += ["resume", resume_session_id, task_prompt]
+        else:
+            argv.append(task_prompt)
         env = {
             "CODEX_API_KEY": credential,
             # Some code paths still read the OpenAI names; keep them consistent
@@ -675,6 +689,11 @@ class CodexRuntime(AgentRuntime):
             "OPENAI_BASE_URL": f"{base}/v1",
             "OPENAI_API_KEY": credential,
         }
+        if session_state_dir:
+            # Codex requires CODEX_HOME itself to exist. /agent-state is made
+            # by the image (or is the state mount), so use that exact root
+            # rather than naming a child the CLI would refuse to create.
+            env["CODEX_HOME"] = session_state_dir
         return argv, env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -692,6 +711,15 @@ class CodexRuntime(AgentRuntime):
         kind = event.get("type") or ""
         item = event.get("item") or {}
         item_type = item.get("type") or item.get("item_type")
+
+        if kind == "thread.started":
+            captured = str(event.get("thread_id") or "").strip()
+            if captured:
+                self.session_id = captured
+            return NormalizedEvent(
+                LIFECYCLE,
+                {"phase": "init", "session_id": self.session_id},
+            )
 
         if kind.startswith("item.") and item_type:
             if item_type == "command_execution" and kind == "item.completed":
@@ -858,19 +886,20 @@ class PiRuntime(GenericRuntime):
     )
 
     def __init__(self) -> None:
-        """Fix the wrapper invocation; Tier 2 mechanics come from Generic."""
+        """Fix the wrapper invocation and remember pi's native session id."""
         super().__init__(
             "pi-freeinference --provider freeinference --model {model} "
             # pi has no native MCP client at the pinned version; MCP arrives
             # through executable extensions, including project-local ones.
             # Disable their discovery until the gateway supplies a reviewed
             # extension explicitly.
-            "--mode json --no-session --no-extensions -p {prompt}",
+            "--mode json --no-extensions -p {prompt}",
             binary="pi-freeinference",
         )
         # One adapter instance per job (see get_runtime), so the suppression
         # in _from_message_update is per-run and cannot leak across jobs.
         self._reported_subtypes: set[str] = set()
+        self.session_id: str | None = None
 
     def prepare(
         self,
@@ -883,6 +912,8 @@ class PiRuntime(GenericRuntime):
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
         reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper writes into pi's provider config."""
         argv, env = super().prepare(
@@ -899,6 +930,16 @@ class PiRuntime(GenericRuntime):
         # cannot parse it back out of pi's argv without reimplementing pi's
         # option handling, so hand it over explicitly.
         env["PI_GATEWAY_MODEL"] = model
+        # Provider config contains the short-lived turn credential. Keep it in
+        # the activation tmpfs; only the session JSONL belongs in durable chat
+        # state. The wrapper creates this directory before exec.
+        env["PI_CODING_AGENT_DIR"] = "/run/agent-activation/pi"
+        if session_state_dir:
+            prompt_at = argv.index("-p")
+            native_args = ["--session-dir", session_state_dir]
+            if resume_session_id:
+                native_args += ["--session", resume_session_id]
+            argv[prompt_at:prompt_at] = native_args
         if self._check_effort(reasoning_effort) is not None:
             argv += ["--thinking", str(reasoning_effort)]
             # `--thinking` alone is a no-op: verified against 0.73.1, pi emits
@@ -924,11 +965,14 @@ class PiRuntime(GenericRuntime):
 
         kind = event.get("type")
         if kind == "session":
+            captured = str(event.get("id") or "").strip()
+            if captured:
+                self.session_id = captured
             return NormalizedEvent(
                 LIFECYCLE,
                 {
                     "phase": "init",
-                    "session_id": event.get("id"),
+                    "session_id": self.session_id,
                     # pi's own version is not on the wire; this is the session
                     # format's, and naming it as such keeps it from being read
                     # as the CLI version the way Claude Code's line supplies.
@@ -1044,12 +1088,14 @@ class PiRuntime(GenericRuntime):
         return []
 
     def capabilities(self) -> RuntimeCapabilities:
-        """Tier 1 events; no resume (``--no-session``) and no trusted cost.
+        """Tier 1 events and no trusted cost attribution.
 
         pi reports a per-turn ``cost`` block, but it is computed from a price
         table the gateway does not populate — every field came back zero in
         the recorded runs. ``api_logs`` is the billing authority regardless,
         so this claims no cost report rather than surfacing a confident zero.
+        Native resume is declared by :class:`drivers.PiDriver`, not by this
+        event/cost capability row.
         """
         return RuntimeCapabilities(
             cost_report=False,
@@ -1080,11 +1126,12 @@ class OpencodeRuntime(GenericRuntime):
     name = "opencode"
 
     def __init__(self) -> None:
-        """Fix the wrapper invocation; Tier 2 mechanics come from Generic."""
+        """Fix the wrapper invocation and remember OpenCode's session id."""
         super().__init__(
             "opencode-freeinference run --format json --auto -m freeinference/{model} {prompt}",
             binary="opencode-freeinference",
         )
+        self.session_id: str | None = None
 
     def prepare(
         self,
@@ -1097,6 +1144,8 @@ class OpencodeRuntime(GenericRuntime):
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
         reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper declares in OpenCode's config."""
         argv, env = super().prepare(
@@ -1110,6 +1159,21 @@ class OpencodeRuntime(GenericRuntime):
             reasoning_effort=reasoning_effort,
         )
         env["OPENCODE_GATEWAY_MODEL"] = model
+        env["OPENCODE_FREEINFERENCE_CONFIG_DIR"] = "/run/agent-activation/opencode"
+        if session_state_dir:
+            # OpenCode 1.18.9 stores sessions in its XDG data root. Relocating
+            # every XDG root keeps all native continuation data inside the
+            # Docker-owned /agent-state tree and out of the repository.
+            env.update(
+                {
+                    "XDG_DATA_HOME": f"{session_state_dir}/opencode/data",
+                    "XDG_CONFIG_HOME": f"{session_state_dir}/opencode/config",
+                    "XDG_CACHE_HOME": f"{session_state_dir}/opencode/cache",
+                    "XDG_STATE_HOME": f"{session_state_dir}/opencode/state",
+                }
+            )
+            if resume_session_id:
+                argv[-1:-1] = ["--session", resume_session_id]
         if self._check_effort(reasoning_effort) is not None:
             # No command-line flag exists for this: the level belongs in the
             # provider config the wrapper writes, so it travels as environment
@@ -1117,6 +1181,21 @@ class OpencodeRuntime(GenericRuntime):
             # all, which is the request shape this runtime already sent.
             env["OPENCODE_GATEWAY_REASONING_EFFORT"] = str(reasoning_effort)
         return argv, env
+
+    def parse_event(self, line: str) -> NormalizedEvent | None:
+        """Keep Tier-2 output raw while capturing its native session locator."""
+        stripped = line.strip()
+        if not stripped:
+            return None
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            return self._raw(stripped, "not json")
+        if isinstance(event, dict):
+            captured = str(event.get("sessionID") or "").strip()
+            if captured:
+                self.session_id = captured
+        return NormalizedEvent(RAW, {"text": stripped[:4000]})
 
     #: Passed through to the AI SDK provider verbatim, which does not validate
     #: it — same posture as codex. The real constraint is the intersection with
@@ -1151,11 +1230,12 @@ class KiloRuntime(GenericRuntime):
     name = "kilo"
 
     def __init__(self) -> None:
-        """Fix the wrapper invocation; Tier 2 mechanics come from Generic."""
+        """Fix the wrapper invocation and remember Kilo's session id."""
         super().__init__(
             "kilo-freeinference run --format json --auto -m freeinference/{model} {prompt}",
             binary="kilo-freeinference",
         )
+        self.session_id: str | None = None
 
     def prepare(
         self,
@@ -1168,6 +1248,8 @@ class KiloRuntime(GenericRuntime):
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
         reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper declares in Kilo's config."""
         argv, env = super().prepare(
@@ -1181,6 +1263,18 @@ class KiloRuntime(GenericRuntime):
             reasoning_effort=reasoning_effort,
         )
         env["KILO_GATEWAY_MODEL"] = model
+        env["KILO_FREEINFERENCE_CONFIG_DIR"] = "/run/agent-activation/kilo"
+        if session_state_dir:
+            env.update(
+                {
+                    "XDG_DATA_HOME": f"{session_state_dir}/kilo/data",
+                    "XDG_CONFIG_HOME": f"{session_state_dir}/kilo/config",
+                    "XDG_CACHE_HOME": f"{session_state_dir}/kilo/cache",
+                    "XDG_STATE_HOME": f"{session_state_dir}/kilo/state",
+                }
+            )
+            if resume_session_id:
+                argv[-1:-1] = ["--session", resume_session_id]
         if self._check_effort(reasoning_effort) is not None:
             # No command-line flag exists for this: the level belongs in the
             # provider config the wrapper writes, so it travels as environment
@@ -1188,6 +1282,21 @@ class KiloRuntime(GenericRuntime):
             # all, which is the request shape this runtime already sent.
             env["KILO_GATEWAY_REASONING_EFFORT"] = str(reasoning_effort)
         return argv, env
+
+    def parse_event(self, line: str) -> NormalizedEvent | None:
+        """Keep Tier-2 output raw while capturing its native session locator."""
+        stripped = line.strip()
+        if not stripped:
+            return None
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            return self._raw(stripped, "not json")
+        if isinstance(event, dict):
+            captured = str(event.get("sessionID") or "").strip()
+            if captured:
+                self.session_id = captured
+        return NormalizedEvent(RAW, {"text": stripped[:4000]})
 
     #: Passed through to the AI SDK provider verbatim, which does not validate
     #: it — same posture as codex. The real constraint is the intersection with

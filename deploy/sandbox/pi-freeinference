@@ -12,8 +12,8 @@ Ships in the sandbox image (reviewed and pinned there, like the CLI itself).
 Three properties are deliberate:
 
 - **The prompt never passes through a shell.** argv in, argv out, one exec.
-- **The config lives in the container's HOME, not the job worktree** — a file
-  dropped in the worktree would surface in ``git diff`` and pollute the patch.
+- **The config never lives in the job worktree.** Retained execution puts it
+  in activation tmpfs; legacy execution falls back to the container's HOME.
 - **json.dump does the quoting**, so a model id or URL that would break
   hand-rolled string templating cannot corrupt the config.
 """
@@ -36,7 +36,11 @@ def main() -> None:
         )
         raise SystemExit(64) from None
 
-    config_dir = os.path.expanduser("~/.pi/agent")
+    # The runtime points PI_CODING_AGENT_DIR at the activation tmpfs. The
+    # generated models.json contains the short-lived turn credential and must
+    # disappear when the chat container stops; native session JSONL lives in
+    # the separately supplied --session-dir under /agent-state.
+    config_dir = os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
     os.makedirs(config_dir, exist_ok=True)
     entry: dict[str, object] = {"id": model}
     if os.environ.get("PI_GATEWAY_REASONING"):

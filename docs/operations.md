@@ -496,8 +496,161 @@ Host credential simply cannot claim the secure job; there is no fallback to
 runc. `trusted-v1` keeps the legacy claim path only for trusted internal/dev
 repositories. Existing rows migrate to that compatibility profile, while every
 follow-up and fork inherits the profile already stored on its thread.
+Restartable chats additionally carry the original image digest in their immutable
+container labels and use that content-addressed image for any retry that occurs
+before Docker returned a container id; a moved image tag cannot change the chat's
+actual image while its database row still reports the old one.
 
 ### How many runners
+
+> **Current-versus-preview boundary.** The default path remains the deployed
+> per-job runner behavior. With `AGENT_RESTARTABLE_SANDBOX=1`, the staged
+> lifecycle in
+> `specs/2026-08-28-one-chat-one-restartable-sandbox-design.md` dispatches
+> Claude Code, Codex, Pi, OpenCode, and Kilo turns through one host-level
+> Session Supervisor, which retains
+> one container per chat. Settled idle timeout stops but does not
+> remove it; the next message starts the same container and natively resumes a
+> new Agent CLI process. Workspace, dependencies, Agent CLI home, and native
+> session data live in the container writable layer; the supervisor has
+> no per-chat host filesystem mapping and accesses them only through Docker
+> Engine. A latest-settled fork now uses a durable PREPARING saga, Docker's
+> paused commit barrier, a separately labelled copy-on-write container, and one
+> database transaction that copies the matching conversation prefix. The clone
+> rewrites only its platform identity/output branch, keeps opaque native CLI
+> state plus staged/unstaged/untracked files, starts stopped, and ordinarily
+> resumes on its first new message. An older-turn fork returns
+> `409 historical_snapshot_unavailable` until per-turn filesystem snapshots
+> exist; it never silently falls back to the legacy history/patch-only copy. Agent
+> CLI PID continuity is not required; context restoration is. Per-turn model
+> and reasoning-effort changes remain supported through in-band control or a
+> process rotation inside the same container. Automatic sandbox cleanup is
+> explicitly deferred;
+> the existing residency LRU, workspace TTL, and generic Docker prune must not
+> delete opted-in restartable chats. The runner/broker implementation and local
+> real-Docker acceptance have landed; keep the preview off for general traffic
+> until the pinned live-provider and Kata conformance matrix passes in the
+> target deployment.
+
+> In that target mode, the Docker socket (or mTLS Engine endpoint) is the only
+> host control/data interface for chat state. `AGENT_WORKDIR_ROOT` and the
+> per-job snapshot/state binds documented below are legacy-mode settings and
+> are removed from the restartable supervisor. Infrastructure bootstrap
+> configuration is separate; no repository, workspace, Agent CLI home, or
+> session file is mapped from the host.
+
+### One chat inactivity clock (and separate safety watchdogs)
+
+`AGENT_CHAT_IDLE_TIMEOUT_S` is the restartable chat's sole lifecycle timeout
+and defaults to **1800 seconds (30 minutes)**. The preview-era
+`AGENT_SESSION_IDLE_TIMEOUT_S` spelling remains a deprecated fallback. Once
+the last turn is durably
+settled and no interactive terminal is attached, the host Session Supervisor
+issues `docker stop`; it never issues `docker rm`. A later acquire starts and
+re-inspects the same labelled container. Supervisor shutdown itself leaves all
+chat containers untouched. After a broker restart the supervisor does not
+infer an active turn from an empty in-memory lease table. Docker observations
+ride the enrolled host heartbeat;
+the control plane checks the durable active-attempt fence and idle deadline,
+then returns an exact generation-scoped stop command. The following heartbeat
+records Docker's STOPPED state. While the broker has a proven activation, the
+same heartbeat carries whether a turn/terminal/file-or-Git operation is active
+and the remaining host-monotonic idle delay. A terminal carries its last
+activity timestamp when it closes: a manual close is fresh activity, while
+reaping an already-idle PTY continues the original 30-minute chat window
+instead of stacking a second one. For a reconstructed generation-zero
+RUNNING container with no durable active attempt and no deadline, the first
+heartbeat contributes one fresh 30-minute recovery window; the database accepts
+that window only once, so subsequent beats cannot keep extending it or stop an
+active turn.
+
+Before a prompt reaches Agent CLI stdin, the worker persists its `job_id` as
+the sandbox's admission receipt. If that retained activation's attempt lease
+expires, this preview stops it, marks the context LOST, and fails the job; it
+does not automatically retry even when the crash may have happened just before
+stdin. That conservative choice prevents duplicate prompt/tool execution.
+
+The other timeout-looking settings do not form additional chat states and do
+not deactivate a healthy chat:
+
+- `AGENT_TIMEOUT_S` defaults to 3600 seconds. It is a hard watchdog for one
+  hung agent turn. A turn that reaches it is cancelled/fenced; it is never
+  interpreted as an ordinary settled-idle transition;
+- `AGENT_TERMINAL_IDLE_TTL_SECONDS` (30 minutes) closes a stale PTY whose
+  client and process have stopped producing activity. For retained chats the
+  effective PTY idle limit is the earlier of this guard and the chat clock;
+  releasing it preserves the last activity timestamp and adds no second wait;
+- `AGENT_TERMINAL_HARD_TTL_SECONDS` (8 hours) bounds one PTY even if it stays
+  noisy forever. It is a resource/security guard, not sandbox deactivation;
+- `AGENT_RESIDENCY_TTL_S` defaults to 1800 seconds and fences the legacy
+  in-runner HOT process/workspace cache. It is not consulted for a retained
+  chat and should be removed after legacy-mode cutover;
+- `AGENT_WORKSPACE_TTL_S` defaults to seven days and cleans only legacy host
+  worktrees. It must not address Docker-owned restartable chat state.
+
+`AGENT_RESTARTABLE_SANDBOX=1` enables the retained-container runner and private
+host lifecycle RPC. `AGENT_RESTARTABLE_RUNTIMES` defaults to
+`claude-code,codex,pi,opencode,kilo`; every listed adapter sends only the new
+prompt and resumes its pinned CLI's native local session id/state on a fresh
+process. Same-PID continuity is not required.
+Keep the flag off for general traffic until the remaining real-Docker/Kata and
+live-provider matrix passes for every advertised CLI. The transactional
+latest-settled full-snapshot fork is implemented and has a real-Docker
+independent-divergence acceptance test; older-turn forks fail closed rather
+than becoming history-only copies. The frontend treats `NEW`, `LIVE`,
+`RESTORED`, and `LOST` as the
+canonical context-correctness states. Legacy `replay`, `hot`, `warm_native`,
+and `cold_native` values remain diagnostic/backward-compatible telemetry and
+are shown only for records that do not yet carry a context status.
+
+The preview does not yet implement R6 disk-pressure admission/alerting or a
+non-mutating pre-prompt context fingerprint. Keep general-traffic rollout off
+until those operational gates and the Kata/live-provider matrix are complete;
+the local stack below is intentionally suitable for functional development,
+not evidence that those production gates have passed.
+
+### Retained Docker storage on a host
+
+Restartable chat state is not under `AGENT_WORKDIR_ROOT` or
+`AGENT_SNAPSHOT_ROOT`. It is the Docker container writable layer, so durable
+same-host operation attaches storage to the Docker daemon, not to each
+sandbox. A Linux host can use this shape (device and filesystem choices remain
+operator-specific):
+
+```bash
+# Mount the durable block volume before Docker starts.
+findmnt --target /mnt/agent-docker
+
+# /etc/docker/daemon.json
+{"data-root":"/mnt/agent-docker"}
+
+sudo systemctl restart docker
+docker info --format '{{.DockerRootDir}}'
+# /mnt/agent-docker
+```
+
+Then set `AGENT_RETAINED_DOCKER_DATA_ROOT=/mnt/agent-docker`. The workspace
+broker compares that exact daemon-reported value during startup and refuses a
+mismatch. It deliberately cannot prove `findmnt` itself: giving the broker a
+host-root mount just to inspect storage would violate the Docker-only boundary.
+Put the mount check in host provisioning/systemd (`RequiresMountsFor=` is a
+reasonable additional guard) before Docker and the agent stack start.
+
+Do not bind `/mnt/agent-docker`, `/var/lib/docker`, `/workspace`, or
+`/agent-state` into the broker or sandbox. Do not use generic `docker system
+prune`, container TTL cleanup, `docker rm`, or image garbage collection against
+`org.freeinference.chat-sandbox=true` objects. Inspect and operate them through
+Docker (`docker inspect`, `docker exec`, `docker cp`, and the broker RPC), not by
+walking overlay directories. Backup or move the whole Docker data-root only
+with the daemon stopped and using Docker/storage-driver-supported procedures.
+
+This makes `docker stop`/`docker start` survive runner, broker, Docker daemon,
+and host reboots as long as the same Docker data-root returns. It does **not**
+make a missing container recoverable on another host: export to object/cold
+storage and cross-host restore remain the explicitly deferred persistent
+checkpoint phase. Until that lands, loss of the Docker data-root is context
+`LOST`, and the control-plane database still supplies the authoritative
+thread→host→container identity needed to locate it.
 
 **One runner runs one job at a time.** It claims, runs the job to completion,
 then claims the next — so the replica count *is* how many jobs the deployment

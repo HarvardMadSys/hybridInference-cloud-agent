@@ -1,7 +1,9 @@
 # Session-resident harness threads
 
-- **Status:** v2 — review comments incorporated (conditional-pass review: both
-  P0s fixed, wording tightened). For final sign-off (Murphy, Juncheng).
+- **Status:** historical implementation record. The container/session
+  lifecycle is superseded for new work by
+  `2026-08-28-one-chat-one-restartable-sandbox-design.md`; the checkpoint
+  sections remain input to the separately deferred persistent-storage phase.
 - **Date:** 2026-08-17
 - **Supersedes:** the "thread, not the harness session, is the unit of
   continuity" rationale in
@@ -9,6 +11,26 @@
   (hybridInference history, commit `9383cbd2`)
 - **Replaces the behavior introduced by:** hybridInference #1113
   ("persistent Cursor-style task threads" — fresh sandbox + text replay per turn)
+
+> **2026-08-28 supersession notice.** The next phase retains exactly one
+> container per `agent_thread`, starts a live Agent CLI on turn 1, stops (but
+> does not remove) the container after settled idle timeout, and starts a new
+> process with native session resume on the next message. Same-PID reuse is an
+> optimization, not a correctness or topology requirement; LIVE/RESTORED
+> context is the product contract. Chat state
+> lives only in the container writable layer, without a per-chat host bind.
+> Fork at the latest settled turn creates a new chat from a coordinated copy
+> of database history and the complete Docker filesystem snapshot. The clone
+> uses ordinary native resume against its copied local state; it does not call
+> a driver-native fork or replay historical prompts, and shares no writable
+> resource with its source. Per-turn model/reasoning changes remain supported
+> through in-band control or a context-preserving CLI process rotation.
+> The new design supersedes D3, D6, D8, the continuity/residency lifecycle in
+> §§4/7/9, P3/P4 in §11, and the process behavior in §§13/14. Per-turn jobs,
+> attempts, leases, events, billing windows, and generation fencing remain.
+> Historical-turn fork, sandbox cleanup, and native checkpoint/cold storage
+> are not part of this phase and must not be inferred from this historical
+> document as approved implementation scope.
 
 ---
 

@@ -92,6 +92,23 @@ make check
 | `make test` | pytest, excluding `external` and `dbtest` |
 | `make test-db` | the `dbtest` tier (needs Postgres) |
 
+### Complete local Docker run
+
+To exercise the actual browser, OAuth boundary, control plane, enrolled host,
+all five pinned Agent CLIs, and retained sandbox lifecycle without a staging
+gateway or provider key:
+
+```bash
+./deploy/local/dev.sh up
+./deploy/local/dev.sh smoke
+```
+
+Open <http://127.0.0.1:13002>. The stack publishes only that loopback edge;
+repository, session, and database state remain Docker-owned. `dev.sh stop`
+stops rather than deletes the stack, so the same chat containers can be
+started and resumed later. See [deploy/local/README.md](deploy/local/README.md)
+for the topology and commands.
+
 ## Contributing
 
 Read [AGENTS.md](AGENTS.md) first — it is the onboarding guide for both humans

@@ -24,23 +24,41 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from cloud_agent_host.chat_sandbox import (
+    ChatSandboxManager,
+    ChatSandboxSpec,
+    RetainedChatLost,
+)
 from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.retained_workspace import (
+    RetainedWorkspaceError,
+    read_retained_file,
+    write_retained_file,
+)
+from cloud_agent_host.runtimes import registered_runtimes
 from cloud_agent_host.sandbox import (
+    ContainerBackend,
     SandboxBackend,
     SandboxError,
     SandboxSpec,
     TerminalNotSupportedError,
     TerminalProcess,
     build_backend_from_env,
+)
+from cloud_agent_host.session_supervisor import (
+    DEFAULT_CHAT_IDLE_TIMEOUT_S,
+    ChatSessionSupervisor,
+    SessionBusy,
+    SessionLeaseLost,
 )
 from cloud_agent_host.workspace_browser import (
     MAX_FILE_PREVIEW_BYTES,
@@ -50,6 +68,9 @@ from cloud_agent_host.workspace_browser import (
 from cloud_agent_host.workspace_paths import WorkspaceIdError, workspace_path
 
 logger = get_logger(__name__)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 MAX_FILE_WRITE_BYTES = 2 * 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
@@ -66,6 +87,27 @@ DEFAULT_TERMINAL_IDLE_TTL_S = 30 * 60.0
 DEFAULT_TERMINAL_HARD_TTL_S = 8 * 60 * 60.0
 TERMINAL_STREAM_WAIT_S = 15.0
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def _chat_idle_timeout_from_env() -> float:
+    """Read the canonical chat-idle clock, accepting the preview-era alias."""
+    raw = os.environ.get("AGENT_CHAT_IDLE_TIMEOUT_S")
+    if not raw:
+        raw = os.environ.get("AGENT_SESSION_IDLE_TIMEOUT_S")
+    return float(raw) if raw else DEFAULT_CHAT_IDLE_TIMEOUT_S
+
+
+def _restartable_mode_covers_every_runtime(enabled: bool) -> bool:
+    """Whether no legacy broker request needs the host worktree bind."""
+    if not enabled:
+        return False
+    raw = os.environ.get("AGENT_RESTARTABLE_RUNTIMES")
+    allowed = (
+        {item.strip() for item in raw.split(",") if item.strip()}
+        if raw
+        else set(registered_runtimes())
+    )
+    return set(registered_runtimes()) <= allowed
 
 
 class FileWriteRequest(BaseModel):
@@ -108,6 +150,80 @@ class TerminalCoordinationRequest(BaseModel):
     lease_generation: int = Field(..., ge=1)
 
 
+class ChatSandboxAcquireRequest(BaseModel):
+    """Immutable chat identity plus the fenced attempt asking to use it."""
+
+    sandbox_id: str = Field(..., min_length=1, max_length=256)
+    generation: int = Field(..., ge=1)
+    activation_generation: int = Field(..., ge=1)
+    runtime_id: str = Field(..., min_length=1, max_length=128)
+    runtime_version: str | None = Field(None, max_length=128)
+    sandbox_image_digest: str | None = Field(None, max_length=512)
+    owner: str = Field(..., min_length=1, max_length=256)
+    has_settled_context: bool = False
+    live_process_proven: bool = False
+    expected_container_id: str | None = Field(None, min_length=1, max_length=256)
+    memory_limit: str = Field("4g", min_length=1, max_length=32)
+    cpu_limit: str = Field("2", min_length=1, max_length=32)
+    stop_timeout_s: int = Field(10, ge=1, le=300)
+
+
+class ChatSandboxLeaseRequest(BaseModel):
+    """Receipt for one local activation mutation."""
+
+    token: str = Field(..., min_length=1, max_length=512)
+
+
+class ChatSandboxSettleRequest(ChatSandboxLeaseRequest):
+    """A durable turn boundary that starts the settled idle timer."""
+
+    job_id: str = Field(..., min_length=1, max_length=256)
+    context_status: Literal["new", "live", "restored"]
+
+
+class ChatSandboxAbandonRequest(ChatSandboxLeaseRequest):
+    """Release a failed local admission without claiming a settled context."""
+
+    lost: bool = False
+
+
+class ChatSandboxIdleStopRequest(BaseModel):
+    """Durable control-plane fence authorizing one retained-container stop."""
+
+    generation: int = Field(..., ge=1)
+    # Full-fork targets have no agent activation yet. A broker reconstructed
+    # after a pre-turn file/terminal wake therefore stops the exact generation
+    # zero container under the control plane's durable fence.
+    activation_generation: int = Field(..., ge=0)
+    reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
+
+
+class ChatSandboxForkRequest(BaseModel):
+    """Durable identities for one latest-settled full Docker clone."""
+
+    operation_id: str = Field(..., min_length=1, max_length=256)
+    source_sandbox_id: str = Field(..., min_length=1, max_length=256)
+    source_generation: int = Field(..., ge=1)
+    source_activation_generation: int = Field(..., ge=0)
+    source_container_id: str = Field(..., min_length=1, max_length=256)
+    source_anchor_job_id: str = Field(..., min_length=1, max_length=256)
+    source_native_session_id: str = Field(..., min_length=1, max_length=512)
+    target_thread_id: str = Field(..., min_length=1, max_length=256)
+    target_sandbox_id: str = Field(..., min_length=1, max_length=256)
+    target_generation: int = Field(1, ge=1)
+
+
+class ChatSandboxForkRollbackRequest(BaseModel):
+    """Exact target ownership needed to compensate an incomplete fork."""
+
+    operation_id: str = Field(..., min_length=1, max_length=256)
+    source_sandbox_id: str = Field(..., min_length=1, max_length=256)
+    target_thread_id: str = Field(..., min_length=1, max_length=256)
+    target_sandbox_id: str = Field(..., min_length=1, max_length=256)
+    target_generation: int = Field(1, ge=1)
+    expected_container_id: str | None = Field(None, min_length=1, max_length=256)
+
+
 @dataclass(frozen=True)
 class _TerminalEvent:
     """One resumable event in a terminal's bounded output ring."""
@@ -127,10 +243,12 @@ class _TerminalSession:
         *,
         terminal_id: str,
         process: TerminalProcess,
-        workdir: Path,
+        workdir: Path | None,
         rows: int,
         cols: int,
         now: float,
+        idle_ttl_s: float | None = None,
+        on_closed: Callable[[float], None] | None = None,
     ) -> None:
         self.id = terminal_id
         self.shell = "sh"
@@ -139,9 +257,12 @@ class _TerminalSession:
         self.cols = cols
         self.created_at = now
         self.last_active_at = now
+        self._idle_ttl_s = idle_ttl_s
         self.state = "running"
         self._process = process
         self._workdir = workdir
+        self._on_closed = on_closed
+        self._activity_released = False
         self._events: deque[_TerminalEvent] = deque()
         self._buffer_bytes = 0
         self._last_seq = 0
@@ -183,9 +304,12 @@ class _TerminalSession:
     def expired(self, *, now: float, idle_ttl_s: float, hard_ttl_s: float) -> bool:
         """Whether idle or absolute lifetime requires this session to close."""
         with self._condition:
+            effective_idle_ttl_s = (
+                min(idle_ttl_s, self._idle_ttl_s) if self._idle_ttl_s is not None else idle_ttl_s
+            )
             return not self._closed and (
                 self.state == "cleanup_failed"
-                or now - self.last_active_at >= idle_ttl_s
+                or now - self.last_active_at >= effective_idle_ttl_s
                 or now - self.created_at >= hard_ttl_s
             )
 
@@ -199,9 +323,27 @@ class _TerminalSession:
                 self._process.write(data)
             except SandboxError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
-        with contextlib.suppress(OSError):
-            os.utime(self._workdir, None)
+        self._touch_workdir()
         return self.descriptor()
+
+    def _touch_workdir(self) -> None:
+        if self._workdir is not None:
+            with contextlib.suppress(OSError):
+                os.utime(self._workdir, None)
+
+    def _release_activity(self) -> None:
+        callback: Callable[[float], None] | None = None
+        last_activity_at = 0.0
+        with self._condition:
+            if not self._activity_released:
+                self._activity_released = True
+                callback = self._on_closed
+                last_activity_at = self.last_active_at
+        if callback is not None:
+            try:
+                callback(last_activity_at)
+            except Exception:
+                logger.exception("workspace_terminal_activity_release_failed")
 
     def suspend(self) -> None:
         """Freeze the process tree, serialized against accepted input."""
@@ -238,12 +380,14 @@ class _TerminalSession:
             self.cols = cols
         return self.descriptor()
 
-    def close(self) -> dict[str, Any]:
-        """Close the complete process tree, retaining failed cleanup for retry."""
+    def close(self, *, mark_activity: bool = True) -> dict[str, Any]:
+        """Close the process tree, optionally treating the close as activity."""
         with self._close_lock:
             with self._condition:
                 if self._closed:
                     return self.descriptor()
+                if mark_activity:
+                    self.last_active_at = time.monotonic()
                 self.state = "closing"
                 self._condition.notify_all()
                 self._wake_async_waiters_locked()
@@ -260,6 +404,7 @@ class _TerminalSession:
                 self.state = "closed"
                 self._condition.notify_all()
                 self._wake_async_waiters_locked()
+            self._release_activity()
             if threading.current_thread() is not self._pump_thread:
                 self._pump_thread.join(timeout=5)
             return self.descriptor()
@@ -356,6 +501,7 @@ class _TerminalSession:
             self._trim_events_locked()
             if not self._closed and self.state == "running":
                 self.state = "exited"
+                self.last_active_at = time.monotonic()
             self._condition.notify_all()
             self._wake_async_waiters_locked()
 
@@ -392,8 +538,7 @@ class _TerminalSession:
                             self._wake_async_waiters_locked()
                     break
                 self._append_output(chunk)
-                with contextlib.suppress(OSError):
-                    os.utime(self._workdir, None)
+                self._touch_workdir()
         except Exception:
             logger.exception("workspace_terminal_output_failed")
             try:
@@ -410,6 +555,7 @@ class _TerminalSession:
             logger.exception("workspace_terminal_wait_failed")
             exit_code = 1
         self._append_exit(exit_code)
+        self._release_activity()
 
 
 class _TerminalManager:
@@ -456,13 +602,23 @@ class _TerminalManager:
             self._workspace_generations.clear()
         for session in sessions:
             try:
-                session.close()
+                session.close(mark_activity=False)
             except (SandboxError, OSError):
                 logger.exception("workspace_terminal_shutdown_cleanup_failed")
         if self._reaper is not None:
             self._reaper.join(timeout=5)
 
-    def create(self, workspace_id: str, workdir: Path, *, rows: int, cols: int) -> dict[str, Any]:
+    def create(
+        self,
+        workspace_id: str,
+        workdir: Path | str,
+        *,
+        rows: int,
+        cols: int,
+        backend: SandboxBackend | None = None,
+        idle_ttl_s: float | None = None,
+        on_closed: Callable[[float], None] | None = None,
+    ) -> dict[str, Any]:
         """Create one PTY while atomically enforcing the per-workspace cap."""
         self.reap()
         terminal_id = "term_" + secrets.token_urlsafe(18)
@@ -483,18 +639,19 @@ class _TerminalManager:
             active = sum(not session.is_closed for session in group.values())
             if active >= MAX_TERMINAL_SESSIONS_PER_WORKSPACE:
                 raise HTTPException(status_code=409, detail="workspace terminal limit reached")
+            terminal_backend = backend or self._backend
             spec = SandboxSpec(
                 argv=["/bin/sh"],
                 workdir=str(workdir),
                 env={
-                    **self._backend.base_env(),
+                    **terminal_backend.base_env(),
                     "GIT_CONFIG_NOSYSTEM": "1",
                     "TERM": "xterm-256color",
                 },
                 phase="agent",
             )
             try:
-                process = self._backend.spawn_terminal(spec, rows=rows, cols=cols)
+                process = terminal_backend.spawn_terminal(spec, rows=rows, cols=cols)
             except TerminalNotSupportedError as exc:
                 raise HTTPException(
                     status_code=409,
@@ -507,10 +664,12 @@ class _TerminalManager:
             session = _TerminalSession(
                 terminal_id=terminal_id,
                 process=process,
-                workdir=workdir,
+                workdir=workdir if isinstance(workdir, Path) else None,
                 rows=rows,
                 cols=cols,
                 now=now,
+                idle_ttl_s=idle_ttl_s,
+                on_closed=on_closed,
             )
             group[terminal_id] = session
         session.start()
@@ -634,7 +793,7 @@ class _TerminalManager:
             ]
         for workspace_id, terminal_id, session in expired:
             try:
-                session.close()
+                session.close(mark_activity=False)
             except (SandboxError, OSError):
                 logger.exception("workspace_terminal_reap_cleanup_failed")
                 continue
@@ -905,7 +1064,7 @@ def _write_file(root: Path, relative: str, content: str) -> dict[str, Any]:
 def _run_sandbox(
     backend: SandboxBackend,
     *,
-    workdir: Path,
+    workdir: Path | str,
     script: str,
     env: dict[str, str],
     timeout_s: float,
@@ -951,12 +1110,13 @@ def _run_sandbox(
     stderr = process.stderr_text()
     if len(stderr.encode("utf-8", errors="replace")) > MAX_COMMAND_OUTPUT_BYTES:
         stderr = stderr[-MAX_COMMAND_OUTPUT_BYTES:]
-    os.utime(workdir, None)
+    if isinstance(workdir, Path):
+        os.utime(workdir, None)
     return exit_code, "".join(chunks), stderr
 
 
 def _run_terminal(
-    backend: SandboxBackend, workdir: Path, request: TerminalRequest
+    backend: SandboxBackend, workdir: Path | str, request: TerminalRequest
 ) -> dict[str, Any]:
     marker = secrets.token_hex(16)
     script = (
@@ -990,7 +1150,9 @@ def _run_terminal(
     return {"output": stdout, "stderr": stderr, "exit_code": status, "cwd": cwd}
 
 
-def _run_git(backend: SandboxBackend, workdir: Path, base_sha: str | None = None) -> dict[str, Any]:
+def _run_git(
+    backend: SandboxBackend, workdir: Path | str, base_sha: str | None = None
+) -> dict[str, Any]:
     if base_sha and not _COMMIT_SHA.fullmatch(base_sha):
         raise HTTPException(status_code=400, detail="base SHA is not a commit hash")
     target = base_sha or "HEAD"
@@ -1081,6 +1243,9 @@ def create_app(
     terminal_idle_ttl_s: float | None = None,
     terminal_hard_ttl_s: float | None = None,
     terminal_max_sessions: int | None = None,
+    session_supervisor: ChatSessionSupervisor | None = None,
+    restartable_enabled: bool | None = None,
+    session_idle_timeout_s: float | None = None,
 ) -> FastAPI:
     """Create the internal broker app with injectable dependencies for tests."""
     sandbox = backend or build_backend_from_env()
@@ -1109,6 +1274,28 @@ def create_app(
         raise ValueError("terminal TTL values must be positive")
     if not 1 <= max_sessions <= 4096:
         raise ValueError("terminal global session limit must be between 1 and 4096")
+    restartable = (
+        restartable_enabled
+        if restartable_enabled is not None
+        else os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") not in ("", "0")
+    )
+    chat_idle_timeout_s = (
+        session_idle_timeout_s
+        if session_idle_timeout_s is not None
+        else _chat_idle_timeout_from_env()
+    )
+    if chat_idle_timeout_s <= 0:
+        raise ValueError("chat sandbox idle timeout must be positive")
+    supervisor = session_supervisor
+    retained_manager: ChatSandboxManager | None = None
+    if supervisor is None and restartable:
+        if not isinstance(sandbox, ContainerBackend):
+            raise ValueError("restartable chat sandboxes require the container or kata backend")
+        retained_manager = ChatSandboxManager(sandbox)
+        supervisor = ChatSessionSupervisor(
+            retained_manager,
+            idle_timeout_s=chat_idle_timeout_s,
+        )
     terminals = _TerminalManager(
         sandbox,
         idle_ttl_s=idle_ttl_s,
@@ -1119,18 +1306,35 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         Path(root).mkdir(parents=True, exist_ok=True)
-        sandbox.preflight(workdir_root=root)
+        # In restartable mode every supported chat owns its repository in the
+        # retained container's writable layer. The broker may itself run in a
+        # container, so ``root`` is not a path the host Docker daemon can
+        # bind-mount. No retained operation needs that mount; keep the legacy
+        # probe for deployments that still create host worktrees.
+        retained_only = _restartable_mode_covers_every_runtime(restartable)
+        sandbox.preflight(workdir_root=None if retained_only else root)
+        if retained_manager is not None:
+            expected_docker_root = (os.environ.get("AGENT_RETAINED_DOCKER_DATA_ROOT") or "").strip()
+            if expected_docker_root:
+                _app.state.retained_docker_data_root = retained_manager.require_docker_data_root(
+                    expected_docker_root
+                )
         # A workdir root has one active broker. Container backends use that
         # stable scope to remove only crash leftovers from a previous instance.
         sandbox.prepare_terminal_broker(root)
         terminals.start()
+        if supervisor is not None:
+            supervisor.start()
         try:
             yield
         finally:
+            if supervisor is not None:
+                supervisor.close()
             terminals.close()
 
     app = FastAPI(title="Agent workspace broker", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.terminal_manager = terminals
+    app.state.session_supervisor = supervisor
 
     def authenticate(x_agent_workspace_token: str | None = Header(None)) -> None:
         if (
@@ -1141,8 +1345,256 @@ def create_app(
             raise HTTPException(status_code=401, detail="invalid workspace broker credential")
 
     @app.get("/health")
-    def health(_: None = Depends(authenticate)) -> dict[str, bool]:
-        return {"ok": True}
+    def health(_: None = Depends(authenticate)) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "retained_docker_data_root": getattr(
+                app.state,
+                "retained_docker_data_root",
+                None,
+            ),
+        }
+
+    def require_supervisor() -> ChatSessionSupervisor:
+        if supervisor is None:
+            raise HTTPException(
+                status_code=409,
+                detail="restartable chat sandboxes are not enabled on this host",
+            )
+        return supervisor
+
+    def supervisor_error(exc: Exception) -> HTTPException:
+        if isinstance(exc, RetainedChatLost):
+            return HTTPException(status_code=410, detail=str(exc))
+        if isinstance(exc, SessionBusy):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, SessionLeaseLost):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, ValueError):
+            return HTTPException(status_code=422, detail=str(exc))
+        return HTTPException(status_code=503, detail=str(exc)[:300])
+
+    def retained_owner(workspace_id: str) -> ChatSessionSupervisor | None:
+        """Thread ids address Docker-owned workspaces; job ids stay legacy."""
+        if not workspace_id.startswith("athr_"):
+            return None
+        return require_supervisor()
+
+    def retained_operation(
+        workspace_id: str,
+        operation: Callable[[SandboxBackend], dict[str, Any]],
+    ) -> dict[str, Any]:
+        owner = retained_owner(workspace_id)
+        if owner is None:
+            raise AssertionError("retained_operation called for a legacy workspace")
+        token: str | None = None
+        try:
+            token, _ = owner.operation_opened(workspace_id)
+            retained = owner.backend(workspace_id)
+            retained.manager.require_network_phase(retained.spec, "agent")
+            return operation(retained)
+        except RetainedWorkspaceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        finally:
+            if token is not None:
+                with contextlib.suppress(SandboxError):
+                    owner.operation_closed(workspace_id, token)
+
+    def ensure_workspace(workspace_id: str) -> Path | None:
+        owner = retained_owner(workspace_id)
+        if owner is None:
+            return _workspace(root, workspace_id)
+        try:
+            owner.status(workspace_id)
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return None
+
+    @app.post("/sandboxes/{thread_id}/acquire")
+    async def acquire_chat_sandbox(
+        thread_id: str,
+        body: ChatSandboxAcquireRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_supervisor()
+        spec = ChatSandboxSpec(
+            thread_id=thread_id,
+            sandbox_id=body.sandbox_id,
+            generation=body.generation,
+            runtime_id=body.runtime_id,
+            runtime_version=body.runtime_version,
+            sandbox_image_digest=body.sandbox_image_digest,
+            memory_limit=body.memory_limit,
+            cpu_limit=body.cpu_limit,
+            stop_timeout_s=body.stop_timeout_s,
+        )
+        try:
+            lease = await asyncio.to_thread(
+                owner.acquire,
+                spec,
+                owner=body.owner,
+                has_settled_context=body.has_settled_context,
+                activation_generation=body.activation_generation,
+                live_process_proven=body.live_process_proven,
+                expected_container_id=body.expected_container_id,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(lease)
+
+    @app.post("/sandboxes/{thread_id}/process-started")
+    async def chat_process_started(
+        thread_id: str,
+        body: ChatSandboxLeaseRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(owner.note_process_started, thread_id, body.token)
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.post("/sandboxes/{thread_id}/settle")
+    async def settle_chat_sandbox(
+        thread_id: str,
+        body: ChatSandboxSettleRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(
+                owner.settle,
+                thread_id,
+                body.token,
+                job_id=body.job_id,
+                context_status=body.context_status,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.post("/sandboxes/{thread_id}/abandon")
+    async def abandon_chat_sandbox(
+        thread_id: str,
+        body: ChatSandboxAbandonRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(
+                owner.abandon,
+                thread_id,
+                body.token,
+                lost=body.lost,
+            )
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.get("/sandboxes")
+    async def list_chat_sandboxes(
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Return Docker-observed state for host-heartbeat reconciliation.
+
+        This is a complete observation, not an ownership mutation.  The
+        control plane keeps the durable thread/container mapping and accepts
+        only exact identity matches; the broker supplies the fact it alone
+        can see: whether each retained Docker container is currently running.
+        Reconciliation also makes a broker restart self-healing because it
+        rebuilds the supervisor's in-memory index from Docker labels first.
+        """
+        owner = require_supervisor()
+        try:
+            descriptors = await asyncio.to_thread(owner.reconcile)
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return {"sandboxes": [asdict(descriptor) for descriptor in descriptors]}
+
+    @app.post("/sandboxes/{thread_id}/stop-idle")
+    async def stop_idle_chat_sandbox(
+        thread_id: str,
+        body: ChatSandboxIdleStopRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Apply the durable ledger's exact idle or failed-attempt stop."""
+        owner = require_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(
+                owner.stop_if_idle,
+                thread_id,
+                generation=body.generation,
+                activation_generation=body.activation_generation,
+                reason=body.reason,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.post("/sandboxes/{thread_id}/fork")
+    async def fork_chat_sandbox(
+        thread_id: str,
+        body: ChatSandboxForkRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Create/adopt an isolated Docker clone for one durable fork saga."""
+        owner = require_supervisor()
+        try:
+            result = await asyncio.to_thread(
+                owner.fork_settled,
+                thread_id,
+                operation_id=body.operation_id,
+                source_sandbox_id=body.source_sandbox_id,
+                source_generation=body.source_generation,
+                source_activation_generation=body.source_activation_generation,
+                source_container_id=body.source_container_id,
+                source_anchor_job_id=body.source_anchor_job_id,
+                source_native_session_id=body.source_native_session_id,
+                target_thread_id=body.target_thread_id,
+                target_sandbox_id=body.target_sandbox_id,
+                target_generation=body.target_generation,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(result)
+
+    @app.post("/sandboxes/{thread_id}/fork-rollback")
+    async def rollback_chat_sandbox_fork(
+        thread_id: str,
+        body: ChatSandboxForkRollbackRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Remove only an incomplete target carrying this fork's labels."""
+        owner = require_supervisor()
+        try:
+            removed = await asyncio.to_thread(
+                owner.rollback_fork,
+                thread_id,
+                operation_id=body.operation_id,
+                source_sandbox_id=body.source_sandbox_id,
+                target_thread_id=body.target_thread_id,
+                target_sandbox_id=body.target_sandbox_id,
+                target_generation=body.target_generation,
+                expected_container_id=body.expected_container_id,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return {"removed": removed}
+
+    @app.get("/sandboxes/{thread_id}")
+    async def chat_sandbox_status(
+        thread_id: str,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(owner.status, thread_id)
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
 
     @app.get("/workspaces/{workspace_id}/files")
     def files(
@@ -1150,8 +1602,19 @@ def create_app(
         path: str = Query("", max_length=4096),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        relative = _relative_path(path)
+        if retained_owner(workspace_id) is not None:
+            return retained_operation(
+                workspace_id,
+                lambda retained: read_retained_file(
+                    retained,
+                    relative,
+                    max_preview_bytes=MAX_FILE_PREVIEW_BYTES,
+                    max_directory_entries=MAX_DIRECTORY_ENTRIES,
+                ),
+            )
         workdir = _workspace(root, workspace_id)
-        return _file_response(workdir, _relative_path(path))
+        return _file_response(workdir, relative)
 
     @app.put("/workspaces/{workspace_id}/files")
     def write_file(
@@ -1160,8 +1623,21 @@ def create_app(
         path: str = Query(..., min_length=1, max_length=4096),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        relative = _relative_path(path)
+        if retained_owner(workspace_id) is not None:
+            return retained_operation(
+                workspace_id,
+                lambda retained: write_retained_file(
+                    retained,
+                    relative,
+                    body.content,
+                    max_write_bytes=MAX_FILE_WRITE_BYTES,
+                    max_preview_bytes=MAX_FILE_PREVIEW_BYTES,
+                    max_directory_entries=MAX_DIRECTORY_ENTRIES,
+                ),
+            )
         workdir = _workspace(root, workspace_id)
-        return _write_file(workdir, _relative_path(path), body.content)
+        return _write_file(workdir, relative, body.content)
 
     @app.post("/workspaces/{workspace_id}/terminal")
     async def terminal(
@@ -1169,6 +1645,12 @@ def create_app(
         body: TerminalRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        if retained_owner(workspace_id) is not None:
+            return await asyncio.to_thread(
+                retained_operation,
+                workspace_id,
+                lambda retained: _run_terminal(retained, "/workspace", body),
+            )
         workdir = _workspace(root, workspace_id)
         return await asyncio.to_thread(_run_terminal, sandbox, workdir, body)
 
@@ -1178,6 +1660,36 @@ def create_app(
         body: TerminalCreateRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        owner = retained_owner(workspace_id)
+        if owner is not None:
+            terminal_token: str | None = None
+            try:
+                terminal_token, _ = await asyncio.to_thread(owner.terminal_opened, workspace_id)
+                retained = owner.backend(workspace_id)
+                retained.manager.require_network_phase(retained.spec, "agent")
+                token = terminal_token
+                return await asyncio.to_thread(
+                    terminals.create,
+                    workspace_id,
+                    "/workspace",
+                    rows=body.rows,
+                    cols=body.cols,
+                    backend=retained,
+                    # A retained PTY cannot add a second inactivity window.
+                    # Reap it by the earlier resource/chat limit, then let the
+                    # supervisor continue from its final activity timestamp.
+                    idle_ttl_s=owner.idle_timeout_s,
+                    on_closed=lambda last_activity: owner.terminal_closed(
+                        workspace_id,
+                        token,
+                        last_activity_monotonic=last_activity,
+                    ),
+                )
+            except (SandboxError, ValueError) as exc:
+                if terminal_token is not None:
+                    with contextlib.suppress(SandboxError):
+                        owner.terminal_closed(workspace_id, terminal_token)
+                raise supervisor_error(exc) from exc
         workdir = _workspace(root, workspace_id)
         return await asyncio.to_thread(
             terminals.create,
@@ -1193,11 +1705,26 @@ def create_app(
         body: TerminalCoordinationRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            terminals.suspend,
-            workspace_id,
-            lease_generation=body.lease_generation,
-        )
+        owner = retained_owner(workspace_id)
+        if owner is None:
+            return await asyncio.to_thread(
+                terminals.suspend,
+                workspace_id,
+                lease_generation=body.lease_generation,
+            )
+        try:
+            await asyncio.to_thread(owner.suspend_workspace, workspace_id)
+            result = await asyncio.to_thread(
+                terminals.suspend,
+                workspace_id,
+                lease_generation=body.lease_generation,
+            )
+            await asyncio.to_thread(owner.wait_workspace_operations, workspace_id)
+            return result
+        except (SandboxError, ValueError) as exc:
+            with contextlib.suppress(SandboxError):
+                await asyncio.to_thread(owner.resume_workspace, workspace_id)
+            raise supervisor_error(exc) from exc
 
     @app.post("/workspaces/{workspace_id}/terminals/resume")
     async def resume_terminals(
@@ -1205,25 +1732,39 @@ def create_app(
         body: TerminalCoordinationRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        owner = retained_owner(workspace_id)
+        result = await asyncio.to_thread(
             terminals.resume,
             workspace_id,
             lease_generation=body.lease_generation,
         )
+        if owner is not None:
+            try:
+                await asyncio.to_thread(owner.resume_workspace, workspace_id)
+            except SandboxError as exc:
+                raise supervisor_error(exc) from exc
+        return result
 
     @app.post("/workspaces/{workspace_id}/terminals/resume-settled")
     async def resume_settled_terminals(
         workspace_id: str,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(terminals.resume_settled, workspace_id)
+        owner = retained_owner(workspace_id)
+        result = await asyncio.to_thread(terminals.resume_settled, workspace_id)
+        if owner is not None:
+            try:
+                await asyncio.to_thread(owner.resume_workspace, workspace_id)
+            except SandboxError as exc:
+                raise supervisor_error(exc) from exc
+        return result
 
     @app.get("/workspaces/{workspace_id}/terminals")
     async def list_terminals(
         workspace_id: str,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        _workspace(root, workspace_id)
+        ensure_workspace(workspace_id)
         return {"terminals": await asyncio.to_thread(terminals.list, workspace_id)}
 
     @app.get("/workspaces/{workspace_id}/terminals/{terminal_id}/stream")
@@ -1233,7 +1774,7 @@ def create_app(
         after: int = Query(0, ge=0),
         _: None = Depends(authenticate),
     ) -> StreamingResponse:
-        _workspace(root, workspace_id)
+        ensure_workspace(workspace_id)
         session = terminals.get(workspace_id, terminal_id)
         session.open_stream()
 
@@ -1271,7 +1812,7 @@ def create_app(
         body: TerminalInputRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        _workspace(root, workspace_id)
+        ensure_workspace(workspace_id)
         try:
             data = base64.b64decode(body.data, validate=True)
         except (binascii.Error, ValueError) as exc:
@@ -1290,7 +1831,7 @@ def create_app(
         body: TerminalResizeRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        _workspace(root, workspace_id)
+        ensure_workspace(workspace_id)
         session = terminals.get(workspace_id, terminal_id)
         return await asyncio.to_thread(
             session.resize,
@@ -1305,7 +1846,7 @@ def create_app(
         terminal_id: str,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        _workspace(root, workspace_id)
+        ensure_workspace(workspace_id)
         return await asyncio.to_thread(terminals.delete, workspace_id, terminal_id)
 
     @app.get("/workspaces/{workspace_id}/git")
@@ -1314,6 +1855,12 @@ def create_app(
         base_sha: str | None = Query(None, max_length=64),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        if retained_owner(workspace_id) is not None:
+            return await asyncio.to_thread(
+                retained_operation,
+                workspace_id,
+                lambda retained: _run_git(retained, "/workspace", base_sha),
+            )
         workdir = _workspace(root, workspace_id)
         return await asyncio.to_thread(_run_git, sandbox, workdir, base_sha)
 

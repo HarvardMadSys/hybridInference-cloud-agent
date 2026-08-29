@@ -167,6 +167,20 @@ services:
       # this host. Required rather than defaulted for the same reason: a
       # fallback to the dispatcher token is the bug written as a default.
       AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker, distinct from AGENT_DISPATCHER_TOKEN}
+      # Preview gate for the Docker-owned chat Session Supervisor. Keep the
+      # legacy workspace routes active during rollout; turning this on adds
+      # retained create/start/stop RPC without changing their public shapes.
+      AGENT_RESTARTABLE_SANDBOX: ${AGENT_RESTARTABLE_SANDBOX:-0}
+      # Daemon-side path, observed through `docker info`; it is deliberately
+      # not mounted into this container. Production points Docker itself at a
+      # durable block volume and sets this to that exact data-root.
+      AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
+      # Product inactivity timeout: after the latest settled turn (and after
+      # all terminals close), docker stop retains the chat writable layer.
+      # This is distinct from AGENT_TIMEOUT_S and the legacy residency lease.
+      # The nested fallback keeps deployments using the preview-era
+      # AGENT_SESSION_IDLE_TIMEOUT_S name working during the rename.
+      AGENT_CHAT_IDLE_TIMEOUT_S: ${AGENT_CHAT_IDLE_TIMEOUT_S:-${AGENT_SESSION_IDLE_TIMEOUT_S:-1800}}
       AGENT_WORKDIR_ROOT: ${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
@@ -261,6 +275,14 @@ services:
       # Must match the broker service above, and must differ from the
       # dispatcher token beside it. Two credentials for two permissions.
       AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker, distinct from AGENT_DISPATCHER_TOKEN}
+
+      # Staged retained-chat execution. The broker and runner must agree on
+      # the gate. Every default runtime below has an exact pinned native-resume
+      # adapter; the preview flag still stays off until deployment conformance.
+      AGENT_RESTARTABLE_SANDBOX: ${AGENT_RESTARTABLE_SANDBOX:-0}
+      AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
+      AGENT_RESTARTABLE_RUNTIMES: ${AGENT_RESTARTABLE_RUNTIMES:-claude-code,codex,pi,opencode,kilo}
+      AGENT_CHAT_IDLE_TIMEOUT_S: ${AGENT_CHAT_IDLE_TIMEOUT_S:-${AGENT_SESSION_IDLE_TIMEOUT_S:-1800}}
 
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}

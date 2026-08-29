@@ -148,8 +148,12 @@ def test_restore_refuses_traversal(tmp_path):
 def test_the_registry_hands_out_the_claude_driver():
     assert isinstance(get_driver("claude-code"), ClaudeCodeDriver)
     assert get_driver("claude-code").capabilities().continuity == "resume"
+    assert get_driver("claude-code").capabilities().checkpoint_export is True
     assert driver_for(_ClaudeStub()).__class__ is ClaudeCodeDriver
-    assert get_driver("pi").capabilities().continuity == "replay"
+    for runtime_id in ("codex", "pi", "opencode", "kilo"):
+        capabilities = get_driver(runtime_id).capabilities()
+        assert capabilities.continuity == "resume"
+        assert capabilities.checkpoint_export is False
 
 
 @pytest.fixture

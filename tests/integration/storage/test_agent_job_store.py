@@ -25,6 +25,8 @@ _TABLES_IN_FK_ORDER = (
     "agent_thread_messages",
     "agent_job_artifacts",
     "agent_job_events",
+    "agent_thread_sandboxes",
+    "agent_sandbox_forks",
     "agent_attempts",
     "agent_jobs",
     "agent_threads",
@@ -111,6 +113,78 @@ async def _expire_attempt(store: AgentJobStore, attempt_id: int) -> None:
             "WHERE id = $1",
             attempt_id,
         )
+
+
+async def _reserve_retained_chat(
+    store: AgentJobStore,
+) -> tuple[dict, dict, dict]:
+    """Create, claim, and reserve one retained chat under a real DB fence."""
+    job = await _create_job(store)
+    claim = await store.claim_job(
+        worker_id="w1",
+        lease_ttl_seconds=60,
+        host="runner-a",
+    )
+    assert claim is not None
+    sandbox = await store.reserve_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="runner-a",
+        sandbox_id="asbx_test",
+        container_name="freeinference-chat-test",
+        runtime_id="claude-code",
+        runtime_version=claim.get("runtime_version"),
+        sandbox_image_digest=claim.get("sandbox_image_digest"),
+        execution_profile=job["execution_profile"],
+    )
+    assert sandbox is not None
+    return job, claim, sandbox
+
+
+async def _settle_retained_chat(
+    store: AgentJobStore,
+    *,
+    native_session_id: str = "native-session-one",
+) -> tuple[dict, dict]:
+    """Create a latest-settled retained chat ready for a full fork."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-retained-one",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="message",
+        payload={"text": "settled answer"},
+    )
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="new",
+        native_session_id=native_session_id,
+        idle_timeout_seconds=1800,
+    )
+    assert await store.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert durable is not None
+    return job, durable
 
 
 async def test_create_get_list_round_trip(store: AgentJobStore):
@@ -933,6 +1007,538 @@ async def test_zombie_worker_is_fenced_out_after_reap(store: AgentJobStore):
         )
         is not None
     )
+
+
+async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
+    store: AgentJobStore,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    running = await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-retained-one",
+        context_status="new",
+    )
+    assert running is not None
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    settled = await store.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="new",
+        native_session_id="claude-session-one",
+        idle_timeout_seconds=1800,
+    )
+    assert settled is not None
+    assert settled["admitted_job_id"] == job["id"]
+
+    observation = {
+        "thread_id": job["thread_id"],
+        "host": "runner-a",
+        "sandbox_id": "asbx_test",
+        "container_id": "container-retained-one",
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+        "running": True,
+    }
+    await store.reconcile_thread_sandbox_observation(
+        **observation,
+        activity_active=True,
+    )
+    assert (await store.thread_sandbox(thread_id=job["thread_id"]))["idle_deadline"] is None
+    await store.reconcile_thread_sandbox_observation(
+        **observation,
+        activity_active=False,
+        idle_remaining_seconds=120,
+    )
+    rearmed = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert rearmed["idle_deadline"] > datetime.now(timezone.utc)
+
+    # A broker can restart between turns, reconstruct the immutable container
+    # identity from Docker, and know no activation generation. A terminal that
+    # wakes the stopped container must still promote the durable row and own
+    # its idle clock, but only while no worker attempt owns it.
+    assert await store.mark_thread_sandbox_stopped(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        sandbox_generation=sandbox["generation"],
+        activation_generation=sandbox["activation_generation"],
+    )
+    observation["activation_generation"] = 0
+    promoted = await store.reconcile_thread_sandbox_observation(
+        **observation,
+        activity_active=True,
+    )
+    assert promoted == "running"
+    await store.reconcile_thread_sandbox_observation(
+        **observation,
+        activity_active=False,
+        idle_remaining_seconds=120,
+    )
+    rearmed_after_restart = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert rearmed_after_restart["state"] == "running"
+    assert rearmed_after_restart["idle_deadline"] > datetime.now(timezone.utc)
+
+    assert await store.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+
+    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert durable is not None
+    assert durable["state"] == "running"
+    assert durable["active_attempt_id"] is None
+    assert durable["admitted_job_id"] is None
+    assert durable["last_settled_job_id"] == job["id"]
+    assert durable["native_session_id"] == "claude-session-one"
+
+
+async def test_retained_fork_saga_copies_history_and_publishes_an_independent_sandbox(
+    store: AgentJobStore,
+):
+    source, source_sandbox = await _settle_retained_chat(store)
+
+    operation = await store.prepare_retained_fork(
+        source_job_id=source["id"],
+        user_id=source["user_id"],
+    )
+
+    assert operation is not None and operation.get("error") is None
+    assert operation["source_container_id"] == source_sandbox["container_id"]
+    assert operation["source_native_session_id"] == "native-session-one"
+    fenced = await store.thread_sandbox(thread_id=source["thread_id"])
+    assert fenced["fork_operation_id"] == operation["id"]
+
+    # Sending after PREPARING is allowed, but the source turn cannot execute
+    # until the Docker snapshot and DB prefix finalize together.
+    queued = await store.create_follow_up(
+        parent_job_id=source["id"],
+        user_id=source["user_id"],
+        prompt="source moves on after the fork point",
+    )
+    assert queued is not None and queued["state"] == "queued"
+    assert await store.claim_job(worker_id="blocked", lease_ttl_seconds=60, host="runner-a") is None
+
+    forked = await store.finalize_retained_fork(
+        operation_id=operation["id"],
+        target_container_id="container-fork-one",
+        target_container_name="freeinference-chat-fork-one",
+        snapshot_image_digest="sha256:fork-image",
+        source_fingerprint="sha256:fork-image",
+        target_fingerprint="sha256:fork-image",
+    )
+
+    assert forked is not None
+    assert forked["thread_id"] == operation["target_thread_id"]
+    assert forked["fork_source_job_id"] == source["id"]
+    assert forked["reasoning_effort"] == source["reasoning_effort"]
+    assert forked["thread_sandbox"]["sandbox_id"] == operation["target_sandbox_id"]
+    assert forked["thread_sandbox"]["container_id"] == "container-fork-one"
+    assert forked["thread_sandbox"]["native_session_id"] == "native-session-one"
+    assert forked["thread_sandbox"]["state"] == "stopped"
+    assert forked["thread_sandbox"]["context_status"] == "restored"
+    target_thread = await store.get_thread_for_job(
+        job_id=forked["id"],
+        user_id=source["user_id"],
+    )
+    assert [(message["role"], message["content"]) for message in target_thread["messages"]] == [
+        ("user", "fix the flaky test"),
+        ("assistant", "settled answer"),
+    ]
+    assert (await store.thread_sandbox(thread_id=source["thread_id"]))["fork_operation_id"] is None
+
+    # A retry of finalization is idempotent and the source queue is released.
+    repeated = await store.finalize_retained_fork(
+        operation_id=operation["id"],
+        target_container_id="container-fork-one",
+        target_container_name="freeinference-chat-fork-one",
+        snapshot_image_digest="sha256:fork-image",
+        source_fingerprint="sha256:fork-image",
+        target_fingerprint="sha256:fork-image",
+    )
+    assert repeated is not None and repeated["id"] == forked["id"]
+    claim = await store.claim_job(worker_id="released", lease_ttl_seconds=60, host="runner-a")
+    assert claim is not None and claim["id"] == queued["id"]
+
+
+async def test_retained_fork_abort_releases_the_source_claim_fence(store: AgentJobStore):
+    source, _ = await _settle_retained_chat(store)
+    operation = await store.prepare_retained_fork(
+        source_job_id=source["id"],
+        user_id=source["user_id"],
+    )
+    assert operation is not None and operation.get("error") is None
+
+    aborted = await store.abort_retained_fork(
+        operation_id=operation["id"],
+        detail="host clone failed",
+    )
+
+    assert aborted is not None and aborted["state"] == "failed"
+    assert aborted["cleanup_pending"] is False
+    sandbox = await store.thread_sandbox(thread_id=source["thread_id"])
+    assert sandbox["fork_operation_id"] is None
+
+
+async def test_stalled_retained_fork_cleanup_survives_control_plane_restarts(
+    store: AgentJobStore,
+):
+    source, _ = await _settle_retained_chat(store)
+    operation = await store.prepare_retained_fork(
+        source_job_id=source["id"],
+        user_id=source["user_id"],
+    )
+    assert operation is not None and operation.get("error") is None
+
+    first_pass = await store.reap_stalled_sandbox_forks(stall_seconds=0)
+
+    assert [row["id"] for row in first_pass] == [operation["id"]]
+    assert first_pass[0]["state"] == "failed"
+    assert first_pass[0]["cleanup_pending"] is True
+    assert (await store.thread_sandbox(thread_id=source["thread_id"]))["fork_operation_id"] is None
+
+    # If the process dies before calling the host, the next pass still sees the
+    # debt; only an explicit broker acknowledgement clears it.
+    repeated = await store.reap_stalled_sandbox_forks(stall_seconds=900)
+    assert [row["id"] for row in repeated] == [operation["id"]]
+    completed = await store.complete_retained_fork_cleanup(operation_id=operation["id"])
+    assert completed is not None and completed["cleanup_pending"] is False
+    assert await store.reap_stalled_sandbox_forks(stall_seconds=0) == []
+
+
+async def test_retained_fork_rejects_a_non_latest_filesystem_anchor(store: AgentJobStore):
+    first, first_sandbox = await _settle_retained_chat(store)
+    second = await store.create_follow_up(
+        parent_job_id=first["id"],
+        user_id=first["user_id"],
+        prompt="second retained turn",
+    )
+    assert second is not None
+    claim = await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-a")
+    assert claim is not None and claim["id"] == second["id"]
+    reserved = await store.reserve_thread_sandbox(
+        thread_id=second["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="runner-a",
+        sandbox_id=first_sandbox["sandbox_id"],
+        container_name=first_sandbox["container_name"],
+        runtime_id=first_sandbox["runtime_id"],
+        runtime_version=first_sandbox["runtime_version"],
+        sandbox_image_digest=first_sandbox["sandbox_image_digest"],
+        execution_profile=first_sandbox["execution_profile"],
+    )
+    fence = {
+        "thread_id": second["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": reserved["generation"],
+        "activation_generation": reserved["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id=first_sandbox["container_id"],
+        context_status="live",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=second["id"])
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=second["id"],
+        context_status="live",
+        native_session_id="native-session-one",
+        idle_timeout_seconds=1800,
+    )
+    assert await store.transition(
+        job_id=second["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+
+    refused = await store.prepare_retained_fork(
+        source_job_id=first["id"],
+        user_id=first["user_id"],
+    )
+
+    assert refused == {"error": "not_latest_settled"}
+
+
+async def test_retained_container_identity_cannot_be_replaced_or_reimaged(
+    store: AgentJobStore,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert (
+        await store.mark_thread_sandbox_running(
+            **fence,
+            container_id="container-retained-one",
+            context_status="new",
+        )
+        is not None
+    )
+    assert (
+        await store.mark_thread_sandbox_running(
+            **fence,
+            container_id="container-retained-replacement",
+            context_status="new",
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="immutable identity"):
+        await store.reserve_thread_sandbox(
+            thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            host="runner-a",
+            sandbox_id=sandbox["sandbox_id"],
+            container_name=sandbox["container_name"],
+            runtime_id=sandbox["runtime_id"],
+            runtime_version=sandbox["runtime_version"],
+            sandbox_image_digest="sha256:a-different-image",
+            execution_profile=sandbox["execution_profile"],
+        )
+
+
+async def test_retained_follow_up_attempt_keeps_original_image_and_cli_pin(
+    store: AgentJobStore,
+):
+    job = await _create_job(store)
+    original = await store.claim_job(
+        worker_id="w1",
+        lease_ttl_seconds=60,
+        host="runner-a",
+        claim_attestation={
+            "sandbox_runtime": "runc",
+            "sandbox_image_digest": "sha256:original-image",
+            "runtime_versions": {"claude-code": "2.1.220"},
+            "runtime_versions_available": {"claude-code": ["2.1.220"]},
+        },
+    )
+    assert original is not None
+    sandbox = await store.reserve_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=original["attempt_id"],
+        lease_generation=original["lease_generation"],
+        host="runner-a",
+        sandbox_id="asbx_pinned",
+        container_name="freeinference-chat-pinned",
+        runtime_id="claude-code",
+        runtime_version=original["runtime_version"],
+        sandbox_image_digest=original["sandbox_image_digest"],
+        execution_profile=job["execution_profile"],
+    )
+    assert sandbox is not None
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": original["attempt_id"],
+        "lease_generation": original["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-pinned",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="new",
+        native_session_id="session-pinned",
+        idle_timeout_seconds=1800,
+    )
+    assert await store.transition(
+        job_id=job["id"],
+        attempt_id=original["attempt_id"],
+        lease_generation=original["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    child = await store.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="continue",
+    )
+    assert child is not None and child["state"] == "queued"
+
+    follow_up = await store.claim_job(
+        worker_id="w2",
+        lease_ttl_seconds=60,
+        host="runner-a",
+        claim_attestation={
+            "sandbox_runtime": "runc",
+            "sandbox_image_digest": "sha256:new-runner-image",
+            "runtime_versions": {"claude-code": "2.1.999"},
+            "runtime_versions_available": {"claude-code": ["2.1.999"]},
+        },
+    )
+
+    assert follow_up is not None
+    assert follow_up["runtime_version"] == "2.1.220"
+    assert follow_up["sandbox_image_digest"] == "sha256:original-image"
+    assert follow_up["thread_sandbox"]["container_id"] == "container-pinned"
+
+
+async def test_failed_preadmission_activation_requests_an_immediate_stop(
+    store: AgentJobStore,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert (
+        await store.mark_thread_sandbox_running(
+            **fence,
+            container_id="container-retained-one",
+            context_status="new",
+        )
+        is not None
+    )
+
+    abandoned = await store.abandon_thread_sandbox(
+        **fence,
+        lost=False,
+        detail="checkout failed",
+        idle_timeout_seconds=1800,
+    )
+
+    assert abandoned is not None
+    assert abandoned["state"] == "stopping"
+    assert abandoned["active_attempt_id"] is None
+    assert abandoned["idle_deadline"] is None
+
+
+async def test_failed_preadmission_before_container_creation_can_be_reprovisioned(
+    store: AgentJobStore,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+
+    abandoned = await store.abandon_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        sandbox_generation=sandbox["generation"],
+        activation_generation=sandbox["activation_generation"],
+        lost=False,
+        detail="image pull failed",
+        idle_timeout_seconds=1800,
+    )
+
+    assert abandoned is not None
+    assert abandoned["container_id"] is None
+    assert abandoned["state"] == "provisioning"
+    assert abandoned["context_status"] == "new"
+    assert abandoned["active_attempt_id"] is None
+    assert abandoned["idle_deadline"] is None
+
+
+async def test_expired_job_finalization_preserves_an_already_settled_context(
+    store: AgentJobStore,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert (
+        await store.mark_thread_sandbox_running(
+            **fence,
+            container_id="container-retained-one",
+            context_status="new",
+        )
+        is not None
+    )
+    assert await store.record_continuity_mode(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        mode=None,
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert (
+        await store.settle_thread_sandbox(
+            **fence,
+            job_id=job["id"],
+            context_status="new",
+            native_session_id="claude-session-one",
+            idle_timeout_seconds=1800,
+        )
+        is not None
+    )
+    await _expire_attempt(store, claim["attempt_id"])
+
+    actions = await store.reap_expired(max_attempts=3)
+
+    assert actions == [{"job_id": job["id"], "attempt_id": claim["attempt_id"], "action": "failed"}]
+    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert durable is not None
+    assert durable["state"] == "running"
+    assert durable["context_status"] == "new"
+    assert durable["last_settled_job_id"] == job["id"]
+    assert durable["admitted_job_id"] is None
+    assert durable["idle_deadline"] is not None
+    assert (await store.job_turn_telemetry(job_id=job["id"]))["context_status"] == "new"
+    failed = await store.get_job(job["id"])
+    assert failed["state"] == "failed"
+    assert "prompt was not replayed" in failed["detail"]
+
+
+async def test_expired_retained_admission_fails_closed_instead_of_replaying(
+    store: AgentJobStore,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert (
+        await store.mark_thread_sandbox_running(
+            **fence,
+            container_id="container-retained-one",
+            context_status="new",
+        )
+        is not None
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    await _expire_attempt(store, claim["attempt_id"])
+
+    actions = await store.reap_expired(max_attempts=3)
+
+    assert actions == [{"job_id": job["id"], "attempt_id": claim["attempt_id"], "action": "failed"}]
+    assert (await store.get_job(job["id"]))["state"] == "failed"
+    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert durable is not None
+    assert durable["state"] == "stopped_dirty"
+    assert durable["context_status"] == "lost"
+    assert durable["active_attempt_id"] is None
+    assert durable["admitted_job_id"] is None
+    assert (await store.job_turn_telemetry(job_id=job["id"]))["context_status"] == "lost"
 
 
 async def test_reap_fails_job_after_max_attempts(store: AgentJobStore):

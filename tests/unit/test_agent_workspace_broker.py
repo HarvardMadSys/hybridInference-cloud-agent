@@ -8,6 +8,8 @@ import os
 import queue
 import subprocess
 import threading
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -20,9 +22,11 @@ from cloud_agent_host.sandbox import (
     SandboxSpec,
     TerminalProcess,
 )
+from cloud_agent_host.session_supervisor import SandboxForkResult, SessionDescriptor, SessionLease
 from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
+    _restartable_mode_covers_every_runtime,
     _terminal_sse_frame,
     _TerminalSession,
     create_app,
@@ -49,6 +53,14 @@ def _workspace(tmp_path):
     _git(repo, "add", "README.md")
     _git(repo, "commit", "--quiet", "-m", "base")
     return root, repo
+
+
+def test_partial_restartable_broker_rollout_keeps_legacy_mount_preflight(monkeypatch):
+    monkeypatch.setenv("AGENT_RESTARTABLE_RUNTIMES", "claude-code")
+    assert _restartable_mode_covers_every_runtime(True) is False
+
+    monkeypatch.delenv("AGENT_RESTARTABLE_RUNTIMES")
+    assert _restartable_mode_covers_every_runtime(True) is True
 
 
 class _FakeTerminalProcess(TerminalProcess):
@@ -600,6 +612,22 @@ def test_terminal_stream_viewers_are_bounded_per_session(tmp_path):
     session.close()
 
 
+def test_retained_terminal_idle_guard_cannot_outlive_the_chat_clock(tmp_path):
+    """A retained PTY uses the earlier terminal/chat idle boundary."""
+    session = _TerminalSession(
+        terminal_id="term_test",
+        process=_FakeTerminalProcess(),
+        workdir=tmp_path,
+        rows=24,
+        cols=80,
+        now=100,
+        idle_ttl_s=10,
+    )
+
+    assert session.expired(now=109, idle_ttl_s=30, hard_ttl_s=60) is False
+    assert session.expired(now=110, idle_ttl_s=30, hard_ttl_s=60) is True
+
+
 @pytest.mark.asyncio
 async def test_terminal_output_wakes_every_async_viewer(tmp_path):
     """One viewer cannot clear another viewer's output notification."""
@@ -833,3 +861,483 @@ def test_terminal_ring_marks_a_single_oversized_output_before_its_retained_tail(
     assert events[0].reason == "output_truncated"
     assert events[1].data == b"b" * MAX_TERMINAL_BUFFER_BYTES
     assert session.events_after(1, wait_s=0) == [events[1]]
+
+
+class _FakeSessionSupervisor:
+    """Record the broker's private restartable-sandbox RPC contract."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.idle_timeout_s = 30.0
+        self.workspace_backend = _FakeTerminalBackend()
+        self.workspace_backend.manager = SimpleNamespace(
+            require_network_phase=lambda spec, phase: self.calls.append(("network", spec, phase))
+        )
+        self.workspace_backend.spec = SimpleNamespace(thread_id="athr_1")
+
+    def acquire(
+        self,
+        spec,
+        *,
+        owner: str,
+        has_settled_context: bool,
+        activation_generation: int,
+        live_process_proven: bool,
+        expected_container_id: str | None,
+    ):
+        self.calls.append(
+            (
+                "acquire",
+                spec,
+                owner,
+                has_settled_context,
+                activation_generation,
+                live_process_proven,
+                expected_container_id,
+            )
+        )
+        return SessionLease(
+            thread_id=spec.thread_id,
+            sandbox_id=spec.sandbox_id,
+            container_id="container-one",
+            container_name=spec.container_name,
+            token="lease-token",
+            activation_generation=2,
+            context_status="restored" if has_settled_context else "new",
+        )
+
+    def note_process_started(self, thread_id: str, token: str):
+        self.calls.append(("process", thread_id, token))
+        return self._descriptor(thread_id, process_generation=4)
+
+    def settle(self, thread_id: str, token: str, *, job_id: str, context_status: str):
+        self.calls.append(("settle", thread_id, token, job_id, context_status))
+        return self._descriptor(
+            thread_id,
+            context_status=context_status,
+            last_settled_job_id=job_id,
+        )
+
+    def abandon(self, thread_id: str, token: str, *, lost: bool):
+        self.calls.append(("abandon", thread_id, token, lost))
+        return self._descriptor(thread_id, context_status="lost" if lost else "new")
+
+    def status(self, thread_id: str):
+        self.calls.append(("status", thread_id))
+        return self._descriptor(thread_id)
+
+    def reconcile(self):
+        self.calls.append(("reconcile",))
+        return [self._descriptor("athr_1")]
+
+    def stop_if_idle(
+        self,
+        thread_id: str,
+        *,
+        generation: int,
+        activation_generation: int,
+        reason: str = "idle",
+    ):
+        self.calls.append(("stop_if_idle", thread_id, generation, activation_generation, reason))
+        descriptor = self._descriptor(thread_id)
+        return replace(
+            descriptor,
+            docker_status="stopped",
+            running=False,
+            activation_generation=activation_generation,
+            idle_deadline_monotonic=None,
+        )
+
+    def fork_settled(self, thread_id: str, **kwargs):
+        self.calls.append(("fork", thread_id, kwargs))
+        return SandboxForkResult(
+            operation_id=kwargs["operation_id"],
+            source_thread_id=thread_id,
+            source_sandbox_id=kwargs["source_sandbox_id"],
+            source_container_id=kwargs["source_container_id"],
+            target_thread_id=kwargs["target_thread_id"],
+            target_sandbox_id=kwargs["target_sandbox_id"],
+            target_container_id="container-fork",
+            target_container_name="freeinference-chat-fork",
+            snapshot_image_digest="sha256:fork-image",
+            source_fingerprint="sha256:fork-image",
+            target_fingerprint="sha256:fork-image",
+        )
+
+    def rollback_fork(self, thread_id: str, **kwargs):
+        self.calls.append(("fork-rollback", thread_id, kwargs))
+        return True
+
+    def operation_opened(self, thread_id: str):
+        self.calls.append(("operation_opened", thread_id))
+        return "operation-token", self._descriptor(thread_id)
+
+    def operation_closed(self, thread_id: str, token: str):
+        self.calls.append(("operation_closed", thread_id, token))
+        return self._descriptor(thread_id)
+
+    def suspend_workspace(self, thread_id: str):
+        self.calls.append(("suspend_workspace", thread_id))
+        return self._descriptor(thread_id)
+
+    def wait_workspace_operations(self, thread_id: str):
+        self.calls.append(("wait_workspace_operations", thread_id))
+        return self._descriptor(thread_id)
+
+    def resume_workspace(self, thread_id: str):
+        self.calls.append(("resume_workspace", thread_id))
+        return self._descriptor(thread_id)
+
+    def terminal_opened(self, thread_id: str):
+        self.calls.append(("terminal_opened", thread_id))
+        return "terminal-token", self._descriptor(thread_id)
+
+    def terminal_closed(
+        self,
+        thread_id: str,
+        token: str,
+        *,
+        last_activity_monotonic: float | None = None,
+    ):
+        self.calls.append(("terminal_closed", thread_id, token, last_activity_monotonic))
+        return self._descriptor(thread_id)
+
+    def backend(self, thread_id: str):
+        self.calls.append(("backend", thread_id))
+        return self.workspace_backend
+
+    @staticmethod
+    def _descriptor(
+        thread_id: str,
+        *,
+        process_generation: int = 3,
+        context_status: str = "live",
+        last_settled_job_id: str | None = "ajob_1",
+    ) -> SessionDescriptor:
+        return SessionDescriptor(
+            thread_id=thread_id,
+            sandbox_id="asbx_1",
+            generation=1,
+            container_id="container-one",
+            container_name="freeinference-chat-one",
+            docker_status="running",
+            running=True,
+            busy=False,
+            terminal_count=0,
+            operation_count=0,
+            workspace_suspended=False,
+            activation_generation=2,
+            process_generation=process_generation,
+            last_settled_job_id=last_settled_job_id,
+            idle_deadline_monotonic=1900.0,
+            context_status=context_status,
+        )
+
+
+@pytest.mark.asyncio
+async def test_broker_exposes_authenticated_restartable_sandbox_lifecycle(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    supervisor = _FakeSessionSupervisor()
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        session_supervisor=supervisor,
+    )
+    transport = ASGITransport(app=app)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+
+    async with AsyncClient(transport=transport, base_url="http://broker") as client:
+        unauthenticated = await client.get("/sandboxes/athr_1")
+        acquired = await client.post(
+            "/sandboxes/athr_1/acquire",
+            headers=headers,
+            json={
+                "sandbox_id": "asbx_1",
+                "generation": 1,
+                "activation_generation": 2,
+                "runtime_id": "claude-code",
+                "runtime_version": "2.1.220",
+                "owner": "attempt:9:generation:2",
+                "has_settled_context": True,
+                "expected_container_id": "container-one",
+            },
+        )
+        process = await client.post(
+            "/sandboxes/athr_1/process-started",
+            headers=headers,
+            json={"token": "lease-token"},
+        )
+        settled = await client.post(
+            "/sandboxes/athr_1/settle",
+            headers=headers,
+            json={
+                "token": "lease-token",
+                "job_id": "ajob_2",
+                "context_status": "restored",
+            },
+        )
+        status = await client.get("/sandboxes/athr_1", headers=headers)
+        observed = await client.get("/sandboxes", headers=headers)
+        stopped = await client.post(
+            "/sandboxes/athr_1/stop-idle",
+            headers=headers,
+            json={"generation": 1, "activation_generation": 2},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert acquired.status_code == 200
+    assert acquired.json()["context_status"] == "restored"
+    assert acquired.json()["token"] == "lease-token"
+    assert process.json()["process_generation"] == 4
+    assert settled.json()["last_settled_job_id"] == "ajob_2"
+    assert status.json()["container_id"] == "container-one"
+    assert observed.json()["sandboxes"] == [
+        {
+            "thread_id": "athr_1",
+            "sandbox_id": "asbx_1",
+            "generation": 1,
+            "container_id": "container-one",
+            "container_name": "freeinference-chat-one",
+            "docker_status": "running",
+            "running": True,
+            "busy": False,
+            "terminal_count": 0,
+            "operation_count": 0,
+            "workspace_suspended": False,
+            "activation_generation": 2,
+            "process_generation": 3,
+            "last_settled_job_id": "ajob_1",
+            "idle_deadline_monotonic": 1900.0,
+            "context_status": "live",
+        }
+    ]
+    assert stopped.json()["running"] is False
+    assert [call[0] for call in supervisor.calls] == [
+        "acquire",
+        "process",
+        "settle",
+        "status",
+        "reconcile",
+        "stop_if_idle",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_broker_accepts_a_generation_zero_fork_target_idle_stop(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    supervisor = _FakeSessionSupervisor()
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        session_supervisor=supervisor,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/sandboxes/athr_fork/stop-idle",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json={"generation": 1, "activation_generation": 0},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["activation_generation"] == 0
+    assert supervisor.calls == [("stop_if_idle", "athr_fork", 1, 0, "idle")]
+
+
+@pytest.mark.asyncio
+async def test_broker_exposes_fenced_full_sandbox_fork_and_rollback(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    supervisor = _FakeSessionSupervisor()
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        session_supervisor=supervisor,
+    )
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    fork_body = {
+        "operation_id": "afork_1",
+        "source_sandbox_id": "asbx_1",
+        "source_generation": 1,
+        "source_activation_generation": 2,
+        "source_container_id": "container-one",
+        "source_anchor_job_id": "ajob_1",
+        "source_native_session_id": "native-session-1",
+        "target_thread_id": "athr_fork",
+        "target_sandbox_id": "asbx_fork",
+        "target_generation": 1,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        forked = await client.post(
+            "/sandboxes/athr_1/fork",
+            headers=headers,
+            json=fork_body,
+        )
+        rolled_back = await client.post(
+            "/sandboxes/athr_1/fork-rollback",
+            headers=headers,
+            json={
+                "operation_id": "afork_1",
+                "source_sandbox_id": "asbx_1",
+                "target_thread_id": "athr_fork",
+                "target_sandbox_id": "asbx_fork",
+                "target_generation": 1,
+                "expected_container_id": "container-fork",
+            },
+        )
+
+    assert forked.status_code == 200, forked.text
+    assert forked.json()["snapshot_image_digest"] == "sha256:fork-image"
+    assert rolled_back.json() == {"removed": True}
+    assert supervisor.calls[-2][0] == "fork"
+    assert supervisor.calls[-1][0] == "fork-rollback"
+
+
+@pytest.mark.asyncio
+async def test_retained_workspace_suspension_wraps_terminal_and_file_barriers(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    supervisor = _FakeSessionSupervisor()
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        session_supervisor=supervisor,
+    )
+    transport = ASGITransport(app=app)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+
+    async with AsyncClient(transport=transport, base_url="http://broker") as client:
+        suspended = await client.post(
+            "/workspaces/athr_1/terminals/suspend",
+            headers=headers,
+            json={"lease_generation": 9},
+        )
+        resumed = await client.post(
+            "/workspaces/athr_1/terminals/resume",
+            headers=headers,
+            json={"lease_generation": 9},
+        )
+
+    assert suspended.status_code == 200, suspended.text
+    assert resumed.status_code == 200, resumed.text
+    assert [call[0] for call in supervisor.calls] == [
+        "suspend_workspace",
+        "wait_workspace_operations",
+        "resume_workspace",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_broker_keeps_legacy_routes_and_reports_restartable_mode_disabled(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        restartable_enabled=False,
+    )
+    transport = ASGITransport(app=app)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+
+    async with AsyncClient(transport=transport, base_url="http://broker") as client:
+        legacy = await client.get("/workspaces/ajob_test/files", headers=headers)
+        retained = await client.get("/sandboxes/athr_1", headers=headers)
+
+    assert legacy.status_code == 200
+    assert retained.status_code == 409
+    assert retained.json() == {"detail": "restartable chat sandboxes are not enabled on this host"}
+
+
+@pytest.mark.asyncio
+async def test_retained_file_routes_use_container_operation_not_a_host_directory(
+    tmp_path, monkeypatch
+):
+    root, _repo = _workspace(tmp_path)
+    supervisor = _FakeSessionSupervisor()
+    reads: list[tuple[str, str]] = []
+    writes: list[tuple[str, str, str]] = []
+
+    def fake_read(backend, relative, **_limits):
+        reads.append((backend.spec.thread_id, relative))
+        return {
+            "path": relative,
+            "kind": "file",
+            "content": "before\n",
+            "size": 7,
+            "binary": False,
+            "truncated": False,
+            "writable": True,
+            "source": "workspace",
+            "omitted_reason": None,
+        }
+
+    def fake_write(backend, relative, content, **_limits):
+        writes.append((backend.spec.thread_id, relative, content))
+        return {**fake_read(backend, relative), "content": content, "size": len(content)}
+
+    monkeypatch.setattr("cloud_agent_host.workspace_broker.read_retained_file", fake_read)
+    monkeypatch.setattr("cloud_agent_host.workspace_broker.write_retained_file", fake_write)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        session_supervisor=supervisor,
+    )
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        read = await client.get("/workspaces/athr_1/files?path=README.md", headers=headers)
+        written = await client.put(
+            "/workspaces/athr_1/files?path=README.md",
+            headers=headers,
+            json={"content": "after\n"},
+        )
+
+    assert read.status_code == 200
+    assert written.status_code == 200
+    assert reads == [("athr_1", "README.md"), ("athr_1", "README.md")]
+    assert writes == [("athr_1", "README.md", "after\n")]
+    assert not (root / "athr_1").exists()
+    assert [call[0] for call in supervisor.calls] == [
+        "operation_opened",
+        "backend",
+        "network",
+        "operation_closed",
+        "operation_opened",
+        "backend",
+        "network",
+        "operation_closed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retained_terminal_execs_in_same_chat_and_releases_idle_block(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    supervisor = _FakeSessionSupervisor()
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        session_supervisor=supervisor,
+    )
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        created = await client.post(
+            "/workspaces/athr_1/terminals",
+            headers=headers,
+            json={"rows": 30, "cols": 100},
+        )
+        terminal_id = created.json()["id"]
+        deleted = await client.delete(
+            f"/workspaces/athr_1/terminals/{terminal_id}", headers=headers
+        )
+
+    assert created.status_code == 200
+    assert deleted.status_code == 200
+    assert supervisor.workspace_backend.specs[0].workdir == "/workspace"
+    assert not (root / "athr_1").exists()
+    assert ("terminal_opened", "athr_1") in supervisor.calls
+    terminal_close = next(call for call in supervisor.calls if call[0] == "terminal_closed")
+    assert terminal_close[:3] == ("terminal_closed", "athr_1", "terminal-token")
+    assert isinstance(terminal_close[3], float)

@@ -67,7 +67,12 @@ class _Runtime(AgentRuntime):
         return None
 
 
-def _context(spawned: list[_Process] | None = None, **process_kwargs) -> LaunchContext:
+def _context(
+    spawned: list[_Process] | None = None,
+    *,
+    state_dir: str | None = None,
+    **process_kwargs,
+) -> LaunchContext:
     def spawn(argv, env):
         process = _Process(**process_kwargs)
         process.argv, process.env = argv, env
@@ -83,6 +88,7 @@ def _context(spawned: list[_Process] | None = None, **process_kwargs) -> LaunchC
         spawn=spawn,
         base_env={"HOME": "/home/agent"},
         mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
+        state_dir=state_dir,
     )
 
 
@@ -209,3 +215,38 @@ def test_get_driver_resolves_the_registry_and_keeps_its_refusal():
     assert get_driver("claude-code").id == "claude-code"
     with pytest.raises(KeyError):
         get_driver("no-such-harness")
+
+
+@pytest.mark.parametrize(
+    ("runtime_id", "resume_flag"),
+    [
+        ("codex", "resume"),
+        ("pi", "--session"),
+        ("opencode", "--session"),
+        ("kilo", "--session"),
+    ],
+)
+def test_native_resume_drivers_pass_only_the_new_prompt_and_exact_session_id(
+    runtime_id: str,
+    resume_flag: str,
+):
+    """A follow-up uses the CLI's native locator, never transcript replay."""
+    spawned: list[_Process] = []
+    driver = get_driver(runtime_id)
+    session = driver.launch_resident(
+        _context(spawned=spawned, state_dir="/host-only-state", lines=[]),
+        session_id="native-session-123",
+    )
+
+    session.start_turn(TurnInput(prompt="only the new message", model="glm-5.1"))
+
+    (process,) = spawned
+    assert resume_flag in process.argv
+    assert process.argv[process.argv.index(resume_flag) + 1] == "native-session-123"
+    assert "only the new message" in process.argv
+    # The host path is never exposed inside the sandbox; all four CLIs use
+    # the canonical state mount / Docker-layer path.
+    assert "/host-only-state" not in process.argv
+    assert "/host-only-state" not in process.env.values()
+    assert driver.capabilities().continuity == "resume"
+    assert driver.capabilities().checkpoint_export is False

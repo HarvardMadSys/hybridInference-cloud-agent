@@ -75,6 +75,8 @@ export interface AgentJobApi {
   agent_egress_tier: string | null;
   /** Which continuity rung this turn ran on. Null on turns that predate it. */
   continuity_mode?: 'hot' | 'warm_native' | 'cold_native' | 'replay' | null;
+  /** Canonical user-facing context state for restartable chat sandboxes. */
+  context_status?: 'new' | 'live' | 'restored' | 'lost' | null;
   duration_ms?: number | null;
   /**
    * What the sandbox consumed, measured from the host. Null when no sampler

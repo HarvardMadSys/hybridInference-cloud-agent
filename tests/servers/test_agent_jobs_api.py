@@ -69,10 +69,12 @@ class FakeAgentJobStore:
         self.live_fence: tuple[int, int] | None = None
         self.attempt_grants: dict[int, str] = {}
         self.terminal_readiness: dict[int, bool] = {}
+        self.sandbox_admissions: list[dict[str, Any]] = []
         self.released: list[tuple[str, int]] = []
         self.runner_hosts: dict[str, dict[str, Any]] = {}
         self.active_host: str | None = None
         self.mcp_connections: dict[str, list[dict[str, Any]]] = {}
+        self.sandbox_forks: dict[str, dict[str, Any]] = {}
         self._next_event_id = 1
         self._next_job = 1
 
@@ -289,6 +291,109 @@ class FakeAgentJobStore:
             )
         return self.jobs[copied_id[source["id"]]]
 
+    async def prepare_retained_fork(
+        self, *, source_job_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        source = self.jobs.get(source_job_id)
+        if source is None or source["user_id"] != user_id:
+            return None
+        if source["state"] not in {"succeeded", "failed", "cancelled"}:
+            return {"error": "not_settled"}
+        sandbox = source.get("thread_sandbox")
+        if not isinstance(sandbox, dict):
+            return {"error": "not_retained"}
+        latest = max(
+            (job for job in self.jobs.values() if job["thread_id"] == source["thread_id"]),
+            key=lambda job: job["turn_no"],
+        )
+        if latest["id"] != source_job_id:
+            return {"error": "not_latest_settled"}
+        existing = next(
+            (
+                operation
+                for operation in self.sandbox_forks.values()
+                if operation["source_thread_id"] == source["thread_id"]
+                and operation["state"] == "preparing"
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        operation_id = f"afork_{len(self.sandbox_forks) + 1:04d}"
+        operation = {
+            "id": operation_id,
+            "state": "preparing",
+            "user_id": user_id,
+            "source_thread_id": source["thread_id"],
+            "source_job_id": source_job_id,
+            "source_sandbox_id": sandbox["sandbox_id"],
+            "source_sandbox_generation": sandbox.get("generation", 1),
+            "source_activation_generation": sandbox.get("activation_generation", 1),
+            "source_container_id": sandbox["container_id"],
+            "source_native_session_id": sandbox.get("native_session_id", "native-session-1"),
+            "target_thread_id": f"athr_fork_{self._next_job:04d}",
+            "target_sandbox_id": f"asbx_fork_{len(self.sandbox_forks) + 1:04d}",
+        }
+        self.sandbox_forks[operation_id] = operation
+        return operation
+
+    async def finalize_retained_fork(
+        self,
+        *,
+        operation_id: str,
+        target_container_id: str,
+        target_container_name: str,
+        snapshot_image_digest: str,
+        source_fingerprint: str | None,
+        target_fingerprint: str | None,
+    ) -> dict[str, Any] | None:
+        operation = self.sandbox_forks.get(operation_id)
+        if operation is None or operation["state"] != "preparing":
+            return None
+        copied = await self.fork_thread(
+            source_job_id=operation["source_job_id"],
+            user_id=operation["user_id"],
+        )
+        if copied is None or copied["thread_id"] != operation["target_thread_id"]:
+            return None
+        sandbox = {
+            "thread_id": copied["thread_id"],
+            "sandbox_id": operation["target_sandbox_id"],
+            "generation": 1,
+            "container_id": target_container_id,
+            "container_name": target_container_name,
+            "sandbox_image_digest": snapshot_image_digest,
+            "native_session_id": operation["source_native_session_id"],
+            "state": "stopped",
+            "context_status": "restored",
+        }
+        for job in self.jobs.values():
+            if job["thread_id"] == copied["thread_id"]:
+                job["thread_sandbox"] = sandbox
+        operation.update(
+            state="ready",
+            target_container_id=target_container_id,
+            source_fingerprint=source_fingerprint,
+            target_fingerprint=target_fingerprint,
+        )
+        return copied
+
+    async def abort_retained_fork(
+        self,
+        *,
+        operation_id: str,
+        detail: str,
+        cleanup_pending: bool = False,
+    ) -> dict[str, Any] | None:
+        operation = self.sandbox_forks.get(operation_id)
+        if operation is not None and operation["state"] == "preparing":
+            operation.update(
+                state="failed",
+                last_error=detail,
+                cleanup_pending=cleanup_pending,
+            )
+        return operation
+
     async def resolve_legacy_published_commit(self, *, parent_job_id: str, commit_sha: str) -> bool:
         parent = self.jobs.get(parent_job_id)
         if parent is None or not parent.get("published_pr_url"):
@@ -432,6 +537,13 @@ class FakeAgentJobStore:
         # Upsert, never append: a rollup describes a closed window, so a
         # retried post is the same window said twice.
         self.turn_telemetry[job_id] = {**self.turn_telemetry.get(job_id, {}), **rollup}
+        return True
+
+    async def admit_thread_sandbox_turn(self, **kwargs: Any) -> bool:
+        """Record the at-most-once admission RPC under the worker fence."""
+        if not self._fenced(kwargs["attempt_id"], kwargs["lease_generation"]):
+            return False
+        self.sandbox_admissions.append(dict(kwargs))
         return True
 
     async def list_jobs(
@@ -1461,6 +1573,11 @@ async def test_config_offers_the_models_the_create_endpoint_accepts(client: Asyn
     config = await client.get("/v1/agent/config")
     assert config.status_code == 200
     assert config.json()["models"] == list(_TEST_MODELS)
+    # This fixture has no GitHub App, but its operator allowlists public repos.
+    # The API accepts those jobs and anonymous clone works, so the composer
+    # must not disable itself behind a narrower historical field name.
+    assert "owner/name" in config.json()["repos"]
+    assert config.json()["github_connected"] is True
 
 
 async def test_follow_ups_append_to_latest_turn_and_reject_blank_prompts(
@@ -1490,6 +1607,27 @@ async def test_follow_ups_append_to_latest_turn_and_reject_blank_prompts(
         json={"prompt": "   \n  "},
     )
     assert blank.status_code == 422
+
+
+async def test_follow_up_is_refused_when_retained_context_is_lost(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["state"] = "failed"
+    store.jobs[job_id]["thread_sandbox"] = {
+        "sandbox_id": "asbx_1",
+        "state": "stopped_dirty",
+        "context_status": "lost",
+    }
+
+    response = await client.post(
+        f"/v1/agent/jobs/{job_id}/follow-ups",
+        json={"prompt": "try the next message"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"]["type"] == "sandbox_context_lost"
+    assert len(store.jobs) == 1
 
 
 async def test_fork_copies_settled_history_into_a_new_thread(
@@ -1595,6 +1733,102 @@ async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: Fak
     store.jobs[job_id]["state"] = "running"
     running = await client.post(f"/v1/agent/jobs/{job_id}/fork")
     assert running.status_code == 409
+
+
+async def test_retained_chat_fork_clones_the_full_sandbox(store: FakeAgentJobStore, monkeypatch):
+    """A retained fork is finalized only from the host's exact Docker receipt."""
+
+    class Broker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def fork_chat_sandbox(self, source_thread_id: str, **kwargs: Any):
+            self.calls.append((source_thread_id, kwargs))
+            return {
+                "operation_id": kwargs["operation_id"],
+                "source_thread_id": source_thread_id,
+                "source_sandbox_id": kwargs["source_sandbox_id"],
+                "source_container_id": kwargs["source_container_id"],
+                "target_thread_id": kwargs["target_thread_id"],
+                "target_sandbox_id": kwargs["target_sandbox_id"],
+                "target_container_id": "container-fork",
+                "target_container_name": "freeinference-chat-fork",
+                "snapshot_image_digest": "sha256:fork-image",
+                "source_fingerprint": "sha256:fork-image",
+                "target_fingerprint": "sha256:fork-image",
+            }
+
+        async def rollback_chat_sandbox_fork(self, *_args: Any, **_kwargs: Any):
+            raise AssertionError("a successful fork must not roll back")
+
+    broker = Broker()
+    monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: broker)
+    app = _build_app(store)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as local_client:
+        job_id = await _create_job(local_client)
+        source = store.jobs[job_id]
+        source["state"] = "succeeded"
+        source["thread_sandbox"] = {
+            "sandbox_id": "asbx_1",
+            "generation": 1,
+            "activation_generation": 2,
+            "container_id": "container-one",
+            "native_session_id": "native-session-1",
+        }
+
+        response = await local_client.post(f"/v1/agent/jobs/{job_id}/fork")
+
+    assert response.status_code == 201
+    forked = store.jobs[response.json()["id"]]
+    assert forked["thread_id"] != source["thread_id"]
+    assert forked["thread_sandbox"] == {
+        "thread_id": forked["thread_id"],
+        "sandbox_id": "asbx_fork_0001",
+        "generation": 1,
+        "container_id": "container-fork",
+        "container_name": "freeinference-chat-fork",
+        "sandbox_image_digest": "sha256:fork-image",
+        "native_session_id": "native-session-1",
+        "state": "stopped",
+        "context_status": "restored",
+    }
+    assert broker.calls[0][1]["source_container_id"] == "container-one"
+
+
+async def test_retained_chat_fork_keeps_cleanup_debt_when_host_rollback_fails(
+    store: FakeAgentJobStore, monkeypatch
+):
+    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+
+    class Broker:
+        async def fork_chat_sandbox(self, *_args: Any, **_kwargs: Any):
+            raise WorkspaceBrokerError(503, "host timed out")
+
+        async def rollback_chat_sandbox_fork(self, *_args: Any, **_kwargs: Any):
+            raise WorkspaceBrokerError(503, "host still unavailable")
+
+    monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: Broker())
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        store.jobs[job_id].update(
+            state="succeeded",
+            thread_sandbox={
+                "sandbox_id": "asbx_1",
+                "generation": 1,
+                "activation_generation": 2,
+                "container_id": "container-one",
+                "native_session_id": "native-session-1",
+            },
+        )
+
+        response = await client.post(f"/v1/agent/jobs/{job_id}/fork")
+
+    assert response.status_code == 503
+    operation = next(iter(store.sandbox_forks.values()))
+    assert operation["state"] == "failed"
+    assert operation["cleanup_pending"] is True
 
 
 async def test_fork_is_owner_scoped(client: AsyncClient, store: FakeAgentJobStore):
@@ -2726,6 +2960,32 @@ async def test_worker_flow_claim_event_artifact_finish(
     )
     assert finish.status_code == 200
     assert store.jobs[job_id]["state"] == "succeeded"
+
+
+async def test_retained_prompt_admission_is_worker_and_generation_fenced(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    job_id = await _create_job(client)
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+
+    admitted = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/sandbox/admit",
+        json={"sandbox_generation": 3, "activation_generation": 7},
+        headers=auth,
+    )
+
+    assert admitted.status_code == 200, admitted.text
+    assert store.sandbox_admissions == [
+        {
+            "thread_id": store.jobs[job_id]["thread_id"],
+            "job_id": job_id,
+            "attempt_id": 100,
+            "lease_generation": 1,
+            "sandbox_generation": 3,
+            "activation_generation": 7,
+        }
+    ]
 
 
 async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: FakeAgentJobStore):

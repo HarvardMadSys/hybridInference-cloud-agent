@@ -15,8 +15,8 @@ Ships in the sandbox image (reviewed and pinned there, like the CLI itself).
 Same properties as the pi/opencode wrappers, deliberately:
 
 - **The prompt never passes through a shell.** argv in, argv out, one exec.
-- **The config lives in the container's HOME, not the job worktree** — a file
-  dropped in the worktree would surface in ``git diff`` and pollute the patch.
+- **The config never lives in the job worktree.** Retained execution puts it
+  in activation tmpfs; legacy execution falls back to the container's HOME.
 - **json.dump does the quoting**, so a model id or URL cannot corrupt it.
 """
 
@@ -38,7 +38,14 @@ def main() -> None:
         )
         raise SystemExit(64) from None
 
-    config_path = os.path.expanduser("~/.kilo-freeinference.json")
+    # Keep the credential-bearing provider file in the activation tmpfs. Kilo
+    # session data uses the XDG roots the runtime places under /agent-state.
+    config_dir = os.environ.get("KILO_FREEINFERENCE_CONFIG_DIR")
+    if config_dir:
+        os.makedirs(config_dir, exist_ok=True)
+        config_path = os.path.join(config_dir, "config.json")
+    else:
+        config_path = os.path.expanduser("~/.kilo-freeinference.json")
     # No command-line flag exists for the reasoning effort, so it arrives in
     # the environment and belongs here. Verified against the pinned CLI:
     # `options.reasoningEffort` is the one shape that reaches the wire as

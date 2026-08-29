@@ -54,6 +54,16 @@ export function normalizeBasePath(raw: string | undefined): string {
  */
 export const gatewayAuthorizeUrl = (process.env.NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL || '').trim();
 
+/** Resolve an absolute production URL or a same-origin local path. */
+export function resolvedGatewayAuthorizeUrl(authorizeUrl = gatewayAuthorizeUrl): string {
+  if (!authorizeUrl) return '';
+  try {
+    return new URL(authorizeUrl, window.location.origin).toString();
+  } catch {
+    return '';
+  }
+}
+
 /**
  * The gateway's token endpoint, derived from the authorize URL's origin.
  *
@@ -63,9 +73,10 @@ export const gatewayAuthorizeUrl = (process.env.NEXT_PUBLIC_GATEWAY_AUTHORIZE_UR
  * get out of step. Returns an empty string when authorization is unconfigured.
  */
 export function gatewayTokenUrl(): string {
-  if (!gatewayAuthorizeUrl) return '';
+  const authorizeUrl = resolvedGatewayAuthorizeUrl();
+  if (!authorizeUrl) return '';
   try {
-    return new URL('/v1/identity/token', gatewayAuthorizeUrl).toString();
+    return new URL('/v1/identity/token', authorizeUrl).toString();
   } catch {
     return '';
   }

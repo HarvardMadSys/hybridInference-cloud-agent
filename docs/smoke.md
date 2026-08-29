@@ -1,5 +1,13 @@
 # Single-host end-to-end smoke (task E11)
 
+For a deterministic, provider-key-free local product run, use
+[`deploy/local/dev.sh`](../deploy/local/README.md) first. That Docker-only stack
+has been executed end to end against the real browser/control-plane/runner and
+all five pinned Agent CLI binaries, including `NEW → LIVE`, idle `docker stop`,
+and same-container `RESTORED`. This document remains the separate staging
+gateway + real GitHub publishing runbook; the local substitute intentionally
+does not claim to prove an external provider or pull-request publication.
+
 Bring up the control plane and one runner host on a single machine, point them
 at a **staging** gateway, and drive one real job from an empty workspace to a
 pull request on a scratch repository.

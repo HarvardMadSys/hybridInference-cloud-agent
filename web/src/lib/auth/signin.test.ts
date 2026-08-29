@@ -69,6 +69,16 @@ describe('callbackUri', () => {
     expect(url.searchParams.get('redirect_uri')).toBe(callbackUri());
     expect(url.searchParams.get('redirect_uri')).toBe(`${ORIGIN}/agents/callback`);
   });
+
+  it('resolves a local same-origin authorize path in the browser', async () => {
+    process.env.NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL = '/authorize';
+    const { buildAuthorizeUrl } = await loadSignin('');
+
+    const url = new URL(await buildAuthorizeUrl('/'));
+
+    expect(url.origin + url.pathname).toBe(`${ORIGIN}/authorize`);
+    expect(url.searchParams.get('redirect_uri')).toBe(`${ORIGIN}/callback`);
+  });
 });
 
 // The other direction, and the reason both live in this module.

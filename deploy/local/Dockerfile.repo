@@ -1,0 +1,21 @@
+FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/local/fixture /tmp/fixture
+
+RUN git init --initial-branch=main /tmp/source \
+    && cp -R /tmp/fixture/. /tmp/source/ \
+    && git -C /tmp/source config user.name "FreeInference Local" \
+    && git -C /tmp/source config user.email "local@freeinference.invalid" \
+    && git -C /tmp/source add . \
+    && git -C /tmp/source commit -m "Initial local demo repository" \
+    && mkdir -p /srv/git/local \
+    && git clone --bare /tmp/source /srv/git/local/demo.git \
+    && git -C /srv/git/local/demo.git update-server-info \
+    && rm -rf /tmp/source /tmp/fixture
+
+EXPOSE 9418
+CMD ["git", "daemon", "--reuseaddr", "--verbose", "--export-all", "--base-path=/srv/git", "/srv/git"]

@@ -364,6 +364,61 @@ def test_the_interval_follows_the_control_plane(monkeypatch) -> None:
     assert identity.interval_s == 7.5
 
 
+def test_heartbeat_carries_retained_sandbox_observations_without_inferring_absence(
+    monkeypatch,
+) -> None:
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    sent: list[dict] = []
+
+    def answer(url, body, bearer=""):
+        sent.append(body)
+        return {"status": "online"}
+
+    monkeypatch.setattr(enrollment, "_post", answer)
+    rows = [
+        {
+            "thread_id": "athr_1",
+            "sandbox_id": "asbx_1",
+            "container_id": "0123456789abcdef",
+            "generation": 1,
+            "activation_generation": 2,
+            "running": False,
+        }
+    ]
+
+    enrollment.heartbeat(base_url="http://cp", identity=identity, retained_sandboxes=rows)
+
+    assert sent[0]["retained_sandboxes"] == rows
+
+
+def test_heartbeat_delivers_fenced_idle_stop_commands(monkeypatch) -> None:
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    delivered: list[list[dict]] = []
+    commands = [
+        {
+            "thread_id": "athr_1",
+            "generation": 2,
+            "activation_generation": 7,
+        }
+    ]
+    monkeypatch.setattr(
+        enrollment,
+        "_post",
+        lambda *_args, **_kwargs: {
+            "status": "online",
+            "retained_sandboxes_stop": commands,
+        },
+    )
+
+    enrollment.heartbeat(
+        base_url="http://cp",
+        identity=identity,
+        on_retained_sandboxes_stop=delivered.append,
+    )
+
+    assert delivered == [commands]
+
+
 def test_a_nonsense_interval_is_ignored(monkeypatch) -> None:
     """Zero or negative would busy-loop against the control plane."""
     identity = enrollment.HostIdentity(host="h1", credential="c")

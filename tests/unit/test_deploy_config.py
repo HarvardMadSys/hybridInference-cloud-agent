@@ -24,6 +24,8 @@ from cloud_agent_host.runner import build_parser
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
+_CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
+_LOCAL_COMPOSE = REPO_ROOT / "deploy/local/docker-compose.yml"
 _DOCKERFILE = Path(__file__).resolve().parents[2] / "deploy/sandbox/Dockerfile.agent-sandbox"
 _CODEX_REQUIREMENTS = Path(__file__).resolve().parents[2] / "deploy/sandbox/codex-requirements.toml"
 
@@ -32,6 +34,71 @@ _CODEX_REQUIREMENTS = Path(__file__).resolve().parents[2] / "deploy/sandbox/code
 def compose() -> dict:
     """Parse the runner compose overlay."""
     return yaml.safe_load(_COMPOSE.read_text())
+
+
+@pytest.fixture(scope="module")
+def local_compose() -> dict:
+    """Parse the Docker-only complete local stack overlay."""
+    return yaml.safe_load(_LOCAL_COMPOSE.read_text())
+
+
+def test_complete_local_stack_exposes_only_its_loopback_edge(local_compose: dict):
+    services = local_compose["services"]
+
+    assert services["edge"]["ports"] == ["127.0.0.1:${LOCAL_EDGE_PORT:-13002}:8088"]
+    assert "ports" not in services["local-gateway"]
+    assert "ports" not in services["local-repo"]
+
+
+def test_complete_local_sandbox_network_has_only_narrow_relays(local_compose: dict):
+    on_egress = {
+        name
+        for name, service in local_compose["services"].items()
+        if "agent-egress" in (service.get("networks") or {})
+    }
+
+    assert local_compose["networks"]["agent-egress"]["internal"] is True
+    assert on_egress == {"local-gateway", "mcp-relay"}
+
+
+def test_complete_local_host_data_is_docker_owned(local_compose: dict):
+    """Runner/broker may control Docker but may not map app data from the host."""
+    named = set(local_compose["volumes"])
+    control = local_compose["services"]["control-plane"]
+    assert control["environment"]["AGENT_GITHUB_APP_PRIVATE_KEY_PATH"] == ""
+    assert control["volumes"] == ["local-empty-github-key:/etc/cloud-agent/github-app.pem:ro"]
+    for service_name in ("runner", "workspace-broker"):
+        for mount in local_compose["services"][service_name]["volumes"]:
+            source = _split_mount(mount)[0]
+            if "docker.sock" in source:
+                assert mount.endswith(":ro")
+            else:
+                assert source in named, f"{service_name} maps host data through {mount}"
+
+
+def test_complete_local_stack_runs_every_native_session_driver(local_compose: dict):
+    services = local_compose["services"]
+    expected = {"claude-code", "codex", "pi", "opencode", "kilo"}
+    for service_name in ("runner", "workspace-broker"):
+        configured = services[service_name]["environment"]["AGENT_RESTARTABLE_RUNTIMES"]
+        assert set(configured.split(",")) == expected
+
+
+def test_root_mounted_web_build_accepts_an_explicit_empty_base_path():
+    """Compose must distinguish unset from explicitly empty for root hosting."""
+    text = _CONTROL_PLANE_COMPOSE.read_text()
+
+    assert "${AGENT_WEB_BASE_PATH?" in text
+    assert "${AGENT_WEB_BASE_PATH:?" not in text
+
+
+def test_docker_build_context_excludes_local_dependency_trees():
+    """Local installs must not turn every image build into a 700 MB upload."""
+    ignored = (REPO_ROOT / ".dockerignore").read_text().splitlines()
+
+    assert ".venv" in ignored
+    assert "web/node_modules" in ignored
+    assert "web/.next" in ignored
 
 
 def test_egress_network_is_internal(compose: dict):
@@ -314,6 +381,28 @@ def test_workspace_broker_and_runner_share_the_same_worktrees(compose: dict):
     # control plane's configuration, not in this file.
 
 
+def test_restartable_chat_gate_and_timeout_match_between_runner_and_broker(compose: dict):
+    """A runner must not dispatch retained work to a broker with the mode disabled."""
+    services = compose["services"]
+    runner_env = services["runner"]["environment"]
+    broker_env = services["workspace-broker"]["environment"]
+
+    assert runner_env["AGENT_RESTARTABLE_SANDBOX"] == broker_env["AGENT_RESTARTABLE_SANDBOX"]
+    assert runner_env["AGENT_CHAT_IDLE_TIMEOUT_S"] == broker_env["AGENT_CHAT_IDLE_TIMEOUT_S"]
+    runtime_default = (
+        runner_env["AGENT_RESTARTABLE_RUNTIMES"]
+        .removeprefix("${AGENT_RESTARTABLE_RUNTIMES:-")
+        .removesuffix("}")
+    )
+    assert set(runtime_default.split(",")) == {
+        "claude-code",
+        "codex",
+        "pi",
+        "opencode",
+        "kilo",
+    }
+
+
 def test_workspace_broker_keeps_execution_off_the_public_gateway(compose: dict):
     """Only the private broker may spawn an isolated workspace command."""
     services = compose["services"]
@@ -339,6 +428,15 @@ def test_the_runner_image_can_actually_start_a_sandbox():
     """The container backend shells out to `docker`; the backend image has none."""
     text = _RUNNER_DOCKERFILE.read_text()
     assert "docker:" in text and "/usr/local/bin/docker" in text
+
+
+def test_sandbox_image_prepares_docker_owned_restartable_state_as_the_agent_user():
+    """Retained workspace/session roots must be writable without a host bind."""
+    text = _DOCKERFILE.read_text()
+
+    create = "install -d -o 10001 -g 10001 /workspace /agent-state"
+    assert create in text
+    assert text.index(create) < text.index("USER agent")
 
 
 def test_the_runner_image_can_check_a_repository_out():
@@ -687,6 +785,7 @@ def test_pi_wrapper_writes_the_provider_config_and_execs_pi(tmp_path):
     stub.chmod(0o755)
     home = tmp_path / "home"
     home.mkdir()
+    activation = tmp_path / "activation" / "pi"
 
     prompt = 'prompt; with $(dangerous) `chars` "quoted"'
     result = _subprocess.run(
@@ -697,6 +796,7 @@ def test_pi_wrapper_writes_the_provider_config_and_execs_pi(tmp_path):
             "OPENAI_BASE_URL": "http://backend:8080/v1",
             "OPENAI_API_KEY": "ajt.attempt.key",
             "PI_GATEWAY_MODEL": "glm-5.1",
+            "PI_CODING_AGENT_DIR": str(activation),
         },
         capture_output=True,
         text=True,
@@ -704,13 +804,12 @@ def test_pi_wrapper_writes_the_provider_config_and_execs_pi(tmp_path):
     )
     assert result.returncode == 0, result.stderr
 
-    provider = _json.loads((home / ".pi/agent/models.json").read_text())["providers"][
-        "freeinference"
-    ]
+    provider = _json.loads((activation / "models.json").read_text())["providers"]["freeinference"]
     assert provider["baseUrl"] == "http://backend:8080/v1"
     assert provider["apiKey"] == "ajt.attempt.key"
     assert provider["api"] == "openai-completions"
     assert provider["models"] == [{"id": "glm-5.1"}]
+    assert not (home / ".pi/agent/models.json").exists()
     # argv passed through byte-for-byte: the shell-hostile prompt survived.
     assert _json.loads(record.read_text()) == [
         "--provider",
@@ -772,6 +871,7 @@ def test_opencode_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     stub.chmod(0o755)
     home = tmp_path / "home"
     home.mkdir()
+    activation = tmp_path / "activation" / "opencode"
 
     prompt = 'fix; the $(bug) "carefully"'
     result = _subprocess.run(
@@ -792,6 +892,7 @@ def test_opencode_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
             "OPENAI_BASE_URL": "http://backend:8080/v1",
             "OPENAI_API_KEY": "ajt.attempt.key",
             "OPENCODE_GATEWAY_MODEL": "glm-5.1",
+            "OPENCODE_FREEINFERENCE_CONFIG_DIR": str(activation),
         },
         capture_output=True,
         text=True,
@@ -822,8 +923,8 @@ def test_opencode_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     assert provider["options"]["baseURL"] == "http://backend:8080/v1"
     assert provider["options"]["apiKey"] == "ajt.attempt.key"
     assert provider["models"] == {"glm-5.1": {"name": "glm-5.1"}}
-    # The config lives in HOME, never in the job worktree.
-    assert seen["env"]["OPENCODE_CONFIG"].startswith(str(home))
+    # Credential-bearing config follows the runtime's activation-only path.
+    assert seen["env"]["OPENCODE_CONFIG"].startswith(str(activation))
 
 
 def test_opencode_wrapper_refuses_to_run_half_configured(tmp_path):
@@ -880,6 +981,7 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     stub.chmod(0o755)
     home = tmp_path / "home"
     home.mkdir()
+    activation = tmp_path / "activation" / "kilo"
 
     prompt = 'fix; the $(bug) "carefully"'
     result = _subprocess.run(
@@ -900,6 +1002,7 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
             "OPENAI_BASE_URL": "http://backend:8080/v1",
             "OPENAI_API_KEY": "ajt.attempt.key",
             "KILO_GATEWAY_MODEL": "glm-5.1",
+            "KILO_FREEINFERENCE_CONFIG_DIR": str(activation),
         },
         capture_output=True,
         text=True,
@@ -936,8 +1039,8 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     assert provider["options"]["baseURL"] == "http://backend:8080/v1"
     assert provider["options"]["apiKey"] == "ajt.attempt.key"
     assert provider["models"] == {"glm-5.1": {"name": "glm-5.1"}}
-    # The config lives in HOME, never in the job worktree.
-    assert seen["env"]["KILO_CONFIG"].startswith(str(home))
+    # Credential-bearing config follows the runtime's activation-only path.
+    assert seen["env"]["KILO_CONFIG"].startswith(str(activation))
 
 
 def test_kilo_wrapper_refuses_to_run_half_configured(tmp_path):

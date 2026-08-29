@@ -13,8 +13,8 @@ Ships in the sandbox image (reviewed and pinned there, like the CLI itself).
 Same properties as the pi wrapper, deliberately:
 
 - **The prompt never passes through a shell.** argv in, argv out, one exec.
-- **The config lives in the container's HOME, not the job worktree** — a file
-  dropped in the worktree would surface in ``git diff`` and pollute the patch.
+- **The config never lives in the job worktree.** Retained execution puts it
+  in activation tmpfs; legacy execution falls back to the container's HOME.
 - **json.dump does the quoting**, so a model id or URL cannot corrupt it.
 """
 
@@ -36,7 +36,15 @@ def main() -> None:
         )
         raise SystemExit(64) from None
 
-    config_path = os.path.expanduser("~/.opencode-freeinference.json")
+    # Provider config embeds the current turn credential. Retained execution
+    # points this at /run/agent-activation (a tmpfs), while OpenCode's XDG data
+    # root is separately placed under /agent-state for native session resume.
+    config_dir = os.environ.get("OPENCODE_FREEINFERENCE_CONFIG_DIR")
+    if config_dir:
+        os.makedirs(config_dir, exist_ok=True)
+        config_path = os.path.join(config_dir, "config.json")
+    else:
+        config_path = os.path.expanduser("~/.opencode-freeinference.json")
     # No command-line flag exists for the reasoning effort, so it arrives in
     # the environment and belongs here. Verified against the pinned CLI:
     # `options.reasoningEffort` is the one shape that reaches the wire as

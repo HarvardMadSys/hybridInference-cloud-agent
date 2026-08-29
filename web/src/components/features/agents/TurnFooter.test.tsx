@@ -150,6 +150,23 @@ describe('TurnFooter', () => {
     expect(screen.getByText('1.2GB')).toBeInTheDocument();
   });
 
+  it('shows one canonical context status instead of duplicating the legacy rung', () => {
+    render(<TurnFooter job={job({ continuityMode: 'warm_native', contextStatus: 'restored' })} />);
+
+    expect(screen.queryByRole('button', { name: 'warm' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'restored' }));
+    expect(screen.getByText(/native session/i)).toBeInTheDocument();
+    expect(screen.getByText(/was not pasted/i)).toBeInTheDocument();
+  });
+
+  it('surfaces context loss without relabelling it as replay', () => {
+    render(<TurnFooter job={job({ contextStatus: 'lost' })} />);
+
+    expect(screen.queryByRole('button', { name: 'replay' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'context lost' }));
+    expect(screen.getByText(/could not verify/i)).toBeInTheDocument();
+  });
+
   it('explains a replay turn on demand, which is why the badge exists', () => {
     // A native `title` was the first delivery and it was the wrong one: it
     // wants a second of motionless hover and cannot be read on a touch

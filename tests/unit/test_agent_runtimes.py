@@ -317,6 +317,33 @@ def test_codex_events_normalize():
     assert runtime.parse_event(json.dumps({"type": "turn.completed"})).event_type == "lifecycle"
 
 
+def test_codex_native_session_id_is_captured_and_resumed_from_state_root():
+    runtime = CodexRuntime()
+    started = runtime.parse_event(
+        json.dumps({"type": "thread.started", "thread_id": "codex-thread-123"})
+    )
+    assert started.event_type == "lifecycle"
+    assert runtime.session_id == "codex-thread-123"
+
+    argv, env = runtime.prepare(
+        workdir="/tmp/x",
+        task_prompt="only the follow-up",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="ajt.a.b",
+        provides_isolation=True,
+        session_state_dir="/agent-state",
+        resume_session_id="codex-thread-123",
+    )
+    resume_at = argv.index("resume")
+    assert argv[resume_at : resume_at + 3] == [
+        "resume",
+        "codex-thread-123",
+        "only the follow-up",
+    ]
+    assert env["CODEX_HOME"] == "/agent-state"
+
+
 def test_generic_runtime_streams_raw_and_never_uses_a_shell():
     """Tier 2 gets a log tail for free, with no shell interpretation."""
     runtime = GenericRuntime("mytool --prompt {prompt} --model {model}")
@@ -371,6 +398,7 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     assert "do the thing; carefully" in argv
     assert argv[argv.index("--model") + 1] == "glm-5.1"
     assert "--mode" in argv and argv[argv.index("--mode") + 1] == "json"
+    assert "--no-session" not in argv
     # The pinned pi release implements MCP through executable extensions,
     # including extensions committed under .pi/.
     assert "--no-extensions" in argv
@@ -381,6 +409,28 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     # Tier 1 since the recorded staging runs pinned the format.
     assert runtime.capabilities().tier == 1
     assert runtime.capabilities().normalized_events is True
+
+
+def test_pi_native_session_is_persisted_and_resumed_explicitly():
+    runtime = PiRuntime()
+    event = runtime.parse_event(
+        json.dumps({"type": "session", "id": "pi-session-123", "version": 3})
+    )
+    assert event.payload["session_id"] == "pi-session-123"
+    assert runtime.session_id == "pi-session-123"
+
+    argv, env = runtime.prepare(
+        workdir="/tmp/x",
+        task_prompt="only the follow-up",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="ajt.a.b",
+        session_state_dir="/agent-state",
+        resume_session_id="pi-session-123",
+    )
+    assert argv[argv.index("--session-dir") + 1] == "/agent-state"
+    assert argv[argv.index("--session") + 1] == "pi-session-123"
+    assert env["PI_CODING_AGENT_DIR"] == "/run/agent-activation/pi"
 
 
 @pytest.mark.parametrize(
@@ -505,6 +555,24 @@ def test_opencode_runtime_targets_the_gateway_through_its_wrapper():
     assert runtime.capabilities().tier == 2
 
 
+def test_opencode_native_session_id_and_xdg_state_are_explicit():
+    runtime = OpencodeRuntime()
+    runtime.parse_event('{"type":"text","sessionID":"ses_open_123"}')
+    assert runtime.session_id == "ses_open_123"
+    argv, env = runtime.prepare(
+        workdir="/tmp/x",
+        task_prompt="only the follow-up",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="ajt.a.b",
+        session_state_dir="/agent-state",
+        resume_session_id="ses_open_123",
+    )
+    assert argv[argv.index("--session") + 1] == "ses_open_123"
+    assert env["XDG_DATA_HOME"] == "/agent-state/opencode/data"
+    assert env["OPENCODE_FREEINFERENCE_CONFIG_DIR"] == "/run/agent-activation/opencode"
+
+
 def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
     """Kilo is invoked via the wrapper, with everything it needs.
 
@@ -536,6 +604,24 @@ def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
     assert env["KILO_GATEWAY_MODEL"] == "glm-5.1"
     assert runtime.parse_event('{"type":"text"}').event_type == "raw"
     assert runtime.capabilities().tier == 2
+
+
+def test_kilo_native_session_id_and_xdg_state_are_explicit():
+    runtime = KiloRuntime()
+    runtime.parse_event('{"type":"text","sessionID":"ses_kilo_123"}')
+    assert runtime.session_id == "ses_kilo_123"
+    argv, env = runtime.prepare(
+        workdir="/tmp/x",
+        task_prompt="only the follow-up",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="ajt.a.b",
+        session_state_dir="/agent-state",
+        resume_session_id="ses_kilo_123",
+    )
+    assert argv[argv.index("--session") + 1] == "ses_kilo_123"
+    assert env["XDG_DATA_HOME"] == "/agent-state/kilo/data"
+    assert env["KILO_FREEINFERENCE_CONFIG_DIR"] == "/run/agent-activation/kilo"
 
 
 def test_capabilities_declare_tiers():

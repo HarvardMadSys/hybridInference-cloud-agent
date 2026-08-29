@@ -293,7 +293,9 @@ def heartbeat(
     runtime_versions: dict[str, str] | None = None,
     runtime_versions_available: dict[str, list[str]] | None = None,
     residencies: list[dict[str, Any]] | None = None,
+    retained_sandboxes: list[dict[str, Any]] | None = None,
     on_residencies_lost: Callable[[list[str]], None] | None = None,
+    on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
     """Report liveness and capacity, and read back what the pool decided.
 
@@ -323,6 +325,7 @@ def heartbeat(
             "runtime_versions": runtime_versions,
             "runtime_versions_available": runtime_versions_available,
             "residencies": residencies,
+            "retained_sandboxes": retained_sandboxes,
         },
         bearer=identity.credential,
     )
@@ -334,6 +337,9 @@ def heartbeat(
         # an exact (thread, generation) match, so a late answer to an old
         # beat cannot end a successor residency.
         on_residencies_lost([item for item in lost if isinstance(item, dict)])
+    stop_retained = answer.get("retained_sandboxes_stop")
+    if stop_retained and on_retained_sandboxes_stop is not None:
+        on_retained_sandboxes_stop([item for item in stop_retained if isinstance(item, dict)])
     identity.status = str(answer.get("status") or identity.status)
     interval = answer.get("heartbeat_interval_seconds")
     if isinstance(interval, (int, float)) and interval > 0:
@@ -519,7 +525,9 @@ class HostHeartbeat:
         runtime_versions: dict[str, str] | None = None,
         runtime_versions_available: dict[str, list[str]] | None = None,
         residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
+        retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
         on_residencies_lost: Callable[[list[str]], None] | None = None,
+        on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
         self._base_url = base_url
         self._identity = identity
@@ -534,7 +542,9 @@ class HostHeartbeat:
         # Freshly asked on every beat — a static list would report sandboxes
         # the pool has already torn down.
         self._residency_beats = residency_beats
+        self._retained_sandbox_beats = retained_sandbox_beats
         self._on_residencies_lost = on_residencies_lost
+        self._on_retained_sandboxes_stop = on_retained_sandboxes_stop
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         #: Set when the control plane says this host is gone. The runner reads
@@ -599,7 +609,13 @@ class HostHeartbeat:
                     residencies=(
                         self._residency_beats() if self._residency_beats is not None else None
                     ),
+                    retained_sandboxes=(
+                        self._retained_sandbox_beats()
+                        if self._retained_sandbox_beats is not None
+                        else None
+                    ),
                     on_residencies_lost=self._on_residencies_lost,
+                    on_retained_sandboxes_stop=self._on_retained_sandboxes_stop,
                 )
             except HostRemoved:
                 # Definitive: this credential is not one the control plane

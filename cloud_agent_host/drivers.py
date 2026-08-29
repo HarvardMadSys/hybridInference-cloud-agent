@@ -12,13 +12,12 @@ labour is deliberate and mirrors the design's D7:
   session, ``start_turn`` on it, iterate its events, ``wait`` for a
   :class:`TurnResult` whose guarantees the platform can lean on (D9).
 
-Today every registered harness is a one-shot process: a session carries at
-most one turn, ``launch(state=...)`` is refused, and continuity is ``replay``.
-That is not a limitation of this interface — it is the honest report of what
-is implemented. The COLD loop (issue #56) teaches the claude-code driver
-``export_state``/``launch(state)`` and flips its continuity to ``resume``; HOT
-(issue #57) brings the live-input session and ``hot``. The interface does not
-change for either, which is the point of landing it first.
+One process may still carry only one turn without losing continuity. Codex,
+pi, OpenCode and Kilo persist their own native session data and accept an
+explicit session locator on the next process; Claude additionally implements
+checkpoint export/restore and a live-input transport. PID lifetime is an
+implementation detail — the contract reports whether the next turn receives
+the native context, not whether Linux happened to keep the same child alive.
 
 Synchronous by design: the runner is threaded, and the only transport v1
 drivers own is container stdio. The design doc's async signatures become
@@ -82,13 +81,17 @@ class HarnessCapabilities:
     """What this harness can do, in the design's semantic vocabulary.
 
     Values state what is *implemented and wired*, never what the upstream CLI
-    could theoretically do — the capability matrix in the design doc is
-    provisional until a contract test pins each cell against the stamped
-    image (issue #54), and until then the honest answer everywhere is the
-    replay world we actually run.
+    could theoretically do. Native resume and portable checkpoint export are
+    separate facts: several pinned CLIs now do the former in the retained
+    sandbox, while persistent-storage work for their state is intentionally a
+    later milestone.
     """
 
     continuity: Literal["hot", "resume", "replay"] = "replay"
+    #: Whether ``export_state`` produces a self-contained blob suitable for
+    #: storage outside the current sandbox. Native on-disk resume does not
+    #: imply this: the retained-container milestone deliberately lands first.
+    checkpoint_export: bool = False
     steering: Literal["mid_turn", "queue_only", "none"] = "none"
     fork: Literal["at_latest", "at_anchor", "none"] = "none"
     # Replay rebuilds the conversation as text, so any turn may pick any
@@ -342,7 +345,7 @@ class HarnessSession:
         """Recorded by the turn on completion; not a caller API."""
         self._turn_done = True
 
-    def export_state(self) -> bytes:
+    def export_state(self) -> HarnessState:
         """Refused until a driver implements checkpointing (issue #56)."""
         raise StateExportUnsupported(
             f"the {self._driver.id!r} driver does not export session state yet"
@@ -374,13 +377,87 @@ class HarnessDriver:
         """The semantic capability row for this harness, as implemented."""
         return HarnessCapabilities()
 
-    def launch(self, context: LaunchContext, state: bytes | None = None) -> HarnessSession:
+    def launch(
+        self,
+        context: LaunchContext,
+        state: HarnessState | None = None,
+    ) -> HarnessSession:
         """Create a session; ``state`` restores one exported earlier (P2)."""
         if state is not None:
             raise StateRestoreUnsupported(
                 f"the {self.id!r} driver does not restore session state yet"
             )
         return HarnessSession(self, context)
+
+
+class NativeResumeSession(HarnessSession):
+    """One native session continued by an explicit id on a fresh process."""
+
+    def __init__(
+        self,
+        driver: HarnessDriver,
+        context: LaunchContext,
+        *,
+        resume_session_id: str | None = None,
+    ) -> None:
+        super().__init__(driver, context)
+        self._resume_session_id = resume_session_id
+
+    def _extra_prepare_kwargs(self) -> dict[str, Any]:
+        if self._context.state_dir is None:
+            return {}
+        return {
+            # A legacy container bind-mounts the host state directory here;
+            # a retained chat owns this path in its Docker writable layer.
+            # The CLI must never receive the host-side path.
+            "session_state_dir": STATE_MOUNT_TARGET,
+            "resume_session_id": self._resume_session_id,
+        }
+
+
+class NativeResumeDriver(HarnessDriver):
+    """Shared driver for CLIs with on-disk state plus ``--session <id>``."""
+
+    def capabilities(self) -> HarnessCapabilities:
+        """Advertise local native resume without claiming portable export."""
+        return HarnessCapabilities(continuity="resume")
+
+    def launch(
+        self,
+        context: LaunchContext,
+        state: HarnessState | None = None,
+    ) -> HarnessSession:
+        """Launch a new native session; portable checkpoint import is deferred."""
+        if state is not None:
+            raise StateRestoreUnsupported(
+                f"the {self.id!r} driver resumes local native state but does not "
+                "import a portable checkpoint yet"
+            )
+        return NativeResumeSession(self, context)
+
+    def launch_resident(self, context: LaunchContext, *, session_id: str) -> HarnessSession:
+        """Resume one explicit native session from the retained state tree."""
+        if context.state_dir is None:
+            raise StateRestoreUnsupported("a native resumed turn needs persistent session state")
+        if not session_id:
+            raise StateRestoreUnsupported("a native resumed turn needs a session locator")
+        return NativeResumeSession(self, context, resume_session_id=session_id)
+
+
+class CodexDriver(NativeResumeDriver):
+    """Codex ``exec resume`` over its persisted rollout files."""
+
+
+class PiDriver(NativeResumeDriver):
+    """pi ``--session`` over its persisted JSONL session tree."""
+
+
+class OpenCodeDriver(NativeResumeDriver):
+    """OpenCode ``run --session`` over its XDG data store."""
+
+
+class KiloDriver(NativeResumeDriver):
+    """Kilo ``run --session`` over its XDG data store."""
 
 
 #: Where the claude CLI keeps its config inside the sandbox: under the state
@@ -433,11 +510,11 @@ class ClaudeCodeSession(HarnessSession):
 
 
 class ClaudeCodeDriver(HarnessDriver):
-    """The claude-code driver: the first with real continuity (issue #56)."""
+    """Claude Code native resume plus portable checkpoint export (issue #56)."""
 
     def capabilities(self) -> HarnessCapabilities:
         """COLD-native continuity; HOT arrives with the live session (#57)."""
-        return HarnessCapabilities(continuity="resume")
+        return HarnessCapabilities(continuity="resume", checkpoint_export=True)
 
     def launch(self, context: LaunchContext, state: HarnessState | None = None) -> HarnessSession:
         """Fresh session, or one that continues an exported state's memory."""
@@ -705,6 +782,10 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
 
 _DRIVER_TYPES: dict[str, type[HarnessDriver]] = {
     "claude-code": ClaudeCodeDriver,
+    "codex": CodexDriver,
+    "pi": PiDriver,
+    "opencode": OpenCodeDriver,
+    "kilo": KiloDriver,
 }
 
 

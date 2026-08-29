@@ -156,6 +156,8 @@ export interface AgentJob {
    * "why did it forget", and the reason this is surfaced at all.
    */
   continuityMode?: 'hot' | 'warm_native' | 'cold_native' | 'replay';
+  /** Canonical user-facing context state; independent of process-id reuse. */
+  contextStatus?: 'new' | 'live' | 'restored' | 'lost';
   /** Wall time of the turn's newest attempt. */
   durationMs?: number;
   /** Host-measured consumption. Absent when nothing measured this turn. */
