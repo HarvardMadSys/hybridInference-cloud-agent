@@ -7,6 +7,9 @@ all five pinned Agent CLI binaries, including `NEW → LIVE`, idle `docker stop`
 and same-container `RESTORED`. This document remains the separate staging
 gateway + real GitHub publishing runbook; the local substitute intentionally
 does not claim to prove an external provider or pull-request publication.
+The local stack also exposes a separate `legacy-smoke` command that runs one
+real default-off disposable job with the production-style same-path bind and
+proves checkpoint export plus final in-sandbox patch generation.
 
 Bring up the control plane and one runner host on a single machine, point them
 at a **staging** gateway, and drive one real job from an empty workspace to a

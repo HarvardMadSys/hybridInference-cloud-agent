@@ -920,9 +920,11 @@ class _CountingBackend:
 
     def __init__(self) -> None:
         self.preflights = 0
+        self.preflight_roots: list[str | None] = []
 
     def preflight(self, workdir_root: str | None = None) -> None:
         self.preflights += 1
+        self.preflight_roots.append(workdir_root)
 
     def has_binary(self, _name: str) -> bool:
         return True
@@ -958,7 +960,7 @@ def test_a_supplied_backend_is_not_preflighted_per_claim(monkeypatch, tmp_path):
 
 
 def test_a_self_built_backend_is_still_preflighted_before_claiming(monkeypatch, tmp_path):
-    """The one-shot path keeps failing fast on a misconfigured host."""
+    """The one-shot path proves its real bind source before taking a job."""
     backend = _CountingBackend()
     monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
     claims: list[bool] = []
@@ -969,15 +971,38 @@ def test_a_self_built_backend_is_still_preflighted_before_claiming(monkeypatch, 
 
     monkeypatch.setattr(runner_mod, "claim", _claim)
 
+    workdir = tmp_path / "one-shot"
     runner_mod.run_once(
         base_url="http://gw",
         dispatcher_token="d",
         worker_id="w",
-        workdir=str(tmp_path),
+        workdir=str(workdir),
     )
 
     assert backend.preflights == 1
+    assert backend.preflight_roots == [str(workdir.resolve())]
+    assert workdir.is_dir()
     assert claims, "preflight must not have replaced the claim"
+
+
+def test_a_fully_restartable_one_shot_does_not_require_a_legacy_bind(monkeypatch, tmp_path):
+    """Docker-owned chats never address the runner image's local workdir."""
+    backend = _CountingBackend()
+    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: None)
+    monkeypatch.setenv("AGENT_RESTARTABLE_SANDBOX", "1")
+    monkeypatch.setenv("AGENT_RESTARTABLE_RUNTIMES", "claude-code,codex,pi,opencode,kilo")
+
+    workdir = tmp_path / "runner-only"
+    runner_mod.run_once(
+        base_url="http://gw",
+        dispatcher_token="d",
+        worker_id="w",
+        workdir=str(workdir),
+    )
+
+    assert backend.preflight_roots == [None]
+    assert not workdir.exists()
 
 
 def test_only_the_claim_call_reports_an_unreachable_gateway(monkeypatch):

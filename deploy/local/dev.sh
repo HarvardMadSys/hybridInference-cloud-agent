@@ -130,13 +130,66 @@ case "$command" in
     wait_ready
     exec python3 "$SCRIPT_DIR/smoke.py" "${2:-http://127.0.0.1:13002}"
     ;;
+  legacy-smoke)
+    ensure_env
+    wait_ready
+    base_url=${2:-http://127.0.0.1:13002}
+    if [ -d /private/tmp ]; then
+      # Docker Desktop/Colima shares /private/tmp, but not macOS's per-user
+      # /private/var/folders/... value of TMPDIR.
+      legacy_tmp_base=/private/tmp
+    else
+      legacy_tmp_base=${TMPDIR:-/tmp}
+    fi
+    legacy_root=$(mktemp -d "$legacy_tmp_base/freeinference-legacy-smoke.XXXXXX")
+    legacy_root=$(CDPATH= cd -- "$legacy_root" && pwd -P)
+    legacy_runner_stopped=0
+    legacy_job_id=
+    legacy_verified=0
+    cleanup_legacy_smoke() {
+      if [ -n "$legacy_job_id" ] && [ "$legacy_verified" -eq 0 ]; then
+        python3 "$SCRIPT_DIR/legacy_smoke.py" cancel "$base_url" "$legacy_job_id" \
+          >/dev/null 2>&1 || true
+      fi
+      if [ "$legacy_runner_stopped" -eq 1 ]; then
+        compose start runner >/dev/null 2>&1 || true
+      fi
+      case "$legacy_root" in
+        */freeinference-legacy-smoke.*)
+          rm -rf -- "$legacy_root"
+          ;;
+      esac
+    }
+    trap cleanup_legacy_smoke EXIT
+    trap 'exit 130' INT TERM
+
+    # A queued job must be claimed only by the explicitly default-off runner
+    # below.  The temporary same-path bind models the production mixed-mode
+    # host mount; it is test data and is removed on every exit.
+    legacy_runner_stopped=1
+    compose stop runner
+    legacy_job_id=$(python3 "$SCRIPT_DIR/legacy_smoke.py" create "$base_url")
+    compose run --rm --no-deps \
+      -e AGENT_RESTARTABLE_SANDBOX=0 \
+      -e AGENT_RESTARTABLE_RUNTIMES= \
+      -v "$legacy_root:$legacy_root" \
+      runner python -m cloud_agent_host.runner \
+      --workdir "$legacy_root/workspace" --host local-docker
+    python3 "$SCRIPT_DIR/legacy_smoke.py" verify "$base_url" "$legacy_job_id"
+    legacy_verified=1
+
+    compose start runner
+    legacy_runner_stopped=0
+    trap - EXIT INT TERM
+    cleanup_legacy_smoke
+    ;;
   config)
     ensure_env
     compose config --quiet
     echo "Local Compose configuration is valid."
     ;;
   *)
-    echo "Usage: $0 {up|start|stop|status|logs [service]|smoke|config}" >&2
+    echo "Usage: $0 {up|start|stop|status|logs [service]|smoke|legacy-smoke|config}" >&2
     exit 2
     ;;
 esac

@@ -24,6 +24,7 @@ Prerequisites: Docker with Compose, `openssl`, `curl`, and Python 3.
 ```bash
 ./deploy/local/dev.sh up
 ./deploy/local/dev.sh smoke
+./deploy/local/dev.sh legacy-smoke
 ```
 
 Then open <http://127.0.0.1:13002>. The first sign-in displays an explicit
@@ -42,6 +43,14 @@ Claude chat, verifies the complete conversation plus Docker filesystem were
 copied into a separate stopped/mount-free container, and resumes that clone.
 A passing result therefore covers `NEW → LIVE → stopped → RESTORED` for every
 CLI plus the latest-settled full Docker fork path.
+
+`legacy-smoke` is a separate compatibility check for the rollout's
+default-off path. It briefly stops the retained runner, launches one
+disposable runner with a same-path temporary bind (the topology production
+mixed mode requires), and proves that the job reaches Claude Code, exports a
+checkpoint, and completes in-sandbox patch generation. The temporary bind is
+removed before the retained runner restarts; it is not part of the normal
+Docker-only local storage topology.
 
 Useful commands:
 

@@ -2404,9 +2404,30 @@ def run_once(
     polling every 5s spent ~17k probes and 17k warning lines a day doing
     nothing — found by watching an idle runner, not by reading it.
     """
+    # Docker resolves bind sources in the daemon's namespace, not relative to
+    # the runner container.  Keep the one-shot path honest: ``--workdir .``
+    # inside the runner image used to become ``/app`` only after a job had
+    # already been claimed, and every sandbox command then failed with exit
+    # 125.  Normalising first also makes the path that preflight proves exactly
+    # the path later passed to ``docker run --mount``.
+    workdir = str(pathlib.Path(workdir).resolve())
     if backend is None:
         backend = build_backend_from_env()
-        backend.preflight()
+        preflight_root = None if _restartable_mode_covers_every_runtime() else workdir
+        if preflight_root is not None:
+            # The normal clone path creates this directory after claim.  A
+            # bind probe has to run before claim, so materialise only the
+            # trusted operator-selected root first.  This also matters under
+            # Docker Desktop/Colima: a child created inside the outer runner
+            # becomes visible to the daemon, while the same child created by
+            # the macOS client may exist only in its file-sharing namespace.
+            try:
+                pathlib.Path(preflight_root).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise SandboxError(
+                    f"could not prepare one-shot workdir {preflight_root!r}: {exc}"
+                ) from exc
+        backend.preflight(workdir_root=preflight_root)
 
     stamper = getattr(backend, "version_stamp", None)
     attestation: dict[str, Any] = stamper() if stamper is not None else {}
