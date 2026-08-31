@@ -13,6 +13,13 @@
   `2026-08-17-session-resident-harness-threads-design.md`. That document
   remains the implementation history and input to later persistent-storage
   work.
+- **Implementation-ready live-session/fork successor (not implemented):**
+  `2026-08-31-native-session-fork-shared-workspace-design.md` moves retained
+  CLI process ownership into the supervisor, keeps one live transport per chat
+  while Docker runs, and specifies native Agent CLI forks whose chats run
+  concurrently in one retained container/workspace. Until that successor lands
+  end to end, this document's runner-owned one-shot process and section 13
+  isolated Docker-clone behavior remain the branch's current source of truth.
 
 ---
 
