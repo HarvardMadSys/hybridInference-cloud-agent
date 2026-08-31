@@ -434,7 +434,7 @@ def test_sandbox_image_prepares_docker_owned_restartable_state_as_the_agent_user
     """Retained workspace/session roots must be writable without a host bind."""
     text = _DOCKERFILE.read_text()
 
-    create = "install -d -o 10001 -g 10001 /workspace /agent-state"
+    create = "install -d -m 2770 -o 10001 -g 10001 /workspace /agent-state"
     assert create in text
     assert text.index(create) < text.index("USER agent")
 

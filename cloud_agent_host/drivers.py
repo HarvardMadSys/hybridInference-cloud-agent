@@ -27,14 +27,23 @@ meaningful with the live-input transport and arrive with it.
 from __future__ import annotations
 
 import io
+import json
 import pathlib
 import tarfile
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.runtimes import (
+    DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
+    ERROR,
+    LIFECYCLE,
     MESSAGE,
+    RAW,
+    THINKING,
+    TOOL_RESULT,
+    TOOL_USE,
     AgentRuntime,
     RuntimeMCPConfig,
     get_runtime,
@@ -93,7 +102,13 @@ class HarnessCapabilities:
     #: imply this: the retained-container milestone deliberately lands first.
     checkpoint_export: bool = False
     steering: Literal["mid_turn", "queue_only", "none"] = "none"
-    fork: Literal["at_latest", "at_anchor", "none"] = "none"
+    fork: Literal["latest_immediate", "at_latest", "at_anchor", "none"] = "none"
+    #: Whether the host supervisor, rather than an individual runner turn,
+    #: can own one bidirectional CLI transport across several messages.
+    resident_transport: Literal["supervisor_live", "none"] = "none"
+    #: A conformance claim, not an upstream marketing claim: two separately
+    #: credentialed resident processes may safely operate in one workspace.
+    concurrent_shared_workspace: bool = False
     # Replay rebuilds the conversation as text, so any turn may pick any
     # model — per-turn switching is the one thing the replay world does
     # *better* than sessions. Session-capable drivers will downgrade this to
@@ -189,9 +204,16 @@ class LaunchContext:
     #: Host directory the platform bind-mounts at the sandbox's state target.
     #: ``None`` disables session persistence (and with it export/restore).
     state_dir: str | None = None
+    #: In-sandbox provider state root. Legacy mounts use /agent-state; a
+    #: retained multi-member runtime may select a provider-compatible child
+    #: directory without changing the host-side persistence signal above.
+    session_state_dir: str = STATE_MOUNT_TARGET
     #: Spawns with a live stdin (SandboxSpec.live_input). ``None`` means this
     #: caller does not offer residency; ``launch_live`` refuses without it.
     spawn_live: Callable[[list[str], dict[str, str]], SandboxProcess] | None = None
+    #: Private per-membership tmpfs root for generated provider configuration.
+    #: It is never the durable native session store.
+    activation_dir: str | None = None
 
 
 class HarnessTurn:
@@ -361,6 +383,16 @@ class HarnessSession:
         if self._turn is not None and not self._turn_done:
             self._turn.cancel()
 
+    def stderr_text(self) -> str:
+        """Return bounded process diagnostics when this session owns one."""
+        if self._turn is None:
+            return ""
+        return self._turn.stderr_text()
+
+    def process_exit_code(self) -> int | None:
+        """Return a resident process status when this session owns one."""
+        return None
+
 
 class HarnessDriver:
     """Launches sessions for one registered harness."""
@@ -406,13 +438,16 @@ class NativeResumeSession(HarnessSession):
     def _extra_prepare_kwargs(self) -> dict[str, Any]:
         if self._context.state_dir is None:
             return {}
-        return {
+        result: dict[str, Any] = {
             # A legacy container bind-mounts the host state directory here;
             # a retained chat owns this path in its Docker writable layer.
             # The CLI must never receive the host-side path.
             "session_state_dir": STATE_MOUNT_TARGET,
             "resume_session_id": self._resume_session_id,
         }
+        if self._context.activation_dir is not None:
+            result["activation_dir"] = self._context.activation_dir
+        return result
 
 
 class NativeResumeDriver(HarnessDriver):
@@ -447,17 +482,831 @@ class NativeResumeDriver(HarnessDriver):
 class CodexDriver(NativeResumeDriver):
     """Codex ``exec resume`` over its persisted rollout files."""
 
+    def capabilities(self) -> HarnessCapabilities:
+        """Advertise Codex app-server live, interrupt, and native-fork support."""
+        return HarnessCapabilities(
+            continuity="resume",
+            steering="mid_turn",
+            fork="latest_immediate",
+            model_switch="restart",
+            resident_transport="supervisor_live",
+            concurrent_shared_workspace=True,
+        )
+
+    def launch_live(
+        self, context: LaunchContext, state: HarnessState | None = None
+    ) -> CodexAppServerSession:
+        """Start a new persistent Codex app-server thread."""
+        if state is not None:
+            raise StateRestoreUnsupported("Codex portable checkpoint import is not implemented")
+        return CodexAppServerSession(self, context)
+
+    def launch_resident_live(
+        self, context: LaunchContext, *, session_id: str
+    ) -> CodexAppServerSession:
+        """Resume one Codex thread through a persistent app-server transport."""
+        if context.state_dir is None:
+            raise StateRestoreUnsupported("a resident Codex session needs a state mount")
+        return CodexAppServerSession(self, context, resume_session_id=session_id)
+
 
 class PiDriver(NativeResumeDriver):
     """pi ``--session`` over its persisted JSONL session tree."""
+
+    def capabilities(self) -> HarnessCapabilities:
+        """Advertise Pi RPC live, interrupt, and prompt-free fork support."""
+        return HarnessCapabilities(
+            continuity="resume",
+            steering="mid_turn",
+            fork="latest_immediate",
+            model_switch="restart",
+            resident_transport="supervisor_live",
+            concurrent_shared_workspace=True,
+        )
+
+    def launch_live(
+        self, context: LaunchContext, state: HarnessState | None = None
+    ) -> PiRpcSession:
+        """Start a new persistent Pi RPC session."""
+        if state is not None:
+            raise StateRestoreUnsupported("pi portable checkpoint import is not implemented")
+        return PiRpcSession(self, context)
+
+    def launch_resident_live(self, context: LaunchContext, *, session_id: str) -> PiRpcSession:
+        """Resume one Pi session through its persistent RPC transport."""
+        if context.state_dir is None:
+            raise StateRestoreUnsupported("a resident pi session needs a state mount")
+        return PiRpcSession(self, context, resume_session_id=session_id)
+
+    def launch_fork_live(
+        self,
+        context: LaunchContext,
+        *,
+        source_session_id: str,
+    ) -> PiRpcSession:
+        """Open pi's prompt-free ``--fork`` RPC process for one probe."""
+        if context.state_dir is None:
+            raise StateRestoreUnsupported("a pi native fork needs a state mount")
+        if not source_session_id:
+            raise ForkUnsupported("a pi native fork needs a source session id")
+        return PiRpcSession(self, context, fork_session_id=source_session_id)
 
 
 class OpenCodeDriver(NativeResumeDriver):
     """OpenCode ``run --session`` over its XDG data store."""
 
+    def capabilities(self) -> HarnessCapabilities:
+        """Advertise OpenCode serve live, interrupt, and native-fork support."""
+        return HarnessCapabilities(
+            continuity="resume",
+            steering="mid_turn",
+            fork="latest_immediate",
+            model_switch="restart",
+            resident_transport="supervisor_live",
+            concurrent_shared_workspace=True,
+        )
+
+    def launch_live(
+        self, context: LaunchContext, state: HarnessState | None = None
+    ) -> HttpAgentLiveSession:
+        """Start a new authenticated OpenCode serve session."""
+        if state is not None:
+            raise StateRestoreUnsupported("OpenCode portable checkpoint import is not implemented")
+        return HttpAgentLiveSession(self, context)
+
+    def launch_resident_live(
+        self, context: LaunchContext, *, session_id: str
+    ) -> HttpAgentLiveSession:
+        """Resume one OpenCode session through its authenticated bridge."""
+        if context.state_dir is None:
+            raise StateRestoreUnsupported("a resident OpenCode session needs a state mount")
+        return HttpAgentLiveSession(self, context, resume_session_id=session_id)
+
 
 class KiloDriver(NativeResumeDriver):
     """Kilo ``run --session`` over its XDG data store."""
+
+    def capabilities(self) -> HarnessCapabilities:
+        """Advertise Kilo serve live, interrupt, and native-fork support."""
+        return HarnessCapabilities(
+            continuity="resume",
+            steering="mid_turn",
+            fork="latest_immediate",
+            model_switch="restart",
+            resident_transport="supervisor_live",
+            concurrent_shared_workspace=True,
+        )
+
+    def launch_live(
+        self, context: LaunchContext, state: HarnessState | None = None
+    ) -> HttpAgentLiveSession:
+        """Start a new authenticated Kilo serve session."""
+        if state is not None:
+            raise StateRestoreUnsupported("Kilo portable checkpoint import is not implemented")
+        return HttpAgentLiveSession(self, context)
+
+    def launch_resident_live(
+        self, context: LaunchContext, *, session_id: str
+    ) -> HttpAgentLiveSession:
+        """Resume one Kilo session through its authenticated bridge."""
+        if context.state_dir is None:
+            raise StateRestoreUnsupported("a resident Kilo session needs a state mount")
+        return HttpAgentLiveSession(self, context, resume_session_id=session_id)
+
+
+class _JsonResidentTurn(HarnessTurn):
+    """One framed activation on a process whose stdout survives the turn."""
+
+    def __init__(self, session: _JsonResidentSession, process: SandboxProcess) -> None:
+        super().__init__(session, process)
+        self._saw_result = False
+        self._protocol_failed = False
+        self.protocol_turn_id: str | None = None
+        # Several native protocols publish mutable updates for one tool item.
+        # Keep this turn-scoped: item identifiers may be reused on later turns.
+        self.reported_tools: set[str] = set()
+
+    def raw_lines(self) -> Iterator[str]:
+        for line in self._session.turn_lines(self):
+            yield line
+            settled, failed = self._session.line_settles_turn(line, self)
+            if settled:
+                self._saw_result = True
+                self._protocol_failed = failed
+                self._process.poll()
+                return
+
+    def iter_events(self) -> Iterator[HarnessEvent]:
+        yield HarnessEvent(TURN_STARTED)
+        for line in self.raw_lines():
+            yield self.event_for_line(line)
+        yield self.finish_event()
+
+    def event_for_line(self, line: str) -> HarnessEvent:
+        event = self._session.event_for_protocol_line(line, self)
+        if event.event_type == MESSAGE:
+            text = str(event.payload.get("text", ""))
+            if text.strip():
+                self._final_messages.append(text)
+        return event
+
+    def cancel(self) -> None:
+        """Use the exact native interrupt; preserve the resident transport."""
+        if self._cancelled:
+            return
+        self._cancelled = True
+        self._session.interrupt_turn(self)
+
+    def wait(self) -> TurnResult:
+        if self._result is None:
+            if not self._saw_result:
+                for line in self.raw_lines():
+                    self.event_for_line(line)
+            if self._saw_result:
+                exit_code = 1 if self._protocol_failed else 0
+            else:
+                exit_code = self._process.wait() or 1
+            self._result = self._build_result(exit_code)
+            self._session.turn_finished()
+        return self._result
+
+
+class _JsonResidentSession(HarnessSession):
+    """Common process lifetime and framing for exact native JSON protocols."""
+
+    def __init__(
+        self,
+        driver: HarnessDriver,
+        context: LaunchContext,
+        *,
+        resume_session_id: str | None = None,
+    ) -> None:
+        super().__init__(driver, context)
+        if context.spawn_live is None:
+            raise DriverError("a resident session needs a live-input spawn")
+        if context.state_dir is None:
+            raise DriverError("a resident session needs a state mount")
+        self._resume_session_id = resume_session_id
+        self._process: SandboxProcess | None = None
+        self._lines: Iterator[str] | None = None
+        self._model: str | None = None
+        self._reasoning_effort: str | None = None
+        self._live_turn: _JsonResidentTurn | None = None
+        self._request_sequence = 0
+        self._prefetched: list[str] = []
+
+    @property
+    def container(self) -> str | None:
+        return getattr(self._process, "container", None)
+
+    def _request_id(self, prefix: str = "req") -> str:
+        self._request_sequence += 1
+        return f"{prefix}-{self._request_sequence}"
+
+    def _write_json(self, value: dict[str, Any]) -> None:
+        if self._process is None:
+            raise DriverError("resident process has not started")
+        try:
+            self._process.write_line(json.dumps(value, separators=(",", ":")))
+        except OSError as exc:
+            raise DriverError(f"resident process is gone: {exc}") from exc
+
+    def _next_line(self) -> str:
+        if self._lines is None:
+            raise DriverError("resident stdout is not attached")
+        try:
+            return next(self._lines)
+        except StopIteration as exc:
+            code = self._process.wait() if self._process is not None else 1
+            # Keep enough local diagnostics to distinguish a protocol crash
+            # from an ordinary EOF.  The sandbox process already retains only
+            # a bounded stderr tail; cap it again here because this exception
+            # crosses the broker boundary.  Agent credentials are supplied in
+            # environment variables, never stderr/argv, but avoid reflecting
+            # arbitrary multiline CLI output to an API caller all the same.
+            diagnostic = ""
+            if self._process is not None:
+                diagnostic = " ".join(self._process.stderr_text().strip().split())[-500:]
+            detail = f"resident process exited unexpectedly ({code})"
+            if diagnostic:
+                detail += f": {diagnostic}"
+            raise DriverError(detail) from exc
+
+    @staticmethod
+    def _object(line: str) -> dict[str, Any] | None:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _read_until(self, predicate: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
+        while True:
+            line = self._next_line()
+            value = self._object(line)
+            if value is not None and predicate(value):
+                return value
+            self._prefetched.append(line)
+
+    def _prepare_live(
+        self, *, model: str, reasoning_effort: str | None
+    ) -> tuple[list[str], dict[str, str]]:
+        prepare_live = getattr(self.runtime, "prepare_live", None)
+        if prepare_live is None:
+            raise DriverError(f"runtime {self.runtime.name!r} has no live invocation")
+        return prepare_live(
+            workdir=self._context.workdir,
+            model=model,
+            gateway_base_url=self._context.gateway_base_url,
+            credential=self._context.credential,
+            provides_isolation=self._context.provides_isolation,
+            mcp_config=self._context.mcp_config,
+            reasoning_effort=reasoning_effort,
+            session_state_dir=self._context.session_state_dir,
+            resume_session_id=self._resume_session_id,
+            activation_dir=self._context.activation_dir,
+        )
+
+    def ensure_started(self, *, model: str, reasoning_effort: str | None) -> None:
+        if self._closed:
+            raise DriverError("session is closed")
+        if self._process is None:
+            argv, extra_env = self._prepare_live(
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+            env = dict(self._context.base_env)
+            env.update(extra_env)
+            assert self._context.spawn_live is not None
+            self._process = self._context.spawn_live(argv, env)
+            self._lines = self._process.lines()
+            self._model = model
+            self._reasoning_effort = reasoning_effort
+            if self._process.poll() is not None:
+                raise DriverError("resident process exited during initialization")
+            self._initialize_protocol()
+        elif model != self._model or reasoning_effort != self._reasoning_effort:
+            raise DriverError("resident model/reasoning change takes a member-only restart")
+
+    def _initialize_protocol(self) -> None:
+        raise NotImplementedError
+
+    def _new_turn(self) -> _JsonResidentTurn:
+        assert self._process is not None
+        return _JsonResidentTurn(self, self._process)
+
+    def start_turn(self, turn_input: TurnInput) -> HarnessTurn:
+        if self._closed:
+            raise DriverError("session is closed")
+        if self._live_turn is not None and self._live_turn._result is None:
+            raise DriverError("a turn is already running on this session")
+        self.ensure_started(
+            model=turn_input.model,
+            reasoning_effort=turn_input.reasoning_effort,
+        )
+        turn = self._new_turn()
+        self._start_protocol_turn(turn_input, turn)
+        self._live_turn = turn
+        return turn
+
+    def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
+        raise NotImplementedError
+
+    def turn_lines(self, turn: _JsonResidentTurn) -> Iterator[str]:
+        while self._prefetched:
+            yield self._prefetched.pop(0)
+        while True:
+            yield self._next_line()
+
+    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool]:
+        raise NotImplementedError
+
+    def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
+        event = self.runtime.parse_event(line)
+        if event is None:
+            return HarnessEvent(LINE, raw_line=line)
+        return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
+
+    def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
+        raise NotImplementedError
+
+    def turn_finished(self) -> None:
+        return
+
+    def process_alive(self) -> bool:
+        return not self._closed and self._process is not None and self._process.poll() is None
+
+    def stderr_text(self) -> str:
+        """Return the resident process's retained stderr tail."""
+        return "" if self._process is None else self._process.stderr_text()
+
+    def process_exit_code(self) -> int | None:
+        """Return the resident process's host-side exit status, if known."""
+        return None if self._process is None else self._process.poll()
+
+    def close(self) -> None:
+        self._closed = True
+        if self._process is not None:
+            self._process.close_stdin()
+            self._process.kill()
+            self._process.wait()
+
+
+class CodexAppServerSession(_JsonResidentSession):
+    """Codex 0.145.0 app-server, one persisted thread per live process."""
+
+    _PROVIDER = "hybridinference"
+
+    def _initialize_protocol(self) -> None:
+        initialize_id = self._request_id("initialize")
+        self._write_json(
+            {
+                "id": initialize_id,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "freeinference-cloud-agent",
+                        "title": "FreeInference Cloud Agent",
+                        "version": "1",
+                    },
+                    "capabilities": {
+                        "experimentalApi": True,
+                        "requestAttestation": False,
+                    },
+                },
+            }
+        )
+        initialized = self._read_until(lambda value: value.get("id") == initialize_id)
+        if initialized.get("error") is not None:
+            raise DriverError(f"Codex initialize failed: {initialized['error']}")
+        self._write_json({"method": "initialized"})
+
+        method = "thread/resume" if self._resume_session_id else "thread/start"
+        request_id = self._request_id("thread")
+        params: dict[str, Any] = {
+            "model": self._model,
+            "modelProvider": self._PROVIDER,
+            "cwd": self._context.workdir,
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access"
+            if self._context.provides_isolation
+            else "workspace-write",
+        }
+        if self._resume_session_id:
+            params["threadId"] = self._resume_session_id
+        self._write_json({"id": request_id, "method": method, "params": params})
+        response = self._read_until(lambda value: value.get("id") == request_id)
+        if response.get("error") is not None:
+            raise DriverError(f"Codex {method} failed: {response['error']}")
+        result = response.get("result")
+        thread = result.get("thread") if isinstance(result, dict) else None
+        session_id = thread.get("id") if isinstance(thread, dict) else None
+        if not session_id:
+            raise DriverError(f"Codex {method} returned no thread id")
+        if self._resume_session_id and session_id != self._resume_session_id:
+            raise DriverError("Codex resumed a different native thread")
+        self.runtime.session_id = str(session_id)
+
+    def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
+        request_id = self._request_id("turn")
+        self._write_json(
+            {
+                "id": request_id,
+                "method": "turn/start",
+                "params": {
+                    "threadId": self.runtime.session_id,
+                    "input": [{"type": "text", "text": turn_input.prompt}],
+                    "model": turn_input.model,
+                    "effort": turn_input.reasoning_effort,
+                },
+            }
+        )
+        response = self._read_until(lambda value: value.get("id") == request_id)
+        if response.get("error") is not None:
+            raise DriverError(f"Codex turn/start failed: {response['error']}")
+        result = response.get("result")
+        protocol_turn = result.get("turn") if isinstance(result, dict) else None
+        turn_id = protocol_turn.get("id") if isinstance(protocol_turn, dict) else None
+        if not turn_id:
+            raise DriverError("Codex turn/start returned no turn id")
+        turn.protocol_turn_id = str(turn_id)
+
+    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool]:
+        """Recognize the completion notification for this exact Codex turn."""
+        value = self._object(line)
+        if value is None or value.get("method") != "turn/completed":
+            return False, False
+        params = value.get("params")
+        completed = params.get("turn") if isinstance(params, dict) else None
+        if not isinstance(completed, dict) or completed.get("id") != turn.protocol_turn_id:
+            return False, False
+        status = str(completed.get("status") or "").lower()
+        return True, status not in {"completed", "interrupted"}
+
+    def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
+        """Normalize one Codex app-server notification for the active turn."""
+        value = self._object(line)
+        if value is None:
+            return HarnessEvent(LINE, raw_line=line)
+        if value.get("error") is not None:
+            return HarnessEvent(ERROR, {"text": str(value["error"])[:2000]}, raw_line=line)
+        method = str(value.get("method") or "")
+        params = value.get("params")
+        params = params if isinstance(params, dict) else {}
+        item = params.get("item")
+        item = item if isinstance(item, dict) else {}
+        item_type = str(item.get("type") or "")
+        if method == "item/completed" and item_type == "agentMessage":
+            return HarnessEvent(MESSAGE, {"text": str(item.get("text") or "")}, raw_line=line)
+        if method == "item/completed" and item_type == "reasoning":
+            text = "\n".join(str(value) for value in item.get("summary") or [])
+            return HarnessEvent(THINKING, {"text": text[:4000]}, raw_line=line)
+        if method in {"item/started", "item/updated"} and item_type in {
+            "commandExecution",
+            "mcpToolCall",
+        }:
+            item_id = str(item.get("id") or "")
+            if (item_id and item_id in turn.reported_tools) or (
+                not item_id and method == "item/updated"
+            ):
+                return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+            if item_id:
+                turn.reported_tools.add(item_id)
+            return HarnessEvent(
+                TOOL_USE,
+                {
+                    "name": item.get("tool") or item_type,
+                    "id": item_id or None,
+                    "input": item.get("command") or item.get("arguments"),
+                },
+                raw_line=line,
+            )
+        if method == "item/completed" and item_type in {"commandExecution", "mcpToolCall"}:
+            exit_code = item.get("exitCode")
+            return HarnessEvent(
+                TOOL_RESULT,
+                {
+                    "tool_use_id": item.get("id"),
+                    "is_error": (isinstance(exit_code, int) and exit_code != 0)
+                    or bool(item.get("error")),
+                    "content": str(
+                        item.get("aggregatedOutput")
+                        or item.get("result")
+                        or item.get("error")
+                        or ""
+                    )[:4000],
+                    "exit_code": exit_code,
+                },
+                raw_line=line,
+            )
+        if method in {"turn/diff/updated", "turn/diffUpdated"}:
+            return HarnessEvent(DIFF, {"text": str(params.get("diff") or "")[:4000]}, raw_line=line)
+        if method == "turn/completed":
+            completed = params.get("turn")
+            return HarnessEvent(
+                LIFECYCLE,
+                {
+                    "phase": "result",
+                    "status": completed.get("status") if isinstance(completed, dict) else None,
+                    "usage": completed.get("usage") if isinstance(completed, dict) else None,
+                },
+                raw_line=line,
+            )
+        return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+
+    def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
+        """Interrupt only the active Codex turn on the resident thread."""
+        if not turn.protocol_turn_id:
+            raise DriverError("Codex turn id is not available for interrupt")
+        self._write_json(
+            {
+                "id": self._request_id("interrupt"),
+                "method": "turn/interrupt",
+                "params": {
+                    "threadId": self.runtime.session_id,
+                    "turnId": turn.protocol_turn_id,
+                },
+            }
+        )
+
+    def fork_native(self, *, source_session_id: str, operation_id: str) -> str:
+        """Create and return one prompt-free native Codex child thread."""
+        if source_session_id != self.runtime.session_id:
+            raise DriverError("Codex fork source no longer matches the live thread")
+        request_id = self._request_id(f"fork-{operation_id}")
+        self._write_json(
+            {
+                "id": request_id,
+                "method": "thread/fork",
+                "params": {
+                    "threadId": source_session_id,
+                    "model": self._model,
+                    "modelProvider": self._PROVIDER,
+                    "cwd": self._context.workdir,
+                    "approvalPolicy": "never",
+                    "sandbox": "danger-full-access"
+                    if self._context.provides_isolation
+                    else "workspace-write",
+                    # We need only the child locator.  Asking Codex to rebuild
+                    # and serialize every historical turn after the native
+                    # mutation makes the response slower and adds a second
+                    # failure surface after the child rollout already exists.
+                    # 0.145.0 explicitly provides this fork mode for clients
+                    # that will resume the returned thread separately.
+                    "excludeTurns": True,
+                },
+            }
+        )
+        response = self._read_until(lambda value: value.get("id") == request_id)
+        if response.get("error") is not None:
+            raise DriverError(f"Codex thread/fork failed: {response['error']}")
+        result = response.get("result")
+        thread = result.get("thread") if isinstance(result, dict) else None
+        child_id = thread.get("id") if isinstance(thread, dict) else None
+        if not child_id or child_id == source_session_id:
+            raise DriverError("Codex thread/fork returned an invalid child id")
+        return str(child_id)
+
+
+class PiRpcSession(_JsonResidentSession):
+    """pi 0.73.1 RPC mode with an explicit native session locator."""
+
+    def __init__(
+        self,
+        driver: HarnessDriver,
+        context: LaunchContext,
+        *,
+        resume_session_id: str | None = None,
+        fork_session_id: str | None = None,
+    ) -> None:
+        if resume_session_id and fork_session_id:
+            raise DriverError("pi cannot resume and fork in one live process")
+        super().__init__(driver, context, resume_session_id=resume_session_id)
+        self._fork_session_id = fork_session_id
+
+    def _prepare_live(
+        self, *, model: str, reasoning_effort: str | None
+    ) -> tuple[list[str], dict[str, str]]:
+        prepare_live = getattr(self.runtime, "prepare_live", None)
+        if prepare_live is None:
+            raise DriverError("pi has no live invocation")
+        return prepare_live(
+            workdir=self._context.workdir,
+            model=model,
+            gateway_base_url=self._context.gateway_base_url,
+            credential=self._context.credential,
+            provides_isolation=self._context.provides_isolation,
+            mcp_config=self._context.mcp_config,
+            reasoning_effort=reasoning_effort,
+            session_state_dir=self._context.session_state_dir,
+            resume_session_id=self._resume_session_id,
+            activation_dir=self._context.activation_dir,
+            fork_session_id=self._fork_session_id,
+        )
+
+    def _initialize_protocol(self) -> None:
+        request_id = self._request_id("state")
+        self._write_json({"id": request_id, "type": "get_state"})
+        response = self._read_until(
+            lambda value: value.get("type") == "response" and value.get("id") == request_id
+        )
+        if response.get("success") is not True:
+            raise DriverError(f"pi get_state failed: {response.get('error')}")
+        data = response.get("data")
+        session_id = data.get("sessionId") if isinstance(data, dict) else None
+        if not session_id:
+            raise DriverError("pi get_state returned no session id")
+        if self._resume_session_id and session_id != self._resume_session_id:
+            raise DriverError("pi resumed a different native session")
+        self.runtime.session_id = str(session_id)
+
+    def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
+        request_id = self._request_id("prompt")
+        turn.protocol_turn_id = request_id
+        self._write_json({"id": request_id, "type": "prompt", "message": turn_input.prompt})
+
+    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool]:
+        """Recognize Pi's response failure or terminal agent-end event."""
+        value = self._object(line)
+        if value is None:
+            return False, False
+        if (
+            value.get("type") == "response"
+            and value.get("id") == turn.protocol_turn_id
+            and value.get("success") is False
+        ):
+            return True, True
+        return value.get("type") == "agent_end", False
+
+    def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
+        """Normalize one Pi RPC protocol event for the active turn."""
+        event = self.runtime.parse_event(line)
+        if event is None:
+            return HarnessEvent(LINE, raw_line=line)
+        return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
+
+    def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
+        """Abort the active Pi RPC turn without closing its session process."""
+        self._write_json({"id": self._request_id("abort"), "type": "abort"})
+
+
+class HttpAgentLiveTurn(_JsonResidentTurn):
+    """One OpenCode/Kilo activation, deduplicating mutable part updates."""
+
+    def __init__(self, session: HttpAgentLiveSession, process: SandboxProcess) -> None:
+        super().__init__(session, process)
+        self.text_parts: dict[str, str] = {}
+
+
+class HttpAgentLiveSession(_JsonResidentSession):
+    """OpenCode/Kilo serve hidden behind the private loopback bridge."""
+
+    def _initialize_protocol(self) -> None:
+        ready = self._read_until(lambda value: value.get("bridge") in {"ready", "fatal"})
+        if ready.get("bridge") != "ready":
+            raise DriverError(f"{self.runtime.name} live bridge failed: {ready.get('detail')}")
+        session_id = str(ready.get("session_id") or "")
+        if not session_id:
+            raise DriverError(f"{self.runtime.name} bridge returned no session id")
+        if self._resume_session_id and session_id != self._resume_session_id:
+            raise DriverError(f"{self.runtime.name} resumed a different native session")
+        self.runtime.session_id = session_id
+
+    def _new_turn(self) -> HttpAgentLiveTurn:
+        assert self._process is not None
+        return HttpAgentLiveTurn(self, self._process)
+
+    def _start_protocol_turn(self, turn_input: TurnInput, turn: _JsonResidentTurn) -> None:
+        request_id = self._request_id("turn")
+        turn.protocol_turn_id = request_id
+        self._write_json({"id": request_id, "type": "turn", "prompt": turn_input.prompt})
+
+    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool]:
+        """Recognize the bridge settlement or command failure for this turn."""
+        value = self._object(line)
+        if value is None:
+            return False, False
+        bridge = value.get("bridge")
+        if bridge == "settled" and value.get("turn_id") == turn.protocol_turn_id:
+            return True, value.get("status") != "completed"
+        if bridge in {"fatal", "command_error"}:
+            command_id = value.get("id")
+            if bridge == "fatal" or command_id in {"", turn.protocol_turn_id}:
+                return True, True
+        return False, False
+
+    def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
+        """Normalize one OpenCode/Kilo bridge event for the active turn."""
+        assert isinstance(turn, HttpAgentLiveTurn)
+        value = self._object(line)
+        if value is None:
+            return HarnessEvent(LINE, raw_line=line)
+        bridge = value.get("bridge")
+        if bridge == "event":
+            event = value.get("event")
+            event = event if isinstance(event, dict) else {}
+            event_type = event.get("type")
+            properties = event.get("properties")
+            properties = properties if isinstance(properties, dict) else {}
+            part = properties.get("part")
+            part = part if isinstance(part, dict) else {}
+            part_type = part.get("type")
+            part_id = str(part.get("id") or "")
+            if event_type == "message.part.updated" and part_type == "text":
+                if part_id:
+                    turn.text_parts[part_id] = str(part.get("text") or "")
+                return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+            if event_type == "message.part.updated" and part_type == "reasoning":
+                text = str(part.get("text") or "")
+                if part.get("time", {}).get("end") if isinstance(part.get("time"), dict) else False:
+                    return HarnessEvent(THINKING, {"text": text[:4000]}, raw_line=line)
+                return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+            if event_type == "message.part.updated" and part_type == "tool":
+                state = part.get("state")
+                state = state if isinstance(state, dict) else {}
+                call_id = str(part.get("callID") or part_id)
+                status = state.get("status")
+                if status in {"pending", "running"} and call_id not in turn.reported_tools:
+                    turn.reported_tools.add(call_id)
+                    return HarnessEvent(
+                        TOOL_USE,
+                        {
+                            "name": part.get("tool"),
+                            "id": call_id,
+                            "input": state.get("input"),
+                        },
+                        raw_line=line,
+                    )
+                if status in {"completed", "error"}:
+                    return HarnessEvent(
+                        TOOL_RESULT,
+                        {
+                            "tool_use_id": call_id,
+                            "is_error": status == "error",
+                            "content": str(state.get("output") or state.get("error") or "")[:4000],
+                        },
+                        raw_line=line,
+                    )
+            if event_type == "session.error":
+                return HarnessEvent(
+                    ERROR,
+                    {"text": str(properties.get("error") or "session failed")[:2000]},
+                    raw_line=line,
+                )
+            return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+        if bridge == "settled":
+            final = "\n\n".join(text for text in turn.text_parts.values() if text.strip())
+            if final:
+                return HarnessEvent(MESSAGE, {"text": final}, raw_line=line)
+            return HarnessEvent(LIFECYCLE, {"phase": "result"}, raw_line=line)
+        if bridge in {"fatal", "command_error"}:
+            return HarnessEvent(
+                ERROR, {"text": str(value.get("detail") or "")[:2000]}, raw_line=line
+            )
+        return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+
+    def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
+        """Interrupt only the active bridge turn on the resident session."""
+        self._write_json(
+            {
+                "id": self._request_id("interrupt"),
+                "type": "interrupt",
+                "turn_id": turn.protocol_turn_id,
+            }
+        )
+
+    def fork_native(self, *, source_session_id: str, operation_id: str) -> str:
+        """Create and return one prompt-free OpenCode/Kilo child session."""
+        if source_session_id != self.runtime.session_id:
+            raise DriverError(f"{self.runtime.name} fork source no longer matches")
+        request_id = self._request_id(f"fork-{operation_id}")
+        self._write_json({"id": request_id, "type": "fork"})
+        response = self._read_until(
+            lambda value: (
+                value.get("bridge") in {"fork_result", "command_error", "fatal"}
+                and (value.get("id") in {None, "", request_id})
+            )
+        )
+        if response.get("bridge") != "fork_result":
+            raise DriverError(f"{self.runtime.name} fork failed: {response.get('detail')}")
+        child_id = str(response.get("session_id") or "")
+        if not child_id or child_id == source_session_id:
+            raise DriverError(f"{self.runtime.name} fork returned an invalid child id")
+        return child_id
+
+    def close(self) -> None:
+        """Let the HTTP server flush SQLite before using the kill backstop."""
+        self._closed = True
+        process = self._process
+        if process is None:
+            return
+        process.close_stdin()
+        deadline = time.monotonic() + 6
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if process.poll() is None:
+            process.kill()
+        process.wait()
 
 
 #: Where the claude CLI keeps its config inside the sandbox: under the state
@@ -513,8 +1362,16 @@ class ClaudeCodeDriver(HarnessDriver):
     """Claude Code native resume plus portable checkpoint export (issue #56)."""
 
     def capabilities(self) -> HarnessCapabilities:
-        """COLD-native continuity; HOT arrives with the live session (#57)."""
-        return HarnessCapabilities(continuity="resume", checkpoint_export=True)
+        """Native resume/export plus the supervisor-owned stream-json pipe."""
+        return HarnessCapabilities(
+            continuity="resume",
+            checkpoint_export=True,
+            steering="mid_turn",
+            fork="latest_immediate",
+            model_switch="restart",
+            resident_transport="supervisor_live",
+            concurrent_shared_workspace=True,
+        )
 
     def launch(self, context: LaunchContext, state: HarnessState | None = None) -> HarnessSession:
         """Fresh session, or one that continues an exported state's memory."""
@@ -620,19 +1477,19 @@ class ClaudeCodeLiveTurn(HarnessTurn):
                 # the boundary and the final message both live in the stream.
                 for line in self.raw_lines():
                     self.event_for_line(line)
-            if self._cancelled:
-                exit_code = self._process.wait()
-            elif self._saw_result:
-                # The process is deliberately still alive: a settled turn on a
-                # resident session exits nothing.
-                exit_code = 0
-            else:
-                # The stream ended without a result event: the process died
-                # mid-turn. A zero here would be a lie a retry acts on.
-                exit_code = self._process.wait() or 1
+            # The process is deliberately still alive after a result. A stream
+            # ending without one is a mid-turn death even if its code was zero.
+            exit_code = 0 if self._saw_result else self._process.wait() or 1
             self._result = self._build_result(exit_code)
             self._session.turn_finished()
         return self._result
+
+    def cancel(self) -> None:
+        """Send Claude's control ``interrupt`` without killing the session."""
+        if self._cancelled:
+            return
+        self._cancelled = True
+        self._session.interrupt_turn()
 
 
 class ClaudeCodeLiveSession(ClaudeCodeSession):
@@ -713,24 +1570,10 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
         if self._live_turn is not None and self._live_turn._result is None:
             raise DriverError("a turn is already running on this session")
         if self._process is None:
-            argv = [*self._argv_template]
-            model_at = argv.index("--model") + 1
-            argv[model_at] = turn_input.model
-            # The template was built without an effort, so the flag is spliced
-            # in beside the model rather than replaced. Spelling comes from the
-            # dialect layer; this method only knows there is one.
-            argv[model_at + 1 : model_at + 1] = self.runtime.effort_args(
-                turn_input.reasoning_effort
+            self.ensure_started(
+                model=turn_input.model,
+                reasoning_effort=turn_input.reasoning_effort,
             )
-            env = dict(self._context.base_env)
-            env.update(self._extra_env)
-            env["ANTHROPIC_MODEL"] = turn_input.model
-            env["ANTHROPIC_SMALL_FAST_MODEL"] = turn_input.model
-            assert self._context.spawn_live is not None
-            self._process = self._context.spawn_live(argv, env)
-            self._lines = self._process.lines()
-            self._model = turn_input.model
-            self._reasoning_effort = turn_input.reasoning_effort
         elif turn_input.model != self._model:
             raise DriverError(
                 f"this resident session runs {self._model!r}; switching to "
@@ -743,6 +1586,7 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
                 f"{turn_input.reasoning_effort!r} takes a restart "
                 "(model_switch=restart)"
             )
+        assert self._process is not None
         try:
             self._process.write_line(self.runtime.user_message_line(turn_input.prompt))
         except OSError as exc:
@@ -753,9 +1597,62 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
         self._live_turn = ClaudeCodeLiveTurn(self, self._process)
         return self._live_turn
 
+    def ensure_started(self, *, model: str, reasoning_effort: str | None) -> None:
+        """Spawn and probe the resident transport without injecting a prompt."""
+        if self._closed:
+            raise DriverError("session is closed")
+        if self._process is None:
+            argv = [*self._argv_template]
+            model_at = argv.index("--model") + 1
+            argv[model_at] = model
+            # The template was built without an effort, so the flag is spliced
+            # in beside the model rather than replaced. Spelling comes from the
+            # dialect layer; this method only knows there is one.
+            argv[model_at + 1 : model_at + 1] = self.runtime.effort_args(reasoning_effort)
+            env = dict(self._context.base_env)
+            env.update(self._extra_env)
+            env["ANTHROPIC_MODEL"] = model
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+            assert self._context.spawn_live is not None
+            self._process = self._context.spawn_live(argv, env)
+            self._lines = self._process.lines()
+            self._model = model
+            self._reasoning_effort = reasoning_effort
+            # ``poll`` is the non-consuming readiness probe. A process that
+            # exits during initialization is not a resident transport.
+            if self._process.poll() is not None:
+                raise DriverError("resident process exited during initialization")
+        elif model != self._model:
+            raise DriverError(
+                f"this resident session runs {self._model!r}; switching to "
+                f"{model!r} takes a restart (model_switch=restart)"
+            )
+        elif reasoning_effort != self._reasoning_effort:
+            raise DriverError(
+                f"this resident session runs at reasoning effort "
+                f"{self._reasoning_effort!r}; switching to "
+                f"{reasoning_effort!r} takes a restart "
+                "(model_switch=restart)"
+            )
+
     def turn_finished(self) -> None:
         """A settled turn leaves a live session ready for the next one."""
         return
+
+    def interrupt_turn(self) -> None:
+        """Interrupt only the active query over the pinned control protocol."""
+        if self._process is None or not self.process_alive():
+            raise DriverError("Claude resident process is not alive")
+        self._process.write_line(
+            json.dumps(
+                {
+                    "type": "control_request",
+                    "request_id": f"interrupt-{id(self._live_turn)}",
+                    "request": {"subtype": "interrupt"},
+                },
+                separators=(",", ":"),
+            )
+        )
 
     def process_alive(self) -> bool:
         """Whether the resident process is spawned and still running.

@@ -125,7 +125,7 @@ So the freeze is applied at the edge, in front of the gateway, on three routes:
 ```text
 POST /v1/agent/jobs                      # create
 POST /v1/agent/jobs/{job_id}/follow-ups  # next turn in a thread
-POST /v1/agent/jobs/{job_id}/fork        # legacy DB-only copy, or latest-settled DB + Docker clone in retained preview (never CLI fork)
+POST /v1/agent/jobs/{job_id}/fork        # shared-live: immediate same-container native fork; legacy modes retain their compatibility behavior
 ```
 
 **And the source-control routes, which is easy to miss** — the freeze is about

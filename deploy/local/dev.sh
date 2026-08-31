@@ -75,7 +75,7 @@ ensure_env() {
       'AGENT_WEB_API_URL=/api' \
       'AGENT_WEB_GATEWAY_AUTHORIZE_URL=/authorize' \
       'AGENT_WEB_APP_NAME=FreeInference Cloud Agent (local)' \
-      'LOCAL_CHAT_IDLE_TIMEOUT_S=60' \
+      'LOCAL_CHAT_IDLE_TIMEOUT_S=15' \
       'LOCAL_AGENT_TIMEOUT_S=600' \
       'AGENT_RETAINED_DOCKER_DATA_ROOT=/var/lib/docker'
   } >"$ENV_FILE"
@@ -144,12 +144,25 @@ case "$command" in
     legacy_root=$(mktemp -d "$legacy_tmp_base/freeinference-legacy-smoke.XXXXXX")
     legacy_root=$(CDPATH= cd -- "$legacy_root" && pwd -P)
     legacy_runner_stopped=0
+    legacy_runner_container=
+    legacy_control_plane_default_off=0
+    legacy_shared_live_value=${LOCAL_SHARED_LIVE_SANDBOX:-1}
+    export LOCAL_SHARED_LIVE_SANDBOX
     legacy_job_id=
     legacy_verified=0
     cleanup_legacy_smoke() {
       if [ -n "$legacy_job_id" ] && [ "$legacy_verified" -eq 0 ]; then
         python3 "$SCRIPT_DIR/legacy_smoke.py" cancel "$base_url" "$legacy_job_id" \
           >/dev/null 2>&1 || true
+      fi
+      if [ -n "$legacy_runner_container" ]; then
+        docker stop "$legacy_runner_container" >/dev/null 2>&1 || true
+        legacy_runner_container=
+      fi
+      if [ "$legacy_control_plane_default_off" -eq 1 ]; then
+        LOCAL_SHARED_LIVE_SANDBOX=$legacy_shared_live_value
+        compose up --detach --force-recreate control-plane >/dev/null 2>&1 || true
+        legacy_control_plane_default_off=0
       fi
       if [ "$legacy_runner_stopped" -eq 1 ]; then
         compose start runner >/dev/null 2>&1 || true
@@ -163,21 +176,38 @@ case "$command" in
     trap cleanup_legacy_smoke EXIT
     trap 'exit 130' INT TERM
 
-    # A queued job must be claimed only by the explicitly default-off runner
-    # below.  The temporary same-path bind models the production mixed-mode
-    # host mount; it is test data and is removed on every exit.
+    # Start the explicitly default-off runner first and wait for its heartbeat
+    # to remove shared-sandbox-v1 from this host. Job requirements are chosen
+    # at create time, so queuing first would permanently mark the smoke job as
+    # shared even though the process that claims it has both retained feature
+    # flags disabled. The temporary same-path bind models the production
+    # mixed-mode host mount; it is test data and is removed on every exit.
     legacy_runner_stopped=1
     compose stop runner
-    legacy_job_id=$(python3 "$SCRIPT_DIR/legacy_smoke.py" create "$base_url")
-    compose run --rm --no-deps \
+    LOCAL_SHARED_LIVE_SANDBOX=0
+    compose up --detach --force-recreate control-plane
+    legacy_control_plane_default_off=1
+    wait_ready
+    legacy_runner_container=$(compose run --detach --rm --no-deps \
       -e AGENT_RESTARTABLE_SANDBOX=0 \
       -e AGENT_RESTARTABLE_RUNTIMES= \
+      -e AGENT_SHARED_LIVE_SANDBOX=0 \
+      -e AGENT_SHARED_LIVE_RUNTIMES= \
       -v "$legacy_root:$legacy_root" \
       runner python -m cloud_agent_host.runner \
-      --workdir "$legacy_root/workspace" --host local-docker
+      --loop --workdir-root "$legacy_root/workspaces" --workspace-ttl 0 \
+      --host local-docker)
+    python3 "$SCRIPT_DIR/legacy_smoke.py" wait-default-off "$base_url" local-docker
+    legacy_job_id=$(python3 "$SCRIPT_DIR/legacy_smoke.py" create "$base_url")
     python3 "$SCRIPT_DIR/legacy_smoke.py" verify "$base_url" "$legacy_job_id"
     legacy_verified=1
 
+    docker stop "$legacy_runner_container" >/dev/null
+    legacy_runner_container=
+    LOCAL_SHARED_LIVE_SANDBOX=$legacy_shared_live_value
+    compose up --detach --force-recreate control-plane
+    legacy_control_plane_default_off=0
+    wait_ready
     compose start runner
     legacy_runner_stopped=0
     trap - EXIT INT TERM

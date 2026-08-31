@@ -36,7 +36,7 @@ import httpx
 
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.publisher import PublishError, publish_patch
+from cloud_agent.publisher import PublishError, fetch_base_bundle, publish_patch
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
 from cloud_agent_host.patch_gate import branch_name_for
 
@@ -159,9 +159,19 @@ def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
     files = "\n".join(f"- `{path}`" for path in changed_files[:50])
     if len(changed_files) > 50:
         files += f"\n- …and {len(changed_files) - 50} more"
+    if job.get("publication_kind") == "shared_snapshot":
+        included = ", ".join(f"`{item}`" for item in job.get("included_job_ids") or [])
+        attribution = (
+            f"Opened from shared sandbox snapshot `{job['snapshot_id']}` "
+            f"(workspace epoch {job['workspace_epoch']}).\n\n"
+            f"**Included settled turns**\n\n{included or '`unknown`'}\n\n"
+            "The chats share one workspace, so this diff is a group snapshot and is not "
+            "attributed to only one chat.\n\n"
+        )
+    else:
+        attribution = f"Opened by a cloud agent job (`{job['job_id']}`).\n\n"
     return (
-        f"Opened by a cloud agent job (`{job['job_id']}`).\n\n"
-        f"**Task**\n\n> {job['task_prompt'][:1500]}\n\n"
+        attribution + f"**Task**\n\n> {job['task_prompt'][:1500]}\n\n"
         f"**Changed files ({len(changed_files)})**\n\n{files}\n\n"
         "---\n"
         "This branch was produced by an agent running in a sandbox with no "
@@ -170,6 +180,94 @@ def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
         "limits) before pushing. It is a draft on purpose — please review "
         "before merging."
     )
+
+
+async def _import_snapshot_base(
+    store: AgentJobStore,
+    *,
+    snapshot: dict[str, Any],
+    commit_sha: str,
+    bundle: bytes | None,
+) -> bool:
+    """Import a published commit into Docker without changing HEAD or files."""
+    snapshot_id = int(snapshot["snapshot_id"])
+    if not bundle:
+        await store.record_snapshot_base_import_failure(
+            snapshot_id=snapshot_id,
+            detail="the publisher produced no retained base bundle",
+        )
+        return False
+    from cloud_agent.broker_routing import broker_for_job
+
+    broker = await broker_for_job(store, snapshot["anchor_job_id"])
+    if broker is None:
+        await store.record_snapshot_base_import_failure(
+            snapshot_id=snapshot_id,
+            detail="the owning workspace broker is unavailable for base import",
+        )
+        return False
+    try:
+        await broker.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
+    except Exception as exc:
+        await store.record_snapshot_base_import_failure(
+            snapshot_id=snapshot_id,
+            detail=f"published base import failed: {exc}",
+        )
+        return False
+    return await store.complete_snapshot_base_import(
+        snapshot_id=snapshot_id,
+        commit_sha=commit_sha,
+    )
+
+
+async def retry_snapshot_base_import(
+    store: AgentJobStore,
+    *,
+    credential: GitHubCredential | None,
+    app_credentials: Any | None,
+) -> bool:
+    """Retry one durable post-publish object import after a broker outage."""
+    getter = getattr(store, "pending_snapshot_base_import", None)
+    if getter is None:
+        return False
+    snapshot = await getter()
+    if snapshot is None:
+        return False
+    try:
+        await require_entitled_repo(
+            snapshot["repo"],
+            snapshot.get("user_id", ""),
+            store=store,
+            app_credentials=app_credentials,
+        )
+        if app_credentials is not None:
+            credential = GitHubCredential(
+                await app_credentials.token_for(
+                    snapshot["repo"],
+                    permissions=_PUBLISH_SCOPE,
+                    repository_scoped=True,
+                )
+            )
+        if credential is None:
+            raise PublishError("no GitHub credential is configured for base import")
+        commit_sha = str(snapshot["published_commit_sha"])
+        bundle = await asyncio.to_thread(
+            fetch_base_bundle,
+            clone_url=credential.clone_url(snapshot["repo"]),
+            commit_sha=commit_sha,
+        )
+        return await _import_snapshot_base(
+            store,
+            snapshot=snapshot,
+            commit_sha=commit_sha,
+            bundle=bundle,
+        )
+    except Exception as exc:
+        await store.record_snapshot_base_import_failure(
+            snapshot_id=int(snapshot["snapshot_id"]),
+            detail=f"published base import retry failed: {exc}",
+        )
+        return False
 
 
 async def publish_one(
@@ -195,6 +293,16 @@ async def publish_one(
     job_id = job["job_id"]
     base_sha = job["base_sha"]
     pr_base = _pr_base_branch(job, base_branch)
+    shared_snapshot = job.get("publication_kind") == "shared_snapshot"
+
+    async def fail(detail: str) -> None:
+        if shared_snapshot:
+            await store.fail_snapshot_publish(
+                snapshot_id=int(job["snapshot_id"]),
+                detail=detail,
+            )
+        else:
+            await store.fail_publish(job_id=job_id, detail=detail)
 
     # Re-checked here, before any credential is minted. Publishing happens well
     # after the job ran, and it is the step that asks for *write* authority —
@@ -210,9 +318,7 @@ async def publish_one(
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
-        await store.fail_publish(
-            job_id=job_id, detail=f"no longer entitled to publish to {job['repo']}: {exc}"
-        )
+        await fail(f"no longer entitled to publish to {job['repo']}: {exc}")
         return None
 
     # Prefer the App: it mints a token scoped to this repository's
@@ -231,20 +337,13 @@ async def publish_one(
                 )
             )
         except Exception as exc:
-            await store.fail_publish(
-                job_id=job_id, detail=f"could not obtain a GitHub credential: {exc}"
-            )
+            await fail(f"could not obtain a GitHub credential: {exc}")
             return None
     if credential is None:
-        await store.fail_publish(
-            job_id=job_id, detail="no GitHub credential is configured for publishing"
-        )
+        await fail("no GitHub credential is configured for publishing")
         return None
     if not base_sha:
-        await store.fail_publish(
-            job_id=job_id,
-            detail="cannot publish: the job has no base_sha to apply the patch onto",
-        )
+        await fail("cannot publish: the job has no base_sha to apply the patch onto")
         return None
 
     try:
@@ -253,12 +352,13 @@ async def publish_one(
         result = await asyncio.to_thread(
             publish_patch,
             job_id=job_id,
-            branch_id=job.get("thread_id") or job_id,
+            branch_id=job.get("branch_id") or job.get("thread_id") or job_id,
             patch=job["patch"],
             clone_url=credential.clone_url(job["repo"]),
             base_sha=base_sha,
             commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
             allow_workflow_changes=allow_workflow_changes,
+            include_base_bundle=shared_snapshot,
         )
         pr_url = job.get("parent_pr_url")
         if not pr_url:
@@ -275,14 +375,26 @@ async def publish_one(
             "agent_job_publish_rejected",
             extra={"event": "agent_job_publish_rejected", "job_id": job_id},
         )
-        await store.fail_publish(job_id=job_id, detail=str(exc))
+        await fail(str(exc))
         return None
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("agent job publish failed unexpectedly")
-        await store.fail_publish(job_id=job_id, detail=f"publish failed: {exc}")
+        await fail(f"publish failed: {exc}")
         return None
 
-    if not await store.record_publish(job_id=job_id, pr_url=pr_url, commit_sha=result.commit_sha):
+    if shared_snapshot:
+        recorded = await store.record_snapshot_publish(
+            snapshot_id=int(job["snapshot_id"]),
+            pr_url=pr_url,
+            commit_sha=result.commit_sha,
+        )
+    else:
+        recorded = await store.record_publish(
+            job_id=job_id,
+            pr_url=pr_url,
+            commit_sha=result.commit_sha,
+        )
+    if not recorded:
         # Someone recorded a PR while we worked. The branch we pushed is
         # harmless (it is the same one), but say so rather than pretend.
         logger.warning(
@@ -291,12 +403,20 @@ async def publish_one(
         )
         return None
 
+    if shared_snapshot:
+        await _import_snapshot_base(
+            store,
+            snapshot=job,
+            commit_sha=result.commit_sha,
+            bundle=result.base_bundle,
+        )
+
     logger.info(
         "agent_job_pr_opened",
         extra={
             "event": "agent_job_pr_opened",
             "job_id": job_id,
-            "branch": branch_name_for(job.get("thread_id") or job_id),
+            "branch": branch_name_for(job.get("branch_id") or job.get("thread_id") or job_id),
             "base_branch": pr_base,
             "pr_url": pr_url,
         },
@@ -328,6 +448,11 @@ async def publish_loop(
             # module recommends — silently never publish anything.
             if credential is None and app_credentials is None:
                 continue
+            await retry_snapshot_base_import(
+                store,
+                credential=credential,
+                app_credentials=app_credentials,
+            )
             while await publish_one(
                 store,
                 credential=credential,

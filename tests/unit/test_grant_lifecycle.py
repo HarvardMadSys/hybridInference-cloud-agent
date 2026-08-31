@@ -39,7 +39,12 @@ from typing import Any
 import pytest
 
 from cloud_agent import app, app as control_plane, grants as grant_client, grants as grants_mod
-from cloud_agent.app import _reap_lapsed_residencies, _renew_live_grants, _revoke_dead_grants
+from cloud_agent.app import (
+    _cleanup_reaped_shared_residencies,
+    _reap_lapsed_residencies,
+    _renew_live_grants,
+    _revoke_dead_grants,
+)
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
 
@@ -676,3 +681,47 @@ async def test_a_deployment_without_grants_still_lapses_residencies() -> None:
     await _reap_lapsed_residencies(store, None)
 
     assert store.lapsed == []  # the reap itself happened
+
+
+async def test_reaped_shared_members_close_processes_and_grants_independently(
+    monkeypatch,
+) -> None:
+    """One unreachable broker cannot block another cleanup or grant revoke."""
+    broker_calls: list[tuple[str, int]] = []
+
+    class _Broker:
+        async def shared_residency_lost(self, thread_id: str, *, generation: int) -> None:
+            broker_calls.append((thread_id, generation))
+
+    async def route(_store, job_id: str):
+        if job_id == "job-unreachable":
+            raise RuntimeError("host unavailable")
+        return _Broker()
+
+    from cloud_agent import broker_routing
+
+    monkeypatch.setattr(broker_routing, "broker_for_job", route)
+    grants = _Grants()
+    actions = [
+        {
+            "job_id": "job-unreachable",
+            "cleanup_residency": {
+                "thread_id": "thread-one",
+                "generation": 3,
+                "grant_id": "grant-one",
+            },
+        },
+        {
+            "job_id": "job-reachable",
+            "cleanup_residency": {
+                "thread_id": "thread-two",
+                "generation": 4,
+                "grant_id": "grant-two",
+            },
+        },
+    ]
+
+    await _cleanup_reaped_shared_residencies(object(), actions, grants)
+
+    assert broker_calls == [("thread-two", 4)]
+    assert grants.revoked == ["grant-one", "grant-two"]

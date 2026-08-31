@@ -1,7 +1,10 @@
 # One chat, one restartable sandbox
 
-- **Status:** implementation preview v5 — source of truth for the staged
-  session-lifecycle rollout
+- **Status:** historical v5 baseline. New capable chats are superseded by
+  `2026-08-31-native-session-fork-shared-workspace-design.md`; `legacy_1to1`
+  retains only its one-process-per-turn resume behavior for rolling
+  compatibility. The current Fork API does not create a new Docker clone for
+  either mode.
 - **Date:** 2026-08-28
 - **Scope:** Docker-owned same-host storage, live interaction while running,
   native Agent CLI resume after `docker stop` / `docker start`, and an
@@ -13,19 +16,23 @@
   `2026-08-17-session-resident-harness-threads-design.md`. That document
   remains the implementation history and input to later persistent-storage
   work.
-- **Implementation-ready live-session/fork successor (not implemented):**
+- **Implemented successor for new shared-live chats:**
   `2026-08-31-native-session-fork-shared-workspace-design.md` moves retained
   CLI process ownership into the supervisor, keeps one live transport per chat
-  while Docker runs, and specifies native Agent CLI forks whose chats run
-  concurrently in one retained container/workspace. Until that successor lands
-  end to end, this document's runner-owned one-shot process and section 13
-  isolated Docker-clone behavior remain the branch's current source of truth.
+  while Docker runs, and performs immediate native Agent CLI forks whose chats
+  run concurrently in one retained container/workspace.
+
+> The runner-owned one-process-per-turn path and full Docker-clone Fork below
+> document the v5/`legacy_1to1` compatibility baseline. They are not the
+> behavior of a new `shared-sandbox-v1` chat. The current Fork API creates no
+> new retained Docker-clone fork in either mode; the old clone code remains
+> only to reconcile or clean an already-recorded historical saga.
 
 ---
 
-## 0. Preview implementation boundary
+## 0. Historical preview implementation boundary
 
-The current branch implements the retained Docker container, durable sandbox
+The v5 branch implemented the retained Docker container, durable sandbox
 ledger, host Session Supervisor, 30-minute settled-idle `docker stop`, same-
 container `docker start`, Docker-only file/Git/terminal access, control-plane
 state reconciliation through the host heartbeat, and strict native resume for
@@ -45,7 +52,7 @@ command. The frontend uses context (`new`/`live`/`restored`/`lost`) as the
 canonical product state; the older continuity rung is legacy diagnostic
 telemetry and is shown only on rows that predate context status.
 
-The preview is deliberately default-off. `AGENT_RESTARTABLE_RUNTIMES` defaults
+The v5 preview was deliberately default-off. `AGENT_RESTARTABLE_RUNTIMES` defaults
 to `claude-code,codex,pi,opencode,kilo`. Their exact pinned native-session
 commands are implemented in the shared driver path; Kata and live-provider
 conformance remain rollout gates beyond the local real-Docker matrix. R5 is
@@ -62,7 +69,7 @@ separately before publication.
 
 ## 1. Decision
 
-The next implementation phase has six product invariants:
+The staged v5 phase had six product invariants:
 
 1. **One chat owns one sandbox container.** A chat is the existing
    `agent_thread`. No other chat may execute in that container.
@@ -352,10 +359,12 @@ pressure by silently deleting an existing chat.
 
 ## 4. Legacy baseline and remaining preview gaps
 
-The first column below describes the legacy/default-off path. R1-R5 have landed
-behind the preview flag, including native-session adapters for all five pinned
-CLIs and the latest-settled full Docker fork. Local real-Docker coverage has
-landed; Kata and live-provider conformance for every advertised CLI, the
+The first column below describes the legacy/default-off path. R1-R5 landed in
+the historical v5 preview, including native-session adapters for all five
+pinned CLIs and its then-current latest-settled full Docker fork. That fork is
+no longer reachable for a new API request; its implementation remains only for
+recovery/cleanup of historical operations. Local real-Docker coverage landed;
+Kata and live-provider conformance for every advertised CLI, the
 context-fingerprint preflight described below, and R6 disk-pressure admission
 remain rollout work rather than claims about this branch:
 

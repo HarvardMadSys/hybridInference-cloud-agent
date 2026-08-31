@@ -12,6 +12,16 @@
 - **Replaces the behavior introduced by:** hybridInference #1113
   ("persistent Cursor-style task threads" — fresh sandbox + text replay per turn)
 
+> **2026-08-31 supersession notice.** New capable chats now use the implemented
+> shared-live design in
+> `2026-08-31-native-session-fork-shared-workspace-design.md`: a supervisor owns
+> one live CLI transport per member, ordinary chats remain one container each,
+> and an immediate runtime-native Fork adds a second independently runnable chat
+> and process to that same container/workspace. Group idle timeout closes the
+> processes and uses `docker stop`; the next member interaction starts the same
+> container and lazily resumes that native session. The 2026-08-28 Docker-clone
+> Fork remains only historical `legacy_1to1` compatibility, not the new path.
+
 > **2026-08-28 supersession notice.** The next phase retains exactly one
 > container per `agent_thread`, starts a live Agent CLI on turn 1, stops (but
 > does not remove) the container after settled idle timeout, and starts a new

@@ -171,6 +171,8 @@ services:
       # legacy workspace routes active during rollout; turning this on adds
       # retained create/start/stop RPC without changing their public shapes.
       AGENT_RESTARTABLE_SANDBOX: ${AGENT_RESTARTABLE_SANDBOX:-0}
+      AGENT_SHARED_LIVE_SANDBOX: ${AGENT_SHARED_LIVE_SANDBOX:-0}
+      AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
       # Daemon-side path, observed through `docker info`; it is deliberately
       # not mounted into this container. Production points Docker itself at a
       # durable block volume and sets this to that exact data-root.
@@ -181,6 +183,11 @@ services:
       # The nested fallback keeps deployments using the preview-era
       # AGENT_SESSION_IDLE_TIMEOUT_S name working during the rename.
       AGENT_CHAT_IDLE_TIMEOUT_S: ${AGENT_CHAT_IDLE_TIMEOUT_S:-${AGENT_SESSION_IDLE_TIMEOUT_S:-1800}}
+      # Fork can wake and native-resume a source without a runner turn.  The
+      # broker therefore needs the same sandbox-reachable relay addresses the
+      # runner hands to ordinary resident processes.
+      AGENT_GATEWAY_URL: http://${AGENT_GATEWAY_HOSTNAME:-agent-gateway}:${AGENT_TUNNEL_LISTEN_PORT:-8080}
+      AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
       AGENT_WORKDIR_ROOT: ${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
@@ -219,6 +226,8 @@ services:
       dockerfile: deploy/host/Dockerfile.agent-runner
     restart: unless-stopped
     environment:
+      AGENT_RESTARTABLE_SANDBOX: ${AGENT_RESTARTABLE_SANDBOX:-0}
+      AGENT_SHARED_LIVE_SANDBOX: ${AGENT_SHARED_LIVE_SANDBOX:-0}
       # The tunnel, by the name both this container and the sandboxes resolve.
       # Overriding it with the gateway's real address is a mistake worth naming:
       # the runner would reach it and the sandbox — on the closed network —
@@ -255,8 +264,9 @@ services:
       # container spends a fresh enrollment token on every restart, and
       # enrollment tokens are single-use.
       AGENT_HOST_CREDENTIAL_FILE: ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/credential
-      # How many jobs this machine will hold at once. Unset means unmetered,
-      # which is what every host that predates the pool is.
+      # Shared native forks require this to be explicitly set to at least 2.
+      # Unset preserves the legacy host's unmetered scheduling behavior while
+      # also preventing it from advertising shared-sandbox-v1 by accident.
       AGENT_HOST_SLOTS: ${AGENT_HOST_SLOTS:-}
       # How this runner reaches its own broker: a service name on this stack's
       # network, which is exactly right here and meaningless anywhere else.
@@ -276,12 +286,13 @@ services:
       # dispatcher token beside it. Two credentials for two permissions.
       AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker, distinct from AGENT_DISPATCHER_TOKEN}
 
-      # Staged retained-chat execution. The broker and runner must agree on
-      # the gate. Every default runtime below has an exact pinned native-resume
-      # adapter; the preview flag still stays off until deployment conformance.
-      AGENT_RESTARTABLE_SANDBOX: ${AGENT_RESTARTABLE_SANDBOX:-0}
+      # Retained/shared execution. The broker and runner must agree on the
+      # gate. Every default runtime below has an exact pinned native-resume
+      # adapter and the host advertises capability only after conformance.
       AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
       AGENT_RESTARTABLE_RUNTIMES: ${AGENT_RESTARTABLE_RUNTIMES:-claude-code,codex,pi,opencode,kilo}
+      AGENT_SHARED_LIVE_RUNTIMES: ${AGENT_SHARED_LIVE_RUNTIMES:-claude-code,codex,pi,opencode,kilo}
+      AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
       AGENT_CHAT_IDLE_TIMEOUT_S: ${AGENT_CHAT_IDLE_TIMEOUT_S:-${AGENT_SESSION_IDLE_TIMEOUT_S:-1800}}
 
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}

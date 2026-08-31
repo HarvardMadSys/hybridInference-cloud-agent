@@ -451,8 +451,8 @@ function HistoryTurn({
   turn: AgentHistoryTurn;
   previousJobId?: string;
   busy: boolean;
-  onFork: (jobId: string) => void;
-  onRewind: (jobId: string, prompt: string) => void;
+  onFork?: (jobId: string) => void;
+  onRewind?: (jobId: string, prompt: string) => void;
 }) {
   const hasEventMessages = turn.events.some((event) => event.kind === 'message');
   const toolCalls = turn.events.filter((event) => event.kind === 'tool_use').length;
@@ -469,7 +469,9 @@ function HistoryTurn({
             key={message.id}
             message={message}
             busy={busy}
-            onRewind={previousJobId ? () => onRewind(previousJobId, message.content) : undefined}
+            onRewind={
+              previousJobId && onRewind ? () => onRewind(previousJobId, message.content) : undefined
+            }
           />
         ))}
       <div aria-label={`Turn ${turn.turnNo} agent activity`} className="mt-2">
@@ -478,7 +480,7 @@ function HistoryTurn({
             key={`${turn.jobId}-${index}`}
             event={event}
             busy={busy}
-            onFork={event.kind === 'message' ? () => onFork(turn.jobId) : undefined}
+            onFork={event.kind === 'message' && onFork ? () => onFork(turn.jobId) : undefined}
           />
         ))}
         {fallbackMessages.map((message) => (
@@ -486,7 +488,7 @@ function HistoryTurn({
             key={message.id}
             message={message}
             busy={busy}
-            onFork={() => onFork(turn.jobId)}
+            onFork={onFork ? () => onFork(turn.jobId) : undefined}
           />
         ))}
       </div>
@@ -833,6 +835,10 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
       setSelectedPath(files[0].path);
     }
   }, [files, selectedPath]);
+  const showWorkspacePublicationStatus =
+    job.workspaceShared &&
+    Boolean(job.workspacePublicationState) &&
+    job.workspacePublicationState !== 'published';
 
   return (
     <div className="space-y-4" aria-label="Git workspace">
@@ -854,6 +860,24 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
                 ? 'Loading…'
                 : 'Archived result'}
         </span>
+        {job.workspaceShared ? (
+          <span className="rounded bg-amber-50 dark:bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-300">
+            Shared workspace
+          </span>
+        ) : null}
+        {showWorkspacePublicationStatus ? (
+          <span
+            className={`rounded px-2 py-1 text-[11px] ${
+              job.workspacePublicationState === 'failed'
+                ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300'
+                : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300'
+            }`}
+          >
+            {job.workspacePublicationState === 'failed'
+              ? 'Shared snapshot needs review'
+              : 'Shared snapshot pending'}
+          </span>
+        ) : null}
         <button
           type="button"
           onClick={() => setRefreshKey((value) => value + 1)}
@@ -1075,9 +1099,9 @@ export function JobDetail({
 
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);
 
-  // Every turn is its own sandbox run, and its context is a runtime-neutral
-  // replay of the conversation — so the model is a per-turn choice, not a
-  // property of the thread. Offer the same list the create endpoint accepts.
+  // The model remains a per-turn choice. A retained live chat reuses its CLI
+  // when the process-fixed settings match; changing the model makes only that
+  // member process restart and native-resume inside the same sandbox.
   useEffect(() => {
     let cancelled = false;
     getAgentConfig()
@@ -1245,10 +1269,19 @@ export function JobDetail({
     }
   }
 
-  // Fork duplicates the conversation up to the anchor turn into a new thread
-  // and navigates there; `draft` prefills the composer for edit-and-rewind.
+  // Fork creates a second native session in this chat's shared workspace and
+  // navigates to its copied history; `draft` prefills edit-and-rewind.
   async function forkFrom(anchorJobId: string, draft?: string) {
     if (forking) return;
+    if (
+      job.workspaceShared &&
+      typeof globalThis.confirm === 'function' &&
+      !globalThis.confirm(
+        'This creates another live Agent CLI in the same sandbox and workspace. Concurrent edits can conflict or overwrite each other. Continue?',
+      )
+    ) {
+      return;
+    }
     setForking(true);
     setActionError(null);
     try {
@@ -1281,6 +1314,16 @@ export function JobDetail({
     : allThreadMessages.length
       ? allThreadMessages[allThreadMessages.length - 1].jobId
       : undefined;
+  const canForkAnchor = (anchorJobId: string) => {
+    if (!job.sandboxId) return true;
+    return Boolean(
+      job.workspaceShared && job.nativeForkAvailable && anchorJobId === job.id && !isActive,
+    );
+  };
+  const rewindPromptAnchor =
+    lastHistoryJobId && lastHistoryJobId !== job.id && canForkAnchor(lastHistoryJobId)
+      ? lastHistoryJobId
+      : null;
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
@@ -1428,8 +1471,16 @@ export function JobDetail({
                     turn={turn}
                     previousJobId={index > 0 ? historyTurns[index - 1].jobId : undefined}
                     busy={forking}
-                    onFork={(anchorJobId) => void forkFrom(anchorJobId)}
-                    onRewind={(anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)}
+                    onFork={
+                      canForkAnchor(turn.jobId)
+                        ? (anchorJobId) => void forkFrom(anchorJobId)
+                        : undefined
+                    }
+                    onRewind={
+                      index > 0 && canForkAnchor(historyTurns[index - 1].jobId)
+                        ? (anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)
+                        : undefined
+                    }
                   />
                 ))}
                 {threadMessages.map((message, index) => {
@@ -1446,12 +1497,12 @@ export function JobDetail({
                       message={message}
                       busy={forking}
                       onFork={
-                        message.role === 'assistant'
+                        message.role === 'assistant' && canForkAnchor(message.jobId)
                           ? () => void forkFrom(message.jobId)
                           : undefined
                       }
                       onRewind={
-                        rewindAnchor
+                        rewindAnchor && canForkAnchor(rewindAnchor)
                           ? () => void forkFrom(rewindAnchor, message.content)
                           : undefined
                       }
@@ -1470,10 +1521,10 @@ export function JobDetail({
                         <CopyIcon />
                         Copy
                       </MessageActionButton>
-                      {lastHistoryJobId && lastHistoryJobId !== job.id ? (
+                      {rewindPromptAnchor ? (
                         <MessageActionButton
                           label="Edit & rewind"
-                          onClick={() => void forkFrom(lastHistoryJobId, job.prompt || job.title)}
+                          onClick={() => void forkFrom(rewindPromptAnchor, job.prompt || job.title)}
                           disabled={forking}
                         >
                           <RewindIcon />
@@ -1521,7 +1572,7 @@ export function JobDetail({
                       event={event}
                       busy={forking}
                       onFork={
-                        event.kind === 'message' && !isActive
+                        event.kind === 'message' && canForkAnchor(job.id) && !isActive
                           ? () => void forkFrom(job.id)
                           : undefined
                       }
@@ -1571,10 +1622,9 @@ export function JobDetail({
                   {modelOptions.length > 0 ? (
                     <>
                       {/* The harness stays the thread's; the model is offered
-                          again. Nothing binds it to the turn before — the next
-                          run is a fresh sandbox handed a runtime-neutral replay
-                          of the conversation, so it can be answered by a model
-                          the thread has not used. */}
+                          again. A model change restarts this member's CLI and
+                          native-resumes it in the same retained workspace; it
+                          does not replace or clone the sandbox. */}
                       <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
                         {job.state === 'cancelled'
                           ? `Restores any saved changes · ${job.runtime} ·`

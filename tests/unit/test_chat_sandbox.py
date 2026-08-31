@@ -15,6 +15,8 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
+    MEMBER_TMPFS_ROOT,
+    MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
@@ -276,6 +278,268 @@ def test_exec_is_bound_to_the_inspected_container_and_workspace(monkeypatch):
     assert exec_command[:2] == ["docker", "exec"]
     assert exec_command[exec_command.index("--workdir") + 1] == CHAT_WORKDIR
     assert exec_command[-4:] == [spec.container_name, "git", "status", "--short"]
+
+
+def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    payload = _inspect_payload(spec, status="running", running=True)
+    popen_calls: list[tuple[list[str], dict]] = []
+
+    class Process:
+        stdin = None
+        stdout = None
+        stderr = None
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
+    )
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append((list(argv), kwargs))
+        return Process()
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+
+    pidfile = f"{MEMBER_TMPFS_ROOT}/0/resident-{'a' * 32}.pid"
+    manager.spawn(
+        spec,
+        ["claude", "--model", "local-demo-model"],
+        live_input=True,
+        user_uid=MEMBER_UID_BASE,
+        user_gid=manager.backend.gid,
+        process_pidfile=pidfile,
+    )
+
+    command, _kwargs = popen_calls[0]
+    wrapper_at = command.index("/bin/sh")
+    wrapper = command[wrapper_at + 2]
+    assert 'started=$(set -- $fields; printf "%s" "${20:-}")' in wrapper
+    assert 'exec "$@"' in wrapper
+    assert "shift 20" not in wrapper
+    assert command[-4:] == [pidfile, "claude", "--model", "local-demo-model"]
+
+
+def test_member_permission_normalization_prunes_platform_and_sibling_provider_homes(
+    monkeypatch,
+):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    manager.normalize_member_files(
+        spec,
+        slot_id=0,
+        user_uid=MEMBER_UID_BASE,
+        user_gid=manager.backend.gid,
+    )
+
+    script = calls[0][0][2]
+    assert script.count("-path /agent-state/.platform") == 2
+    assert script.count("-path /agent-state/codex-members") == 2
+    assert script.count("-path /agent-state/opencode-members") == 2
+    assert script.count("-path /agent-state/kilo-members") == 2
+    assert 'stat -c %u "$member"' in script
+    assert 'normalize_dirs "$member"' in script
+    assert calls[0][1]["user_uid"] == MEMBER_UID_BASE
+
+
+def test_member_replacement_reaps_pidfile_group_and_every_same_uid_leftover(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    manager.reap_member_processes(
+        spec,
+        slot_id=0,
+        user_uid=MEMBER_UID_BASE,
+        user_gid=manager.backend.gid,
+    )
+
+    assert len(calls) == 2
+    assert "resident-*.pid" in calls[0][0][2]
+    assert "/proc/[0-9]*" in calls[1][0][2]
+    assert "scan TERM" in calls[1][0][2]
+    assert "scan KILL" in calls[1][0][2]
+    assert "pkill" not in calls[1][0][2]
+    assert calls[1][1]["input_bytes"] == b""
+    assert calls[1][1]["user_uid"] == MEMBER_UID_BASE
+
+
+def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if kwargs.get("input_bytes") is None:
+            return SimpleNamespace(returncode=0, stdout=b"42 500\n41 400\n", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    baseline = manager.capture_member_processes(
+        spec,
+        slot_id=0,
+        user_uid=MEMBER_UID_BASE,
+        user_gid=manager.backend.gid,
+    )
+    manager.reap_member_processes_except(
+        spec,
+        slot_id=0,
+        user_uid=MEMBER_UID_BASE,
+        user_gid=manager.backend.gid,
+        baseline=baseline,
+    )
+
+    assert baseline == ((41, 400), (42, 500))
+    assert calls[1][1]["input_bytes"] == b"41 400\n42 500\n"
+    assert "grep -Fqx" in calls[1][0][2]
+    assert f"{MEMBER_TMPFS_ROOT}/0/reap-" in calls[1][0][-1]
+
+    with pytest.raises(SandboxError, match="malformed"):
+        manager._parse_member_processes(b"41 nope\n")
+
+
+def test_shared_writer_freeze_runs_as_each_owner_without_cap_kill(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=3,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    calls: list[tuple[list[str], dict]] = []
+    receipts = {
+        manager.backend.uid: b"31 10001 300\n",
+        MEMBER_UID_BASE: b"41 11001 400\n",
+        MEMBER_UID_BASE + 1: b"51 11002 500\n",
+    }
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if kwargs.get("input_bytes") is not None:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=receipts[kwargs["user_uid"]],
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    manifest = manager.freeze_shared_writers(
+        spec,
+        slot_ids=[1, 0, 1],
+        token="a" * 32,
+    )
+
+    assert manifest == f"{ACTIVATION_TMPFS}/snapshot-{'a' * 32}.pids"
+    assert [call[1]["user_uid"] for call in calls] == [10001, 11001, 11002, 10001]
+    assert all(call[1]["user_uid"] != 0 for call in calls)
+    assert calls[-1][1]["input_bytes"] == (b"31 10001 300\n41 11001 400\n51 11002 500\n")
+    census_script = calls[0][0][2]
+    assert '[ "$pid" != "$$" ]' in census_script
+    assert "kill -STOP" in census_script
+    assert "kill -CONT" in census_script
+
+
+def test_shared_writer_thaw_reads_manifest_and_resumes_as_each_owner(monkeypatch):
+    spec = ChatSandboxSpec(
+        thread_id="athr_shared",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        shared_live=True,
+        resident_slot_capacity=2,
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    calls: list[tuple[list[str], dict]] = []
+    manifest = f"{ACTIVATION_TMPFS}/snapshot-{'b' * 32}.pids"
+
+    def fake_exec(_spec, argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[2] == 'cat -- "$1"':
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"31 10001 300\n41 11001 400\n",
+                stderr=b"",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+
+    manager.thaw_shared_writers(spec, slot_ids=[0], manifest=manifest)
+
+    assert [call[1]["user_uid"] for call in calls] == [10001, 10001, 11001, 10001]
+    assert all(call[1]["user_uid"] != 0 for call in calls)
+    assert calls[1][0][-1] == "31:300"
+    assert calls[2][0][-1] == "41:400"
+    assert "kill -CONT" in calls[1][0][2]
+    assert calls[-1][0][2] == 'rm -f -- "$1"'
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"1 10001 300\n",
+        b"31 0 300\n",
+        b"31 10001 0\n",
+        b"31 10001 300 extra\n",
+        b"31 10001 300\n31 10001 301\n",
+        "31 10001 300\N{SNOWMAN}\n".encode(),
+    ],
+)
+def test_shared_writer_manifest_rejects_values_outside_the_identity_fence(payload):
+    with pytest.raises(SandboxError, match="snapshot writer census"):
+        ChatSandboxManager._parse_frozen_processes(payload, allowed_uids={10001})
 
 
 def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(monkeypatch):

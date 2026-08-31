@@ -535,6 +535,15 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     hasLedger: job.spent_usd !== null,
     ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
     ...(job.context_status ? { contextStatus: job.context_status } : {}),
+    ...(job.resident_state ? { residentState: job.resident_state } : {}),
+    ...(job.sandbox_id ? { sandboxId: job.sandbox_id } : {}),
+    ...(job.workspace_shared ? { workspaceShared: true } : {}),
+    ...(job.native_state ? { nativeState: job.native_state } : {}),
+    ...(job.native_fork_available ? { nativeForkAvailable: true } : {}),
+    ...(job.workspace_publication_state
+      ? { workspacePublicationState: job.workspace_publication_state }
+      : {}),
+    ...(typeof job.workspace_epoch === 'number' ? { workspaceEpoch: job.workspace_epoch } : {}),
     ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
     ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),
     timeoutLabel: '',

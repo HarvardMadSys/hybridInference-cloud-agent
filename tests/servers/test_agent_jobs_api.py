@@ -28,6 +28,7 @@ and mean exactly what they did before.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -76,6 +77,7 @@ class FakeAgentJobStore:
         self.active_host: str | None = None
         self.mcp_connections: dict[str, list[dict[str, Any]]] = {}
         self.sandbox_forks: dict[str, dict[str, Any]] = {}
+        self.session_forks: dict[str, dict[str, Any]] = {}
         self._next_event_id = 1
         self._next_job = 1
 
@@ -326,6 +328,7 @@ class FakeAgentJobStore:
             "state": "preparing",
             "user_id": user_id,
             "source_thread_id": source["thread_id"],
+            "origin_thread_id": sandbox.get("origin_thread_id", source["thread_id"]),
             "source_job_id": source_job_id,
             "source_sandbox_id": sandbox["sandbox_id"],
             "source_sandbox_generation": sandbox.get("generation", 1),
@@ -394,6 +397,197 @@ class FakeAgentJobStore:
                 cleanup_pending=cleanup_pending,
             )
         return operation
+
+    async def prepare_session_fork(
+        self,
+        *,
+        source_job_id: str,
+        user_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Model the new same-container native-fork saga for route tests."""
+        source = self.jobs.get(source_job_id)
+        if source is None or source["user_id"] != user_id:
+            return None
+        if source["state"] not in {"succeeded", "failed", "cancelled"}:
+            return {"error": "not_settled"}
+        sandbox = source.get("thread_sandbox")
+        if not isinstance(sandbox, dict) or sandbox.get("shared_live") is not True:
+            return {"error": "not_shared_live"}
+        existing = next(
+            (
+                row
+                for row in self.session_forks.values()
+                if row["user_id"] == user_id and row["idempotency_key"] == idempotency_key
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        operation_id = f"asfork_{len(self.session_forks) + 1:04d}"
+        operation = {
+            "id": operation_id,
+            "state": "preparing",
+            "user_id": user_id,
+            "idempotency_key": idempotency_key,
+            "host": sandbox.get("host", "runner-a"),
+            "sandbox_id": sandbox["sandbox_id"],
+            "sandbox_generation": sandbox.get("generation", 1),
+            "container_id": sandbox["container_id"],
+            "runtime_id": sandbox.get("runtime_id", source["runtime"]),
+            "runtime_version": sandbox.get("runtime_version"),
+            "sandbox_image_digest": sandbox.get("sandbox_image_digest"),
+            "resident_slot_capacity": sandbox.get("resident_slot_capacity", 8),
+            "memory_limit": sandbox.get("memory_limit", "4g"),
+            "cpu_limit": sandbox.get("cpu_limit", "2"),
+            "stop_timeout_seconds": sandbox.get("stop_timeout_seconds", 10),
+            "source_thread_id": source["thread_id"],
+            "origin_thread_id": sandbox.get("origin_thread_id", source["thread_id"]),
+            "source_job_id": source_job_id,
+            "source_native_session_id": sandbox["native_session_id"],
+            "source_activation_generation": sandbox.get("activation_generation", 1),
+            "resident_slot_id": sandbox.get("resident_slot_id", 0),
+            "target_thread_id": f"athr_fork_{self._next_job:04d}",
+            "target_resident_slot_id": 1,
+            "group_members": sandbox.get("group_members")
+            or [
+                {
+                    "thread_id": source["thread_id"],
+                    "native_session_id": sandbox["native_session_id"],
+                    "context_status": "live",
+                    "activation_generation": sandbox.get("activation_generation", 1),
+                    "process_generation": 1,
+                    "residency_generation": 1,
+                    "resident_state": "live",
+                    "resident_slot_id": sandbox.get("resident_slot_id", 0),
+                    "last_settled_job_id": source_job_id,
+                }
+            ],
+            "source_job": source,
+        }
+        self.session_forks[operation_id] = operation
+        return operation
+
+    async def claim_session_fork_materialization(
+        self,
+        *,
+        operation_id: str,
+        coordinator_token: str,
+        lease_seconds: float,
+    ) -> bool:
+        operation = self.session_forks.get(operation_id)
+        if operation is None or operation["state"] != "preparing":
+            return False
+        if operation.get("coordinator_token") not in {None, coordinator_token}:
+            return False
+        operation["coordinator_token"] = coordinator_token
+        operation["coordinator_lease_seconds"] = lease_seconds
+        return True
+
+    async def release_session_fork_materialization(
+        self,
+        *,
+        operation_id: str,
+        coordinator_token: str,
+    ) -> bool:
+        operation = self.session_forks.get(operation_id)
+        if operation is None or operation.get("coordinator_token") != coordinator_token:
+            return False
+        operation["coordinator_token"] = None
+        return True
+
+    async def establish_session_fork_residencies(
+        self, *, operation_id: str, coordinator_token: str, ttl_seconds: float
+    ) -> dict[str, Any] | None:
+        operation = self.session_forks.get(operation_id)
+        if operation is None or operation.get("coordinator_token") != coordinator_token:
+            return None
+        source = self.jobs[operation["source_job_id"]]
+        return {
+            "source": {
+                "thread_id": operation["source_thread_id"],
+                "generation": 11,
+                "previous_grant_id": None,
+                "establishing_attempt_id": f"fork-source:{operation_id}",
+                "user_id": source["user_id"],
+                "model": source["model"],
+            },
+            "target": {
+                "thread_id": operation["target_thread_id"],
+                "generation": 12,
+                "previous_grant_id": None,
+                "establishing_attempt_id": f"fork-target:{operation_id}",
+                "user_id": source["user_id"],
+                "model": source["model"],
+            },
+        }
+
+    async def link_residency_grant(self, *, thread_id: str, generation: int, grant_id: str) -> bool:
+        return True
+
+    async def release_residency(self, *, thread_id: str, generation: int, host: str) -> str | None:
+        return None
+
+    async def record_session_fork_materialized(
+        self,
+        *,
+        operation_id: str,
+        coordinator_token: str,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        operation = self.session_forks.get(operation_id)
+        if (
+            operation is None
+            or operation.get("coordinator_token") != coordinator_token
+            or receipt.get("operation_id") != operation_id
+        ):
+            return None
+        operation.update(
+            state="materialized",
+            coordinator_token=None,
+            host_receipt=receipt,
+            target_native_session_id=receipt["target_native_session_id"],
+            source_process_generation=receipt["source_process_generation"],
+            target_process_generation=receipt["target_process_generation"],
+        )
+        return operation
+
+    async def finalize_session_fork(self, *, operation_id: str) -> dict[str, Any] | None:
+        operation = self.session_forks.get(operation_id)
+        if operation is None or operation["state"] not in {"materialized", "ready"}:
+            return None
+        if operation["state"] == "ready":
+            return self.jobs.get(operation["target_anchor_job_id"])
+        copied = await self.fork_thread(
+            source_job_id=operation["source_job_id"],
+            user_id=operation["user_id"],
+        )
+        if copied is None or copied["thread_id"] != operation["target_thread_id"]:
+            return None
+        source_sandbox = self.jobs[operation["source_job_id"]]["thread_sandbox"]
+        target_member = {
+            "thread_id": copied["thread_id"],
+            "native_session_id": operation["target_native_session_id"],
+            "context_status": "live",
+            "activation_generation": 0,
+            "process_generation": operation["target_process_generation"],
+            "residency_generation": 12,
+            "resident_state": "live",
+            "resident_slot_id": operation["target_resident_slot_id"],
+            "last_settled_job_id": copied["id"],
+        }
+        shared_members = [*source_sandbox.get("group_members", []), target_member]
+        for child in self.jobs.values():
+            if child["thread_id"] == copied["thread_id"]:
+                child["thread_sandbox"] = {
+                    **source_sandbox,
+                    "thread_id": copied["thread_id"],
+                    "native_session_id": operation["target_native_session_id"],
+                    "resident_slot_id": operation["target_resident_slot_id"],
+                    "group_members": shared_members,
+                }
+        operation.update(state="ready", target_anchor_job_id=copied["id"])
+        return copied
 
     async def resolve_legacy_published_commit(self, *, parent_job_id: str, commit_sha: str) -> bool:
         parent = self.jobs.get(parent_job_id)
@@ -1764,78 +1958,14 @@ async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: Fak
     assert running.status_code == 409
 
 
-async def test_retained_chat_fork_clones_the_full_sandbox(store: FakeAgentJobStore, monkeypatch):
-    """A retained fork is finalized only from the host's exact Docker receipt."""
-
-    class Broker:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict[str, Any]]] = []
-
-        async def fork_chat_sandbox(self, source_thread_id: str, **kwargs: Any):
-            self.calls.append((source_thread_id, kwargs))
-            return {
-                "operation_id": kwargs["operation_id"],
-                "source_thread_id": source_thread_id,
-                "source_sandbox_id": kwargs["source_sandbox_id"],
-                "source_container_id": kwargs["source_container_id"],
-                "target_thread_id": kwargs["target_thread_id"],
-                "target_sandbox_id": kwargs["target_sandbox_id"],
-                "target_container_id": "container-fork",
-                "target_container_name": "freeinference-chat-fork",
-                "snapshot_image_digest": "sha256:fork-image",
-                "source_fingerprint": "sha256:fork-image",
-                "target_fingerprint": "sha256:fork-image",
-            }
-
-        async def rollback_chat_sandbox_fork(self, *_args: Any, **_kwargs: Any):
-            raise AssertionError("a successful fork must not roll back")
-
-    broker = Broker()
-    monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: broker)
-    app = _build_app(store)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as local_client:
-        job_id = await _create_job(local_client)
-        source = store.jobs[job_id]
-        source["state"] = "succeeded"
-        source["thread_sandbox"] = {
-            "sandbox_id": "asbx_1",
-            "generation": 1,
-            "activation_generation": 2,
-            "container_id": "container-one",
-            "native_session_id": "native-session-1",
-        }
-
-        response = await local_client.post(f"/v1/agent/jobs/{job_id}/fork")
-
-    assert response.status_code == 201
-    forked = store.jobs[response.json()["id"]]
-    assert forked["thread_id"] != source["thread_id"]
-    assert forked["thread_sandbox"] == {
-        "thread_id": forked["thread_id"],
-        "sandbox_id": "asbx_fork_0001",
-        "generation": 1,
-        "container_id": "container-fork",
-        "container_name": "freeinference-chat-fork",
-        "sandbox_image_digest": "sha256:fork-image",
-        "native_session_id": "native-session-1",
-        "state": "stopped",
-        "context_status": "restored",
-    }
-    assert broker.calls[0][1]["source_container_id"] == "container-one"
-
-
-async def test_retained_chat_fork_keeps_cleanup_debt_when_host_rollback_fails(
+async def test_legacy_retained_chat_cannot_fall_back_to_a_docker_clone(
     store: FakeAgentJobStore, monkeypatch
 ):
-    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+    """Historical one-chat containers stay readable but are never cloned."""
 
     class Broker:
-        async def fork_chat_sandbox(self, *_args: Any, **_kwargs: Any):
-            raise WorkspaceBrokerError(503, "host timed out")
-
-        async def rollback_chat_sandbox_fork(self, *_args: Any, **_kwargs: Any):
-            raise WorkspaceBrokerError(503, "host still unavailable")
+        async def __getattr__(self, _name: str):
+            raise AssertionError("legacy fork must be rejected before a host mutation")
 
     monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: Broker())
     app = _build_app(store)
@@ -1844,20 +1974,219 @@ async def test_retained_chat_fork_keeps_cleanup_debt_when_host_rollback_fails(
         store.jobs[job_id].update(
             state="succeeded",
             thread_sandbox={
-                "sandbox_id": "asbx_1",
-                "generation": 1,
-                "activation_generation": 2,
-                "container_id": "container-one",
-                "native_session_id": "native-session-1",
+                "sandbox_id": "asbx_legacy",
+                "container_id": "container-legacy",
+                "native_session_id": "native-session-legacy",
+                "shared_live": False,
             },
         )
 
         response = await client.post(f"/v1/agent/jobs/{job_id}/fork")
 
-    assert response.status_code == 503
-    operation = next(iter(store.sandbox_forks.values()))
-    assert operation["state"] == "failed"
-    assert operation["cleanup_pending"] is True
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"]["type"] == "native_fork_unavailable"
+    assert store.session_forks == {}
+
+
+async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Clicking Fork immediately materializes a sibling process, not a clone."""
+
+    class Broker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
+            self.calls.append((source_thread_id, kwargs))
+            assert kwargs["expected_container_id"] == "container-shared"
+            assert kwargs["origin_thread_id"] == source_thread_id
+            assert kwargs["source_native_session_id"] == "native-session-source"
+            assert kwargs["target_thread_id"] != source_thread_id
+            return {
+                "operation_id": kwargs["operation_id"],
+                "sandbox_id": kwargs["sandbox_id"],
+                "sandbox_generation": kwargs["generation"],
+                "container_id": kwargs["expected_container_id"],
+                "runtime_id": kwargs["runtime_id"],
+                "runtime_version": kwargs["runtime_version"],
+                "source_thread_id": source_thread_id,
+                "source_native_session_id": kwargs["source_native_session_id"],
+                "target_thread_id": kwargs["target_thread_id"],
+                "target_native_session_id": "native-session-child",
+                "target_resident_slot_id": kwargs["target_slot_id"],
+                "source_residency_generation": kwargs["source_launch"]["residency_generation"],
+                "target_residency_generation": kwargs["target_launch"]["residency_generation"],
+                "source_process_generation": 7,
+                "target_process_generation": 1,
+            }
+
+    broker = Broker()
+    monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        source = store.jobs[job_id]
+        source["state"] = "succeeded"
+        source["thread_sandbox"] = {
+            "thread_id": source["thread_id"],
+            "sandbox_id": "asbx_shared",
+            "generation": 3,
+            "activation_generation": 4,
+            "container_id": "container-shared",
+            "container_name": "freeinference-chat-shared",
+            "runtime_id": "claude-code",
+            "runtime_version": "2.1.220",
+            "sandbox_image_digest": "sha256:shared-image",
+            "native_session_id": "native-session-source",
+            "state": "running",
+            "context_status": "live",
+            "shared_live": True,
+            "resident_slot_id": 0,
+            "resident_slot_capacity": 8,
+            "group_members": [],
+        }
+
+        response = await client.post(
+            f"/v1/agent/jobs/{job_id}/fork",
+            headers={"Idempotency-Key": "fork-on-click"},
+        )
+
+    assert response.status_code == 201
+    forked = store.jobs[response.json()["id"]]
+    assert forked["thread_id"] != source["thread_id"]
+    assert forked["thread_sandbox"]["sandbox_id"] == source["thread_sandbox"]["sandbox_id"]
+    assert forked["thread_sandbox"]["container_id"] == source["thread_sandbox"]["container_id"]
+    assert forked["thread_sandbox"]["native_session_id"] == "native-session-child"
+    assert len(broker.calls) == 1
+
+
+async def test_same_native_fork_request_has_one_external_coordinator(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Two API workers must not rotate residencies or fork the CLI twice."""
+
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    class Broker:
+        calls = 0
+
+        async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
+            self.calls += 1
+            started.set()
+            await finish.wait()
+            return {
+                "operation_id": kwargs["operation_id"],
+                "sandbox_id": kwargs["sandbox_id"],
+                "sandbox_generation": kwargs["generation"],
+                "container_id": kwargs["expected_container_id"],
+                "runtime_id": kwargs["runtime_id"],
+                "runtime_version": kwargs["runtime_version"],
+                "source_thread_id": source_thread_id,
+                "source_native_session_id": kwargs["source_native_session_id"],
+                "target_thread_id": kwargs["target_thread_id"],
+                "target_native_session_id": "native-session-child",
+                "target_resident_slot_id": kwargs["target_slot_id"],
+                "source_residency_generation": kwargs["source_launch"]["residency_generation"],
+                "target_residency_generation": kwargs["target_launch"]["residency_generation"],
+                "source_process_generation": 2,
+                "target_process_generation": 1,
+            }
+
+    broker = Broker()
+    monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        source = store.jobs[job_id]
+        source["state"] = "succeeded"
+        source["thread_sandbox"] = {
+            "thread_id": source["thread_id"],
+            "sandbox_id": "asbx_shared",
+            "generation": 1,
+            "activation_generation": 1,
+            "container_id": "container-shared",
+            "runtime_id": "claude-code",
+            "runtime_version": "2.1.220",
+            "native_session_id": "native-session-source",
+            "shared_live": True,
+            "resident_slot_id": 0,
+            "resident_slot_capacity": 8,
+        }
+        path = f"/v1/agent/jobs/{job_id}/fork"
+        headers = {"Idempotency-Key": "same-click"}
+        first = asyncio.create_task(client.post(path, headers=headers))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        competing = await client.post(path, headers=headers)
+        finish.set()
+        completed = await first
+
+    assert competing.status_code == 409
+    assert competing.json()["detail"]["error"]["type"] == "fork_in_progress"
+    assert competing.headers["retry-after"] == "2"
+    assert completed.status_code == 201
+    assert broker.calls == 1
+
+
+async def test_ready_native_fork_retry_does_not_need_the_host(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """A lost success response remains idempotent after the host disappears."""
+
+    class Broker:
+        calls = 0
+
+        async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
+            self.calls += 1
+            return {
+                "operation_id": kwargs["operation_id"],
+                "sandbox_id": kwargs["sandbox_id"],
+                "sandbox_generation": kwargs["generation"],
+                "container_id": kwargs["expected_container_id"],
+                "runtime_id": kwargs["runtime_id"],
+                "runtime_version": kwargs["runtime_version"],
+                "source_thread_id": source_thread_id,
+                "source_native_session_id": kwargs["source_native_session_id"],
+                "target_thread_id": kwargs["target_thread_id"],
+                "target_native_session_id": "native-session-child",
+                "target_resident_slot_id": kwargs["target_slot_id"],
+                "source_residency_generation": kwargs["source_launch"]["residency_generation"],
+                "target_residency_generation": kwargs["target_launch"]["residency_generation"],
+                "source_process_generation": 2,
+                "target_process_generation": 1,
+            }
+
+    broker = Broker()
+    monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        source = store.jobs[job_id]
+        source["state"] = "succeeded"
+        source["thread_sandbox"] = {
+            "thread_id": source["thread_id"],
+            "sandbox_id": "asbx_shared",
+            "generation": 1,
+            "activation_generation": 1,
+            "container_id": "container-shared",
+            "runtime_id": "claude-code",
+            "runtime_version": "2.1.220",
+            "native_session_id": "native-session-source",
+            "shared_live": True,
+            "resident_slot_id": 0,
+            "resident_slot_capacity": 8,
+        }
+        path = f"/v1/agent/jobs/{job_id}/fork"
+        headers = {"Idempotency-Key": "lost-success-response"}
+        first = await client.post(path, headers=headers)
+        monkeypatch.setattr(broker_routing, "workspace_broker_from_env", lambda: None)
+        retried = await client.post(path, headers=headers)
+
+    assert first.status_code == 201
+    assert retried.status_code == 201
+    assert retried.json()["id"] == first.json()["id"]
+    assert broker.calls == 1
 
 
 async def test_fork_is_owner_scoped(client: AsyncClient, store: FakeAgentJobStore):
@@ -3085,6 +3414,89 @@ async def test_retained_prompt_admission_is_worker_and_generation_fenced(
             "activation_generation": 7,
         }
     ]
+
+
+async def test_shared_abandon_releases_the_exact_residency_and_grant(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """A pre-admission process failure must not leave a renewable grant live."""
+
+    class RecordingGrants(_FakeGrants):
+        def __init__(self) -> None:
+            super().__init__()
+            self.revoked: list[str] = []
+
+        async def revoke(self, grant_id: str) -> bool:
+            self.revoked.append(grant_id)
+            return True
+
+    grants = RecordingGrants()
+    app = _build_app(store)
+    from cloud_agent.api.deps import get_grant_client
+
+    app.dependency_overrides[get_grant_client] = lambda: grants
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        job_id = await _create_job(client)
+        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+
+        job = store.jobs[job_id]
+        sandbox = {
+            "thread_id": job["thread_id"],
+            "sandbox_id": "asbx_shared",
+            "generation": 3,
+            "host": "runner-a",
+            "container_id": "container-shared",
+            "container_name": "freeinference-shared",
+            "runtime_id": "claude-code",
+            "runtime_version": "2.1.220",
+            "sandbox_image_digest": "sha256:shared",
+            "execution_profile": "trusted-v1",
+            "state": "stopping",
+            "context_status": "new",
+            "activation_generation": 7,
+            "process_generation": 4,
+            "shared_live": True,
+            "origin_thread_id": job["thread_id"],
+            "resident_state": "stopped",
+            "residency_generation": 11,
+            "resident_slot_id": 0,
+            "resident_slot_capacity": 8,
+        }
+        releases: list[tuple[str, int, str]] = []
+
+        async def abandon_thread_sandbox(**kwargs: Any) -> dict[str, Any]:
+            assert kwargs["attempt_id"] == 100
+            assert kwargs["lease_generation"] == 1
+            return sandbox
+
+        async def release_residency(*, thread_id: str, generation: int, host: str) -> str:
+            releases.append((thread_id, generation, host))
+            return "agr_resident_shared"
+
+        monkeypatch.setattr(
+            store,
+            "abandon_thread_sandbox",
+            abandon_thread_sandbox,
+            raising=False,
+        )
+        monkeypatch.setattr(store, "release_residency", release_residency)
+
+        response = await client.post(
+            f"/v1/agent/worker/jobs/{job_id}/sandbox/abandon",
+            json={
+                "sandbox_generation": 3,
+                "activation_generation": 7,
+                "lost": False,
+                "detail": "process failed before admission",
+            },
+            headers=auth,
+        )
+
+    assert response.status_code == 200, response.text
+    assert releases == [(job["thread_id"], 11, "runner-a")]
+    assert grants.revoked == ["agr_resident_shared"]
 
 
 async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: FakeAgentJobStore):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import json
 import os
 import queue
 import subprocess
@@ -1143,6 +1145,71 @@ class _FakeSessionSupervisor:
         )
 
 
+class _FakeSharedSessionSupervisor:
+    """Record shared snapshot/import RPCs without requiring Docker."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.imports: list[tuple[bytes, str, dict[str, str]]] = []
+        self.manager = SimpleNamespace(import_base_bundle=self._import_base_bundle)
+        self.workspace_backend = SimpleNamespace(
+            manager=self.manager,
+            spec=SimpleNamespace(sandbox_id="asbx_shared"),
+        )
+
+    def register_manifest(self, spec, members, *, expected_container_id=None):
+        self.calls.append(("manifest", spec, members, expected_container_id))
+        return []
+
+    def capture_snapshot(self, thread_id: str, *, capture):
+        self.calls.append(("snapshot", thread_id))
+        return {"patch": "diff --git a/a.txt b/a.txt\n"}
+
+    def operation_opened(self, thread_id: str):
+        self.calls.append(("operation_opened", thread_id))
+        return "shared-operation", None
+
+    def backend(self, thread_id: str):
+        self.calls.append(("backend", thread_id))
+        return self.workspace_backend
+
+    def operation_closed(self, thread_id: str, token: str):
+        self.calls.append(("operation_closed", thread_id, token))
+        return None
+
+    def _import_base_bundle(self, spec, bundle: bytes, *, commit: str, env):
+        self.imports.append((bundle, commit, env))
+
+
+def _shared_snapshot_identity() -> dict[str, object]:
+    return {
+        "sandbox_id": "asbx_shared",
+        "generation": 3,
+        "origin_thread_id": "athr_source",
+        "runtime_id": "claude-code",
+        "runtime_version": "2.1.220",
+        "sandbox_image_digest": "sha256:image",
+        "expected_container_id": "container-shared",
+        "resident_slot_capacity": 8,
+        "memory_limit": "4g",
+        "cpu_limit": "2",
+        "stop_timeout_s": 10,
+        "members": [
+            {
+                "thread_id": "athr_source",
+                "native_session_id": "native-source",
+                "context_status": "live",
+                "activation_generation": 4,
+                "process_generation": 2,
+                "residency_generation": 7,
+                "resident_state": "live",
+                "resident_slot_id": 0,
+                "last_settled_job_id": "ajob_source",
+            }
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_broker_exposes_authenticated_restartable_sandbox_lifecycle(tmp_path):
     root, _repo = _workspace(tmp_path)
@@ -1256,6 +1323,94 @@ async def test_broker_accepts_a_generation_zero_fork_target_idle_stop(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_broker_rehydrates_shared_child_aliases_without_starting_the_group(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    supervisor = _FakeSharedSessionSupervisor()
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/register",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json=_shared_snapshot_identity(),
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "sandbox_id": "asbx_shared", "member_count": 0}
+    assert [call[0] for call in supervisor.calls] == ["manifest"]
+
+
+@pytest.mark.asyncio
+async def test_shared_turn_reports_activation_boundary_failure_before_result(tmp_path):
+    """A failed process/file boundary cannot be hidden behind a success frame."""
+
+    class Turn:
+        @staticmethod
+        def lines():
+            return iter(())
+
+        @staticmethod
+        def wait():
+            return SimpleNamespace(
+                status="completed",
+                final_output="done",
+                exit_code=0,
+                usage=None,
+                raw=None,
+            )
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    class BoundaryFailureSupervisor:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def start_turn(self, *_args, **_kwargs):
+            self.calls.append("start")
+            return Turn()
+
+        def complete_turn(self, *_args, **_kwargs):
+            self.calls.append("complete")
+            raise SandboxError("member permission normalization failed")
+
+        def abort_turn(self, *_args, **_kwargs):
+            self.calls.append("abort")
+
+    root, _repo = _workspace(tmp_path)
+    supervisor = BoundaryFailureSupervisor()
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/turn",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json={
+                "token": "lease-token",
+                "prompt": "test",
+                "model": "model",
+                "reasoning_effort": None,
+            },
+        )
+
+    frames = [json.loads(line) for line in response.text.splitlines() if line]
+    assert response.status_code == 200
+    assert frames == [{"kind": "error", "detail": "member permission normalization failed"}]
+    assert supervisor.calls == ["start", "complete", "abort"]
+
+
+@pytest.mark.asyncio
 async def test_broker_exposes_fenced_full_sandbox_fork_and_rollback(tmp_path):
     root, _repo = _workspace(tmp_path)
     supervisor = _FakeSessionSupervisor()
@@ -1302,6 +1457,76 @@ async def test_broker_exposes_fenced_full_sandbox_fork_and_rollback(tmp_path):
     assert rolled_back.json() == {"removed": True}
     assert supervisor.calls[-2][0] == "fork"
     assert supervisor.calls[-1][0] == "fork-rollback"
+
+
+@pytest.mark.asyncio
+async def test_shared_snapshot_receipt_and_base_import_preserve_workspace_identity(tmp_path):
+    root, _repo = _workspace(tmp_path)
+    shared = _FakeSharedSessionSupervisor()
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        session_supervisor=_FakeSessionSupervisor(),
+        shared_session_supervisor=shared,
+    )
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    identity = _shared_snapshot_identity()
+    bundle = b"trusted-git-bundle"
+    commit_sha = "b" * 40
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        captured = await client.post(
+            "/shared-sandboxes/athr_source/snapshot",
+            headers=headers,
+            json={
+                **identity,
+                "snapshot_id": 9,
+                "workspace_epoch": 12,
+                "base_sha": "a" * 40,
+            },
+        )
+        imported = await client.post(
+            "/shared-sandboxes/athr_source/import-base",
+            headers=headers,
+            json={
+                **identity,
+                "snapshot_id": 9,
+                "commit_sha": commit_sha,
+                "bundle_b64": base64.b64encode(bundle).decode(),
+            },
+        )
+
+    assert captured.status_code == 200, captured.text
+    patch = "diff --git a/a.txt b/a.txt\n"
+    assert captured.json() == {
+        "snapshot_id": 9,
+        "sandbox_id": "asbx_shared",
+        "sandbox_generation": 3,
+        "container_id": "container-shared",
+        "workspace_epoch": 12,
+        "base_sha": "a" * 40,
+        "patch": patch,
+        "content_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+    }
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["workspace_head_preserved"] is True
+    assert shared.imports == [
+        (
+            bundle,
+            commit_sha,
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "/workspace",
+            },
+        )
+    ]
+    assert shared.calls[-3:] == [
+        ("operation_opened", "athr_source"),
+        ("backend", "athr_source"),
+        ("operation_closed", "athr_source", "shared-operation"),
+    ]
 
 
 @pytest.mark.asyncio

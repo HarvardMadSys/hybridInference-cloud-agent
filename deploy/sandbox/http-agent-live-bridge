@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""Private stdio bridge for OpenCode/Kilo's authenticated loopback server.
+
+The host supervisor deliberately owns only one Docker-exec stdin/stdout pipe.
+OpenCode and Kilo expose their resident protocol over HTTP/SSE instead, so this
+small stdlib-only process keeps the server and its random Basic-auth secret
+inside the member's process group and translates it to fenced JSON lines.
+
+The password is generated in memory, never persisted or placed in argv.  The
+server binds loopback only, and this bridge is run under the member-specific
+UID/tmpfs slot.  stdout is protocol-only; child diagnostics go to stderr.
+"""
+
+from __future__ import annotations
+
+import base64
+import contextlib
+import json
+import os
+import secrets
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+_RUNTIMES = {
+    "opencode": {
+        "wrapper": "opencode-freeinference",
+        "username": "opencode",
+        "password_env": "OPENCODE_SERVER_PASSWORD",
+        "username_env": "OPENCODE_SERVER_USERNAME",
+        "directory_header": "x-opencode-directory",
+    },
+    "kilo": {
+        "wrapper": "kilo-freeinference",
+        "username": "kilo",
+        "password_env": "KILO_SERVER_PASSWORD",
+        "username_env": "KILO_SERVER_USERNAME",
+        "directory_header": "x-kilo-directory",
+    },
+}
+
+
+class BridgeError(RuntimeError):
+    """A local protocol or server error that must fail closed."""
+
+
+class Bridge:
+    def __init__(self, runtime: str) -> None:
+        if runtime not in _RUNTIMES:
+            raise BridgeError(f"unsupported live HTTP runtime: {runtime!r}")
+        self.runtime = runtime
+        self.config = _RUNTIMES[runtime]
+        self.workdir = os.environ.get("AGENT_LIVE_WORKDIR", "/workspace")
+        self.model = (
+            os.environ.get("OPENCODE_GATEWAY_MODEL")
+            if runtime == "opencode"
+            else os.environ.get("KILO_GATEWAY_MODEL")
+        )
+        if not self.model:
+            raise BridgeError("gateway model is missing")
+        self.session_id = os.environ.get("AGENT_LIVE_SESSION_ID") or None
+        self.username = str(self.config["username"])
+        self.password = secrets.token_urlsafe(48)
+        self.auth = (
+            "Basic " + base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
+        )
+        self.port = self._available_port()
+        self.base_url = f"http://127.0.0.1:{self.port}"
+        self.child: subprocess.Popen[str] | None = None
+        self._stdout_lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._turn_lock = threading.Lock()
+        self._turn_id: str | None = None
+        self._turn_saw_busy = False
+        self._turn_failed = False
+
+    @staticmethod
+    def _available_port() -> int:
+        # The server has no inherited-listener option. Holding an ephemeral
+        # loopback socket until immediately before spawn minimizes the only
+        # race without exposing a fixed port shared by member processes.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+
+    def emit(self, value: dict[str, Any]) -> None:
+        with self._stdout_lock:
+            sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+
+    def _headers(self, *, json_body: bool = False) -> dict[str, str]:
+        headers = {
+            "Authorization": self.auth,
+            "Accept": "application/json",
+            str(self.config["directory_header"]): self.workdir,
+        }
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        return headers
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float = 30,
+    ) -> Any:
+        body = None if payload is None else json.dumps(payload).encode()
+        request = urllib.request.Request(
+            self.base_url + path,
+            data=body,
+            headers=self._headers(json_body=payload is not None),
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                content = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            raise BridgeError(f"{method} {path} returned {exc.code}: {detail}") from exc
+        except OSError as exc:
+            raise BridgeError(f"{method} {path} failed: {exc}") from exc
+        if not content:
+            return None
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise BridgeError(f"{method} {path} returned invalid JSON") from exc
+
+    def start(self) -> None:
+        env = dict(os.environ)
+        env[str(self.config["password_env"])] = self.password
+        env[str(self.config["username_env"])] = self.username
+        argv = [
+            str(self.config["wrapper"]),
+            "serve",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            str(self.port),
+        ]
+        self.child = subprocess.Popen(
+            argv,
+            cwd=self.workdir,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        threading.Thread(target=self._relay_child_output, args=(False,), daemon=True).start()
+        threading.Thread(target=self._relay_child_output, args=(True,), daemon=True).start()
+
+        deadline = time.monotonic() + 30
+        while True:
+            if self.child.poll() is not None:
+                raise BridgeError(f"{self.runtime} serve exited during startup")
+            try:
+                health = self.request("GET", "/global/health", timeout=1)
+                if isinstance(health, dict) and health.get("healthy") is True:
+                    break
+            except BridgeError:
+                pass
+            if time.monotonic() >= deadline:
+                raise BridgeError(f"{self.runtime} serve did not become healthy")
+            time.sleep(0.05)
+
+        if self.session_id:
+            resumed = self.request(
+                "GET", f"/session/{urllib.parse.quote(self.session_id, safe='')}"
+            )
+            if not isinstance(resumed, dict) or resumed.get("id") != self.session_id:
+                raise BridgeError("server resumed a different native session")
+        else:
+            created = self.request(
+                "POST",
+                "/session",
+                {
+                    # The outer sandbox is the permission boundary. This is
+                    # the server-mode equivalent of the existing `run --auto`.
+                    "permission": [{"permission": "*", "pattern": "*", "action": "allow"}]
+                },
+            )
+            if not isinstance(created, dict) or not created.get("id"):
+                raise BridgeError("server did not return a native session id")
+            self.session_id = str(created["id"])
+
+        threading.Thread(target=self._watch_child, daemon=True).start()
+        threading.Thread(target=self._events, daemon=True).start()
+        self.emit(
+            {
+                "bridge": "ready",
+                "runtime": self.runtime,
+                "session_id": self.session_id,
+            }
+        )
+
+    def _relay_child_output(self, stderr: bool) -> None:
+        assert self.child is not None
+        stream = self.child.stderr if stderr else self.child.stdout
+        assert stream is not None
+        label = "stderr" if stderr else "stdout"
+        for line in stream:
+            sys.stderr.write(f"[{self.runtime} serve {label}] {line}")
+            sys.stderr.flush()
+
+    def _watch_child(self) -> None:
+        assert self.child is not None
+        code = self.child.wait()
+        if self._stopping.is_set():
+            return
+        self.emit({"bridge": "fatal", "detail": f"serve exited with status {code}"})
+        os._exit(code or 1)
+
+    def _events(self) -> None:
+        failures = 0
+        while not self._stopping.is_set():
+            request = urllib.request.Request(
+                self.base_url + "/event",
+                headers={**self._headers(), "Accept": "text/event-stream"},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    failures = 0
+                    data: list[str] = []
+                    for raw in response:
+                        if self._stopping.is_set():
+                            return
+                        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                        if line.startswith("data:"):
+                            data.append(line[5:].lstrip())
+                        elif not line and data:
+                            self._event_payload("\n".join(data))
+                            data.clear()
+            except Exception as exc:
+                if self._stopping.is_set():
+                    return
+                failures += 1
+                if failures in (1, 5, 20):
+                    self.emit(
+                        {
+                            "bridge": "diagnostic",
+                            "detail": f"event stream reconnect {failures}: {exc}",
+                        }
+                    )
+                time.sleep(min(1.0, failures * 0.05))
+
+    def _event_payload(self, payload: str) -> None:
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            self.emit({"bridge": "diagnostic", "detail": "invalid SSE JSON"})
+            return
+        if not isinstance(event, dict):
+            return
+        properties = event.get("properties")
+        if not isinstance(properties, dict):
+            return
+        session_id = properties.get("sessionID")
+        part = properties.get("part")
+        if not session_id and isinstance(part, dict):
+            session_id = part.get("sessionID")
+        if session_id != self.session_id:
+            return
+
+        event_type = event.get("type")
+        if event_type == "permission.asked":
+            # New sessions carry a wildcard allow rule. Keep this fail-safe for
+            # a resumed historical session whose older rule set still asks.
+            request_id = properties.get("id")
+            if request_id:
+                try:
+                    self.request(
+                        "POST",
+                        "/session/"
+                        + urllib.parse.quote(str(self.session_id), safe="")
+                        + "/permissions/"
+                        + urllib.parse.quote(str(request_id), safe=""),
+                        {"response": "once"},
+                    )
+                except BridgeError as exc:
+                    self.emit({"bridge": "diagnostic", "detail": str(exc)})
+
+        with self._turn_lock:
+            active = self._turn_id
+            if active is None:
+                return
+            if event_type == "session.status":
+                status = properties.get("status")
+                if isinstance(status, dict) and status.get("type") != "idle":
+                    self._turn_saw_busy = True
+                if isinstance(status, dict) and status.get("type") == "idle":
+                    self._settle_locked(active)
+                    return
+            elif event_type == "session.idle":
+                self._settle_locked(active)
+                return
+            elif event_type == "session.error":
+                self._turn_failed = True
+        self.emit({"bridge": "event", "turn_id": active, "event": event})
+
+    def _settle_locked(self, turn_id: str) -> None:
+        # The server emits busy/status before its matching idle. Ignore a
+        # subscription's stale initial idle so it cannot settle a new prompt.
+        if not self._turn_saw_busy:
+            return
+        status = "failed" if self._turn_failed else "completed"
+        self.emit({"bridge": "settled", "turn_id": turn_id, "status": status})
+        self._turn_id = None
+        self._turn_saw_busy = False
+        self._turn_failed = False
+
+    def command(self, command: dict[str, Any]) -> None:
+        command_id = str(command.get("id") or "")
+        kind = command.get("type")
+        if not command_id:
+            raise BridgeError("command id is required")
+        if kind == "turn":
+            prompt = command.get("prompt")
+            if not isinstance(prompt, str):
+                raise BridgeError("turn prompt must be text")
+            with self._turn_lock:
+                if self._turn_id is not None:
+                    raise BridgeError("a turn is already active")
+                self._turn_id = command_id
+                self._turn_saw_busy = False
+                self._turn_failed = False
+            try:
+                self.request(
+                    "POST",
+                    f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/prompt_async",
+                    {
+                        "model": {"providerID": "freeinference", "modelID": self.model},
+                        "parts": [{"type": "text", "text": prompt}],
+                    },
+                )
+            except Exception:
+                with self._turn_lock:
+                    self._turn_id = None
+                raise
+            self.emit({"bridge": "turn_accepted", "turn_id": command_id})
+            return
+        if kind == "interrupt":
+            with self._turn_lock:
+                if self._turn_id != command.get("turn_id"):
+                    raise BridgeError("interrupt targets a stale turn")
+            self.request(
+                "POST", f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/abort"
+            )
+            self.emit({"bridge": "interrupt_accepted", "id": command_id})
+            return
+        if kind == "fork":
+            with self._turn_lock:
+                if self._turn_id is not None:
+                    raise BridgeError("cannot fork an active session")
+            child = self.request(
+                "POST",
+                f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/fork?"
+                + urllib.parse.urlencode({"directory": self.workdir}),
+                {},
+            )
+            if not isinstance(child, dict) or not child.get("id"):
+                raise BridgeError("fork did not return a child session id")
+            self.emit(
+                {
+                    "bridge": "fork_result",
+                    "id": command_id,
+                    "source_session_id": self.session_id,
+                    "session_id": str(child["id"]),
+                }
+            )
+            return
+        if kind == "ping":
+            self.emit({"bridge": "pong", "id": command_id, "session_id": self.session_id})
+            return
+        raise BridgeError(f"unknown command type: {kind!r}")
+
+    def run(self) -> None:
+        self.start()
+        for line in sys.stdin:
+            try:
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise BridgeError("command must be a JSON object")
+                self.command(value)
+            except Exception as exc:
+                command_id = ""
+                with contextlib.suppress(Exception):
+                    command_id = str(value.get("id") or "")  # type: ignore[possibly-undefined]
+                self.emit({"bridge": "command_error", "id": command_id, "detail": str(exc)})
+        self.stop()
+
+    def stop(self) -> None:
+        self._stopping.set()
+        child = self.child
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: http-agent-live-bridge <opencode|kilo>")
+    bridge: Bridge | None = None
+    try:
+        bridge = Bridge(sys.argv[1])
+
+        def terminate(*_: object) -> None:
+            assert bridge is not None
+            bridge.stop()
+            # ``stdin`` may still be open when Docker stops the member. Stop
+            # must therefore terminate this bridge too, rather than returning
+            # to a blocking ``for line in stdin`` after its child is gone.
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, terminate)
+        signal.signal(signal.SIGINT, terminate)
+        bridge.run()
+    except Exception as exc:
+        if bridge is not None:
+            bridge.emit({"bridge": "fatal", "detail": str(exc)})
+            bridge.stop()
+        else:
+            sys.stderr.write(f"http-agent-live-bridge: {exc}\n")
+        raise SystemExit(1) from None
+
+
+if __name__ == "__main__":
+    main()

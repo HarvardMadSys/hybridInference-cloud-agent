@@ -8,6 +8,8 @@
   `2026-08-28-one-chat-one-restartable-sandbox-design.md` (the newer invariant
   that preserves per-turn configuration through in-place control or a
   context-preserving CLI process rotation);
+  `2026-08-31-native-session-fork-shared-workspace-design.md` (supervisor-owned
+  member-concurrent live transports and member-only process rotation);
   gateway repo `hybridInference` (§6 lands there — the two halves ship as
   one gateway PR and one agent PR)
 - **One sentence:** let the owner of a thread choose how hard the model
@@ -18,6 +20,11 @@
 ---
 
 ## 0. Restartable-sandbox amendment (2026-08-28)
+
+The implemented 2026-08-31 shared-live path keeps a compatible member process
+alive across turns. If the pinned live protocol cannot safely apply a new
+model/effort setting, only that member is flushed and natively resumed; a forked
+sibling process is neither blocked nor restarted.
 
 The per-turn effort override below remains the target behavior for a
 restartable chat. PID continuity is not a product invariant: a driver that can

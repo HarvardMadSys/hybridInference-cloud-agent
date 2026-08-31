@@ -1,0 +1,29 @@
+#!/opt/claude-agent-sdk/bin/python
+"""Prompt-free native Claude session fork using the pinned Agent SDK."""
+
+from __future__ import annotations
+
+import json
+import sys
+
+from claude_agent_sdk import fork_session
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: claude-session-fork <source-session-id>")
+    result = fork_session(sys.argv[1], directory="/workspace")
+    print(
+        json.dumps(
+            {
+                "source_session_id": sys.argv[1],
+                "session_id": result.session_id,
+            },
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

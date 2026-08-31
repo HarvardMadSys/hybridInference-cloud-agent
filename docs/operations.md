@@ -503,43 +503,38 @@ actual image while its database row still reports the old one.
 
 ### How many runners
 
-> **Current-versus-preview boundary.** The default path remains the deployed
-> per-job runner behavior. With `AGENT_RESTARTABLE_SANDBOX=1`, the staged
-> lifecycle in
-> `specs/2026-08-28-one-chat-one-restartable-sandbox-design.md` dispatches
+> **Capability-gated shared-live boundary.** With both
+> `AGENT_RESTARTABLE_SANDBOX=1` and `AGENT_SHARED_LIVE_SANDBOX=1`, and only on a
+> host advertising `shared-sandbox-v1`, the implementation in
+> `specs/2026-08-31-native-session-fork-shared-workspace-design.md` dispatches
 > Claude Code, Codex, Pi, OpenCode, and Kilo turns through one host-level
-> Session Supervisor, which retains
-> one container per chat. Settled idle timeout stops but does not
-> remove it; the next message starts the same container and natively resumes a
-> new Agent CLI process. Workspace, dependencies, Agent CLI home, and native
-> session data live in the container writable layer; the supervisor has
-> no per-chat host filesystem mapping and accesses them only through Docker
-> Engine. A latest-settled fork now uses a durable PREPARING saga, Docker's
-> paused commit barrier, a separately labelled copy-on-write container, and one
-> database transaction that copies the matching conversation prefix. The clone
-> rewrites only its platform identity/output branch, keeps opaque native CLI
-> state plus staged/unstaged/untracked files, starts stopped, and ordinarily
-> resumes on its first new message. An older-turn fork returns
-> `409 historical_snapshot_unavailable` until per-turn filesystem snapshots
-> exist; it never silently falls back to the legacy history/patch-only copy. Agent
-> CLI PID continuity is not required; context restoration is. Per-turn model
-> and reasoning-effort changes remain supported through in-band control or a
-> process rotation inside the same container. Automatic sandbox cleanup is
-> explicitly deferred;
-> the existing residency LRU, workspace TTL, and generic Docker prune must not
-> delete opted-in restartable chats. The runner/broker implementation and local
-> real-Docker acceptance have landed; keep the preview off for general traffic
-> until the pinned live-provider and Kata conformance matrix passes in the
-> target deployment.
+> Session Supervisor. An ordinary chat owns one container/workspace and one
+> live CLI transport that remains resident between compatible turns. A
+> latest-settled Fork immediately invokes the pinned CLI's native fork-only
+> surface, adds a second chat/session/process to that same container, and lets
+> source and child run concurrently without a group turn lock. It creates no
+> Docker image/container clone and sends no model prompt. An older-turn Fork
+> still returns `409 historical_snapshot_unavailable` rather than silently
+> choosing newer context.
+>
+> Group idle timeout closes every idle resident process and uses `docker stop`,
+> never `docker rm`; the next member operation starts the exact container and
+> lazily resumes that member. Workspace, dependencies, Agent CLI home, and
+> native session data remain in the Docker writable layer. Forked chats share
+> one Git/workspace/publication lineage, with only a bounded quiescent barrier
+> for snapshot capture. Historical `legacy_1to1` containers remain readable and
+> resumable, but no new retained Docker-clone Fork is created by the shared-live
+> route. Keep the capability off for general traffic until the exact-runtime
+> live-provider and Kata/gVisor conformance gates pass in the target deployment.
 
-> In that target mode, the Docker socket (or mTLS Engine endpoint) is the only
+> In shared-live mode, the Docker socket (or mTLS Engine endpoint) is the only
 > host control/data interface for chat state. `AGENT_WORKDIR_ROOT` and the
 > per-job snapshot/state binds documented below are legacy-mode settings and
 > are removed from the restartable supervisor. Infrastructure bootstrap
 > configuration is separate; no repository, workspace, Agent CLI home, or
 > session file is mapped from the host.
 
-> The checked-in production compose remains mixed-mode while the preview is
+> The checked-in production compose remains mixed-mode while shared-live is
 > default-off, so its shared runner/broker still carries the legacy workdir
 > bind. Retained requests do not use that path. The local retained stack uses
 > Docker-managed infrastructure volumes (and chat containers with `Mounts=[]`)
@@ -592,26 +587,26 @@ not deactivate a healthy chat:
   releasing it preserves the last activity timestamp and adds no second wait;
 - `AGENT_TERMINAL_HARD_TTL_SECONDS` (8 hours) bounds one PTY even if it stays
   noisy forever. It is a resource/security guard, not sandbox deactivation;
-- `AGENT_RESIDENCY_TTL_S` defaults to 1800 seconds and fences the legacy
-  in-runner HOT process/workspace cache. It is not consulted for a retained
-  chat and should be removed after legacy-mode cutover;
+- `AGENT_RESIDENCY_TTL_S` defaults to 1800 seconds and fences each member's
+  live-process ownership plus renewable inference grant. Losing that lease
+  demotes/restarts the member; it does not itself stop a healthy chat group or
+  create another inactivity clock;
 - `AGENT_WORKSPACE_TTL_S` defaults to seven days and cleans only legacy host
   worktrees. It must not address Docker-owned restartable chat state.
 
-`AGENT_RESTARTABLE_SANDBOX=1` enables the retained-container runner and private
-host lifecycle RPC. `AGENT_RESTARTABLE_RUNTIMES` defaults to
-`claude-code,codex,pi,opencode,kilo`; every listed adapter sends only the new
-prompt and resumes its pinned CLI's native local session id/state on a fresh
-process. Same-PID continuity is not required.
-Keep the flag off for general traffic until the remaining real-Docker/Kata and
-live-provider matrix passes for every advertised CLI. The transactional
-latest-settled full-snapshot fork is implemented and has a real-Docker
-independent-divergence acceptance test; older-turn forks fail closed rather
-than becoming history-only copies. The frontend treats `NEW`, `LIVE`,
-`RESTORED`, and `LOST` as the
-canonical context-correctness states. Legacy `replay`, `hot`, `warm_native`,
-and `cold_native` values remain diagnostic/backward-compatible telemetry and
-are shown only for records that do not yet carry a context status.
+`AGENT_RESTARTABLE_SANDBOX=1` enables retained Docker lifecycle;
+`AGENT_SHARED_LIVE_SANDBOX=1` additionally enables creation of supervisor-owned
+live groups and advertisement of `shared-sandbox-v1` after exact image/runtime
+attestation. `AGENT_SHARED_LIVE_RUNTIMES` defaults to
+`claude-code,codex,pi,opencode,kilo`. Compatible follow-ups send only the new
+prompt to the same resident process; recovery resumes the pinned native session
+in a replacement process. Latest-settled Fork is immediate and runtime-native
+inside the same container/workspace; older-turn forks fail closed and no new
+shared-live Fork creates a Docker clone. Keep the capability off for general
+traffic until the Kata/gVisor and real-provider matrix passes for every enabled
+CLI. The frontend treats `NEW`, `LIVE`, `RESTORED`, and `LOST` as canonical
+context-correctness states; `hot`, `warm_native`, `cold_native`, and `replay`
+remain diagnostic transport/recovery telemetry.
 
 The preview does not yet implement R6 disk-pressure admission/alerting or a
 non-mutating pre-prompt context fingerprint. Keep general-traffic rollout off

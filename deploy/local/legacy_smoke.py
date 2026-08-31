@@ -9,6 +9,7 @@ model and completed the final in-sandbox patch step.
 from __future__ import annotations
 
 import sys
+import time
 from typing import Any
 
 from smoke import Client, wait_job
@@ -30,6 +31,25 @@ def create_job(base_url: str) -> str:
         },
     )
     return str(created["id"])
+
+
+def wait_default_off(base_url: str, host: str) -> None:
+    """Wait until the temporary runner's capability downgrade is durable."""
+    client = Client(base_url)
+    client.login()
+    deadline = time.monotonic() + 30
+    last: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        pool = client.request("/api/admin/agent/runner-hosts")
+        last = next(
+            (item for item in pool.get("hosts") or [] if item.get("host") == host),
+            None,
+        )
+        if last is not None and "shared-sandbox-v1" not in (last.get("capabilities") or []):
+            print(f"  host {host}: default-off capability heartbeat observed", flush=True)
+            return
+        time.sleep(0.25)
+    raise RuntimeError(f"host {host!r} did not drop shared capability: {last}")
 
 
 def _event_phases(events: list[dict[str, Any]]) -> set[str]:
@@ -74,9 +94,14 @@ def cancel_job(base_url: str, job_id: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or argv[1] not in {"create", "verify", "cancel"}:
+    if len(argv) < 2 or argv[1] not in {
+        "create",
+        "verify",
+        "cancel",
+        "wait-default-off",
+    }:
         print(
-            "usage: legacy_smoke.py {create|verify|cancel} BASE_URL [JOB_ID]",
+            "usage: legacy_smoke.py {create|verify|cancel|wait-default-off} BASE_URL [JOB_ID|HOST]",
             file=sys.stderr,
         )
         return 2
@@ -84,6 +109,12 @@ def main(argv: list[str]) -> int:
     base_url = argv[2] if len(argv) > 2 else "http://127.0.0.1:13002"
     if mode == "create":
         print(create_job(base_url))
+        return 0
+    if mode == "wait-default-off":
+        if len(argv) != 4:
+            print("wait-default-off requires HOST", file=sys.stderr)
+            return 2
+        wait_default_off(base_url, argv[3])
         return 0
     if len(argv) != 4:
         print(f"{mode} requires JOB_ID", file=sys.stderr)

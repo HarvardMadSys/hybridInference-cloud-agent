@@ -114,6 +114,12 @@ RUNTIME_VERSION_LABEL_SUFFIX = ".version"
 #: because they answer different questions and a reader that knows nothing
 #: about menus must keep reading a single exact version out of ``.version``.
 RUNTIME_VERSION_MENU_LABEL_SUFFIX = ".versions"
+#: Image-resident helpers which participate in a protocol capability but are
+#: not selectable Agent CLIs.  Keeping this namespace distinct prevents a
+#: helper such as the Claude Agent SDK from appearing in the admin runtime
+#: version menu.
+HELPER_VERSION_LABEL_PREFIX = "org.freeinference.helper."
+HELPER_VERSION_LABEL_SUFFIX = ".version"
 
 #: Where `deploy/sandbox/install-runtimes.sh` puts every version it installs.
 #: Selecting one is a PATH prepend and nothing more: all five CLIs resolve
@@ -157,6 +163,22 @@ def _labelled(labels: dict[str, Any], suffix: str) -> dict[str, str]:
             runtime_id = key[len(RUNTIME_VERSION_LABEL_PREFIX) : -len(suffix)]
             if runtime_id:
                 found[runtime_id] = value
+    return found
+
+
+def _helper_versions(labels: dict[str, Any]) -> dict[str, str]:
+    """Return exact helper attestations without treating them as runtimes."""
+    found: dict[str, str] = {}
+    for key, value in labels.items():
+        if (
+            isinstance(key, str)
+            and isinstance(value, str)
+            and key.startswith(HELPER_VERSION_LABEL_PREFIX)
+            and key.endswith(HELPER_VERSION_LABEL_SUFFIX)
+        ):
+            helper_id = key[len(HELPER_VERSION_LABEL_PREFIX) : -len(HELPER_VERSION_LABEL_SUFFIX)]
+            if helper_id:
+                found[helper_id] = value
     return found
 
 
@@ -856,6 +878,7 @@ class ContainerBackend(SandboxBackend):
             "sandbox_image_digest": "",
             "runtime_versions": {},
             "runtime_versions_available": {},
+            "helper_versions": {},
         }
         try:
             proc = subprocess.run(
@@ -896,6 +919,10 @@ class ContainerBackend(SandboxBackend):
                 runtime_id: _split_menu(menus.get(runtime_id), default)
                 for runtime_id, default in versions.items()
             }
+            stamp["helper_versions"] = _helper_versions(labels)
+            stamp["shared_sandbox_protocol"] = str(
+                labels.get("org.freeinference.shared-sandbox.protocol") or ""
+            )
         return stamp
 
     @property

@@ -604,6 +604,7 @@ class CodexRuntime(AgentRuntime):
         reasoning_effort: str | None = None,
         session_state_dir: str | None = None,
         resume_session_id: str | None = None,
+        activation_dir: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Build the headless invocation and its environment.
 
@@ -643,6 +644,7 @@ class CodexRuntime(AgentRuntime):
           them on the next turn.
         """
         self._require_empty_mcp_config(mcp_config)
+        _ = activation_dir
         base = gateway_base_url.rstrip("/").removesuffix("/v1")
         provider = "hybridinference"
         argv = [
@@ -693,6 +695,57 @@ class CodexRuntime(AgentRuntime):
             # Codex requires CODEX_HOME itself to exist. /agent-state is made
             # by the image (or is the state mount), so use that exact root
             # rather than naming a child the CLI would refuse to create.
+            env["CODEX_HOME"] = session_state_dir
+        return argv, env
+
+    def prepare_live(
+        self,
+        *,
+        workdir: str,
+        model: str,
+        gateway_base_url: str,
+        credential: str,
+        provides_isolation: bool = False,
+        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
+        activation_dir: str | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Build the pinned 0.145.0 stdio app-server transport.
+
+        Thread creation/resume is an RPC after the initialize handshake, so
+        ``model``, ``workdir`` and ``resume_session_id`` intentionally do not
+        become positional CLI arguments here.  Provider configuration remains
+        command-line overrides, exactly as in :meth:`prepare`, and the empty
+        managed MCP allowlist baked into the image remains the final policy
+        layer for app-server (which has no ``--ignore-user-config`` flag).
+        """
+        self._require_empty_mcp_config(mcp_config)
+        _ = (workdir, model, provides_isolation, resume_session_id, activation_dir)
+        base = gateway_base_url.rstrip("/").removesuffix("/v1")
+        provider = "hybridinference"
+        argv = [
+            self.binary,
+            *self.effort_args(reasoning_effort),
+            "-c",
+            f'model_provider="{provider}"',
+            "-c",
+            f'model_providers.{provider}.name="HybridInference"',
+            "-c",
+            f'model_providers.{provider}.base_url="{base}/v1"',
+            "-c",
+            f'model_providers.{provider}.env_key="CODEX_API_KEY"',
+            "-c",
+            f'model_providers.{provider}.wire_api="responses"',
+            "app-server",
+        ]
+        env = {
+            "CODEX_API_KEY": credential,
+            "OPENAI_BASE_URL": f"{base}/v1",
+            "OPENAI_API_KEY": credential,
+        }
+        if session_state_dir:
             env["CODEX_HOME"] = session_state_dir
         return argv, env
 
@@ -914,6 +967,7 @@ class PiRuntime(GenericRuntime):
         reasoning_effort: str | None = None,
         session_state_dir: str | None = None,
         resume_session_id: str | None = None,
+        activation_dir: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper writes into pi's provider config."""
         argv, env = super().prepare(
@@ -933,7 +987,7 @@ class PiRuntime(GenericRuntime):
         # Provider config contains the short-lived turn credential. Keep it in
         # the activation tmpfs; only the session JSONL belongs in durable chat
         # state. The wrapper creates this directory before exec.
-        env["PI_CODING_AGENT_DIR"] = "/run/agent-activation/pi"
+        env["PI_CODING_AGENT_DIR"] = activation_dir or "/run/agent-activation/pi"
         if session_state_dir:
             prompt_at = argv.index("-p")
             native_args = ["--session-dir", session_state_dir]
@@ -949,6 +1003,51 @@ class PiRuntime(GenericRuntime):
             # declaring it unconditionally makes pi send `medium` on every turn
             # and Auto would stop meaning "as before".
             env["PI_GATEWAY_REASONING"] = "1"
+        return argv, env
+
+    def prepare_live(
+        self,
+        *,
+        workdir: str,
+        model: str,
+        gateway_base_url: str,
+        credential: str,
+        provides_isolation: bool = False,
+        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
+        activation_dir: str | None = None,
+        fork_session_id: str | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Build pi 0.73.1's bidirectional JSONL RPC process.
+
+        ``--fork`` is a prompt-free native mutation performed by a temporary
+        RPC process.  It cannot be combined with ``--session``; keeping that
+        rule here mirrors the exact CLI validation instead of relying on a
+        later opaque exit.
+        """
+        if resume_session_id and fork_session_id:
+            raise ValueError("pi cannot resume and fork in one invocation")
+        argv, env = self.prepare(
+            workdir=workdir,
+            task_prompt="",
+            model=model,
+            gateway_base_url=gateway_base_url,
+            credential=credential,
+            provides_isolation=provides_isolation,
+            mcp_config=mcp_config,
+            reasoning_effort=reasoning_effort,
+            session_state_dir=session_state_dir,
+            resume_session_id=resume_session_id,
+            activation_dir=activation_dir,
+        )
+        mode_at = argv.index("--mode") + 1
+        argv[mode_at] = "rpc"
+        prompt_at = argv.index("-p")
+        del argv[prompt_at : prompt_at + 2]
+        if fork_session_id:
+            argv += ["--fork", fork_session_id]
         return argv, env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -1146,6 +1245,7 @@ class OpencodeRuntime(GenericRuntime):
         reasoning_effort: str | None = None,
         session_state_dir: str | None = None,
         resume_session_id: str | None = None,
+        activation_dir: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper declares in OpenCode's config."""
         argv, env = super().prepare(
@@ -1159,7 +1259,9 @@ class OpencodeRuntime(GenericRuntime):
             reasoning_effort=reasoning_effort,
         )
         env["OPENCODE_GATEWAY_MODEL"] = model
-        env["OPENCODE_FREEINFERENCE_CONFIG_DIR"] = "/run/agent-activation/opencode"
+        env["OPENCODE_FREEINFERENCE_CONFIG_DIR"] = (
+            activation_dir or "/run/agent-activation/opencode"
+        )
         if session_state_dir:
             # OpenCode 1.18.9 stores sessions in its XDG data root. Relocating
             # every XDG root keeps all native continuation data inside the
@@ -1181,6 +1283,39 @@ class OpencodeRuntime(GenericRuntime):
             # all, which is the request shape this runtime already sent.
             env["OPENCODE_GATEWAY_REASONING_EFFORT"] = str(reasoning_effort)
         return argv, env
+
+    def prepare_live(
+        self,
+        *,
+        workdir: str,
+        model: str,
+        gateway_base_url: str,
+        credential: str,
+        provides_isolation: bool = False,
+        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
+        activation_dir: str | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Launch the reviewed stdlib bridge around OpenCode 1.18.9 serve."""
+        _argv, env = self.prepare(
+            workdir=workdir,
+            task_prompt="",
+            model=model,
+            gateway_base_url=gateway_base_url,
+            credential=credential,
+            provides_isolation=provides_isolation,
+            mcp_config=mcp_config,
+            reasoning_effort=reasoning_effort,
+            session_state_dir=session_state_dir,
+            resume_session_id=None,
+            activation_dir=activation_dir,
+        )
+        if resume_session_id:
+            env["AGENT_LIVE_SESSION_ID"] = resume_session_id
+        env["AGENT_LIVE_WORKDIR"] = workdir
+        return ["http-agent-live-bridge", "opencode"], env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
         """Keep Tier-2 output raw while capturing its native session locator."""
@@ -1250,6 +1385,7 @@ class KiloRuntime(GenericRuntime):
         reasoning_effort: str | None = None,
         session_state_dir: str | None = None,
         resume_session_id: str | None = None,
+        activation_dir: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """Add the model id the wrapper declares in Kilo's config."""
         argv, env = super().prepare(
@@ -1263,7 +1399,7 @@ class KiloRuntime(GenericRuntime):
             reasoning_effort=reasoning_effort,
         )
         env["KILO_GATEWAY_MODEL"] = model
-        env["KILO_FREEINFERENCE_CONFIG_DIR"] = "/run/agent-activation/kilo"
+        env["KILO_FREEINFERENCE_CONFIG_DIR"] = activation_dir or "/run/agent-activation/kilo"
         if session_state_dir:
             env.update(
                 {
@@ -1282,6 +1418,39 @@ class KiloRuntime(GenericRuntime):
             # all, which is the request shape this runtime already sent.
             env["KILO_GATEWAY_REASONING_EFFORT"] = str(reasoning_effort)
         return argv, env
+
+    def prepare_live(
+        self,
+        *,
+        workdir: str,
+        model: str,
+        gateway_base_url: str,
+        credential: str,
+        provides_isolation: bool = False,
+        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
+        reasoning_effort: str | None = None,
+        session_state_dir: str | None = None,
+        resume_session_id: str | None = None,
+        activation_dir: str | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Launch the reviewed stdlib bridge around Kilo 7.4.17 serve."""
+        _argv, env = self.prepare(
+            workdir=workdir,
+            task_prompt="",
+            model=model,
+            gateway_base_url=gateway_base_url,
+            credential=credential,
+            provides_isolation=provides_isolation,
+            mcp_config=mcp_config,
+            reasoning_effort=reasoning_effort,
+            session_state_dir=session_state_dir,
+            resume_session_id=None,
+            activation_dir=activation_dir,
+        )
+        if resume_session_id:
+            env["AGENT_LIVE_SESSION_ID"] = resume_session_id
+        env["AGENT_LIVE_WORKDIR"] = workdir
+        return ["http-agent-live-bridge", "kilo"], env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
         """Keep Tier-2 output raw while capturing its native session locator."""

@@ -1170,6 +1170,7 @@ def _inspect_json(**overrides):
             "Labels": {
                 "org.freeinference.runtime.claude-code.version": "1.2.3",
                 "org.freeinference.runtime.codex.version": "0.5.0",
+                "org.freeinference.helper.claude-agent-sdk.version": "0.2.148",
                 "org.freeinference.runtime..version": "nameless",
                 "org.opencontainers.image.source": "irrelevant",
             }
@@ -1196,6 +1197,7 @@ def test_version_stamp_reads_runtime_digest_and_baked_versions(monkeypatch):
     assert stamp["sandbox_image_digest"] == "registry.example/sandbox@sha256:pinned"
     # Only well-formed version labels count; a nameless runtime id is dropped.
     assert stamp["runtime_versions"] == {"claude-code": "1.2.3", "codex": "0.5.0"}
+    assert stamp["helper_versions"] == {"claude-agent-sdk": "0.2.148"}
     backend.version_stamp()
     assert len(calls) == 1  # cached — the image is pinned for this process
 

@@ -62,6 +62,7 @@ class FakeHostPoolStore:
         self.link_ok = True
         self.beat_answers: dict[tuple[str, int], str | None] = {}
         self.release_answer: str | None = None
+        self.release_calls: list[tuple[str, int, str, int | None]] = []
         self.sandbox_observations: list[dict[str, Any]] = []
         self.sandbox_stop_due: dict[str, Any] | None = None
 
@@ -242,6 +243,19 @@ class FakeHostPoolStore:
         return self.beat_answers.get((thread_id, generation))
 
     async def release_residency(self, *, thread_id: str, generation: int, host: str) -> str | None:
+        self.release_calls.append((thread_id, generation, host, None))
+        return self.release_answer
+
+    async def release_shared_residency_if_quiescent(
+        self,
+        *,
+        thread_id: str,
+        generation: int,
+        process_generation: int,
+        host: str,
+        sandbox_id: str,
+    ) -> str | None:
+        self.release_calls.append((thread_id, generation, host, process_generation))
         return self.release_answer
 
     async def reconcile_thread_sandbox_observation(self, **kwargs: Any) -> str | None:
@@ -841,6 +855,14 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
                 # stored selection against this, and an absent key would be
                 # indistinguishable from "this host offers nothing".
                 "runtime_versions_available": {},
+                # Non-CLI helpers (currently the Claude Agent SDK fork
+                # helper) are attested separately from runtime binaries.
+                "helper_versions": {},
+                # Shared-live claims additionally carry a process-local
+                # protocol/version fence. Legacy callers omit both fields,
+                # which the wire model normalizes to these safe defaults.
+                "shared_sandbox_protocol": None,
+                "runner_capabilities": [],
                 "host_kernel": "host",
                 "guest_kernel": "guest",
             },
@@ -1232,6 +1254,8 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
                     "running": True,
                     "activity_active": False,
                     "idle_remaining_seconds": 1799.5,
+                    "shared_live": False,
+                    "members": [],
                 }
             ]
         },
@@ -1250,6 +1274,8 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
             "running": True,
             "activity_active": False,
             "idle_remaining_seconds": 1799.5,
+            "shared_live": False,
+            "members": [],
         }
     ]
 
@@ -1282,7 +1308,9 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residenc
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["retained_sandboxes_stop"] == [store.sandbox_stop_due]
+    assert response.json()["retained_sandboxes_stop"] == [
+        {**store.sandbox_stop_due, "shared_live": False}
+    ]
 
 
 async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(residency_client):
@@ -1314,7 +1342,60 @@ async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(re
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["retained_sandboxes_stop"] == [store.sandbox_stop_due]
+    assert response.json()["retained_sandboxes_stop"] == [
+        {**store.sandbox_stop_due, "shared_live": False}
+    ]
+
+
+async def test_stopped_shared_group_releases_and_revokes_each_member_residency(residency_client):
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.release_answer = "agr-stopped"
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_source",
+                    "sandbox_id": "asbx_shared",
+                    "container_id": "0123456789abcdef",
+                    "generation": 1,
+                    "activation_generation": 2,
+                    "running": False,
+                    "shared_live": True,
+                    "members": [
+                        {
+                            "thread_id": "athr_source",
+                            "native_session_id": "native-source",
+                            "process_generation": 11,
+                            "residency_generation": 7,
+                            "resident_state": "stopped",
+                            "resident_slot_id": 0,
+                        },
+                        {
+                            "thread_id": "athr_child",
+                            "native_session_id": "native-child",
+                            "process_generation": 12,
+                            "residency_generation": 8,
+                            "resident_state": "stopped",
+                            "resident_slot_id": 1,
+                        },
+                    ],
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert store.release_calls == [
+        ("athr_source", 7, "runner-a", 11),
+        ("athr_child", 8, "runner-a", 12),
+    ]
+    assert grants.renewed == []
+    assert grants.revoked == ["agr-stopped", "agr-stopped"]
+    assert response.json()["residencies_lost"] == []
 
 
 async def test_release_revokes_the_grant_it_returns(residency_client):

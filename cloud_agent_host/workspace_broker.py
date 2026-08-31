@@ -14,6 +14,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import hashlib
 import json
 import os
 import queue
@@ -34,11 +35,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from cloud_agent_host.chat_sandbox import (
+    CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
     RetainedChatLost,
 )
+from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.retained_workspace import (
     RetainedWorkspaceError,
     read_retained_file,
@@ -60,6 +64,11 @@ from cloud_agent_host.session_supervisor import (
     SessionBusy,
     SessionLeaseLost,
 )
+from cloud_agent_host.shared_session_supervisor import (
+    SharedChatSessionSupervisor,
+    SharedMemberManifest,
+)
+from cloud_agent_host.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
 from cloud_agent_host.workspace_browser import (
     MAX_FILE_PREVIEW_BYTES,
     WorkspacePathError,
@@ -174,6 +183,12 @@ class ChatSandboxLeaseRequest(BaseModel):
     token: str = Field(..., min_length=1, max_length=512)
 
 
+class SharedResidencyLostRequest(BaseModel):
+    """Control-plane rejection of one exact member residency generation."""
+
+    generation: int = Field(..., ge=1)
+
+
 class ChatSandboxSettleRequest(ChatSandboxLeaseRequest):
     """A durable turn boundary that starts the settled idle timer."""
 
@@ -222,6 +237,112 @@ class ChatSandboxForkRollbackRequest(BaseModel):
     target_sandbox_id: str = Field(..., min_length=1, max_length=256)
     target_generation: int = Field(1, ge=1)
     expected_container_id: str | None = Field(None, min_length=1, max_length=256)
+
+
+class SharedSandboxMemberRequest(BaseModel):
+    """Authoritative durable identity for one member alias."""
+
+    thread_id: str = Field(..., min_length=1, max_length=256)
+    native_session_id: str | None = Field(None, max_length=512)
+    context_status: Literal["new", "live", "restored", "lost"] = "new"
+    activation_generation: int = Field(0, ge=0)
+    process_generation: int = Field(0, ge=0)
+    residency_generation: int = Field(0, ge=0)
+    resident_state: Literal["stopped", "starting", "live", "restarting", "lost"] = "stopped"
+    resident_slot_id: int = Field(..., ge=0, le=127)
+    last_settled_job_id: str | None = Field(None, max_length=256)
+
+
+class SharedSandboxIdentityRequest(BaseModel):
+    """Immutable group identity plus its current member manifest."""
+
+    sandbox_id: str = Field(..., min_length=1, max_length=256)
+    generation: int = Field(..., ge=1)
+    origin_thread_id: str = Field(..., min_length=1, max_length=256)
+    runtime_id: str = Field(..., min_length=1, max_length=128)
+    runtime_version: str | None = Field(None, max_length=128)
+    sandbox_image_digest: str | None = Field(None, max_length=512)
+    expected_container_id: str | None = Field(None, min_length=1, max_length=256)
+    resident_slot_capacity: int = Field(8, ge=2, le=128)
+    memory_limit: str = Field("4g", min_length=1, max_length=32)
+    cpu_limit: str = Field("2", min_length=1, max_length=32)
+    stop_timeout_s: int = Field(10, ge=1, le=300)
+    members: list[SharedSandboxMemberRequest] = Field(..., min_length=1, max_length=128)
+
+
+class SharedSandboxAcquireRequest(SharedSandboxIdentityRequest):
+    """Lease one member while preserving sibling concurrency."""
+
+    owner: str = Field(..., min_length=1, max_length=256)
+    activation_generation: int = Field(..., ge=1)
+    has_settled_context: bool = False
+
+
+class SharedResidentLaunchConfig(BaseModel):
+    """Process-fixed configuration and renewable residency credential."""
+
+    runtime_id: str = Field(..., min_length=1, max_length=128)
+    runtime_version: str | None = Field(None, max_length=128)
+    native_session_id: str | None = Field(None, max_length=512)
+    model: str = Field(..., min_length=1, max_length=256)
+    reasoning_effort: str | None = Field(None, max_length=64)
+    # The broker replaces this with its host-local relay address when one is
+    # configured.  The fallback keeps injected/unit-test brokers usable.
+    gateway_base_url: str = Field("", max_length=2048)
+    credential: str | None = Field(None, max_length=16384)
+    mcp_server_ids: list[str] = Field(default_factory=list, max_length=64)
+    mcp_base_url: str = Field("", max_length=2048)
+    mcp_credential: str = Field("", max_length=16384)
+    slot_id: int = Field(..., ge=0, le=127)
+    residency_generation: int = Field(0, ge=0)
+
+
+class SharedResidentLaunchRequest(ChatSandboxLeaseRequest):
+    """Lease fence plus resident launch configuration."""
+
+    launch: SharedResidentLaunchConfig
+
+
+class SharedTurnRequest(ChatSandboxLeaseRequest):
+    """One prompt delivered to an already-owned resident process."""
+
+    prompt: str = Field(..., min_length=1, max_length=2_000_000)
+    model: str = Field(..., min_length=1, max_length=256)
+    reasoning_effort: str | None = Field(None, max_length=64)
+
+
+class SharedSettleRequest(ChatSandboxLeaseRequest):
+    """One member's successful native turn boundary."""
+
+    job_id: str = Field(..., min_length=1, max_length=256)
+    context_status: Literal["new", "live", "restored"]
+
+
+class SharedForkRequest(SharedSandboxIdentityRequest):
+    """Prompt-free fork-only request inside one shared sandbox."""
+
+    operation_id: str = Field(..., min_length=1, max_length=256)
+    source_native_session_id: str = Field(..., min_length=1, max_length=512)
+    target_thread_id: str = Field(..., min_length=1, max_length=256)
+    target_slot_id: int = Field(..., ge=0, le=127)
+    source_launch: SharedResidentLaunchConfig
+    target_launch: SharedResidentLaunchConfig
+
+
+class SharedSnapshotCaptureRequest(SharedSandboxIdentityRequest):
+    """Exact ordered workspace epoch requested by the coordinator."""
+
+    snapshot_id: int = Field(..., ge=1)
+    workspace_epoch: int = Field(..., ge=1)
+    base_sha: str = Field(..., min_length=7, max_length=64)
+
+
+class SharedBaseImportRequest(SharedSandboxIdentityRequest):
+    """Published commit objects to add without moving shared Git state."""
+
+    snapshot_id: int = Field(..., ge=1)
+    commit_sha: str = Field(..., min_length=7, max_length=64)
+    bundle_b64: str = Field(..., min_length=1)
 
 
 @dataclass(frozen=True)
@@ -1257,7 +1378,9 @@ def create_app(
     terminal_hard_ttl_s: float | None = None,
     terminal_max_sessions: int | None = None,
     session_supervisor: ChatSessionSupervisor | None = None,
+    shared_session_supervisor: SharedChatSessionSupervisor | None = None,
     restartable_enabled: bool | None = None,
+    shared_live_enabled: bool | None = None,
     session_idle_timeout_s: float | None = None,
 ) -> FastAPI:
     """Create the internal broker app with injectable dependencies for tests."""
@@ -1300,15 +1423,27 @@ def create_app(
     if chat_idle_timeout_s <= 0:
         raise ValueError("chat sandbox idle timeout must be positive")
     supervisor = session_supervisor
+    shared_enabled = (
+        shared_live_enabled
+        if shared_live_enabled is not None
+        else os.environ.get("AGENT_SHARED_LIVE_SANDBOX", "") not in ("", "0")
+    )
+    shared_supervisor = shared_session_supervisor
     retained_manager: ChatSandboxManager | None = None
-    if supervisor is None and restartable:
+    if (supervisor is None or (shared_supervisor is None and shared_enabled)) and restartable:
         if not isinstance(sandbox, ContainerBackend):
             raise ValueError("restartable chat sandboxes require the container or kata backend")
         retained_manager = ChatSandboxManager(sandbox)
-        supervisor = ChatSessionSupervisor(
-            retained_manager,
-            idle_timeout_s=chat_idle_timeout_s,
-        )
+        if supervisor is None:
+            supervisor = ChatSessionSupervisor(
+                retained_manager,
+                idle_timeout_s=chat_idle_timeout_s,
+            )
+        if shared_supervisor is None and shared_enabled:
+            shared_supervisor = SharedChatSessionSupervisor(
+                retained_manager,
+                idle_timeout_s=chat_idle_timeout_s,
+            )
     terminals = _TerminalManager(
         sandbox,
         idle_ttl_s=idle_ttl_s,
@@ -1336,6 +1471,7 @@ def create_app(
         # stable scope to remove only crash leftovers from a previous instance.
         sandbox.prepare_terminal_broker(root)
         supervisor_started = False
+        shared_supervisor_started = False
         terminals_started = False
         try:
             # Reconcile/reap retained Docker execs before this process starts
@@ -1345,18 +1481,24 @@ def create_app(
             if supervisor is not None:
                 supervisor.start()
                 supervisor_started = True
+            if shared_supervisor is not None:
+                shared_supervisor.start()
+                shared_supervisor_started = True
             terminals.start()
             terminals_started = True
             yield
         finally:
             if terminals_started:
                 terminals.close()
+            if shared_supervisor_started and shared_supervisor is not None:
+                shared_supervisor.close()
             if supervisor_started and supervisor is not None:
                 supervisor.close()
 
     app = FastAPI(title="Agent workspace broker", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.terminal_manager = terminals
     app.state.session_supervisor = supervisor
+    app.state.shared_session_supervisor = shared_supervisor
 
     def authenticate(x_agent_workspace_token: str | None = Header(None)) -> None:
         if (
@@ -1385,6 +1527,14 @@ def create_app(
             )
         return supervisor
 
+    def require_shared_supervisor() -> SharedChatSessionSupervisor:
+        if shared_supervisor is None:
+            raise HTTPException(
+                status_code=409,
+                detail="shared live chat sandboxes are not enabled on this host",
+            )
+        return shared_supervisor
+
     def supervisor_error(exc: Exception) -> HTTPException:
         if isinstance(exc, RetainedChatLost):
             return HTTPException(status_code=410, detail=str(exc))
@@ -1396,10 +1546,14 @@ def create_app(
             return HTTPException(status_code=422, detail=str(exc))
         return HTTPException(status_code=503, detail=str(exc)[:300])
 
-    def retained_owner(workspace_id: str) -> ChatSessionSupervisor | None:
+    def retained_owner(
+        workspace_id: str,
+    ) -> ChatSessionSupervisor | SharedChatSessionSupervisor | None:
         """Thread ids address Docker-owned workspaces; job ids stay legacy."""
         if not workspace_id.startswith("athr_"):
             return None
+        if shared_supervisor is not None and shared_supervisor.owns(workspace_id):
+            return shared_supervisor
         return require_supervisor()
 
     def retained_operation(
@@ -1433,6 +1587,399 @@ def create_app(
         except SandboxError as exc:
             raise supervisor_error(exc) from exc
         return None
+
+    def shared_spec(body: SharedSandboxIdentityRequest) -> ChatSandboxSpec:
+        return ChatSandboxSpec(
+            thread_id=body.origin_thread_id,
+            sandbox_id=body.sandbox_id,
+            generation=body.generation,
+            runtime_id=body.runtime_id,
+            runtime_version=body.runtime_version,
+            sandbox_image_digest=body.sandbox_image_digest,
+            memory_limit=body.memory_limit,
+            cpu_limit=body.cpu_limit,
+            stop_timeout_s=body.stop_timeout_s,
+            shared_live=True,
+            resident_slot_capacity=body.resident_slot_capacity,
+        )
+
+    def shared_manifest(
+        members: list[SharedSandboxMemberRequest],
+    ) -> list[SharedMemberManifest]:
+        return [SharedMemberManifest(**member.model_dump()) for member in members]
+
+    def resident_launch(
+        thread_id: str,
+        body: SharedResidentLaunchConfig,
+    ) -> ResidentLaunch:
+        gateway_base_url = (os.environ.get("AGENT_GATEWAY_URL") or body.gateway_base_url).strip()
+        if not gateway_base_url:
+            raise SandboxError("resident launch has no sandbox-reachable gateway URL")
+        return ResidentLaunch(
+            thread_id=thread_id,
+            runtime_id=body.runtime_id,
+            runtime_version=body.runtime_version,
+            native_session_id=body.native_session_id,
+            model=body.model,
+            reasoning_effort=body.reasoning_effort,
+            gateway_base_url=gateway_base_url,
+            credential=body.credential,
+            mcp_server_ids=tuple(body.mcp_server_ids),
+            mcp_base_url=body.mcp_base_url,
+            mcp_credential=body.mcp_credential,
+            slot_id=body.slot_id,
+            residency_generation=body.residency_generation,
+        )
+
+    @app.post("/shared-sandboxes/{thread_id}/acquire")
+    async def acquire_shared_chat_sandbox(
+        thread_id: str,
+        body: SharedSandboxAcquireRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            lease = await asyncio.to_thread(
+                owner.acquire,
+                shared_spec(body),
+                thread_id=thread_id,
+                owner=body.owner,
+                activation_generation=body.activation_generation,
+                has_settled_context=body.has_settled_context,
+                manifest=shared_manifest(body.members),
+                expected_container_id=body.expected_container_id,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(lease)
+
+    @app.post("/shared-sandboxes/{thread_id}/register")
+    async def register_shared_chat_sandbox(
+        thread_id: str,
+        body: SharedSandboxIdentityRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Restore DB-owned member aliases without waking the container."""
+        owner = require_shared_supervisor()
+        if thread_id != body.origin_thread_id:
+            raise HTTPException(status_code=422, detail="shared registration must name the origin")
+        try:
+            descriptors = await asyncio.to_thread(
+                owner.register_manifest,
+                shared_spec(body),
+                shared_manifest(body.members),
+                expected_container_id=body.expected_container_id,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return {
+            "ok": True,
+            "sandbox_id": body.sandbox_id,
+            "member_count": len(descriptors),
+        }
+
+    @app.post("/shared-sandboxes/{thread_id}/resident")
+    async def ensure_shared_resident(
+        thread_id: str,
+        body: SharedResidentLaunchRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(
+                owner.ensure_resident,
+                thread_id,
+                body.token,
+                resident_launch(thread_id, body.launch),
+            )
+        except (DriverError, SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.post("/shared-sandboxes/{thread_id}/turn")
+    async def run_shared_turn(
+        thread_id: str,
+        body: SharedTurnRequest,
+        _: None = Depends(authenticate),
+    ) -> StreamingResponse:
+        owner = require_shared_supervisor()
+        try:
+            turn = await asyncio.to_thread(
+                owner.start_turn,
+                thread_id,
+                body.token,
+                prompt=body.prompt,
+                model=body.model,
+                reasoning_effort=body.reasoning_effort,
+            )
+        except (DriverError, SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+
+        def frames():
+            turn_completed = False
+            try:
+                for event in turn.lines():
+                    yield (
+                        json.dumps(
+                            {
+                                "kind": "event",
+                                "event_type": event.event_type,
+                                "payload": event.payload,
+                                "raw_line": event.raw_line,
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+                result = turn.wait()
+                # The activation boundary is part of success, not cleanup
+                # after success. It reaps escaped background processes and
+                # normalizes shared writes; if either fails the runner must
+                # receive an error frame instead of a result followed by an
+                # opaque settle failure.
+                owner.complete_turn(thread_id, body.token, turn)
+                turn_completed = True
+                yield (
+                    json.dumps(
+                        {
+                            "kind": "result",
+                            "status": result.status,
+                            "final_output": result.final_output,
+                            "exit_code": result.exit_code,
+                            "usage": result.usage,
+                            "raw": result.raw,
+                            "stderr": turn.stderr_text()[-4000:],
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+            except Exception as exc:
+                yield (
+                    json.dumps(
+                        {"kind": "error", "detail": str(exc)[:1000]},
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    if not turn_completed:
+                        owner.abort_turn(thread_id, body.token, turn)
+
+        return StreamingResponse(
+            frames(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/shared-sandboxes/{thread_id}/interrupt")
+    async def interrupt_shared_turn(
+        thread_id: str,
+        body: ChatSandboxLeaseRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            await asyncio.to_thread(owner.interrupt, thread_id, body.token)
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return {"ok": True}
+
+    @app.post("/shared-sandboxes/{thread_id}/residency-lost")
+    async def shared_residency_lost(
+        thread_id: str,
+        body: SharedResidencyLostRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(
+                owner.residency_lost,
+                thread_id,
+                generation=body.generation,
+            )
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.post("/shared-sandboxes/{thread_id}/settle")
+    async def settle_shared_chat_sandbox(
+        thread_id: str,
+        body: SharedSettleRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(
+                owner.settle,
+                thread_id,
+                body.token,
+                job_id=body.job_id,
+                context_status=body.context_status,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.post("/shared-sandboxes/{thread_id}/abandon")
+    async def abandon_shared_chat_sandbox(
+        thread_id: str,
+        body: ChatSandboxAbandonRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(
+                owner.abandon,
+                thread_id,
+                body.token,
+                lost=body.lost,
+            )
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.get("/shared-sandboxes/{thread_id}")
+    async def shared_chat_sandbox_status(
+        thread_id: str,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(owner.status, thread_id)
+        except SandboxError as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.post("/shared-sandboxes/{thread_id}/stop-idle")
+    async def stop_idle_shared_chat_sandbox(
+        thread_id: str,
+        body: ChatSandboxIdleStopRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            descriptor = await asyncio.to_thread(
+                owner.stop_if_idle,
+                thread_id,
+                generation=body.generation,
+                reason=body.reason,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(descriptor)
+
+    @app.post("/shared-sandboxes/{thread_id}/fork")
+    async def fork_shared_chat_session(
+        thread_id: str,
+        body: SharedForkRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        owner = require_shared_supervisor()
+        try:
+            await asyncio.to_thread(
+                owner.register_manifest,
+                shared_spec(body),
+                shared_manifest(body.members),
+                expected_container_id=body.expected_container_id,
+            )
+            result = await asyncio.to_thread(
+                owner.fork_native,
+                thread_id,
+                operation_id=body.operation_id,
+                source_native_session_id=body.source_native_session_id,
+                target_thread_id=body.target_thread_id,
+                target_slot_id=body.target_slot_id,
+                source_launch=resident_launch(thread_id, body.source_launch),
+                target_launch=resident_launch(body.target_thread_id, body.target_launch),
+            )
+        except (DriverError, SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return asdict(result)
+
+    @app.post("/shared-sandboxes/{thread_id}/snapshot")
+    async def capture_shared_workspace_snapshot(
+        thread_id: str,
+        body: SharedSnapshotCaptureRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Capture one immutable group diff under the supervisor barrier."""
+        owner = require_shared_supervisor()
+        try:
+            await asyncio.to_thread(
+                owner.register_manifest,
+                shared_spec(body),
+                shared_manifest(body.members),
+                expected_container_id=body.expected_container_id,
+            )
+            result = await asyncio.to_thread(
+                owner.capture_snapshot,
+                thread_id,
+                capture=lambda backend: _run_git(backend, CHAT_WORKDIR, body.base_sha),
+            )
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        patch = result.get("patch")
+        if not isinstance(patch, str):
+            raise HTTPException(status_code=502, detail="Git capture returned no patch")
+        return {
+            "snapshot_id": body.snapshot_id,
+            "sandbox_id": body.sandbox_id,
+            "sandbox_generation": body.generation,
+            "container_id": body.expected_container_id,
+            "workspace_epoch": body.workspace_epoch,
+            "base_sha": body.base_sha,
+            "patch": patch,
+            "content_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+        }
+
+    @app.post("/shared-sandboxes/{thread_id}/import-base")
+    async def import_shared_workspace_base(
+        thread_id: str,
+        body: SharedBaseImportRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Import a trusted publisher commit object without checkout/reset."""
+        owner = require_shared_supervisor()
+        try:
+            bundle = base64.b64decode(body.bundle_b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="base bundle is not valid base64") from exc
+        if len(bundle) > DEFAULT_MAX_BASE_BUNDLE_BYTES:
+            raise HTTPException(status_code=413, detail="base bundle exceeds the import limit")
+        try:
+            await asyncio.to_thread(
+                owner.register_manifest,
+                shared_spec(body),
+                shared_manifest(body.members),
+                expected_container_id=body.expected_container_id,
+            )
+            token, _descriptor = await asyncio.to_thread(owner.operation_opened, thread_id)
+            try:
+                backend = owner.backend(thread_id)
+                await asyncio.to_thread(
+                    backend.manager.import_base_bundle,
+                    backend.spec,
+                    bundle,
+                    commit=body.commit_sha,
+                    env={
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "safe.directory",
+                        "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
+                    },
+                )
+            finally:
+                await asyncio.to_thread(owner.operation_closed, thread_id, token)
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
+        return {
+            "ok": True,
+            "snapshot_id": body.snapshot_id,
+            "sandbox_id": body.sandbox_id,
+            "commit_sha": body.commit_sha,
+            "workspace_head_preserved": True,
+        }
 
     @app.post("/sandboxes/{thread_id}/acquire")
     async def acquire_chat_sandbox(
@@ -1532,9 +2079,40 @@ def create_app(
         owner = require_supervisor()
         try:
             descriptors = await asyncio.to_thread(owner.reconcile)
+            shared_descriptors = (
+                await asyncio.to_thread(shared_supervisor.list)
+                if shared_supervisor is not None
+                else []
+            )
         except SandboxError as exc:
             raise supervisor_error(exc) from exc
-        return {"sandboxes": [asdict(descriptor) for descriptor in descriptors]}
+        rows = [asdict(descriptor) for descriptor in descriptors]
+        shared_groups: dict[str, list[dict[str, Any]]] = {}
+        for descriptor in shared_descriptors:
+            shared_groups.setdefault(descriptor.sandbox_id, []).append(asdict(descriptor))
+        for members in shared_groups.values():
+            origin = next(
+                (row for row in members if row["thread_id"] == row["origin_thread_id"]),
+                members[0],
+            )
+            origin = dict(origin)
+            origin["shared_live"] = True
+            origin["members"] = [
+                {
+                    "thread_id": row["thread_id"],
+                    "native_session_id": row["native_session_id"],
+                    "context_status": row["context_status"],
+                    "activation_generation": row["activation_generation"],
+                    "process_generation": row["process_generation"],
+                    "residency_generation": row["residency_generation"],
+                    "resident_state": row["resident_state"],
+                    "resident_slot_id": row["resident_slot_id"],
+                    "last_settled_job_id": row["last_settled_job_id"],
+                }
+                for row in members
+            ]
+            rows.append(origin)
+        return {"sandboxes": rows}
 
     @app.post("/sandboxes/{thread_id}/stop-idle")
     async def stop_idle_chat_sandbox(
@@ -1734,6 +2312,15 @@ def create_app(
                 workspace_id,
                 lease_generation=body.lease_generation,
             )
+        if isinstance(owner, SharedChatSessionSupervisor):
+            # Shared members never take the legacy group-wide workspace lock.
+            # This endpoint coordinates only terminals owned by this chat;
+            # sibling agents and bounded workspace operations remain live.
+            return await asyncio.to_thread(
+                terminals.suspend,
+                workspace_id,
+                lease_generation=body.lease_generation,
+            )
         try:
             await asyncio.to_thread(owner.suspend_workspace, workspace_id)
             result = await asyncio.to_thread(
@@ -1760,7 +2347,7 @@ def create_app(
             workspace_id,
             lease_generation=body.lease_generation,
         )
-        if owner is not None:
+        if owner is not None and not isinstance(owner, SharedChatSessionSupervisor):
             try:
                 await asyncio.to_thread(owner.resume_workspace, workspace_id)
             except SandboxError as exc:
@@ -1774,7 +2361,7 @@ def create_app(
     ) -> dict[str, Any]:
         owner = retained_owner(workspace_id)
         result = await asyncio.to_thread(terminals.resume_settled, workspace_id)
-        if owner is not None:
+        if owner is not None and not isinstance(owner, SharedChatSessionSupervisor):
             try:
                 await asyncio.to_thread(owner.resume_workspace, workspace_id)
             except SandboxError as exc:

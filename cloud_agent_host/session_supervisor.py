@@ -31,6 +31,7 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_RUNTIME_LABEL,
     CHAT_RUNTIME_VERSION_LABEL,
     CHAT_SANDBOX_ID_LABEL,
+    CHAT_SHARED_LABEL,
     CHAT_STOP_TIMEOUT_LABEL,
     CHAT_THREAD_LABEL,
     ChatSandboxInspection,
@@ -192,6 +193,11 @@ class ChatSessionSupervisor:
         """Discover owned Docker containers without changing their lifecycle."""
         found: list[SessionDescriptor] = []
         for inspection in self._manager.list():
+            # Shared-live containers have their own group/member supervisor.
+            # Adopting one here as a legacy 1:1 chat would create two local
+            # lifecycle authorities for the same Docker object.
+            if inspection.labels.get(CHAT_SHARED_LABEL) == "true":
+                continue
             spec = self._spec_from_inspection(inspection)
             with self._lock:
                 existing = self._entries.get(spec.thread_id)

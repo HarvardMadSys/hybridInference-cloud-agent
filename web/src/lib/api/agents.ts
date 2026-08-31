@@ -77,6 +77,22 @@ export interface AgentJobApi {
   continuity_mode?: 'hot' | 'warm_native' | 'cold_native' | 'replay' | null;
   /** Canonical user-facing context state for restartable chat sandboxes. */
   context_status?: 'new' | 'live' | 'restored' | 'lost' | null;
+  /** Process state is independent from context correctness. */
+  resident_state?: 'stopped' | 'starting' | 'live' | 'restarting' | 'lost' | null;
+  sandbox_id?: string | null;
+  workspace_shared?: boolean;
+  native_state?: 'new' | 'ready' | 'fork_preparing' | 'lost' | null;
+  fork_anchor_job_id?: string | null;
+  native_fork_available?: boolean;
+  workspace_publication_state?:
+    | 'pending'
+    | 'capturing'
+    | 'captured'
+    | 'publishing'
+    | 'published'
+    | 'failed'
+    | null;
+  workspace_epoch?: number | null;
   duration_ms?: number | null;
   /**
    * What the sandbox consumed, measured from the host. Null when no sampler
@@ -504,16 +520,91 @@ export async function followUpAgentJob(
 }
 
 /**
- * Copy the conversation up to a settled turn into a new thread.
+ * Capability-gated shared chats native-fork the latest settled conversation
+ * into a second live CLI session in the same sandbox/workspace. Historical
+ * chats without retained sandbox state keep the DB-only compatibility path.
  *
- * Nothing runs and nothing publishes until the owner sends the next turn
- * there. Returns the copied anchor turn — the page to navigate to.
+ * The fork-only call starts/probes the child's resident CLI but sends no
+ * prompt and performs no model call. Returns the copied anchor turn — the
+ * page to navigate to.
  */
+const pendingForkRequestIds = new Map<string, string>();
+
+function forkRequestStorageKey(jobId: string): string {
+  return `agent-native-fork-request-${jobId}`;
+}
+
+function pendingForkRequestId(jobId: string): string {
+  const memory = pendingForkRequestIds.get(jobId);
+  if (memory) return memory;
+  try {
+    const stored = globalThis.sessionStorage?.getItem(forkRequestStorageKey(jobId));
+    if (stored) {
+      pendingForkRequestIds.set(jobId, stored);
+      return stored;
+    }
+  } catch {
+    // Privacy settings may block browser storage; in-memory idempotency still
+    // protects repeated clicks for the lifetime of this page.
+  }
+  const created =
+    globalThis.crypto?.randomUUID?.() ??
+    `fork-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  pendingForkRequestIds.set(jobId, created);
+  try {
+    globalThis.sessionStorage?.setItem(forkRequestStorageKey(jobId), created);
+  } catch {
+    // See the read path above.
+  }
+  return created;
+}
+
+function clearPendingForkRequest(jobId: string): void {
+  pendingForkRequestIds.delete(jobId);
+  try {
+    globalThis.sessionStorage?.removeItem(forkRequestStorageKey(jobId));
+  } catch {
+    // A successful response is already authoritative; storage cleanup is best effort.
+  }
+}
+
+async function forkFailureType(resp: Response): Promise<string | null> {
+  if (resp.ok) return null;
+  try {
+    const body = (await resp.clone().json()) as {
+      error?: { type?: unknown };
+      detail?: { error?: { type?: unknown } };
+    };
+    const type = body.error?.type ?? body.detail?.error?.type;
+    return typeof type === 'string' ? type : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function forkAgentJob(jobId: string): Promise<AgentJobApi> {
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/fork`, {
-    method: 'POST',
-  });
-  return jsonOrThrow<AgentJobApi>(resp);
+  const requestId = pendingForkRequestId(jobId);
+  try {
+    const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/fork`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': requestId },
+    });
+    // Network/5xx/ordinary conflict retries must retain this key: the host may
+    // already have materialized the child and the repeated request is how the
+    // control plane recovers it. A durable FAILED saga is different: replaying
+    // its key can only return the same failure forever, so allow the next user
+    // click to start a new, independently fenced operation after reconciliation.
+    if ((await forkFailureType(resp)) === 'native_fork_failed') {
+      clearPendingForkRequest(jobId);
+    }
+    const result = await jsonOrThrow<AgentJobApi>(resp);
+    clearPendingForkRequest(jobId);
+    return result;
+  } catch (cause) {
+    // A lost response may hide a committed fork. Keep the same key so the
+    // owner's retry returns that child instead of creating another one.
+    throw cause;
+  }
 }
 
 /** Page through the event log. Used to backfill before the stream attaches. */

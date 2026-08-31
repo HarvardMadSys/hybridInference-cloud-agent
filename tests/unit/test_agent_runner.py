@@ -71,6 +71,49 @@ def test_restartable_preview_defaults_to_every_native_session_driver(monkeypatch
     assert runner_mod._restartable_runtime_enabled(job) is True
 
 
+def test_shared_live_capability_attests_clis_and_non_menu_helpers(monkeypatch):
+    monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "1")
+    monkeypatch.setenv("AGENT_HOST_SLOTS", "2")
+    monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8082")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
+    backend = ContainerBackend(image="img")
+    stamp = {
+        "sandbox_image_digest": "sha256:shared-image",
+        "shared_sandbox_protocol": "v1",
+        "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+        "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+    }
+
+    assert runner_mod._shared_live_host_capabilities(backend, stamp) == ["shared-sandbox-v1"]
+    assert "claude-agent-sdk" not in stamp["runtime_versions"]
+
+    stamp["helper_versions"]["claude-agent-sdk"] = "0.2.147"
+    assert runner_mod._shared_live_host_capabilities(backend, stamp) == []
+
+
+@pytest.mark.parametrize("capacity", ["nope", "1", "129"])
+def test_shared_live_capability_rejects_invalid_resident_capacity(monkeypatch, capacity):
+    monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "1")
+    monkeypatch.setenv("AGENT_HOST_SLOTS", "2")
+    monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", capacity)
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8082")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
+
+    assert (
+        runner_mod._shared_live_host_capabilities(
+            ContainerBackend(image="img"),
+            {
+                "sandbox_image_digest": "sha256:shared-image",
+                "shared_sandbox_protocol": "v1",
+                "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+                "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+            },
+        )
+        == []
+    )
+
+
 def test_partial_restartable_rollout_keeps_the_legacy_mount_preflight(monkeypatch):
     """A staged runtime subset is not a Docker-only runner yet."""
     monkeypatch.setenv("AGENT_RESTARTABLE_SANDBOX", "1")

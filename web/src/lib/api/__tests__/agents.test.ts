@@ -186,8 +186,55 @@ describe('agents api', () => {
     expect(fetchWithAuth).toHaveBeenCalledWith(
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/fork',
-      { method: 'POST' },
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': expect.any(String) },
+      },
     );
+  });
+
+  it('keeps the fork idempotency key while an ambiguous request is retryable', async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            detail: {
+              error: { type: 'sandbox_host_unavailable', message: 'host unavailable' },
+            },
+          },
+          503,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_recovered', state: 'succeeded' }));
+
+    await expect(forkAgentJob('job/retryable')).rejects.toThrow();
+    await expect(forkAgentJob('job/retryable')).resolves.toMatchObject({ id: 'ajob_recovered' });
+
+    const firstHeaders = fetchWithAuth.mock.calls[0][2]?.headers as Record<string, string>;
+    const secondHeaders = fetchWithAuth.mock.calls[1][2]?.headers as Record<string, string>;
+    expect(secondHeaders['Idempotency-Key']).toBe(firstHeaders['Idempotency-Key']);
+  });
+
+  it('rotates the fork idempotency key after a durably failed saga', async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            detail: {
+              error: { type: 'native_fork_failed', message: 'reconciled as failed' },
+            },
+          },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_retried', state: 'succeeded' }));
+
+    await expect(forkAgentJob('job/failed')).rejects.toThrow();
+    await expect(forkAgentJob('job/failed')).resolves.toMatchObject({ id: 'ajob_retried' });
+
+    const firstHeaders = fetchWithAuth.mock.calls[0][2]?.headers as Record<string, string>;
+    const secondHeaders = fetchWithAuth.mock.calls[1][2]?.headers as Record<string, string>;
+    expect(secondHeaders['Idempotency-Key']).not.toBe(firstHeaders['Idempotency-Key']);
   });
 
   it('loads source-control integrations', async () => {

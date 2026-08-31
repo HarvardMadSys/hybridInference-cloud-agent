@@ -1,0 +1,884 @@
+"""Concurrency and capture barriers for shared live chat sandboxes."""
+
+from __future__ import annotations
+
+import subprocess
+import threading
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+from cloud_agent_host.chat_sandbox import (
+    ChatSandboxInspection,
+    ChatSandboxSpec,
+    ChatSandboxStatus,
+)
+from cloud_agent_host.resident_transport import (
+    ResidentLaunch,
+    ResidentTransport,
+    ResidentTransportFactory,
+)
+from cloud_agent_host.session_supervisor import SessionBusy
+from cloud_agent_host.shared_session_supervisor import (
+    SharedChatSessionSupervisor,
+    SharedMemberManifest,
+)
+
+
+class _Manager:
+    def __init__(self) -> None:
+        self.backend = SimpleNamespace(
+            uid=10001,
+            gid=10001,
+            image="sha256:image",
+            runtime="runc",
+        )
+        self.items: dict[str, ChatSandboxInspection] = {}
+        self.events: list[object] = []
+        self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
+
+    @staticmethod
+    def _inspection(spec: ChatSandboxSpec, *, running: bool = True) -> ChatSandboxInspection:
+        return ChatSandboxInspection(
+            container_id="container-shared",
+            name=spec.container_name,
+            status=ChatSandboxStatus.RUNNING if running else ChatSandboxStatus.STOPPED,
+            running=running,
+            image=spec.sandbox_image_digest or "sha256:image",
+            labels=spec.docker_labels(),
+            mounts=(),
+            networks=("agent-net",),
+        )
+
+    def create(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+        return self.items.setdefault(spec.container_name, self._inspection(spec))
+
+    def require_existing(
+        self, spec: ChatSandboxSpec, *, container_id: str
+    ) -> ChatSandboxInspection:
+        current = self.items[spec.container_name]
+        assert current.container_id == container_id
+        return current
+
+    def inspect(self, container_name: str) -> ChatSandboxInspection | None:
+        return self.items.get(container_name)
+
+    def start(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+        current = self.items[spec.container_name]
+        if not current.running:
+            current = replace(
+                current,
+                running=True,
+                status=ChatSandboxStatus.RUNNING,
+            )
+            self.items[spec.container_name] = current
+        return current
+
+    def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+        current = replace(
+            self.items[spec.container_name],
+            running=False,
+            status=ChatSandboxStatus.STOPPED,
+        )
+        self.items[spec.container_name] = current
+        return current
+
+    def freeze_shared_writers(
+        self, spec: ChatSandboxSpec, *, slot_ids: list[int], token: str
+    ) -> str:
+        self.events.append(("freeze", tuple(sorted(slot_ids))))
+        return f"/run/agent-activation/snapshot-{token}.pids"
+
+    def thaw_shared_writers(
+        self, spec: ChatSandboxSpec, *, slot_ids: list[int], manifest: str
+    ) -> None:
+        self.events.append(("thaw", tuple(sorted(slot_ids)), manifest))
+
+    def capture_member_processes(self, spec: ChatSandboxSpec, **kwargs):
+        self.events.append(("census", kwargs["slot_id"]))
+        return self.process_baseline
+
+    def reap_member_processes_except(self, spec: ChatSandboxSpec, **kwargs) -> None:
+        self.events.append(("reap-except", kwargs["slot_id"], kwargs["baseline"]))
+
+    def normalize_member_files(self, spec: ChatSandboxSpec, **kwargs) -> None:
+        self.events.append(("normalize", kwargs["slot_id"]))
+
+
+class _Turn:
+    def __init__(self) -> None:
+        self.interrupted = False
+
+    def interrupt(self) -> None:
+        self.interrupted = True
+
+
+class _Transport:
+    def __init__(self, launch: ResidentLaunch) -> None:
+        self.launch = launch
+        self.native_session_id = launch.native_session_id or "native-child"
+        self.alive = True
+        self.turns: list[_Turn] = []
+
+    def compatible_with(self, launch: ResidentLaunch) -> bool:
+        # Mirror ResidentTransport: the renewable credential and its generation
+        # are not ordinary config equality. The supervisor must separately
+        # force a restart when the residency fence rotates.
+        return (
+            replace(
+                self.launch,
+                credential=launch.credential,
+                residency_generation=launch.residency_generation,
+            )
+            == launch
+        )
+
+    def close(self) -> None:
+        self.alive = False
+
+    def start_turn(self, **_kwargs) -> _Turn:
+        turn = _Turn()
+        self.turns.append(turn)
+        return turn
+
+
+class _TransportFactory:
+    def __init__(self) -> None:
+        self.opened: list[ResidentLaunch] = []
+        self.transports: list[_Transport] = []
+
+    def open(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> _Transport:
+        self.opened.append(launch)
+        transport = _Transport(launch)
+        self.transports.append(transport)
+        return transport
+
+    def fork_native(self, *_args, **_kwargs) -> str:
+        raise AssertionError("this test did not configure native fork behavior")
+
+
+def _spec() -> ChatSandboxSpec:
+    return ChatSandboxSpec(
+        thread_id="athr_source",
+        sandbox_id="asbx_shared",
+        generation=1,
+        runtime_id="claude-code",
+        runtime_version="2.1.220",
+        sandbox_image_digest="sha256:image",
+        shared_live=True,
+        resident_slot_capacity=4,
+    )
+
+
+def _launch(thread_id: str, *, native_session_id: str | None, slot: int) -> ResidentLaunch:
+    return ResidentLaunch(
+        thread_id=thread_id,
+        runtime_id="claude-code",
+        runtime_version="2.1.220",
+        native_session_id=native_session_id,
+        model="glm-5.1",
+        reasoning_effort=None,
+        gateway_base_url="http://gateway",
+        credential="grant",
+        slot_id=slot,
+        residency_generation=slot + 1,
+    )
+
+
+def _members() -> list[SharedMemberManifest]:
+    return [
+        SharedMemberManifest(
+            thread_id="athr_source",
+            native_session_id="native-source",
+            context_status="live",
+            resident_slot_id=0,
+            last_settled_job_id="ajob_source",
+        ),
+        SharedMemberManifest(
+            thread_id="athr_peer",
+            native_session_id="native-peer",
+            context_status="live",
+            resident_slot_id=1,
+            last_settled_job_id="ajob_peer",
+        ),
+    ]
+
+
+def test_native_fork_journal_uses_the_docker_layer_owner_not_capabilityless_root():
+    class JournalManager:
+        def __init__(self) -> None:
+            self.backend = SimpleNamespace(uid=10001, gid=10001)
+            self.calls: list[tuple[list[str], dict]] = []
+
+        def exec_capture(self, _spec, argv, **kwargs):
+            self.calls.append((list(argv), kwargs))
+            return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+
+    manager = JournalManager()
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+
+    factory._write_fork_journal(_spec(), "fork-one", {"state": "preparing"})
+    assert factory._read_fork_journal(_spec(), "fork-one") is None
+
+    assert [call[1]["user_uid"] for call in manager.calls] == [10001, 10001]
+    assert [call[1]["user_gid"] for call in manager.calls] == [10001, 10001]
+    assert all(
+        "/home/agent/.freeinference-platform/session-forks" in " ".join(call[0])
+        for call in manager.calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("runtime_id", "collection"),
+    [
+        ("codex", "codex-members"),
+        ("opencode", "opencode-members"),
+        ("kilo", "kilo-members"),
+    ],
+)
+def test_private_provider_members_get_deterministic_distinct_homes(
+    runtime_id: str, collection: str
+):
+    source = _launch("athr_source", native_session_id="native-source", slot=0)
+    child = replace(source, thread_id="athr_child", native_session_id="native-child", slot_id=1)
+
+    source_home = ResidentTransportFactory._member_state_dir(replace(source, runtime_id=runtime_id))
+    child_home = ResidentTransportFactory._member_state_dir(replace(child, runtime_id=runtime_id))
+
+    assert source_home.startswith(f"/agent-state/{collection}/")
+    assert child_home.startswith(f"/agent-state/{collection}/")
+    assert source_home != child_home
+
+
+def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(monkeypatch):
+    manager = _Manager()
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    spec = replace(_spec(), runtime_id="codex", runtime_version="0.145.0")
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        runtime_id="codex",
+        runtime_version="0.145.0",
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2),
+        runtime_id="codex",
+        runtime_version="0.145.0",
+    )
+    mutation_calls: list[str] = []
+    source = SimpleNamespace(
+        native_session_id="native-source",
+        launch=source_launch,
+        session=SimpleNamespace(
+            fork_native=lambda **_kwargs: mutation_calls.append("fork") or "duplicate"
+        ),
+        close=lambda: mutation_calls.append("close"),
+    )
+    expected = {
+        "operation_id": "fork-recover",
+        "sandbox_id": spec.sandbox_id,
+        "sandbox_generation": spec.generation,
+        "runtime_id": "codex",
+        "runtime_version": "0.145.0",
+        "source_session_id": "native-source",
+        "target_thread_id": "athr_child",
+        "target_slot_id": 2,
+    }
+    writes: list[dict[str, object]] = []
+    clones: list[tuple[ResidentLaunch, ResidentLaunch]] = []
+    monkeypatch.setattr(
+        factory,
+        "_read_fork_journal",
+        lambda *_args: {
+            **expected,
+            "state": "preparing",
+            "source_child_session_ids": ["native-old-child"],
+        },
+    )
+    monkeypatch.setattr(
+        factory,
+        "_codex_fork_children",
+        lambda *_args, **_kwargs: {"native-old-child", "native-recovered-child"},
+    )
+    monkeypatch.setattr(
+        factory,
+        "_clone_private_member_state",
+        lambda _spec, source_item, target_item: clones.append((source_item, target_item)),
+    )
+    monkeypatch.setattr(
+        factory,
+        "_write_fork_journal",
+        lambda _spec, _operation_id, value: writes.append(value),
+    )
+
+    child_id = factory.fork_native(
+        spec,
+        source,  # type: ignore[arg-type]
+        "fork-recover",
+        target_launch,
+    )
+
+    assert child_id == "native-recovered-child"
+    assert mutation_calls == ["close"]
+    assert clones == [(source_launch, target_launch)]
+    assert writes == [{**expected, "state": "ready", "target_session_id": "native-recovered-child"}]
+
+
+def test_codex_lost_fork_response_recovers_from_the_rollout_inventory(monkeypatch):
+    manager = _Manager()
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    spec = replace(_spec(), runtime_id="codex", runtime_version="0.145.0")
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        runtime_id="codex",
+        runtime_version="0.145.0",
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2),
+        runtime_id="codex",
+        runtime_version="0.145.0",
+    )
+    closed: list[bool] = []
+
+    def lost_response(**_kwargs):
+        raise EOFError("response disappeared after persistence")
+
+    source = SimpleNamespace(
+        native_session_id="native-source",
+        launch=source_launch,
+        session=SimpleNamespace(fork_native=lost_response),
+        close=lambda: closed.append(True),
+    )
+    inventories = iter(
+        [
+            {"native-old-child"},
+            {"native-old-child", "native-recovered-child"},
+        ]
+    )
+    writes: list[dict[str, object]] = []
+    monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
+    monkeypatch.setattr(
+        factory,
+        "_codex_fork_children",
+        lambda *_args, **_kwargs: next(inventories),
+    )
+    monkeypatch.setattr(factory, "_clone_private_member_state", lambda *_args: None)
+    monkeypatch.setattr(
+        factory,
+        "_write_fork_journal",
+        lambda _spec, _operation_id, value: writes.append(value),
+    )
+
+    child_id = factory.fork_native(
+        spec,
+        source,  # type: ignore[arg-type]
+        "fork-lost-response",
+        target_launch,
+    )
+
+    assert child_id == "native-recovered-child"
+    assert closed == [True]
+    assert writes[0]["state"] == "preparing"
+    assert writes[0]["source_child_session_ids"] == ["native-old-child"]
+    assert writes[1]["state"] == "ready"
+    assert writes[1]["target_session_id"] == "native-recovered-child"
+
+
+@pytest.mark.parametrize("runtime_id", ["opencode", "kilo"])
+def test_http_native_fork_flushes_and_clones_private_provider_state(monkeypatch, runtime_id: str):
+    manager = _Manager()
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    spec = replace(_spec(), runtime_id=runtime_id, runtime_version="test-version")
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        runtime_id=runtime_id,
+        runtime_version="test-version",
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2),
+        runtime_id=runtime_id,
+        runtime_version="test-version",
+    )
+    lifecycle: list[str] = []
+    source = SimpleNamespace(
+        native_session_id="native-source",
+        launch=source_launch,
+        session=SimpleNamespace(
+            fork_native=lambda **_kwargs: lifecycle.append("fork") or "native-child"
+        ),
+        close=lambda: lifecycle.append("close"),
+    )
+    writes: list[dict[str, object]] = []
+    monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
+    monkeypatch.setattr(
+        factory,
+        "_clear_http_member_locks",
+        lambda _spec, launch: lifecycle.append(f"clear:{launch.thread_id}"),
+    )
+    monkeypatch.setattr(
+        factory,
+        "_clone_private_member_state",
+        lambda _spec, source_item, target_item: lifecycle.append(
+            f"clone:{source_item.thread_id}:{target_item.thread_id}"
+        ),
+    )
+    monkeypatch.setattr(
+        factory,
+        "_write_fork_journal",
+        lambda _spec, _operation_id, value: writes.append(value),
+    )
+
+    child_id = factory.fork_native(
+        spec,
+        source,  # type: ignore[arg-type]
+        "fork-http",
+        target_launch,
+    )
+
+    assert child_id == "native-child"
+    assert lifecycle == [
+        "fork",
+        "close",
+        "clear:athr_source",
+        "clone:athr_source:athr_child",
+    ]
+    assert manager.events == [("normalize", 0), ("normalize", 2)]
+    assert writes[0]["state"] == "preparing"
+    assert writes[1]["state"] == "ready"
+
+
+@pytest.mark.parametrize("runtime_id", ["opencode", "kilo"])
+def test_http_member_lock_cleanup_runs_as_the_source_slot_owner(runtime_id: str):
+    class LockManager:
+        def __init__(self) -> None:
+            self.backend = SimpleNamespace(gid=10001)
+            self.calls: list[tuple[list[str], dict]] = []
+
+        def exec_capture(self, _spec, argv, **kwargs):
+            self.calls.append((list(argv), kwargs))
+            return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+
+    manager = LockManager()
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=3),
+        runtime_id=runtime_id,
+        runtime_version="test-version",
+    )
+
+    factory._clear_http_member_locks(_spec(), launch)
+
+    assert len(manager.calls) == 1
+    argv, kwargs = manager.calls[0]
+    assert argv[-1] == runtime_id
+    assert argv[-2] == factory._member_state_dir(launch)
+    assert "locks" in argv[2]
+    assert kwargs["user_uid"] == 11004
+    assert kwargs["user_gid"] == 10001
+
+
+def test_snapshot_is_a_short_group_barrier_and_always_thaws_writers():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+
+    def capture(_backend):
+        manager.events.append("capture")
+        with pytest.raises(SessionBusy, match="snapshot"):
+            supervisor.operation_opened("athr_peer")
+        return {"patch": "diff --git a/a b/a\n"}
+
+    result = supervisor.capture_snapshot("athr_source", capture=capture)
+
+    assert result == {"patch": "diff --git a/a b/a\n"}
+    assert manager.events[0] == ("freeze", (0, 1))
+    assert manager.events[1] == "capture"
+    assert manager.events[2][0] == "thaw"
+    assert supervisor.status("athr_source").snapshotting is False
+
+
+def test_snapshot_refuses_active_mutations_instead_of_serializing_normal_work():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    token, _ = supervisor.operation_opened("athr_peer")
+
+    with pytest.raises(SessionBusy, match="active mutations"):
+        supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""})
+
+    supervisor.operation_closed("athr_peer", token)
+    assert supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""}) == {
+        "patch": ""
+    }
+
+
+def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor: SharedChatSessionSupervisor
+
+    def native_forker(spec, source_transport, operation_id, target_launch):
+        assert source_transport.native_session_id == "native-source"
+        assert operation_id == "fork-one"
+        token, peer = supervisor.operation_opened("athr_peer")
+        assert peer.operation_count == 1
+        assert supervisor.status("athr_source").operation_count == 1
+        supervisor.operation_closed("athr_peer", token)
+        return "native-child"
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=factory,
+        native_forker=native_forker,
+    )
+    supervisor.register_manifest(_spec(), _members())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    source_launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, source_launch)
+    supervisor.settle(
+        "athr_source",
+        lease.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+
+    result = supervisor.fork_native(
+        "athr_source",
+        operation_id="fork-one",
+        source_native_session_id="native-source",
+        target_thread_id="athr_child",
+        target_slot_id=2,
+        source_launch=source_launch,
+        target_launch=_launch("athr_child", native_session_id=None, slot=2),
+    )
+
+    assert result.container_id == "container-shared"
+    assert result.target_native_session_id == "native-child"
+    assert supervisor.status("athr_child").resident_state == "live"
+    assert supervisor.status("athr_source").operation_count == 0
+
+
+def test_native_fork_retry_rotates_only_source_and_hidden_child_processes():
+    manager = _Manager()
+    factory = _TransportFactory()
+    fork_calls: list[str] = []
+
+    def native_forker(_spec, _source_transport, operation_id, _target_launch):
+        fork_calls.append(operation_id)
+        return "native-child"
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=factory,
+        native_forker=native_forker,
+    )
+    supervisor.register_manifest(_spec(), _members())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    source_launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, source_launch)
+    supervisor.settle(
+        "athr_source",
+        lease.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+    target_launch = _launch("athr_child", native_session_id=None, slot=2)
+    first = supervisor.fork_native(
+        "athr_source",
+        operation_id="fork-retry",
+        source_native_session_id="native-source",
+        target_thread_id="athr_child",
+        target_slot_id=2,
+        source_launch=source_launch,
+        target_launch=target_launch,
+    )
+
+    retried = supervisor.fork_native(
+        "athr_source",
+        operation_id="fork-retry",
+        source_native_session_id="native-source",
+        target_thread_id="athr_child",
+        target_slot_id=2,
+        source_launch=replace(source_launch, credential="grant-rotated", residency_generation=10),
+        target_launch=replace(target_launch, credential="grant-rotated", residency_generation=11),
+    )
+
+    assert fork_calls == ["fork-retry"]
+    assert first.source_process_generation == first.target_process_generation == 1
+    assert retried.source_process_generation == retried.target_process_generation == 2
+    assert retried.source_residency_generation == 10
+    assert retried.target_residency_generation == 11
+    assert [launch.residency_generation for launch in factory.opened] == [1, 3, 10, 11]
+
+
+def test_native_fork_resumes_a_source_transport_closed_by_the_cli():
+    manager = _Manager()
+    factory = _TransportFactory()
+
+    def native_forker(_spec, source_transport, _operation_id, _target_launch):
+        source_transport.alive = False
+        return "native-child"
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=factory,
+        native_forker=native_forker,
+    )
+    supervisor.register_manifest(_spec(), _members())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    source_launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, source_launch)
+    supervisor.settle(
+        "athr_source",
+        lease.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+
+    result = supervisor.fork_native(
+        "athr_source",
+        operation_id="fork-closes-source",
+        source_native_session_id="native-source",
+        target_thread_id="athr_child",
+        target_slot_id=2,
+        source_launch=source_launch,
+        target_launch=_launch("athr_child", native_session_id=None, slot=2),
+    )
+
+    child_launch = _launch("athr_child", native_session_id="native-child", slot=2)
+    assert result.source_process_generation == 2
+    assert supervisor.status("athr_source").resident_state == "live"
+    assert factory.opened == [source_launch, source_launch, child_launch]
+
+
+def test_new_activation_waits_for_an_inflight_idle_stop_then_restarts_exact_container():
+    class BlockingStopManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stop_entered = threading.Event()
+            self.allow_stop = threading.Event()
+
+        def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+            self.stop_entered.set()
+            assert self.allow_stop.wait(timeout=2)
+            return super().stop(spec)
+
+    manager = BlockingStopManager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    manifest = _members()
+    manager.create(_spec())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=manifest,
+        expected_container_id="container-shared",
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor.settle(
+        "athr_source",
+        lease.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+
+    stopped: list[object] = []
+    errors: list[BaseException] = []
+
+    def stop_group() -> None:
+        try:
+            stopped.append(supervisor.stop_if_idle("athr_source", generation=1))
+        except BaseException as exc:  # pragma: no cover - assertion reports it below
+            errors.append(exc)
+
+    stop_thread = threading.Thread(target=stop_group)
+    stop_thread.start()
+    assert manager.stop_entered.wait(timeout=1)
+    with pytest.raises(SessionBusy, match="stop"):
+        supervisor.operation_opened("athr_peer")
+
+    acquired: list[object] = []
+
+    def wake_group() -> None:
+        try:
+            acquired.append(
+                supervisor.acquire(
+                    _spec(),
+                    thread_id="athr_source",
+                    owner="attempt:2",
+                    activation_generation=2,
+                    has_settled_context=True,
+                    manifest=manifest,
+                    expected_container_id="container-shared",
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it below
+            errors.append(exc)
+
+    wake_thread = threading.Thread(target=wake_group)
+    wake_thread.start()
+    wake_thread.join(timeout=0.05)
+    assert wake_thread.is_alive(), "new activation bypassed the stop admission barrier"
+
+    manager.allow_stop.set()
+    stop_thread.join(timeout=1)
+    wake_thread.join(timeout=1)
+
+    assert errors == []
+    assert len(stopped) == len(acquired) == 1
+    assert acquired[0].container_id == "container-shared"
+    assert acquired[0].context_status == "restored"
+    assert manager.items[_spec().container_name].running is True
+
+
+def test_status_downgrades_a_dead_resident_process_without_losing_native_context():
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor.settle(
+        "athr_source",
+        lease.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+    factory.transports[-1].alive = False
+
+    descriptor = supervisor.status("athr_source")
+
+    assert descriptor.resident_state == "restarting"
+    assert descriptor.context_status == "live"
+    assert descriptor.native_session_id == "native-source"
+
+
+def test_process_fixed_config_restart_reports_restored_instead_of_hot():
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    first = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", first.token, launch)
+    supervisor.settle(
+        "athr_source",
+        first.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+
+    second = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    assert second.context_status == "live"
+
+    restarted = supervisor.ensure_resident(
+        "athr_source",
+        second.token,
+        replace(
+            launch,
+            model="glm-5.2",
+            credential="grant-2",
+            residency_generation=2,
+        ),
+    )
+
+    assert restarted.process_generation == 2
+    assert restarted.context_status == "restored"
+
+
+def test_unused_mcp_token_does_not_change_live_process_compatibility():
+    launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    transport = ResidentTransport(launch=launch, session=SimpleNamespace())
+
+    assert transport.compatible_with(
+        replace(launch, mcp_base_url="http://relay", mcp_credential="fresh-attempt-token")
+    )
+
+
+def test_turn_boundary_preserves_reviewed_resident_tree_and_reaps_new_processes():
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    supervisor.complete_turn("athr_source", lease.token, turn)
+
+    assert manager.events[-3:] == [
+        ("census", 0),
+        ("reap-except", 0, ((41, 400),)),
+        ("normalize", 0),
+    ]
+    assert supervisor.status("athr_source").resident_state == "live"

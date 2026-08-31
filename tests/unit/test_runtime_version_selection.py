@@ -29,6 +29,7 @@ from cloud_agent.schemas import WorkerClaimAttestation, WorkerClaimResponse
 from cloud_agent.storage.store import resolve_runtime_version
 from cloud_agent_host.runner import (
     ClaimedJob,
+    _claim_attestation,
     _select_runtime_version,
     runtime_version_unavailable,
 )
@@ -283,7 +284,7 @@ def test_the_claim_schema_declares_everything_the_runner_attests() -> None:
     # degraded path — its keys are the ones a working inspect produces too, and
     # the keys are the whole subject here.
     backend = ContainerBackend(image="unused", docker_binary="/nonexistent-docker")
-    reported = set(backend.version_stamp())
+    reported = set(_claim_attestation(backend))
     declared = set(WorkerClaimAttestation.model_fields)
 
     dropped = reported - declared
@@ -300,6 +301,9 @@ def test_the_menu_survives_validation() -> None:
             "sandbox_runtime": "",
             "runtime_versions": {"claude-code": "2.1.220"},
             "runtime_versions_available": {"claude-code": ["2.1.220", "2.1.235"]},
+            "helper_versions": {"claude-agent-sdk": "0.2.148"},
+            "shared_sandbox_protocol": "v1",
+            "runner_capabilities": ["shared-sandbox-v1"],
         }
     )
 
@@ -308,6 +312,9 @@ def test_the_menu_survives_validation() -> None:
     assert attestation.model_dump()["runtime_versions_available"] == {
         "claude-code": ["2.1.220", "2.1.235"]
     }
+    assert attestation.model_dump()["helper_versions"] == {"claude-agent-sdk": "0.2.148"}
+    assert attestation.model_dump()["shared_sandbox_protocol"] == "v1"
+    assert attestation.model_dump()["runner_capabilities"] == ["shared-sandbox-v1"]
 
 
 def test_the_claim_response_declares_everything_the_runner_reads() -> None:

@@ -158,6 +158,20 @@ export interface AgentJob {
   continuityMode?: 'hot' | 'warm_native' | 'cold_native' | 'replay';
   /** Canonical user-facing context state; independent of process-id reuse. */
   contextStatus?: 'new' | 'live' | 'restored' | 'lost';
+  /** Process residency is distinct from context correctness. */
+  residentState?: 'stopped' | 'starting' | 'live' | 'restarting' | 'lost';
+  sandboxId?: string;
+  workspaceShared?: boolean;
+  nativeState?: 'new' | 'ready' | 'fork_preparing' | 'lost';
+  nativeForkAvailable?: boolean;
+  workspacePublicationState?:
+    | 'pending'
+    | 'capturing'
+    | 'captured'
+    | 'publishing'
+    | 'published'
+    | 'failed';
+  workspaceEpoch?: number;
   /** Wall time of the turn's newest attempt. */
   durationMs?: number;
   /** Host-measured consumption. Absent when nothing measured this turn. */

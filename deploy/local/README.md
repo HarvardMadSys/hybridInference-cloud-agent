@@ -19,7 +19,10 @@ not alternate code paths in the application.
 
 ## Run
 
-Prerequisites: Docker with Compose, `openssl`, `curl`, and Python 3.
+Prerequisites: Docker with Compose, `openssl`, `curl`, and Python 3. Give Docker
+Desktop at least 4 GiB of memory; 8 GiB is recommended for the all-five-runtime
+and concurrent-fork smoke. A roughly 2 GiB VM can OOM Kilo before the session
+protocol is exercised.
 
 ```bash
 ./deploy/local/dev.sh up
@@ -36,21 +39,24 @@ versions of Claude Code, Codex, Pi, OpenCode, and Kilo. Later builds use Docker
 layer cache.
 
 `smoke` logs in through PKCE, runs a first turn and native-session follow-up
-through **each of those five real CLI binaries**, waits for every chat
-container to stop at the idle deadline, and proves each third turn restores
-the same container id with no mounts. It then full-forks the latest settled
-Claude chat, verifies the complete conversation plus Docker filesystem were
-copied into a separate stopped/mount-free container, and resumes that clone.
-A passing result therefore covers `NEW → LIVE → stopped → RESTORED` for every
-CLI plus the latest-settled full Docker fork path.
+through **each of those five real CLI binaries**, waits for every chat group to
+stop at the idle deadline, and proves each third turn restores the same
+mount-free container id. It then immediately native-forks every latest settled
+session, verifies source and child are independently LIVE inside the same
+container/workspace, queues turns on both sides without a group turn lock, and
+wakes the stopped group from the child. A passing result therefore covers
+`NEW → LIVE → stopped → RESTORED`, prompt-free same-container Fork, concurrent
+source/child admission, and group stop/restore for all five CLIs.
 
 `legacy-smoke` is a separate compatibility check for the rollout's
-default-off path. It briefly stops the retained runner, launches one
-disposable runner with a same-path temporary bind (the topology production
-mixed mode requires), and proves that the job reaches Claude Code, exports a
-checkpoint, and completes in-sandbox patch generation. The temporary bind is
-removed before the retained runner restarts; it is not part of the normal
-Docker-only local storage topology.
+default-off path. It briefly stops the retained runners, recreates the local
+control plane with the shared-live rollout gate disabled, and launches one
+explicitly default-off runner with a same-path temporary bind (the topology
+production mixed mode requires). It proves that the job reaches Claude Code,
+exports a checkpoint, and completes in-sandbox patch generation. The temporary
+bind is removed and the normal control plane/runners are restored before exit,
+including after failure; the bind is not part of the normal Docker-only local
+storage topology.
 
 Useful commands:
 
@@ -67,5 +73,8 @@ and can be started again. There are no host workspace or database bind mounts;
 the Docker socket is the runner/broker control channel, and Docker's own data
 root holds the state.
 
-The local chat inactivity timeout is 60 seconds so stop/resume is easy to see.
+The local chat inactivity timeout is 15 seconds so stop/resume is easy to see
+and the five-runtime smoke does not keep five heavyweight CLI groups resident
+at once on a small Docker Desktop VM. Active turns are never stopped by this
+idle clock.
 Production remains 1800 seconds unless configured otherwise.

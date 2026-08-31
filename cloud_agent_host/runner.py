@@ -69,6 +69,7 @@ from cloud_agent_host.enrollment import (
 from cloud_agent_host.logging_utils import configure_process_logging
 from cloud_agent_host.patch_gate import branch_name_for, validate_patch
 from cloud_agent_host.residency import ResidentEntry, ResidentPool
+from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import ResourceSampler, daemon_reachable
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -94,6 +95,11 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import build_cache_from_env, run_setup
+from cloud_agent_host.shared_protocol import (
+    SHARED_SANDBOX_HELPER_PINS,
+    SHARED_SANDBOX_PROTOCOL,
+    SHARED_SANDBOX_RUNTIME_PINS,
+)
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_host.workspace_paths import purge_stale_workspaces, workspace_path
 from cloud_agent_host.workspace_snapshot import (
@@ -437,6 +443,23 @@ class ControlPlane:
             },
         )
 
+    def establish_shared_residency(
+        self,
+        *,
+        sandbox_id: str,
+        runtime_id: str,
+        runtime_version: str | None,
+    ) -> dict[str, Any]:
+        """Obtain the member-scoped renewable credential owned by the broker."""
+        return self._post(
+            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/residency",
+            {
+                "sandbox_id": sandbox_id,
+                "runtime_id": runtime_id,
+                "runtime_version": runtime_version,
+            },
+        )
+
     def admit_chat_turn(
         self,
         *,
@@ -460,6 +483,7 @@ class ControlPlane:
         context_status: str,
         native_session_id: str | None,
         idle_timeout_seconds: float,
+        base_sha: str | None = None,
     ) -> dict[str, Any]:
         """Persist a native context boundary before the host starts its idle timer."""
         return self._post(
@@ -469,6 +493,7 @@ class ControlPlane:
                 "activation_generation": activation_generation,
                 "context_status": context_status,
                 "native_session_id": native_session_id,
+                "base_sha": base_sha,
                 "idle_timeout_seconds": idle_timeout_seconds,
             },
         )
@@ -1713,8 +1738,108 @@ def _configured_restartable_runtimes() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _configured_shared_live_runtimes() -> set[str]:
+    """Return the exact runtimes explicitly admitted to the shared protocol."""
+    raw = os.environ.get("AGENT_SHARED_LIVE_RUNTIMES")
+    if not raw:
+        return set(registered_runtimes())
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _shared_live_feature_enabled() -> bool:
+    """Whether this host opted into creating new shared-live sandbox groups."""
+    return os.environ.get("AGENT_SHARED_LIVE_SANDBOX", "") not in ("", "0")
+
+
+def _shared_live_host_capabilities(
+    backend: SandboxBackend,
+    stamp: dict[str, Any],
+) -> list[str]:
+    """Advertise shared-v1 only when this exact host can honor its contract."""
+    if not _shared_live_feature_enabled() or not isinstance(backend, ContainerBackend):
+        return []
+    try:
+        slots = int(os.environ.get("AGENT_HOST_SLOTS") or 0)
+    except ValueError:
+        return []
+    if slots < 2:
+        return []
+    try:
+        resident_capacity = int(os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or 8)
+    except ValueError:
+        return []
+    if not 2 <= resident_capacity <= 128:
+        return []
+    if not (os.environ.get("AGENT_WORKSPACE_BROKER_URL") or "").strip():
+        return []
+    if not (os.environ.get("AGENT_WORKSPACE_BROKER_TOKEN") or "").strip():
+        return []
+    digest = stamp.get("sandbox_image_digest")
+    if not isinstance(digest, str) or not digest.strip():
+        return []
+    if stamp.get("shared_sandbox_protocol") != SHARED_SANDBOX_PROTOCOL:
+        return []
+    versions = stamp.get("runtime_versions")
+    if not isinstance(versions, dict) or any(
+        versions.get(runtime_id) != version
+        for runtime_id, version in SHARED_SANDBOX_RUNTIME_PINS.items()
+    ):
+        return []
+    helpers = stamp.get("helper_versions")
+    if not isinstance(helpers, dict) or any(
+        helpers.get(helper_id) != version
+        for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
+    ):
+        return []
+    for runtime_id in _configured_shared_live_runtimes():
+        try:
+            capabilities = driver_for(get_runtime(runtime_id)).capabilities()
+        except KeyError:
+            return []
+        if (
+            capabilities.resident_transport != "supervisor_live"
+            or capabilities.fork != "latest_immediate"
+            or not capabilities.concurrent_shared_workspace
+        ):
+            return []
+    return ["shared-sandbox-v1"]
+
+
+def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
+    """Build the exact-replica claim proof, including local rollout config."""
+    stamper = getattr(backend, "version_stamp", None)
+    stamp: dict[str, Any] = stamper() if stamper is not None else {}
+    # ``version_stamp`` proves the immutable image. This separately proves the
+    # polling process has the feature flag, broker, slots and driver surfaces
+    # needed to use it; a sibling replica's host heartbeat cannot stand in for
+    # those process-local facts during a rolling deployment.
+    stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
+    return stamp
+
+
+def _retained_lifecycle_enabled() -> bool:
+    """Whether either retained protocol needs host lifecycle reconciliation."""
+    return _shared_live_feature_enabled() or os.environ.get(
+        "AGENT_RESTARTABLE_SANDBOX", ""
+    ) not in ("", "0")
+
+
+def _shared_live_runtime_enabled(job: ClaimedJob) -> bool:
+    """Route an existing shared member or a capability-gated new chat."""
+    existing = job.thread_sandbox or {}
+    if job.thread_sandbox is not None:
+        # Durable ownership wins over a later rollout-flag change. Silently
+        # switching either direction would create a second workspace.
+        return existing.get("shared_live") is True
+    return _shared_live_feature_enabled() and job.runtime in _configured_shared_live_runtimes()
+
+
 def _restartable_mode_covers_every_runtime() -> bool:
     """Whether this runner has no legacy job path that needs a host bind."""
+    if _shared_live_feature_enabled() and set(registered_runtimes()) <= (
+        _configured_shared_live_runtimes()
+    ):
+        return True
     if os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") in ("", "0"):
         return False
     return set(registered_runtimes()) <= _configured_restartable_runtimes()
@@ -1722,6 +1847,8 @@ def _restartable_mode_covers_every_runtime() -> bool:
 
 def _restartable_runtime_enabled(job: ClaimedJob) -> bool:
     """Whether this turn belongs on the staged retained-container path."""
+    if _shared_live_runtime_enabled(job):
+        return True
     if job.thread_sandbox is not None:
         # Once a thread owns Docker-only local state, falling back to a fresh
         # legacy worktree would be silent context loss. The durable row wins
@@ -1758,9 +1885,17 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
         now = time.monotonic()
         idle_timeout_s = _chat_idle_timeout_s()
         for row in rows[:4096]:
+            shared_live = bool(row.get("shared_live"))
+            members = (
+                [dict(item) for item in row.get("members") or [] if isinstance(item, dict)]
+                if shared_live
+                else []
+            )
             activation_generation = int(row["activation_generation"])
             running = bool(row["running"])
-            active = bool(row.get("busy")) or int(row.get("terminal_count") or 0) > 0
+            active = (bool(row.get("group_busy")) if shared_live else bool(row.get("busy"))) or int(
+                row.get("terminal_count") or 0
+            ) > 0
             active = active or int(row.get("operation_count") or 0) > 0
             active = active or bool(row.get("workspace_suspended"))
             deadline = row.get("idle_deadline_monotonic")
@@ -1793,6 +1928,8 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     "running": running,
                     "activity_active": active if activity_known else None,
                     "idle_remaining_seconds": idle_remaining,
+                    "shared_live": shared_live,
+                    "members": members,
                 }
             )
         return observations
@@ -1815,12 +1952,19 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
         client = _session_supervisor_from_env()
         for command in commands:
             try:
-                client.stop_idle(
-                    str(command["thread_id"]),
-                    generation=int(command["generation"]),
-                    activation_generation=int(command["activation_generation"]),
-                    reason=str(command.get("reason") or "idle"),
-                )
+                if command.get("shared_live"):
+                    client.stop_shared_idle(
+                        str(command["thread_id"]),
+                        generation=int(command["generation"]),
+                        reason=str(command.get("reason") or "idle"),
+                    )
+                else:
+                    client.stop_idle(
+                        str(command["thread_id"]),
+                        generation=int(command["generation"]),
+                        activation_generation=int(command["activation_generation"]),
+                        reason=str(command.get("reason") or "idle"),
+                    )
             except (KeyError, TypeError, ValueError, SessionSupervisorError) as exc:
                 # A stale command is expected during a racing acquire. The
                 # next heartbeat reports fresh Docker state and the durable
@@ -1833,6 +1977,40 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
     except (SandboxError, SessionSupervisorError) as exc:
         print(
             f"agent runner: retained idle stop unavailable: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+    finally:
+        if client is not None:
+            client.close()
+
+
+def _handle_host_residencies_lost(
+    residents: ResidentPool,
+    lost: list[dict[str, Any]],
+) -> None:
+    """Fence both legacy runner entries and supervisor-owned shared members."""
+    residents.handle_lost(lost)
+    client: SessionSupervisorClient | None = None
+    try:
+        client = _session_supervisor_from_env()
+        shared_members = {
+            str(member.get("thread_id"))
+            for row in client.list()
+            if row.get("shared_live")
+            for member in row.get("members") or []
+            if isinstance(member, dict) and member.get("thread_id")
+        }
+        for item in lost:
+            thread_id = str(item.get("thread_id") or "")
+            generation = item.get("generation")
+            if thread_id not in shared_members or not isinstance(generation, int):
+                continue
+            with contextlib.suppress(SessionSupervisorError):
+                client.shared_residency_lost(thread_id, generation=generation)
+    except (SandboxError, SessionSupervisorError) as exc:
+        print(
+            f"agent runner: shared residency cleanup unavailable: {exc}",
             file=sys.stderr,
             flush=True,
         )
@@ -1926,6 +2104,598 @@ def _verified_native_session_id(
             f"(expected {previous!r}, observed {observed!r})"
         )
     return observed
+
+
+def _shared_group_manifest(reservation: dict[str, Any], *, thread_id: str) -> list[dict[str, Any]]:
+    """Project the durable member manifest onto the broker's strict wire shape."""
+    raw = reservation.get("group_members")
+    members = [dict(item) for item in raw or [] if isinstance(item, dict)]
+    if not members:
+        members = [dict(reservation)]
+    allowed = {
+        "thread_id",
+        "native_session_id",
+        "context_status",
+        "activation_generation",
+        "process_generation",
+        "residency_generation",
+        "resident_state",
+        "resident_slot_id",
+        "last_settled_job_id",
+    }
+    projected = [
+        {key: value for key, value in member.items() if key in allowed} for member in members
+    ]
+    if not any(member.get("thread_id") == thread_id for member in projected):
+        raise SandboxError("shared sandbox manifest omitted the claimed chat")
+    for member in projected:
+        if member.get("resident_slot_id") is None:
+            raise SandboxError("shared sandbox manifest contains an unassigned resident slot")
+    return projected
+
+
+def _stream_shared_agent_turn(
+    *,
+    supervisor: SessionSupervisorClient,
+    job: ClaimedJob,
+    control: ControlPlane,
+    heart: Heartbeater,
+    lease_token: str,
+    timeout_s: float,
+) -> tuple[int, str, list[str], dict[str, Any] | None]:
+    """Relay exactly one broker-framed member turn under its attempt fence."""
+    stream = supervisor.start_shared_turn(
+        job.thread_id or "",
+        token=lease_token,
+        prompt=job.task_prompt,
+        model=job.model,
+        reasoning_effort=job.reasoning_effort,
+    )
+    frames: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+    def pump() -> None:
+        try:
+            for frame in stream.frames():
+                frames.put(frame)
+        except Exception as exc:
+            frames.put({"kind": "client_error", "detail": str(exc)[:1000]})
+        finally:
+            frames.put(None)
+
+    reader = threading.Thread(target=pump, daemon=True, name="shared-agent-stream")
+    reader.start()
+    deadline = time.monotonic() + timeout_s
+    tail: list[str] = []
+    tool_errors: list[str] = []
+    denied_hosts: set[str] = set()
+    result_frame: dict[str, Any] | None = None
+    try:
+        while True:
+            if heart.lease_lost:
+                with contextlib.suppress(Exception):
+                    supervisor.interrupt_shared(job.thread_id or "", token=lease_token)
+                raise LeaseLost("lease lost while the shared Agent CLI was running")
+            if heart.cancel_requested:
+                with contextlib.suppress(Exception):
+                    supervisor.interrupt_shared(job.thread_id or "", token=lease_token)
+                control.append_event(NormalizedEvent("lifecycle", {"phase": "cancelled_by_owner"}))
+                return 130, "".join(tail), tool_errors, result_frame
+            if time.monotonic() > deadline:
+                with contextlib.suppress(Exception):
+                    supervisor.interrupt_shared(job.thread_id or "", token=lease_token)
+                control.append_event(
+                    NormalizedEvent("error", {"text": f"agent exceeded {timeout_s:.0f}s"})
+                )
+                return 124, "".join(tail), tool_errors, result_frame
+            try:
+                frame = frames.get(timeout=_POLL_INTERVAL_S)
+            except queue.Empty:
+                continue
+            if frame is None:
+                break
+            kind = frame.get("kind")
+            if kind == "event":
+                raw_line = frame.get("raw_line")
+                if isinstance(raw_line, str):
+                    tail.append(raw_line)
+                    del tail[:-40]
+                event_type = str(frame.get("event_type") or "")
+                payload = frame.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
+                if event_type == "tool_result" and payload.get("is_error"):
+                    content = str(payload.get("content") or "")
+                    tool_errors.append(content[:200])
+                    blocked = detect_blocked_egress(content)
+                    if blocked and blocked not in denied_hosts:
+                        denied_hosts.add(blocked)
+                        control.append_event(NormalizedEvent("error", {"host": blocked}))
+                if event_type and event_type != LINE:
+                    control.append_event(NormalizedEvent(event_type, payload))
+                continue
+            if kind == "result":
+                result_frame = frame
+                stderr = str(frame.get("stderr") or "")
+                if stderr.strip():
+                    tail.append(stderr[-2000:])
+                continue
+            if kind in {"error", "client_error"}:
+                raise SessionSupervisorError(502, str(frame.get("detail") or "shared turn failed"))
+            raise SessionSupervisorError(502, "shared turn returned an unknown frame")
+        if result_frame is None:
+            raise SessionSupervisorError(502, "shared turn ended without a result")
+        status = str(result_frame.get("status") or "failed")
+        exit_code = int(result_frame.get("exit_code") or 0)
+        if status == "cancelled":
+            exit_code = 130
+        elif status != "completed" and exit_code == 0:
+            exit_code = 1
+        if tool_errors:
+            control.append_event(
+                NormalizedEvent(
+                    "error",
+                    {
+                        "detail": f"{len(tool_errors)} tool call(s) failed",
+                        "first": tool_errors[0],
+                    },
+                )
+            )
+        return exit_code, "".join(tail), tool_errors, result_frame
+    finally:
+        stream.close()
+
+
+def _run_shared_live_attempt(
+    *,
+    runtime: AgentRuntime,
+    job: ClaimedJob,
+    control: ControlPlane,
+    heart: Heartbeater,
+    backend: SandboxBackend,
+    host: str | None,
+    gateway_base_url: str,
+    agent_timeout_s: float,
+    finish_attempt: Any,
+) -> int:
+    """Deliver one chat turn to its supervisor-owned resident CLI member."""
+    if not isinstance(backend, ContainerBackend):
+        finish_attempt("failed", "shared live chats require the container or kata backend")
+        return 2
+    if not host or not job.thread_id:
+        finish_attempt("failed", "shared live chats require an enrolled host and thread id")
+        return 2
+    driver = driver_for(runtime)
+    if getattr(driver, "launch_live", None) is None:
+        finish_attempt("failed", f"runtime {job.runtime!r} has no shared live transport")
+        return 2
+
+    manager = ChatSandboxManager(backend)
+    stamp = backend.version_stamp()
+    existing = job.thread_sandbox or {}
+    if existing and existing.get("shared_live") is not True:
+        finish_attempt(
+            "failed", "a legacy retained chat cannot be upgraded to shared-live in place"
+        )
+        return 2
+    if not existing and not str(stamp.get("sandbox_image_digest") or "").strip():
+        finish_attempt("failed", "shared live chat creation requires an inspected image digest")
+        return 2
+    if existing and existing.get("runtime_id") != job.runtime:
+        finish_attempt(
+            "failed",
+            f"this shared chat is pinned to runtime {existing.get('runtime_id')!r}",
+        )
+        return 2
+    if existing and existing.get("execution_profile") != job.execution_profile:
+        finish_attempt("failed", "shared chat execution profile cannot change in place")
+        return 2
+
+    capacity = int(
+        existing.get("resident_slot_capacity")
+        or os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
+        or 8
+    )
+    if not 2 <= capacity <= 128:
+        finish_attempt("failed", "shared resident capacity must be between 2 and 128")
+        return 2
+    sandbox_id = str(existing.get("sandbox_id") or f"asbx_{secrets.token_hex(16)}")
+    origin_thread_id = str(existing.get("origin_thread_id") or job.thread_id)
+    seed_spec = ChatSandboxSpec(
+        thread_id=origin_thread_id,
+        sandbox_id=sandbox_id,
+        generation=int(existing.get("generation") or 1),
+        runtime_id=str(existing.get("runtime_id") or job.runtime),
+        runtime_version=(existing.get("runtime_version") if existing else job.runtime_version),
+        sandbox_image_digest=(
+            existing.get("sandbox_image_digest")
+            if existing
+            else (stamp.get("sandbox_image_digest") or None)
+        ),
+        shared_live=True,
+        resident_slot_capacity=capacity,
+    )
+    if existing:
+        if existing.get("host") != host:
+            finish_attempt("failed", "shared chat was claimed on the wrong host")
+            return 2
+        if existing.get("container_name") != seed_spec.container_name:
+            finish_attempt("failed", "shared chat container identity does not match its labels")
+            return 2
+
+    try:
+        reservation = control.reserve_chat_sandbox(
+            {
+                "sandbox_id": seed_spec.sandbox_id,
+                "container_name": seed_spec.container_name,
+                "runtime_id": seed_spec.runtime_id,
+                "runtime_version": seed_spec.runtime_version,
+                "sandbox_image_digest": seed_spec.sandbox_image_digest,
+                "execution_profile": job.execution_profile,
+                "host": host,
+                "shared_live": True,
+                "resident_slot_capacity": capacity,
+                "memory_limit": seed_spec.memory_limit,
+                "cpu_limit": seed_spec.cpu_limit,
+                "stop_timeout_seconds": seed_spec.stop_timeout_s,
+            }
+        )
+    except LeaseLost:
+        return 3
+    except Exception as exc:
+        finish_attempt("failed", f"could not reserve shared chat sandbox: {exc}")
+        return 2
+
+    spec = ChatSandboxSpec(
+        thread_id=str(reservation.get("origin_thread_id") or origin_thread_id),
+        sandbox_id=str(reservation["sandbox_id"]),
+        generation=int(reservation["generation"]),
+        runtime_id=str(reservation["runtime_id"]),
+        runtime_version=reservation.get("runtime_version"),
+        sandbox_image_digest=reservation.get("sandbox_image_digest"),
+        shared_live=True,
+        resident_slot_capacity=int(reservation.get("resident_slot_capacity") or capacity),
+        memory_limit=str(reservation.get("memory_limit") or seed_spec.memory_limit),
+        cpu_limit=str(reservation.get("cpu_limit") or seed_spec.cpu_limit),
+        stop_timeout_s=int(reservation.get("stop_timeout_seconds") or seed_spec.stop_timeout_s),
+    )
+    activation_generation = int(reservation["activation_generation"])
+    has_context = bool(reservation.get("last_settled_job_id"))
+    native_session_id = str(reservation.get("native_session_id") or "").strip() or None
+    manifest = _shared_group_manifest(reservation, thread_id=job.thread_id)
+    supervisor: SessionSupervisorClient | None = None
+    lease_token: str | None = None
+    settled = False
+    abandoned = False
+    turn_admitted = False
+    terminals_suspended = False
+    context_invalid = False
+    failure_detail: str | None = None
+    context_status = "restored" if has_context else "new"
+    idle_timeout_s = _chat_idle_timeout_s()
+
+    def abandon_before_finish(*, lost: bool, detail: str | None) -> None:
+        nonlocal abandoned
+        if abandoned or settled:
+            return
+        if supervisor is not None and lease_token is not None:
+            with contextlib.suppress(Exception):
+                supervisor.abandon_shared(job.thread_id or "", token=lease_token, lost=lost)
+        with contextlib.suppress(Exception):
+            control.abandon_chat_sandbox(
+                sandbox_generation=spec.generation,
+                activation_generation=activation_generation,
+                lost=lost,
+                detail=detail,
+                idle_timeout_seconds=idle_timeout_s,
+            )
+        abandoned = True
+
+    try:
+        supervisor = _session_supervisor_from_env()
+        try:
+            lease = supervisor.acquire_shared(
+                spec,
+                thread_id=job.thread_id,
+                activation_generation=activation_generation,
+                owner=f"attempt:{job.attempt_id}",
+                has_settled_context=has_context,
+                members=manifest,
+                expected_container_id=reservation.get("container_id"),
+            )
+        except SessionSupervisorError as exc:
+            context_invalid = has_context and exc.status_code == 410
+            raise
+        lease_token = str(lease["token"])
+        if int(lease["activation_generation"]) != activation_generation:
+            raise SandboxError("shared supervisor returned the wrong activation generation")
+        if reservation.get("container_id") not in {None, lease.get("container_id")}:
+            raise SandboxError("shared supervisor returned a replacement chat container")
+        context_status = str(lease.get("context_status") or context_status)
+        if context_status not in {"new", "live", "restored"}:
+            raise SandboxError(f"shared supervisor returned invalid context {context_status!r}")
+        running = control.mark_chat_sandbox_running(
+            sandbox_generation=spec.generation,
+            activation_generation=activation_generation,
+            container_id=str(lease["container_id"]),
+            context_status=context_status,
+        )
+        retained = RetainedChatBackend(manager, spec)
+        control.append_event(
+            NormalizedEvent(
+                "lifecycle",
+                {
+                    "phase": "started",
+                    "runtime": job.runtime,
+                    "attempt_no": job.attempt_no,
+                    "context_status": context_status,
+                    "resident_state": lease.get("resident_state"),
+                    "workspace_shared": True,
+                    "container_id": lease["container_id"],
+                    "activation_generation": activation_generation,
+                    **retained.sandbox_metadata(),
+                },
+            )
+        )
+        control.suspend_terminals("workspace_preparing")
+        terminals_suspended = True
+
+        if not has_context:
+            manager.reset_unsettled_state(spec)
+            base_sha = _prepare_retained_checkout(job=job, manager=manager, spec=spec)
+            reused_workspace = False
+            if job.setup_script:
+                setup = run_setup(
+                    script=job.setup_script,
+                    workdir=CHAT_WORKDIR,
+                    repo=job.repo,
+                    backend=retained,
+                    cache=None,
+                )
+                control.append_event(
+                    NormalizedEvent(
+                        "lifecycle",
+                        {"phase": "setup", "cached": False, "ran": setup.ran},
+                    )
+                )
+                if setup.exit_code != 0:
+                    failure_detail = f"setup failed ({setup.exit_code}): {setup.detail}"
+                    abandon_before_finish(lost=False, detail=failure_detail)
+                    finish_attempt("failed", failure_detail, base_sha=base_sha)
+                    return 1
+            manager.prepare_shared_workspace(spec)
+        else:
+            if not native_session_id:
+                context_invalid = True
+                raise SandboxError("shared chat has no native Agent CLI session locator")
+            if not _resident_base_ready(CHAT_WORKDIR, job, retained):
+                imported_base = _import_retained_base(job=job, manager=manager, spec=spec)
+                if not _resident_base_ready(CHAT_WORKDIR, job, retained):
+                    context_invalid = True
+                    raise SandboxError("shared chat cannot resolve its pinned base commit")
+                control.append_event(
+                    NormalizedEvent(
+                        "lifecycle",
+                        {
+                            "phase": "base_imported",
+                            "base_sha": imported_base,
+                            "workspace_head_preserved": True,
+                        },
+                    )
+                )
+            base_sha = job.base_sha or _retained_head(retained)
+            reused_workspace = True
+        control.append_event(
+            NormalizedEvent(
+                "lifecycle",
+                {
+                    "phase": "checked_out",
+                    "base_sha": base_sha,
+                    "reused": reused_workspace,
+                    "storage": "docker_writable_layer",
+                    "workspace_shared": True,
+                },
+            )
+        )
+
+        version_problem = runtime_version_unavailable(job, retained)
+        if version_problem is not None:
+            failure_detail = version_problem
+            abandon_before_finish(lost=False, detail=failure_detail)
+            finish_attempt("failed", failure_detail, base_sha=base_sha)
+            return 1
+        if not retained.has_binary(runtime.binary):
+            failure_detail = f"runtime binary {runtime.binary!r} is not installed"
+            abandon_before_finish(lost=False, detail=failure_detail)
+            finish_attempt("failed", failure_detail, base_sha=base_sha)
+            return 2
+
+        if has_context:
+            manager.require_network_phase(spec, "agent")
+        else:
+            manager.transition_to_agent_network(spec)
+        control.resume_terminals()
+        terminals_suspended = False
+
+        slot_id = int(running.get("resident_slot_id") or reservation.get("resident_slot_id") or 0)
+        launch = ResidentLaunch(
+            thread_id=job.thread_id,
+            runtime_id=job.runtime,
+            runtime_version=job.runtime_version,
+            native_session_id=native_session_id,
+            model=job.model,
+            reasoning_effort=job.reasoning_effort,
+            gateway_base_url=gateway_base_url,
+            credential=None,
+            mcp_server_ids=tuple(job.mcp_servers),
+            # The MCP relay token is attempt-fenced. It is process-fixed only
+            # when this turn actually exposes MCP endpoints; carrying an
+            # otherwise-unused fresh token here would restart every ordinary
+            # no-MCP chat and falsely erase HOT continuity.
+            mcp_base_url=job.mcp_base_url if job.mcp_servers else "",
+            mcp_credential=job.mcp_token if job.mcp_servers else "",
+            slot_id=slot_id,
+            residency_generation=int(running.get("residency_generation") or 0),
+        )
+        resident_descriptor: dict[str, Any] | None = None
+        if lease.get("resident_state") == "live":
+            try:
+                resident_descriptor = supervisor.ensure_shared_resident(
+                    job.thread_id,
+                    token=lease_token,
+                    launch=launch,
+                )
+            except SessionSupervisorError:
+                # A process-fixed model/MCP setting changed, the process died,
+                # or this broker restarted. Rotate only this member's grant and
+                # resume its exact native session below.
+                resident_descriptor = None
+        if resident_descriptor is None:
+            residency = control.establish_shared_residency(
+                sandbox_id=spec.sandbox_id,
+                runtime_id=job.runtime,
+                runtime_version=job.runtime_version,
+            )
+            credential = str(residency.get("credential") or "")
+            if not credential:
+                raise SandboxError("control plane returned no shared residency credential")
+            grant_model = residency.get("model")
+            if grant_model not in {None, job.model}:
+                raise SandboxError("shared residency grant model does not match this turn")
+            launch = replace(
+                launch,
+                credential=credential,
+                residency_generation=int(residency["generation"]),
+            )
+            resident_descriptor = supervisor.ensure_shared_resident(
+                job.thread_id,
+                token=lease_token,
+                launch=launch,
+            )
+        context_status = str(resident_descriptor.get("context_status") or context_status)
+        if context_status not in {"new", "live", "restored"}:
+            raise SandboxError(
+                f"shared supervisor returned invalid resident context {context_status!r}"
+            )
+        process_generation = int(resident_descriptor["process_generation"])
+        control.record_chat_process(
+            sandbox_generation=spec.generation,
+            activation_generation=activation_generation,
+            process_generation=process_generation,
+        )
+        if context_status == "live":
+            control.report_continuity("hot", context_status="live")
+        elif has_context:
+            control.report_continuity("warm_native", context_status="restored")
+        else:
+            control.report_context_status("new")
+
+        control.admit_chat_turn(
+            sandbox_generation=spec.generation,
+            activation_generation=activation_generation,
+        )
+        turn_admitted = True
+        sampler = ResourceSampler(None)
+        try:
+            exit_code, tail, tool_errors, _ = _stream_shared_agent_turn(
+                supervisor=supervisor,
+                job=job,
+                control=control,
+                heart=heart,
+                lease_token=lease_token,
+                timeout_s=agent_timeout_s,
+            )
+        finally:
+            # Container totals include concurrent siblings and must not be
+            # duplicated as this member's usage. Report explicit zero coverage
+            # until process-tree accounting lands.
+            with contextlib.suppress(Exception):
+                control.report_resources(sampler.stop())
+        if exit_code == 130:
+            failure_detail = "cancelled by owner after shared-session admission"
+            abandon_before_finish(lost=True, detail=failure_detail)
+            finish_attempt("cancelled", "cancelled by owner", base_sha=base_sha)
+            return 0
+        if exit_code == 124:
+            failure_detail = "shared Agent CLI turn exceeded its execution timeout"
+            abandon_before_finish(lost=True, detail=failure_detail)
+            finish_attempt("failed", failure_detail, base_sha=base_sha)
+            return 1
+        if exit_code != 0:
+            failure_detail = f"agent exited {exit_code}: {tail[-500:]}"
+            abandon_before_finish(lost=True, detail=failure_detail)
+            finish_attempt("failed", failure_detail, base_sha=base_sha)
+            return 1
+        if tool_errors:
+            # Match the existing conservative no-change rule only after a
+            # publication snapshot can attribute the shared diff. A successful
+            # shared turn may race a sibling, so tool errors alone do not prove
+            # this member produced no useful state.
+            control.append_event(
+                NormalizedEvent(
+                    "lifecycle",
+                    {"phase": "shared_tool_errors_observed", "count": len(tool_errors)},
+                )
+            )
+
+        local_settle = supervisor.settle_shared(
+            job.thread_id,
+            token=lease_token,
+            job_id=job.job_id,
+            context_status=context_status,
+        )
+        settled_session_id = str(local_settle.get("native_session_id") or "").strip()
+        if not settled_session_id:
+            raise SandboxError("shared supervisor settled without a native session locator")
+        control.settle_chat_sandbox(
+            sandbox_generation=spec.generation,
+            activation_generation=activation_generation,
+            context_status=context_status,
+            native_session_id=settled_session_id,
+            base_sha=base_sha,
+            idle_timeout_seconds=idle_timeout_s,
+        )
+        settled = True
+        control.append_event(
+            NormalizedEvent(
+                "lifecycle",
+                {
+                    "phase": "shared_workspace_settled",
+                    "workspace_shared": True,
+                    "publication": "pending_snapshot",
+                },
+            )
+        )
+        finish_attempt(
+            "succeeded",
+            "agent completed (shared workspace; publication snapshot pending)",
+            base_sha=base_sha,
+        )
+        return 0
+    except LeaseLost:
+        failure_detail = "attempt lease lost during shared live execution"
+        return 3
+    except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
+        failure_detail = str(exc)
+        abandon_before_finish(lost=turn_admitted or context_invalid, detail=failure_detail)
+        with contextlib.suppress(Exception):
+            control.append_event(NormalizedEvent("error", {"text": failure_detail[:1000]}))
+            finish_attempt("failed", failure_detail[:1000])
+        return 2
+    except Exception as exc:
+        failure_detail = f"shared live chat failed unexpectedly: {exc}"
+        abandon_before_finish(lost=turn_admitted, detail=failure_detail)
+        with contextlib.suppress(Exception):
+            control.append_event(NormalizedEvent("error", {"text": failure_detail[:1000]}))
+            finish_attempt("failed", failure_detail[:1000])
+        return 2
+    finally:
+        if not settled and not abandoned:
+            abandon_before_finish(lost=turn_admitted or context_invalid, detail=failure_detail)
+        if supervisor is not None:
+            supervisor.close()
+        if terminals_suspended:
+            with contextlib.suppress(Exception):
+                control.resume_terminals()
 
 
 def _run_retained_attempt(
@@ -2429,8 +3199,7 @@ def run_once(
                 ) from exc
         backend.preflight(workdir_root=preflight_root)
 
-    stamper = getattr(backend, "version_stamp", None)
-    attestation: dict[str, Any] = stamper() if stamper is not None else {}
+    attestation = _claim_attestation(backend)
     job = claim(
         base_url=base_url,
         dispatcher_token=dispatcher_token,
@@ -2488,6 +3257,18 @@ def run_once(
     if restartable:
         heart.start()
         try:
+            if _shared_live_runtime_enabled(job):
+                return _run_shared_live_attempt(
+                    runtime=runtime,
+                    job=job,
+                    control=control,
+                    heart=heart,
+                    backend=backend,
+                    host=host,
+                    gateway_base_url=gateway_url,
+                    agent_timeout_s=agent_timeout_s,
+                    finish_attempt=finish_attempt,
+                )
             return _run_retained_attempt(
                 runtime=runtime,
                 job=job,
@@ -3052,16 +3833,20 @@ def run_forever(
     # The heartbeat runs whether or not jobs do. A host with nothing to do
     # must still report, or the reaper marks it offline and stops sending it
     # work: a pool that empties whenever it is idle.
+    initial_stamper = getattr(backend, "version_stamp", None)
+    initial_stamp: dict[str, Any] = initial_stamper() if initial_stamper is not None else {}
+    host_capabilities = _shared_live_host_capabilities(backend, initial_stamp)
     identity = ensure_enrolled(
         base_url=base_url,
         host=host or worker_id,
         broker_url=_broker_url_from_env(),
         slots_total=int(os.environ.get("AGENT_HOST_SLOTS") or 0) or None,
+        capabilities=host_capabilities,
         runner_version=_runner_version(),
     )
-    if os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") not in ("", "0") and identity is None:
+    if _retained_lifecycle_enabled() and identity is None:
         raise RuntimeError(
-            "AGENT_RESTARTABLE_SANDBOX requires an enrolled host identity; "
+            "restartable/shared-live sandbox mode requires an enrolled host identity; "
             "configure AGENT_ENROLL_TOKEN or a persisted host credential before "
             "enabling retained chats"
         )
@@ -3074,7 +3859,7 @@ def run_forever(
         # ``getattr`` for the same reason as ``check_gateway_reachable`` above:
         # a deployment-owned backend that predates the hook must keep running.
         stamper = getattr(backend, "version_stamp", None)
-        stamp: dict[str, Any] = stamper() if stamper is not None else {}
+        stamp: dict[str, Any] = stamper() if stamper is not None else initial_stamp
         # Residency needs an enrolled identity twice over: establish/release
         # authenticate with the host credential, and the beats ride the same
         # heartbeat. A pool-less runner (the pre-enrollment shape) simply
@@ -3094,6 +3879,7 @@ def run_forever(
             identity=identity,
             broker_url=_broker_url_from_env(),
             slots_total=int(os.environ.get("AGENT_HOST_SLOTS") or 0) or None,
+            capabilities=host_capabilities,
             runner_version=_runner_version(),
             sandbox_runtime=stamp.get("sandbox_runtime"),
             sandbox_image_digest=stamp.get("sandbox_image_digest"),
@@ -3101,15 +3887,11 @@ def run_forever(
             runtime_versions_available=stamp.get("runtime_versions_available"),
             residency_beats=residents.beats,
             retained_sandbox_beats=(
-                _retained_sandbox_heartbeat_rows
-                if os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") not in ("", "0")
-                else None
+                _retained_sandbox_heartbeat_rows if _retained_lifecycle_enabled() else None
             ),
-            on_residencies_lost=residents.handle_lost,
+            on_residencies_lost=lambda lost: _handle_host_residencies_lost(residents, lost),
             on_retained_sandboxes_stop=(
-                _stop_retained_sandboxes
-                if os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") not in ("", "0")
-                else None
+                _stop_retained_sandboxes if _retained_lifecycle_enabled() else None
             ),
         )
         pool.start()

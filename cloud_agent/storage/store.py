@@ -35,6 +35,7 @@ Design (adjudicated in issue #1041):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from typing import Any
@@ -43,8 +44,10 @@ import asyncpg
 
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
+    SHARED_SANDBOX_CAPABILITY,
     ExecutionProfile,
     default_execution_profile,
+    shared_sandbox_claim_attested,
 )
 from cloud_agent.host_pool import (
     CLAIMABLE_STATUSES,
@@ -105,6 +108,107 @@ def _new_sandbox_fork_id() -> str:
     return f"afork_{secrets.token_hex(16)}"
 
 
+def _new_session_fork_id() -> str:
+    """Generate one shared native-session fork operation id."""
+    return f"asfork_{secrets.token_hex(16)}"
+
+
+# A rolling deployment has two retained ledgers. ``agent_thread_sandboxes``
+# remains authoritative for old immutable 1:1 containers; capability-gated
+# shared groups live in ``agent_sandboxes`` plus memberships. Read paths use
+# one shape so callers cannot accidentally route a child chat to a new empty
+# container. Write paths still choose the authority explicitly.
+_THREAD_SANDBOX_SOURCE = """
+(
+    SELECT
+        l.thread_id, l.sandbox_id, l.generation, l.host, l.container_id,
+        l.container_name, l.runtime_id, l.runtime_version,
+        l.sandbox_image_digest, l.execution_profile, l.state,
+        '4g'::text AS memory_limit, '2'::text AS cpu_limit,
+        10::integer AS stop_timeout_seconds,
+        l.context_status, l.activation_generation, l.process_generation,
+        l.active_attempt_id, l.admitted_job_id, l.admitted_at,
+        l.last_settled_job_id, l.native_session_id, l.idle_deadline,
+        l.last_error, l.created_at, l.updated_at, l.fork_operation_id,
+        FALSE AS shared_live, l.thread_id AS origin_thread_id,
+        'stopped'::text AS resident_state, 0::bigint AS residency_generation,
+        NULL::integer AS resident_slot_id, 1::integer AS resident_slot_capacity,
+        CASE WHEN l.context_status = 'lost' THEN 'lost'
+             WHEN l.native_session_id IS NULL THEN 'new' ELSE 'ready' END AS native_state,
+        NULL::text AS forked_from_thread_id, NULL::text AS fork_anchor_job_id,
+        l.updated_at AS group_last_activity_at,
+        NULL::text AS workspace_publication_state, 0::bigint AS workspace_epoch,
+        FALSE AS native_fork_capable, '[]'::jsonb AS group_members
+    FROM agent_thread_sandboxes l
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM agent_thread_sandbox_memberships shadow_m
+        JOIN agent_sandboxes shadow_g ON shadow_g.id = shadow_m.sandbox_id
+        WHERE shadow_m.thread_id = l.thread_id
+          AND shadow_g.mode = 'shared_live'
+    )
+
+    UNION ALL
+
+    SELECT
+        m.thread_id, g.id AS sandbox_id, g.generation, g.host, g.container_id,
+        g.container_name, g.runtime_id, g.runtime_version,
+        g.sandbox_image_digest, g.execution_profile, g.state,
+        g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+        m.context_status, m.activation_generation, m.process_generation,
+        m.active_attempt_id, m.admitted_job_id, m.admitted_at,
+        m.last_settled_job_id, m.native_session_id, g.idle_deadline,
+        COALESCE(m.last_error, g.last_error) AS last_error,
+        m.created_at, m.updated_at, m.fork_operation_id,
+        TRUE AS shared_live, g.origin_thread_id, m.resident_state,
+        m.residency_generation, m.resident_slot_id,
+        g.resident_slot_capacity, m.native_state,
+        m.forked_from_thread_id, m.fork_anchor_job_id,
+        g.last_activity_at AS group_last_activity_at,
+        (
+            SELECT snapshot.state
+            FROM agent_sandbox_snapshots snapshot
+            WHERE snapshot.sandbox_id = g.id
+            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
+            LIMIT 1
+        ) AS workspace_publication_state,
+        g.workspace_epoch,
+        EXISTS (
+            SELECT 1 FROM agent_runner_hosts h
+            WHERE h.host = g.host
+              AND h.status = 'online'
+              AND h.capabilities @> '["shared-sandbox-v1"]'::jsonb
+        ) AS native_fork_capable,
+        COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'thread_id', peer.thread_id,
+                    'native_session_id', peer.native_session_id,
+                    'native_state', peer.native_state,
+                    'context_status', peer.context_status,
+                    'activation_generation', peer.activation_generation,
+                    'process_generation', peer.process_generation,
+                    'residency_generation', peer.residency_generation,
+                    'resident_state', peer.resident_state,
+                    'resident_slot_id', peer.resident_slot_id,
+                    'active_attempt_id', peer.active_attempt_id,
+                    'admitted_job_id', peer.admitted_job_id,
+                    'admitted_at', peer.admitted_at,
+                    'last_settled_job_id', peer.last_settled_job_id,
+                    'forked_from_thread_id', peer.forked_from_thread_id,
+                    'fork_anchor_job_id', peer.fork_anchor_job_id
+                ) ORDER BY peer.created_at, peer.thread_id
+            )
+            FROM agent_thread_sandbox_memberships peer
+            WHERE peer.sandbox_id = g.id
+        ), '[]'::jsonb) AS group_members
+    FROM agent_thread_sandbox_memberships m
+    JOIN agent_sandboxes g ON g.id = m.sandbox_id
+    WHERE g.mode = 'shared_live'
+) AS s
+"""
+
+
 def _load_json(value: Any) -> Any:
     """Decode a JSONB column that asyncpg may hand back as str or object."""
     if isinstance(value, (str, bytes)):
@@ -114,6 +218,13 @@ def _load_json(value: Any) -> Any:
             logger.warning("Failed to decode agent job JSON column", exc_info=True)
             return None
     return value
+
+
+def _sandbox_row_to_dict(row: Any) -> dict[str, Any]:
+    """Decode the JSON members embedded in the rolling sandbox read shape."""
+    result = dict(row)
+    result["group_members"] = _load_json(result.get("group_members")) or []
+    return result
 
 
 def resolve_runtime_version(
@@ -755,10 +866,22 @@ class AgentJobStore:
             # fails the inserted turn in its own transaction; if LOST wins,
             # no turn is inserted at all.
             sandbox = await conn.fetchrow(
-                "SELECT state, context_status FROM agent_thread_sandboxes "
-                "WHERE thread_id = $1 FOR UPDATE",
+                """
+                SELECT g.state, m.context_status, TRUE AS shared_live
+                FROM agent_thread_sandbox_memberships m
+                JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                FOR UPDATE OF g, m
+                """,
                 thread_id,
             )
+            if sandbox is None:
+                sandbox = await conn.fetchrow(
+                    "SELECT state, context_status, FALSE AS shared_live "
+                    "FROM agent_thread_sandboxes "
+                    "WHERE thread_id = $1 FOR UPDATE",
+                    thread_id,
+                )
             if sandbox is not None and (
                 sandbox["context_status"] == "lost" or sandbox["state"] in {"stopped_dirty", "lost"}
             ):
@@ -766,7 +889,11 @@ class AgentJobStore:
             turn_no = parent["turn_no"] + 1
             parent_ready = parent["state"] in (FAILED, CANCELLED) or (
                 parent["state"] == SUCCEEDED
-                and (parent["published_commit_sha"] is not None or not parent["has_patch"])
+                and (
+                    (sandbox is not None and sandbox["shared_live"])
+                    or parent["published_commit_sha"] is not None
+                    or not parent["has_patch"]
+                )
             )
             state = QUEUED if parent_ready else WAITING
             row = await conn.fetchrow(
@@ -952,6 +1079,834 @@ class AgentJobStore:
                 copied_id[source["id"]],
             )
         return _job_row_to_dict(anchor)
+
+    async def _session_fork_details(self, conn: Any, operation_id: str) -> dict[str, Any] | None:
+        """Return one native-fork saga with its immutable host launch inputs."""
+        operation = await conn.fetchrow(
+            "SELECT * FROM agent_session_forks WHERE id = $1",
+            operation_id,
+        )
+        if operation is None:
+            return None
+        sandbox = await conn.fetchrow(
+            f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+            operation["source_thread_id"],
+        )
+        source = await conn.fetchrow(
+            f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE id = $1",
+            operation["source_job_id"],
+        )
+        result = dict(operation)
+        result["host_receipt"] = _load_json(result.get("host_receipt"))
+        if sandbox is not None:
+            sandbox_dict = _sandbox_row_to_dict(sandbox)
+            result["thread_sandbox"] = sandbox_dict
+            for key, value in sandbox_dict.items():
+                result.setdefault(key, value)
+        if source is not None:
+            result["source_job"] = _job_row_to_dict(source)
+        return result
+
+    async def prepare_session_fork(
+        self,
+        *,
+        source_job_id: str,
+        user_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Fence a latest-settled shared member and reserve an invisible child."""
+        if not idempotency_key or len(idempotency_key) > 256 or "\x00" in idempotency_key:
+            raise ValueError("session fork idempotency key is invalid")
+        operation_id = _new_session_fork_id()
+        target_thread_id = _new_thread_id()
+        async with self._pool.acquire() as conn, conn.transaction():
+            # A request may race itself across two HTTP workers. Serialize the
+            # unique-key lookup before either can observe a missing row.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                json.dumps([user_id, idempotency_key], separators=(",", ":")),
+            )
+            existing = await conn.fetchrow(
+                """
+                SELECT * FROM agent_session_forks
+                WHERE user_id = $1 AND idempotency_key = $2
+                FOR UPDATE
+                """,
+                user_id,
+                idempotency_key,
+            )
+            if existing is not None:
+                result = await self._session_fork_details(conn, str(existing["id"]))
+                if result is not None and existing["source_job_id"] != source_job_id:
+                    result["error"] = "idempotency_conflict"
+                return result
+
+            source = await conn.fetchrow(
+                f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE id = $1 AND user_id = $2 FOR UPDATE",
+                source_job_id,
+                user_id,
+            )
+            if source is None:
+                return None
+            if source["state"] not in TERMINAL_STATES:
+                return {"error": "not_settled"}
+            row = await conn.fetchrow(
+                """
+                SELECT m.*, g.generation AS sandbox_generation, g.host,
+                       g.container_id, g.container_name, g.runtime_id,
+                       g.runtime_version, g.sandbox_image_digest,
+                       g.execution_profile, g.state AS sandbox_state,
+                       g.resident_slot_capacity, g.memory_limit, g.cpu_limit,
+                       g.stop_timeout_seconds
+                FROM agent_thread_sandbox_memberships m
+                JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                FOR UPDATE OF g, m
+                """,
+                source["thread_id"],
+            )
+            if row is None:
+                return {"error": "not_shared_live"}
+            if row["last_settled_job_id"] != source_job_id:
+                return {"error": "not_latest_settled"}
+            if row["active_attempt_id"] is not None:
+                return {"error": "source_busy"}
+            if row["native_state"] != "ready" or not row["native_session_id"]:
+                return {"error": "native_context_unavailable"}
+            if row["resident_slot_id"] is None:
+                return {"error": "sandbox_not_ready"}
+            if row["fork_operation_id"] is not None:
+                return {"error": "fork_in_progress"}
+            if row["sandbox_state"] in {
+                "lost",
+                "stopped_dirty",
+                "provisioning",
+                "stopping",
+            }:
+                return {"error": "sandbox_not_ready"}
+            if not row["container_id"]:
+                return {"error": "sandbox_not_ready"}
+            if row["runtime_id"] != source["runtime"]:
+                return {"error": "runtime_mismatch"}
+
+            occupied_rows = await conn.fetch(
+                """
+                SELECT resident_slot_id AS slot
+                FROM agent_thread_sandbox_memberships
+                WHERE sandbox_id = $1 AND resident_slot_id IS NOT NULL
+                UNION ALL
+                SELECT target_resident_slot_id AS slot
+                FROM agent_session_forks
+                WHERE sandbox_id = $1 AND state IN ('preparing', 'materialized')
+                  AND target_resident_slot_id IS NOT NULL
+                """,
+                row["sandbox_id"],
+            )
+            occupied = {int(item["slot"]) for item in occupied_rows}
+            target_slot = next(
+                (
+                    slot
+                    for slot in range(int(row["resident_slot_capacity"]))
+                    if slot not in occupied
+                ),
+                None,
+            )
+            if target_slot is None:
+                return {"error": "resident_capacity_exhausted"}
+
+            await conn.execute(
+                """
+                INSERT INTO agent_session_forks (
+                    id, user_id, idempotency_key, sandbox_id,
+                    sandbox_generation, container_id, runtime_id,
+                    runtime_version, source_thread_id, source_job_id,
+                    source_native_session_id, source_activation_generation,
+                    target_thread_id, target_resident_slot_id
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8,
+                    $9, $10, $11, $12, $13, $14
+                )
+                """,
+                operation_id,
+                user_id,
+                idempotency_key,
+                row["sandbox_id"],
+                row["sandbox_generation"],
+                row["container_id"],
+                row["runtime_id"],
+                row["runtime_version"],
+                source["thread_id"],
+                source_job_id,
+                row["native_session_id"],
+                row["activation_generation"],
+                target_thread_id,
+                target_slot,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET native_state = 'fork_preparing', fork_operation_id = $2,
+                    updated_at = NOW()
+                WHERE thread_id = $1
+                """,
+                source["thread_id"],
+                operation_id,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET active_operation_count = active_operation_count + 1,
+                    idle_deadline = NULL, last_activity_at = NOW(), updated_at = NOW()
+                WHERE id = $1
+                """,
+                row["sandbox_id"],
+            )
+            return await self._session_fork_details(conn, operation_id)
+
+    async def establish_session_fork_residencies(
+        self,
+        *,
+        operation_id: str,
+        coordinator_token: str,
+        ttl_seconds: float,
+    ) -> dict[str, Any] | None:
+        """Create/recover the two independent process credentials for a fork."""
+        if not coordinator_token or len(coordinator_token) > 256 or "\x00" in coordinator_token:
+            raise ValueError("session fork coordinator token is invalid")
+        async with self._pool.acquire() as conn, conn.transaction():
+            operation = await conn.fetchrow(
+                "SELECT * FROM agent_session_forks WHERE id = $1 FOR UPDATE",
+                operation_id,
+            )
+            if (
+                operation is None
+                or operation["state"] != "preparing"
+                or operation["coordinator_token"] != coordinator_token
+            ):
+                return None
+            source_job = await conn.fetchrow(
+                """
+                SELECT user_id, model FROM agent_jobs
+                WHERE id = $1 AND user_id = $2
+                """,
+                operation["source_job_id"],
+                operation["user_id"],
+            )
+            if source_job is None:
+                return None
+            generations: dict[str, int] = {}
+            previous: dict[str, str | None] = {}
+            thread_ids = {
+                "source": str(operation["source_thread_id"]),
+                "target": str(operation["target_thread_id"]),
+            }
+            sandbox_host = await conn.fetchval(
+                "SELECT host FROM agent_sandboxes WHERE id = $1 AND generation = $2",
+                operation["sandbox_id"],
+                operation["sandbox_generation"],
+            )
+            if sandbox_host is None:
+                return None
+            for role, thread_id in thread_ids.items():
+                current = await conn.fetchrow(
+                    "SELECT * FROM agent_thread_residencies WHERE thread_id = $1 FOR UPDATE",
+                    thread_id,
+                )
+                # The grant token itself is deliberately never stored.  A
+                # retried HTTP fork therefore cannot safely reuse a residency
+                # whose token may already be inside an unacknowledged host
+                # process: minting over the same generation would relabel that
+                # old-token process as current.  Rotate the generation on every
+                # PREPARING attempt, revoke the prior linked grant, and make the
+                # supervisor restart only these two member processes.
+                previous[role] = (None if current is None else current["grant_id"]) or operation[
+                    f"previous_{role}_grant_id"
+                ]
+                created = await conn.fetchrow(
+                    """
+                    INSERT INTO agent_thread_residencies (
+                        thread_id, host, sandbox_id, runtime_id, runtime_version,
+                        status, lease_expires_at, grant_id
+                    )
+                    SELECT $1, g.host, g.id, $3, $4, 'hot',
+                           NOW() + make_interval(secs => $5), NULL
+                    FROM agent_sandboxes g
+                    WHERE g.id = $2 AND g.generation = $6
+                    ON CONFLICT (thread_id) DO UPDATE SET
+                        generation = agent_thread_residencies.generation + 1,
+                        host = EXCLUDED.host,
+                        sandbox_id = EXCLUDED.sandbox_id,
+                        runtime_id = EXCLUDED.runtime_id,
+                        runtime_version = EXCLUDED.runtime_version,
+                        status = 'hot', lease_expires_at = EXCLUDED.lease_expires_at,
+                        grant_id = NULL, established_at = NOW(), last_active_at = NOW()
+                    RETURNING *
+                    """,
+                    thread_id,
+                    operation["sandbox_id"],
+                    operation["runtime_id"],
+                    operation["runtime_version"],
+                    ttl_seconds,
+                    operation["sandbox_generation"],
+                )
+                if created is None:
+                    return None
+                generations[role] = int(created["generation"])
+
+            await conn.execute(
+                """
+                UPDATE agent_session_forks
+                SET source_residency_generation = $2,
+                    target_residency_generation = $3,
+                    previous_source_grant_id = $4,
+                    previous_target_grant_id = $5,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                operation_id,
+                generations["source"],
+                generations["target"],
+                previous["source"],
+                previous["target"],
+            )
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET residency_generation = $2, resident_state = 'restarting',
+                    updated_at = NOW()
+                WHERE thread_id = $1 AND fork_operation_id = $3
+                """,
+                operation["source_thread_id"],
+                generations["source"],
+                operation_id,
+            )
+            common = {
+                "user_id": source_job["user_id"],
+                "model": source_job["model"],
+            }
+            return {
+                "source": {
+                    **common,
+                    "thread_id": thread_ids["source"],
+                    "generation": generations["source"],
+                    "previous_grant_id": previous["source"],
+                    "establishing_attempt_id": f"fork-source:{operation_id}",
+                },
+                "target": {
+                    **common,
+                    "thread_id": thread_ids["target"],
+                    "generation": generations["target"],
+                    "previous_grant_id": previous["target"],
+                    "establishing_attempt_id": f"fork-target:{operation_id}",
+                },
+            }
+
+    async def claim_session_fork_materialization(
+        self,
+        *,
+        operation_id: str,
+        coordinator_token: str,
+        lease_seconds: float,
+    ) -> bool:
+        """Lease the one external native mutation for a PREPARING saga.
+
+        Idempotency-key insertion is serialized in :meth:`prepare_session_fork`,
+        but its HTTP handler necessarily leaves that transaction before minting
+        credentials and calling the host. This second durable fence prevents
+        two workers handling the same request from rotating both member
+        residencies and invoking the native fork concurrently. An abandoned
+        coordinator can be taken over after the bounded lease.
+        """
+        if not coordinator_token or len(coordinator_token) > 256 or "\x00" in coordinator_token:
+            raise ValueError("session fork coordinator token is invalid")
+        if lease_seconds <= 0:
+            raise ValueError("session fork coordinator lease must be positive")
+        async with self._pool.acquire() as conn:
+            claimed = await conn.fetchval(
+                """
+                UPDATE agent_session_forks
+                SET coordinator_token = $2,
+                    coordinator_lease_expires_at = NOW() + make_interval(secs => $3),
+                    updated_at = NOW()
+                WHERE id = $1 AND state = 'preparing'
+                  AND (
+                    coordinator_token IS NULL
+                    OR coordinator_lease_expires_at IS NULL
+                    OR coordinator_lease_expires_at <= NOW()
+                    OR coordinator_token = $2
+                  )
+                RETURNING 1
+                """,
+                operation_id,
+                coordinator_token,
+                lease_seconds,
+            )
+        return claimed is not None
+
+    async def release_session_fork_materialization(
+        self,
+        *,
+        operation_id: str,
+        coordinator_token: str,
+    ) -> bool:
+        """Release a coordinator that failed before any host mutation began."""
+        async with self._pool.acquire() as conn:
+            released = await conn.fetchval(
+                """
+                UPDATE agent_session_forks
+                SET coordinator_token = NULL, coordinator_lease_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE id = $1 AND state = 'preparing' AND coordinator_token = $2
+                RETURNING 1
+                """,
+                operation_id,
+                coordinator_token,
+            )
+        return released is not None
+
+    async def record_session_fork_materialized(
+        self,
+        *,
+        operation_id: str,
+        coordinator_token: str,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Persist a validated host receipt before exposing the child chat."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            operation = await conn.fetchrow(
+                "SELECT * FROM agent_session_forks WHERE id = $1 FOR UPDATE",
+                operation_id,
+            )
+            if operation is None or operation["state"] not in {"preparing", "materialized"}:
+                return None
+            if (
+                operation["state"] == "preparing"
+                and operation["coordinator_token"] != coordinator_token
+            ):
+                return None
+            expected = {
+                "operation_id": operation_id,
+                "sandbox_id": operation["sandbox_id"],
+                "sandbox_generation": int(operation["sandbox_generation"]),
+                "container_id": operation["container_id"],
+                "runtime_id": operation["runtime_id"],
+                "runtime_version": operation["runtime_version"],
+                "source_thread_id": operation["source_thread_id"],
+                "source_native_session_id": operation["source_native_session_id"],
+                "target_thread_id": operation["target_thread_id"],
+                "target_resident_slot_id": int(operation["target_resident_slot_id"]),
+                "source_residency_generation": int(operation["source_residency_generation"] or 0),
+                "target_residency_generation": int(operation["target_residency_generation"] or 0),
+            }
+            if any(receipt.get(key) != value for key, value in expected.items()):
+                return None
+            target_native_id = str(receipt.get("target_native_session_id") or "")
+            source_process = int(receipt.get("source_process_generation") or 0)
+            target_process = int(receipt.get("target_process_generation") or 0)
+            if (
+                not target_native_id
+                or target_native_id == operation["source_native_session_id"]
+                or source_process <= 0
+                or target_process <= 0
+            ):
+                return None
+            if operation["state"] == "materialized":
+                prior = _load_json(operation["host_receipt"])
+                return (
+                    await self._session_fork_details(conn, operation_id)
+                    if prior == receipt
+                    else None
+                )
+            collision = await conn.fetchval(
+                """
+                SELECT 1 FROM agent_thread_sandbox_memberships
+                WHERE sandbox_id = $1 AND native_session_id = $2
+                """,
+                operation["sandbox_id"],
+                target_native_id,
+            )
+            if collision is not None:
+                return None
+            await conn.execute(
+                """
+                UPDATE agent_session_forks
+                SET target_native_session_id = $2,
+                    source_process_generation = $3,
+                    target_process_generation = $4,
+                    host_receipt = $5::jsonb, state = 'materialized',
+                    coordinator_token = NULL, coordinator_lease_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                operation_id,
+                target_native_id,
+                source_process,
+                target_process,
+                json.dumps(receipt),
+            )
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET process_generation = $2, residency_generation = $3,
+                    resident_state = 'live', updated_at = NOW()
+                WHERE thread_id = $1 AND fork_operation_id = $4
+                """,
+                operation["source_thread_id"],
+                source_process,
+                operation["source_residency_generation"],
+                operation_id,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET state = 'running', last_activity_at = NOW(), updated_at = NOW()
+                WHERE id = $1 AND generation = $2 AND container_id = $3
+                """,
+                operation["sandbox_id"],
+                operation["sandbox_generation"],
+                operation["container_id"],
+            )
+            return await self._session_fork_details(conn, operation_id)
+
+    async def finalize_session_fork(self, *, operation_id: str) -> dict[str, Any] | None:
+        """Atomically create the visible child history, membership and native edge."""
+        anchor_id: str | None = None
+        async with self._pool.acquire() as conn, conn.transaction():
+            operation = await conn.fetchrow(
+                "SELECT * FROM agent_session_forks WHERE id = $1 FOR UPDATE",
+                operation_id,
+            )
+            if operation is None:
+                return None
+            if operation["state"] == "ready":
+                anchor_id = str(operation["target_anchor_job_id"] or "") or None
+            elif operation["state"] == "materialized":
+                source = await conn.fetchrow(
+                    f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE id = $1 FOR UPDATE",
+                    operation["source_job_id"],
+                )
+                membership = await conn.fetchrow(
+                    """
+                    SELECT * FROM agent_thread_sandbox_memberships
+                    WHERE thread_id = $1 FOR UPDATE
+                    """,
+                    operation["source_thread_id"],
+                )
+                if (
+                    source is None
+                    or membership is None
+                    or membership["fork_operation_id"] != operation_id
+                    or membership["native_session_id"] != operation["source_native_session_id"]
+                    or not operation["target_native_session_id"]
+                ):
+                    return None
+                thread = await conn.fetchrow(
+                    "SELECT repo, title FROM agent_threads WHERE id = $1 FOR UPDATE",
+                    operation["source_thread_id"],
+                )
+                if thread is None:
+                    return None
+                turns = await conn.fetch(
+                    f"SELECT {_JOB_COLUMNS} FROM agent_jobs "
+                    "WHERE thread_id = $1 AND turn_no <= $2 ORDER BY turn_no",
+                    operation["source_thread_id"],
+                    source["turn_no"],
+                )
+                messages = await conn.fetch(
+                    """
+                    SELECT m.job_id, m.role, m.content, m.created_at
+                    FROM agent_thread_messages m
+                    JOIN agent_jobs j ON j.id = m.job_id
+                    WHERE m.thread_id = $1 AND j.turn_no <= $2
+                    ORDER BY j.turn_no,
+                             CASE WHEN m.role = 'user' THEN 0 ELSE 1 END, m.id
+                    """,
+                    operation["source_thread_id"],
+                    source["turn_no"],
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO agent_threads (id, user_id, repo, title)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    operation["target_thread_id"],
+                    operation["user_id"],
+                    thread["repo"],
+                    f"{thread['title']} (fork)"[:160],
+                )
+                copied: dict[str, str] = {}
+                previous_copy: str | None = None
+                for turn in turns:
+                    copy_id = _new_job_id()
+                    copied[str(turn["id"])] = copy_id
+                    await conn.execute(
+                        """
+                        INSERT INTO agent_jobs (
+                            id, thread_id, parent_job_id, turn_no, user_id, repo,
+                            base_sha, task_prompt, setup_script, runtime, model,
+                            execution_profile, reasoning_effort, state,
+                            published_pr_url, published_commit_sha, detail, metadata,
+                            fork_source_job_id, mcp_servers, created_at, updated_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                            $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20,
+                            clock_timestamp(), clock_timestamp()
+                        )
+                        """,
+                        copy_id,
+                        operation["target_thread_id"],
+                        previous_copy,
+                        turn["turn_no"],
+                        operation["user_id"],
+                        turn["repo"],
+                        turn["base_sha"],
+                        turn["task_prompt"],
+                        turn["setup_script"],
+                        turn["runtime"],
+                        turn["model"],
+                        turn["execution_profile"],
+                        turn["reasoning_effort"],
+                        turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
+                        turn["published_pr_url"],
+                        turn["published_commit_sha"],
+                        turn["detail"],
+                        json.dumps(_load_json(turn["metadata"]))
+                        if turn["metadata"] is not None
+                        else None,
+                        turn["id"],
+                        list(turn["mcp_servers"] or []),
+                    )
+                    previous_copy = copy_id
+                await conn.executemany(
+                    """
+                    INSERT INTO agent_thread_messages
+                        (thread_id, job_id, role, content, created_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    [
+                        (
+                            operation["target_thread_id"],
+                            copied[str(message["job_id"])],
+                            message["role"],
+                            message["content"],
+                            message["created_at"],
+                        )
+                        for message in messages
+                    ],
+                )
+                anchor_id = copied[str(source["id"])]
+                await conn.execute(
+                    """
+                    INSERT INTO agent_thread_sandbox_memberships (
+                        thread_id, sandbox_id, native_session_id, native_state,
+                        context_status, process_generation, residency_generation,
+                        resident_state, resident_slot_id, last_settled_job_id,
+                        forked_from_thread_id, fork_anchor_job_id
+                    ) VALUES (
+                        $1, $2, $3, 'ready', 'live', $4, $5, 'live', $6,
+                        $7, $8, $9
+                    )
+                    """,
+                    operation["target_thread_id"],
+                    operation["sandbox_id"],
+                    operation["target_native_session_id"],
+                    operation["target_process_generation"],
+                    operation["target_residency_generation"],
+                    operation["target_resident_slot_id"],
+                    anchor_id,
+                    operation["source_thread_id"],
+                    operation["source_job_id"],
+                )
+                await conn.execute(
+                    """
+                    UPDATE agent_thread_sandbox_memberships
+                    SET native_state = 'ready', fork_operation_id = NULL,
+                        process_generation = $2, residency_generation = $3,
+                        resident_state = 'live', updated_at = NOW()
+                    WHERE thread_id = $1 AND fork_operation_id = $4
+                    """,
+                    operation["source_thread_id"],
+                    operation["source_process_generation"],
+                    operation["source_residency_generation"],
+                    operation_id,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO agent_native_session_edges (
+                        operation_id, sandbox_id, source_thread_id,
+                        target_thread_id, source_native_session_id,
+                        target_native_session_id
+                    ) VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    operation_id,
+                    operation["sandbox_id"],
+                    operation["source_thread_id"],
+                    operation["target_thread_id"],
+                    operation["source_native_session_id"],
+                    operation["target_native_session_id"],
+                )
+                await conn.execute(
+                    """
+                    UPDATE agent_session_forks
+                    SET target_anchor_job_id = $2, state = 'ready',
+                        completed_at = NOW(), updated_at = NOW()
+                    WHERE id = $1
+                    """,
+                    operation_id,
+                    anchor_id,
+                )
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes g
+                    SET active_operation_count = GREATEST(active_operation_count - 1, 0),
+                        last_activity_at = NOW(),
+                        idle_deadline = CASE
+                            WHEN active_operation_count = 1
+                             AND NOT EXISTS (
+                                SELECT 1 FROM agent_thread_sandbox_memberships m
+                                WHERE m.sandbox_id = g.id
+                                  AND m.active_attempt_id IS NOT NULL
+                             )
+                            THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                            ELSE NULL
+                        END,
+                        updated_at = NOW()
+                    WHERE g.id = $1
+                    """,
+                    operation["sandbox_id"],
+                )
+            else:
+                return None
+        return None if anchor_id is None else await self.get_job(anchor_id)
+
+    async def reap_stalled_session_forks(
+        self, *, stall_seconds: float = 900.0
+    ) -> list[dict[str, Any]]:
+        """Recover durable native-fork receipts or fail an ambiguous attempt.
+
+        ``materialized`` has a validated host receipt and is safe to finalize.
+        A stale ``preparing`` operation has no receipt the control plane can
+        trust, so it is failed without exposing its hidden target. Its exact
+        source/target residency generations are lapsed for member-scoped host
+        cleanup and grant revocation; siblings are never touched.
+        """
+        actions: list[dict[str, Any]] = []
+        async with self._pool.acquire() as conn, conn.transaction():
+            candidates = await conn.fetch(
+                """
+                SELECT id FROM agent_session_forks
+                WHERE state IN ('preparing', 'materialized')
+                  AND updated_at < NOW() - make_interval(secs => $1)
+                ORDER BY id
+                """,
+                stall_seconds,
+            )
+            for candidate in candidates:
+                operation = await conn.fetchrow(
+                    "SELECT * FROM agent_session_forks WHERE id = $1 FOR UPDATE SKIP LOCKED",
+                    candidate["id"],
+                )
+                if operation is None:
+                    continue
+                if operation["state"] == "materialized":
+                    item = dict(operation)
+                    item["recovery_action"] = "finalize"
+                    actions.append(item)
+                    continue
+                if operation["state"] != "preparing":
+                    continue
+                changed = await conn.fetchrow(
+                    """
+                    UPDATE agent_session_forks
+                    SET state = 'failed',
+                        last_error = 'native fork coordinator stopped before a receipt was recorded',
+                        coordinator_token = NULL,
+                        coordinator_lease_expires_at = NULL,
+                        updated_at = NOW(), completed_at = NOW()
+                    WHERE id = $1 AND state = 'preparing'
+                      AND updated_at < NOW() - make_interval(secs => $2)
+                    RETURNING *
+                    """,
+                    operation["id"],
+                    stall_seconds,
+                )
+                if changed is None:
+                    continue
+                await conn.execute(
+                    """
+                    UPDATE agent_thread_sandbox_memberships
+                    SET native_state = CASE
+                            WHEN context_status = 'lost' THEN 'lost' ELSE 'ready' END,
+                        fork_operation_id = NULL,
+                        resident_state = CASE
+                            WHEN context_status = 'lost' THEN 'lost' ELSE 'restarting' END,
+                        last_error = $3, updated_at = NOW()
+                    WHERE thread_id = $1 AND fork_operation_id = $2
+                    """,
+                    operation["source_thread_id"],
+                    operation["id"],
+                    changed["last_error"],
+                )
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes g
+                    SET active_operation_count = GREATEST(active_operation_count - 1, 0),
+                        idle_deadline = CASE
+                            WHEN active_operation_count = 1
+                             AND NOT EXISTS (
+                                SELECT 1 FROM agent_thread_sandbox_memberships m
+                                WHERE m.sandbox_id = g.id
+                                  AND m.active_attempt_id IS NOT NULL
+                             )
+                            THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                            ELSE NULL
+                        END,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    """,
+                    operation["sandbox_id"],
+                )
+                cleanup: list[dict[str, Any]] = []
+                sandbox_host = await conn.fetchval(
+                    "SELECT host FROM agent_sandboxes WHERE id = $1",
+                    operation["sandbox_id"],
+                )
+                for role, thread_column, generation_column in (
+                    (
+                        "source",
+                        "source_thread_id",
+                        "source_residency_generation",
+                    ),
+                    (
+                        "target",
+                        "target_thread_id",
+                        "target_residency_generation",
+                    ),
+                ):
+                    generation = operation[generation_column]
+                    if generation is None:
+                        continue
+                    residency = await conn.fetchrow(
+                        """
+                        UPDATE agent_thread_residencies
+                        SET status = 'none', last_active_at = NOW()
+                        WHERE thread_id = $1 AND generation = $2
+                          AND host = $3 AND status <> 'none'
+                        RETURNING thread_id, generation, grant_id
+                        """,
+                        operation[thread_column],
+                        generation,
+                        sandbox_host,
+                    )
+                    if residency is not None:
+                        member = dict(residency)
+                        member["role"] = role
+                        cleanup.append(member)
+                item = dict(changed)
+                item["recovery_action"] = "cleanup"
+                item["cleanup_residencies"] = cleanup
+                actions.append(item)
+        return actions
 
     async def prepare_retained_fork(
         self, *, source_job_id: str, user_id: str
@@ -1467,9 +2422,15 @@ class AgentJobStore:
                 f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE thread_id = $1 ORDER BY turn_no",
                 thread["id"],
             )
+            sandbox = await conn.fetchrow(
+                f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+                thread["id"],
+            )
             job_rows = [_job_row_to_dict(job) for job in jobs]
             for job in job_rows:
                 job["pinned_at"] = thread["pinned_at"]
+                if sandbox is not None:
+                    job["thread_sandbox"] = _sandbox_row_to_dict(sandbox)
         return {
             "id": thread["id"],
             "repo": thread["repo"],
@@ -1737,7 +2698,7 @@ class AgentJobStore:
                        to_jsonb(s) AS thread_sandbox
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
-                LEFT JOIN agent_thread_sandboxes s ON s.thread_id = j.thread_id
+                LEFT JOIN {_THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.id = $1
                 """,
                 job_id,
@@ -2439,7 +3400,7 @@ class AgentJobStore:
                        {_QUALIFIED_HOST_COLUMNS}
                 FROM agent_jobs j
                 LEFT JOIN agent_attempts a ON a.id = j.current_attempt_id
-                LEFT JOIN agent_thread_sandboxes s ON s.thread_id = j.thread_id
+                LEFT JOIN {_THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 LEFT JOIN agent_runner_hosts h
                   ON h.host = COALESCE(a.host_id, s.host)
                 WHERE j.id = $1
@@ -2542,6 +3503,7 @@ class AgentJobStore:
             runtime_versions_available = {}
         host_kernel = attestation.get("host_kernel")
         guest_kernel = attestation.get("guest_kernel")
+        shared_attestation = shared_sandbox_claim_attested(attestation)
         await self.touch_runner_host(host=host, worker_id=worker_id)
         async with self._pool.acquire() as conn, conn.transaction():
             policy = await conn.fetchrow(
@@ -2632,10 +3594,14 @@ class AgentJobStore:
                   ON r.thread_id = j.thread_id
                  AND r.status = 'hot'
                  AND r.lease_expires_at > NOW()
-                LEFT JOIN agent_thread_sandboxes s
-                  ON s.thread_id = j.thread_id
+                LEFT JOIN {_THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
+                  AND (
+                        NOT (COALESCE(j.metadata->'requires', '[]'::jsonb)
+                             ? '{SHARED_SANDBOX_CAPABILITY}')
+                        OR $4::boolean
+                  )
                   AND (
                         j.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
                         OR (
@@ -2657,6 +3623,7 @@ class AgentJobStore:
                             AND s.state IN (
                                 'provisioning', 'starting', 'running', 'stopped'
                             )
+                            AND (NOT s.shared_live OR $4::boolean)
                         )
                   )
                 ORDER BY j.created_at
@@ -2666,6 +3633,7 @@ class AgentJobStore:
                 capabilities,
                 host,
                 secure_attestation,
+                shared_attestation,
             )
             if job_row is None:
                 return None
@@ -2985,6 +3953,87 @@ class AgentJobStore:
                 if updated["thread_id"] is not None:
                     sandbox_transition = await conn.fetchrow(
                         """
+                        UPDATE agent_thread_sandbox_memberships m
+                        SET context_status = CASE
+                                WHEN m.last_settled_job_id IS DISTINCT FROM $1
+                                     AND (
+                                        m.admitted_job_id = $1
+                                        OR g.container_id IS NULL
+                                     ) THEN 'lost'
+                                ELSE m.context_status
+                            END,
+                            native_state = CASE
+                                WHEN m.last_settled_job_id IS DISTINCT FROM $1
+                                     AND (
+                                        m.admitted_job_id = $1
+                                        OR g.container_id IS NULL
+                                     ) THEN 'lost'
+                                ELSE m.native_state
+                            END,
+                            resident_state = CASE
+                                WHEN m.last_settled_job_id = $1 THEN m.resident_state
+                                WHEN m.admitted_job_id = $1 OR g.container_id IS NULL
+                                    THEN 'lost'
+                                ELSE 'restarting'
+                            END,
+                            active_attempt_id = CASE
+                                WHEN m.active_attempt_id = $2 THEN NULL
+                                ELSE m.active_attempt_id
+                            END,
+                            admitted_job_id = CASE
+                                WHEN m.admitted_job_id = $1 THEN NULL
+                                ELSE m.admitted_job_id
+                            END,
+                            admitted_at = CASE
+                                WHEN m.admitted_job_id = $1 THEN NULL
+                                ELSE m.admitted_at
+                            END,
+                            last_error = CASE
+                                WHEN m.last_settled_job_id = $1 THEN m.last_error
+                                ELSE COALESCE($4, 'retained turn ended before settlement')
+                            END,
+                            updated_at = NOW()
+                        FROM agent_sandboxes g
+                        WHERE m.thread_id = $3 AND g.id = m.sandbox_id
+                          AND g.mode = 'shared_live'
+                          AND (
+                                m.active_attempt_id = $2
+                                OR m.admitted_job_id = $1
+                          )
+                        RETURNING m.context_status, m.sandbox_id, TRUE AS shared_live
+                        """,
+                        job_id,
+                        attempt_id,
+                        updated["thread_id"],
+                        detail,
+                    )
+                    if sandbox_transition is not None:
+                        await conn.execute(
+                            """
+                            UPDATE agent_sandboxes g
+                            SET last_activity_at = NOW(),
+                                idle_deadline = CASE
+                                    WHEN g.active_operation_count = 0
+                                     AND NOT EXISTS (
+                                        SELECT 1
+                                        FROM agent_thread_sandbox_memberships peer
+                                        WHERE peer.sandbox_id = g.id
+                                          AND peer.active_attempt_id IS NOT NULL
+                                     )
+                                    THEN COALESCE(
+                                        g.idle_deadline,
+                                        NOW() + make_interval(secs => g.idle_timeout_seconds)
+                                    )
+                                    ELSE NULL
+                                END,
+                                updated_at = NOW()
+                            WHERE g.id = $1
+                            """,
+                            sandbox_transition["sandbox_id"],
+                        )
+                    else:
+                        sandbox_transition = await conn.fetchrow(
+                            """
                         UPDATE agent_thread_sandboxes s
                         SET state = CASE
                                 WHEN s.last_settled_job_id = $1 THEN s.state
@@ -3026,13 +4075,13 @@ class AgentJobStore:
                                 s.active_attempt_id = $2
                                 OR s.admitted_job_id = $1
                           )
-                        RETURNING s.context_status
+                        RETURNING s.context_status, FALSE AS shared_live
                         """,
-                        job_id,
-                        attempt_id,
-                        updated["thread_id"],
-                        detail,
-                    )
+                            job_id,
+                            attempt_id,
+                            updated["thread_id"],
+                            detail,
+                        )
                     if (
                         sandbox_transition is not None
                         and sandbox_transition["context_status"] == "lost"
@@ -3070,7 +4119,11 @@ class AgentJobStore:
                 # fast-forward the same thread branch instead of opening one
                 # PR per message. Failures/cancellations and no-op successes
                 # have no publish step and may release their child now.
-                if (to_state != SUCCEEDED or not has_patch) and not (
+                if (
+                    to_state != SUCCEEDED
+                    or not has_patch
+                    or (sandbox_transition is not None and sandbox_transition["shared_live"])
+                ) and not (
                     sandbox_transition is not None
                     and sandbox_transition["context_status"] == "lost"
                 ):
@@ -3277,6 +4330,33 @@ class AgentJobStore:
         fork keeps the source immutable until its saga releases the fence.
         """
         async with self._pool.acquire() as conn:
+            shared_ready = await conn.fetchval(
+                """
+                SELECT
+                    m.context_status <> 'lost'
+                    AND m.native_state <> 'lost'
+                    AND g.state NOT IN (
+                        'provisioning', 'stopping', 'stopped_dirty', 'lost'
+                    )
+                    AND m.fork_operation_id IS NULL
+                    AND (
+                        m.active_attempt_id IS NULL
+                        OR EXISTS (
+                            SELECT 1 FROM agent_attempts a
+                            WHERE a.id = m.active_attempt_id
+                              AND a.status = 'running'
+                              AND a.lease_expires_at > NOW()
+                              AND a.terminal_ready = TRUE
+                        )
+                    )
+                FROM agent_thread_sandbox_memberships m
+                JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                """,
+                thread_id,
+            )
+            if shared_ready is not None:
+                return bool(shared_ready)
             ready = await conn.fetchval(
                 """
                 SELECT
@@ -3513,6 +4593,11 @@ class AgentJobStore:
         runtime_version: str | None,
         sandbox_image_digest: str | None,
         execution_profile: str,
+        shared_live: bool = False,
+        resident_slot_capacity: int = 8,
+        memory_limit: str = "4g",
+        cpu_limit: str = "2",
+        stop_timeout_seconds: int = 10,
     ) -> dict[str, Any] | None:
         """Reserve/start one thread's durable sandbox under its attempt fence.
 
@@ -3524,7 +4609,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn, conn.transaction():
             earns = await conn.fetchrow(
                 """
-                SELECT j.id, j.thread_id
+                SELECT j.id, j.thread_id, j.user_id, j.metadata
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
                 WHERE a.id = $1 AND a.lease_generation = $2
@@ -3540,6 +4625,31 @@ class AgentJobStore:
             )
             if earns is None:
                 return None
+            if shared_live:
+                metadata = _load_json(earns["metadata"]) or {}
+                requirements = metadata.get("requires") if isinstance(metadata, dict) else None
+                if not isinstance(requirements, list) or (
+                    SHARED_SANDBOX_CAPABILITY not in requirements
+                ):
+                    return None
+                return await self._reserve_shared_thread_sandbox(
+                    conn,
+                    thread_id=thread_id,
+                    attempt_id=attempt_id,
+                    host=host,
+                    sandbox_id=sandbox_id,
+                    container_name=container_name,
+                    runtime_id=runtime_id,
+                    runtime_version=runtime_version,
+                    sandbox_image_digest=sandbox_image_digest,
+                    execution_profile=execution_profile,
+                    resident_slot_capacity=resident_slot_capacity,
+                    memory_limit=memory_limit,
+                    cpu_limit=cpu_limit,
+                    stop_timeout_seconds=stop_timeout_seconds,
+                    user_id=str(earns["user_id"]),
+                    job_id=str(earns["id"]),
+                )
             row = await conn.fetchrow(
                 "SELECT * FROM agent_thread_sandboxes WHERE thread_id = $1 FOR UPDATE",
                 thread_id,
@@ -3617,6 +4727,172 @@ class AgentJobStore:
             )
         return dict(updated)
 
+    async def _reserve_shared_thread_sandbox(
+        self,
+        conn: Any,
+        *,
+        thread_id: str,
+        attempt_id: int,
+        host: str,
+        sandbox_id: str,
+        container_name: str,
+        runtime_id: str,
+        runtime_version: str | None,
+        sandbox_image_digest: str | None,
+        execution_profile: str,
+        resident_slot_capacity: int,
+        memory_limit: str,
+        cpu_limit: str,
+        stop_timeout_seconds: int,
+        user_id: str,
+        job_id: str,
+    ) -> dict[str, Any] | None:
+        """Reserve one independently fenced member in a shared-live group."""
+        if not 2 <= resident_slot_capacity <= 128:
+            raise ValueError("shared sandbox resident slot capacity must be between 2 and 128")
+        legacy = await conn.fetchval(
+            "SELECT 1 FROM agent_thread_sandboxes WHERE thread_id = $1",
+            thread_id,
+        )
+        membership = await conn.fetchrow(
+            """
+            SELECT m.*, g.origin_thread_id
+            FROM agent_thread_sandbox_memberships m
+            JOIN agent_sandboxes g ON g.id = m.sandbox_id
+            WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+            FOR UPDATE OF g, m
+            """,
+            thread_id,
+        )
+        if legacy is not None and membership is None:
+            raise ValueError("an existing legacy sandbox cannot be silently upgraded in place")
+        if membership is None:
+            capability = await conn.fetchval(
+                """
+                SELECT 1 FROM agent_runner_hosts
+                WHERE host = $1 AND status = 'online'
+                  AND capabilities @> '["shared-sandbox-v1"]'::jsonb
+                """,
+                host,
+            )
+            if capability is None:
+                raise ValueError("host has not advertised shared-sandbox-v1")
+            await conn.execute(
+                """
+                INSERT INTO agent_sandboxes (
+                    id, origin_thread_id, user_id, host, container_name,
+                    runtime_id, runtime_version, sandbox_image_digest,
+                    execution_profile, resident_slot_capacity, memory_limit,
+                    cpu_limit, stop_timeout_seconds
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                """,
+                sandbox_id,
+                thread_id,
+                user_id,
+                host,
+                container_name,
+                runtime_id,
+                runtime_version,
+                sandbox_image_digest,
+                execution_profile,
+                resident_slot_capacity,
+                memory_limit,
+                cpu_limit,
+                stop_timeout_seconds,
+            )
+            await conn.execute(
+                """
+                INSERT INTO agent_thread_sandbox_memberships (
+                    thread_id, sandbox_id, resident_slot_id
+                ) VALUES ($1, $2, 0)
+                """,
+                thread_id,
+                sandbox_id,
+            )
+            membership = await conn.fetchrow(
+                """
+                SELECT m.*, g.origin_thread_id
+                FROM agent_thread_sandbox_memberships m
+                JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                WHERE m.thread_id = $1
+                FOR UPDATE OF g, m
+                """,
+                thread_id,
+            )
+        if membership is None:
+            return None
+        group = await conn.fetchrow(
+            "SELECT * FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+            membership["sandbox_id"],
+        )
+        if group is None:
+            return None
+        immutable = {
+            "id": sandbox_id,
+            "host": host,
+            "container_name": container_name,
+            "runtime_id": runtime_id,
+            "runtime_version": runtime_version,
+            "sandbox_image_digest": sandbox_image_digest,
+            "execution_profile": execution_profile,
+            "memory_limit": memory_limit,
+            "cpu_limit": cpu_limit,
+            "stop_timeout_seconds": stop_timeout_seconds,
+        }
+        if any(group[key] != value for key, value in immutable.items()):
+            raise ValueError("shared sandbox immutable identity or runtime changed")
+        if group["state"] in {"lost", "stopped_dirty"} or membership["native_state"] == "lost":
+            return None
+        if membership["fork_operation_id"] is not None:
+            # The dequeue query carries the same fence, but admission is a
+            # separate transaction and may race a Fork request that wins after
+            # claim. Never append a turn to the source session while its
+            # settled prefix is being materialized.
+            return None
+        active_attempt = membership["active_attempt_id"]
+        if active_attempt is not None and active_attempt != attempt_id:
+            return None
+        admitted_job = membership["admitted_job_id"]
+        if admitted_job is not None and admitted_job != job_id:
+            return None
+        already_admitted = active_attempt == attempt_id and group["state"] in {
+            "starting",
+            "running",
+        }
+        activation_generation = int(membership["activation_generation"])
+        if not already_admitted:
+            activation_generation += 1
+        context_status = "new" if membership["last_settled_job_id"] is None else "restored"
+        await conn.execute(
+            """
+            UPDATE agent_thread_sandbox_memberships
+            SET active_attempt_id = $2, activation_generation = $3,
+                context_status = $4, resident_state = CASE
+                    WHEN resident_state = 'live' THEN resident_state ELSE 'starting' END,
+                last_error = NULL, updated_at = NOW()
+            WHERE thread_id = $1
+            """,
+            thread_id,
+            attempt_id,
+            activation_generation,
+            context_status,
+        )
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET state = 'starting', idle_deadline = NULL,
+                last_activity_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+            """,
+            group["id"],
+        )
+        row = await conn.fetchrow(
+            f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+            thread_id,
+        )
+        return None if row is None else _sandbox_row_to_dict(row)
+
     async def mark_thread_sandbox_running(
         self,
         *,
@@ -3630,6 +4906,48 @@ class AgentJobStore:
     ) -> dict[str, Any] | None:
         """Confirm Docker start under both attempt and sandbox generations."""
         async with self._pool.acquire() as conn:
+            shared = await conn.fetchrow(
+                """
+                WITH updated_group AS (
+                    UPDATE agent_sandboxes g
+                    SET state = 'running', container_id = $6,
+                        last_activity_at = NOW(), updated_at = NOW()
+                    FROM agent_thread_sandbox_memberships m
+                    JOIN agent_attempts a ON a.id = m.active_attempt_id
+                    JOIN agent_jobs j ON j.id = a.job_id
+                    WHERE m.thread_id = $1 AND g.id = m.sandbox_id
+                      AND g.mode = 'shared_live' AND g.generation = $4
+                      AND m.activation_generation = $5
+                      AND m.active_attempt_id = $2
+                      AND (g.container_id IS NULL OR g.container_id = $6)
+                      AND a.id = $2 AND a.lease_generation = $3
+                      AND a.status = 'running' AND a.lease_expires_at > NOW()
+                      AND j.current_attempt_id = a.id AND j.thread_id = m.thread_id
+                    RETURNING g.id
+                )
+                UPDATE agent_thread_sandbox_memberships m
+                SET context_status = $7,
+                    resident_state = CASE
+                        WHEN m.resident_state = 'live' THEN 'live' ELSE 'starting' END,
+                    updated_at = NOW()
+                FROM updated_group u
+                WHERE m.thread_id = $1 AND m.sandbox_id = u.id
+                RETURNING m.thread_id
+                """,
+                thread_id,
+                attempt_id,
+                lease_generation,
+                sandbox_generation,
+                activation_generation,
+                container_id,
+                context_status,
+            )
+            if shared is not None:
+                row = await conn.fetchrow(
+                    f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+                    thread_id,
+                )
+                return None if row is None else _sandbox_row_to_dict(row)
             row = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandboxes s
@@ -3668,6 +4986,28 @@ class AgentJobStore:
     ) -> bool:
         """Record the supervisor's diagnostic CLI process generation."""
         async with self._pool.acquire() as conn:
+            shared = await conn.fetchval(
+                """
+                UPDATE agent_thread_sandbox_memberships m
+                SET process_generation = $6, resident_state = 'live', updated_at = NOW()
+                FROM agent_sandboxes g, agent_attempts a
+                WHERE m.thread_id = $1 AND g.id = m.sandbox_id
+                  AND g.mode = 'shared_live' AND g.generation = $4
+                  AND m.activation_generation = $5
+                  AND m.active_attempt_id = $2
+                  AND a.id = $2 AND a.lease_generation = $3
+                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                RETURNING m.thread_id
+                """,
+                thread_id,
+                attempt_id,
+                lease_generation,
+                sandbox_generation,
+                activation_generation,
+                process_generation,
+            )
+            if shared is not None:
+                return True
             return bool(
                 await conn.fetchval(
                     """
@@ -3690,6 +5030,41 @@ class AgentJobStore:
                 )
             )
 
+    async def record_shared_thread_residency(
+        self,
+        *,
+        thread_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        sandbox_id: str,
+        residency_generation: int,
+    ) -> bool:
+        """Bind one renewable residency generation to its active membership."""
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    UPDATE agent_thread_sandbox_memberships m
+                    SET residency_generation = $5,
+                        resident_state = CASE
+                            WHEN resident_state = 'live' THEN 'live' ELSE 'starting' END,
+                        updated_at = NOW()
+                    FROM agent_sandboxes g, agent_attempts a
+                    WHERE m.thread_id = $1 AND m.sandbox_id = $4
+                      AND g.id = m.sandbox_id AND g.mode = 'shared_live'
+                      AND m.active_attempt_id = $2
+                      AND a.id = $2 AND a.lease_generation = $3
+                      AND a.status = 'running' AND a.lease_expires_at > NOW()
+                    RETURNING m.thread_id
+                    """,
+                    thread_id,
+                    attempt_id,
+                    lease_generation,
+                    sandbox_id,
+                    residency_generation,
+                )
+            )
+
     async def admit_thread_sandbox_turn(
         self,
         *,
@@ -3708,6 +5083,42 @@ class AgentJobStore:
         records LOST instead of sending the same user message a second time.
         """
         async with self._pool.acquire() as conn:
+            shared = await conn.fetchval(
+                """
+                UPDATE agent_thread_sandbox_memberships m
+                SET admitted_job_id = $6,
+                    admitted_at = COALESCE(m.admitted_at, NOW()),
+                    updated_at = NOW()
+                FROM agent_sandboxes g, agent_attempts a, agent_jobs j
+                WHERE m.thread_id = $1 AND g.id = m.sandbox_id
+                  AND g.mode = 'shared_live' AND g.generation = $4
+                  AND m.activation_generation = $5
+                  AND m.active_attempt_id = $2
+                  AND a.id = $2 AND a.lease_generation = $3
+                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                  AND j.id = $6 AND j.current_attempt_id = a.id
+                  AND j.thread_id = m.thread_id AND j.state = 'running'
+                  AND (m.admitted_job_id IS NULL OR m.admitted_job_id = $6)
+                RETURNING m.thread_id
+                """,
+                thread_id,
+                attempt_id,
+                lease_generation,
+                sandbox_generation,
+                activation_generation,
+                job_id,
+            )
+            if shared is not None:
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes g
+                    SET idle_deadline = NULL, last_activity_at = NOW(), updated_at = NOW()
+                    FROM agent_thread_sandbox_memberships m
+                    WHERE m.thread_id = $1 AND g.id = m.sandbox_id
+                    """,
+                    thread_id,
+                )
+                return True
             return bool(
                 await conn.fetchval(
                     """
@@ -3748,9 +5159,116 @@ class AgentJobStore:
         context_status: str,
         native_session_id: str | None,
         idle_timeout_seconds: float,
+        base_sha: str | None = None,
     ) -> dict[str, Any] | None:
         """Close one turn boundary and arm deactivation without deleting state."""
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            shared = await conn.fetchrow(
+                """
+                UPDATE agent_thread_sandbox_memberships m
+                SET active_attempt_id = NULL, last_settled_job_id = $6,
+                    context_status = $7,
+                    native_session_id = COALESCE($8, m.native_session_id),
+                    native_state = 'ready', resident_state = 'live',
+                    last_error = NULL, updated_at = NOW()
+                FROM agent_sandboxes g, agent_attempts a
+                WHERE m.thread_id = $1 AND g.id = m.sandbox_id
+                  AND g.mode = 'shared_live' AND g.generation = $4
+                  AND m.activation_generation = $5
+                  AND m.active_attempt_id = $2
+                  AND m.admitted_job_id = $6
+                  AND a.id = $2 AND a.lease_generation = $3
+                  AND a.job_id = $6 AND a.status = 'running'
+                  AND a.lease_expires_at > NOW()
+                RETURNING m.sandbox_id
+                """,
+                thread_id,
+                attempt_id,
+                lease_generation,
+                sandbox_generation,
+                activation_generation,
+                job_id,
+                context_status,
+                native_session_id,
+            )
+            if shared is not None:
+                group = await conn.fetchrow(
+                    """
+                    UPDATE agent_sandboxes g
+                    SET state = 'running', last_activity_at = NOW(),
+                        idle_timeout_seconds = $2,
+                        idle_deadline = CASE
+                            WHEN g.active_operation_count = 0
+                             AND NOT EXISTS (
+                                SELECT 1
+                                FROM agent_thread_sandbox_memberships peer
+                                WHERE peer.sandbox_id = g.id
+                                  AND peer.active_attempt_id IS NOT NULL
+                             )
+                            THEN NOW() + make_interval(secs => $2)
+                            ELSE NULL
+                        END,
+                        workspace_epoch = workspace_epoch + 1,
+                        published_base_sha = COALESCE(g.published_base_sha, $3),
+                        snapshot_state = CASE
+                            WHEN g.snapshot_state IN ('snapshotting', 'importing', 'dirty')
+                                THEN g.snapshot_state
+                            ELSE 'pending'
+                        END,
+                        updated_at = NOW()
+                    WHERE g.id = $1
+                    RETURNING g.workspace_epoch, g.published_base_sha
+                    """,
+                    shared["sandbox_id"],
+                    idle_timeout_seconds,
+                    base_sha,
+                )
+                if group is None or not group["published_base_sha"]:
+                    raise ValueError("shared workspace settlement has no resolved Git base")
+                pending = await conn.fetchrow(
+                    """
+                    SELECT id FROM agent_sandbox_snapshots
+                    WHERE sandbox_id = $1 AND state = 'pending'
+                    FOR UPDATE
+                    """,
+                    shared["sandbox_id"],
+                )
+                if pending is None:
+                    await conn.execute(
+                        """
+                        INSERT INTO agent_sandbox_snapshots (
+                            sandbox_id, workspace_epoch, anchor_job_id,
+                            included_job_ids, base_sha
+                        )
+                        VALUES ($1, $2, $3, jsonb_build_array($3::text), $4)
+                        """,
+                        shared["sandbox_id"],
+                        group["workspace_epoch"],
+                        job_id,
+                        group["published_base_sha"],
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE agent_sandbox_snapshots
+                        SET workspace_epoch = $2, anchor_job_id = $3,
+                            included_job_ids = CASE
+                                WHEN included_job_ids @> jsonb_build_array($3::text)
+                                    THEN included_job_ids
+                                ELSE included_job_ids || jsonb_build_array($3::text)
+                            END,
+                            updated_at = NOW()
+                        WHERE id = $1 AND state = 'pending'
+                        """,
+                        pending["id"],
+                        group["workspace_epoch"],
+                        job_id,
+                    )
+                row = await conn.fetchrow(
+                    f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+                    thread_id,
+                )
+                return None if row is None else _sandbox_row_to_dict(row)
             row = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandboxes s
@@ -3820,6 +5338,8 @@ class AgentJobStore:
         running: bool,
         activity_active: bool | None = None,
         idle_remaining_seconds: float | None = None,
+        shared_live: bool = False,
+        members: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Reconcile a host-authenticated Docker observation into the ledger.
 
@@ -3834,6 +5354,18 @@ class AgentJobStore:
         outside a worker turn. Container, sandbox, and sandbox-generation
         identity still have to match exactly.
         """
+        if shared_live:
+            return await self._reconcile_shared_sandbox_observation(
+                thread_id=thread_id,
+                host=host,
+                sandbox_id=sandbox_id,
+                container_id=container_id,
+                sandbox_generation=sandbox_generation,
+                running=running,
+                activity_active=activity_active,
+                idle_remaining_seconds=idle_remaining_seconds,
+                members=members or [],
+            )
         async with self._pool.acquire() as conn, conn.transaction():
             # Docker creation can win just before the runner dies and posts
             # ``/running``. A host-authenticated observation carrying all
@@ -3964,6 +5496,154 @@ class AgentJobStore:
         effective_state = state if state is not None else recovered_state
         return None if effective_state is None else str(effective_state)
 
+    async def _reconcile_shared_sandbox_observation(
+        self,
+        *,
+        thread_id: str,
+        host: str,
+        sandbox_id: str,
+        container_id: str,
+        sandbox_generation: int,
+        running: bool,
+        activity_active: bool | None,
+        idle_remaining_seconds: float | None,
+        members: list[dict[str, Any]],
+    ) -> str | None:
+        """Join one Docker group observation with independently fenced members."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            group = await conn.fetchrow(
+                """
+                SELECT * FROM agent_sandboxes
+                WHERE id = $1 AND origin_thread_id = $2 AND host = $3
+                  AND generation = $4 AND mode = 'shared_live'
+                FOR UPDATE
+                """,
+                sandbox_id,
+                thread_id,
+                host,
+                sandbox_generation,
+            )
+            if group is None:
+                return None
+            if group["container_id"] not in {None, container_id}:
+                return None
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET container_id = COALESCE(container_id, $2), updated_at = NOW()
+                WHERE id = $1
+                """,
+                sandbox_id,
+                container_id,
+            )
+            for member in members[:128]:
+                member_thread = str(member.get("thread_id") or "")
+                if not member_thread:
+                    continue
+                observed_activation = int(member.get("activation_generation") or 0)
+                observed_process = int(member.get("process_generation") or 0)
+                observed_residency = int(member.get("residency_generation") or 0)
+                resident_state = str(member.get("resident_state") or "stopped")
+                if resident_state not in {"stopped", "starting", "live", "restarting", "lost"}:
+                    continue
+                # A heartbeat may confirm an equal/newer local process state,
+                # but cannot move a durable activation fence backwards or
+                # overwrite a process belonging to a newer residency.
+                await conn.execute(
+                    """
+                    UPDATE agent_thread_sandbox_memberships
+                    SET process_generation = CASE
+                            WHEN native_state = 'lost' OR context_status = 'lost'
+                                THEN process_generation
+                            ELSE GREATEST(process_generation, $3)
+                        END,
+                        resident_state = CASE
+                            WHEN native_state = 'lost' OR context_status = 'lost'
+                                THEN 'lost'
+                            WHEN residency_generation <= $4
+                             AND process_generation <= $3
+                             AND activation_generation <= $2 THEN $5
+                            ELSE resident_state
+                        END,
+                        updated_at = NOW()
+                    WHERE thread_id = $1 AND sandbox_id = $6
+                    """,
+                    member_thread,
+                    observed_activation,
+                    observed_process,
+                    observed_residency,
+                    resident_state,
+                    sandbox_id,
+                )
+
+            active_member = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM agent_thread_sandbox_memberships
+                    WHERE sandbox_id = $1 AND active_attempt_id IS NOT NULL
+                )
+                """,
+                sandbox_id,
+            )
+            # A host heartbeat is an observation sampled before this database
+            # transaction.  It may say "locally idle" just before a native
+            # fork/snapshot coordinator increments its durable operation
+            # fence.  Never let that stale sample re-arm an idle deadline in
+            # the middle of the externally visible mutation.
+            durable_activity = (
+                bool(active_member)
+                or int(group["active_operation_count"]) > 0
+                or (group["snapshot_state"] == "snapshotting")
+            )
+            if running:
+                deadline_sql = "idle_deadline"
+                deadline_arg: float | None = None
+                if activity_active is True or durable_activity:
+                    deadline_sql = "NULL"
+                elif activity_active is False and idle_remaining_seconds is not None:
+                    deadline_sql = "NOW() + make_interval(secs => $2)"
+                    deadline_arg = idle_remaining_seconds
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE agent_sandboxes
+                    SET state = 'running', idle_deadline = {deadline_sql},
+                        updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING state
+                    """,
+                    *((sandbox_id, deadline_arg) if deadline_arg is not None else (sandbox_id,)),
+                )
+                return None if row is None else str(row["state"])
+
+            if active_member:
+                return None
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_sandboxes
+                SET state = 'stopped', idle_deadline = NULL, updated_at = NOW()
+                WHERE id = $1 AND (
+                    state IN ('stopping', 'stopped_dirty', 'lost')
+                    OR (state = 'running' AND idle_deadline IS NOT NULL
+                        AND idle_deadline <= NOW())
+                )
+                RETURNING state
+                """,
+                sandbox_id,
+            )
+            if row is None:
+                return None
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET resident_state = CASE
+                        WHEN native_state = 'lost' THEN 'lost' ELSE 'stopped' END,
+                    updated_at = NOW()
+                WHERE sandbox_id = $1
+                """,
+                sandbox_id,
+            )
+            return None if row is None else str(row["state"])
+
     async def due_thread_sandbox_stop(
         self,
         *,
@@ -3972,8 +5652,43 @@ class AgentJobStore:
         sandbox_id: str,
         container_id: str,
         sandbox_generation: int,
+        shared_live: bool = False,
     ) -> dict[str, Any] | None:
         """Return an exact fence for a due idle or failed-attempt stop."""
+        if shared_live:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT origin_thread_id AS thread_id, generation,
+                           0::bigint AS activation_generation,
+                           CASE
+                               WHEN state IN ('stopped_dirty', 'lost') THEN 'lost'
+                               WHEN state = 'stopping' THEN 'orphaned_attempt'
+                               ELSE 'idle'
+                           END AS reason,
+                           TRUE AS shared_live
+                    FROM agent_sandboxes g
+                    WHERE g.id = $1 AND g.origin_thread_id = $2 AND g.host = $3
+                      AND g.container_id = $4 AND g.generation = $5
+                      AND g.active_operation_count = 0
+                      AND g.snapshot_state <> 'snapshotting'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM agent_thread_sandbox_memberships m
+                          WHERE m.sandbox_id = g.id AND m.active_attempt_id IS NOT NULL
+                      )
+                      AND (
+                            (state = 'running' AND idle_deadline IS NOT NULL
+                                AND idle_deadline <= NOW())
+                            OR state IN ('stopping', 'stopped_dirty', 'lost')
+                      )
+                    """,
+                    sandbox_id,
+                    thread_id,
+                    host,
+                    container_id,
+                    sandbox_generation,
+                )
+            return None if row is None else dict(row)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -3982,7 +5697,7 @@ class AgentJobStore:
                            WHEN state IN ('stopped_dirty', 'lost') THEN 'lost'
                            WHEN state = 'stopping' THEN 'orphaned_attempt'
                            ELSE 'idle'
-                       END AS reason
+                       END AS reason, FALSE AS shared_live
                 FROM agent_thread_sandboxes
                 WHERE thread_id = $1 AND host = $2 AND sandbox_id = $3
                   AND container_id = $4 AND generation = $5
@@ -4018,6 +5733,76 @@ class AgentJobStore:
         # activations stop immediately and therefore never arm settled-idle.
         _ = idle_timeout_seconds
         async with self._pool.acquire() as conn, conn.transaction():
+            shared = await conn.fetchrow(
+                """
+                UPDATE agent_thread_sandbox_memberships m
+                SET active_attempt_id = NULL,
+                    context_status = CASE WHEN $6 THEN 'lost' ELSE m.context_status END,
+                    native_state = CASE WHEN $6 THEN 'lost' ELSE m.native_state END,
+                    resident_state = CASE WHEN $6 THEN 'lost' ELSE 'restarting' END,
+                    last_error = $7, updated_at = NOW()
+                FROM agent_sandboxes g, agent_attempts a
+                WHERE m.thread_id = $1 AND g.id = m.sandbox_id
+                  AND g.mode = 'shared_live' AND g.generation = $4
+                  AND m.activation_generation = $5
+                  AND m.active_attempt_id = $2
+                  AND (
+                        ($6 AND (m.admitted_job_id IS NULL OR m.admitted_job_id = a.job_id))
+                        OR (NOT $6 AND m.admitted_job_id IS NULL)
+                  )
+                  AND a.id = $2 AND a.lease_generation = $3
+                RETURNING m.sandbox_id
+                """,
+                thread_id,
+                attempt_id,
+                lease_generation,
+                sandbox_generation,
+                activation_generation,
+                lost,
+                detail,
+            )
+            if shared is not None:
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes g
+                    SET state = CASE WHEN g.container_id IS NULL
+                                     THEN 'provisioning' ELSE 'running' END,
+                        last_activity_at = NOW(),
+                        idle_timeout_seconds = $2,
+                        idle_deadline = CASE
+                            WHEN g.container_id IS NOT NULL
+                             AND g.active_operation_count = 0
+                             AND NOT EXISTS (
+                                SELECT 1
+                                FROM agent_thread_sandbox_memberships peer
+                                WHERE peer.sandbox_id = g.id
+                                  AND peer.active_attempt_id IS NOT NULL
+                             )
+                            THEN NOW() + make_interval(secs => $2)
+                            ELSE NULL
+                        END,
+                        last_error = CASE WHEN $3 THEN $4 ELSE g.last_error END,
+                        updated_at = NOW()
+                    WHERE g.id = $1
+                    """,
+                    shared["sandbox_id"],
+                    idle_timeout_seconds,
+                    lost,
+                    detail,
+                )
+                if lost:
+                    await conn.execute(
+                        "UPDATE agent_attempts SET context_status = 'lost' "
+                        "WHERE id = $1 AND lease_generation = $2",
+                        attempt_id,
+                        lease_generation,
+                    )
+                    await self._fail_unrunnable_follow_ups(conn, thread_id=thread_id)
+                current = await conn.fetchrow(
+                    f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+                    thread_id,
+                )
+                return None if current is None else _sandbox_row_to_dict(current)
             row = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandboxes s
@@ -4069,10 +5854,14 @@ class AgentJobStore:
         """Return the durable local sandbox mapping, including STOPPED/LOST."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM agent_thread_sandboxes WHERE thread_id = $1",
+                f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread_id,
             )
-        return None if row is None else dict(row)
+        if row is None:
+            return None
+        result = dict(row)
+        result["group_members"] = _load_json(result.get("group_members")) or []
+        return result
 
     # ── Thread residency (design §7, issue #57) ────────────────────────
     #
@@ -4229,6 +6018,61 @@ class AgentJobStore:
                 host,
             )
 
+    async def release_shared_residency_if_quiescent(
+        self,
+        *,
+        thread_id: str,
+        generation: int,
+        process_generation: int,
+        host: str,
+        sandbox_id: str,
+    ) -> str | None:
+        """Release a stopped shared member unless a durable transition owns it.
+
+        A host observation is sampled before its heartbeat transaction. Native
+        Fork can rotate and mint a new residency after that sample but before
+        the heartbeat reaches this method. The group's durable operation fence,
+        member attempt, and observed process generation therefore participate
+        in the same UPDATE that releases the grant. The membership must also
+        have accepted the stopped/lost observation; checking any of these in
+        Python would recreate the revoke-after-mint race this method exists to
+        prevent.
+        """
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                UPDATE agent_thread_residencies r
+                SET status = 'none', last_active_at = NOW()
+                WHERE r.thread_id = $1 AND r.generation = $2
+                  AND r.host = $3 AND r.sandbox_id = $4
+                  AND r.status <> 'none'
+                  AND EXISTS (
+                      SELECT 1 FROM agent_thread_sandbox_memberships m
+                      WHERE m.thread_id = $1 AND m.sandbox_id = $4
+                        AND m.residency_generation = $2
+                        AND m.process_generation <= $5
+                        AND m.resident_state IN ('stopped', 'lost')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_sandboxes g
+                      WHERE g.id = $4
+                        AND (g.active_operation_count > 0
+                             OR g.snapshot_state = 'snapshotting')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_thread_sandbox_memberships m
+                      WHERE m.thread_id = $1 AND m.sandbox_id = $4
+                        AND m.active_attempt_id IS NOT NULL
+                  )
+                RETURNING COALESCE(r.grant_id, '')
+                """,
+                thread_id,
+                generation,
+                host,
+                sandbox_id,
+                process_generation,
+            )
+
     async def record_residency_checkpoint(
         self, *, thread_id: str, generation: int, turn_id: str
     ) -> bool:
@@ -4373,6 +6217,248 @@ class AgentJobStore:
                 )
             return state
 
+    # ── Shared-workspace snapshot coordination ─────────────────────────
+
+    async def claim_due_sandbox_snapshot(self) -> dict[str, Any] | None:
+        """Fence one quiescent shared workspace for bounded patch capture.
+
+        This claim never waits for publication and never changes a job state.
+        The host revalidates quiescence against its live operation ledger; a
+        turn that entered between this transaction and the broker call simply
+        makes the capture retry later.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT s.id AS snapshot_id, s.sandbox_id, s.workspace_epoch,
+                       s.anchor_job_id, s.base_sha, g.generation,
+                       g.origin_thread_id, g.container_id, g.container_name,
+                       g.runtime_id, g.runtime_version, g.sandbox_image_digest,
+                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.resident_slot_capacity,
+                       COALESCE((
+                           SELECT jsonb_agg(
+                               jsonb_build_object(
+                                   'thread_id', m.thread_id,
+                                   'native_session_id', m.native_session_id,
+                                   'context_status', m.context_status,
+                                   'activation_generation', m.activation_generation,
+                                   'process_generation', m.process_generation,
+                                   'residency_generation', m.residency_generation,
+                                   'resident_state', m.resident_state,
+                                   'resident_slot_id', m.resident_slot_id,
+                                   'last_settled_job_id', m.last_settled_job_id
+                               ) ORDER BY m.created_at, m.thread_id
+                           )
+                           FROM agent_thread_sandbox_memberships m
+                           WHERE m.sandbox_id = g.id
+                       ), '[]'::jsonb) AS members
+                FROM agent_sandbox_snapshots s
+                JOIN agent_sandboxes g ON g.id = s.sandbox_id
+                WHERE s.state = 'pending'
+                  AND g.mode = 'shared_live'
+                  AND g.state = 'running'
+                  AND g.snapshot_state = 'pending'
+                  AND g.active_operation_count = 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_thread_sandbox_memberships active
+                      WHERE active.sandbox_id = g.id
+                        AND active.active_attempt_id IS NOT NULL
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements_text(s.included_job_ids) included(job_id)
+                      JOIN agent_jobs included_job ON included_job.id = included.job_id
+                      WHERE included_job.state NOT IN ('succeeded', 'failed', 'cancelled')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_sandbox_snapshots prior
+                      WHERE prior.sandbox_id = s.sandbox_id
+                        AND prior.workspace_epoch < s.workspace_epoch
+                        AND prior.state <> 'published'
+                  )
+                ORDER BY s.created_at, s.id
+                LIMIT 1
+                FOR UPDATE OF s, g SKIP LOCKED
+                """
+            )
+            if row is None:
+                return None
+            captured = await conn.fetchval(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = 'capturing', last_error = NULL, updated_at = NOW()
+                WHERE id = $1 AND state = 'pending'
+                RETURNING id
+                """,
+                row["snapshot_id"],
+            )
+            if captured is None:
+                return None
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET snapshot_state = 'snapshotting', idle_deadline = NULL,
+                    updated_at = NOW()
+                WHERE id = $1 AND snapshot_state = 'pending'
+                """,
+                row["sandbox_id"],
+            )
+        result = dict(row)
+        result["members"] = _load_json(result.get("members")) or []
+        return result
+
+    async def record_sandbox_snapshot_capture(
+        self,
+        *,
+        snapshot_id: int,
+        sandbox_id: str,
+        workspace_epoch: int,
+        base_sha: str,
+        patch: str,
+        content_sha256: str,
+    ) -> str | None:
+        """Store one immutable broker receipt and release the capture barrier.
+
+        Returns ``captured`` or ``published`` (for an empty no-op snapshot),
+        and ``None`` for a stale/mismatched receipt.
+        """
+        digest = hashlib.sha256(patch.encode("utf-8")).hexdigest()
+        if not secrets.compare_digest(digest, content_sha256):
+            raise ValueError("sandbox snapshot content hash does not match its patch")
+        async with self._pool.acquire() as conn, conn.transaction():
+            state = "captured" if patch.strip() else "published"
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET patch_content = $5, content_sha256 = $6, state = $7,
+                    published_commit_sha = CASE WHEN $7 = 'published' THEN base_sha END,
+                    captured_at = NOW(),
+                    published_at = CASE WHEN $7 = 'published' THEN NOW() END,
+                    last_error = NULL, updated_at = NOW()
+                WHERE id = $1 AND sandbox_id = $2 AND workspace_epoch = $3
+                  AND base_sha = $4 AND state = 'capturing'
+                RETURNING sandbox_id
+                """,
+                snapshot_id,
+                sandbox_id,
+                workspace_epoch,
+                base_sha,
+                patch,
+                content_sha256,
+                state,
+            )
+            if row is None:
+                return None
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes g
+                SET state = 'running',
+                    snapshot_state = CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM agent_sandbox_snapshots pending
+                            WHERE pending.sandbox_id = g.id AND pending.state = 'pending'
+                        ) THEN 'pending' ELSE 'quiescent' END,
+                    idle_deadline = CASE
+                        WHEN g.active_operation_count = 0
+                         AND NOT EXISTS (
+                            SELECT 1 FROM agent_thread_sandbox_memberships active
+                            WHERE active.sandbox_id = g.id
+                              AND active.active_attempt_id IS NOT NULL
+                         )
+                        THEN NOW() + make_interval(secs => g.idle_timeout_seconds)
+                        ELSE NULL END,
+                    updated_at = NOW()
+                WHERE g.id = $1 AND g.snapshot_state = 'snapshotting'
+                """,
+                sandbox_id,
+            )
+        return state
+
+    async def defer_sandbox_snapshot_capture(
+        self,
+        *,
+        snapshot_id: int,
+        detail: str,
+        dirty: bool = False,
+    ) -> bool:
+        """Release a failed host capture; busy retries, unsafe census dirties."""
+        next_state = "failed" if dirty else "pending"
+        group_state = "dirty" if dirty else "pending"
+        async with self._pool.acquire() as conn, conn.transaction():
+            sandbox_id = await conn.fetchval(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = $2, last_error = $3, updated_at = NOW()
+                WHERE id = $1 AND state = 'capturing'
+                RETURNING sandbox_id
+                """,
+                snapshot_id,
+                next_state,
+                detail[:2000],
+            )
+            if sandbox_id is None:
+                return False
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET snapshot_state = $2,
+                    idle_deadline = CASE WHEN active_operation_count = 0
+                         AND NOT EXISTS (
+                            SELECT 1 FROM agent_thread_sandbox_memberships active
+                            WHERE active.sandbox_id = agent_sandboxes.id
+                              AND active.active_attempt_id IS NOT NULL
+                         )
+                        THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                        ELSE NULL END,
+                    last_error = CASE WHEN $2 = 'dirty' THEN $3 ELSE last_error END,
+                    updated_at = NOW()
+                WHERE id = $1 AND snapshot_state = 'snapshotting'
+                """,
+                sandbox_id,
+                group_state,
+                detail[:2000],
+            )
+        return True
+
+    async def reap_stalled_sandbox_snapshot_captures(
+        self, *, stall_seconds: float = 300.0
+    ) -> list[int]:
+        """Return abandoned CAPTURING claims to the retryable pending queue."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = 'pending',
+                    last_error = 'snapshot coordinator stopped during capture',
+                    updated_at = NOW()
+                WHERE state = 'capturing'
+                  AND updated_at < NOW() - make_interval(secs => $1)
+                RETURNING id, sandbox_id
+                """,
+                stall_seconds,
+            )
+            if rows:
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes
+                    SET snapshot_state = 'pending',
+                        idle_deadline = CASE
+                            WHEN active_operation_count = 0
+                             AND NOT EXISTS (
+                                SELECT 1 FROM agent_thread_sandbox_memberships active
+                                WHERE active.sandbox_id = agent_sandboxes.id
+                                  AND active.active_attempt_id IS NOT NULL
+                             )
+                            THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                            ELSE NULL END,
+                        updated_at = NOW()
+                    WHERE id = ANY($1::text[]) AND snapshot_state = 'snapshotting'
+                    """,
+                    [row["sandbox_id"] for row in rows],
+                )
+        return [int(row["id"]) for row in rows]
+
     # ── Platform-side publishing ───────────────────────────────────────
     #
     # Publishing is driven by the trusted server, not by the worker: the
@@ -4383,7 +6469,7 @@ class AgentJobStore:
     # gateway processes can run the publisher loop without double-publishing.
 
     async def claim_for_publish(self) -> dict[str, Any] | None:
-        """Take one finished job that has a patch and no PR yet.
+        """Take one immutable shared snapshot or finished legacy job.
 
         Marks it ``publishing`` in the same transaction, so a second publisher
         cannot pick it up. The thread lock is shared with retained-fork
@@ -4392,6 +6478,117 @@ class AgentJobStore:
         overlap. Returns the job plus its patch, or ``None``.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            snapshot = await conn.fetchrow(
+                """
+                SELECT s.id AS snapshot_id, s.sandbox_id, s.workspace_epoch,
+                       s.anchor_job_id AS id, s.base_sha, s.patch_content AS patch,
+                       s.included_job_ids, g.origin_thread_id,
+                       g.generation, g.container_id, g.runtime_id,
+                       g.runtime_version, g.sandbox_image_digest,
+                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.resident_slot_capacity,
+                       COALESCE((
+                           SELECT jsonb_agg(
+                               jsonb_build_object(
+                                   'thread_id', member.thread_id,
+                                   'native_session_id', member.native_session_id,
+                                   'context_status', member.context_status,
+                                   'activation_generation', member.activation_generation,
+                                   'process_generation', member.process_generation,
+                                   'residency_generation', member.residency_generation,
+                                   'resident_state', member.resident_state,
+                                   'resident_slot_id', member.resident_slot_id,
+                                   'last_settled_job_id', member.last_settled_job_id
+                               ) ORDER BY member.created_at, member.thread_id
+                           )
+                           FROM agent_thread_sandbox_memberships member
+                           WHERE member.sandbox_id = g.id
+                       ), '[]'::jsonb) AS members,
+                       j.thread_id, j.parent_job_id, j.user_id, j.repo,
+                       j.task_prompt, j.metadata,
+                       prior.published_pr_url AS parent_pr_url
+                FROM agent_sandbox_snapshots s
+                JOIN agent_sandboxes g ON g.id = s.sandbox_id
+                JOIN agent_jobs j ON j.id = s.anchor_job_id
+                LEFT JOIN LATERAL (
+                    SELECT previous.published_pr_url
+                    FROM agent_sandbox_snapshots previous
+                    WHERE previous.sandbox_id = s.sandbox_id
+                      AND previous.published_pr_url IS NOT NULL
+                    ORDER BY previous.workspace_epoch DESC
+                    LIMIT 1
+                ) prior ON TRUE
+                WHERE s.state = 'captured'
+                  AND s.patch_content IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_sandbox_snapshots earlier
+                      WHERE earlier.sandbox_id = s.sandbox_id
+                        AND earlier.workspace_epoch < s.workspace_epoch
+                        AND earlier.state <> 'published'
+                  )
+                ORDER BY s.created_at, s.id
+                LIMIT 1
+                FOR UPDATE OF s SKIP LOCKED
+                """
+            )
+            if snapshot is not None:
+                claimed = await conn.fetchval(
+                    """
+                    UPDATE agent_sandbox_snapshots
+                    SET state = 'publishing', last_error = NULL, updated_at = NOW()
+                    WHERE id = $1 AND state = 'captured'
+                    RETURNING id
+                    """,
+                    snapshot["snapshot_id"],
+                )
+                if claimed is None:
+                    return None
+                attempt_id = await conn.fetchval(
+                    "SELECT current_attempt_id FROM agent_jobs WHERE id = $1",
+                    snapshot["id"],
+                )
+                if attempt_id is not None:
+                    await self._insert_event(
+                        conn,
+                        job_id=snapshot["id"],
+                        attempt_id=attempt_id,
+                        event_type="lifecycle",
+                        payload={
+                            "phase": "shared_snapshot_publishing",
+                            "snapshot_id": snapshot["snapshot_id"],
+                            "workspace_epoch": snapshot["workspace_epoch"],
+                        },
+                    )
+                return {
+                    "publication_kind": "shared_snapshot",
+                    "snapshot_id": int(snapshot["snapshot_id"]),
+                    "sandbox_id": snapshot["sandbox_id"],
+                    "workspace_epoch": int(snapshot["workspace_epoch"]),
+                    "included_job_ids": _load_json(snapshot["included_job_ids"]) or [],
+                    "job_id": snapshot["id"],
+                    "anchor_job_id": snapshot["id"],
+                    "thread_id": snapshot["thread_id"],
+                    "branch_id": snapshot["origin_thread_id"],
+                    "origin_thread_id": snapshot["origin_thread_id"],
+                    "generation": int(snapshot["generation"]),
+                    "container_id": snapshot["container_id"],
+                    "runtime_id": snapshot["runtime_id"],
+                    "runtime_version": snapshot["runtime_version"],
+                    "sandbox_image_digest": snapshot["sandbox_image_digest"],
+                    "memory_limit": snapshot["memory_limit"],
+                    "cpu_limit": snapshot["cpu_limit"],
+                    "stop_timeout_seconds": int(snapshot["stop_timeout_seconds"]),
+                    "resident_slot_capacity": int(snapshot["resident_slot_capacity"]),
+                    "members": _load_json(snapshot["members"]) or [],
+                    "parent_job_id": snapshot["parent_job_id"],
+                    "parent_pr_url": snapshot["parent_pr_url"],
+                    "user_id": snapshot["user_id"],
+                    "repo": snapshot["repo"],
+                    "base_sha": snapshot["base_sha"],
+                    "task_prompt": snapshot["task_prompt"],
+                    "metadata": _load_json(snapshot["metadata"]),
+                    "patch": snapshot["patch"],
+                }
             row = await conn.fetchrow(
                 """
                 SELECT j.id, j.thread_id, j.parent_job_id, j.user_id, j.repo, j.base_sha,
@@ -4411,6 +6608,14 @@ class AgentJobStore:
                 ) thread_publish ON TRUE
                 WHERE j.state = 'succeeded'
                   AND j.published_pr_url IS NULL
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM agent_thread_sandbox_memberships member
+                        JOIN agent_sandboxes shared_group
+                          ON shared_group.id = member.sandbox_id
+                        WHERE member.thread_id = j.thread_id
+                          AND shared_group.mode = 'shared_live'
+                  )
                   AND NOT EXISTS (
                         SELECT 1 FROM agent_thread_sandboxes s
                         WHERE s.thread_id = j.thread_id
@@ -4442,6 +6647,7 @@ class AgentJobStore:
                 payload={"phase": "publishing"},
             )
         return {
+            "publication_kind": "job_patch",
             "job_id": row["id"],
             "thread_id": row["thread_id"],
             "parent_job_id": row["parent_job_id"],
@@ -4497,6 +6703,244 @@ class AgentJobStore:
                 commit_sha,
             )
         return True
+
+    async def record_snapshot_publish(
+        self,
+        *,
+        snapshot_id: int,
+        pr_url: str,
+        commit_sha: str,
+    ) -> bool:
+        """Advance one group lineage and wait for object-only base import.
+
+        Included Agent turns stay succeeded throughout.  Publication is a
+        group artifact and must never rewrite a successful model turn as a
+        failure merely because GitHub or the broker was unavailable later.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = 'published', published_pr_url = $2,
+                    published_commit_sha = $3, published_at = NOW(),
+                    last_error = NULL, updated_at = NOW()
+                WHERE id = $1 AND state = 'publishing'
+                RETURNING sandbox_id, anchor_job_id, included_job_ids
+                """,
+                snapshot_id,
+                pr_url,
+                commit_sha,
+            )
+            if row is None:
+                return False
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET published_base_sha = $2, snapshot_state = 'importing',
+                    idle_deadline = NULL, updated_at = NOW()
+                WHERE id = $1
+                """,
+                row["sandbox_id"],
+                commit_sha,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET base_sha = $2, updated_at = NOW()
+                WHERE sandbox_id = $1 AND state = 'pending'
+                """,
+                row["sandbox_id"],
+                commit_sha,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_jobs
+                SET published_pr_url = COALESCE(published_pr_url, $2),
+                    published_commit_sha = COALESCE(published_commit_sha, $3),
+                    updated_at = NOW()
+                WHERE id IN (
+                    SELECT jsonb_array_elements_text($1::jsonb)
+                ) AND state = 'succeeded'
+                """,
+                json.dumps(_load_json(row["included_job_ids"]) or []),
+                pr_url,
+                commit_sha,
+            )
+            attempt_id = await conn.fetchval(
+                "SELECT current_attempt_id FROM agent_jobs WHERE id = $1",
+                row["anchor_job_id"],
+            )
+            if attempt_id is not None:
+                await self._insert_event(
+                    conn,
+                    job_id=row["anchor_job_id"],
+                    attempt_id=attempt_id,
+                    event_type="lifecycle",
+                    payload={
+                        "phase": "shared_snapshot_published",
+                        "snapshot_id": snapshot_id,
+                        "pr_url": pr_url,
+                    },
+                )
+        return True
+
+    async def fail_snapshot_publish(self, *, snapshot_id: int, detail: str) -> None:
+        """Retain a rejected group artifact without failing included turns."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = 'failed', last_error = $2, updated_at = NOW()
+                WHERE id = $1 AND state = 'publishing'
+                RETURNING sandbox_id, anchor_job_id
+                """,
+                snapshot_id,
+                detail[:2000],
+            )
+            if row is None:
+                return
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET snapshot_state = 'dirty', last_error = $2,
+                    idle_deadline = CASE
+                        WHEN active_operation_count = 0
+                         AND NOT EXISTS (
+                            SELECT 1 FROM agent_thread_sandbox_memberships active
+                            WHERE active.sandbox_id = agent_sandboxes.id
+                              AND active.active_attempt_id IS NOT NULL
+                         )
+                        THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                        ELSE NULL END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                row["sandbox_id"],
+                detail[:2000],
+            )
+            attempt_id = await conn.fetchval(
+                "SELECT current_attempt_id FROM agent_jobs WHERE id = $1",
+                row["anchor_job_id"],
+            )
+            if attempt_id is not None:
+                await self._insert_event(
+                    conn,
+                    job_id=row["anchor_job_id"],
+                    attempt_id=attempt_id,
+                    event_type="error",
+                    payload={
+                        "phase": "shared_snapshot_publish_rejected",
+                        "snapshot_id": snapshot_id,
+                        "detail": detail[:2000],
+                    },
+                )
+
+    async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
+        """Return one published group commit whose object import is pending."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT latest.id AS snapshot_id, latest.sandbox_id,
+                       latest.anchor_job_id, latest.published_commit_sha,
+                       g.origin_thread_id, g.generation, g.container_id,
+                       g.runtime_id, g.runtime_version, g.sandbox_image_digest,
+                       g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
+                       g.resident_slot_capacity, j.repo, j.user_id,
+                       COALESCE((
+                           SELECT jsonb_agg(
+                               jsonb_build_object(
+                                   'thread_id', member.thread_id,
+                                   'native_session_id', member.native_session_id,
+                                   'context_status', member.context_status,
+                                   'activation_generation', member.activation_generation,
+                                   'process_generation', member.process_generation,
+                                   'residency_generation', member.residency_generation,
+                                   'resident_state', member.resident_state,
+                                   'resident_slot_id', member.resident_slot_id,
+                                   'last_settled_job_id', member.last_settled_job_id
+                               ) ORDER BY member.created_at, member.thread_id
+                           )
+                           FROM agent_thread_sandbox_memberships member
+                           WHERE member.sandbox_id = g.id
+                       ), '[]'::jsonb) AS members
+                FROM agent_sandboxes g
+                JOIN LATERAL (
+                    SELECT s.id, s.sandbox_id, s.anchor_job_id,
+                           s.published_commit_sha
+                    FROM agent_sandbox_snapshots s
+                    WHERE s.sandbox_id = g.id AND s.state = 'published'
+                      AND s.published_commit_sha = g.published_base_sha
+                    ORDER BY s.workspace_epoch DESC
+                    LIMIT 1
+                ) latest ON TRUE
+                JOIN agent_jobs j ON j.id = latest.anchor_job_id
+                WHERE g.mode = 'shared_live' AND g.snapshot_state = 'importing'
+                ORDER BY g.updated_at
+                LIMIT 1
+                """
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        result["members"] = _load_json(result.get("members")) or []
+        return result
+
+    async def complete_snapshot_base_import(self, *, snapshot_id: int, commit_sha: str) -> bool:
+        """Acknowledge that the exact published commit resolves in Docker."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            sandbox_id = await conn.fetchval(
+                """
+                SELECT sandbox_id FROM agent_sandbox_snapshots
+                WHERE id = $1 AND state = 'published'
+                  AND published_commit_sha = $2
+                FOR UPDATE
+                """,
+                snapshot_id,
+                commit_sha,
+            )
+            if sandbox_id is None:
+                return False
+            updated = await conn.fetchval(
+                """
+                UPDATE agent_sandboxes g
+                SET state = 'running',
+                    snapshot_state = CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM agent_sandbox_snapshots pending
+                            WHERE pending.sandbox_id = g.id AND pending.state = 'pending'
+                        ) THEN 'pending' ELSE 'quiescent' END,
+                    last_error = NULL,
+                    idle_deadline = CASE
+                        WHEN g.active_operation_count = 0
+                         AND NOT EXISTS (
+                            SELECT 1 FROM agent_thread_sandbox_memberships active
+                            WHERE active.sandbox_id = g.id
+                              AND active.active_attempt_id IS NOT NULL
+                         )
+                        THEN NOW() + make_interval(secs => g.idle_timeout_seconds)
+                        ELSE NULL END,
+                    updated_at = NOW()
+                WHERE g.id = $1 AND g.snapshot_state = 'importing'
+                  AND g.published_base_sha = $2
+                RETURNING g.id
+                """,
+                sandbox_id,
+                commit_sha,
+            )
+        return updated is not None
+
+    async def record_snapshot_base_import_failure(self, *, snapshot_id: int, detail: str) -> None:
+        """Keep an idempotent import retry visible without losing the commit."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET last_error = $2, updated_at = NOW()
+                WHERE id = $1 AND state = 'published'
+                """,
+                snapshot_id,
+                detail[:2000],
+            )
 
     async def fail_publish(self, *, job_id: str, detail: str) -> None:
         """Mark a job whose patch could not be published.
@@ -4576,6 +7020,44 @@ class AgentJobStore:
                 )
         return [row["id"] for row in rows]
 
+    async def reap_stalled_snapshot_publishes(self, *, stall_seconds: float = 900.0) -> list[int]:
+        """Fail ambiguous shared publishes without changing Agent turn state."""
+        detail = "the publisher stopped before finishing; manual review required"
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = 'failed', last_error = $2, updated_at = NOW()
+                WHERE state = 'publishing'
+                  AND published_pr_url IS NULL
+                  AND updated_at < NOW() - make_interval(secs => $1)
+                RETURNING id, sandbox_id
+                """,
+                stall_seconds,
+                detail,
+            )
+            if rows:
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes
+                    SET snapshot_state = 'dirty', last_error = $2,
+                        idle_deadline = CASE
+                            WHEN active_operation_count = 0
+                             AND NOT EXISTS (
+                                SELECT 1 FROM agent_thread_sandbox_memberships active
+                                WHERE active.sandbox_id = agent_sandboxes.id
+                                  AND active.active_attempt_id IS NOT NULL
+                             )
+                            THEN NOW() + make_interval(secs => idle_timeout_seconds)
+                            ELSE NULL END,
+                        updated_at = NOW()
+                    WHERE id = ANY($1::text[])
+                    """,
+                    [row["sandbox_id"] for row in rows],
+                    detail,
+                )
+        return [int(row["id"]) for row in rows]
+
     async def reap_expired(self, *, max_attempts: int = 3) -> list[dict[str, Any]]:
         """Close expired attempts and requeue (or fail) their jobs.
 
@@ -4596,11 +7078,23 @@ class AgentJobStore:
                        s.thread_id AS sandbox_thread_id,
                        s.active_attempt_id AS sandbox_active_attempt_id,
                        s.admitted_job_id AS sandbox_admitted_job_id,
-                       s.last_settled_job_id AS sandbox_last_settled_job_id
+                       s.last_settled_job_id AS sandbox_last_settled_job_id,
+                       shared_member.thread_id AS shared_sandbox_thread_id,
+                       shared_member.sandbox_id AS shared_sandbox_id,
+                       shared_member.active_attempt_id AS shared_active_attempt_id,
+                       shared_member.admitted_job_id AS shared_admitted_job_id,
+                       shared_member.last_settled_job_id AS shared_last_settled_job_id,
+                       shared_member.residency_generation AS shared_residency_generation
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
                 LEFT JOIN agent_thread_sandboxes s
                   ON s.thread_id = j.thread_id
+                LEFT JOIN (
+                    agent_thread_sandbox_memberships shared_member
+                    JOIN agent_sandboxes shared_group
+                      ON shared_group.id = shared_member.sandbox_id
+                     AND shared_group.mode = 'shared_live'
+                ) ON shared_member.thread_id = j.thread_id
                 WHERE a.status = 'running' AND a.lease_expires_at < NOW()
                 ORDER BY a.id
                 FOR UPDATE OF a, j SKIP LOCKED
@@ -4626,17 +7120,35 @@ class AgentJobStore:
                     event_type=EVENT_ATTEMPT_SUPERSEDED,
                     payload={"attempt_no": row["attempt_no"], "reason": "lease_expired"},
                 )
-                settled_retained_turn = row["sandbox_last_settled_job_id"] == job_id
-                admitted_ambiguously = (
-                    row["sandbox_admitted_job_id"] == job_id and not settled_retained_turn
+                shared_live = row["shared_sandbox_thread_id"] is not None
+                sandbox_thread_id = (
+                    row["shared_sandbox_thread_id"] if shared_live else row["sandbox_thread_id"]
                 )
-                owns_retained_activation = row["sandbox_active_attempt_id"] == attempt_id
+                sandbox_active_attempt_id = (
+                    row["shared_active_attempt_id"]
+                    if shared_live
+                    else row["sandbox_active_attempt_id"]
+                )
+                sandbox_admitted_job_id = (
+                    row["shared_admitted_job_id"] if shared_live else row["sandbox_admitted_job_id"]
+                )
+                sandbox_last_settled_job_id = (
+                    row["shared_last_settled_job_id"]
+                    if shared_live
+                    else row["sandbox_last_settled_job_id"]
+                )
+                settled_retained_turn = sandbox_last_settled_job_id == job_id
+                admitted_ambiguously = (
+                    sandbox_admitted_job_id == job_id and not settled_retained_turn
+                )
+                owns_retained_activation = sandbox_active_attempt_id == attempt_id
                 retained_activation_expired = (
                     admitted_ambiguously or owns_retained_activation
                 ) and not settled_retained_turn
                 settled_finalization_expired = (
-                    settled_retained_turn and row["sandbox_admitted_job_id"] == job_id
+                    settled_retained_turn and sandbox_admitted_job_id == job_id
                 )
+                cleanup_residency: dict[str, Any] | None = None
                 if retained_activation_expired:
                     # The admission receipt identifies a definitely ambiguous
                     # prompt. Even before admission, an expired runner may
@@ -4645,44 +7157,120 @@ class AgentJobStore:
                     # expired retained activations closed instead of guessing
                     # that a retry is safe; ordinary CLI/process replacement
                     # at a clean turn boundary remains supported.
-                    await conn.execute(
-                        """
-                        UPDATE agent_thread_sandboxes
-                        SET state = 'stopped_dirty',
-                            context_status = 'lost',
-                            active_attempt_id = CASE
-                                WHEN active_attempt_id = $2 THEN NULL
-                                ELSE active_attempt_id
-                            END,
-                            admitted_job_id = CASE
-                                WHEN admitted_job_id = $1 THEN NULL
-                                ELSE admitted_job_id
-                            END,
-                            admitted_at = CASE
-                                WHEN admitted_job_id = $1 THEN NULL
-                                ELSE admitted_at
-                            END,
-                            idle_deadline = NULL,
-                            last_error = CASE
-                                WHEN admitted_job_id = $1
-                                    THEN 'attempt lease expired after prompt admission'
-                                ELSE 'retained activation lease expired'
-                            END,
-                            updated_at = NOW()
-                        WHERE thread_id = $3
-                          AND (active_attempt_id = $2 OR admitted_job_id = $1)
-                        """,
-                        job_id,
-                        attempt_id,
-                        row["sandbox_thread_id"],
-                    )
+                    if shared_live:
+                        lost_member = await conn.fetchrow(
+                            """
+                            UPDATE agent_thread_sandbox_memberships
+                            SET native_state = 'lost', context_status = 'lost',
+                                resident_state = 'lost',
+                                active_attempt_id = CASE
+                                    WHEN active_attempt_id = $2 THEN NULL
+                                    ELSE active_attempt_id
+                                END,
+                                admitted_job_id = CASE
+                                    WHEN admitted_job_id = $1 THEN NULL
+                                    ELSE admitted_job_id
+                                END,
+                                admitted_at = CASE
+                                    WHEN admitted_job_id = $1 THEN NULL
+                                    ELSE admitted_at
+                                END,
+                                last_error = CASE
+                                    WHEN admitted_job_id = $1
+                                        THEN 'attempt lease expired after prompt admission'
+                                    ELSE 'retained activation lease expired'
+                                END,
+                                updated_at = NOW()
+                            WHERE thread_id = $3 AND sandbox_id = $4
+                              AND last_settled_job_id IS DISTINCT FROM $1
+                              AND (active_attempt_id = $2 OR admitted_job_id = $1)
+                            RETURNING residency_generation
+                            """,
+                            job_id,
+                            attempt_id,
+                            sandbox_thread_id,
+                            row["shared_sandbox_id"],
+                        )
+                        if lost_member is not None:
+                            await conn.execute(
+                                """
+                                UPDATE agent_sandboxes g
+                                SET state = CASE WHEN g.container_id IS NULL
+                                                 THEN 'provisioning' ELSE 'running' END,
+                                    last_activity_at = NOW(),
+                                    idle_deadline = CASE
+                                        WHEN g.container_id IS NOT NULL
+                                         AND g.active_operation_count = 0
+                                         AND NOT EXISTS (
+                                            SELECT 1
+                                            FROM agent_thread_sandbox_memberships peer
+                                            WHERE peer.sandbox_id = g.id
+                                              AND peer.active_attempt_id IS NOT NULL
+                                         )
+                                        THEN NOW() + make_interval(
+                                            secs => g.idle_timeout_seconds
+                                        )
+                                        ELSE NULL
+                                    END,
+                                    updated_at = NOW()
+                                WHERE g.id = $1
+                                """,
+                                row["shared_sandbox_id"],
+                            )
+                            residency_generation = int(lost_member["residency_generation"] or 0)
+                            if residency_generation > 0:
+                                released = await conn.fetchrow(
+                                    """
+                                    UPDATE agent_thread_residencies
+                                    SET status = 'none', last_active_at = NOW()
+                                    WHERE thread_id = $1 AND generation = $2
+                                      AND status <> 'none'
+                                    RETURNING thread_id, generation, host, grant_id
+                                    """,
+                                    sandbox_thread_id,
+                                    residency_generation,
+                                )
+                                if released is not None:
+                                    cleanup_residency = dict(released)
+                    else:
+                        await conn.execute(
+                            """
+                            UPDATE agent_thread_sandboxes
+                            SET state = 'stopped_dirty',
+                                context_status = 'lost',
+                                active_attempt_id = CASE
+                                    WHEN active_attempt_id = $2 THEN NULL
+                                    ELSE active_attempt_id
+                                END,
+                                admitted_job_id = CASE
+                                    WHEN admitted_job_id = $1 THEN NULL
+                                    ELSE admitted_job_id
+                                END,
+                                admitted_at = CASE
+                                    WHEN admitted_job_id = $1 THEN NULL
+                                    ELSE admitted_at
+                                END,
+                                idle_deadline = NULL,
+                                last_error = CASE
+                                    WHEN admitted_job_id = $1
+                                        THEN 'attempt lease expired after prompt admission'
+                                    ELSE 'retained activation lease expired'
+                                END,
+                                updated_at = NOW()
+                            WHERE thread_id = $3
+                              AND (active_attempt_id = $2 OR admitted_job_id = $1)
+                            """,
+                            job_id,
+                            attempt_id,
+                            sandbox_thread_id,
+                        )
                     await conn.execute(
                         "UPDATE agent_attempts SET context_status = 'lost' WHERE id = $1",
                         attempt_id,
                     )
                     await self._fail_unrunnable_follow_ups(
                         conn,
-                        thread_id=row["sandbox_thread_id"],
+                        thread_id=sandbox_thread_id,
                     )
                 elif settled_finalization_expired:
                     # The native context boundary is durable; only the final
@@ -4690,9 +7278,14 @@ class AgentJobStore:
                     # never relabel its usable context LOST. Close admission,
                     # preserve the settled idle deadline, and fail the job for
                     # explicit operator/user review.
+                    table = (
+                        "agent_thread_sandbox_memberships"
+                        if shared_live
+                        else "agent_thread_sandboxes"
+                    )
                     await conn.execute(
-                        """
-                        UPDATE agent_thread_sandboxes
+                        f"""
+                        UPDATE {table}
                         SET active_attempt_id = CASE
                                 WHEN active_attempt_id = $2 THEN NULL
                                 ELSE active_attempt_id
@@ -4712,7 +7305,7 @@ class AgentJobStore:
                         """,
                         job_id,
                         attempt_id,
-                        row["sandbox_thread_id"],
+                        sandbox_thread_id,
                     )
                 if row["current_attempt_id"] != attempt_id or row["state"] in TERMINAL_STATES:
                     # Stale attempt of an already-moved-on job: closing it is enough.
@@ -4801,7 +7394,14 @@ class AgentJobStore:
                         "WHERE parent_job_id = $1 AND state = 'waiting'",
                         job_id,
                     )
-                actions.append({"job_id": job_id, "attempt_id": attempt_id, "action": action})
+                action_result: dict[str, Any] = {
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "action": action,
+                }
+                if cleanup_residency is not None:
+                    action_result["cleanup_residency"] = cleanup_residency
+                actions.append(action_result)
         return actions
 
     # ── Inference grants (E9) ──────────────────────────────────────────

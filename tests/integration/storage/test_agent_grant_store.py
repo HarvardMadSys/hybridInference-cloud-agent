@@ -33,11 +33,17 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _ALLOWED_TEST_DB_PATTERN = "_test_"
 _TABLES_IN_FK_ORDER = (
+    "agent_native_session_edges",
+    "agent_thread_sandbox_memberships",
+    "agent_sandbox_snapshots",
+    "agent_session_forks",
+    "agent_sandboxes",
     "agent_thread_messages",
     "agent_job_artifacts",
     "agent_job_events",
     "agent_thread_sandboxes",
     "agent_sandbox_forks",
+    "agent_thread_residencies",
     "agent_attempts",
     "agent_jobs",
     "agent_threads",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -123,6 +124,39 @@ class WorkspaceBrokerClient:
         body = response.json()
         if not isinstance(body, dict):
             raise WorkspaceBrokerError(502, "The chat sandbox supervisor returned invalid data.")
+        return body
+
+    async def _shared_sandbox_request(
+        self,
+        method: str,
+        thread_id: str,
+        suffix: str = "",
+        *,
+        json: dict[str, Any] | None = None,
+        timeout: float = 60,
+    ) -> dict[str, Any]:
+        """Call the private shared-live supervisor for one membership."""
+        encoded = quote(thread_id, safe="")
+        path = f"/shared-sandboxes/{encoded}"
+        if suffix:
+            path += f"/{suffix}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.request(
+                    method,
+                    f"{self._base_url}{path}",
+                    headers=self._headers,
+                    json=json,
+                )
+        except httpx.HTTPError as exc:
+            raise WorkspaceBrokerError(
+                503, "The shared chat supervisor is temporarily unavailable."
+            ) from exc
+        if response.is_error:
+            raise self._response_error(response)
+        body = response.json()
+        if not isinstance(body, dict):
+            raise WorkspaceBrokerError(502, "The shared chat supervisor returned invalid data.")
         return body
 
     async def health(self, *, timeout: float = 3) -> None:
@@ -416,6 +450,174 @@ class WorkspaceBrokerClient:
     async def chat_sandbox_status(self, thread_id: str) -> dict[str, Any]:
         """Inspect the exact retained container recorded for a thread."""
         return await self._sandbox_request("GET", thread_id)
+
+    async def shared_chat_sandbox_status(self, thread_id: str) -> dict[str, Any]:
+        """Inspect one membership in its shared retained container."""
+        return await self._shared_sandbox_request("GET", thread_id)
+
+    async def register_shared_sandbox(self, sandbox: dict[str, Any]) -> dict[str, Any]:
+        """Rehydrate durable member aliases after a broker process restart.
+
+        Docker labels identify the group and its origin chat, but forked chat
+        aliases live in the control-plane ledger.  Workspace operations can
+        arrive before another Agent turn, so they carry that bounded manifest
+        back to the owning supervisor without starting or cloning a container.
+        """
+        origin_thread_id = str(sandbox.get("origin_thread_id") or "")
+        members = []
+        allowed_member_fields = {
+            "thread_id",
+            "native_session_id",
+            "context_status",
+            "activation_generation",
+            "process_generation",
+            "residency_generation",
+            "resident_state",
+            "resident_slot_id",
+            "last_settled_job_id",
+        }
+        for raw in sandbox.get("group_members") or []:
+            if isinstance(raw, dict):
+                members.append(
+                    {key: value for key, value in raw.items() if key in allowed_member_fields}
+                )
+        if not origin_thread_id or not members:
+            raise WorkspaceBrokerError(502, "The shared sandbox manifest is incomplete.")
+        return await self._shared_sandbox_request(
+            "POST",
+            origin_thread_id,
+            "register",
+            json={
+                "sandbox_id": sandbox["sandbox_id"],
+                "generation": sandbox["generation"],
+                "origin_thread_id": origin_thread_id,
+                "runtime_id": sandbox["runtime_id"],
+                "runtime_version": sandbox.get("runtime_version"),
+                "sandbox_image_digest": sandbox.get("sandbox_image_digest"),
+                "expected_container_id": sandbox.get("container_id"),
+                "resident_slot_capacity": sandbox["resident_slot_capacity"],
+                "memory_limit": sandbox["memory_limit"],
+                "cpu_limit": sandbox["cpu_limit"],
+                "stop_timeout_s": sandbox["stop_timeout_seconds"],
+                "members": members,
+            },
+        )
+
+    async def shared_residency_lost(self, thread_id: str, *, generation: int) -> dict[str, Any]:
+        """Close one exact shared member process generation."""
+        return await self._shared_sandbox_request(
+            "POST",
+            thread_id,
+            "residency-lost",
+            json={"generation": generation},
+        )
+
+    async def fork_shared_session(
+        self,
+        source_thread_id: str,
+        *,
+        sandbox_id: str,
+        generation: int,
+        origin_thread_id: str,
+        runtime_id: str,
+        runtime_version: str | None,
+        sandbox_image_digest: str | None,
+        expected_container_id: str,
+        resident_slot_capacity: int,
+        memory_limit: str,
+        cpu_limit: str,
+        stop_timeout_s: int,
+        members: list[dict[str, Any]],
+        operation_id: str,
+        source_native_session_id: str,
+        target_thread_id: str,
+        target_slot_id: int,
+        source_launch: dict[str, Any],
+        target_launch: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Materialize a prompt-free native child in the same sandbox."""
+        return await self._shared_sandbox_request(
+            "POST",
+            source_thread_id,
+            "fork",
+            json={
+                "sandbox_id": sandbox_id,
+                "generation": generation,
+                "origin_thread_id": origin_thread_id,
+                "runtime_id": runtime_id,
+                "runtime_version": runtime_version,
+                "sandbox_image_digest": sandbox_image_digest,
+                "expected_container_id": expected_container_id,
+                "resident_slot_capacity": resident_slot_capacity,
+                "memory_limit": memory_limit,
+                "cpu_limit": cpu_limit,
+                "stop_timeout_s": stop_timeout_s,
+                "members": members,
+                "operation_id": operation_id,
+                "source_native_session_id": source_native_session_id,
+                "target_thread_id": target_thread_id,
+                "target_slot_id": target_slot_id,
+                "source_launch": source_launch,
+                "target_launch": target_launch,
+            },
+            timeout=180,
+        )
+
+    @staticmethod
+    def _shared_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Copy only the reviewed immutable group/member manifest fields."""
+        return {
+            "sandbox_id": snapshot["sandbox_id"],
+            "generation": snapshot["generation"],
+            "origin_thread_id": snapshot["origin_thread_id"],
+            "runtime_id": snapshot["runtime_id"],
+            "runtime_version": snapshot.get("runtime_version"),
+            "sandbox_image_digest": snapshot.get("sandbox_image_digest"),
+            "expected_container_id": snapshot.get("container_id"),
+            "resident_slot_capacity": snapshot["resident_slot_capacity"],
+            "memory_limit": snapshot["memory_limit"],
+            "cpu_limit": snapshot["cpu_limit"],
+            "stop_timeout_s": snapshot["stop_timeout_seconds"],
+            "members": snapshot["members"],
+        }
+
+    async def capture_shared_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Ask the owning host for one bounded, generation-fenced Git diff."""
+        payload = {
+            **self._shared_identity(snapshot),
+            "snapshot_id": snapshot["snapshot_id"],
+            "workspace_epoch": snapshot["workspace_epoch"],
+            "base_sha": snapshot["base_sha"],
+        }
+        return await self._shared_sandbox_request(
+            "POST",
+            str(snapshot["origin_thread_id"]),
+            "snapshot",
+            json=payload,
+            timeout=120,
+        )
+
+    async def import_shared_base(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        commit_sha: str,
+        bundle: bytes,
+    ) -> dict[str, Any]:
+        """Import trusted commit objects without changing workspace state."""
+        payload = {
+            **self._shared_identity(snapshot),
+            "snapshot_id": snapshot["snapshot_id"],
+            "commit_sha": commit_sha,
+            "bundle_b64": base64.b64encode(bundle).decode("ascii"),
+        }
+        return await self._shared_sandbox_request(
+            "POST",
+            str(snapshot["origin_thread_id"]),
+            "import-base",
+            json=payload,
+            timeout=360,
+        )
 
 
 def workspace_broker_from_env() -> WorkspaceBrokerClient | None:

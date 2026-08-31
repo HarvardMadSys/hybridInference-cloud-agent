@@ -11,6 +11,8 @@
   (historical continuity ladder),
   `2026-08-28-one-chat-one-restartable-sandbox-design.md`
   (RUNNING/STOPPED lifecycle and host-level Session Supervisor ownership);
+  `2026-08-31-native-session-fork-shared-workspace-design.md`
+  (implemented member-concurrent live processes and shared group accounting);
   issue #57 (residency observability read path)
 - **Model:** the DeepSeek harness session-telemetry seam
   (`docs/subsystems/session-telemetry.md`,
@@ -23,6 +25,14 @@
 ---
 
 ## 0. Restartable-sandbox amendment (2026-08-28)
+
+The 2026-08-31 shared-live implementation keeps these product states but makes
+process residency member-scoped and Docker lifecycle/resource totals
+group-scoped. Attempt-fenced events retain runtime-reported turn usage; the
+long-lived inference grant is billed by the gateway to `thread:<thread_id>`
+because one credential spans several turns. Until process-tree sampling lands,
+per-member CPU/memory/I/O reports explicit zero coverage and never duplicate
+one container total onto concurrent jobs.
 
 For a thread opted into the one-chat/one-restartable-sandbox lifecycle,
 the first turn records `new` because there is no prior session to continue.

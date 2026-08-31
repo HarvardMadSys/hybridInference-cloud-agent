@@ -63,13 +63,13 @@ const CONTEXT_LABEL: Record<string, { text: string; tone: string; title: string 
     text: 'context live',
     tone: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400 ring-sky-600/20 dark:ring-sky-500/25',
     title:
-      'The same running chat sandbox still held the native agent session and workspace. This does not claim that the operating-system process id stayed the same.',
+      'The supervisor still held the live native agent session and workspace, so it could continue without reconstructing the session. Process ids are deliberately not part of the public contract.',
   },
   restored: {
     text: 'restored',
     tone: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400 ring-sky-600/20 dark:ring-sky-500/25',
     title:
-      'The stopped chat sandbox was started again and the Agent CLI loaded its native session. The prior transcript was not pasted in as a substitute.',
+      'The Agent CLI process was reopened and loaded its exact native session from the same retained sandbox. The container may have been restarted, or only this member process may have been re-keyed; the prior transcript was not pasted in as a substitute.',
   },
   lost: {
     text: 'context lost',

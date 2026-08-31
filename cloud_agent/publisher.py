@@ -33,6 +33,7 @@ from cloud_agent_host.patch_gate import (
     validate_change_set,
     validate_patch,
 )
+from cloud_agent_host.source_archive import build_base_bundle
 
 logger = get_logger(__name__)
 
@@ -80,6 +81,7 @@ class PublishResult:
     branch: str
     commit_sha: str
     changed_files: list[str]
+    base_bundle: bytes | None = None
 
 
 def _run_git(
@@ -194,6 +196,7 @@ def publish_patch(
     commit_message: str,
     branch_id: str | None = None,
     allow_workflow_changes: bool = False,
+    include_base_bundle: bool = False,
 ) -> PublishResult:
     """Validate and publish one run's patch on its stable thread branch.
 
@@ -262,6 +265,9 @@ def publish_patch(
         gate = post
         _run_git(["commit", "--quiet", "--no-verify", "-m", commit_message], cwd=repo)
         commit_sha = _run_git(["rev-parse", "HEAD"], cwd=repo).strip()
+        base_bundle = (
+            build_base_bundle(str(repo), commit=commit_sha) if include_base_bundle else None
+        )
 
         # Pinned refspec: this process can only ever write the one branch, and
         # never force-updates it.
@@ -278,7 +284,34 @@ def publish_patch(
                 "files": len(gate.changed_files),
             },
         )
-        return PublishResult(branch=branch, commit_sha=commit_sha, changed_files=gate.changed_files)
+        return PublishResult(
+            branch=branch,
+            commit_sha=commit_sha,
+            changed_files=gate.changed_files,
+            base_bundle=base_bundle,
+        )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def fetch_base_bundle(*, clone_url: str, commit_sha: str) -> bytes:
+    """Fetch one published commit and return its bounded credential-free bundle."""
+    if not _COMMIT_SHA.fullmatch(commit_sha or ""):
+        raise PublishError(f"commit_sha must be a full commit hash, got {commit_sha!r}")
+    workdir = Path(tempfile.mkdtemp(prefix="agent-base-import-"))
+    try:
+        repo = workdir / "repo"
+        _run_git(["init", "--quiet", str(repo)])
+        _run_git(["remote", "add", "origin", clone_url], cwd=repo)
+        _run_git(
+            ["fetch", "--quiet", "--depth", "1", "origin", "--end-of-options", commit_sha],
+            cwd=repo,
+        )
+        _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=repo)
+        try:
+            return build_base_bundle(str(repo), commit=commit_sha)
+        except Exception as exc:
+            raise PublishError(f"could not build the retained base bundle: {exc}") from exc
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

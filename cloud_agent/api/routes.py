@@ -50,7 +50,8 @@ from cloud_agent.api.deps import (
     looks_like_agent_token,
     verify_admin_access,
 )
-from cloud_agent.broker_routing import broker_for_attempt, broker_for_job
+from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
+from cloud_agent.broker_routing import broker_for_attempt, broker_for_job, hydrate_shared_broker
 from cloud_agent.checkpoints import (
     CHECKPOINT_KIND,
     MAX_CHECKPOINT_CONTENT_BYTES,
@@ -65,7 +66,9 @@ from cloud_agent.entitlement import (
     require_entitled_repo,
 )
 from cloud_agent.execution_profiles import (
+    ENV_SHARED_LIVE_SANDBOX,
     RESERVED_EXECUTION_METADATA_KEYS,
+    SHARED_SANDBOX_CAPABILITY,
     default_execution_profile,
 )
 from cloud_agent.gateway import GatewayError
@@ -111,6 +114,7 @@ from cloud_agent.schemas import (
     AttemptResources,
     GitHubConnectionResponse,
     GitHubConnectRequest,
+    HostResidencyEstablishResponse,
     McpIntegrationResponse,
     McpServerSummary,
     OAuthConnectRequest,
@@ -135,6 +139,7 @@ from cloud_agent.schemas import (
     WorkerSandboxAdmissionRequest,
     WorkerSandboxProcessRequest,
     WorkerSandboxReserveRequest,
+    WorkerSandboxResidencyRequest,
     WorkerSandboxRunningRequest,
     WorkerSandboxSettleRequest,
     WorkerTerminalSuspendRequest,
@@ -199,6 +204,11 @@ logger = get_logger(__name__)
 #: no address, and a runtime asked for servers anyway refuses rather than
 #: resolving them against the inference gateway, which does not answer for MCP.
 ENV_SANDBOX_MCP_URL = "AGENT_SANDBOX_MCP_URL"
+# The host fork request is bounded to 180s. Keep one short recovery margin so
+# a second API worker cannot take over while the first is still recording its
+# receipt; a crashed worker becomes retryable without waiting for the 15-minute
+# stalled-saga reconciler.
+SESSION_FORK_COORDINATOR_LEASE_S = 210.0
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -400,6 +410,18 @@ def _job_response(
     base_ref = metadata.pop(BASE_REF_METADATA_KEY, None)
     if not isinstance(base_ref, str):
         base_ref = None
+    sandbox = job.get("thread_sandbox") or {}
+    native_fork_available = bool(
+        (not sandbox and job.get("state") in TERMINAL_STATES)
+        or (
+            sandbox.get("shared_live") is True
+            and sandbox.get("native_fork_capable") is True
+            and sandbox.get("native_state") == "ready"
+            and sandbox.get("fork_operation_id") is None
+            and sandbox.get("last_settled_job_id") == job.get("id")
+            and job.get("state") in TERMINAL_STATES
+        )
+    )
     return AgentJobResponse(
         id=job["id"],
         thread_id=job.get("thread_id"),
@@ -413,7 +435,9 @@ def _job_response(
         reasoning_effort=job.get("reasoning_effort"),
         base_ref=base_ref,
         base_sha=job["base_sha"],
-        output_branch=branch_name_for(job.get("thread_id") or job["id"]),
+        output_branch=branch_name_for(
+            sandbox.get("origin_thread_id") or job.get("thread_id") or job["id"]
+        ),
         state=job["state"],
         cancel_requested=job["cancel_requested"],
         current_attempt_id=job["current_attempt_id"],
@@ -434,6 +458,14 @@ def _job_response(
         agent_egress_tier=agent_tier,
         continuity_mode=(telemetry or {}).get("continuity_mode"),
         context_status=(telemetry or {}).get("context_status"),
+        resident_state=sandbox.get("resident_state"),
+        sandbox_id=sandbox.get("sandbox_id"),
+        workspace_shared=bool(sandbox.get("shared_live")),
+        native_state=sandbox.get("native_state"),
+        fork_anchor_job_id=sandbox.get("fork_anchor_job_id"),
+        native_fork_available=native_fork_available,
+        workspace_publication_state=sandbox.get("workspace_publication_state"),
+        workspace_epoch=sandbox.get("workspace_epoch"),
         duration_ms=_attempt_duration_ms(telemetry),
         resources=_attempt_resources(telemetry),
     )
@@ -1342,6 +1374,17 @@ async def _create_job_as(
         metadata[BASE_REF_METADATA_KEY] = body.base_ref
     for key, value in (reserved_metadata or {}).items():
         metadata[key] = value
+    # Shared-live is a host protocol, not merely a runner-side preference. A
+    # new chat in this mode must only be claimed by a host that proved the
+    # image, CLI pins, broker, and capacity needed to honor it. Follow-ups
+    # inherit this server-owned requirement from their parent.
+    if os.environ.get(ENV_SHARED_LIVE_SANDBOX, "") not in ("", "0"):
+        requirements = metadata.get("requires")
+        if not isinstance(requirements, list):
+            requirements = []
+        if SHARED_SANDBOX_CAPABILITY not in requirements:
+            requirements.append(SHARED_SANDBOX_CAPABILITY)
+        metadata["requires"] = requirements
     mcp_servers = await _resolve_mcp_servers(
         body.mcp_servers, runtime=body.runtime, store=job_store, user_id=user["user_id"]
     )
@@ -1742,16 +1785,12 @@ async def create_agent_follow_up(
 @router.post("/jobs/{job_id}/fork", response_model=AgentJobResponse, status_code=201)
 async def fork_agent_job(
     job_id: str,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
 ) -> AgentJobResponse:
-    """Fork a settled chat, including its complete retained Docker state.
-
-    Legacy chats retain their history-only behavior. A retained chat uses a
-    crash-recoverable database/Docker saga and supports only its latest settled
-    boundary, because there is no historical filesystem snapshot for an older
-    turn. No inference starts in the clone until the owner sends a new message.
-    """
+    """Fork one settled native session into the same shared Docker workspace."""
     job_store = _require_store(store)
     job = await _owned_job(job_store, job_id, user)
     not_settled = HTTPException(
@@ -1782,20 +1821,25 @@ async def fork_agent_job(
         )
         return _job_response(forked)
 
-    broker = await broker_for_job(job_store, job_id)
-    if broker is None:
+    sandbox = job.get("thread_sandbox") or {}
+    if sandbox.get("shared_live") is not True:
         raise HTTPException(
-            status_code=503,
+            status_code=409,
             detail={
                 "error": {
-                    "type": "sandbox_host_unavailable",
-                    "message": "The host retaining this chat is not reachable for a full fork.",
+                    "type": "native_fork_unavailable",
+                    "message": (
+                        "This historical retained chat predates shared native-session "
+                        "forks. Start a new chat to use same-workspace Fork."
+                    ),
                 }
             },
         )
-    operation = await job_store.prepare_retained_fork(
+
+    operation = await job_store.prepare_session_fork(
         source_job_id=job_id,
         user_id=user["user_id"],
+        idempotency_key=idempotency_key or f"generated:{secrets.token_urlsafe(24)}",
     )
     if operation is None:
         raise HTTPException(
@@ -1805,149 +1849,282 @@ async def fork_agent_job(
     error = operation.get("error")
     if error:
         error_contract = {
+            "idempotency_conflict": (
+                "idempotency_conflict",
+                "This Idempotency-Key was already used for a different fork source.",
+            ),
             "not_settled": (
                 "not_settled",
                 "This turn is still active; stop the run before forking it.",
             ),
             "not_latest_settled": (
                 "historical_snapshot_unavailable",
-                "Only the latest settled turn has a matching retained filesystem snapshot.",
+                "Native Fork is available only at this chat's latest settled turn.",
             ),
-            "not_retained": (
-                "sandbox_snapshot_unavailable",
-                "This chat has no retained sandbox to clone.",
+            "not_shared_live": (
+                "native_fork_unavailable",
+                "This chat does not use a shared-native sandbox.",
             ),
             "sandbox_not_ready": (
-                "sandbox_snapshot_unavailable",
-                "This chat's retained context is missing or is not safe to clone.",
+                "native_context_unavailable",
+                "This chat's retained native context is not safe to fork.",
             ),
-            "sandbox_busy": (
+            "source_busy": (
                 "sandbox_busy",
-                "This chat is currently active; retry the fork after the turn or terminal closes.",
+                "This chat is currently running a turn; retry after it settles.",
             ),
             "fork_in_progress": (
                 "fork_in_progress",
-                "Another full-sandbox fork is already being prepared for this chat.",
+                "Another native fork is already being prepared from this chat.",
+            ),
+            "resident_capacity_exhausted": (
+                "resident_capacity_exhausted",
+                "This shared sandbox has no free resident Agent CLI slot.",
+            ),
+            "native_context_unavailable": (
+                "native_context_unavailable",
+                "This chat has no settled native session to fork.",
+            ),
+            "runtime_mismatch": (
+                "native_fork_unavailable",
+                "The retained runtime no longer matches this chat.",
             ),
         }
         error_type, message = error_contract.get(
             str(error),
-            ("sandbox_snapshot_unavailable", "The retained sandbox cannot be forked right now."),
+            ("native_fork_unavailable", "The retained native session cannot be forked now."),
         )
         raise HTTPException(
             status_code=409,
             detail={"error": {"type": error_type, "message": message}},
         )
 
-    rollback_args = {
-        "operation_id": str(operation["id"]),
-        "source_sandbox_id": str(operation["source_sandbox_id"]),
-        "target_thread_id": str(operation["target_thread_id"]),
-        "target_sandbox_id": str(operation["target_sandbox_id"]),
-        "target_generation": 1,
-    }
+    operation_id = str(operation["id"])
 
-    async def rollback_incomplete_clone(*, expected_container_id: str | None = None) -> bool:
-        try:
-            await broker.rollback_chat_sandbox_fork(
-                str(operation["source_thread_id"]),
-                expected_container_id=expected_container_id,
-                **rollback_args,
-            )
-        except WorkspaceBrokerError:
-            return False
-        return True
-
-    clone: dict[str, Any] | None = None
-    try:
-        clone = await broker.fork_chat_sandbox(
-            str(operation["source_thread_id"]),
-            operation_id=str(operation["id"]),
-            source_sandbox_id=str(operation["source_sandbox_id"]),
-            source_generation=int(operation["source_sandbox_generation"]),
-            source_activation_generation=int(operation["source_activation_generation"]),
-            source_container_id=str(operation["source_container_id"]),
-            source_anchor_job_id=str(operation["source_job_id"]),
-            source_native_session_id=str(operation["source_native_session_id"]),
-            target_thread_id=str(operation["target_thread_id"]),
-            target_sandbox_id=str(operation["target_sandbox_id"]),
-            target_generation=1,
-        )
-    except WorkspaceBrokerError as exc:
-        # The rollback endpoint serializes with the fork mutex, so this remains
-        # safe even if an HTTP timeout left the host-side worker finishing.
-        rollback_complete = await rollback_incomplete_clone()
-        await job_store.abort_retained_fork(
-            operation_id=str(operation["id"]),
-            detail=exc.message,
-            cleanup_pending=not rollback_complete,
-        )
-        raise _workspace_broker_http_error(exc) from exc
-
-    expected_clone = {
-        "operation_id": str(operation["id"]),
-        "source_thread_id": str(operation["source_thread_id"]),
-        "source_sandbox_id": str(operation["source_sandbox_id"]),
-        "source_container_id": str(operation["source_container_id"]),
-        "target_thread_id": str(operation["target_thread_id"]),
-        "target_sandbox_id": str(operation["target_sandbox_id"]),
-    }
-    invalid_clone = any(clone.get(key) != value for key, value in expected_clone.items()) or any(
-        not isinstance(clone.get(key), str) or not clone[key]
-        for key in (
-            "target_container_id",
-            "target_container_name",
-            "snapshot_image_digest",
-            "source_fingerprint",
-            "target_fingerprint",
-        )
-    )
-    if invalid_clone:
-        rollback_complete = await rollback_incomplete_clone(
-            expected_container_id=(
-                clone.get("target_container_id")
-                if isinstance(clone.get("target_container_id"), str)
-                else None
-            )
-        )
-        await job_store.abort_retained_fork(
-            operation_id=str(operation["id"]),
-            detail="sandbox host returned an invalid fork receipt",
-            cleanup_pending=not rollback_complete,
-        )
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": {
-                    "type": "invalid_sandbox_fork_receipt",
-                    "message": "The sandbox host returned an invalid full-fork receipt.",
-                }
-            },
-        )
-
-    forked = await job_store.finalize_retained_fork(
-        operation_id=str(operation["id"]),
-        target_container_id=str(clone["target_container_id"]),
-        target_container_name=str(clone["target_container_name"]),
-        snapshot_image_digest=str(clone["snapshot_image_digest"]),
-        source_fingerprint=str(clone["source_fingerprint"]),
-        target_fingerprint=str(clone["target_fingerprint"]),
-    )
-    if forked is None:
-        rollback_complete = await rollback_incomplete_clone(
-            expected_container_id=str(clone["target_container_id"])
-        )
-        await job_store.abort_retained_fork(
-            operation_id=str(operation["id"]),
-            detail="source sandbox fence changed before fork finalization",
-            cleanup_pending=not rollback_complete,
-        )
+    if operation["state"] == "failed":
         raise HTTPException(
             status_code=409,
             detail={
                 "error": {
-                    "type": "sandbox_fork_fence_changed",
-                    "message": "The source chat changed before its full fork could be finalized.",
+                    "type": "native_fork_failed",
+                    "message": str(
+                        operation.get("last_error") or "Native Fork could not complete."
+                    ),
+                }
+            },
+        )
+
+    async def release_failed_fork_residencies(rows: dict[str, Any]) -> None:
+        for role in ("source", "target"):
+            residency = rows[role]
+            grant_id = await job_store.release_residency(
+                thread_id=str(residency["thread_id"]),
+                generation=int(residency["generation"]),
+                host=str(operation["host"]),
+            )
+            if grant_id and grants is not None:
+                with contextlib.suppress(Exception):
+                    await grants.revoke(grant_id)
+
+    if operation["state"] == "preparing":
+        # Resolve the host only for the state that still needs a native
+        # mutation.  READY and MATERIALIZED are durable control-plane states:
+        # a retry after a lost HTTP response must return/finalize the same
+        # child even when the retaining host has since become unreachable.
+        broker = await broker_for_job(job_store, job_id)
+        if broker is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "type": "sandbox_host_unavailable",
+                        "message": (
+                            "The host retaining this chat is not reachable for native Fork."
+                        ),
+                    }
+                },
+            )
+        # Validate every immutable host input before minting or rotating either
+        # residency. A malformed manifest is a control-plane defect, not a
+        # reason to leak two renewable grants into an uncallable saga.
+        source_job = operation.get("source_job") or {}
+        source_thread_id = str(operation["source_thread_id"])
+        members: list[dict[str, Any]] = []
+        for member in operation.get("group_members") or []:
+            manifest = {
+                key: member.get(key)
+                for key in (
+                    "thread_id",
+                    "native_session_id",
+                    "context_status",
+                    "activation_generation",
+                    "process_generation",
+                    "residency_generation",
+                    "resident_state",
+                    "resident_slot_id",
+                    "last_settled_job_id",
+                )
+            }
+            members.append(manifest)
+        source_member = next(
+            (member for member in members if member["thread_id"] == source_thread_id),
+            None,
+        )
+        if source_member is None or operation.get("resident_slot_id") is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "type": "native_context_unavailable",
+                        "message": "The shared sandbox manifest is incomplete.",
+                    }
+                },
+            )
+        launch_common = {
+            "runtime_id": str(operation["runtime_id"]),
+            "runtime_version": operation.get("runtime_version"),
+            "model": str(source_job.get("model") or ""),
+            "reasoning_effort": source_job.get("reasoning_effort"),
+            # Replaced by the broker's host-local, sandbox-reachable relay.
+            "gateway_base_url": "",
+            # Fork-only does not need a tool credential. A later turn whose
+            # MCP set is non-empty performs a member-only native restart.
+            "mcp_server_ids": [],
+            "mcp_base_url": "",
+            "mcp_credential": "",
+        }
+        coordinator_token = secrets.token_urlsafe(32)
+        claimed = await job_store.claim_session_fork_materialization(
+            operation_id=operation_id,
+            coordinator_token=coordinator_token,
+            lease_seconds=SESSION_FORK_COORDINATOR_LEASE_S,
+        )
+        if not claimed:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "type": "fork_in_progress",
+                        "message": "This native Fork is already being materialized; retry shortly.",
+                    }
+                },
+                headers={"Retry-After": "2"},
+            )
+        residencies = await job_store.establish_session_fork_residencies(
+            operation_id=operation_id,
+            coordinator_token=coordinator_token,
+            ttl_seconds=RESIDENCY_TTL_S,
+        )
+        if residencies is None:
+            await job_store.release_session_fork_materialization(
+                operation_id=operation_id,
+                coordinator_token=coordinator_token,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "type": "fork_fence_changed",
+                        "message": "The source session changed before Fork could start.",
+                    }
+                },
+            )
+        for role in ("source", "target"):
+            previous_grant = residencies[role].get("previous_grant_id")
+            if previous_grant and grants is not None:
+                with contextlib.suppress(Exception):
+                    await grants.revoke(previous_grant)
+        source_credential = await _mint_residency_grant(
+            job_store,
+            grants,
+            row=residencies["source"],
+        )
+        target_credential = await _mint_residency_grant(
+            job_store,
+            grants,
+            row=residencies["target"],
+        )
+        if not source_credential or not target_credential:
+            await release_failed_fork_residencies(residencies)
+            await job_store.release_session_fork_materialization(
+                operation_id=operation_id,
+                coordinator_token=coordinator_token,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "type": "residency_grant_unavailable",
+                        "message": "Fork could not obtain two independent resident credentials.",
+                    }
+                },
+            )
+
+        source_member["residency_generation"] = int(residencies["source"]["generation"])
+        source_member["resident_state"] = "restarting"
+        try:
+            receipt = await broker.fork_shared_session(
+                source_thread_id,
+                sandbox_id=str(operation["sandbox_id"]),
+                generation=int(operation["sandbox_generation"]),
+                origin_thread_id=str(operation["origin_thread_id"]),
+                runtime_id=str(operation["runtime_id"]),
+                runtime_version=operation.get("runtime_version"),
+                sandbox_image_digest=operation.get("sandbox_image_digest"),
+                expected_container_id=str(operation["container_id"]),
+                resident_slot_capacity=int(operation["resident_slot_capacity"]),
+                memory_limit=str(operation["memory_limit"]),
+                cpu_limit=str(operation["cpu_limit"]),
+                stop_timeout_s=int(operation["stop_timeout_seconds"]),
+                members=members,
+                operation_id=operation_id,
+                source_native_session_id=str(operation["source_native_session_id"]),
+                target_thread_id=str(operation["target_thread_id"]),
+                target_slot_id=int(operation["target_resident_slot_id"]),
+                source_launch={
+                    **launch_common,
+                    "native_session_id": str(operation["source_native_session_id"]),
+                    "credential": source_credential,
+                    "slot_id": int(operation["resident_slot_id"]),
+                    "residency_generation": int(residencies["source"]["generation"]),
+                },
+                target_launch={
+                    **launch_common,
+                    "native_session_id": None,
+                    "credential": target_credential,
+                    "slot_id": int(operation["target_resident_slot_id"]),
+                    "residency_generation": int(residencies["target"]["generation"]),
+                },
+            )
+        except WorkspaceBrokerError as exc:
+            # PREPARING is intentionally retained: a retry with the same key
+            # recovers the in-container journal or safely resumes before the
+            # native mutation was reached.
+            raise _workspace_broker_http_error(exc) from exc
+        materialized = await job_store.record_session_fork_materialized(
+            operation_id=operation_id,
+            coordinator_token=coordinator_token,
+            receipt=receipt,
+        )
+        if materialized is None:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": {
+                        "type": "invalid_native_fork_receipt",
+                        "message": "The sandbox host returned a mismatched native Fork receipt.",
+                    }
+                },
+            )
+
+    forked = await job_store.finalize_session_fork(operation_id=operation_id)
+    if forked is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "native_fork_fence_changed",
+                    "message": "The source chat changed before native Fork finalization.",
                 }
             },
         )
@@ -1958,8 +2135,9 @@ async def fork_agent_job(
             "job_id": forked["id"],
             "thread_id": forked.get("thread_id"),
             "source_job_id": job_id,
-            "sandbox_clone": True,
-            "fork_operation_id": operation["id"],
+            "sandbox_clone": False,
+            "workspace_shared": True,
+            "fork_operation_id": operation_id,
         },
     )
     return _job_response(forked)
@@ -2123,6 +2301,18 @@ def _workspace_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
     )
 
 
+async def _workspace_broker_for_job(
+    store: AgentJobStore,
+    job: dict[str, Any],
+) -> WorkspaceBrokerClient | None:
+    """Resolve the owning broker and restore shared aliases before use."""
+    broker = await broker_for_job(store, job["id"])
+    try:
+        return await hydrate_shared_broker(job, broker)
+    except WorkspaceBrokerError as exc:
+        raise _workspace_broker_http_error(exc) from exc
+
+
 def _terminal_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
     """Preserve terminal errors while presenting a missing worktree as a conflict."""
     if exc.status_code == 404 and exc.message == "workspace is not materialized":
@@ -2220,7 +2410,7 @@ async def _terminal_owner_workspace(
             store=job_store,
             app_credentials=app_credentials,
         )
-    broker = await broker_for_job(job_store, job["id"])
+    broker = await _workspace_broker_for_job(job_store, job)
     if broker is None:
         raise HTTPException(
             status_code=409,
@@ -2282,7 +2472,7 @@ async def get_agent_job_workspace_file(
     # New self-hosted runners retain one real worktree per job. Prefer it
     # before consulting GitHub/snapshots; only a pre-broker job falls through
     # to the archived view.
-    broker = await broker_for_job(job_store, job["id"])
+    broker = await _workspace_broker_for_job(job_store, job)
     if broker is not None:
         try:
             return AgentWorkspaceResponse(**(await broker.files(_workspace_id(job), safe_path)))
@@ -2429,7 +2619,7 @@ async def write_agent_job_workspace_file(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
     await _require_mutable_workspace_ready(job=job, store=job_store)
-    broker = await broker_for_job(job_store, job["id"])
+    broker = await _workspace_broker_for_job(job_store, job)
     if broker is None:
         raise HTTPException(
             status_code=409,
@@ -2473,7 +2663,7 @@ async def run_agent_job_terminal_command(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
     await _require_mutable_workspace_ready(job=job, store=job_store)
-    broker = await broker_for_job(job_store, job["id"])
+    broker = await _workspace_broker_for_job(job_store, job)
     if broker is None:
         raise HTTPException(status_code=409, detail="This deployment has no live workspace broker.")
     try:
@@ -2690,7 +2880,7 @@ async def get_agent_job_git_workspace(
     await _require_workspace_entitlement(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
-    broker = await broker_for_job(job_store, job["id"])
+    broker = await _workspace_broker_for_job(job_store, job)
     if broker is None:
         return AgentGitWorkspaceResponse(available=False)
     try:
@@ -3473,6 +3663,11 @@ async def worker_reserve_thread_sandbox(
             runtime_version=body.runtime_version,
             sandbox_image_digest=body.sandbox_image_digest,
             execution_profile=body.execution_profile.value,
+            shared_live=body.shared_live,
+            resident_slot_capacity=body.resident_slot_capacity,
+            memory_limit=body.memory_limit,
+            cpu_limit=body.cpu_limit,
+            stop_timeout_seconds=body.stop_timeout_seconds,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3508,6 +3703,73 @@ async def worker_mark_thread_sandbox_running(
     if row is None:
         raise _lease_lost()
     return WorkerThreadSandbox(**row)
+
+
+@router.post(
+    "/worker/jobs/{job_id}/sandbox/residency",
+    response_model=HostResidencyEstablishResponse,
+)
+async def worker_establish_shared_sandbox_residency(
+    job_id: str,
+    body: WorkerSandboxResidencyRequest,
+    authorization: str | None = Header(None),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
+) -> HostResidencyEstablishResponse:
+    """Mint the renewable member grant before the supervisor opens a CLI."""
+    job_store = _require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    thread_id = await _worker_thread_id(job_store, job_id)
+    host = await job_store.host_for_job(job_id=job_id)
+    if host is None or not host.get("host"):
+        raise _lease_lost()
+    row = await job_store.establish_residency(
+        thread_id=thread_id,
+        host=str(host["host"]),
+        runtime_id=body.runtime_id,
+        runtime_version=body.runtime_version,
+        sandbox_id=body.sandbox_id,
+        ttl_seconds=RESIDENCY_TTL_S,
+    )
+    if row is None:
+        raise _lease_lost()
+    credential = await _mint_residency_grant(job_store, grants, row=row)
+    if not credential:
+        # Shared-live processes cannot safely outlive an attempt on its token.
+        # Unlike legacy HOT this mode is therefore all-or-nothing at admission.
+        await job_store.release_residency(
+            thread_id=thread_id,
+            generation=int(row["generation"]),
+            host=str(host["host"]),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="a renewable shared-session credential could not be minted",
+        )
+    recorded = await job_store.record_shared_thread_residency(
+        thread_id=thread_id,
+        attempt_id=claims["attempt_id"],
+        lease_generation=claims["lease_generation"],
+        sandbox_id=body.sandbox_id,
+        residency_generation=int(row["generation"]),
+    )
+    if not recorded:
+        released = await job_store.release_residency(
+            thread_id=thread_id,
+            generation=int(row["generation"]),
+            host=str(host["host"]),
+        )
+        if released and grants is not None:
+            await grants.revoke(released)
+        raise _lease_lost()
+    return HostResidencyEstablishResponse(
+        thread_id=thread_id,
+        generation=int(row["generation"]),
+        ttl_seconds=RESIDENCY_TTL_S,
+        credential=credential,
+        model=row.get("model"),
+    )
 
 
 @router.post(
@@ -3590,6 +3852,7 @@ async def worker_settle_thread_sandbox(
         job_id=job_id,
         context_status=body.context_status,
         native_session_id=body.native_session_id,
+        base_sha=body.base_sha,
         idle_timeout_seconds=body.idle_timeout_seconds,
     )
     if row is None:
@@ -3606,6 +3869,7 @@ async def worker_abandon_thread_sandbox(
     body: WorkerSandboxAbandonRequest,
     authorization: str | None = Header(None),
     store: AgentJobStore | None = Depends(get_agent_job_store),
+    grants: Any = Depends(get_grant_client),
 ) -> WorkerThreadSandbox:
     """Release a failed activation; ambiguous admission becomes LOST."""
     job_store = _require_store(store)
@@ -3624,6 +3888,19 @@ async def worker_abandon_thread_sandbox(
     )
     if row is None:
         raise _lease_lost()
+    if row.get("shared_live") and int(row.get("residency_generation") or 0) > 0:
+        # The shared supervisor closes this member's process on abandon. End
+        # its matching renewable capability now instead of leaving a dead
+        # process's grant live until the residency TTL. The generation fence
+        # makes a concurrent successor immune to this cleanup.
+        released = await job_store.release_residency(
+            thread_id=thread_id,
+            generation=int(row["residency_generation"]),
+            host=str(row["host"]),
+        )
+        if released and grants is not None:
+            with contextlib.suppress(Exception):
+                await grants.revoke(released)
     return WorkerThreadSandbox(**row)
 
 

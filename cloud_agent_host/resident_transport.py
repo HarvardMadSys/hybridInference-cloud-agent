@@ -1,0 +1,933 @@
+"""Supervisor-owned live Agent CLI transports inside retained containers.
+
+The runner owns attempts; this module owns processes.  A transport is keyed by
+one sandbox membership and survives the runner request that delivered a turn.
+It deliberately contains no control-plane client, so a sandbox process can
+never inherit the worker credential used to mutate jobs.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import secrets
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from cloud_agent_host.chat_sandbox import (
+    CHAT_STATE_DIR,
+    CHAT_WORKDIR,
+    MEMBER_TMPFS_ROOT,
+    MEMBER_UID_BASE,
+    ChatSandboxManager,
+    ChatSandboxSpec,
+)
+from cloud_agent_host.drivers import (
+    DriverError,
+    HarnessEvent,
+    HarnessSession,
+    HarnessTurn,
+    LaunchContext,
+    TurnInput,
+    TurnResult,
+    get_driver,
+)
+from cloud_agent_host.runtimes import RuntimeMCPConfig
+from cloud_agent_host.sandbox import SANDBOX_PATH, runtime_bin_dir
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+# Provider homes contain files on which the owning CLI performs owner-only
+# chmod, SQLite, or project-lock operations. Shared workspace membership uses
+# distinct UIDs and distinct live processes, so fork siblings cannot safely
+# point those CLIs at one common provider home. The workspace remains shared;
+# the state captured at the native fork boundary is copied into the child's
+# private home before the two processes resume independently.
+PRIVATE_MEMBER_STATE_ROOTS = {
+    "codex": f"{CHAT_STATE_DIR}/codex-members",
+    "opencode": f"{CHAT_STATE_DIR}/opencode-members",
+    "kilo": f"{CHAT_STATE_DIR}/kilo-members",
+}
+
+# Host-owned exactly-once receipts must not live inside a provider home. Some
+# CLIs enumerate their whole state root, and the deliberately unreadable
+# platform directory otherwise turns into a provider-side EACCES. This path is
+# in the container writable layer (not tmpfs or a host mount), so docker stop /
+# start preserves it just like /workspace and /agent-state.
+PLATFORM_STATE_DIR = "/home/agent/.freeinference-platform"
+
+
+@dataclass(frozen=True)
+class ResidentLaunch:
+    """Everything needed to open one member process, excluding its prompt."""
+
+    thread_id: str
+    runtime_id: str
+    runtime_version: str | None
+    native_session_id: str | None
+    model: str
+    reasoning_effort: str | None
+    gateway_base_url: str
+    credential: str | None
+    mcp_server_ids: tuple[str, ...] = ()
+    mcp_base_url: str = ""
+    mcp_credential: str = ""
+    slot_id: int = 0
+    residency_generation: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.thread_id or not self.runtime_id or not self.model:
+            raise ValueError("resident launch identity, runtime, and model are required")
+        if not self.gateway_base_url:
+            raise ValueError("resident launch gateway is required")
+        if self.slot_id < 0:
+            raise ValueError("resident slot id cannot be negative")
+        if self.residency_generation < 0:
+            raise ValueError("residency generation cannot be negative")
+
+
+class ResidentTurn:
+    """One activation borrowing a live transport without owning its process."""
+
+    def __init__(self, turn: HarnessTurn) -> None:
+        self._turn = turn
+
+    def lines(self) -> Iterator[HarnessEvent]:
+        """Yield normalized driver events through the exact turn boundary."""
+        for line in self._turn.raw_lines():
+            yield self._turn.event_for_line(line)
+
+    def wait(self) -> TurnResult:
+        """Return the settled result while leaving a healthy transport alive."""
+        return self._turn.wait()
+
+    def interrupt(self) -> None:
+        """Interrupt only this activation through the driver's native seam."""
+        self._turn.cancel()
+
+    def stderr_text(self) -> str:
+        """Return bounded diagnostic stderr from the resident process."""
+        return self._turn.stderr_text()
+
+
+class ResidentTransport:
+    """A single live native session owned by the host supervisor."""
+
+    def __init__(
+        self,
+        *,
+        launch: ResidentLaunch,
+        session: HarnessSession,
+    ) -> None:
+        self.launch = launch
+        self.session = session
+
+    @property
+    def native_session_id(self) -> str | None:
+        """The runtime's observed locator, falling back to the resumed id."""
+        observed = getattr(self.session.runtime, "session_id", None)
+        return str(observed or self.launch.native_session_id or "").strip() or None
+
+    @property
+    def alive(self) -> bool:
+        """Whether the underlying resident process still exists."""
+        return bool(getattr(self.session, "process_alive", lambda: False)())
+
+    @property
+    def container(self) -> str | None:
+        """Container name used by resource/process accounting."""
+        return self.session.container
+
+    def stderr_text(self) -> str:
+        """Return a bounded diagnostic tail without exposing launch secrets."""
+        diagnostic = getattr(self.session, "stderr_text", lambda: "")()
+        return " ".join(str(diagnostic).strip().split())[-500:]
+
+    @property
+    def exit_code(self) -> int | None:
+        """Return the attached process exit code when it has terminated."""
+        return getattr(self.session, "process_exit_code", lambda: None)()
+
+    def compatible_with(self, launch: ResidentLaunch) -> bool:
+        """Whether a new activation may borrow this exact process.
+
+        The caller normally carries a fresh attempt credential, while the
+        resident process intentionally keeps its renewable residency grant.
+        Credentials therefore cannot participate in equality. Everything the
+        CLI fixes at process start still does, including model, effort and MCP
+        configuration.
+        """
+        same_mcp = self.launch.mcp_server_ids == launch.mcp_server_ids and (
+            not launch.mcp_server_ids
+            or (
+                self.launch.mcp_base_url == launch.mcp_base_url
+                and self.launch.mcp_credential == launch.mcp_credential
+            )
+        )
+        return (
+            self.launch.thread_id == launch.thread_id
+            and self.launch.runtime_id == launch.runtime_id
+            and self.launch.runtime_version == launch.runtime_version
+            and self.launch.model == launch.model
+            and self.launch.reasoning_effort == launch.reasoning_effort
+            and self.launch.gateway_base_url == launch.gateway_base_url
+            and same_mcp
+            and self.launch.slot_id == launch.slot_id
+        )
+
+    def start_turn(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        reasoning_effort: str | None,
+    ) -> ResidentTurn:
+        """Send one prompt to this already-open native session."""
+        return ResidentTurn(
+            self.session.start_turn(
+                TurnInput(
+                    prompt=prompt,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+            )
+        )
+
+    def close(self) -> None:
+        """Flush/terminate this process generation without deleting state."""
+        self.session.close()
+
+
+class ResidentTransportFactory:
+    """Open exact-version transports in credential-isolated member slots."""
+
+    def __init__(self, manager: ChatSandboxManager) -> None:
+        self._manager = manager
+
+    def open(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> ResidentTransport:
+        """Start and probe a runtime's persistent transport."""
+        if not launch.credential:
+            raise DriverError("opening a resident transport requires a residency credential")
+        if launch.slot_id >= spec.resident_slot_capacity:
+            raise DriverError("resident slot is outside this sandbox's immutable capacity")
+        runtime_id = launch.runtime_id
+        driver = get_driver(runtime_id)
+        state_dir = self._member_state_dir(launch)
+        if runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
+            self._prepare_member_state(spec, launch, state_dir)
+        context = self._launch_context(spec, launch, state_dir=state_dir)
+        if launch.native_session_id:
+            opener = getattr(driver, "launch_resident_live", None)
+            if opener is None:
+                raise DriverError(f"runtime {runtime_id!r} has no live resume transport")
+            session = opener(context, session_id=launch.native_session_id)
+        else:
+            opener = getattr(driver, "launch_live", None)
+            if opener is None:
+                raise DriverError(f"runtime {runtime_id!r} has no live session transport")
+            session = opener(context)
+        try:
+            ensure_started = getattr(session, "ensure_started", None)
+            if ensure_started is None:
+                raise DriverError(f"runtime {runtime_id!r} cannot prove resident readiness")
+            ensure_started(
+                model=launch.model,
+                reasoning_effort=launch.reasoning_effort,
+            )
+            if not bool(getattr(session, "process_alive", lambda: False)()):
+                raise DriverError(f"runtime {runtime_id!r} resident process is not alive")
+            return ResidentTransport(launch=launch, session=session)
+        except Exception:
+            with contextlib.suppress(Exception):
+                session.close()
+            raise
+
+    @staticmethod
+    def _member_state_dir(launch: ResidentLaunch) -> str:
+        root = PRIVATE_MEMBER_STATE_ROOTS.get(launch.runtime_id)
+        if root is None:
+            return CHAT_STATE_DIR
+        member_key = hashlib.sha256(launch.thread_id.encode("utf-8")).hexdigest()
+        return f"{root}/{member_key}"
+
+    def _prepare_member_state(
+        self,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        state_dir: str,
+    ) -> None:
+        """Create a member-owned provider home, importing legacy state once."""
+        if launch.runtime_id == "codex":
+            self._prepare_codex_member_state(spec, launch, state_dir)
+            return
+        self._prepare_http_member_state(spec, launch, state_dir)
+
+    def _prepare_http_member_state(
+        self,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        state_dir: str,
+    ) -> None:
+        """Create an isolated OpenCode/Kilo XDG root for one membership.
+
+        Pre-fork retained containers stored each HTTP runtime directly below
+        ``/agent-state``. Import that tree only when resuming a known native
+        session. New memberships start empty, while native-fork children are
+        populated by :meth:`_clone_private_member_state` before they open.
+        """
+        runtime_id = launch.runtime_id
+        if runtime_id not in {"opencode", "kilo"}:
+            raise DriverError(f"runtime {runtime_id!r} has no private HTTP state home")
+        uid = MEMBER_UID_BASE + launch.slot_id
+        source_dir = f"{CHAT_STATE_DIR}/{runtime_id}"
+        script = (
+            'set -eu; source="$1"; target="$2"; native="$3"; runtime="$4"; '
+            'marker="$target/.freeinference-member-state-v1"; umask 0007; '
+            'mkdir -p -- "$target"; '
+            'if test ! -e "$marker"; then '
+            '  if test -n "$native" && test -d "$source"; then '
+            '    cp -R -- "$source" "$target/"; '
+            "  fi; "
+            '  rm -rf -- "$target/$runtime/state/$runtime/locks"; '
+            '  : > "$marker"; '
+            "fi"
+        )
+        result = self._manager.exec_capture(
+            spec,
+            [
+                "/bin/sh",
+                "-c",
+                script,
+                "sh",
+                source_dir,
+                state_dir,
+                launch.native_session_id or "",
+                runtime_id,
+            ],
+            workdir="/",
+            timeout_s=120,
+            user_uid=uid,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError(
+                f"{runtime_id} member state could not be prepared: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+
+    def _prepare_codex_member_state(
+        self,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        state_dir: str,
+    ) -> None:
+        """Create one UID-owned Codex home, importing a legacy root once.
+
+        Older retained containers stored Codex directly under /agent-state.
+        When such a chat is resumed after rollout, copy only provider state and
+        deliberately exclude platform journals, other runtimes, and ephemeral
+        lock/temp directories. New chats copy just the harmless bootstrap
+        config and let Codex initialize the rest itself.
+        """
+        uid = MEMBER_UID_BASE + launch.slot_id
+        script = (
+            'set -eu; source="$1"; target="$2"; native="$3"; '
+            'marker="$target/.freeinference-member-state-v1"; umask 0007; '
+            'mkdir -p -- "$target"; '
+            'if test ! -e "$marker"; then '
+            "  imported=0; "
+            '  if test -n "$native" && test -d "$source/sessions" && '
+            '     find "$source/sessions" -type f -name "rollout-*-$native.jsonl" '
+            "       -print -quit | grep -q .; then "
+            '    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do '
+            '      test -e "$entry" || continue; name=${entry##*/}; '
+            '      case "$name" in '
+            "        codex-members|.platform|tmp|.tmp|claude|pi|opencode|kilo) continue;; "
+            "      esac; "
+            '      cp -R -- "$entry" "$target/"; '
+            "    done; imported=1; "
+            "  fi; "
+            '  if test "$imported" -eq 0 && test -f "$source/config.toml"; then '
+            '    cp -- "$source/config.toml" "$target/config.toml"; '
+            "  fi; "
+            '  mkdir -p -- "$target/tmp" "$target/.tmp"; : > "$marker"; '
+            "fi"
+        )
+        result = self._manager.exec_capture(
+            spec,
+            [
+                "/bin/sh",
+                "-c",
+                script,
+                "sh",
+                CHAT_STATE_DIR,
+                state_dir,
+                launch.native_session_id or "",
+            ],
+            workdir="/",
+            timeout_s=120,
+            user_uid=uid,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError(
+                "Codex member state could not be prepared: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+
+    def _clone_private_member_state(
+        self,
+        spec: ChatSandboxSpec,
+        source_launch: ResidentLaunch,
+        target_launch: ResidentLaunch,
+    ) -> None:
+        """Copy one flushed provider home into the child UID's private home."""
+        source_dir = self._member_state_dir(source_launch)
+        target_dir = self._member_state_dir(target_launch)
+        if source_dir == target_dir:
+            raise DriverError("native fork target reused the source provider home")
+        runtime_id = source_launch.runtime_id
+        if runtime_id != target_launch.runtime_id or runtime_id not in PRIVATE_MEMBER_STATE_ROOTS:
+            raise DriverError("native fork cannot clone incompatible provider homes")
+        target_uid = MEMBER_UID_BASE + target_launch.slot_id
+        script = (
+            'set -eu; source="$1"; target="$2"; runtime="$3"; umask 0007; '
+            'test -d "$source"; mkdir -p -- "$target"; '
+            'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
+            'for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do '
+            '  test -e "$entry" || continue; name=${entry##*/}; '
+            '  case "$name" in tmp|.tmp) continue;; esac; '
+            '  cp -R -- "$entry" "$target/"; '
+            "done; "
+            'mkdir -p -- "$target/tmp" "$target/.tmp"; '
+            'case "$runtime" in '
+            '  opencode|kilo) rm -rf -- "$target/$runtime/state/$runtime/locks";; '
+            "esac; "
+            ': > "$target/.freeinference-member-state-v1"'
+        )
+        result = self._manager.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script, "sh", source_dir, target_dir, runtime_id],
+            workdir="/",
+            timeout_s=120,
+            user_uid=target_uid,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError(
+                f"{runtime_id} fork state could not be materialized for the child: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+
+    def _clear_http_member_locks(
+        self,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+    ) -> None:
+        """Remove dead OpenCode/Kilo server locks after closing that process.
+
+        Both HTTP runtimes leave a per-project lock in their XDG state tree.
+        The source process is intentionally restarted after native fork, so a
+        lock that still names the closed PID must not survive into that new
+        process generation.  Session history and databases are left intact.
+        """
+        runtime_id = launch.runtime_id
+        if runtime_id not in {"opencode", "kilo"}:
+            raise DriverError(f"runtime {runtime_id!r} has no HTTP member locks")
+        state_dir = self._member_state_dir(launch)
+        uid = MEMBER_UID_BASE + launch.slot_id
+        result = self._manager.exec_capture(
+            spec,
+            [
+                "/bin/sh",
+                "-c",
+                'set -eu; state="$1"; runtime="$2"; '
+                'rm -rf -- "$state/$runtime/state/$runtime/locks"',
+                "sh",
+                state_dir,
+                runtime_id,
+            ],
+            workdir="/",
+            timeout_s=120,
+            user_uid=uid,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError(
+                f"{runtime_id} stale member locks could not be cleared: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+
+    def _launch_context(
+        self,
+        spec: ChatSandboxSpec,
+        launch: ResidentLaunch,
+        *,
+        state_dir: str | None = None,
+    ) -> LaunchContext:
+        """Build one member-isolated launch seam used by live and fork probes."""
+        uid = MEMBER_UID_BASE + launch.slot_id
+        runtime_id = launch.runtime_id
+        activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
+        home = f"/home/agent-member-{launch.slot_id}"
+        base_env = dict(self._manager.backend.base_env())
+        base_env.update(
+            {
+                "HOME": home,
+                "PATH": SANDBOX_PATH,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
+            }
+        )
+        if launch.runtime_version:
+            base_env["PATH"] = (
+                f"{runtime_bin_dir(runtime_id, launch.runtime_version)}:{base_env['PATH']}"
+            )
+
+        reaped = False
+
+        def spawn_live(argv: list[str], env: dict[str, str]):
+            nonlocal reaped
+            if not reaped:
+                # A broker restart cannot reattach Docker-exec pipes. Remove
+                # any prior tree in this member's distinct uid before native
+                # resume opens the replacement transport.
+                self._manager.reap_member_processes(
+                    spec,
+                    slot_id=launch.slot_id,
+                    user_uid=uid,
+                    user_gid=self._manager.backend.gid,
+                )
+                reaped = True
+            pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
+            return self._manager.spawn(
+                spec,
+                argv,
+                env=env,
+                workdir=CHAT_WORKDIR,
+                live_input=True,
+                user_uid=uid,
+                user_gid=self._manager.backend.gid,
+                process_pidfile=pidfile,
+            )
+
+        mcp_enabled = bool(launch.mcp_server_ids)
+        return LaunchContext(
+            workdir=CHAT_WORKDIR,
+            gateway_base_url=launch.gateway_base_url,
+            credential=launch.credential,
+            provides_isolation=True,
+            spawn=lambda argv, env: self._manager.spawn(
+                spec,
+                argv,
+                env=env,
+                workdir=CHAT_WORKDIR,
+                user_uid=uid,
+                user_gid=self._manager.backend.gid,
+            ),
+            spawn_live=spawn_live,
+            base_env=base_env,
+            mcp_config=RuntimeMCPConfig(
+                server_ids=launch.mcp_server_ids,
+                base_url=launch.mcp_base_url if mcp_enabled else "",
+                credential=launch.mcp_credential if mcp_enabled else "",
+            ),
+            state_dir=CHAT_STATE_DIR,
+            session_state_dir=state_dir or CHAT_STATE_DIR,
+            activation_dir=activation_dir,
+        )
+
+    def fork_native(
+        self,
+        spec: ChatSandboxSpec,
+        source: ResidentTransport,
+        operation_id: str,
+        target_launch: ResidentLaunch,
+    ) -> str:
+        """Materialize or recover one prompt-free, journaled native fork."""
+        source_id = source.native_session_id
+        if not source_id:
+            raise DriverError("native fork source has no settled session id")
+        if not operation_id:
+            raise DriverError("native fork operation id is required")
+        if source.launch.runtime_id != target_launch.runtime_id:
+            raise DriverError("native fork cannot change runtime")
+        if source.launch.runtime_version != target_launch.runtime_version:
+            raise DriverError("native fork cannot change runtime version")
+        if not target_launch.credential:
+            raise DriverError("native fork target needs a residency credential")
+
+        expected = {
+            "operation_id": operation_id,
+            "sandbox_id": spec.sandbox_id,
+            "sandbox_generation": spec.generation,
+            "runtime_id": source.launch.runtime_id,
+            "runtime_version": source.launch.runtime_version,
+            "source_session_id": source_id,
+            "target_thread_id": target_launch.thread_id,
+            "target_slot_id": target_launch.slot_id,
+        }
+        runtime_id = source.launch.runtime_id
+        existing = self._read_fork_journal(spec, operation_id)
+        codex_baseline: set[str] | None = None
+        if existing is not None:
+            self._validate_journal(existing, expected)
+            if existing.get("state") == "ready":
+                child_id = str(existing.get("target_session_id") or "")
+                if not child_id or child_id == source_id:
+                    raise DriverError("native fork journal has an invalid child id")
+                return child_id
+            if runtime_id != "codex":
+                # The process may have persisted a child immediately before a
+                # crash. Retrying that ambiguous mutation would manufacture a
+                # second hidden child, so fail closed for the saga reconciler.
+                raise DriverError("native fork has an ambiguous preparing journal")
+            codex_baseline = self._codex_journal_baseline(existing)
+            child_id = self._recover_codex_fork(
+                spec,
+                source.launch,
+                source_id=source_id,
+                baseline=codex_baseline,
+            )
+        else:
+            preparing = {**expected, "state": "preparing"}
+            if runtime_id == "codex":
+                codex_baseline = self._codex_fork_children(
+                    spec,
+                    source.launch,
+                    source_id=source_id,
+                )
+                preparing["source_child_session_ids"] = sorted(codex_baseline)
+            self._write_fork_journal(spec, operation_id, preparing)
+            child_id = ""
+
+        if not child_id and runtime_id in {"codex", "opencode", "kilo"}:
+            fork = getattr(source.session, "fork_native", None)
+            if fork is None:
+                raise DriverError(f"runtime {runtime_id!r} has no live native fork")
+            try:
+                child_id = str(fork(source_session_id=source_id, operation_id=operation_id) or "")
+            except Exception:
+                if runtime_id != "codex" or codex_baseline is None:
+                    raise
+                # Codex writes the child rollout before returning the RPC.
+                # A severed response is recoverable without issuing a second
+                # mutation when exactly one new child points at this source.
+                # Zero may simply mean the write has not become visible yet;
+                # preserve PREPARING and let the idempotent HTTP retry scan it.
+                recovered = self._new_codex_fork_children(
+                    spec,
+                    source.launch,
+                    source_id=source_id,
+                    baseline=codex_baseline,
+                )
+                if len(recovered) != 1:
+                    raise
+                child_id = next(iter(recovered))
+        elif not child_id and runtime_id == "claude-code":
+            child_id = self._fork_claude(spec, source_id, source.launch.slot_id)
+        elif not child_id and runtime_id == "pi":
+            child_id = self._fork_pi(spec, source_id, target_launch)
+        elif not child_id:
+            raise DriverError(f"runtime {runtime_id!r} has no native fork path")
+        if not child_id or child_id == source_id:
+            raise DriverError(f"runtime {runtime_id!r} returned an invalid fork child id")
+        if codex_baseline is not None and child_id in codex_baseline:
+            raise DriverError("Codex native fork reused a pre-existing child session")
+
+        if runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
+            # These providers use owner-only files, SQLite, or project locks.
+            # Stop the quiescent source so its state is flushed, expose its
+            # credential-free files to the target UID, and copy that stable
+            # post-fork state into the child's private home. The supervisor
+            # resumes the exact source immediately after this method returns;
+            # PID continuity is not required. For Codex this materialization
+            # is also the recovery path when the original RPC response is lost.
+            source.close()
+            if runtime_id in {"opencode", "kilo"}:
+                self._clear_http_member_locks(spec, source.launch)
+            self._manager.normalize_member_files(
+                spec,
+                slot_id=source.launch.slot_id,
+                user_uid=MEMBER_UID_BASE + source.launch.slot_id,
+                user_gid=self._manager.backend.gid,
+            )
+            self._clone_private_member_state(
+                spec,
+                source.launch,
+                target_launch,
+            )
+            normalization_slot = target_launch.slot_id
+        elif runtime_id == "pi":
+            normalization_slot = target_launch.slot_id
+        else:
+            normalization_slot = source.launch.slot_id
+
+        self._manager.normalize_member_files(
+            spec,
+            slot_id=normalization_slot,
+            user_uid=MEMBER_UID_BASE + normalization_slot,
+            user_gid=self._manager.backend.gid,
+        )
+        self._write_fork_journal(
+            spec,
+            operation_id,
+            {**expected, "state": "ready", "target_session_id": child_id},
+        )
+        return child_id
+
+    def _recover_codex_fork(
+        self,
+        spec: ChatSandboxSpec,
+        source_launch: ResidentLaunch,
+        *,
+        source_id: str,
+        baseline: set[str],
+    ) -> str:
+        recovered = self._new_codex_fork_children(
+            spec,
+            source_launch,
+            source_id=source_id,
+            baseline=baseline,
+        )
+        if len(recovered) != 1:
+            detail = "no child is visible" if not recovered else "multiple children are visible"
+            raise DriverError(f"Codex native fork preparing journal is ambiguous: {detail}")
+        return next(iter(recovered))
+
+    def _new_codex_fork_children(
+        self,
+        spec: ChatSandboxSpec,
+        source_launch: ResidentLaunch,
+        *,
+        source_id: str,
+        baseline: set[str],
+    ) -> set[str]:
+        return (
+            self._codex_fork_children(
+                spec,
+                source_launch,
+                source_id=source_id,
+            )
+            - baseline
+        )
+
+    def _codex_fork_children(
+        self,
+        spec: ChatSandboxSpec,
+        source_launch: ResidentLaunch,
+        *,
+        source_id: str,
+    ) -> set[str]:
+        """Read bounded Codex rollout metadata for crash-safe fork recovery."""
+        state_dir = self._member_state_dir(source_launch)
+        script = """
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]) / "sessions"
+source_id = sys.argv[2]
+children = set()
+seen = 0
+if root.is_dir():
+    for path in root.rglob("*.jsonl"):
+        seen += 1
+        if seen > 100000:
+            raise SystemExit(42)
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                first = handle.readline(1_000_001)
+            if len(first) > 1_000_000:
+                raise SystemExit(43)
+            item = json.loads(first)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(payload, dict) or payload.get("forked_from_id") != source_id:
+            continue
+        child_id = payload.get("session_id") or payload.get("id")
+        if isinstance(child_id, str) and child_id and len(child_id) <= 256:
+            children.add(child_id)
+        if len(children) > 4096:
+            raise SystemExit(44)
+print(json.dumps(sorted(children), separators=(",", ":")))
+"""
+        result = self._manager.exec_capture(
+            spec,
+            ["python3", "-c", script, state_dir, source_id],
+            workdir="/",
+            timeout_s=30,
+            user_uid=MEMBER_UID_BASE + source_launch.slot_id,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError(
+                "Codex fork recovery inventory failed: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+        try:
+            value = json.loads(result.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DriverError("Codex fork recovery inventory returned invalid JSON") from exc
+        if (
+            not isinstance(value, list)
+            or len(value) > 4096
+            or any(not isinstance(item, str) or not item or len(item) > 256 for item in value)
+        ):
+            raise DriverError("Codex fork recovery inventory has an invalid shape")
+        return set(value)
+
+    @staticmethod
+    def _codex_journal_baseline(journal: dict[str, object]) -> set[str]:
+        value = journal.get("source_child_session_ids")
+        if (
+            not isinstance(value, list)
+            or len(value) > 4096
+            or any(not isinstance(item, str) or not item or len(item) > 256 for item in value)
+        ):
+            raise DriverError("Codex native fork journal has no valid recovery baseline")
+        if len(set(value)) != len(value):
+            raise DriverError("Codex native fork journal recovery baseline is not canonical")
+        return set(value)
+
+    def _fork_claude(self, spec: ChatSandboxSpec, source_id: str, source_slot: int) -> str:
+        uid = MEMBER_UID_BASE + source_slot
+        result = self._manager.exec_capture(
+            spec,
+            ["claude-session-fork", source_id],
+            env={
+                "HOME": f"/home/agent-member-{source_slot}",
+                "CLAUDE_CONFIG_DIR": f"{CHAT_STATE_DIR}/claude",
+                "PATH": SANDBOX_PATH,
+            },
+            workdir=CHAT_WORKDIR,
+            timeout_s=60,
+            user_uid=uid,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError(
+                "Claude native fork failed: " + result.stderr.decode("utf-8", "replace")[:500]
+            )
+        try:
+            receipt = json.loads(result.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DriverError("Claude native fork returned invalid JSON") from exc
+        if not isinstance(receipt, dict) or receipt.get("source_session_id") != source_id:
+            raise DriverError("Claude native fork returned the wrong source session")
+        return str(receipt.get("session_id") or "")
+
+    def _fork_pi(
+        self,
+        spec: ChatSandboxSpec,
+        source_id: str,
+        target_launch: ResidentLaunch,
+    ) -> str:
+        driver = get_driver("pi")
+        opener = getattr(driver, "launch_fork_live", None)
+        if opener is None:
+            raise DriverError("pi driver has no prompt-free fork transport")
+        probe = opener(self._launch_context(spec, target_launch), source_session_id=source_id)
+        try:
+            ensure_started = getattr(probe, "ensure_started", None)
+            if ensure_started is None:
+                raise DriverError("pi fork transport cannot prove readiness")
+            ensure_started(
+                model=target_launch.model,
+                reasoning_effort=target_launch.reasoning_effort,
+            )
+            child_id = str(getattr(probe.runtime, "session_id", None) or "")
+            if not child_id or child_id == source_id:
+                raise DriverError("pi --fork returned an invalid child session id")
+            return child_id
+        finally:
+            with contextlib.suppress(Exception):
+                probe.close()
+
+    @staticmethod
+    def _journal_key(operation_id: str) -> str:
+        return hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+
+    def _read_fork_journal(
+        self,
+        spec: ChatSandboxSpec,
+        operation_id: str,
+    ) -> dict[str, object] | None:
+        path = f"{PLATFORM_STATE_DIR}/session-forks/{self._journal_key(operation_id)}.json"
+        result = self._manager.exec_capture(
+            spec,
+            ["/bin/sh", "-c", 'test ! -e "$1" || cat -- "$1"', "sh", path],
+            workdir="/",
+            timeout_s=15,
+            # The sandbox drops every Linux capability. UID 0 therefore does
+            # not have CAP_DAC_OVERRIDE and cannot traverse the Docker-layer
+            # state root owned by the sandbox account. Use that exact owner
+            # for the platform journal instead of assuming root bypasses DAC.
+            user_uid=self._manager.backend.uid,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError("native fork journal could not be read")
+        if not result.stdout:
+            return None
+        try:
+            value = json.loads(result.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DriverError("native fork journal is corrupt") from exc
+        if not isinstance(value, dict):
+            raise DriverError("native fork journal has an invalid shape")
+        return value
+
+    def _write_fork_journal(
+        self,
+        spec: ChatSandboxSpec,
+        operation_id: str,
+        value: dict[str, object],
+    ) -> None:
+        directory = f"{PLATFORM_STATE_DIR}/session-forks"
+        path = f"{directory}/{self._journal_key(operation_id)}.json"
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        script = (
+            'set -eu; directory="$1"; target="$2"; '
+            'umask 077; mkdir -p -- "$directory"; chmod 0700 -- "$directory"; '
+            'tmp="$target.tmp.$$"; trap \'rm -f -- "$tmp"\' EXIT; '
+            'cat > "$tmp"; chmod 0600 -- "$tmp"; mv -f -- "$tmp" "$target"; '
+            "trap - EXIT"
+        )
+        result = self._manager.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script, "sh", directory, path],
+            workdir="/",
+            timeout_s=15,
+            input_bytes=payload,
+            user_uid=self._manager.backend.uid,
+            user_gid=self._manager.backend.gid,
+        )
+        if result.returncode != 0:
+            raise DriverError(
+                "native fork journal could not be written: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
+
+    @staticmethod
+    def _validate_journal(
+        journal: dict[str, object],
+        expected: dict[str, object],
+    ) -> None:
+        if any(journal.get(key) != value for key, value in expected.items()):
+            raise DriverError("native fork journal identity does not match the request")
+        if journal.get("state") not in {"preparing", "ready"}:
+            raise DriverError("native fork journal has an invalid state")
+
+
+__all__ = [
+    "ResidentLaunch",
+    "ResidentTransport",
+    "ResidentTransportFactory",
+    "ResidentTurn",
+]

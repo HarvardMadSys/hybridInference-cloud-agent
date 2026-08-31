@@ -95,6 +95,9 @@ services:
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-trusted-v1}
+      # New chats require a host that advertises the complete shared-live
+      # protocol; unset/0 preserves the legacy disposable scheduling path.
+      AGENT_SHARED_LIVE_SANDBOX: ${AGENT_SHARED_LIVE_SANDBOX:-0}
 
       # --- Publishing and source control ------------------------------------
       # The only component that holds a git credential, which is precisely what

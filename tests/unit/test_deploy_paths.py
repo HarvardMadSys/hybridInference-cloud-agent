@@ -14,6 +14,7 @@ open-decisions register.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -119,6 +120,19 @@ def test_the_runner_image_runs_the_host_package() -> None:
     text = (HOST / "Dockerfile.agent-runner").read_text(encoding="utf-8")
     assert "COPY cloud_agent_host/ cloud_agent_host/" in text
     assert '"cloud_agent_host.runner"' in text
+
+
+def test_the_runner_entrypoint_does_not_import_the_control_plane_package() -> None:
+    """The slim runner image carries only the host package at runtime."""
+    source = (REPO / "cloud_agent_host/runner.py").read_text(encoding="utf-8")
+    imports = {
+        node.module
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert not {
+        module for module in imports if module == "cloud_agent" or module.startswith("cloud_agent.")
+    }
 
 
 def test_the_remote_compose_builds_from_files_that_exist() -> None:

@@ -417,6 +417,108 @@ async def _reap_lapsed_residencies(store: AgentJobStore, grants: Any | None) -> 
             await grants.revoke(row["grant_id"])
 
 
+async def _cleanup_reaped_shared_residencies(
+    store: AgentJobStore,
+    actions: list[dict[str, Any]],
+    grants: Any | None,
+) -> None:
+    """Fence exact shared member processes orphaned by attempt expiry."""
+    cleanups = [
+        (action, action.get("cleanup_residency"))
+        for action in actions
+        if action.get("cleanup_residency")
+    ]
+    if not cleanups:
+        return
+
+    from cloud_agent.broker_routing import broker_for_job
+
+    for action, cleanup in cleanups:
+        try:
+            broker = await broker_for_job(store, str(action["job_id"]))
+            if broker is not None:
+                await broker.shared_residency_lost(
+                    str(cleanup["thread_id"]),
+                    generation=int(cleanup["generation"]),
+                )
+        except Exception:
+            # The durable residency generation is already closed. A later
+            # host heartbeat echoes the dead generation and retries local
+            # process cleanup, so broker reachability cannot block reaping.
+            logger.warning(
+                "agent_reaped_shared_residency_cleanup_failed",
+                extra={
+                    "event": "agent_reaped_shared_residency_cleanup_failed",
+                    "thread_id": cleanup["thread_id"],
+                    "generation": cleanup["generation"],
+                },
+                exc_info=True,
+            )
+        grant_id = cleanup.get("grant_id")
+        if grant_id and grants is not None:
+            with contextlib.suppress(Exception):
+                await grants.revoke(grant_id)
+
+
+async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
+    """Capture at most one quiescent shared workspace without blocking turns."""
+    claim = getattr(store, "claim_due_sandbox_snapshot", None)
+    if claim is None:
+        return
+    snapshot = await claim()
+    if snapshot is None:
+        return
+
+    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+
+    broker = await broker_for_job(store, snapshot["anchor_job_id"])
+    if broker is None:
+        await store.defer_sandbox_snapshot_capture(
+            snapshot_id=int(snapshot["snapshot_id"]),
+            detail="the owning workspace broker is unavailable",
+        )
+        return
+    try:
+        receipt = await broker.capture_shared_snapshot(snapshot)
+        expected = {
+            "snapshot_id": int(snapshot["snapshot_id"]),
+            "sandbox_id": snapshot["sandbox_id"],
+            "sandbox_generation": int(snapshot["generation"]),
+            "container_id": snapshot["container_id"],
+            "workspace_epoch": int(snapshot["workspace_epoch"]),
+            "base_sha": snapshot["base_sha"],
+        }
+        if any(receipt.get(key) != value for key, value in expected.items()):
+            raise ValueError("shared snapshot host receipt identity did not match the claim")
+        patch = receipt.get("patch")
+        digest = receipt.get("content_sha256")
+        if not isinstance(patch, str) or not isinstance(digest, str):
+            raise ValueError("shared snapshot host receipt omitted its patch or hash")
+        recorded = await store.record_sandbox_snapshot_capture(
+            snapshot_id=int(snapshot["snapshot_id"]),
+            sandbox_id=str(snapshot["sandbox_id"]),
+            workspace_epoch=int(snapshot["workspace_epoch"]),
+            base_sha=str(snapshot["base_sha"]),
+            patch=patch,
+            content_sha256=digest,
+        )
+        if recorded is None:
+            raise ValueError("shared snapshot receipt lost its durable generation fence")
+    except WorkspaceBrokerError as exc:
+        await store.defer_sandbox_snapshot_capture(
+            snapshot_id=int(snapshot["snapshot_id"]),
+            detail=str(exc),
+            dirty=exc.status_code in {410, 422, 502},
+        )
+    except ValueError as exc:
+        await store.defer_sandbox_snapshot_capture(
+            snapshot_id=int(snapshot["snapshot_id"]),
+            detail=str(exc),
+            dirty=True,
+        )
+
+
 async def reap_expired_attempts(
     store: AgentJobStore,
     *,
@@ -468,7 +570,12 @@ async def reap_expired_attempts(
         except Exception:
             logger.warning("Residency reaper pass failed", exc_info=True)
         try:
+            await _capture_due_shared_snapshot(store)
+        except Exception:
+            logger.warning("Shared workspace snapshot pass failed", exc_info=True)
+        try:
             actions = await store.reap_expired(max_attempts=max_attempts)
+            await _cleanup_reaped_shared_residencies(store, actions, grants)
             await _reconcile_settled_terminals(store)
             if actions:
                 logger.info(
@@ -484,6 +591,28 @@ async def reap_expired_attempts(
                     "agent_publishes_stalled",
                     extra={"event": "agent_publishes_stalled", "job_ids": stalled},
                 )
+            snapshot_reaper = getattr(store, "reap_stalled_sandbox_snapshot_captures", None)
+            if snapshot_reaper is not None:
+                stalled_captures = await snapshot_reaper()
+                if stalled_captures:
+                    logger.warning(
+                        "agent_snapshot_captures_stalled",
+                        extra={
+                            "event": "agent_snapshot_captures_stalled",
+                            "snapshot_ids": stalled_captures,
+                        },
+                    )
+            snapshot_publish_reaper = getattr(store, "reap_stalled_snapshot_publishes", None)
+            if snapshot_publish_reaper is not None:
+                stalled_snapshot_publishes = await snapshot_publish_reaper()
+                if stalled_snapshot_publishes:
+                    logger.warning(
+                        "agent_snapshot_publishes_stalled",
+                        extra={
+                            "event": "agent_snapshot_publishes_stalled",
+                            "snapshot_ids": stalled_snapshot_publishes,
+                        },
+                    )
             stalled_forks = await store.reap_stalled_sandbox_forks()
             if stalled_forks:
                 from cloud_agent.broker_routing import broker_for_job
@@ -522,6 +651,39 @@ async def reap_expired_attempts(
                     extra={
                         "event": "agent_sandbox_forks_stalled",
                         "operation_ids": [operation["id"] for operation in stalled_forks],
+                        "cleaned_operation_ids": cleaned,
+                    },
+                )
+            stalled_session_forks = await store.reap_stalled_session_forks()
+            if stalled_session_forks:
+                from cloud_agent.broker_routing import broker_for_job
+
+                recovered: list[str] = []
+                cleaned: list[str] = []
+                for operation in stalled_session_forks:
+                    operation_id = str(operation["id"])
+                    if operation.get("recovery_action") == "finalize":
+                        if await store.finalize_session_fork(operation_id=operation_id):
+                            recovered.append(operation_id)
+                        continue
+                    broker = await broker_for_job(store, operation["source_job_id"])
+                    for residency in operation.get("cleanup_residencies") or []:
+                        if broker is not None:
+                            with contextlib.suppress(Exception):
+                                await broker.shared_residency_lost(
+                                    str(residency["thread_id"]),
+                                    generation=int(residency["generation"]),
+                                )
+                        grant_id = residency.get("grant_id")
+                        if grant_id and grants is not None:
+                            with contextlib.suppress(Exception):
+                                await grants.revoke(grant_id)
+                    cleaned.append(operation_id)
+                logger.warning(
+                    "agent_session_forks_reconciled",
+                    extra={
+                        "event": "agent_session_forks_reconciled",
+                        "recovered_operation_ids": recovered,
                         "cleaned_operation_ids": cleaned,
                     },
                 )

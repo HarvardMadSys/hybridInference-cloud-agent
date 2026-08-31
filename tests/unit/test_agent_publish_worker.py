@@ -55,6 +55,10 @@ class FakeStore:
         self.recorded: tuple[str, str] | None = None
         self.recorded_commit: str | None = None
         self.failed: tuple[str, str] | None = None
+        self.snapshot_recorded: tuple[int, str, str] | None = None
+        self.snapshot_failed: tuple[int, str] | None = None
+        self.import_failed: tuple[int, str] | None = None
+        self.import_completed: tuple[int, str] | None = None
         self._record_ok = record_ok
 
     async def claim_for_publish(self):
@@ -71,6 +75,22 @@ class FakeStore:
 
     async def fail_publish(self, *, job_id: str, detail: str) -> None:
         self.failed = (job_id, detail)
+
+    async def record_snapshot_publish(
+        self, *, snapshot_id: int, pr_url: str, commit_sha: str
+    ) -> bool:
+        self.snapshot_recorded = (snapshot_id, pr_url, commit_sha)
+        return self._record_ok
+
+    async def fail_snapshot_publish(self, *, snapshot_id: int, detail: str) -> None:
+        self.snapshot_failed = (snapshot_id, detail)
+
+    async def record_snapshot_base_import_failure(self, *, snapshot_id: int, detail: str) -> None:
+        self.import_failed = (snapshot_id, detail)
+
+    async def complete_snapshot_base_import(self, *, snapshot_id: int, commit_sha: str) -> bool:
+        self.import_completed = (snapshot_id, commit_sha)
+        return True
 
 
 def _patch_publish(monkeypatch, result_or_exc):
@@ -118,6 +138,76 @@ async def test_successful_publish_records_the_pr(monkeypatch):
     assert captured["head_branch"] == "agent/ajob_1"
     assert captured["base_branch"] == "dev"
     assert "ajob_1" in captured["body"]
+
+
+async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(monkeypatch):
+    from cloud_agent import broker_routing
+
+    snapshot = {
+        **_JOB,
+        "publication_kind": "shared_snapshot",
+        "snapshot_id": 9,
+        "workspace_epoch": 4,
+        "included_job_ids": ["ajob_1", "ajob_2"],
+        "anchor_job_id": "ajob_2",
+        "thread_id": "athr_child",
+        "branch_id": "athr_origin",
+    }
+    store = FakeStore(snapshot)
+    _patch_publish(
+        monkeypatch,
+        PublishResult(
+            branch="agent/athr_origin",
+            commit_sha="b" * 40,
+            changed_files=["x"],
+            base_bundle=b"bundle",
+        ),
+    )
+    captured_pr = _patch_pr(monkeypatch)
+
+    class Broker:
+        def __init__(self) -> None:
+            self.imported: tuple[dict[str, Any], str, bytes] | None = None
+
+        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
+            self.imported = (row, commit_sha, bundle)
+
+    broker = Broker()
+
+    async def route(_store, job_id: str):
+        assert job_id == "ajob_2"
+        return broker
+
+    monkeypatch.setattr(broker_routing, "broker_for_job", route)
+
+    url = await publish_one(store, credential=GitHubCredential("t"))
+
+    assert url == "https://github.com/o/n/pull/7"
+    assert store.recorded is None and store.failed is None
+    assert store.snapshot_recorded == (9, url, "b" * 40)
+    assert store.snapshot_failed is None and store.import_failed is None
+    assert store.import_completed == (9, "b" * 40)
+    assert broker.imported == (snapshot, "b" * 40, b"bundle")
+    assert "group snapshot" in captured_pr["body"]
+    assert "ajob_1" in captured_pr["body"] and "ajob_2" in captured_pr["body"]
+
+
+async def test_shared_snapshot_rejection_does_not_fail_its_successful_turn(monkeypatch):
+    snapshot = {
+        **_JOB,
+        "publication_kind": "shared_snapshot",
+        "snapshot_id": 9,
+        "workspace_epoch": 4,
+        "included_job_ids": ["ajob_1"],
+        "anchor_job_id": "ajob_1",
+        "branch_id": "athr_origin",
+    }
+    store = FakeStore(snapshot)
+    _patch_publish(monkeypatch, PublishError("patch rejected"))
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert store.failed is None
+    assert store.snapshot_failed == (9, "patch rejected")
 
 
 async def test_the_pr_targets_the_branch_the_job_was_started_from(monkeypatch):

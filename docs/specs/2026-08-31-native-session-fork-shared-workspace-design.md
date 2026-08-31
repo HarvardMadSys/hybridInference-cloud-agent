@@ -1,11 +1,11 @@
 # Concurrent live native-session forks in one shared sandbox workspace
 
-- **Status:** implementation-ready proposal v5 — documentation only; not yet
-  implemented
+- **Status:** implemented preview v6 — capability-gated; this document is the
+  source of truth for new shared-live chats
 - **Date:** 2026-08-31
 - **Depends on:**
   `2026-08-28-one-chat-one-restartable-sandbox-design.md`
-- **Proposes replacing:** that document's runner-owned one-shot retained CLI
+- **Supersedes for new shared-live chats:** that document's runner-owned one-shot retained CLI
   process model and retained-chat fork behavior; ordinary
   one-chat/one-container ownership remains unchanged
 - **Scope:** supervisor-owned live Agent CLI transports while Docker is
@@ -15,11 +15,18 @@
 - **Defers:** historical-turn forks, independent filesystems/branches for
   siblings, cross-host restore, cold storage, and sandbox deletion
 
-This document is a proposed next design. The current branch still implements
-runner-owned one-shot retained turns and the full Docker clone in section 13 of
-the existing restartable-sandbox spec. No API, UI, or operational
-documentation may claim this proposal is live until the schema, drivers, host
-protocol, frontend, and concurrency tests land together.
+The schema, five exact-version live drivers, host supervisor protocol, native
+fork saga, shared publication coordinator, deployment wiring, and frontend
+contract described here are implemented together behind
+`AGENT_SHARED_LIVE_SANDBOX`. New capable chats use this design. Historical
+one-chat retained containers remain readable in `legacy_1to1` mode and are not
+silently upgraded; legacy disposable jobs retain their database-only chat-copy
+compatibility path. No new retained Docker-clone fork is created.
+
+This is still a rollout preview rather than a persistent-storage design. The
+container's Docker writable layer is the only durable chat state, so losing the
+container or its Docker data root is LOST. Cross-host restore, container
+deletion, native-state garbage collection, and cold storage remain deferred.
 
 ---
 
@@ -32,8 +39,9 @@ The required topology is:
 2. Fork creates another chat in the **same** sandbox group. It branches the
    selected chat's native Agent CLI session but does not copy the container,
    workspace, or Git repository.
-3. Every ready member chat owns its own native session and, while the sandbox
-   group is running, normally one supervisor-owned live Agent CLI transport.
+3. Every ready member chat owns its own native session and, after that member
+   is activated while the sandbox group is running, one supervisor-owned live
+   Agent CLI transport.
    After fork, two member processes remain available simultaneously in the
    same container against the same `/workspace`, including while both are
    executing turns.
@@ -51,8 +59,8 @@ The required topology is:
 7. Repeated forks may create N member chats in one sandbox group; concurrent
    execution is bounded only by configured host/container resource admission,
    never by an artificial limit of one active member.
-8. The retained Docker-clone fork path is removed. Fork always means native
-   conversation fork into the same sandbox/workspace.
+8. The retained Docker-clone fork path is removed. Fork for a new shared-live
+   chat means native conversation fork into the same sandbox/workspace.
 
 The ordinary case remains one-to-one:
 
@@ -88,11 +96,14 @@ chat B -> group G, native session B, resident process generation PB
 
 Session continuity needs no per-chat volume, host bind mount, container clone,
 or PID identity. `/workspace` and the runtime's durable `/agent-state` are the
-shared Docker-owned data; each membership's native session id selects the
-correct conversation inside that state. Native transcripts are same-owner
-group data, not a hostile ACL boundary between sibling chats. The platform
-still isolates credentials, process control, event routing, and authorization
-per membership as described in section 11.
+Docker-owned data. `/workspace` is intentionally common to the group;
+provider homes that cannot safely host concurrent CLI processes are
+member-private subtrees of `/agent-state`, materialized from the native fork
+boundary. Each membership's native session id selects the correct conversation
+inside its provider home. Native transcripts are same-owner group data, not a
+hostile ACL boundary between sibling chats. The platform still isolates
+credentials, process control, event routing, and authorization per membership
+as described in section 11.
 
 ## 2. Meaning and consequences of one shared workspace
 
@@ -205,18 +216,21 @@ database transaction open across HTTP:
    that member's idle resident transport, then runs fork-only from the
    revalidated source locator. It preserves that process when the reviewed
    runtime protocol permits, otherwise it restarts only that member by native
-   resume. The operation counts as group activity. Fork-helper
-   mutations are serialized per sandbox group so one helper UID/private auth
-   channel never serves two operations at once; this short mutex orders only
-   Fork actions and does not block any Agent turn, terminal, or workspace
-   operation in another membership.
-3. Before invoking the CLI, a credential-free fork helper writes a durable
-   PREPARING journal under a platform-owned directory in the Docker writable
-   layer. It invokes the operation idempotently and atomically writes the
-   runtime, exact runtime version, source id `F`, target id `B`, sandbox
-   generation, and operation generation to the READY journal. A retry reads
-   that receipt instead of forking again. The journal is not a host mount and
-   contains no grant or provider credential.
+   resume. The operation counts as group activity. Native fork mutations are
+   serialized by one short per-group fork mutex; it orders only Fork actions
+   and does not block an Agent turn, terminal, or workspace operation in
+   another membership.
+3. Before invoking the CLI, a platform-owned journal writer running without a
+   provider credential writes a durable PREPARING receipt under a protected
+   directory in the Docker writable layer. The runtime fork is then invoked
+   once and the writer atomically records the
+   operation id, runtime, exact runtime version, source id `F`, target id `B`,
+   sandbox generation, target thread, and target slot to the READY journal. A
+   retry reads that receipt instead of forking again. For Codex, PREPARING also
+   records the bounded set of rollout ids already marked `forked_from_id=F`;
+   after a lost RPC response, exactly one new such rollout is the recoverable
+   `B`. Zero or multiple new children remain ambiguous and fail closed. The
+   journal is not a host mount and contains no grant or provider credential.
 4. The host returns that receipt. The control plane records the operation as
    MATERIALIZED and rejects a receipt for the wrong source, sandbox, runtime,
    version, or generation.
@@ -228,23 +242,29 @@ database transaction open across HTTP:
    transaction and is not returned before its transport is ready.
 6. A failure before the native call changes no native or visible child. A
    failure after the runtime persisted `B` or started its hidden transport but
-   before finalization may leave an unreachable native/process orphan; it never
-   changes `F`. Reconciliation finalizes a recorded receipt when possible,
-   otherwise it closes only the preallocated child process generation, scrubs
-   its slot, and an unreachable-session collector removes `B` after proving
-   that no membership or native edge owns it.
+   before finalization never changes `F`. Codex recovers a uniquely provable
+   child from its PREPARING baseline; runtimes without an equally reviewed
+   native inventory may leave unreachable native state. Reconciliation
+   finalizes a validated MATERIALIZED receipt. An unresolved stale PREPARING
+   operation fails closed after the configured reconciliation window,
+   releases/lapses only its source/target residency generations, and exposes no
+   child. Destructive garbage collection of unreachable native state is not
+   implemented in this phase.
 7. A reconciler retries or fails only the exact operation generation. It never
-   stops sibling processes or changes their memberships. Retrying an ambiguous
-   no-inference fork may create another unreachable native copy, but it must
-   expose at most one finalized child.
+   stops sibling processes or changes their memberships. The same operation id
+   never repeats an ambiguous native mutation: a PREPARING Codex journal is
+   completed only from one baseline-differenced child, while other ambiguous
+   PREPARING journals are rejected. At most one finalized child is exposed.
 
 The operation table has the states `preparing -> materialized -> ready`, plus
 terminal `failed`. A unique client request id closes the "database committed
 but HTTP response was lost" duplication window. The in-container receipt closes
-the "host returned but the control plane restarted" window. The only remaining
-ambiguous window is a runtime persisting `B` immediately before the helper is
-killed; such a target stays unreachable and is handled by the verified orphan
-collector, never guessed into a chat.
+the "host returned but the control plane restarted" window. For Codex, the
+rollout baseline also closes the "persisted `B`, response lost" window without
+issuing another `thread/fork`. For a runtime without a reviewed child
+inventory, such a target stays unreachable until the separately deferred
+sandbox or native-state cleanup phase. It is never guessed into a chat or
+replayed as if the fork had succeeded.
 
 After the Fork API succeeds, parent and child turns use the existing ordinary
 prompt-admission and at-most-once rules. A later crash is scoped to the member
@@ -257,11 +277,11 @@ The exact local sandbox image pins and resident surfaces are:
 
 | Runtime | Current pin | Supervisor-owned live transport | Button-time fork-only path | Status |
 |---|---:|---|---|---|
-| Claude Code | CLI `2.1.220`; Agent SDK not yet installed | `--print --input-format stream-json --output-format stream-json`; the current driver already has `ClaudeCodeLiveSession` | Pin and call Anthropic's official [`fork_session(F, directory="/workspace")`](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.148/src/claude_agent_sdk/_internal/session_mutations.py#L220) local-session API; briefly flush/restart the source if the live CLI cannot be forked safely in place | **Requires an exact reviewed Agent SDK pin** and moving the existing live handle from runner ownership to the supervisor. Plain headless `--fork-session` is not fork-only |
-| Codex | `0.145.0` | `codex app-server --listen stdio://` with `thread/start`, `turn/start`, `thread/resume`, and `turn/interrupt` | Native app-server `thread/fork` | The exact installed `0.145.0` generated schema already contains all five methods. Select one exact reviewed pin (`0.145.0` or an intentionally upgraded version such as `0.148.0`) only after operational and event-parser conformance; an upgrade is not required merely to obtain the topology |
-| Pi | `0.73.1` | `pi --mode rpc --session-dir ... --session F --offline` | Start RPC with `--fork F`; its session manager creates the target before waiting for input | Supported by the exact installed CLI and [session contract](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md); needs live multi-turn, fork-only receipt, and concurrent JSONL/global-state conformance |
-| OpenCode | `1.18.9` | One authenticated `opencode serve` process per membership | Resident service `POST /session/F/fork?directory=/workspace` | Supported by exact [`Session.fork`](https://github.com/anomalyco/opencode/blob/v1.18.9/packages/opencode/src/session/session.ts); exact-image offline probe produced a distinct session id without a prompt |
-| Kilo | `7.4.17` | One authenticated `kilo serve` process per membership | Resident service `POST /session/F/fork?directory=/workspace` | Supported by the exact pinned image; offline probe produced a distinct session id without a prompt; needs source-level pin review and concurrent shared-database conformance |
+| Claude Code | CLI `2.1.220`; Agent SDK helper `0.2.148` | `--print --input-format stream-json --output-format stream-json` | Exact SDK `fork_session(F, directory="/workspace")` helper | Implemented; the helper has a separate non-menu image attestation. Plain headless `--fork-session` is not used |
+| Codex | `0.145.0` | `codex app-server` over stdio with `thread/start`, `turn/start`, `thread/resume`, and `turn/interrupt` | Native app-server `thread/fork` | Implemented at the exact existing pin; no upgrade or TUI fallback |
+| Pi | `0.73.1` | `pi --mode rpc --session-dir ... --session F --offline` | Prompt-free temporary RPC launch with `--fork F` | Implemented; the child id is captured before the temporary fork transport closes |
+| OpenCode | `1.18.9` | One authenticated loopback `opencode serve` and private XDG provider home per membership, driven through an in-container bridge | Native `POST /session/F/fork?directory=/workspace`, then flush/copy the fork-boundary provider state | Implemented at the exact pin |
+| Kilo | `7.4.17` | One authenticated loopback `kilo serve` and private XDG provider home per membership, driven through an in-container bridge | Native `POST /session/F/fork?directory=/workspace`, then flush/copy the fork-boundary provider state | Implemented at the exact pin |
 
 The fork-only audit changes an important earlier assumption. OpenCode and Kilo
 both expose a persistent native session service even though their `run --fork`
@@ -277,19 +297,18 @@ Local exact-image probes established that OpenCode `1.18.9` and Kilo `7.4.17`
 create distinct persisted ids through their loopback APIs with networking
 disabled. A Claude `2.1.220` probe established that a local slash command can
 trigger `--fork-session` without inference, but it adds command records and is
-therefore not the production design. The official Agent SDK helper must be
-pinned in the sandbox image and tested against CLI `2.1.220` instead. A local
+therefore not the production design. The official Agent SDK helper is pinned
+in the sandbox image and invoked against CLI `2.1.220` instead. A local
 exact-image schema probe confirmed that Codex `0.145.0` contains
 `thread/start`, `turn/start`, `thread/resume`, `thread/fork`, and
-`turn/interrupt`; a real app-server/provider probe still gates the selected
-production pin.
+`turn/interrupt`; the shared capability is gated on that exact production pin.
 
 Each OpenCode/Kilo resident service must be authenticated even though it binds
 `127.0.0.1`: sibling UIDs share the container network namespace and can reach
 loopback. The exact OpenCode image supports
 `OPENCODE_SERVER_USERNAME`/`OPENCODE_SERVER_PASSWORD`; the exact Kilo image
 supports `KILO_SERVER_USERNAME`/`KILO_SERVER_PASSWORD`. A random local-control
-password lives only in that membership slot's private tmpfs/environment and is
+password lives only in the bridge process memory/environment and is
 rotated whenever the resident process generation changes. The service runs in
 pure mode on a random loopback port and terminates when the membership is
 closed or the container stops. A separate recovery helper, if needed, uses an
@@ -299,9 +318,9 @@ The rollout suite repeats this check for both runtimes and proves a sibling
 slot cannot read the password from `/proc` or private tmpfs.
 
 The OpenCode/Kilo port is never published to the host or another Docker
-network. The supervisor drives it through a slot-owned in-container control
-client created with the Docker exec API; Basic Auth is read from a `0600`
-private tmpfs file rather than placed in argv. Claude, Codex, and Pi keep their
+network. The supervisor drives it through a slot-owned in-container bridge;
+Basic Auth is generated inside that bridge, is not placed in argv, and is not
+persisted in the Docker layer or a host file. Claude, Codex, and Pi keep their
 framed stdin/stdout pipes directly in the supervisor. Thus every transport is
 reachable through the existing Docker authority without a host bind mount or a
 new sandbox egress destination.
@@ -330,52 +349,36 @@ provider test with two simultaneous processes that proves:
 9. concurrent file and Git conflicts surface as ordinary tool results rather
    than corrupting platform state or being attributed to the wrong chat.
 
-Codex remains disabled for shared-native fork until one exact version is
-selected and its app-server framing, event parser, native-id capture, resume,
-fork, interrupt, and all existing Codex tests pass together. Production images
-must not use a floating dependency. There is no TUI/PTTY or transcript-replay
-fallback for any runtime.
+Codex shared-native fork is enabled only when the image attests exact pin
+`0.145.0` and the host advertises `shared-sandbox-v1`. Its app-server framing,
+event parser, native-id capture, resume, fork, interrupt, and existing Codex
+tests pass together. Production images must not use a floating dependency.
+There is no TUI/PTTY or transcript-replay fallback for any shared runtime.
 
 ## 5. Driver and process model
 
-The current `HarnessSession.fork()` raises `ForkUnsupported`, and retained
-turns are still launched by a runner-owned one-shot session. Both ownership
-boundaries change. A resident driver supplies a supervisor-owned transport and
-a fork operation distinct from a model turn:
+The implementation deliberately does not use the old generic
+`HarnessSession.fork()`/one-shot retained path. `ResidentTransportFactory`
+opens a driver-native live session inside the container, while the shared host
+supervisor owns that transport beyond one runner request. Native fork is a
+separate prompt-free operation:
 
 ```python
 class ResidentTransport:
-    session_id: str
-    process_generation: int
+    native_session_id: str
 
-    def send_turn(self, turn: TurnInput, *, activation_generation: int) -> HarnessTurn: ...
-    def flush(self) -> None: ...
-    def interrupt(self, *, activation_generation: int) -> None: ...
+    def start_turn(self, *, prompt, model, reasoning_effort) -> ResidentTurn: ...
     def close(self) -> None: ...
 
-class HarnessDriver:
-    def open_resident(
-        self,
-        context: LaunchContext,
-        *,
-        session_id: str | None,
-        process_generation: int,
-    ) -> ResidentTransport: ...
-
-    def fork_session(
-        self,
-        context: LaunchContext,
-        *,
-        source_session_id: str,
-        source_transport: ResidentTransport | None,
-        operation_id: str,
-    ) -> ForkReceipt: ...
+class ResidentTransportFactory:
+    def open(self, sandbox, launch) -> ResidentTransport: ...
+    def fork_native(self, sandbox, source, operation_id, target_launch) -> str: ...
 ```
 
-`fork_session(...)` must call the exact runtime-native fork-only path, return
+`fork_native(...)` calls the exact runtime-native fork-only path, returns
 and verify the already-persisted target native id, emit no Agent turn events,
 and refuse before changing state if the pinned runtime lacks support. The
-supervisor then calls `open_resident(..., session_id=B)` and proves the child
+supervisor then calls `open(..., native_session_id=B)` and proves the child
 transport ready before the Fork API returns. The first user message is sent to
 that existing transport; it is not part of the fork operation.
 
@@ -391,8 +394,11 @@ The latter two capabilities are enabled only by live multi-turn and
 simultaneous-process conformance. They describe our implemented
 driver/image/supervisor combination, not an upstream CLI's advertised feature.
 
-Every ready membership in a running group normally owns one process generation
-and resident transport, including between turns. An active turn adds a nested
+Every membership activated in a running group owns one process generation and
+resident transport, including between turns. After a Docker/broker restart,
+members are restored lazily: the requesting member becomes HOT before its
+operation proceeds; untouched siblings remain WARM until their own next
+interaction. An active turn adds a nested
 activation generation; at most one activation may write one membership at a
 time. Process handles, input queues, stdout/stderr framing, native-id capture,
 interrupts, and credentials are keyed by
@@ -408,9 +414,14 @@ only that activation; it does not discard a settled resident process or a
 sibling transport.
 
 The live process uses that membership's independently fenced, short-TTL,
-renewable residency grant. Active jobs remain the authorities for message
-admission, events, cancellation, and usage attribution. A model, permission,
-or MCP configuration that the pinned live protocol cannot safely change causes
+renewable residency grant. Active jobs remain the authorities for prompt
+admission, event routing, cancellation, and runtime-reported turn usage. The
+gateway grant is necessarily process-stable and is billed to the chat identity
+`thread:<thread_id>`, not retroactively split among whichever job attempts used
+that process. Per-turn gateway-ledger attribution would require a separately
+reviewed local credential relay; this implementation neither fabricates that
+split nor duplicates usage. A model, permission, or MCP configuration that the
+pinned live protocol cannot safely change causes
 a deliberate member-only flush/restart with a re-keyed grant and native resume;
 the turn then proceeds on the replacement transport. Under the current
 attempt-scoped MCP contract, an MCP configuration change is such a restart
@@ -482,9 +493,11 @@ last_error nullable
 
 Each membership enforces at most one unresolved prompt for its native session.
 Different memberships may simultaneously have active attempts. A resident
-slot is generation-fenced and bound only while its process is alive; it is
-cleared on verified close/container stop and may be reassigned on native
-restart.
+slot is generation-fenced and remains the membership's stable execution
+identity across process restart and Docker stop/start. Stopping the container
+clears its tmpfs and processes, not the durable slot assignment. A new fork
+reserves a currently unowned slot; an existing membership is never silently
+rebound to another slot.
 
 The existing `agent_thread_residencies` authority remains per thread/chat and
 links through the membership to the shared sandbox group. Shared-fork v1 uses
@@ -544,24 +557,19 @@ of this rollout.
   container locator resolves through the shared sandbox group.
 - A member with an active/admitted attempt cannot claim another turn.
 - A different member in the same group may claim and execute concurrently.
-- Host capacity has separate accounting for retained containers, resident CLI
-  processes, and currently executing turns. A running ordinary group consumes
-  one resident slot; each finalized fork consumes another while that group is
-  running.
-- Every live membership reserves a credential-isolated execution slot for its
-  process generation, including while idle. Fork reserves the target slot
-  before mutating native state. Slot exhaustion queues/refuses new group/fork
-  admission with no half-created child; it is not implemented by a single
-  sandbox-group turn mutex.
-- Fork-only helpers reserve a bounded host maintenance slot and a group
-  operation refcount but no inference grant. Host-wide exhaustion returns a
-  stable retryable response; it never bypasses admission by spawning
-  unbounded local servers.
+- Per-container `resident_slot_capacity` bounds the number of chat
+  memberships/live CLI processes in one group. Each membership owns one
+  credential-isolated slot, including while idle. Fork reserves the target
+  slot before mutating native state; exhaustion refuses the fork with no
+  visible half-child. `AGENT_HOST_SLOTS` separately bounds concurrently claimed
+  turns on the machine. There is no sandbox-group turn mutex.
+- Fork-only work increments the group's operation refcount so idle stop cannot
+  race it, but does not send a model prompt or consume an inference turn.
 - Turn settlement leaves the member's transport and slot HOT. The normal path
   does not evict it before the group timeout; host admission leaves enough
   resident capacity before creating the chat/fork. A crash, rolling supervisor
-  restart, incompatible configuration, or explicit emergency pressure action
-  may flush and demote only that member to WARM, then natively restart it. An
+  restart, or incompatible configuration may flush and demote only that member
+  to WARM, then natively restart it. An
   active turn is never capacity-evicted.
 - The container must be provisioned with CPU/memory appropriate for the
   configured concurrency. Resource pressure may queue/refuse work through
@@ -570,14 +578,24 @@ of this rollout.
 - A runner process currently executes one claimed job synchronously. Therefore
   two simultaneous A/B turns still require at least two runner executors (the
   production Compose default already has three replicas) and two active-turn
-  slots, or an equivalent in-process executor pool. Local Compose currently has
-  one runner/slot and must be raised for the A/B concurrency test. Idle CLI
+  slots, or an equivalent in-process executor pool. Local Compose configures
+  two runner replicas and two host attempt slots; production Compose defaults
+  to three replicas and requires `AGENT_HOST_SLOTS >= 2` before advertising
+  the shared capability. Idle CLI
   transports live in the shared broker/supervisor rather than pinning runner
   replicas; runners are parallel turn clients of that lifecycle authority.
+- The shared sandbox defaults to a 4 GiB container limit. Local Docker Desktop
+  should expose at least 4 GiB, and 8 GiB is recommended when exercising all
+  five runtimes or concurrent members. A smaller daemon can OOM a CLI before the
+  protocol is exercised; that is a capacity failure, not evidence that turns
+  were serialized.
 - Shared-group jobs carry a `shared-sandbox-v1` host requirement. A host may
   advertise it only when its broker, image, runtime pin, slot pool, and runner
   concurrency all pass the feature probes; an old or partially upgraded host
-  cannot claim those jobs.
+  cannot claim those jobs. Claim also repeats the gate against the exact
+  polling replica's image digest, protocol, runtime/helper pins, and
+  process-local feature/broker/slot configuration. A rolling old replica
+  cannot borrow a newer sibling's machine-level heartbeat capability.
 
 ### Host supervisor
 
@@ -598,31 +616,33 @@ fenced turns to this supervisor instead of spawning Docker execs themselves.
 It can keep several member processes idle, drive several turns concurrently,
 interrupt one exact activation, and report all generations independently.
 
-A supervisor restart reconstructs Docker groups from immutable labels and the
-authoritative membership manifest returned by the control plane. Existing
-Docker exec processes whose pipes/control sockets cannot be safely reattached
-are generation-fenced, flushed when possible, and replaced by native resume;
-this is a temporary member-specific HOT-to-WARM-to-HOT recovery, not context
-loss. The next acquire carries the native locator and generations, while the
-heartbeat response reconciles durable group commands. The host never invents
-a second container because its in-memory member map was lost.
+A supervisor restart reconstructs Docker groups from immutable labels. A turn
+acquire, Fork, or snapshot request carries the durable membership manifest and
+hydrates the aliases that operation needs. Existing Docker exec processes whose
+pipes/control sockets cannot be safely reattached are generation-fenced,
+flushed when possible, and replaced lazily by native resume; this is a temporary
+member-specific HOT-to-WARM-to-HOT recovery, not context loss. Heartbeats report
+the members currently known by the replacement supervisor and separately
+reconcile durable stop/lost commands; omission is never interpreted as
+membership deletion. The host never invents a second container because its
+in-memory member map was lost.
 
-Each resident exec runs under a generation-labelled wrapper/process group with
-an exact slot-owned pidfile, and the wrapper acts as a child subreaper.
-Process-group kill alone is insufficient because untrusted tools can call
-`setsid` or double-fork. Before a turn, the supervisor records the reviewed
-idle resident process tree. At settlement/cancellation it uses the native
-interrupt when available, then reaps every process created by that activation,
-including reparented descendants, while preserving the verified resident
-transport. A credential-free cleanup exec under that exact slot UID performs
-the final census. A process cannot change UID under the required
-`no-new-privileges`/dropped-capability profile.
+Each resident exec runs under a generation-labelled process group with an
+exact slot-owned pidfile. The container is created with Docker `--init`; the
+member wrapper itself is not a child subreaper. Process-group kill alone is
+insufficient because untrusted tools can call `setsid` or double-fork. Before a
+turn, the supervisor records every PID/start-time pair owned by that member
+UID. At settlement/cancellation it uses the native interrupt when available,
+then repeatedly TERM/KILLs every same-UID process not in that baseline while
+preserving the verified resident transport. PID start time defeats reuse and
+the whole-UID census catches process-group escape. A process cannot change UID
+under the required `no-new-privileges`/dropped-capability profile.
 
-If turn cleanup cannot recover a verified idle transport, the supervisor
-flushes/kills that member's resident root and every process under its UID,
-scrubs the private activation path, and natively restarts the same session in a
-new process generation. The slot is never rebound to another membership until
-a zero-process/zero-secret proof succeeds. Because simultaneously resident
+If the activation census cannot prove a clean boundary, the turn fails closed,
+the affected resident transport is closed, and that membership is not reported
+HOT. Before any later replacement transport opens, a whole-UID reaper proves
+the slot empty and native resume creates a new process generation. The stable
+slot is not rebound to another membership. Because simultaneously resident
 siblings have different UIDs, none of these actions targets them.
 
 Agent-launched background processes may run during the turn but are closed at
@@ -633,12 +653,10 @@ tracked lifecycle and still uses the shared workspace. This preserves the
 feature without letting a tool process that inherited the resident credential
 survive beyond its turn fence.
 
-The current retained-process kill backstop that stops the whole container
-cannot be the normal member-failure path once siblings may still be running.
-If the UID cleanup cannot prove the slot empty, the safe last resort is a
-generation-fenced group stop and dirty-state reconciliation; the platform must
-not release a possibly credential-bearing slot merely to preserve sibling
-processes.
+Member cleanup failure does not automatically stop the group or signal
+siblings. A real container exit/OOM, missing Docker object, or explicit group
+idle stop remains group-scoped. The implementation does not claim a separate
+automatic group-stop recovery path for an ambiguous member cleanup.
 
 The immutable Docker `sandbox_id` label becomes authoritative. The existing
 thread label is treated as the legacy/origin member for migration; sibling ids
@@ -661,31 +679,34 @@ processes for event visibility and cancellation: chat A lists/cancels A's
 terminals and chat B lists/cancels B's terminals, while both terminal sets run
 in the same `/workspace` and refresh the same group activity deadline. A
 terminal carries no inference credential and cannot read a sibling Agent
-slot's private activation state. Every writer-capable shell/PTY still uses a
-tracked noncredential execution identity/wrapper so detached descendants stay
-owned by that terminal operation. Bounded file/Git commands are similarly
-refcounted and reaped before their identity is reused. This is process
-lifecycle accounting, not a lock between chats.
+slot's private activation state. Each PTY has a tracked noncredential lifecycle
+token and bounded idle/hard lifetime; bounded file/Git commands are likewise
+group-refcounted. Snapshot capture additionally freezes and verifies the
+complete sandbox/member UID census, which is the outer boundary for detached
+writers. This is process lifecycle accounting, not a lock between chats.
 
 ### Heartbeat
 
-One group observation reports Docker identity/state plus every membership's
-resident state, slot, residency/process generation, active activation if any,
-group activity timestamp, monotonic idle remaining time, and active
-mutation/refcount values. The control-plane response carries the authoritative
-membership manifest and renews or rejects each residency generation
-independently. Reconciliation must neither collapse concurrent attempts into
-one owner nor create duplicate containers from sibling observations.
+One group observation reports Docker identity/state, activity/refcount values,
+monotonic idle remaining time, and the supervisor's currently registered member
+descriptors. A replacement supervisor may initially report only the member that
+caused reconstruction; omitted durable members are not deleted and are hydrated
+from the next acquire/Fork/snapshot manifest. Residency renew/reject beats stay
+independently generation-fenced per member. The control-plane response carries
+group stop commands and exact lost-residency generations, not an authoritative
+membership manifest. Reconciliation neither collapses concurrent attempts into
+one owner nor creates duplicate containers from sibling observations.
 Control-plane stop commands fence the sandbox/container generation; a stale
 host observation cannot stop a newer activation.
 
 ### Resource accounting and failure scope
 
-Inference usage remains exact because every resident process has its own
-membership grant and every request is attributed to the fenced active turn.
-Turn timeout and cancellation first invoke the exact transport's native
-interrupt for that activation; an unhealthy transport takes the member-only
-process restart path.
+Every resident process has its own member-scoped residency grant, whose gateway
+billing identity is the chat/thread. Attempt-fenced runtime events preserve the
+turn's reported usage, but the implementation does not claim a per-turn split
+of the gateway ledger for a credential reused across turns. Turn timeout and
+cancellation first invoke the exact transport's native interrupt for that
+activation; an unhealthy transport takes the member-only process restart path.
 The current Docker sampler, however, reports cumulative container counters and
 cannot truthfully charge the same CPU/memory/I/O to two overlapping jobs. The
 shared mode must either add process-tree sampling rooted at each member wrapper
@@ -733,14 +754,21 @@ stop.
    flushes their native session locators, revokes/releases every resident grant
    and local-control credential, and issues one `docker stop`.
 5. Any later operation through any member first `docker start`s that exact
-   container. The control plane supplies the durable group membership manifest
-   and the supervisor natively starts one resident transport for every ready
-   member before the group is fully HOT again. The requesting operation waits
-   only for its member to become ready; sibling restores proceed independently
-   and one member failure does not suppress the others.
+   container. The request supplies the durable group membership manifest, but
+   the supervisor natively resumes only the requesting member before allowing
+   that operation to proceed. Untouched siblings stay WARM and are restored
+   independently on their next interaction; one member failure does not
+   suppress the others.
 6. Concurrent activity is reference-counted only to prevent a mid-operation
    stop. It does not serialize A and B and is not a second user-visible
    timeout.
+7. A host heartbeat is an observation, not a lifecycle command. Reconciliation
+   accepts a member's `stopped`/`lost` state only when its activation,
+   residency, and process generations are not older than the durable member.
+   Residency release then atomically requires that accepted stopped/lost state,
+   the same process generation, no active attempt, and no group operation or
+   snapshot. A STOPPED sample taken while a fork is starting therefore cannot
+   revoke the source grant after that fork has already restarted the process.
 
 Container lifecycle is shared; chat execution status is not. While A is
 running, B may be idle, running, failed, or complete independently.
@@ -748,8 +776,11 @@ running, B may be idle, running, failed, or complete independently.
 Attempt context remains:
 
 - `new`: this member has no prior settled native context;
-- `live`: valid member context was used while Docker was already running;
-- `restored`: Docker had to start before this member resumed/forked context;
+- `live`: valid context was used by the same compatible resident process that
+  was already attached to the supervisor;
+- `restored`: valid settled native context was resumed into a replacement
+  process, whether because Docker started, the supervisor/broker restarted, the
+  process crashed, or configuration required a member-only re-key;
 - `lost`: this member's native context cannot be trusted.
 
 A failed member process does not automatically mark siblings LOST. Missing or
@@ -821,9 +852,12 @@ barrier**:
    branch.
 6. If quiescence never occurs, capture remains pending. If validation, branch
    movement, or publication fails, the immutable snapshot is retained for
-   explicit retry/release and later snapshots stay ordered behind it. The
-   Agent turns remain settled; a publication failure is not relabelled as an
-   Agent-turn failure.
+   operator diagnosis, the group is marked `DIRTY`, and later snapshots stay
+   ordered behind it. There is deliberately no automatic publish retry after
+   an ambiguous external side effect; an operator-facing repair/release API is
+   deferred. The Agent turns remain settled, the otherwise quiescent container
+   still receives its normal group idle deadline, and a publication failure is
+   not relabelled as an Agent-turn failure.
 
 This is not a turn mutex: A and B remain concurrently interactive. It is the
 minimum consistency boundary required by the existing patch/PR feature. If
@@ -900,23 +934,15 @@ not persistent storage, and not a host mount. The extra isolation below exists
 only because the current platform deliberately gives simultaneous CLI
 processes separately fenced credentials.
 
-### 11.1 Current implementation is not safe for concurrent grants
+### 11.1 Implemented member-execution isolation
 
-Today the retained container and every `docker exec` run as the same numeric
-user/group (`10001:10001`). The container has one `0700`
-`/run/agent-activation` tmpfs, and the Pi/OpenCode/Kilo adapters use fixed
-subdirectories below it. That is safe only because the supervisor currently
-admits one Agent CLI activation at a time.
+Legacy one-to-one containers retain their original single-agent UID path and
+never advertise `shared-sandbox-v1`. A shared-live container is created only
+from an exactly attested image with the slot pool below; the capability gate
+fails closed rather than admitting concurrent grants through the old fixed
+activation path.
 
-If two current execs run concurrently, they can overwrite the fixed provider
-configuration, and same-UID untrusted code can inspect another process's
-environment/config or signal it. That exposes the sibling process's attempt or
-residency grant and breaks usage attribution, revocation, cancellation, and
-event ownership. The new topology must not be enabled on that implementation.
-
-### 11.2 Required member-execution isolation
-
-The first implementation uses a bounded pool of resident execution slots
+The shared implementation uses a bounded pool of resident execution slots
 prepared in the sandbox image/container. Each live member receives a
 different numeric Linux UID and private credential tmpfs/config directory,
 while all slots share a non-privileged workspace group:
@@ -925,7 +951,8 @@ while all slots share a non-privileged workspace group:
 slot A: uid 11001, shared gid 10001, private activation path A
 slot B: uid 11002, shared gid 10001, private activation path B
 workspace/native store: setgid shared gid 10001, no credential files
-fork helper: dedicated uid, shared gid 10001, private durable receipt directory
+fork journal: sandbox uid 10001, protected `.platform` receipt directory
+runtime fork: source or target member uid, according to the pinned CLI protocol
 ```
 
 The image predefines slot identities/HOMEs, and container creation supplies
@@ -947,31 +974,65 @@ cannot silently demote the design to one shared UID.
 
 To keep the requested one shared workspace, checkout/setup applies a reviewed
 setgid/shared-group mode, umask, Git `safe.directory`/shared-repository
-configuration, and native-store permissions. All five CLIs must prove that a
-different slot can resume the membership id selected by the platform and
-concurrently use the shared SQLite/JSONL store without corruption. A wrapper
-uses group-preserving umask/modes and normalizes only credential-free native
-state at reviewed flush/close boundaries so a restarted slot can resume it.
-Exact tests cover upstream files that default to `0600` as well as SQLite
-DB/WAL/SHM creation while several resident services remain open.
+configuration, and native-store permissions. Each CLI must prove that a
+different slot can resume the membership id selected by the platform without
+corrupting concurrent siblings. A wrapper uses group-preserving umask/modes
+and normalizes only credential-free native state at reviewed flush/close
+boundaries so a restarted slot can resume it.
 
-The runtime's native store is deliberately same-owner shared state. The
-platform does not claim that Unix permissions prevent a malicious sibling chat
-from reading or modifying another transcript inside a shared upstream
-database; neither the upstream SQLite schemas nor JSONL stores provide such an
-ACL. Normal drivers are fenced to their membership's native id and the
-conformance suite prevents accidental cross-selection. A stronger hostile
-transcript boundary would require independent state namespaces or containers
-and is a different product topology. Credentials and process control remain
-hard boundaries.
+Codex, OpenCode, and Kilo cannot safely share one live provider home across
+fork siblings. Codex 0.145.0 performs owner-only chmod and SQLite/config
+operations under `CODEX_HOME`; OpenCode and Kilo keep SQLite databases and
+per-project live-server locks in their XDG roots. Each membership therefore
+has a deterministic container-layer provider home while retaining the same
+`/workspace`.
 
-The fork helper is a predeclared, unprivileged image identity with no provider
-grant. It may read the credential-free shared native store and write only its
-platform receipt directory plus runtime-created target state. Its directory is
-Docker-owned and inaccessible to Agent slots; it is not `/run` tmpfs, a host
-mount, or a new persistence service. OpenCode/Kilo resident servers
-additionally use the per-process loopback authentication described in section
-4; a recovery-only helper uses a separate operation credential.
+Native fork first uses the quiescent source process and the pinned CLI's native
+fork API. After the child id is durably returned, the source process closes so
+its provider state is stable; that exact post-fork state is copied into the
+target member home. The supervisor then resumes the exact source and child ids
+as two independent live processes over their separate provider homes. No
+prompt is replayed, the source container/workspace is unchanged, and PID
+continuity is not part of the contract. OpenCode/Kilo locks that still name the
+closed source PID are removed from the source home, and copied lock directories
+are removed from the child home, before either process resumes. This does not
+alter session history; each resumed server creates its own lock in its own
+home.
+
+Turn-boundary permission normalization prunes all three private-home
+collections and then enters only the current UID's deterministic home. An
+owner-only directory such as Codex `tmp/arg0`, or a sibling HTTP-runtime lock,
+is neither traversed nor treated as a failed turn. Claude and Pi may keep their
+credential-free native store group-shared because their pinned formats support
+it. Exact tests cover files that default to `0600`, SQLite DB/WAL/SHM state,
+and two simultaneous post-fork OpenCode/Kilo services without a shared lock
+killing either resident process.
+
+These native stores are not a hostile sibling transcript ACL. Normal drivers
+are fenced to their membership's native id and the conformance suite prevents
+accidental cross-selection, but members intentionally share the workspace and
+the group-readable state needed for native fork materialization. A stronger
+hostile transcript boundary would require independent containers and is a
+different product topology. Credentials and process control remain hard
+boundaries.
+
+The platform journal reader/writer runs as the sandbox owner UID `10001`, with
+no provider grant, and writes only the protected
+`/home/agent/.freeinference-platform/session-forks` receipt directory. It is
+outside every provider home so a CLI that enumerates its state root cannot turn
+the intentionally unreadable journal into a provider-side permission failure.
+Codex PREPARING receipts additionally contain only a bounded list of native
+child ids observed before mutation; recovery re-reads first-line
+`session_meta.payload.forked_from_id` metadata and accepts exactly one set
+difference. Transcript bodies and credentials are never copied into the
+platform journal.
+The runtime-native fork itself runs under the source or target member slot
+required by that pinned CLI: Codex/OpenCode/Kilo use the source live transport,
+Claude uses a source-slot helper, and Pi uses a temporary target-slot transport.
+The fork path sends no prompt and must make no provider request. The journal is
+Docker-layer state; it is not `/run` tmpfs, a host mount, or a persistence
+service. OpenCode/Kilo resident servers additionally use the per-process
+loopback authentication described in section 4.
 
 Files that an agent deliberately chmods, deletes, or overwrites remain
 ordinary shared-workspace/native-state interference inside the same authorized
@@ -990,11 +1051,11 @@ A local Docker proof with the exact sandbox image and its intended
 `11002` concurrently with separately owned tmpfs paths. The second UID was
 denied access to the first process's `/proc/.../environ`, signals, and private
 tmpfs while retaining write access to its own slot. This proves the Docker
-primitive, not the full feature: every CLI, shared native store, workspace
-permission, slot-reuse, Kata/gVisor, and adversarial test above remains a
-rollout gate.
+primitive. Repository tests additionally cover driver routing, shared native
+state permissions, slot reuse, and process cleanup; real-provider concurrency
+for each enabled CLI plus Kata/gVisor validation remain rollout gates.
 
-### 11.3 Invariants after isolation lands
+### 11.2 Enforced invariants
 
 - Forked memberships belong to the same authorized user/security domain and
   inherit repository, runtime, image, execution profile, permission policy,
@@ -1002,7 +1063,8 @@ rollout gate.
 - Every resident process receives exactly one member-scoped, short-TTL
   residency grant through its own environment/config path; heartbeat renewal
   and revocation are fenced by that membership/process generation. Active
-  attempts still delimit prompt admission, events, cancellation, and usage. An
+  attempts delimit prompt admission, events, cancellation, and runtime-reported
+  turn usage; gateway billing for the resident grant remains chat-scoped. An
   attempt-scoped MCP token or incompatible configuration triggers the
   documented member-only flush/restart unless a reviewed per-turn relay can
   rotate it without exposing it to the idle CLI.
@@ -1015,42 +1077,48 @@ rollout gate.
   disk, shared generated config, `/proc`, or a reusable environment file.
 - No long-lived or cross-task credential is written into the Docker layer or
   native session state.
-- Docker continues to own `/workspace` and Agent CLI state; no host bind mount
-  or per-chat host directory is introduced.
+- Docker continues to own chat `/workspace` and Agent CLI state; no host bind
+  mount or per-chat host directory is introduced. Host services still use the
+  Docker socket and their existing service/database volumes, which are not chat
+  state mappings.
 - Setup-phase and agent-phase egress boundaries remain unchanged for every
   concurrent exec.
 - A member may see sibling workspace/native project-global state by product
   design, but it must not receive another member's event stream, grant,
   cancellation authority, or control-plane authorization.
 
-## 12. Current-code impact matrix
+## 12. Implementation map
 
-| Component today | Required concurrent-shared change |
+| Component | Landed concurrent-shared behavior |
 |---|---|
-| `agent_thread_sandboxes` | Split container group from per-chat session/attempt memberships |
-| Claim/store fencing | Replace one group `active_attempt_id` with one independently fenced attempt per membership |
-| Thread residency/grants | Keep one independently fenced live-process lease and grant per membership; resolve all of them to the shared sandbox |
-| `ChatSessionSupervisor` | Replace one thread lease/process with a member map that owns simultaneous long-lived transports, input queues, output framing, and process recovery |
-| Runner | Stop spawning/owning the retained CLI; deliver one fenced turn to the supervisor without suspending the shared workspace |
-| Sandbox process identity | Replace same-UID/fixed activation config with credential-isolated UID/tmpfs execution slots and shared-group workspace permissions |
-| Workspace broker | Resolve thread authorization to the same backend without a group turn lock; keep activity/refcount tracking |
-| Heartbeat/reconciliation | Report one container plus every resident/turn generation and reconcile the authoritative membership manifest |
-| Idle stop | Require zero active turns/commands, then flush/close idle resident CLIs before stopping the shared container |
-| Driver | Add exact-version supervisor-live transport, native interrupt/resume, native fork-only receipts, and concurrent shared-state gates |
-| Retained fork route | Remove Docker commit/create/fingerprint clone flow and synchronously materialize the member-only native fork before returning success |
-| Fork recovery | Add client idempotency, PREPARING/MATERIALIZED/READY saga states, and a credential-free in-container receipt journal |
-| Migrations | Preserve old clone audit rows, retire new clone creation, add group/membership/native-edge/fork-operation records |
-| Patch/publisher | Replace per-job authority with ordered group snapshots, one lineage branch, imported published bases, and a bounded quiescent capture coordinator |
-| Frontend | Allow simultaneous chat Running states and display shared/racing workspace semantics |
-| Runner topology | Keep idle transports in the supervisor and require two or more turn executors/slots for simultaneous A/B turns |
-| Resource accounting | Count resident processes separately from active turns; add truthful process-tree coverage or omit unavailable per-member counters |
+| `agent_thread_sandboxes` | Container-group lifecycle is split from per-chat session/attempt memberships |
+| Claim/store fencing | Each membership owns one independently fenced attempt instead of one group `active_attempt_id` |
+| Thread residency/grants | Each membership keeps one fenced live-process lease/grant and resolves it to the shared sandbox |
+| `ChatSessionSupervisor` | A member map owns simultaneous long-lived transports, input queues, output framing, and process recovery |
+| Runner | Delivers one fenced turn to the supervisor without owning the retained CLI or suspending the shared workspace |
+| Sandbox process identity | Uses credential-isolated UID/tmpfs execution slots plus shared-group workspace permissions |
+| Workspace broker | Resolves thread authorization to the same backend without a group turn lock and keeps activity/refcount tracking |
+| Heartbeat/reconciliation | Reports one container plus locally registered member generations, hydrates manifests on acquire/Fork/snapshot, and never treats omission as deletion |
+| Idle stop | Requires zero active turns/commands, then flushes/closes idle resident CLIs before stopping the shared container |
+| Driver | Provides exact-version supervisor-live transport, native interrupt/resume, native fork-only receipts, and concurrent shared-state gates |
+| Retained fork route | Bypasses Docker commit/create/fingerprint clone and synchronously materializes the member-only native fork before returning success |
+| Fork recovery | Uses client idempotency, PREPARING/MATERIALIZED/READY saga states, and a credential-free in-container receipt journal |
+| Migrations | Preserve old clone audit rows, retire new clone creation, and add group/membership/native-edge/fork-operation records |
+| Patch/publisher | Uses ordered group snapshots, one lineage branch, imported published bases, and a bounded quiescent capture coordinator instead of per-job authority |
+| Frontend | Allows simultaneous chat Running states and displays shared/racing workspace semantics |
+| Runner topology | Keeps idle transports in the supervisor and requires two or more turn executors/slots for simultaneous A/B turns |
+| Resource accounting | Counts resident processes separately from active turns and reports zero coverage for unavailable per-member counters rather than duplicating container totals |
 
 No change needs host filesystem mapping. The existing Docker writable layer is
 already the shared workspace/state location.
 
 ## 13. Acceptance and regression gates
 
-The feature is not complete until tests prove:
+The repository's automated suite covers the control-plane, host, database,
+Docker primitive, and frontend contracts below. Real-provider checks for every
+exact runtime and Kata/gVisor isolation remain deployment rollout gates; this
+document does not relabel those external checks as locally completed. The full
+production acceptance contract is:
 
 1. A normal running chat gets exactly one container, one membership, and one
    supervisor-owned live CLI process; two sequential compatible turns reuse
@@ -1071,10 +1139,10 @@ The feature is not complete until tests prove:
 7. Repeated forks support N memberships and at least two concurrent turns.
 8. A retained fork request for an older settled turn fails without side
    effects instead of silently using the latest native context.
-9. The exact Claude CLI + official Agent SDK, selected exact Codex app-server,
-   Pi RPC, OpenCode serve, and Kilo serve images pass live multi-turn,
-   prompt-free fork-only, simultaneous transport, and native-restart tests with
-   real provider traffic for the turns.
+9. Before a runtime is enabled in production, its exact Claude CLI + official
+   Agent SDK, Codex app-server, Pi RPC, OpenCode serve, or Kilo serve image passes
+   live multi-turn, prompt-free fork-only, simultaneous transport, and
+   native-restart tests with real provider traffic for the turns.
 10. Concurrent slots cannot read each other's environment/config, ptrace or
    signal each other, overwrite credential files, or spend against the wrong
    attempt; slot reuse removes stale secrets.
@@ -1085,16 +1153,18 @@ The feature is not complete until tests prove:
 13. Concurrent Git contention is surfaced as ordinary tool errors and does not
     corrupt the control-plane ledger.
 14. Model, effort, MCP configuration, renewable HOT residency grants, active
-    attempt generations, usage, and cancellation remain correctly attributed
-    per member under concurrency; restarting/re-keying A cannot revoke B.
+    attempt generations, runtime-reported turn usage, and cancellation remain
+    correctly attributed per member under concurrency; gateway inference billed
+    through a resident credential is chat/thread-scoped, and restarting/re-keying
+    A cannot revoke B.
 15. An ordinary member process/restart failure does not kill or relabel
-    siblings. Only the documented uncontainable credential-cleanup fallback or
-    a container failure may stop the group; actual container-state loss still
-    marks the whole group LOST.
+    siblings. A container failure may stop the group, and actual container-state
+    loss still marks the whole group LOST; ambiguous member cleanup fails that
+    member closed without claiming an automatic group-stop recovery path.
 16. Group `last_activity_at` is the maximum activity across all members; idle
     stop never occurs while any member operation is active, and an operation
-    through either member restarts the same container and reconstructs live
-    transports for every ready native session.
+    through either member restarts the same container and restores that member
+    lazily while untouched siblings remain WARM.
 17. Publication waits for a bounded quiescent snapshot, coalesces one shared
     workspace epoch, keeps idle CLI roots alive, and never blocks an
     already-running Agent turn.
@@ -1110,19 +1180,22 @@ The feature is not complete until tests prove:
 21. Real Docker inspection proves there are no chat-state mounts or persisted
     activation credentials.
 22. Killing the host/control-plane call before and after native target creation
-    never mutates the source, never exposes a half-created child, and leaves at
+    never mutates the source or exposes a half-created child. Codex recovers
+    exactly one baseline-differenced rollout; every unresolved runtime leaves at
     most an unreachable native orphan that reconciliation can identify safely.
 23. Repeating one client fork request before materialization, after host
     receipt, after database commit, and after a lost HTTP response always
     returns at most the same one child; a different request id creates a new
     child.
 24. OpenCode/Kilo resident services reject unauthenticated sibling requests;
-    their random process-generation control credential is absent from sibling
-    `/proc`, tmpfs, native state, Docker layer, logs, and host files.
+    their random process-generation control credential stays only in the owning
+    bridge process environment and is absent from sibling `/proc`, native state,
+    Docker layer, logs, and host files. Their provider XDG homes are distinct
+    after fork, so both resident servers and both chats remain live concurrently.
 25. A broker restart reaps or fences orphan member wrappers, preserves every
-    settled native locator, natively rebuilds each live transport from WARM,
-    and returns it to HOT without cloning a container or treating a lost
-    in-memory timer as an immediate timeout.
+    settled native locator, and lazily rebuilds the requesting member transport
+    from WARM to HOT without cloning a container or treating a lost in-memory
+    timer as an immediate timeout.
 26. An additive migration backfills every existing retained chat into one
     group/member pair, historical Docker clones remain independent groups, and
     old hosts cannot claim `shared-sandbox-v1` work during rolling rollout.
@@ -1130,14 +1203,14 @@ The feature is not complete until tests prove:
     activation descendants reaped while its reviewed idle CLI root survives;
     full member restart clears the entire UID without signalling a sibling.
     The slot cannot be rebound until the zero-process proof succeeds; cleanup
-    ambiguity takes the documented group-stop fallback.
-28. Writer-capable terminals/commands retain ownership of their detached
-    descendants, and the snapshot coordinator refuses quiescence when the
-    Docker process census contains an untracked writer process.
+    ambiguity fails the member closed.
+28. Snapshot capture freezes the complete sandbox/member UID process census and
+    refuses quiescence when that census or the operation ledger shows an
+    unaccounted writer; it does not rely on a forever-attachable terminal PID.
 29. A backfilled container with the old image keeps 1:1 resume behavior and
     exposes no shared Fork capability; the rollout never assumes a host update
     changed binaries, users, or tmpfs inside an existing container.
-30. Two simultaneous Fork actions in one group are ordered by the helper-only
+30. Two simultaneous Fork actions in one group are ordered by the per-group fork
     mutex and produce independent receipts, while an already-running sibling
     Agent turn continues uninterrupted.
 31. An idle resident CLI neither refreshes `last_activity_at` nor blocks the
@@ -1148,95 +1221,81 @@ The feature is not complete until tests prove:
     the same transport and receives only its own framed events.
 33. An incompatible model/MCP/permission change restarts only the affected
     member and resumes the same native session before admitting the turn.
+34. A STOPPED heartbeat sampled between fork residency rotation and source
+    process restart cannot overwrite the newer READY process generation or
+    revoke its grant, even when the heartbeat commits after the fork operation
+    fence has cleared.
 
 Required validation layers are unit, server, database, migration, real Docker,
 multi-process stress, crash/reconciliation, real-provider conformance, and
 frontend end-to-end tests. A sequential fake driver is not sufficient evidence
 for this design.
 
-## 14. Rollout plan after approval
+## 14. Landed implementation and rollout gates
 
-1. Record the approved product behavior: supervisor-owned live CLI per member,
-   local-two-CLIs workspace races, one shared branch/PR, shared ambient project
-   state, and the bounded publication snapshot barrier.
-2. Select and pin one exact Codex app-server version (the current `0.145.0`
-   already exposes the required schema, while an upgrade remains allowed) and
-   one exact Claude Agent SDK version compatible with CLI `2.1.220`. First
-   prove no regressions in every existing model/effort/MCP/event/patch test.
-3. Add persistent multi-turn, native interrupt/restart, immediate fork-only,
-   and simultaneous-transport conformance for all five exact runtime images,
-   including authenticated resident loopback service probes.
-4. Land credential-isolated execution slots, shared-workspace/native-store
-   permissions, the credential-free fork helper/journal, and adversarial
-   `/proc`/config/signal plus detached-child UID-reaping tests before allowing
-   a second simultaneous grant into any container.
-5. Add group/membership/native-edge/fork-operation/snapshot tables in an
-   additive migration. Dual-read/backfill every current retained row 1:1
-   without changing its container, keep old clone rows readable, and do not
-   drop the old table during the rolling deployment.
-6. Move retained process ownership from runner to supervisor, then make
-   scheduler, runner turn delivery, activation config, broker, heartbeat,
-   interruption, timeout, recovery, and resource reporting member-concurrent.
-   Upgrade local/prod resident and turn-executor capacity and advertise
-   `shared-sandbox-v1` only after all pieces are present.
-7. Land shared workspace epochs and the bounded quiescent publication
-   coordinator, then switch shared retained follow-ups away from the old
-   per-job publish wait.
-8. Replace retained Docker-clone fork with the member-only native fork saga;
-   stop admitting old clone operations, reconcile every in-flight clone record,
-   and only then remove new clone creation. Historical cloned containers remain
-   ordinary independent groups.
-9. Update API/frontend semantics, add the idempotency contract, and run the
-   entire regression matrix. Enable the feature flag per exact runtime only on
-   capable hosts; retain an operational rollback that disables new shared
-   forks without invalidating already-created memberships.
+The capability-gated implementation now includes:
 
-Existing containers whose immutable image predates the slot/helper/runtime
-changes remain capability-off after backfill. New groups use the new pinned
-image. This is expected during rolling rollout and is surfaced as unavailable,
-not as an attempted Docker clone or an eventual runtime failure.
+1. additive group, membership, native-edge, fork-saga, and snapshot tables with
+   dual reads/backfill for retained one-to-one rows;
+2. exact pinned resident transports and native fork adapters for Claude Code
+   `2.1.220` + Agent SDK `0.2.148`, Codex `0.145.0`, Pi `0.73.1`, OpenCode
+   `1.18.9`, and Kilo `7.4.17`;
+3. supervisor-owned live processes, per-member UID/private-tmpfs slots,
+   independently fenced turn delivery, concurrent broker access, group idle
+   stop, lazy native restore, and process-generation-fenced heartbeat
+   reconciliation;
+4. immediate idempotent native Fork with PREPARING/MATERIALIZED/READY recovery
+   and a protected in-container journal, including crash-safe Codex rollout
+   baseline recovery, without a new Docker clone;
+5. ordered group workspace snapshots, bounded quiescent capture, trusted
+   publication/base import, and shared follow-ups that do not wait for legacy
+   per-job patch publication; and
+6. API/frontend status, capability, warning, retry-idempotency, and concurrent
+   chat behavior while retaining legacy one-to-one/disposable paths.
 
-## 15. Feasibility conclusion
+`AGENT_SHARED_LIVE_SANDBOX` is still the rollout switch. A host advertises
+`shared-sandbox-v1` only when its image digest, exact runtime/helper pins, slot
+pool, broker/supervisor protocol, and runner concurrency pass attestation.
+The claim repeats that proof from the exact polling replica; the shared host
+row is scheduling evidence, not a substitute for replica-local attestation
+during a rolling deployment.
+Existing containers whose immutable image predates those changes remain
+capability-off after backfill; they continue their legacy 1:1 resume behavior
+and never fall through to a Docker-clone attempt.
 
-The requested effect is implementable: Docker can keep multiple Agent CLI
-processes alive in one container, the exact five runtimes expose persistent
-stdin/RPC/app-server/HTTP transports, and the existing Docker-owned writable
-layer is already one shared workspace. Ordinary non-fork chats can remain 1:1.
-The current control-plane fork saga, host-affinity claim, fencing generations,
-Docker broker, retained stop/start path, runner replicas, residency ledger,
-capability matching, trusted patch publisher, and frontend immediate Fork
-request are reusable building blocks. The material ownership change is moving
-the resident transport from a runner-local handle into the supervisor member
-map.
+Production enablement still requires the environment-specific gates that a
+repository test cannot honestly substitute for:
 
-It is not implementable as "literally no coordination anywhere." Per-session
-prompt fencing, process/cancellation identity, Docker stop refcounts, and a
-short quiescent patch/publication snapshot are necessary for correctness. None
-of those serializes normal turns across different chats; A and B can execute
-and edit the workspace simultaneously.
+- simultaneous real-provider multi-turn/fork/restart conformance for every
+  runtime that will be enabled;
+- the required Kata/gVisor and adversarial isolation validation for untrusted
+  multi-tenant repositories;
+- at least two runner executors/host turn slots and enough Docker CPU/memory for
+  the chosen member concurrency; and
+- gradual capability/feature-flag rollout with monitoring of residency loss,
+  native fork reconciliation, snapshot backlog, OOM/container loss, and an
+  operational rollback that stops creating new shared groups without
+  invalidating existing memberships.
 
-The main engineering gates are:
+## 15. Implementation conclusion
 
-- pin the official Claude Agent SDK fork helper alongside CLI `2.1.220`, and
-  select one exact reviewed Codex app-server pin without model/event
-  regressions;
-- implement and stress the supervisor-owned live transport for Claude
-  stream-json, Codex app-server, Pi RPC, OpenCode serve, and Kilo serve;
-- replace the current same-UID/fixed-config execution path with proven
-  credential-isolated member slots without weakening container security;
-- prove every runtime's local session store tolerates immediate fork-only plus
-  simultaneous live processes, and that a forked child's resident transport is
-  ready before any new user message;
-- move active-attempt/process state from the group row to memberships;
-- remove global terminal/workspace suspension from normal Agent turns;
-- add enough runner/host-slot concurrency and truthful process-vs-container
-  resource reporting;
-- make fork retries durable/idempotent and authenticate in-container resident
-  loopback services;
-- redefine patches and publication as ordered shared workspace snapshots;
-- expose inherent file/Git/project-memory races honestly in the UI.
+The requested topology is implemented behind the capability gate. An ordinary
+chat owns one Docker container/workspace and one supervisor-owned live Agent CLI
+process. A successful Fork creates a second chat, native session, resident slot,
+and live process in that same container; both may run concurrently against the
+same files. A settled turn does not close its compatible process. At group
+timeout the supervisor closes resident processes and performs `docker stop`;
+the next interaction starts the exact container and natively restores only the
+requesting member before continuing.
 
-These are additive implementation changes with explicit rolling-rollout and
-fallback gates, not missing platform primitives. Subject to the exact-runtime
-conformance tests, there is no fundamental blocker in the current
-infrastructure and the implementation can begin from this specification.
+No chat-state host bind mount, per-chat host directory, container copy, or
+prompt replay is needed. Docker's writable layer preserves `/workspace` and
+native CLI state across stop/start. Losing that Docker object/data root remains
+LOST because persistent cold storage and cross-host restore are intentionally
+deferred.
+
+The implementation still coordinates where correctness requires it:
+per-session prompt admission, per-member process/cancellation fences, group
+activity refcounts around Docker stop, one short per-group Fork ordering mutex,
+and the bounded quiescent publication capture. None is a cross-chat turn lock;
+parent and forked child can execute and edit the workspace simultaneously.

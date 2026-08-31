@@ -58,12 +58,17 @@ CHAT_IMAGE_DIGEST_LABEL = "org.freeinference.chat-image-digest"
 CHAT_MEMORY_LIMIT_LABEL = "org.freeinference.chat-memory-limit"
 CHAT_CPU_LIMIT_LABEL = "org.freeinference.chat-cpu-limit"
 CHAT_STOP_TIMEOUT_LABEL = "org.freeinference.chat-stop-timeout-seconds"
+CHAT_SHARED_LABEL = "org.freeinference.chat-shared-live"
+CHAT_RESIDENT_CAPACITY_LABEL = "org.freeinference.chat-resident-slot-capacity"
 CHAT_FORK_OPERATION_LABEL = "org.freeinference.chat-fork-operation"
 CHAT_FORK_SOURCE_SANDBOX_LABEL = "org.freeinference.chat-fork-source-sandbox"
 CHAT_CONTAINER_PREFIX = "freeinference-chat"
 CHAT_WORKDIR = "/workspace"
 CHAT_STATE_DIR = "/agent-state"
 ACTIVATION_TMPFS = "/run/agent-activation"
+MEMBER_TMPFS_ROOT = "/run/agent-members"
+MEMBER_UID_BASE = 11001
+MEMBER_UID_LIMIT = 128
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _DOCKER_IMAGE_ID = re.compile(r"sha256:[0-9a-fA-F]{64}")
 
@@ -105,6 +110,8 @@ class ChatSandboxSpec:
     memory_limit: str = "4g"
     cpu_limit: str = "2"
     stop_timeout_s: int = 10
+    shared_live: bool = False
+    resident_slot_capacity: int = 8
     labels: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -131,6 +138,8 @@ class ChatSandboxSpec:
             raise ValueError("generation must be positive")
         if not 1 <= self.stop_timeout_s <= 300:
             raise ValueError("stop_timeout_s must be between 1 and 300")
+        if not 2 <= self.resident_slot_capacity <= MEMBER_UID_LIMIT:
+            raise ValueError(f"resident_slot_capacity must be between 2 and {MEMBER_UID_LIMIT}")
         reserved = {
             CHAT_SANDBOX_LABEL,
             CHAT_THREAD_LABEL,
@@ -142,6 +151,8 @@ class ChatSandboxSpec:
             CHAT_MEMORY_LIMIT_LABEL,
             CHAT_CPU_LIMIT_LABEL,
             CHAT_STOP_TIMEOUT_LABEL,
+            CHAT_SHARED_LABEL,
+            CHAT_RESIDENT_CAPACITY_LABEL,
         }
         overlap = reserved.intersection(self.labels)
         if overlap:
@@ -169,6 +180,9 @@ class ChatSandboxSpec:
             labels[CHAT_RUNTIME_VERSION_LABEL] = self.runtime_version
         if self.sandbox_image_digest:
             labels[CHAT_IMAGE_DIGEST_LABEL] = self.sandbox_image_digest
+        if self.shared_live:
+            labels[CHAT_SHARED_LABEL] = "true"
+            labels[CHAT_RESIDENT_CAPACITY_LABEL] = str(self.resident_slot_capacity)
         labels.update(self.labels)
         return labels
 
@@ -276,6 +290,16 @@ class ChatSandboxManager:
                 f"uid={self.backend.uid},gid={self.backend.gid}"
             ),
         ]
+        if spec.shared_live:
+            for slot_id in range(spec.resident_slot_capacity):
+                uid = MEMBER_UID_BASE + slot_id
+                argv += [
+                    "--tmpfs",
+                    (
+                        f"{MEMBER_TMPFS_ROOT}/{slot_id}:rw,nosuid,nodev,noexec,"
+                        f"mode=0700,uid={uid},gid={self.backend.gid}"
+                    ),
+                ]
         if self.backend.runtime:
             argv += ["--runtime", self.backend.runtime]
         argv += self.backend.extra_args
@@ -512,6 +536,8 @@ class ChatSandboxManager:
         workdir: str = CHAT_WORKDIR,
         interactive: bool = False,
         tty: bool = False,
+        user_uid: int | None = None,
+        user_gid: int | None = None,
     ) -> list[str]:
         """Compose ``docker exec`` after identity/running checks at spawn time."""
         if not argv:
@@ -523,7 +549,8 @@ class ChatSandboxManager:
             command.append("--tty")
         command += [
             "--user",
-            f"{self.backend.uid}:{self.backend.gid}",
+            f"{user_uid if user_uid is not None else self.backend.uid}:"
+            f"{user_gid if user_gid is not None else self.backend.gid}",
             "--workdir",
             workdir,
         ]
@@ -542,17 +569,45 @@ class ChatSandboxManager:
         env: dict[str, str] | None = None,
         workdir: str = CHAT_WORKDIR,
         live_input: bool = False,
+        user_uid: int | None = None,
+        user_gid: int | None = None,
+        process_pidfile: str | None = None,
     ) -> SandboxProcess:
         """Run an attached command inside the retained container."""
         current = self._require(spec)
         if not current.running:
             raise SandboxError("chat sandbox must be started before exec")
+        exec_argv = argv
+        if process_pidfile is not None:
+            self._validate_member_pidfile(spec, process_pidfile, user_uid=user_uid)
+            # The CLI is a session leader, so its complete child tree can be
+            # interrupted without stopping sibling sessions in this container.
+            # Persist both PID and Linux start time: a stale numeric PID must
+            # never be allowed to signal a later, unrelated process.
+            wrapper = (
+                'pidfile="$1"; shift; umask 0002; '
+                'cleanup() { rm -f -- "$pidfile"; }; '
+                "trap cleanup EXIT; "
+                "setsid --fork --wait /bin/sh -c '"
+                'pidfile="$1"; shift; '
+                'fields=$(sed "s/^[^)]*) //" "/proc/$$/stat") || exit 126; '
+                # Read field 22 (start time; field 20 after stripping pid and
+                # comm) in a subshell.  Doing ``set -- $fields`` in this shell
+                # would overwrite the CLI argv that must remain in ``$@``.
+                'started=$(set -- $fields; printf "%s" "${20:-}"); '
+                'case "$started" in ""|*[!0-9]*) exit 126;; esac; '
+                'printf "%s %s\\n" "$$" "$started" > "$pidfile" || exit 126; '
+                'exec "$@"\' sh "$pidfile" "$@"'
+            )
+            exec_argv = ["/bin/sh", "-c", wrapper, "sh", process_pidfile, *argv]
         command = self.build_exec_command(
             spec,
-            argv,
+            exec_argv,
             env=env,
             workdir=workdir,
             interactive=live_input,
+            user_uid=user_uid,
+            user_gid=user_gid,
         )
         process = subprocess.Popen(
             command,
@@ -563,7 +618,596 @@ class ChatSandboxManager:
             text=True,
             bufsize=1,
         )
-        return _RetainedExecProcess(process, manager=self, spec=spec)
+        return _RetainedExecProcess(
+            process,
+            manager=self,
+            spec=spec,
+            process_pidfile=process_pidfile,
+            user_uid=user_uid,
+            user_gid=user_gid,
+        )
+
+    @staticmethod
+    def _validate_member_pidfile(
+        spec: ChatSandboxSpec,
+        pidfile: str,
+        *,
+        user_uid: int | None,
+    ) -> int:
+        """Return the slot after validating one private resident PID path."""
+        match = re.fullmatch(
+            rf"{re.escape(MEMBER_TMPFS_ROOT)}/([0-9]+)/resident-[0-9a-f]{{32}}\.pid",
+            pidfile,
+        )
+        if not spec.shared_live or match is None:
+            raise ValueError("process-scoped kill requires a shared member PID file")
+        slot_id = int(match.group(1))
+        if slot_id >= spec.resident_slot_capacity:
+            raise ValueError("resident PID file is outside sandbox capacity")
+        if user_uid != MEMBER_UID_BASE + slot_id:
+            raise ValueError("resident PID file does not match its member uid")
+        return slot_id
+
+    def reap_member_processes(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        slot_id: int,
+        user_uid: int,
+        user_gid: int,
+    ) -> None:
+        """Kill unattached live CLI trees in exactly one private member slot."""
+        if not spec.shared_live or not 0 <= slot_id < spec.resident_slot_capacity:
+            raise ValueError("resident slot is outside this shared sandbox")
+        if user_uid != MEMBER_UID_BASE + slot_id:
+            raise ValueError("resident slot does not match its member uid")
+        directory = f"{MEMBER_TMPFS_ROOT}/{slot_id}"
+        script = self._member_reaper_script(f"{directory}/resident-*.pid")
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script, "sh", str(user_uid)],
+            workdir="/",
+            timeout_s=20,
+            user_uid=user_uid,
+            user_gid=user_gid,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "stale resident process cleanup failed: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
+        # A tool can deliberately escape the resident process group with
+        # setsid/double-fork, and a broker restart can lose its pidfile. The
+        # member UID is the second, independent ownership fence: before opening
+        # a replacement transport there must be no process left under it.
+        self.reap_member_processes_except(
+            spec,
+            slot_id=slot_id,
+            user_uid=user_uid,
+            user_gid=user_gid,
+            baseline=(),
+        )
+
+    def capture_member_processes(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        slot_id: int,
+        user_uid: int,
+        user_gid: int,
+    ) -> tuple[tuple[int, int], ...]:
+        """Capture the reviewed resident PID/start-time set before one turn."""
+        self._validate_member_identity(spec, slot_id=slot_id, user_uid=user_uid)
+        script = (
+            'set -eu; expected_uid="$1"; for proc in /proc/[0-9]*; do '
+            'pid=${proc##*/}; [ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
+            'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
+            '[ "$uid" = "$expected_uid" ] || continue; '
+            'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'started=$(set -- $fields; printf "%s" "${20:-}"); '
+            'case "$started" in ""|*[!0-9]*) continue;; esac; '
+            'printf "%s %s\n" "$pid" "$started"; done'
+        )
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script, "sh", str(user_uid)],
+            workdir="/",
+            timeout_s=20,
+            user_uid=user_uid,
+            user_gid=user_gid,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "member process census failed: " + result.stderr.decode("utf-8", "replace")[:300]
+            )
+        return self._parse_member_processes(result.stdout)
+
+    def reap_member_processes_except(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        slot_id: int,
+        user_uid: int,
+        user_gid: int,
+        baseline: tuple[tuple[int, int], ...],
+    ) -> None:
+        """Reap every member process not present in a fenced baseline.
+
+        This is the activation boundary for background tools. It runs as the
+        member UID (the container has no CAP_KILL), validates Linux start times
+        to defeat PID reuse, and repeats through SIGKILL so a process cannot
+        escape merely by changing process groups or forking during cleanup.
+        """
+        self._validate_member_identity(spec, slot_id=slot_id, user_uid=user_uid)
+        payload = self._encode_member_processes(baseline)
+        receipt = f"{MEMBER_TMPFS_ROOT}/{slot_id}/reap-{secrets.token_hex(16)}.baseline"
+        script = (
+            'set -eu; expected_uid="$1"; baseline="$2"; umask 077; '
+            'cleanup() { rm -f -- "$baseline"; }; trap cleanup EXIT HUP INT TERM; '
+            'cat > "$baseline"; '
+            'scan() { signal="$1"; extra=0; for proc in /proc/[0-9]*; do '
+            'pid=${proc##*/}; [ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
+            'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
+            '[ "$uid" = "$expected_uid" ] || continue; '
+            'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'started=$(set -- $fields; printf "%s" "${20:-}"); '
+            'case "$started" in ""|*[!0-9]*) continue;; esac; '
+            'grep -Fqx -- "$pid $started" "$baseline" && continue; extra=1; '
+            '[ "$signal" = NONE ] || kill -"$signal" "$pid" 2>/dev/null || :; '
+            'done; [ "$extra" = 0 ]; }; '
+            'round=0; while [ "$round" -lt 20 ]; do '
+            "scan TERM && break; round=$((round + 1)); sleep 0.05; done; "
+            "round=0; while ! scan KILL; do round=$((round + 1)); "
+            '[ "$round" -lt 64 ] || exit 45; sleep 0.05; done; '
+            "scan NONE; cleanup; trap - EXIT HUP INT TERM"
+        )
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script, "sh", str(user_uid), receipt],
+            workdir="/",
+            timeout_s=30,
+            input_bytes=payload,
+            user_uid=user_uid,
+            user_gid=user_gid,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "member activation process cleanup failed: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
+
+    @staticmethod
+    def _validate_member_identity(
+        spec: ChatSandboxSpec,
+        *,
+        slot_id: int,
+        user_uid: int,
+    ) -> None:
+        if not spec.shared_live or not 0 <= slot_id < spec.resident_slot_capacity:
+            raise ValueError("resident slot is outside this shared sandbox")
+        if user_uid != MEMBER_UID_BASE + slot_id:
+            raise ValueError("resident slot does not match its member uid")
+
+    @staticmethod
+    def _parse_member_processes(payload: bytes) -> tuple[tuple[int, int], ...]:
+        try:
+            text = payload.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise SandboxError("member process census is not ASCII") from exc
+        found: list[tuple[int, int]] = []
+        seen: set[int] = set()
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) != 2 or any(
+                not field.isascii() or not field.isdigit() for field in fields
+            ):
+                raise SandboxError("member process census is malformed")
+            pid, started = (int(field) for field in fields)
+            if pid <= 1 or started <= 0 or pid in seen or len(found) >= 4096:
+                raise SandboxError("member process census is outside its identity fence")
+            seen.add(pid)
+            found.append((pid, started))
+        return tuple(sorted(found))
+
+    @staticmethod
+    def _encode_member_processes(processes: tuple[tuple[int, int], ...]) -> bytes:
+        canonical = ChatSandboxManager._parse_member_processes(
+            "".join(f"{pid} {started}\n" for pid, started in processes).encode("ascii")
+        )
+        return "".join(f"{pid} {started}\n" for pid, started in canonical).encode("ascii")
+
+    def prepare_shared_workspace(self, spec: ChatSandboxSpec) -> None:
+        """Make the imported owner tree writable through the shared group."""
+        if not spec.shared_live:
+            raise ValueError("shared workspace preparation requires shared_live")
+        script = (
+            "set -eu; "
+            f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev -type d "
+            "-exec chmod g+rwx,g+s -- {} +; "
+            f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev -type f "
+            "-exec chmod g+rw -- {} +; "
+            f"git -C {CHAT_WORKDIR} config core.sharedRepository group"
+        )
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script],
+            workdir="/",
+            timeout_s=120,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "shared workspace permission preparation failed: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
+
+    def normalize_member_files(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        slot_id: int,
+        user_uid: int,
+        user_gid: int,
+    ) -> None:
+        """Expose one member's credential-free workspace/state writes to peers."""
+        if not spec.shared_live or not 0 <= slot_id < spec.resident_slot_capacity:
+            raise ValueError("resident slot is outside this shared sandbox")
+        if user_uid != MEMBER_UID_BASE + slot_id:
+            raise ValueError("resident slot does not match its member uid")
+        # Codex, OpenCode, and Kilo each need a member-private provider home:
+        # Codex can make temp files owner-only, while the HTTP runtimes keep
+        # SQLite databases and per-project process locks. A sibling UID must
+        # never traverse those homes merely to normalize its own writes.
+        # Normalize shared roots while pruning every private-home collection,
+        # then enter only direct children owned by this member.
+        script = (
+            "set -eu; uid=$1; "
+            'normalize_dirs() { find "$@" -xdev -uid "$uid" -type d '
+            "-exec chmod g+rwx,g+s -- {} +; }; "
+            'normalize_files() { find "$@" -xdev -uid "$uid" -type f '
+            "-exec chmod g+rw -- {} +; }; "
+            f"normalize_dirs {CHAT_WORKDIR}; normalize_files {CHAT_WORKDIR}; "
+            f"find {CHAT_STATE_DIR} -xdev "
+            f"\\( -path {CHAT_STATE_DIR}/.platform "
+            f"-o -path {CHAT_STATE_DIR}/codex-members "
+            f"-o -path {CHAT_STATE_DIR}/opencode-members "
+            f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
+            '-uid "$uid" -type d -exec chmod g+rwx,g+s -- {} +; '
+            f"find {CHAT_STATE_DIR} -xdev "
+            f"\\( -path {CHAT_STATE_DIR}/.platform "
+            f"-o -path {CHAT_STATE_DIR}/codex-members "
+            f"-o -path {CHAT_STATE_DIR}/opencode-members "
+            f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
+            '-uid "$uid" -type f -exec chmod g+rw -- {} +; '
+            f"for collection in {CHAT_STATE_DIR}/codex-members "
+            f"{CHAT_STATE_DIR}/opencode-members {CHAT_STATE_DIR}/kilo-members; do "
+            'test -d "$collection" || continue; '
+            'for member in "$collection"/*; do '
+            'test -e "$member" || continue; '
+            'test "$(stat -c %u "$member" 2>/dev/null || :)" = "$uid" || continue; '
+            'normalize_dirs "$member"; normalize_files "$member"; '
+            "done; done"
+        )
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script, "sh", str(user_uid)],
+            workdir="/",
+            timeout_s=120,
+            user_uid=user_uid,
+            user_gid=user_gid,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "shared member permission normalization failed: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
+
+    def freeze_shared_writers(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        slot_ids: list[int],
+        token: str,
+    ) -> str:
+        """Stop every existing shared-workspace writer for one short capture.
+
+        Agent processes use per-member UIDs, while terminals/setup commands
+        use the sandbox UID.  Freezing the complete existing UID census closes
+        the detached-child gap that a process-group-only barrier leaves.  The
+        Git capture exec starts after this census and is the sole new writer;
+        admissions remain blocked by the supervisor until thaw completes.
+        """
+        if not spec.shared_live:
+            raise ValueError("writer freeze requires a shared-live sandbox")
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise ValueError("snapshot freeze token is invalid")
+        unique_slots = sorted(set(slot_ids))
+        if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
+            raise ValueError("snapshot member slot is outside sandbox capacity")
+        manifest = f"{ACTIVATION_TMPFS}/snapshot-{token}.pids"
+        target_uids = [self.backend.uid, *(MEMBER_UID_BASE + slot for slot in unique_slots)]
+        # The container drops every capability.  Even UID 0 therefore cannot
+        # signal a process owned by a member UID; CAP_KILL is intentionally not
+        # added back.  Run one census as each identity instead.  Repeating the
+        # census until every observed process is stopped closes the race where
+        # an idle CLI background process forks while /proc is being scanned.
+        script = (
+            'set -eu; expected_uid="$1"; committed=0; receipt=""; '
+            "resume_receipt() { "
+            '[ "$committed" = 0 ] || return 0; '
+            "for item in $receipt; do pid=${item%%:*}; started=${item#*:}; "
+            'uid=$(stat -c %u "/proc/$pid" 2>/dev/null || :); '
+            'raw=$(cat "/proc/$pid/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'current=$(set -- $fields; printf "%s" "${20:-}"); '
+            '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] '
+            '&& kill -CONT "$pid" 2>/dev/null || :; done; }; '
+            "trap resume_receipt EXIT; trap 'exit 46' HUP INT TERM; round=0; "
+            "while :; do round=$((round + 1)); stable=1; "
+            "for proc in /proc/[0-9]*; do pid=${proc##*/}; "
+            '[ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
+            'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
+            '[ "$uid" = "$expected_uid" ] || continue; '
+            'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'state=$(set -- $fields; printf "%s" "${1:-}"); '
+            'started=$(set -- $fields; printf "%s" "${20:-}"); '
+            'case "$started" in ""|*[!0-9]*) continue;; esac; item="$pid:$started"; '
+            'case " $receipt " in *" $item "*) '
+            'case "$state" in T|t) ;; *) kill -STOP "$pid" 2>/dev/null || continue; '
+            'stable=0;; esac;; *) kill -STOP "$pid" 2>/dev/null || continue; '
+            'receipt="$receipt $item"; stable=0;; esac; done; '
+            '[ "$stable" = 1 ] && break; [ "$round" -lt 64 ] || exit 45; done; '
+            "for item in $receipt; do pid=${item%%:*}; started=${item#*:}; "
+            'printf "%s %s %s\\n" "$pid" "$expected_uid" "$started"; done; '
+            "committed=1"
+        )
+        frozen: list[tuple[int, int, int]] = []
+        try:
+            for uid in target_uids:
+                result = self.exec_capture(
+                    spec,
+                    ["/bin/sh", "-c", script, "sh", str(uid)],
+                    workdir="/",
+                    timeout_s=20,
+                    user_uid=uid,
+                    user_gid=self.backend.gid,
+                )
+                if result.returncode != 0:
+                    raise SandboxError(
+                        "shared snapshot writer freeze failed: "
+                        + result.stderr.decode("utf-8", "replace")[:300]
+                    )
+                frozen.extend(self._parse_frozen_processes(result.stdout, allowed_uids={uid}))
+            if len({pid for pid, _uid, _started in frozen}) != len(frozen):
+                raise SandboxError("shared snapshot writer census returned a duplicate pid")
+            payload = self._encode_frozen_processes(frozen)
+            write_script = (
+                'set -eu; manifest="$1"; temporary="$manifest.tmp.$$"; umask 077; '
+                "trap 'rm -f -- \"$temporary\"' EXIT HUP INT TERM; "
+                'cat > "$temporary"; chmod 600 "$temporary"; mv "$temporary" "$manifest"; '
+                "trap - EXIT HUP INT TERM"
+            )
+            written = self.exec_capture(
+                spec,
+                ["/bin/sh", "-c", write_script, "sh", manifest],
+                workdir="/",
+                timeout_s=20,
+                input_bytes=payload,
+                user_uid=self.backend.uid,
+                user_gid=self.backend.gid,
+            )
+            if written.returncode != 0:
+                raise SandboxError(
+                    "shared snapshot writer manifest failed: "
+                    + written.stderr.decode("utf-8", "replace")[:300]
+                )
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self._resume_frozen_processes(
+                    spec,
+                    target_uids=target_uids,
+                    frozen=frozen,
+                    require_exact_census=False,
+                )
+            raise
+        return manifest
+
+    def thaw_shared_writers(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        slot_ids: list[int],
+        manifest: str,
+        require_exact_census: bool = True,
+    ) -> None:
+        """Resume exactly the frozen PID/start pairs and detect new writers."""
+        if not spec.shared_live:
+            raise ValueError("writer thaw requires a shared-live sandbox")
+        if not re.fullmatch(
+            rf"{re.escape(ACTIVATION_TMPFS)}/snapshot-[0-9a-f]{{32}}\.pids", manifest
+        ):
+            raise ValueError("snapshot writer manifest path is invalid")
+        unique_slots = sorted(set(slot_ids))
+        if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
+            raise ValueError("snapshot member slot is outside sandbox capacity")
+        target_uids = [self.backend.uid, *(MEMBER_UID_BASE + slot for slot in unique_slots)]
+        read = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", 'cat -- "$1"', "sh", manifest],
+            workdir="/",
+            timeout_s=20,
+            user_uid=self.backend.uid,
+            user_gid=self.backend.gid,
+        )
+        if read.returncode != 0:
+            raise SandboxError(
+                "shared snapshot writer manifest is unavailable: "
+                + read.stderr.decode("utf-8", "replace")[:300]
+            )
+        frozen = self._parse_frozen_processes(read.stdout, allowed_uids=set(target_uids))
+        resume_error: BaseException | None = None
+        try:
+            self._resume_frozen_processes(
+                spec,
+                target_uids=target_uids,
+                frozen=frozen,
+                require_exact_census=require_exact_census,
+            )
+        except BaseException as exc:
+            resume_error = exc
+        removed = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", 'rm -f -- "$1"', "sh", manifest],
+            workdir="/",
+            timeout_s=20,
+            user_uid=self.backend.uid,
+            user_gid=self.backend.gid,
+        )
+        if resume_error is not None:
+            raise resume_error
+        if removed.returncode != 0:
+            raise SandboxError(
+                "shared snapshot writer manifest cleanup failed: "
+                + removed.stderr.decode("utf-8", "replace")[:300]
+            )
+
+    @staticmethod
+    def _parse_frozen_processes(
+        payload: bytes,
+        *,
+        allowed_uids: set[int],
+    ) -> list[tuple[int, int, int]]:
+        """Validate the private PID/start-time receipt before any signal."""
+        try:
+            text = payload.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise SandboxError("shared snapshot writer census is not ASCII") from exc
+        frozen: list[tuple[int, int, int]] = []
+        seen: set[int] = set()
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) != 3 or any(
+                not field.isascii() or not field.isdigit() for field in fields
+            ):
+                raise SandboxError("shared snapshot writer census is malformed")
+            pid, uid, started = (int(field) for field in fields)
+            if pid <= 1 or started <= 0 or uid not in allowed_uids or pid in seen:
+                raise SandboxError("shared snapshot writer census is outside its identity fence")
+            seen.add(pid)
+            frozen.append((pid, uid, started))
+        return frozen
+
+    @staticmethod
+    def _encode_frozen_processes(frozen: list[tuple[int, int, int]]) -> bytes:
+        """Encode a deterministic, private manifest for the later thaw."""
+        return "".join(f"{pid} {uid} {started}\n" for pid, uid, started in sorted(frozen)).encode(
+            "ascii"
+        )
+
+    def _resume_frozen_processes(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        target_uids: list[int],
+        frozen: list[tuple[int, int, int]],
+        require_exact_census: bool,
+    ) -> None:
+        """Resume each receipt as its owner and report any changed census."""
+        by_uid = {
+            uid: [(pid, started) for pid, owner, started in frozen if owner == uid]
+            for uid in target_uids
+        }
+        script = (
+            'set -u; exact="$1"; expected_uid="$2"; shift 2; unknown=0; '
+            'if [ "$exact" = 1 ]; then for proc in /proc/[0-9]*; do '
+            'pid=${proc##*/}; [ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
+            'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
+            '[ "$uid" = "$expected_uid" ] || continue; '
+            'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'started=$(set -- $fields; printf "%s" "${20:-}"); found=0; '
+            'for item in "$@"; do [ "$item" = "$pid:$started" ] && found=1; done; '
+            '[ "$found" = 1 ] || unknown=1; done; fi; '
+            'for item in "$@"; do pid=${item%%:*}; started=${item#*:}; '
+            'uid=$(stat -c %u "/proc/$pid" 2>/dev/null || :); '
+            'raw=$(cat "/proc/$pid/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'current=$(set -- $fields; printf "%s" "${20:-}"); '
+            '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] '
+            '&& kill -CONT "$pid" 2>/dev/null || :; done; [ "$unknown" = 0 ]'
+        )
+        errors: list[str] = []
+        for uid in target_uids:
+            expected = [f"{pid}:{started}" for pid, started in by_uid[uid]]
+            try:
+                result = self.exec_capture(
+                    spec,
+                    [
+                        "/bin/sh",
+                        "-c",
+                        script,
+                        "sh",
+                        "1" if require_exact_census else "0",
+                        str(uid),
+                        *expected,
+                    ],
+                    workdir="/",
+                    timeout_s=20,
+                    user_uid=uid,
+                    user_gid=self.backend.gid,
+                )
+            except BaseException as exc:
+                errors.append(str(exc))
+                continue
+            if result.returncode != 0:
+                errors.append(result.stderr.decode("utf-8", "replace")[:300])
+        if errors:
+            detail = next((error for error in errors if error), "writer census changed")
+            raise SandboxError("shared snapshot writer census changed during capture: " + detail)
+
+    def kill_member_process(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        pidfile: str,
+        user_uid: int,
+        user_gid: int,
+    ) -> None:
+        """Signal one verified resident process group, never the container."""
+        self._validate_member_pidfile(spec, pidfile, user_uid=user_uid)
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", self._member_reaper_script('"$2"'), "sh", str(user_uid), pidfile],
+            workdir="/",
+            timeout_s=20,
+            user_uid=user_uid,
+            user_gid=user_gid,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "resident process cleanup failed: " + result.stderr.decode("utf-8", "replace")[:300]
+            )
+
+    @staticmethod
+    def _member_reaper_script(pidfile_expression: str) -> str:
+        """Build the in-container PID/start-time verification and group kill."""
+        return (
+            'set -eu; expected_uid="$1"; '
+            f"for pidfile in {pidfile_expression}; do "
+            '[ -e "$pidfile" ] || continue; '
+            'read -r pid started extra < "$pidfile" || { rm -f -- "$pidfile"; continue; }; '
+            'case "$pid" in ""|*[!0-9]*) rm -f -- "$pidfile"; continue;; esac; '
+            'case "$started" in ""|*[!0-9]*) '
+            'rm -f -- "$pidfile"; continue;; esac; '
+            '[ -z "$extra" ] || { rm -f -- "$pidfile"; continue; }; '
+            '[ "$(stat -c %u "/proc/$pid" 2>/dev/null || :)" = "$expected_uid" ] '
+            '|| { rm -f -- "$pidfile"; continue; }; '
+            'fields=$(sed "s/^[^)]*) //" "/proc/$pid/stat" 2>/dev/null || :); '
+            "set -- $fields; current_pgid=${3:-}; current_started=${20:-}; "
+            '[ "$current_pgid" = "$pid" ] && [ "$current_started" = "$started" ] '
+            '|| { rm -f -- "$pidfile"; continue; }; '
+            'kill -TERM -- "-$pid" 2>/dev/null || :; attempt=0; '
+            'while kill -0 -- "-$pid" 2>/dev/null; do attempt=$((attempt + 1)); '
+            '[ "$attempt" -lt 40 ] || { kill -KILL -- "-$pid" 2>/dev/null || :; break; }; '
+            'sleep 0.05; done; rm -f -- "$pidfile"; '
+            "done"
+        )
 
     def spawn_terminal(
         self,
@@ -683,6 +1327,8 @@ class ChatSandboxManager:
         workdir: str = CHAT_WORKDIR,
         timeout_s: float = 60,
         input_bytes: bytes | None = None,
+        user_uid: int | None = None,
+        user_gid: int | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run one bounded command and capture bytes without opening a host path."""
         current = self._require(spec)
@@ -694,6 +1340,8 @@ class ChatSandboxManager:
             env=env,
             workdir=workdir,
             interactive=input_bytes is not None,
+            user_uid=user_uid,
+            user_gid=user_gid,
         )
         try:
             return subprocess.run(
@@ -1069,7 +1717,7 @@ class ChatSandboxManager:
 
 
 class _RetainedExecProcess(SandboxProcess):
-    """An attached ``docker exec`` whose kill backstop stops, never removes, chat state."""
+    """An attached ``docker exec`` with container- or member-scoped cleanup."""
 
     def __init__(
         self,
@@ -1077,10 +1725,16 @@ class _RetainedExecProcess(SandboxProcess):
         *,
         manager: ChatSandboxManager,
         spec: ChatSandboxSpec,
+        process_pidfile: str | None,
+        user_uid: int | None,
+        user_gid: int | None,
     ) -> None:
         self._process = process
         self._manager = manager
         self._spec = spec
+        self._process_pidfile = process_pidfile
+        self._user_uid = user_uid
+        self._user_gid = user_gid
         self._stderr_chunks: list[str] = []
         self._stderr_thread: threading.Thread | None = None
         if process.stderr is not None:
@@ -1120,9 +1774,18 @@ class _RetainedExecProcess(SandboxProcess):
         return self._process.poll()
 
     def kill(self) -> None:
-        """Stop the whole activation so a detached exec cannot mutate state."""
+        """Kill only one shared member, or use the legacy container backstop."""
         try:
-            self._manager.stop(self._spec)
+            if self._process_pidfile is not None:
+                assert self._user_uid is not None and self._user_gid is not None
+                self._manager.kill_member_process(
+                    self._spec,
+                    pidfile=self._process_pidfile,
+                    user_uid=self._user_uid,
+                    user_gid=self._user_gid,
+                )
+            else:
+                self._manager.stop(self._spec)
         finally:
             if self._process.poll() is None:
                 self._process.kill()
@@ -1383,13 +2046,18 @@ __all__ = [
     "CHAT_FORK_SOURCE_SANDBOX_LABEL",
     "CHAT_GENERATION_LABEL",
     "CHAT_IMAGE_DIGEST_LABEL",
+    "CHAT_RESIDENT_CAPACITY_LABEL",
     "CHAT_RUNTIME_LABEL",
     "CHAT_RUNTIME_VERSION_LABEL",
     "CHAT_SANDBOX_ID_LABEL",
     "CHAT_SANDBOX_LABEL",
+    "CHAT_SHARED_LABEL",
     "CHAT_STATE_DIR",
     "CHAT_THREAD_LABEL",
     "CHAT_WORKDIR",
+    "MEMBER_TMPFS_ROOT",
+    "MEMBER_UID_BASE",
+    "MEMBER_UID_LIMIT",
     "ChatSandboxInspection",
     "ChatSandboxManager",
     "ChatSandboxSpec",

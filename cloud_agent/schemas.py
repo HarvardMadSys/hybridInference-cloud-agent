@@ -218,6 +218,19 @@ class AgentJobResponse(BaseModel):
     # optimization rung above: RESTORED can be warm_native today and another
     # native transport tomorrow without rewriting what the user was promised.
     context_status: Literal["new", "live", "restored", "lost"] | None = None
+    # Process residency is deliberately separate from context correctness.
+    # A RESTORED turn may already be HOT again, while a LIVE context may be
+    # briefly WARM during a member-only process restart.
+    resident_state: Literal["stopped", "starting", "live", "restarting", "lost"] | None = None
+    sandbox_id: str | None = None
+    workspace_shared: bool = False
+    native_state: Literal["new", "ready", "fork_preparing", "lost"] | None = None
+    fork_anchor_job_id: str | None = None
+    native_fork_available: bool = False
+    workspace_publication_state: (
+        Literal["pending", "capturing", "captured", "publishing", "published", "failed"] | None
+    ) = None
+    workspace_epoch: int | None = None
     duration_ms: int | None = None
     resources: AttemptResources | None = None
     # The deployment's egress posture for this job's two phases, so the owner
@@ -562,6 +575,12 @@ class WorkerClaimAttestation(BaseModel):
     #: saw an empty menu and fell back to the image default. Every selection an
     #: admin made was a no-op, and the only sign was one log line.
     runtime_versions_available: dict[str, list[str]] = Field(default_factory=dict, max_length=64)
+    #: Versions of in-image protocol helpers that are not Agent CLIs (for
+    #: example the Claude SDK fork bridge). They ride the same attestation so
+    #: the API cannot silently discard evidence used by capability gating.
+    helper_versions: dict[str, str] = Field(default_factory=dict, max_length=64)
+    shared_sandbox_protocol: str | None = Field(None, max_length=32)
+    runner_capabilities: list[str] = Field(default_factory=list, max_length=64)
     host_kernel: str | None = Field(None, max_length=256)
     guest_kernel: str | None = Field(None, max_length=256)
 
@@ -598,6 +617,26 @@ class WorkerClaimRequest(BaseModel):
     )
 
 
+class WorkerSandboxMember(BaseModel):
+    """One native chat session inside a shared retained sandbox group."""
+
+    thread_id: str
+    native_session_id: str | None = None
+    native_state: Literal["new", "ready", "fork_preparing", "lost"] = "new"
+    context_status: Literal["new", "live", "restored", "lost"] = "new"
+    activation_generation: int = 0
+    process_generation: int = 0
+    residency_generation: int = 0
+    resident_state: Literal["stopped", "starting", "live", "restarting", "lost"] = "stopped"
+    resident_slot_id: int | None = None
+    active_attempt_id: int | None = None
+    admitted_job_id: str | None = None
+    admitted_at: datetime | None = None
+    last_settled_job_id: str | None = None
+    forked_from_thread_id: str | None = None
+    fork_anchor_job_id: str | None = None
+
+
 class WorkerThreadSandbox(BaseModel):
     """The durable same-host container mapping carried with a claimed turn."""
 
@@ -611,6 +650,9 @@ class WorkerThreadSandbox(BaseModel):
     runtime_version: str | None = None
     sandbox_image_digest: str | None = None
     execution_profile: str
+    memory_limit: str = "4g"
+    cpu_limit: str = "2"
+    stop_timeout_seconds: int = 10
     state: Literal[
         "provisioning",
         "starting",
@@ -628,6 +670,17 @@ class WorkerThreadSandbox(BaseModel):
     admitted_at: datetime | None = None
     last_settled_job_id: str | None = None
     native_session_id: str | None = None
+    # Additive shared-live topology. Older workers ignore these fields and
+    # continue to use the one-to-one values above; capable workers require the
+    # host capability before accepting ``shared_live=True``.
+    shared_live: bool = False
+    origin_thread_id: str | None = None
+    resident_state: Literal["stopped", "starting", "live", "restarting", "lost"] = "stopped"
+    residency_generation: int = 0
+    resident_slot_id: int | None = None
+    resident_slot_capacity: int = 1
+    group_last_activity_at: datetime | None = None
+    group_members: list[WorkerSandboxMember] = Field(default_factory=list)
 
 
 class WorkerClaimResponse(BaseModel):
@@ -793,10 +846,10 @@ class WorkerArtifactResponse(BaseModel):
 class WorkerContinuityRequest(BaseModel):
     """Which continuity rung this attempt is running on (design §9).
 
-    ``warm_native`` is the implemented resident rung: native session and
-    workspace continuous, process restarted per turn. ``hot`` is reserved for
-    a live process receiving injected turns and stays unreported until
-    residency-scoped credentials make one possible (design §13).
+    ``hot`` means a matching supervisor-owned resident process accepted this
+    turn. ``warm_native`` means the Docker-owned native session was resumed in
+    a replacement process. The rung remains diagnostic; NEW/LIVE/RESTORED/LOST
+    is the product-facing context contract.
     """
 
     mode: Literal["hot", "warm_native", "cold_native", "replay"] | None = None
@@ -813,6 +866,11 @@ class WorkerSandboxReserveRequest(BaseModel):
     sandbox_image_digest: str | None = Field(None, max_length=512)
     execution_profile: ExecutionProfile
     host: str = Field(..., min_length=1, max_length=253)
+    shared_live: bool = False
+    resident_slot_capacity: int = Field(8, ge=2, le=128)
+    memory_limit: str = Field("4g", min_length=1, max_length=32)
+    cpu_limit: str = Field("2", min_length=1, max_length=32)
+    stop_timeout_seconds: int = Field(10, ge=1, le=300)
 
 
 class WorkerSandboxRunningRequest(BaseModel):
@@ -822,6 +880,14 @@ class WorkerSandboxRunningRequest(BaseModel):
     activation_generation: int = Field(..., ge=1)
     container_id: str = Field(..., min_length=1, max_length=256)
     context_status: Literal["new", "live", "restored"]
+
+
+class WorkerSandboxResidencyRequest(BaseModel):
+    """Mint/rotate the renewable grant for a supervisor-owned member process."""
+
+    sandbox_id: str = Field(..., min_length=1, max_length=256)
+    runtime_id: str = Field(..., min_length=1, max_length=128)
+    runtime_version: str | None = Field(None, max_length=128)
 
 
 class WorkerSandboxProcessRequest(BaseModel):
@@ -846,6 +912,7 @@ class WorkerSandboxSettleRequest(BaseModel):
     activation_generation: int = Field(..., ge=1)
     context_status: Literal["new", "live", "restored"]
     native_session_id: str | None = Field(None, max_length=512)
+    base_sha: str | None = Field(None, min_length=7, max_length=64)
     idle_timeout_seconds: float = Field(1800.0, gt=0, le=7 * 24 * 60 * 60)
 
 
@@ -1395,6 +1462,8 @@ class RetainedSandboxBeat(BaseModel):  # type: ignore[no-any-unimported]
             "Null is unknown or currently active, not an immediate deadline."
         ),
     )
+    shared_live: bool = False
+    members: list[WorkerSandboxMember] = Field(default_factory=list, max_length=128)
 
 
 class RetainedSandboxStop(BaseModel):  # type: ignore[no-any-unimported]
@@ -1408,6 +1477,7 @@ class RetainedSandboxStop(BaseModel):  # type: ignore[no-any-unimported]
     # zero. Rejecting it here leaks that reconstructed container in RUNNING.
     activation_generation: int = Field(..., ge=0)
     reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
+    shared_live: bool = False
 
 
 class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]

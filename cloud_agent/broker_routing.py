@@ -138,6 +138,22 @@ async def broker_for_job(
     return workspace_broker_from_env()
 
 
+async def hydrate_shared_broker(
+    job: dict[str, Any], broker: WorkspaceBrokerClient | None
+) -> WorkspaceBrokerClient | None:
+    """Restore a shared group's aliases before a generic workspace request.
+
+    The broker can reconstruct a Docker group from immutable labels after a
+    restart, but forked thread ids are database-owned aliases.  Re-registering
+    the current bounded manifest makes Files/Terminal/Git work for a child even
+    when no subsequent Agent turn has happened yet.
+    """
+    sandbox = job.get("thread_sandbox")
+    if broker is not None and isinstance(sandbox, dict) and sandbox.get("shared_live") is True:
+        await broker.register_shared_sandbox(sandbox)
+    return broker
+
+
 #: How long a probe result is reused before the next heartbeat re-checks.
 #: Heartbeats arrive every 30s per host; probing each one would make the
 #: control plane's liveness path depend on a second service's, and probing only

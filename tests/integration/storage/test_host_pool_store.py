@@ -34,6 +34,11 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _ALLOWED_TEST_DB_PATTERN = "_test_"
 _TABLES_IN_FK_ORDER = (
+    "agent_native_session_edges",
+    "agent_thread_sandbox_memberships",
+    "agent_sandbox_snapshots",
+    "agent_session_forks",
+    "agent_sandboxes",
     "agent_thread_messages",
     "agent_job_artifacts",
     "agent_job_events",
@@ -122,6 +127,26 @@ def _kata_attestation(**overrides) -> dict:
         "runtime_versions": {"claude-code": "2.1.0"},
         "host_kernel": "6.8.0-host",
         "guest_kernel": "6.1.0-kata",
+    }
+    stamp.update(overrides)
+    return stamp
+
+
+def _shared_attestation(**overrides) -> dict:
+    """Exact image plus process-local capability proof for shared-live claims."""
+    stamp = {
+        "sandbox_runtime": "",
+        "sandbox_image_digest": "sandbox@sha256:shared",
+        "shared_sandbox_protocol": "v1",
+        "runner_capabilities": ["shared-sandbox-v1"],
+        "runtime_versions": {
+            "claude-code": "2.1.220",
+            "codex": "0.145.0",
+            "pi": "0.73.1",
+            "opencode": "1.18.9",
+            "kilo": "7.4.17",
+        },
+        "helper_versions": {"claude-agent-sdk": "0.2.148"},
     }
     stamp.update(overrides)
     return stamp
@@ -495,6 +520,55 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
         )
     assert attempt["sandbox_runtime"] is None
     assert attempt["runtime_version"] is None
+
+
+@pytest.mark.parametrize(
+    "attestation",
+    [
+        {},
+        _shared_attestation(runner_capabilities=[]),
+        _shared_attestation(sandbox_image_digest=""),
+        _shared_attestation(shared_sandbox_protocol="v0"),
+        _shared_attestation(helper_versions={"claude-agent-sdk": "0.2.147"}),
+        _shared_attestation(
+            runtime_versions={
+                "claude-code": "2.1.219",
+                "codex": "0.145.0",
+                "pi": "0.73.1",
+                "opencode": "1.18.9",
+                "kilo": "7.4.17",
+            }
+        ),
+    ],
+)
+async def test_shared_host_row_cannot_authorize_a_mismatched_polling_replica(store, attestation):
+    """One upgraded sibling's heartbeat is not another replica's claim proof."""
+    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2)
+    job = await _create_job(store, metadata={"requires": ["shared-sandbox-v1"]})
+
+    claim = await store.claim_job(
+        worker_id="rolling-old-replica",
+        lease_ttl_seconds=60,
+        host="runner-a",
+        claim_attestation=attestation,
+    )
+
+    assert claim is None
+    assert (await store.get_job(job["id"]))["state"] == "queued"
+
+
+async def test_exact_polling_replica_can_claim_shared_work(store):
+    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2)
+    job = await _create_job(store, metadata={"requires": ["shared-sandbox-v1"]})
+
+    claim = await store.claim_job(
+        worker_id="rolling-new-replica",
+        lease_ttl_seconds=60,
+        host="runner-a",
+        claim_attestation=_shared_attestation(),
+    )
+
+    assert claim is not None and claim["id"] == job["id"]
 
 
 async def test_runc_replica_skips_secure_work_and_takes_the_next_trusted_job(store):

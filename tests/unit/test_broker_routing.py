@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from cloud_agent import broker_routing
-from cloud_agent.broker_routing import broker_for_attempt, broker_for_job
+from cloud_agent.broker_routing import broker_for_attempt, broker_for_job, hydrate_shared_broker
 from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
 
 BROKER_TOKEN_ENV = "AGENT_WORKSPACE_BROKER_TOKEN"
@@ -117,6 +117,31 @@ async def test_the_job_lookup_routes_by_the_current_attempts_host():
     broker = await broker_for_job(store, "job-1")
 
     assert _base_url(broker) == "http://broker-b:8092"
+
+
+async def test_shared_child_workspace_hydrates_its_db_owned_alias_before_use():
+    class Broker:
+        def __init__(self) -> None:
+            self.registered: list[dict[str, Any]] = []
+
+        async def register_shared_sandbox(self, sandbox: dict[str, Any]):
+            self.registered.append(sandbox)
+
+    broker = Broker()
+    sandbox = {"shared_live": True, "sandbox_id": "asbx_shared"}
+
+    assert await hydrate_shared_broker({"thread_sandbox": sandbox}, broker) is broker
+    assert broker.registered == [sandbox]
+
+
+async def test_legacy_workspace_hydration_is_a_noop():
+    class Broker:
+        async def register_shared_sandbox(self, sandbox):  # pragma: no cover - must stay unused
+            raise AssertionError(sandbox)
+
+    broker = Broker()
+
+    assert await hydrate_shared_broker({"thread_sandbox": None}, broker) is broker
 
 
 async def test_a_job_with_no_running_attempt_falls_back_to_the_env(monkeypatch):

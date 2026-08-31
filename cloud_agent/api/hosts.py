@@ -282,7 +282,57 @@ async def heartbeat_host(
             running=beat.running,
             activity_active=beat.activity_active,
             idle_remaining_seconds=beat.idle_remaining_seconds,
+            shared_live=beat.shared_live,
+            members=[member.model_dump() for member in beat.members],
         )
+        if beat.shared_live:
+            for member in beat.members:
+                if member.residency_generation <= 0:
+                    continue
+                # A stopped group has no process that can legitimately use a
+                # residency credential. Release and revoke it instead of
+                # renewing it forever. The database performs this release
+                # under the group's operation and member-attempt fences: this
+                # heartbeat was sampled earlier and must not revoke a grant a
+                # concurrent fork/start minted after that sample.
+                if not beat.running or member.resident_state in {"stopped", "lost"}:
+                    released = await job_store.release_shared_residency_if_quiescent(
+                        thread_id=member.thread_id,
+                        generation=member.residency_generation,
+                        process_generation=member.process_generation,
+                        host=updated["host"],
+                        sandbox_id=beat.sandbox_id,
+                    )
+                    if released and grants is not None:
+                        with contextlib.suppress(Exception):
+                            await grants.revoke(released)
+                    continue
+                # ``starting`` and ``restarting`` are bounded launch windows.
+                # Do not race an in-flight process launch by revoking its new
+                # grant, but also do not renew an old, unattached credential;
+                # it expires naturally unless the member proves LIVE later.
+                if member.resident_state != "live":
+                    continue
+                extended = await job_store.heartbeat_residency(
+                    thread_id=member.thread_id,
+                    generation=member.residency_generation,
+                    host=updated["host"],
+                    ttl_seconds=RESIDENCY_TTL_S,
+                )
+                if extended and grants is not None:
+                    with contextlib.suppress(Exception):
+                        await grants.renew(extended)
+                if extended is None and not any(
+                    item.thread_id == member.thread_id
+                    and item.generation == member.residency_generation
+                    for item in lost
+                ):
+                    lost.append(
+                        ResidencyBeat(
+                            thread_id=member.thread_id,
+                            generation=member.residency_generation,
+                        )
+                    )
         if beat.running:
             due = await job_store.due_thread_sandbox_stop(
                 thread_id=beat.thread_id,
@@ -290,6 +340,7 @@ async def heartbeat_host(
                 sandbox_id=beat.sandbox_id,
                 container_id=beat.container_id,
                 sandbox_generation=beat.generation,
+                shared_live=beat.shared_live,
             )
             if due is not None:
                 retained_stops.append(due)
