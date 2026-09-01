@@ -39,7 +39,7 @@ import threading
 import time
 import tty
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.egress import (
@@ -50,11 +50,18 @@ from cloud_agent_host.egress import (
     build_policy_from_env,
 )
 from cloud_agent_host.egress_proxy import CANARY_HOST
-from cloud_agent_host.guest_observer import GUEST_OBSERVER_BINARY, GUEST_OBSERVER_VERSION
+from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_BINARY,
+    GUEST_OBSERVER_ROOT,
+    GUEST_OBSERVER_VERSION,
+    GuestObservation,
+    GuestObserverController,
+    GuestObserverCursor,
+)
 from cloud_agent_host.logging_utils import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 logger = get_logger(__name__)
 
@@ -104,6 +111,16 @@ if getent hosts "$host" >/dev/null 2>&1; then echo dns-only; else echo unresolve
 # `--runtime` flag as runc, which is why one backend covers both: they are the
 # same mechanism with a different isolation boundary underneath.
 KATA_RUNTIME = "io.containerd.kata.v2"
+
+# A one-shot Kata turn keeps a tiny non-root init alive while the trusted guest
+# observer is started and the agent is attached with ``docker exec``. This is
+# the private PID-file location used to interrupt only that agent tree before
+# the guest is destroyed on timeout/cancellation.
+_ONE_SHOT_ACTIVATION_TMPFS = "/run/freeinference-turn"
+_ONE_SHOT_PIDFILE = f"{_ONE_SHOT_ACTIVATION_TMPFS}/agent.pid"
+_ONE_SHOT_INIT_COMMAND = (
+    "trap 'exit 0' TERM INT; while :; do sleep 3600 & child=$!; wait $child || true; done"
+)
 
 # Image labels carrying the CLI versions baked into a sandbox image, e.g.
 # ``org.freeinference.runtime.claude-code.version=1.2.3``. The image build
@@ -253,6 +270,10 @@ class SandboxSpec:
     # shared host. Ignored by the process backend, which has no boundary.
     memory_limit: str = "4g"
     cpu_limit: str = "2"
+    #: Capture exact process lifecycle events for this agent turn when the
+    #: backend is Kata. Setup commands and terminal helpers deliberately leave
+    #: this false: their work is outside the turn telemetry boundary.
+    observe_processes: bool = False
 
 
 class SandboxProcess(ABC):
@@ -300,6 +321,19 @@ class SandboxProcess(ABC):
 
     def poll(self) -> int | None:
         """Reap-if-exited: the exit code, or ``None`` while still running."""
+        return None
+
+    def finish_guest_observation(self) -> GuestObservation | None:
+        """Close process telemetry owned by this handle, when it has any.
+
+        Retained sandboxes own their observer at the backend level. A Kata
+        one-shot process instead owns its disposable guest and must close the
+        observer before that guest is removed. Other handles return ``None``.
+        """
+        return None
+
+    def begin_guest_observation(self) -> GuestObserverCursor | None:
+        """Fence another turn on a surviving process, when supported."""
         return None
 
 
@@ -511,6 +545,112 @@ class _PopenProcess(SandboxProcess):
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5)
         return "".join(self._stderr_chunks)
+
+
+class _ObservedContainerProcess(_PopenProcess):
+    """A one-shot Kata exec whose guest must outlive telemetry finalization."""
+
+    def __init__(
+        self,
+        process: subprocess.Popen,
+        *,
+        container: str,
+        controller: GuestObserverController,
+        cursor: GuestObserverCursor,
+        terminate_tree: Callable[[], None],
+        remove_container: Callable[[], bool],
+    ) -> None:
+        super().__init__(process, container=container)
+        self._controller = controller
+        self._cursor = cursor
+        self._cursor_uid = cursor.uid
+        self._terminate_tree = terminate_tree
+        self._remove_container = remove_container
+        self._lifecycle_lock = threading.RLock()
+        self._last_observation: GuestObservation | None = None
+        self._container_removed = False
+
+    def _close_observation(self, *, terminate: bool, destroy: bool) -> GuestObservation:
+        with self._lifecycle_lock:
+            if self._container_removed:
+                return self._last_observation or GuestObservation.unavailable(
+                    "Kata turn container was already removed"
+                )
+            if terminate and self._process.poll() is None:
+                try:
+                    self._terminate_tree()
+                except Exception as exc:
+                    logger.warning(
+                        "kata_one_shot_process_cleanup_failed",
+                        extra={
+                            "event": "kata_one_shot_process_cleanup_failed",
+                            "detail": str(exc)[:300],
+                        },
+                    )
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self._process.wait(timeout=5)
+            if self._cursor is not None:
+                try:
+                    self._last_observation = self._controller.finish(self._cursor)
+                except Exception as exc:
+                    self._last_observation = GuestObservation.unavailable(str(exc))
+                self._cursor = None
+            if destroy:
+                removed = False
+                try:
+                    removed = self._remove_container()
+                except Exception as exc:
+                    logger.warning(
+                        "kata_one_shot_container_cleanup_failed",
+                        extra={
+                            "event": "kata_one_shot_container_cleanup_failed",
+                            "detail": str(exc)[:300],
+                        },
+                    )
+                finally:
+                    if self._process.poll() is None:
+                        self._process.kill()
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            self._process.wait(timeout=5)
+                self._container_removed = removed
+            return self._last_observation or GuestObservation.unavailable(
+                "turn had no guest observer cursor"
+            )
+
+    def kill(self) -> None:
+        """Stop the agent tree, drain eBPF events, then destroy its guest."""
+        self._close_observation(terminate=True, destroy=True)
+
+    def begin_guest_observation(self) -> GuestObserverCursor:
+        """Fence a later turn on this still-resident Kata process."""
+        with self._lifecycle_lock:
+            if self._container_removed or self._process.poll() is not None:
+                return GuestObserverCursor.unavailable(
+                    self._cursor_uid,
+                    "resident Kata process is no longer running",
+                )
+            if self._cursor is not None:
+                # A missing close must never silently widen the next turn to
+                # include its predecessor. Preserve an explicit incomplete
+                # result and start from a fresh fence.
+                self._last_observation = GuestObservation.unavailable(
+                    "previous resident Kata turn did not close its observer fence"
+                )
+            self._cursor = self._controller.begin(user_uid=self._cursor_uid)
+            return self._cursor
+
+    def finish_guest_observation(self) -> GuestObservation:
+        """Close the turn fence before removing this disposable Kata guest."""
+        return self._close_observation(
+            terminate=False,
+            destroy=self._process.poll() is not None,
+        )
+
+    def wait(self) -> int:
+        """Reap the agent, then drain telemetry before its guest disappears."""
+        returncode = super().wait()
+        self._close_observation(terminate=False, destroy=True)
+        return returncode
 
 
 class ProcessBackend(SandboxBackend):
@@ -1597,6 +1737,9 @@ class ContainerBackend(SandboxBackend):
         *,
         terminal_name: str | None = None,
         job_name: str | None = None,
+        detached: bool = False,
+        observer_ready: bool = False,
+        command_argv: list[str] | None = None,
     ) -> list[str]:
         """Compose the shared, security-sensitive ``docker run`` argv.
 
@@ -1604,12 +1747,11 @@ class ContainerBackend(SandboxBackend):
         used for resize/kill. Network, privilege, mount and resource flags
         share this builder so future hardening applies to both execution paths.
         """
-        argv = [
-            self.docker_binary,
-            "run",
-            "--rm",
-            "--interactive",
-        ]
+        argv = [self.docker_binary, "run"]
+        if detached:
+            argv.append("--detach")
+        else:
+            argv += ["--rm", "--interactive"]
         if job_name is not None:
             # Named for one reason: the host-side sampler resolves a
             # container's cgroup through the daemon, and an anonymous
@@ -1662,6 +1804,22 @@ class ContainerBackend(SandboxBackend):
             "--pids-limit",
             "512",
         ]
+        if observer_ready:
+            argv += [
+                # Keep BPF in the bounding set so Docker's creation-time
+                # seccomp profile admits the syscall. PID 1 and the agent are
+                # still non-root, cap-dropped, and under no-new-privileges;
+                # only the source-controlled privileged exec below can use it.
+                "--cap-add",
+                "BPF",
+                "--tmpfs",
+                f"{GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0",
+                "--tmpfs",
+                (
+                    f"{_ONE_SHOT_ACTIVATION_TMPFS}:rw,nosuid,nodev,noexec,"
+                    f"mode=0700,uid={self.uid},gid={self.gid}"
+                ),
+            ]
         if self.runtime:
             argv += ["--runtime", self.runtime]
         env = dict(spec.env)
@@ -1674,8 +1832,10 @@ class ContainerBackend(SandboxBackend):
         for key, value in sorted(env.items()):
             argv += ["--env", f"{key}={value}"]
         argv += self.extra_args
+        if detached:
+            argv += ["--entrypoint", "/bin/sh"]
         argv.append(self.image)
-        argv += spec.argv
+        argv += spec.argv if command_argv is None else command_argv
         return argv
 
     def build_command(self, spec: SandboxSpec, *, name: str | None = None) -> list[str]:
@@ -1688,6 +1848,8 @@ class ContainerBackend(SandboxBackend):
 
     def spawn(self, spec: SandboxSpec) -> SandboxProcess:
         """Start the agent inside a throwaway container."""
+        if spec.observe_processes and self.runtime == KATA_RUNTIME:
+            return self._spawn_observed(spec)
         container_name = f"hyi-job-{secrets.token_hex(12)}"
         command = self.build_command(spec, name=container_name)
         logger.info(
@@ -1717,6 +1879,240 @@ class ContainerBackend(SandboxBackend):
                 bufsize=1,
             ),
             container=container_name,
+        )
+
+    def _spawn_observed(self, spec: SandboxSpec) -> SandboxProcess:
+        """Start eBPF before one Kata agent and keep the guest until drain."""
+        container_name = f"hyi-job-{secrets.token_hex(12)}"
+        launch = self._build_command(
+            # The fixed init needs no per-attempt credential. Keep secrets out
+            # of the long-lived container config and pass them only to the
+            # attached agent exec below.
+            replace(spec, env={}),
+            job_name=container_name,
+            detached=True,
+            observer_ready=True,
+            command_argv=["-c", _ONE_SHOT_INIT_COMMAND],
+        )
+        logger.info(
+            "agent_sandbox_spawn",
+            extra={
+                "event": "agent_sandbox_spawn",
+                "backend": self.name,
+                "vm_isolated": True,
+                "image": self.image,
+                "process_observer": "kata-guest-ebpf-v1",
+            },
+        )
+        try:
+            started = subprocess.run(
+                launch,
+                env={**os.environ},
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxError(f"Kata turn container could not start: {exc}") from exc
+
+        removed = False
+        removal_lock = threading.Lock()
+
+        def remove_container() -> bool:
+            nonlocal removed
+            with removal_lock:
+                if removed:
+                    return True
+                detail = "container removal did not complete"
+                for attempt in range(20):
+                    try:
+                        result = subprocess.run(
+                            [self.docker_binary, "rm", "--force", container_name],
+                            env={**os.environ},
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=False,
+                        )
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        detail = str(exc)
+                        break
+                    stderr = result.stderr.strip()
+                    if result.returncode == 0 or "No such container" in stderr:
+                        removed = True
+                        return True
+                    detail = stderr or f"docker rm exited {result.returncode}"
+                    in_progress = (
+                        "removal of container" in stderr and "is already in progress" in stderr
+                    )
+                    if not in_progress or attempt == 19:
+                        break
+                    time.sleep(0.05)
+                if not removed:
+                    logger.warning(
+                        "kata_one_shot_container_cleanup_failed",
+                        extra={
+                            "event": "kata_one_shot_container_cleanup_failed",
+                            "detail": detail[:300],
+                        },
+                    )
+                return removed
+
+        if started.returncode != 0:
+            remove_container()
+            raise SandboxError(
+                "Kata turn container could not start: " + started.stderr.strip()[:300]
+            )
+
+        def capture(argv: list[str], timeout_s: float):
+            return subprocess.run(
+                [
+                    self.docker_binary,
+                    "exec",
+                    "--user",
+                    "0:0",
+                    "--workdir",
+                    "/",
+                    container_name,
+                    *argv,
+                ],
+                env={**os.environ},
+                capture_output=True,
+                timeout=timeout_s,
+                check=False,
+            )
+
+        def privileged(argv: list[str], detach: bool, timeout_s: float):
+            command = [self.docker_binary, "exec"]
+            if detach:
+                command.append("--detach")
+            command += [
+                "--privileged",
+                "--user",
+                "0:0",
+                "--workdir",
+                "/",
+                container_name,
+                *argv,
+            ]
+            return subprocess.run(
+                command,
+                env={**os.environ},
+                capture_output=True,
+                timeout=timeout_s,
+                check=False,
+            )
+
+        controller = GuestObserverController(capture=capture, privileged=privileged)
+        cursor = controller.begin(user_uid=self.uid)
+
+        # Match the retained-container kill contract: the CLI becomes a
+        # session leader and records both PID and Linux start time, so a stale
+        # numeric PID can never signal a later process after reuse.
+        wrapper = (
+            'pidfile="$1"; shift; umask 0077; '
+            'cleanup() { rm -f -- "$pidfile"; }; trap cleanup EXIT; '
+            "setsid --fork --wait /bin/sh -c '"
+            'pidfile="$1"; shift; '
+            'fields=$(sed "s/^[^)]*) //" "/proc/$$/stat") || exit 126; '
+            'started=$(set -- $fields; printf "%s" "${20:-}"); '
+            'case "$started" in ""|*[!0-9]*) exit 126;; esac; '
+            'printf "%s %s\\n" "$$" "$started" > "$pidfile" || exit 126; '
+            'exec "$@"\' sh "$pidfile" "$@"'
+        )
+        exec_argv = ["/bin/sh", "-c", wrapper, "sh", _ONE_SHOT_PIDFILE, *spec.argv]
+        command = [self.docker_binary, "exec"]
+        if spec.live_input:
+            command.append("--interactive")
+        command += [
+            "--user",
+            f"{self.uid}:{self.gid}",
+            "--workdir",
+            "/workspace",
+        ]
+        env = dict(spec.env)
+        if self.egress is not None:
+            env.update(self.egress.sandbox_env(spec.phase))
+        for key, value in sorted(env.items()):
+            if not key or "=" in key or "\x00" in key or "\x00" in value:
+                remove_container()
+                raise SandboxError(f"invalid environment entry {key!r}")
+            command += ["--env", f"{key}={value}"]
+        command += [container_name, *exec_argv]
+
+        killer = (
+            'set -eu; expected_uid="$1"; pidfile="$2"; '
+            'attempt=0; while [ ! -e "$pidfile" ]; do attempt=$((attempt + 1)); '
+            '[ "$attempt" -lt 40 ] || exit 0; sleep 0.05; done; '
+            'read -r pid started extra < "$pidfile" || { rm -f -- "$pidfile"; exit 0; }; '
+            'case "$pid" in ""|*[!0-9]*) rm -f -- "$pidfile"; exit 0;; esac; '
+            'case "$started" in ""|*[!0-9]*) rm -f -- "$pidfile"; exit 0;; esac; '
+            '[ -z "$extra" ] || { rm -f -- "$pidfile"; exit 0; }; '
+            '[ "$(stat -c %u "/proc/$pid" 2>/dev/null || :)" = "$expected_uid" ] '
+            '|| { rm -f -- "$pidfile"; exit 0; }; '
+            'fields=$(sed "s/^[^)]*) //" "/proc/$pid/stat" 2>/dev/null || :); '
+            "set -- $fields; current_pgid=${3:-}; current_started=${20:-}; "
+            '[ "$current_pgid" = "$pid" ] && [ "$current_started" = "$started" ] '
+            '|| { rm -f -- "$pidfile"; exit 0; }; '
+            'kill -TERM -- "-$pid" 2>/dev/null || :; attempt=0; '
+            'while kill -0 -- "-$pid" 2>/dev/null; do attempt=$((attempt + 1)); '
+            '[ "$attempt" -lt 40 ] || { kill -KILL -- "-$pid" 2>/dev/null || :; '
+            'attempt=0; while kill -0 -- "-$pid" 2>/dev/null; do '
+            'attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || exit 124; '
+            "sleep 0.05; done; break; }; "
+            'sleep 0.05; done; rm -f -- "$pidfile"'
+        )
+
+        def terminate_tree() -> None:
+            result = subprocess.run(
+                [
+                    self.docker_binary,
+                    "exec",
+                    "--privileged",
+                    "--user",
+                    "0:0",
+                    "--workdir",
+                    "/",
+                    container_name,
+                    "/bin/sh",
+                    "-c",
+                    killer,
+                    "sh",
+                    str(self.uid),
+                    _ONE_SHOT_PIDFILE,
+                ],
+                env={**os.environ},
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise SandboxError(
+                    "Kata turn process cleanup failed: " + result.stderr.strip()[:300]
+                )
+
+        try:
+            process = subprocess.Popen(
+                command,
+                env={**os.environ},
+                stdin=subprocess.PIPE if spec.live_input else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except Exception:
+            remove_container()
+            raise
+        return _ObservedContainerProcess(
+            process,
+            container=container_name,
+            controller=controller,
+            cursor=cursor,
+            terminate_tree=terminate_tree,
+            remove_container=remove_container,
         )
 
     def spawn_terminal(self, spec: SandboxSpec, *, rows: int, cols: int) -> TerminalProcess:

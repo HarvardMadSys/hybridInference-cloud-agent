@@ -217,6 +217,10 @@ class LaunchContext:
     #: Private per-membership tmpfs root for generated provider configuration.
     #: It is never the durable native session store.
     activation_dir: str | None = None
+    #: Retained containers own their state inside Docker rather than at a host
+    #: path. They provide this trusted writer so Claude's passive hooks are
+    #: installed in the filesystem the CLI will actually read.
+    install_tool_hooks: Callable[[dict[str, Any]], None] | None = None
 
 
 class HarnessTurn:
@@ -395,6 +399,18 @@ class HarnessSession:
     def process_exit_code(self) -> int | None:
         """Return a resident process status when this session owns one."""
         return None
+
+    def begin_guest_observation(self) -> Any | None:
+        """Fence a new turn on an observer-aware resident process."""
+        process = getattr(self, "_process", None)
+        begin = getattr(process, "begin_guest_observation", None)
+        return begin() if begin is not None else None
+
+    def finish_guest_observation(self, _cursor: Any | None = None) -> Any | None:
+        """Close a resident process fence without ending the process."""
+        process = getattr(self, "_process", None)
+        finish = getattr(process, "finish_guest_observation", None)
+        return finish() if finish is not None else None
 
 
 class HarnessDriver:
@@ -1348,6 +1364,10 @@ class ClaudeCodeSession(HarnessSession):
     def _install_tool_hooks(self) -> None:
         """Install passive Claude hooks that mark exact tool-call boundaries."""
         try:
+            settings_update = hook_settings(CLAUDE_TOOL_MARKS)
+            if self._context.install_tool_hooks is not None:
+                self._context.install_tool_hooks(settings_update)
+                return
             config = pathlib.Path(self._context.state_dir) / "claude"
             config.mkdir(parents=True, exist_ok=True)
             settings_path = config / "settings.json"
@@ -1355,7 +1375,7 @@ class ClaudeCodeSession(HarnessSession):
             if settings_path.exists():
                 with contextlib.suppress(Exception):
                     settings = json.loads(settings_path.read_text()) or {}
-            settings.update(hook_settings(CLAUDE_TOOL_MARKS))
+            settings.update(settings_update)
             settings_path.write_text(json.dumps(settings, indent=2))
         except Exception as exc:  # pragma: no cover - defence, not behaviour
             print(f"tool hooks not installed: {exc}", file=sys.stderr)

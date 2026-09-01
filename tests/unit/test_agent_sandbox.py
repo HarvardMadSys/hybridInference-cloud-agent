@@ -6,6 +6,7 @@ composed command rather than trusted to a container runtime being installed.
 
 from __future__ import annotations
 
+import io
 import logging
 import signal
 import subprocess
@@ -16,6 +17,7 @@ import pytest
 from cloud_agent_host import sandbox as sandbox_mod
 from cloud_agent_host.egress import EgressPolicyError
 from cloud_agent_host.egress_proxy import CANARY_HOST
+from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -100,6 +102,156 @@ def test_container_command_carries_the_isolation_flags():
     assert "--network agent-net" in joined
     # The agent's argv comes after the image, never before it.
     assert command[command.index("img:1") + 1 :] == ["claude", "-p", "hi"]
+
+
+def test_observed_kata_turn_starts_ebpf_before_agent_and_drains_before_remove(monkeypatch):
+    """A throwaway guest must exist on both sides of the agent lifecycle."""
+    events: list[str] = []
+    run_commands: list[list[str]] = []
+    popen_commands: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, command, **_kwargs) -> None:
+            events.append("agent-start")
+            popen_commands.append(list(command))
+            self.stdin = None
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            events.append("agent-wait")
+            self.returncode = 0
+            return 0
+
+        def kill(self):
+            self.returncode = -9
+
+    def fake_run(command, **_kwargs):
+        run_commands.append(list(command))
+        if command[1] == "run":
+            events.append("guest-start")
+            return SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
+        if command[1:3] == ["rm", "--force"]:
+            events.append("guest-remove")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def begin(_controller, *, user_uid):
+        events.append("observer-begin")
+        return GuestObserverCursor(uid=user_uid, available=True)
+
+    def finish(_controller, _cursor):
+        events.append("observer-finish")
+        return GuestObservation(
+            source="kata-guest-ebpf-v1",
+            complete=True,
+            lost_events=0,
+            truncated=False,
+        )
+
+    monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_mod.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(sandbox_mod.GuestObserverController, "begin", begin)
+    monkeypatch.setattr(sandbox_mod.GuestObserverController, "finish", finish)
+    backend = ContainerBackend(image="img:1", network="agent-net", runtime=KATA_RUNTIME)
+
+    process = backend.spawn(
+        SandboxSpec(
+            argv=["claude", "-p", "hi"],
+            workdir="/tmp/wd",
+            env={"TOKEN": "turn-secret"},
+            observe_processes=True,
+        )
+    )
+
+    assert events[:3] == ["guest-start", "observer-begin", "agent-start"]
+    launch = run_commands[0]
+    assert "--detach" in launch and "--rm" not in launch
+    assert launch[launch.index("--runtime") + 1] == KATA_RUNTIME
+    assert launch[launch.index("--user") + 1] == "10001:10001"
+    assert launch[launch.index("--cap-add") + 1] == "BPF"
+    assert not any(value == "TOKEN=turn-secret" for value in launch)
+    agent_exec = popen_commands[0]
+    assert agent_exec[:2] == ["docker", "exec"]
+    assert "TOKEN=turn-secret" in agent_exec
+    assert agent_exec[-3:] == ["claude", "-p", "hi"]
+
+    assert process.wait() == 0
+    assert events[-3:] == ["agent-wait", "observer-finish", "guest-remove"]
+
+
+def test_observed_live_kata_turn_refences_without_destroying_the_guest(monkeypatch):
+    """Closing one HOT turn must not kill the process needed by the next."""
+    events: list[str] = []
+    process_holder: list[object] = []
+
+    class FakePopen:
+        def __init__(self, _command, **_kwargs) -> None:
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+            self.returncode = None
+            process_holder.append(self)
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 143
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    def fake_run(command, **_kwargs):
+        if command[1] == "run":
+            return SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
+        if command[1:3] == ["rm", "--force"]:
+            events.append("remove")
+        elif command[1] == "exec":
+            events.append("terminate")
+            process_holder[0].returncode = 143
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def begin(_controller, *, user_uid):
+        events.append("begin")
+        return GuestObserverCursor(uid=user_uid, available=True)
+
+    def finish(_controller, _cursor):
+        events.append("finish")
+        return GuestObservation(
+            source="kata-guest-ebpf-v1",
+            complete=True,
+            lost_events=0,
+            truncated=False,
+        )
+
+    monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_mod.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(sandbox_mod.GuestObserverController, "begin", begin)
+    monkeypatch.setattr(sandbox_mod.GuestObserverController, "finish", finish)
+    backend = ContainerBackend(image="img:1", network="agent-net", runtime=KATA_RUNTIME)
+    process = backend.spawn(
+        SandboxSpec(
+            argv=["claude"],
+            workdir="/tmp/wd",
+            live_input=True,
+            observe_processes=True,
+        )
+    )
+
+    process.finish_guest_observation()
+    assert events == ["begin", "finish"]
+    process.begin_guest_observation()
+    process.finish_guest_observation()
+    assert events == ["begin", "finish", "begin", "finish"]
+
+    process.begin_guest_observation()
+    process.kill()
+    assert events[-4:] == ["begin", "terminate", "finish", "remove"]
 
 
 def test_container_terminal_keeps_isolation_and_adds_a_named_tty():

@@ -36,16 +36,11 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.guest_observer import (
-    GUEST_OBSERVER_BINARY,
-    GUEST_OBSERVER_EVENTS,
     GUEST_OBSERVER_ROOT,
-    GUEST_OBSERVER_STATUS,
-    MAX_OBSERVATION_BYTES,
     GuestObservation,
+    GuestObserverController,
     GuestObserverCursor,
-    GuestObserverProtocolError,
-    finish_observation,
-    parse_snapshot,
+    GuestObserverRuntimeError,
 )
 from cloud_agent_host.sandbox import (
     KATA_RUNTIME,
@@ -56,6 +51,7 @@ from cloud_agent_host.sandbox import (
     SandboxSpec,
     TerminalProcess,
 )
+from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -660,26 +656,34 @@ class ChatSandboxManager:
             user_gid=user_gid,
         )
 
-    @staticmethod
     def _validate_member_pidfile(
+        self,
         spec: ChatSandboxSpec,
         pidfile: str,
         *,
         user_uid: int | None,
     ) -> int:
-        """Return the slot after validating one private resident PID path."""
-        match = re.fullmatch(
+        """Validate one shared member or legacy retained agent PID path."""
+        member_match = re.fullmatch(
             rf"{re.escape(MEMBER_TMPFS_ROOT)}/([0-9]+)/resident-[0-9a-f]{{32}}\.pid",
             pidfile,
         )
-        if not spec.shared_live or match is None:
-            raise ValueError("process-scoped kill requires a shared member PID file")
-        slot_id = int(match.group(1))
-        if slot_id >= spec.resident_slot_capacity:
-            raise ValueError("resident PID file is outside sandbox capacity")
-        if user_uid != MEMBER_UID_BASE + slot_id:
-            raise ValueError("resident PID file does not match its member uid")
-        return slot_id
+        if spec.shared_live:
+            if member_match is None:
+                raise ValueError("process-scoped kill requires a shared member PID file")
+            slot_id = int(member_match.group(1))
+            if slot_id >= spec.resident_slot_capacity:
+                raise ValueError("resident PID file is outside sandbox capacity")
+            if user_uid != MEMBER_UID_BASE + slot_id:
+                raise ValueError("resident PID file does not match its member uid")
+            return slot_id
+        legacy_match = re.fullmatch(
+            rf"{re.escape(ACTIVATION_TMPFS)}/agent-[0-9a-f]{{32}}\.pid",
+            pidfile,
+        )
+        if legacy_match is None or user_uid != self.backend.uid:
+            raise ValueError("process-scoped kill requires a retained agent PID file")
+        return -1
 
     def reap_member_processes(
         self,
@@ -1204,18 +1208,33 @@ class ChatSandboxManager:
     ) -> None:
         """Signal one verified resident process group, never the container."""
         self._validate_member_pidfile(spec, pidfile, user_uid=user_uid)
-        result = self.exec_capture(
-            spec,
-            ["/bin/sh", "-c", self._member_reaper_script('"$2"'), "sh", str(user_uid), pidfile],
-            workdir="/",
-            timeout_s=20,
-            user_uid=user_uid,
-            user_gid=user_gid,
+        argv = [
+            "/bin/sh",
+            "-c",
+            self._member_reaper_script('"$2"'),
+            "sh",
+            str(user_uid),
+            pidfile,
+        ]
+        result = (
+            self._kata_privileged_exec(spec, argv, timeout_s=20)
+            if self.backend.runtime == KATA_RUNTIME
+            else self.exec_capture(
+                spec,
+                argv,
+                workdir="/",
+                timeout_s=20,
+                user_uid=user_uid,
+                user_gid=user_gid,
+            )
         )
         if result.returncode != 0:
-            raise SandboxError(
-                "resident process cleanup failed: " + result.stderr.decode("utf-8", "replace")[:300]
+            stderr = (
+                result.stderr.decode("utf-8", "replace")
+                if isinstance(result.stderr, bytes)
+                else str(result.stderr or "")
             )
+            raise SandboxError("resident process cleanup failed: " + stderr[:300])
 
     @staticmethod
     def _member_reaper_script(pidfile_expression: str) -> str:
@@ -1237,7 +1256,10 @@ class ChatSandboxManager:
             '|| { rm -f -- "$pidfile"; continue; }; '
             'kill -TERM -- "-$pid" 2>/dev/null || :; attempt=0; '
             'while kill -0 -- "-$pid" 2>/dev/null; do attempt=$((attempt + 1)); '
-            '[ "$attempt" -lt 40 ] || { kill -KILL -- "-$pid" 2>/dev/null || :; break; }; '
+            '[ "$attempt" -lt 40 ] || { kill -KILL -- "-$pid" 2>/dev/null || :; '
+            'attempt=0; while kill -0 -- "-$pid" 2>/dev/null; do '
+            'attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || exit 124; '
+            "sleep 0.05; done; break; }; "
             'sleep 0.05; done; rm -f -- "$pidfile"; '
             "done"
         )
@@ -1390,7 +1412,7 @@ class ChatSandboxManager:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxError(f"chat sandbox exec failed: {exc}") from exc
 
-    def _observer_privileged_exec(
+    def _kata_privileged_exec(
         self,
         spec: ChatSandboxSpec,
         argv: list[str],
@@ -1398,15 +1420,15 @@ class ChatSandboxManager:
         detach: bool = False,
         timeout_s: float = 30,
     ) -> subprocess.CompletedProcess[str]:
-        """Run one fixed platform helper with guest-root privilege, Kata only.
+        """Run one source-controlled platform helper as Kata guest root.
 
         This is deliberately not a general privileged-exec API.  Callers pass
-        only source-controlled argv from the methods below, and the runtime
-        guard prevents an observer intended for a guest kernel from gaining
-        privilege on the host's shared kernel under runc.
+        only source-controlled observer/cleanup argv from private methods, and
+        the runtime guard prevents them from gaining privilege on the host's
+        shared kernel under runc.
         """
         if self.backend.runtime != KATA_RUNTIME:
-            raise SandboxError("guest process observation requires the Kata runtime")
+            raise SandboxError("guest-root platform helpers require the Kata runtime")
         current = self._require(spec)
         if not current.running:
             raise SandboxError("chat sandbox must be started before guest observation")
@@ -1424,6 +1446,22 @@ class ChatSandboxManager:
         ]
         return self._run(command, timeout=timeout_s)
 
+    def _observer_privileged_exec(
+        self,
+        spec: ChatSandboxSpec,
+        argv: list[str],
+        *,
+        detach: bool = False,
+        timeout_s: float = 30,
+    ) -> subprocess.CompletedProcess[str]:
+        """Keep the observer-only seam explicit for tests and call sites."""
+        return self._kata_privileged_exec(
+            spec,
+            argv,
+            detach=detach,
+            timeout_s=timeout_s,
+        )
+
     def _guest_observer_snapshot(
         self,
         spec: ChatSandboxSpec,
@@ -1431,156 +1469,53 @@ class ChatSandboxManager:
         after_poll_seq: int | None = None,
     ):
         """Read an atomic status/size/guest-clock tuple from the root journal."""
-        # The wait is inside one ordinary, capabilityless root exec.  The
-        # observer publishes status only after draining its ring buffer, so a
-        # later poll sequence is the flush barrier that closes a turn without
-        # adding an arbitrary sleep (and without missing a 1 ms process).
-        script = (
-            "import json, os, sys, time\n"
-            "status_path, events_path, expected_binary = sys.argv[1:4]\n"
-            "wanted = int(sys.argv[4])\n"
-            "deadline = time.monotonic() + 3.0\n"
-            "while True:\n"
-            "    try:\n"
-            "        with open(status_path, encoding='utf-8') as handle:\n"
-            "            status = json.load(handle)\n"
-            "        pid = int(status.get('pid', 0))\n"
-            "        if pid <= 0 or not os.path.exists(f'/proc/{pid}'):\n"
-            "            raise RuntimeError('observer process is not alive')\n"
-            "        try:\n"
-            "            observer_alive = os.path.samefile(f'/proc/{pid}/exe', expected_binary)\n"
-            "        except OSError:\n"
-            "            observer_alive = False\n"
-            "        if not observer_alive:\n"
-            "            raise RuntimeError('observer pid does not name the trusted binary')\n"
-            "        if wanted < 0 or int(status.get('poll_seq', -1)) > wanted:\n"
-            "            break\n"
-            "    except (OSError, ValueError, TypeError, json.JSONDecodeError):\n"
-            "        status = None\n"
-            "    if time.monotonic() >= deadline:\n"
-            "        raise RuntimeError('observer status did not advance')\n"
-            "    time.sleep(0.01)\n"
-            "size = int(status.get('journal_bytes', -1))\n"
-            "actual_size = os.path.getsize(events_path) if os.path.exists(events_path) else 0\n"
-            "if size < 0 or actual_size < size:\n"
-            "    raise RuntimeError('observer journal is behind its published fence')\n"
-            "print(json.dumps({'status': status, 'journal_size': size, "
-            "'guest_mono_ns': time.monotonic_ns()}, separators=(',', ':')))\n"
-        )
-        result = self.exec_capture(
-            spec,
-            [
-                "python3",
-                "-c",
-                script,
-                GUEST_OBSERVER_STATUS,
-                GUEST_OBSERVER_EVENTS,
-                GUEST_OBSERVER_BINARY,
-                str(-1 if after_poll_seq is None else after_poll_seq),
-            ],
-            workdir="/",
-            timeout_s=5,
-            user_uid=0,
-            user_gid=0,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "guest observer snapshot failed: " + result.stderr.decode("utf-8", "replace")[-300:]
-            )
         try:
-            return parse_snapshot(result.stdout)
-        except GuestObserverProtocolError as exc:
+            return self._guest_observer_controller(spec).snapshot(after_poll_seq=after_poll_seq)
+        except GuestObserverRuntimeError as exc:
             raise SandboxError(str(exc)) from exc
+
+    def _guest_observer_controller(self, spec: ChatSandboxSpec) -> GuestObserverController:
+        """Bind the shared observer contract to this label-verified container."""
+
+        def capture(argv: list[str], timeout_s: float):
+            return self.exec_capture(
+                spec,
+                argv,
+                workdir="/",
+                timeout_s=timeout_s,
+                user_uid=0,
+                user_gid=0,
+            )
+
+        def privileged(argv: list[str], detach: bool, timeout_s: float):
+            return self._observer_privileged_exec(
+                spec,
+                argv,
+                detach=detach,
+                timeout_s=timeout_s,
+            )
+
+        return GuestObserverController(
+            capture=capture,
+            privileged=privileged,
+            lock=self._guest_observer_lock,
+        )
 
     def ensure_guest_observer(self, spec: ChatSandboxSpec) -> None:
         """Start the reviewed eBPF helper and wait until all probes are attached."""
         if self.backend.runtime != KATA_RUNTIME:
             raise SandboxError("guest process observation requires the Kata runtime")
         try:
-            self._guest_observer_snapshot(spec)
-            return
-        except SandboxError:
-            pass
-
-        with self._guest_observer_lock:
-            # A sibling may have won the first-start race while this caller
-            # waited.  Recheck under the lock before touching the singleton.
-            try:
-                self._guest_observer_snapshot(spec)
-                return
-            except SandboxError:
-                self._start_guest_observer(spec)
+            self._guest_observer_controller(spec).ensure()
+        except GuestObserverRuntimeError as exc:
+            raise SandboxError(str(exc)) from exc
 
     def _start_guest_observer(self, spec: ChatSandboxSpec) -> None:
         """Replace a stale singleton; caller holds ``_guest_observer_lock``."""
-        # A failed helper can leave a status file.  Cleanup is itself the same
-        # fixed trusted helper path, never an argv supplied by a job.
-        cleanup = (
-            "import json, os, signal, sys, time\n"
-            "status, events, expected_binary = sys.argv[1:4]\n"
-            "pid = 0\n"
-            "def is_expected_process():\n"
-            "    if pid <= 1:\n"
-            "        return False\n"
-            "    try:\n"
-            "        return os.path.samefile(f'/proc/{pid}/exe', expected_binary)\n"
-            "    except OSError:\n"
-            "        return False\n"
-            "try:\n"
-            "    with open(status, encoding='utf-8') as handle:\n"
-            "        pid = int(json.load(handle).get('pid', 0))\n"
-            "    if is_expected_process():\n"
-            "        os.kill(pid, signal.SIGTERM)\n"
-            "except (OSError, ValueError, TypeError, json.JSONDecodeError):\n"
-            "    pass\n"
-            "deadline = time.monotonic() + 1.0\n"
-            "while is_expected_process() and time.monotonic() < deadline:\n"
-            "    time.sleep(0.01)\n"
-            "if is_expected_process():\n"
-            "    os.kill(pid, signal.SIGKILL)\n"
-            "    deadline = time.monotonic() + 1.0\n"
-            "    while is_expected_process() and time.monotonic() < deadline:\n"
-            "        time.sleep(0.01)\n"
-            "if is_expected_process():\n"
-            "    raise RuntimeError('stale guest observer did not exit')\n"
-            "for item in (status, events):\n"
-            "    try:\n"
-            "        os.unlink(item)\n"
-            "    except FileNotFoundError:\n"
-            "        pass\n"
-        )
-        cleaned = self._observer_privileged_exec(
-            spec,
-            [
-                "python3",
-                "-c",
-                cleanup,
-                GUEST_OBSERVER_STATUS,
-                GUEST_OBSERVER_EVENTS,
-                GUEST_OBSERVER_BINARY,
-            ],
-        )
-        if cleaned.returncode != 0:
-            raise SandboxError(
-                "stale guest observer cleanup failed: " + cleaned.stderr.strip()[-300:]
-            )
-        started = self._observer_privileged_exec(
-            spec,
-            [GUEST_OBSERVER_BINARY],
-            detach=True,
-        )
-        if started.returncode != 0:
-            raise SandboxError("guest observer could not start: " + started.stderr.strip()[-300:])
-        deadline = time.monotonic() + 5.0
-        problem = "guest observer did not become ready"
-        while time.monotonic() < deadline:
-            try:
-                self._guest_observer_snapshot(spec)
-                return
-            except SandboxError as exc:
-                problem = str(exc)
-                time.sleep(0.05)
-        raise SandboxError(problem)
+        try:
+            self._guest_observer_controller(spec).start()
+        except GuestObserverRuntimeError as exc:
+            raise SandboxError(str(exc)) from exc
 
     def begin_guest_observation(
         self,
@@ -1591,27 +1526,7 @@ class ChatSandboxManager:
         """Fence the journal immediately before one member prompt is admitted."""
         if self.backend.runtime != KATA_RUNTIME:
             return GuestObserverCursor.unavailable(user_uid, "sandbox is not a Kata guest")
-        try:
-            self.ensure_guest_observer(spec)
-            host_before = time.monotonic_ns()
-            snapshot = self._guest_observer_snapshot(spec)
-            host_after = time.monotonic_ns()
-        except Exception as exc:
-            return GuestObserverCursor.unavailable(user_uid, str(exc))
-        host_midpoint = host_before + (host_after - host_before) // 2
-        return GuestObserverCursor(
-            uid=user_uid,
-            offset=snapshot.journal_size,
-            lost=snapshot.status.lost,
-            journal_dropped=snapshot.status.journal_dropped,
-            poll_seq=snapshot.status.poll_seq,
-            observer_pid=snapshot.status.pid,
-            event_seq=snapshot.status.event_seq,
-            guest_mono_ns=snapshot.guest_mono_ns,
-            mono_offset_ns=host_midpoint - snapshot.guest_mono_ns,
-            clock_error_ns=max(0, (host_after - host_before) // 2),
-            available=True,
-        )
+        return self._guest_observer_controller(spec).begin(user_uid=user_uid)
 
     def finish_guest_observation(
         self,
@@ -1619,75 +1534,131 @@ class ChatSandboxManager:
         cursor: GuestObserverCursor | None,
     ) -> GuestObservation:
         """Drain and read exactly one cursor's bounded member event slice."""
-        if cursor is None:
-            return GuestObservation.unavailable("turn had no guest observer cursor")
-        if not cursor.available:
-            return GuestObservation.unavailable(cursor.detail)
-        try:
-            closing = self._guest_observer_snapshot(spec)
-            if closing.status.pid != cursor.observer_pid:
-                return GuestObservation.unavailable("guest observer restarted mid-turn")
-            if closing.status.event_seq < cursor.event_seq:
-                return GuestObservation.unavailable("guest observer event sequence reset mid-turn")
-            # Capture the poll generation only *after* the turn has completed,
-            # then cross two publications.  The first publication may already
-            # be in flight after its poll: an event arriving between that drain
-            # and status rename belongs to the turn but waits for the following
-            # poll. Requiring the generation after that closes this tiny tail
-            # race without relying on an arbitrary sleep. Waiting merely after
-            # the begin cursor would be much weaker and could return against a
-            # status that has been stale for most of a long turn.
-            snapshot = self._guest_observer_snapshot(
-                spec,
-                after_poll_seq=closing.status.poll_seq + 1,
-            )
-            if snapshot.status.pid != cursor.observer_pid:
-                return GuestObservation.unavailable("guest observer restarted while flushing")
-            if snapshot.status.event_seq < closing.status.event_seq:
-                return GuestObservation.unavailable(
-                    "guest observer event sequence reset while flushing"
-                )
-            if snapshot.journal_size < cursor.offset:
-                return GuestObservation.unavailable("guest observer journal restarted mid-turn")
-            available = snapshot.journal_size - cursor.offset
-            count = min(available, MAX_OBSERVATION_BYTES)
-            reader = (
+        return self._guest_observer_controller(spec).finish(cursor)
+
+    def tool_mark_reader(self, spec: ChatSandboxSpec) -> ToolMarkReader:
+        """Return a bounded reader for hook marks inside one retained container."""
+        path = f"{CHAT_STATE_DIR}/{TOOL_MARK_FILE}"
+
+        def remote_size() -> int:
+            script = (
                 "import os, sys\n"
-                "filename, offset, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\n"
-                "with open(filename, 'rb', buffering=0) as handle:\n"
-                "    handle.seek(offset)\n"
-                "    sys.stdout.buffer.write(handle.read(count))\n"
+                "try:\n"
+                "    size = os.path.getsize(sys.argv[1])\n"
+                "except OSError:\n"
+                "    size = 0\n"
+                "print(size)\n"
             )
             result = self.exec_capture(
                 spec,
-                [
-                    "python3",
-                    "-c",
-                    reader,
-                    GUEST_OBSERVER_EVENTS,
-                    str(cursor.offset),
-                    str(count),
-                ],
+                ["python3", "-c", script, path],
                 workdir="/",
-                timeout_s=10,
-                user_uid=0,
-                user_gid=0,
+                timeout_s=5,
+                user_uid=self.backend.uid,
+                user_gid=self.backend.gid,
             )
             if result.returncode != 0:
-                raise SandboxError(
-                    "guest observer journal read failed: "
-                    + result.stderr.decode("utf-8", "replace")[-300:]
-                )
-            if len(result.stdout) != count:
-                raise SandboxError("guest observer journal read stopped before its published fence")
-            return finish_observation(
-                cursor=cursor,
-                snapshot=snapshot,
-                payload=result.stdout,
-                truncated=available > count,
+                raise SandboxError("tool-mark fence could not be read")
+            return int(result.stdout.decode("ascii", "strict").strip() or "0")
+
+        def remote_read(offset: int, count: int) -> bytes:
+            bounded = min(max(0, count), MAX_TOOL_MARK_BYTES)
+            script = (
+                "import os, sys\n"
+                "path, offset, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\n"
+                "try:\n"
+                "    with open(path, 'rb', buffering=0) as handle:\n"
+                "        handle.seek(offset)\n"
+                "        sys.stdout.buffer.write(handle.read(count))\n"
+                "except FileNotFoundError:\n"
+                "    pass\n"
             )
-        except Exception as exc:
-            return GuestObservation.unavailable(str(exc))
+            result = self.exec_capture(
+                spec,
+                ["python3", "-c", script, path, str(max(0, offset)), str(bounded)],
+                workdir="/",
+                timeout_s=5,
+                user_uid=self.backend.uid,
+                user_gid=self.backend.gid,
+            )
+            if result.returncode != 0 or len(result.stdout) > bounded:
+                raise SandboxError("tool-mark slice could not be read")
+            return result.stdout
+
+        return ToolMarkReader(
+            None,
+            remote_size=remote_size,
+            remote_read=remote_read,
+        )
+
+    def install_tool_hooks(self, spec: ChatSandboxSpec, update: dict[str, Any]) -> None:
+        """Atomically merge trusted Claude hook settings inside the container.
+
+        Docker-owned retained state has no corresponding host path. Writing it
+        with :mod:`pathlib` on the broker would configure the broker itself,
+        not the Agent CLI. A group-writable mark file is created at the same
+        boundary so concurrent shared members can append one atomic line each.
+        """
+        payload = json.dumps(update, separators=(",", ":")).encode()
+        if len(payload) > 64 * 1024:
+            raise SandboxError("tool hook settings exceed their trusted bound")
+        script = (
+            "import contextlib, fcntl, json, os, pathlib, sys\n"
+            "config = pathlib.Path(sys.argv[1])\n"
+            "marks = pathlib.Path(sys.argv[2])\n"
+            "raw = sys.stdin.buffer.read(65537)\n"
+            "if len(raw) > 65536:\n"
+            "    raise RuntimeError('tool hook settings are too large')\n"
+            "update = json.loads(raw)\n"
+            "if not isinstance(update, dict):\n"
+            "    raise RuntimeError('tool hook settings are not an object')\n"
+            "os.umask(0o007)\n"
+            "config.mkdir(parents=True, exist_ok=True)\n"
+            "marks.parent.mkdir(parents=True, exist_ok=True)\n"
+            "mark_fd = os.open(marks, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o660)\n"
+            "os.close(mark_fd)\n"
+            "with contextlib.suppress(PermissionError):\n"
+            "    os.chmod(marks, 0o660)\n"
+            "lock_path = config / '.freeinference-hooks.lock'\n"
+            "lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o660)\n"
+            "with os.fdopen(lock_fd, 'r+') as lock:\n"
+            "    fcntl.flock(lock, fcntl.LOCK_EX)\n"
+            "    settings_path = config / 'settings.json'\n"
+            "    settings = {}\n"
+            "    try:\n"
+            "        candidate = json.loads(settings_path.read_text())\n"
+            "        if isinstance(candidate, dict):\n"
+            "            settings = candidate\n"
+            "    except (OSError, ValueError, TypeError):\n"
+            "        pass\n"
+            "    settings.update(update)\n"
+            "    temporary = config / f'.settings.{os.getpid()}.tmp'\n"
+            "    try:\n"
+            "        temporary.write_text(json.dumps(settings, indent=2))\n"
+            "        os.chmod(temporary, 0o660)\n"
+            "        os.replace(temporary, settings_path)\n"
+            "    finally:\n"
+            "        with contextlib.suppress(FileNotFoundError):\n"
+            "            temporary.unlink()\n"
+        )
+        result = self.exec_capture(
+            spec,
+            [
+                "python3",
+                "-c",
+                script,
+                f"{CHAT_STATE_DIR}/claude",
+                f"{CHAT_STATE_DIR}/{TOOL_MARK_FILE}",
+            ],
+            workdir="/",
+            timeout_s=10,
+            input_bytes=payload,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "tool hooks could not be installed in retained state: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
 
     def reset_unsettled_state(self, spec: ChatSandboxSpec) -> None:
         """Clear a never-settled first-turn import before an idempotent retry.
@@ -2207,13 +2178,47 @@ class RetainedChatBackend(SandboxBackend):
         env = dict(spec.env)
         if self.manager.backend.egress is not None:
             env.update(self.manager.backend.egress.sandbox_env(spec.phase))
+        observed_pidfile = (
+            f"{ACTIVATION_TMPFS}/agent-{secrets.token_hex(16)}.pid"
+            if spec.observe_processes and self.runtime == KATA_RUNTIME
+            else None
+        )
         return self.manager.spawn(
             self.spec,
             spec.argv,
             env=env,
             workdir=CHAT_WORKDIR,
             live_input=spec.live_input,
+            user_uid=self.manager.backend.uid,
+            user_gid=self.manager.backend.gid,
+            process_pidfile=observed_pidfile,
         )
+
+    def begin_guest_observation(self) -> GuestObserverCursor | None:
+        """Fence this retained turn when it runs inside a Kata guest."""
+        if self.runtime != KATA_RUNTIME:
+            return None
+        return self.manager.begin_guest_observation(
+            self.spec,
+            user_uid=self.manager.backend.uid,
+        )
+
+    def finish_guest_observation(
+        self,
+        cursor: GuestObserverCursor | None,
+    ) -> GuestObservation | None:
+        """Close the retained Kata fence; non-Kata backends report no observer."""
+        if self.runtime != KATA_RUNTIME:
+            return None
+        return self.manager.finish_guest_observation(self.spec, cursor)
+
+    def tool_mark_reader(self) -> ToolMarkReader:
+        """Read exact Claude hook marks from the container-owned state layer."""
+        return self.manager.tool_mark_reader(self.spec)
+
+    def install_tool_hooks(self, update: dict[str, Any]) -> None:
+        """Install Claude's passive boundaries in Docker-owned state."""
+        self.manager.install_tool_hooks(self.spec, update)
 
     def spawn_terminal(self, spec: SandboxSpec, *, rows: int, cols: int) -> TerminalProcess:
         """Open an interactive PTY in this chat's retained workspace."""

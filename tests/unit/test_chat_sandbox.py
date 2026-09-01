@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -27,11 +29,12 @@ from cloud_agent_host.egress import EgressPolicy, EgressTier
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
+    GuestObserverController,
     GuestObserverCursor,
     GuestObserverSnapshot,
     GuestObserverStatus,
 )
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError, SandboxSpec
 
 
 def _spec() -> ChatSandboxSpec:
@@ -43,6 +46,27 @@ def _spec() -> ChatSandboxSpec:
         runtime_version="2.1.220",
         sandbox_image_digest="sha256:image-pinned",
     )
+
+
+def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
+    status = snapshot.status
+    return json.dumps(
+        {
+            "status": {
+                "version": 1,
+                "ready": True,
+                "pid": status.pid,
+                "poll_seq": status.poll_seq,
+                "event_seq": status.event_seq,
+                "lost": status.lost,
+                "journal_dropped": status.journal_dropped,
+                "journal_bytes": status.journal_bytes,
+            },
+            "journal_size": snapshot.journal_size,
+            "guest_mono_ns": snapshot.guest_mono_ns,
+        },
+        separators=(",", ":"),
+    ).encode()
 
 
 def _inspect_payload(
@@ -121,10 +145,7 @@ def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
     assert command[command.index("--runtime") + 1] == KATA_RUNTIME
 
 
-def test_finishing_guest_observation_flushes_after_the_turn_end_fence(monkeypatch):
-    manager = ChatSandboxManager(
-        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
-    )
+def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
     closing = GuestObserverSnapshot(
         status=GuestObserverStatus(91, 20, 8, 0, 0, 0),
         journal_size=0,
@@ -137,15 +158,21 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence(monkeypatc
     )
     waits: list[int | None] = []
 
-    def snapshot(_spec, *, after_poll_seq=None):
-        waits.append(after_poll_seq)
-        return closing if after_poll_seq is None else flushed
+    def capture(argv, _timeout_s):
+        if GUEST_OBSERVER_BINARY in argv:
+            wanted = int(argv[-2])
+            waits.append(None if wanted < 0 else wanted)
+            snapshot = closing if wanted < 0 else flushed
+            return SimpleNamespace(
+                returncode=0,
+                stdout=_observer_snapshot_payload(snapshot),
+                stderr=b"",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr(manager, "_guest_observer_snapshot", snapshot)
-    monkeypatch.setattr(
-        manager,
-        "exec_capture",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
+    controller = GuestObserverController(
+        capture=capture,
+        privileged=lambda *_args: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
     )
     cursor = GuestObserverCursor(
         uid=MEMBER_UID_BASE,
@@ -157,7 +184,7 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence(monkeypatc
         available=True,
     )
 
-    observation = manager.finish_guest_observation(_spec(), cursor)
+    observation = controller.finish(cursor)
 
     assert observation.complete is True
     # The first post-turn publication can have completed its poll before the
@@ -166,28 +193,28 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence(monkeypatc
     assert waits == [None, 21]
 
 
-def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary(monkeypatch):
-    manager = ChatSandboxManager(
-        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
-    )
+def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
     calls: list[tuple[list[str], bool]] = []
 
-    def privileged(_spec, argv, *, detach=False, **_kwargs):
+    def privileged(argv, detach, _timeout_s):
         calls.append((list(argv), detach))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(manager, "_observer_privileged_exec", privileged)
-    monkeypatch.setattr(
-        manager,
-        "_guest_observer_snapshot",
-        lambda _spec: GuestObserverSnapshot(
-            status=GuestObserverStatus(91, 1, 0, 0, 0, 0),
-            journal_size=0,
-            guest_mono_ns=1,
+    ready = GuestObserverSnapshot(
+        status=GuestObserverStatus(91, 1, 0, 0, 0, 0),
+        journal_size=0,
+        guest_mono_ns=1,
+    )
+    controller = GuestObserverController(
+        capture=lambda *_args: SimpleNamespace(
+            returncode=0,
+            stdout=_observer_snapshot_payload(ready),
+            stderr=b"",
         ),
+        privileged=privileged,
     )
 
-    manager._start_guest_observer(_spec())
+    controller.start()
 
     cleanup_argv, cleanup_detached = calls[0]
     assert cleanup_detached is False
@@ -231,25 +258,24 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
     assert snapshot.status.poll_seq == 22
     command = calls[0]
     compile(command[2], "<guest-observer-snapshot>", "exec")
-    assert command[-2:] == [GUEST_OBSERVER_BINARY, "21"]
+    assert command[-3:] == [GUEST_OBSERVER_BINARY, "21", "3.0"]
     assert "os.path.samefile" in command[2]
 
 
-def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census(monkeypatch):
-    manager = ChatSandboxManager(
-        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
-    )
+def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
     snapshot = GuestObserverSnapshot(
         status=GuestObserverStatus(91, 21, 8, 0, 0, 10),
         journal_size=10,
         guest_mono_ns=2_050_000_000,
     )
 
-    monkeypatch.setattr(manager, "_guest_observer_snapshot", lambda *_args, **_kwargs: snapshot)
-    monkeypatch.setattr(
-        manager,
-        "exec_capture",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=b"short", stderr=b""),
+    def capture(argv, _timeout_s):
+        stdout = _observer_snapshot_payload(snapshot) if GUEST_OBSERVER_BINARY in argv else b"short"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+
+    controller = GuestObserverController(
+        capture=capture,
+        privileged=lambda *_args: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
     )
     cursor = GuestObserverCursor(
         uid=MEMBER_UID_BASE,
@@ -260,11 +286,69 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census(mon
         available=True,
     )
 
-    observation = manager.finish_guest_observation(_spec(), cursor)
+    observation = controller.finish(cursor)
 
     assert observation.source is None
     assert observation.complete is False
     assert "published fence" in (observation.detail or "")
+
+
+def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):
+    """Capabilityless guest root cannot traverse the 2770 agent-state tree."""
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    calls: list[dict[str, object]] = []
+
+    def exec_capture(_spec, argv, **kwargs):
+        calls.append({"argv": list(argv), **kwargs})
+        stdout = b"0\n" if len(calls) == 1 else b"100.0 pre toolu_1\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", exec_capture)
+
+    reader = manager.tool_mark_reader(_spec())
+    assert [mark[2] for mark in reader.read()] == ["toolu_1"]
+    assert [(call["user_uid"], call["user_gid"]) for call in calls] == [
+        (manager.backend.uid, manager.backend.gid),
+        (manager.backend.uid, manager.backend.gid),
+    ]
+
+
+def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch, tmp_path):
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    captured: dict[str, object] = {}
+
+    def exec_capture(_spec, argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["input"] = kwargs["input_bytes"]
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", exec_capture)
+    update = {"hooks": {"PreToolUse": [{"hooks": []}]}}
+
+    manager.install_tool_hooks(_spec(), update)
+
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    compile(argv[2], "<retained-tool-hooks>", "exec")
+    assert argv[-2:] == ["/agent-state/claude", "/agent-state/tool-marks.log"]
+    assert json.loads(captured["input"]) == update
+    assert "fcntl.flock" in argv[2]
+    assert "os.O_APPEND" in argv[2]
+
+    config = tmp_path / "agent-state" / "claude"
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text(json.dumps({"model": "keep-me"}))
+    marks = tmp_path / "agent-state" / "tool-marks.log"
+    subprocess.run(
+        ["python3", "-c", argv[2], str(config), str(marks)],
+        input=captured["input"],
+        check=True,
+    )
+    installed = json.loads((config / "settings.json").read_text())
+    assert installed["model"] == "keep-me"
+    assert installed["hooks"] == update["hooks"]
+    assert marks.exists()
+    assert marks.stat().st_mode & 0o777 == 0o660
 
 
 def test_retained_storage_preflight_reads_daemon_root_without_mounting_it(monkeypatch):
@@ -502,6 +586,47 @@ def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
     assert 'exec "$@"' in wrapper
     assert "shift 20" not in wrapper
     assert command[-4:] == [pidfile, "claude", "--model", "local-demo-model"]
+
+
+def test_retained_kata_agent_uses_process_scoped_cancel_instead_of_stopping_guest():
+    """The guest must stay alive until its observer has drained cancellation."""
+    captured: dict[str, object] = {}
+    expected = object()
+
+    class Manager:
+        backend = SimpleNamespace(
+            runtime=KATA_RUNTIME,
+            uid=10001,
+            gid=10001,
+            image="img",
+            egress=None,
+        )
+
+        @staticmethod
+        def require_network_phase(_spec, _phase):
+            return None
+
+        @staticmethod
+        def spawn(_spec, _argv, **kwargs):
+            captured.update(kwargs)
+            return expected
+
+    backend = RetainedChatBackend(Manager(), _spec())
+    process = backend.spawn(
+        SandboxSpec(
+            argv=["claude"],
+            workdir=CHAT_WORKDIR,
+            observe_processes=True,
+        )
+    )
+
+    assert process is expected
+    assert captured["user_uid"] == 10001
+    assert captured["user_gid"] == 10001
+    assert re.fullmatch(
+        rf"{re.escape(ACTIVATION_TMPFS)}/agent-[0-9a-f]{{32}}\.pid",
+        str(captured["process_pidfile"]),
+    )
 
 
 def test_member_permission_normalization_prunes_platform_and_sibling_provider_homes(

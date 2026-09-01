@@ -539,6 +539,7 @@ class ResidentTransportFactory:
             state_dir=CHAT_STATE_DIR,
             session_state_dir=state_dir or CHAT_STATE_DIR,
             activation_dir=activation_dir,
+            install_tool_hooks=lambda update: self._manager.install_tool_hooks(spec, update),
         )
 
     def fork_native(

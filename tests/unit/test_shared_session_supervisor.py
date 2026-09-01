@@ -978,3 +978,55 @@ def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup(
         ("reap-except", 0, ((41, 400),)),
         ("normalize", 0),
     ]
+
+
+def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
+    """The supervisor must carry the retained hook slice to the broker."""
+
+    class Manager(_Manager):
+        def tool_mark_reader(self, _spec):
+            self.events.append(("marks-begin",))
+
+            def read():
+                self.events.append(("marks-finish",))
+                return [(10.0, "pre", "toolu_1"), (10.1, "post", "toolu_1")]
+
+            return SimpleNamespace(read=read)
+
+    manager = Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    telemetry = supervisor.complete_turn("athr_source", lease.token, turn)
+
+    assert telemetry.tool_marks == (
+        (10.0, "pre", "toolu_1"),
+        (10.1, "post", "toolu_1"),
+    )
+    assert manager.events[-5:] == [
+        ("census", 0),
+        ("marks-begin",),
+        ("marks-finish",),
+        ("reap-except", 0, ((41, 400),)),
+        ("normalize", 0),
+    ]

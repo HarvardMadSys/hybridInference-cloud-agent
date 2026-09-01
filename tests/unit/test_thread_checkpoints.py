@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import tarfile
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -275,6 +276,22 @@ def test_the_hooks_do_not_replace_settings_the_directory_already_holds(tmp_path)
     settings = json.loads((config / "settings.json").read_text())
     assert settings["model"] == "keep-me"
     assert "PreToolUse" in settings["hooks"]
+
+
+def test_docker_owned_state_uses_the_retained_hook_writer(tmp_path):
+    """A guest path must not be mistaken for a path on the broker host."""
+    updates: list[dict] = []
+    host_path = tmp_path / "not-the-retained-state"
+    context = replace(
+        _context(host_path),
+        install_tool_hooks=lambda update: updates.append(update),
+    )
+
+    ClaudeCodeDriver(_ClaudeStub()).launch(context).start_turn(TurnInput(prompt="go", model="m"))
+
+    assert len(updates) == 1
+    assert set(updates[0]["hooks"]) == {"PreToolUse", "PostToolUse"}
+    assert not host_path.exists()
 
 
 def test_a_turn_without_a_state_mount_installs_nothing(tmp_path):

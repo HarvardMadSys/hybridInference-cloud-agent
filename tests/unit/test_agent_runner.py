@@ -11,10 +11,12 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from cloud_agent_host import enrollment, runner as runner_mod
+from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
 from cloud_agent_host.runner import (
     ClaimedJob,
     LeaseLost,
@@ -381,6 +383,149 @@ def test_agent_timeout_is_enforced(tmp_path):
     )
     assert code == 124
     assert any(kind == "error" for kind, _ in control.events)
+
+
+def test_retained_hooks_are_installed_before_the_guest_process_fence(tmp_path):
+    """Platform hook setup must not be counted as an agent-created process."""
+    events: list[str] = []
+
+    class Process:
+        @staticmethod
+        def lines():
+            return iter([_result_line()])
+
+        @staticmethod
+        def kill():
+            return None
+
+        @staticmethod
+        def wait():
+            return 0
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    class Backend:
+        provides_isolation = True
+        is_vm_isolated = True
+
+        @staticmethod
+        def base_env():
+            return {"PATH": "/usr/bin"}
+
+        @staticmethod
+        def adopt_workdir(_path):
+            return None
+
+        @staticmethod
+        def install_tool_hooks(_update):
+            events.append("hooks")
+
+        @staticmethod
+        def begin_guest_observation():
+            events.append("begin")
+            return GuestObserverCursor(uid=10001, available=True)
+
+        @staticmethod
+        def finish_guest_observation(_cursor):
+            events.append("finish")
+            return GuestObservation(
+                source="kata-guest-ebpf-v1",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+            )
+
+        @staticmethod
+        def tool_mark_reader():
+            return SimpleNamespace(read=lambda: [])
+
+        @staticmethod
+        def spawn(_spec):
+            events.append("spawn")
+            return Process()
+
+    control = FakeControl()
+    code, _tail, _errors = run_agent(
+        ClaudeCodeRuntime(),
+        job=ClaimedJob(**{**_JOB.__dict__, "runtime": "claude-code"}),
+        workdir=str(tmp_path),
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=Backend(),
+        state_dir="/agent-state",
+        export_checkpoint=False,
+    )
+
+    assert code == 0
+    assert events == ["hooks", "begin", "spawn", "finish"]
+    assert control.resources[0]["process_observation_complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("heart", "timeout_s", "expected_code"),
+    [
+        (FakeHeart(cancel=True), 30.0, 130),
+        (FakeHeart(), -1.0, 124),
+    ],
+)
+def test_shared_cancel_and_timeout_drain_the_terminal_resource_frame(
+    heart,
+    timeout_s,
+    expected_code,
+):
+    """Interrupt first, then preserve the broker's closed eBPF observation."""
+    resources = {
+        "process_observer": "kata-guest-ebpf-v1",
+        "process_observation_complete": True,
+        "processes": [{"pid": 412}],
+    }
+
+    class Stream:
+        closed = False
+
+        @staticmethod
+        def frames():
+            yield {
+                "kind": "result",
+                "status": "cancelled",
+                "exit_code": 130,
+                "resources": resources,
+            }
+
+        def close(self):
+            self.closed = True
+
+    class Supervisor:
+        def __init__(self) -> None:
+            self.stream = Stream()
+            self.interrupts = 0
+
+        def start_shared_turn(self, *_args, **_kwargs):
+            return self.stream
+
+        def interrupt_shared(self, *_args, **_kwargs):
+            self.interrupts += 1
+
+    supervisor = Supervisor()
+    job = ClaimedJob(**{**_JOB.__dict__, "thread_id": "athr_shared"})
+
+    code, _tail, _errors, result = runner_mod._stream_shared_agent_turn(
+        supervisor=supervisor,
+        job=job,
+        control=FakeControl(),
+        heart=heart,
+        lease_token="lease-token",
+        timeout_s=timeout_s,
+    )
+
+    assert code == expected_code
+    assert result is not None and result["resources"] is resources
+    assert supervisor.interrupts == 1
+    assert supervisor.stream.closed is True
 
 
 def test_agent_environment_is_hermetic(tmp_path, monkeypatch):
@@ -1680,6 +1825,7 @@ def test_the_first_live_turn_spawns_on_the_residency_grant(tmp_path):
     assert control.context_status == "restored"
     (spec,) = backend.specs
     assert spec.live_input is True
+    assert spec.observe_processes is True
     assert spec.argv[spec.argv.index("--resume") + 1] == "sess-prev"
     assert live_out["session"] is not None
     assert live_out["session_id"] == "sess-new"

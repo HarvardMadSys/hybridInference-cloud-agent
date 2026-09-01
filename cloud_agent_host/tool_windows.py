@@ -40,7 +40,10 @@ import pathlib
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from cloud_agent_host.resources import Sample, _delta, _readable
 
@@ -53,6 +56,10 @@ MAX_TOOL_CALLS = 500
 #: practice (MCP servers name their own). Bounded here so one hostile name
 #: cannot widen every row that carries it.
 MAX_TOOL_NAME = 120
+
+# Exact marks are an optional precision upgrade, never an unbounded telemetry
+# channel. A turn that exceeds this simply stays message-timed.
+MAX_TOOL_MARK_BYTES = 1024 * 1024
 
 
 #: Where the sandbox's hooks append their boundary marks, relative to the
@@ -362,13 +369,31 @@ class ToolMarkReader:
     window it is meant to narrow — which is what a clock step would produce.
     """
 
-    def __init__(self, state_dir: str | None) -> None:
+    def __init__(
+        self,
+        state_dir: str | None,
+        *,
+        remote_size: Callable[[], int] | None = None,
+        remote_read: Callable[[int, int], bytes] | None = None,
+    ) -> None:
         self._path = pathlib.Path(state_dir) / TOOL_MARK_FILE if state_dir else None
+        self._remote_size = remote_size
+        self._remote_read = remote_read
+        self._remote_fenced = True
         self._offset = self._size()
         self._wall0 = time.time()
         self._mono0 = time.monotonic()
 
     def _size(self) -> int:
+        if self._remote_size is not None:
+            try:
+                return max(0, int(self._remote_size()))
+            except Exception:
+                # Reading from zero after a failed retained-state fence could
+                # replay marks from an older turn. Disable the optional exact
+                # path instead; message-level windows remain valid.
+                self._remote_fenced = False
+                return 0
         try:
             return os.path.getsize(self._path) if self._path else 0
         except OSError:
@@ -380,13 +405,18 @@ class ToolMarkReader:
         Every failure is empty rather than raised: the marks are an upgrade to
         a measurement that already works without them.
         """
-        if self._path is None:
+        if (self._path is None and self._remote_read is None) or not self._remote_fenced:
             return []
         try:
-            with self._path.open("r", errors="replace") as handle:
-                handle.seek(self._offset)
-                lines = handle.readlines()
-        except OSError:
+            if self._remote_read is not None:
+                payload = self._remote_read(self._offset, MAX_TOOL_MARK_BYTES)
+                lines = payload.decode("utf-8", "replace").splitlines()
+            else:
+                assert self._path is not None
+                with self._path.open("r", errors="replace") as handle:
+                    handle.seek(self._offset)
+                    lines = handle.read(MAX_TOOL_MARK_BYTES).splitlines()
+        except Exception:
             return []
         marks: list[tuple[float, str, str]] = []
         for line in lines:
@@ -405,6 +435,7 @@ class ToolMarkReader:
 
 __all__ = [
     "MAX_TOOL_CALLS",
+    "MAX_TOOL_MARK_BYTES",
     "TOOL_MARK_FILE",
     "ToolMarkReader",
     "ToolWindow",

@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_CPU_LIMIT_LABEL,
@@ -47,6 +47,9 @@ from cloud_agent_host.session_supervisor import (
     SessionBusy,
     SessionLeaseLost,
 )
+
+if TYPE_CHECKING:
+    from cloud_agent_host.tool_windows import ToolMarkReader
 
 ContextStatus = Literal["new", "live", "restored", "lost"]
 ResidentState = Literal["stopped", "starting", "live", "restarting", "lost"]
@@ -136,6 +139,47 @@ class NativeSessionForkResult:
     resident_state: Literal["live"] = "live"
 
 
+@dataclass(frozen=True)
+class SharedTurnTelemetry:
+    """Kernel process events and exact hook marks closed at one turn boundary."""
+
+    observation: GuestObservation
+    tool_marks: tuple[tuple[float, str, str], ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Compatibility view for callers that previously received only it."""
+        return self.observation.complete
+
+    @property
+    def source(self) -> str | None:
+        """Observer identifier from the process result."""
+        return self.observation.source
+
+    @property
+    def lost_events(self) -> int:
+        """Lost event count from the process result."""
+        return self.observation.lost_events
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the bounded process journal was truncated."""
+        return self.observation.truncated
+
+    @property
+    def processes(self) -> tuple[Any, ...]:
+        """Observed process rows before wire serialization."""
+        return self.observation.processes
+
+
+class SharedTurnBoundaryError(SandboxError):
+    """A failed activation boundary that still carries its closed telemetry."""
+
+    def __init__(self, detail: str, telemetry: SharedTurnTelemetry) -> None:
+        super().__init__(detail)
+        self.telemetry = telemetry
+
+
 @dataclass
 class _Member:
     thread_id: str
@@ -153,6 +197,7 @@ class _Member:
     current_turn: ResidentTurn | None = None
     activation_processes: tuple[tuple[int, int], ...] | None = None
     observer_cursor: GuestObserverCursor | None = None
+    tool_mark_reader: ToolMarkReader | None = None
     turn_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -483,6 +528,12 @@ class SharedChatSessionSupervisor:
                 user_gid=self._manager.backend.gid,
             )
             observer_cursor: GuestObserverCursor | None = None
+            mark_reader_factory = getattr(self._manager, "tool_mark_reader", None)
+            tool_mark_reader = (
+                mark_reader_factory(group.spec)
+                if mark_reader_factory is not None and transport.launch.runtime_id == "claude-code"
+                else None
+            )
             if self._manager.backend.runtime == KATA_RUNTIME:
                 begin_observation = getattr(self._manager, "begin_guest_observation", None)
                 if begin_observation is None:
@@ -535,6 +586,7 @@ class SharedChatSessionSupervisor:
                 member.current_turn = turn
                 member.activation_processes = activation_processes
                 member.observer_cursor = observer_cursor
+                member.tool_mark_reader = tool_mark_reader
         if not admitted:
             with contextlib.suppress(Exception):
                 turn.interrupt()
@@ -555,7 +607,7 @@ class SharedChatSessionSupervisor:
         thread_id: str,
         token: str,
         turn: ResidentTurn,
-    ) -> GuestObservation:
+    ) -> SharedTurnTelemetry:
         """Close observation, then enforce and release the activation boundary."""
         with self._lock:
             group, member = self._leased_member(thread_id, token)
@@ -564,6 +616,7 @@ class SharedChatSessionSupervisor:
             slot_id = member.resident_slot_id
             activation_processes = member.activation_processes
             observer_cursor = member.observer_cursor
+            tool_mark_reader = member.tool_mark_reader
         observation = GuestObservation.unavailable("sandbox is not a Kata guest")
         if self._manager.backend.runtime == KATA_RUNTIME:
             finish_observation = getattr(self._manager, "finish_guest_observation", None)
@@ -575,7 +628,21 @@ class SharedChatSessionSupervisor:
                 # Close before the member reaper/permission normalizer below:
                 # those are platform processes and must not be billed to the
                 # tool call whose background children they clean up.
-                observation = finish_observation(group.spec, observer_cursor)
+                try:
+                    finished = finish_observation(group.spec, observer_cursor)
+                    observation = (
+                        finished
+                        if isinstance(finished, GuestObservation)
+                        else GuestObservation.unavailable(
+                            "workspace broker returned invalid process telemetry"
+                        )
+                    )
+                except Exception as exc:
+                    observation = GuestObservation.unavailable(str(exc))
+        telemetry = SharedTurnTelemetry(
+            observation=observation,
+            tool_marks=tuple(tool_mark_reader.read() if tool_mark_reader is not None else ()),
+        )
         boundary_error: Exception | None = None
         try:
             if activation_processes is None:
@@ -613,6 +680,7 @@ class SharedChatSessionSupervisor:
             member.current_turn = None
             member.activation_processes = None
             member.observer_cursor = None
+            member.tool_mark_reader = None
             transport = member.transport
             if boundary_error is not None:
                 member.transport = None
@@ -635,10 +703,11 @@ class SharedChatSessionSupervisor:
             if transport is not None:
                 with contextlib.suppress(Exception):
                     transport.close()
-            raise SandboxError(
-                f"shared member activation boundary failed: {boundary_error}"
+            raise SharedTurnBoundaryError(
+                f"shared member activation boundary failed: {boundary_error}",
+                telemetry,
             ) from boundary_error
-        return observation
+        return telemetry
 
     def interrupt(self, thread_id: str, token: str) -> None:
         """Interrupt the exact member activation, leaving siblings untouched."""
@@ -648,7 +717,12 @@ class SharedChatSessionSupervisor:
         if turn is not None:
             turn.interrupt()
 
-    def abort_turn(self, thread_id: str, token: str, turn: ResidentTurn) -> None:
+    def abort_turn(
+        self,
+        thread_id: str,
+        token: str,
+        turn: ResidentTurn,
+    ) -> SharedTurnTelemetry:
         """Fence a turn whose broker stream disappeared before its result.
 
         An HTTP client can vanish while the CLI is quiet. Merely closing the
@@ -667,7 +741,7 @@ class SharedChatSessionSupervisor:
         if transport is not None:
             with contextlib.suppress(Exception):
                 transport.close()
-        self.complete_turn(thread_id, token, turn)
+        return self.complete_turn(thread_id, token, turn)
 
     def settle(
         self,
@@ -1492,4 +1566,6 @@ __all__ = [
     "SharedMemberManifest",
     "SharedSessionDescriptor",
     "SharedSessionLease",
+    "SharedTurnBoundaryError",
+    "SharedTurnTelemetry",
 ]

@@ -17,10 +17,14 @@ events into the wire rows the control plane may store.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cloud_agent_host.tool_windows import ToolWindow
 
 
@@ -41,6 +45,10 @@ MAX_EXECUTABLE_BYTES = 512
 
 class GuestObserverProtocolError(ValueError):
     """The trusted helper returned a malformed or out-of-contract journal."""
+
+
+class GuestObserverRuntimeError(RuntimeError):
+    """The fixed in-guest helper could not be started, fenced, or read."""
 
 
 @dataclass(frozen=True)
@@ -142,6 +150,271 @@ class GuestObservation:
             truncated=False,
             detail=(detail or "guest observer unavailable")[:300],
         )
+
+
+class GuestObserverController:
+    """Drive one trusted observer through a container-specific exec transport.
+
+    The lifecycle and parsing contract is shared by throwaway, retained, and
+    shared-live Kata containers.  Docker identity checks stay with the caller:
+    this class receives only two fixed exec seams and never accepts an argv
+    from a job.  Keeping the security-sensitive helper scripts here prevents
+    the three lifecycle paths from drifting into subtly different fences.
+    """
+
+    def __init__(
+        self,
+        *,
+        capture: Callable[[list[str], float], Any],
+        privileged: Callable[[list[str], bool, float], Any],
+        lock: threading.Lock | None = None,
+    ) -> None:
+        self._capture = capture
+        self._privileged = privileged
+        self._lock = lock or threading.Lock()
+
+    @staticmethod
+    def _stderr(result: Any) -> str:
+        value = getattr(result, "stderr", "")
+        if isinstance(value, bytes):
+            return value.decode("utf-8", "replace")
+        return str(value or "")
+
+    @staticmethod
+    def _stdout(result: Any) -> bytes:
+        value = getattr(result, "stdout", b"")
+        if isinstance(value, bytes):
+            return value
+        return str(value or "").encode()
+
+    def snapshot(
+        self,
+        *,
+        after_poll_seq: int | None = None,
+        wait_s: float = 3.0,
+    ) -> GuestObserverSnapshot:
+        """Read one atomic status/size/guest-clock tuple from the root journal."""
+        bounded_wait = min(3.0, max(0.0, wait_s))
+        script = (
+            "import json, os, sys, time\n"
+            "status_path, events_path, expected_binary = sys.argv[1:4]\n"
+            "wanted = int(sys.argv[4])\n"
+            "deadline = time.monotonic() + float(sys.argv[5])\n"
+            "while True:\n"
+            "    try:\n"
+            "        with open(status_path, encoding='utf-8') as handle:\n"
+            "            status = json.load(handle)\n"
+            "        pid = int(status.get('pid', 0))\n"
+            "        if pid <= 0 or not os.path.exists(f'/proc/{pid}'):\n"
+            "            raise RuntimeError('observer process is not alive')\n"
+            "        try:\n"
+            "            observer_alive = os.path.samefile(f'/proc/{pid}/exe', expected_binary)\n"
+            "        except OSError:\n"
+            "            observer_alive = False\n"
+            "        if not observer_alive:\n"
+            "            raise RuntimeError('observer pid does not name the trusted binary')\n"
+            "        if wanted < 0 or int(status.get('poll_seq', -1)) > wanted:\n"
+            "            break\n"
+            "    except (OSError, ValueError, TypeError, json.JSONDecodeError):\n"
+            "        status = None\n"
+            "    if time.monotonic() >= deadline:\n"
+            "        raise RuntimeError('observer status did not advance')\n"
+            "    time.sleep(0.01)\n"
+            "size = int(status.get('journal_bytes', -1))\n"
+            "actual_size = os.path.getsize(events_path) if os.path.exists(events_path) else 0\n"
+            "if size < 0 or actual_size < size:\n"
+            "    raise RuntimeError('observer journal is behind its published fence')\n"
+            "print(json.dumps({'status': status, 'journal_size': size, "
+            "'guest_mono_ns': time.monotonic_ns()}, separators=(',', ':')))\n"
+        )
+        result = self._capture(
+            [
+                "python3",
+                "-c",
+                script,
+                GUEST_OBSERVER_STATUS,
+                GUEST_OBSERVER_EVENTS,
+                GUEST_OBSERVER_BINARY,
+                str(-1 if after_poll_seq is None else after_poll_seq),
+                str(bounded_wait),
+            ],
+            max(5.0, bounded_wait + 2.0),
+        )
+        if getattr(result, "returncode", 1) != 0:
+            raise GuestObserverRuntimeError(
+                "guest observer snapshot failed: " + self._stderr(result)[-300:]
+            )
+        try:
+            return parse_snapshot(self._stdout(result))
+        except GuestObserverProtocolError as exc:
+            raise GuestObserverRuntimeError(str(exc)) from exc
+
+    def ensure(self) -> None:
+        """Start the reviewed eBPF helper and wait until every probe is attached."""
+        try:
+            self.snapshot(wait_s=0)
+            return
+        except GuestObserverRuntimeError:
+            pass
+        with self._lock:
+            try:
+                self.snapshot(wait_s=0)
+                return
+            except GuestObserverRuntimeError:
+                self.start()
+
+    def start(self) -> None:
+        """Replace one stale singleton; the caller holds the shared start lock."""
+        cleanup = (
+            "import json, os, signal, sys, time\n"
+            "status, events, expected_binary = sys.argv[1:4]\n"
+            "pid = 0\n"
+            "def is_expected_process():\n"
+            "    if pid <= 1:\n"
+            "        return False\n"
+            "    try:\n"
+            "        return os.path.samefile(f'/proc/{pid}/exe', expected_binary)\n"
+            "    except OSError:\n"
+            "        return False\n"
+            "try:\n"
+            "    with open(status, encoding='utf-8') as handle:\n"
+            "        pid = int(json.load(handle).get('pid', 0))\n"
+            "    if is_expected_process():\n"
+            "        os.kill(pid, signal.SIGTERM)\n"
+            "except (OSError, ValueError, TypeError, json.JSONDecodeError):\n"
+            "    pass\n"
+            "deadline = time.monotonic() + 1.0\n"
+            "while is_expected_process() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.01)\n"
+            "if is_expected_process():\n"
+            "    os.kill(pid, signal.SIGKILL)\n"
+            "    deadline = time.monotonic() + 1.0\n"
+            "    while is_expected_process() and time.monotonic() < deadline:\n"
+            "        time.sleep(0.01)\n"
+            "if is_expected_process():\n"
+            "    raise RuntimeError('stale guest observer did not exit')\n"
+            "for item in (status, events):\n"
+            "    try:\n"
+            "        os.unlink(item)\n"
+            "    except FileNotFoundError:\n"
+            "        pass\n"
+        )
+        cleaned = self._privileged(
+            [
+                "python3",
+                "-c",
+                cleanup,
+                GUEST_OBSERVER_STATUS,
+                GUEST_OBSERVER_EVENTS,
+                GUEST_OBSERVER_BINARY,
+            ],
+            False,
+            30.0,
+        )
+        if getattr(cleaned, "returncode", 1) != 0:
+            raise GuestObserverRuntimeError(
+                "stale guest observer cleanup failed: " + self._stderr(cleaned)[-300:]
+            )
+        started = self._privileged([GUEST_OBSERVER_BINARY], True, 30.0)
+        if getattr(started, "returncode", 1) != 0:
+            raise GuestObserverRuntimeError(
+                "guest observer could not start: " + self._stderr(started)[-300:]
+            )
+        deadline = time.monotonic() + 5.0
+        problem = "guest observer did not become ready"
+        while time.monotonic() < deadline:
+            try:
+                self.snapshot()
+                return
+            except GuestObserverRuntimeError as exc:
+                problem = str(exc)
+                time.sleep(0.05)
+        raise GuestObserverRuntimeError(problem)
+
+    def begin(self, *, user_uid: int) -> GuestObserverCursor:
+        """Fence the journal immediately before one prompt is admitted."""
+        try:
+            self.ensure()
+            host_before = time.monotonic_ns()
+            snapshot = self.snapshot()
+            host_after = time.monotonic_ns()
+        except Exception as exc:
+            return GuestObserverCursor.unavailable(user_uid, str(exc))
+        host_midpoint = host_before + (host_after - host_before) // 2
+        return GuestObserverCursor(
+            uid=user_uid,
+            offset=snapshot.journal_size,
+            lost=snapshot.status.lost,
+            journal_dropped=snapshot.status.journal_dropped,
+            poll_seq=snapshot.status.poll_seq,
+            observer_pid=snapshot.status.pid,
+            event_seq=snapshot.status.event_seq,
+            guest_mono_ns=snapshot.guest_mono_ns,
+            mono_offset_ns=host_midpoint - snapshot.guest_mono_ns,
+            clock_error_ns=max(0, (host_after - host_before) // 2),
+            available=True,
+        )
+
+    def finish(self, cursor: GuestObserverCursor | None) -> GuestObservation:
+        """Drain and read exactly one cursor's bounded event slice."""
+        if cursor is None:
+            return GuestObservation.unavailable("turn had no guest observer cursor")
+        if not cursor.available:
+            return GuestObservation.unavailable(cursor.detail)
+        try:
+            closing = self.snapshot()
+            if closing.status.pid != cursor.observer_pid:
+                return GuestObservation.unavailable("guest observer restarted mid-turn")
+            if closing.status.event_seq < cursor.event_seq:
+                return GuestObservation.unavailable("guest observer event sequence reset mid-turn")
+            # Cross two publications after the closing snapshot. The first may
+            # already be in flight after its poll; the second closes that tail.
+            snapshot = self.snapshot(after_poll_seq=closing.status.poll_seq + 1)
+            if snapshot.status.pid != cursor.observer_pid:
+                return GuestObservation.unavailable("guest observer restarted while flushing")
+            if snapshot.status.event_seq < closing.status.event_seq:
+                return GuestObservation.unavailable(
+                    "guest observer event sequence reset while flushing"
+                )
+            if snapshot.journal_size < cursor.offset:
+                return GuestObservation.unavailable("guest observer journal restarted mid-turn")
+            available = snapshot.journal_size - cursor.offset
+            count = min(available, MAX_OBSERVATION_BYTES)
+            reader = (
+                "import os, sys\n"
+                "filename, offset, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\n"
+                "with open(filename, 'rb', buffering=0) as handle:\n"
+                "    handle.seek(offset)\n"
+                "    sys.stdout.buffer.write(handle.read(count))\n"
+            )
+            result = self._capture(
+                [
+                    "python3",
+                    "-c",
+                    reader,
+                    GUEST_OBSERVER_EVENTS,
+                    str(cursor.offset),
+                    str(count),
+                ],
+                10.0,
+            )
+            if getattr(result, "returncode", 1) != 0:
+                raise GuestObserverRuntimeError(
+                    "guest observer journal read failed: " + self._stderr(result)[-300:]
+                )
+            payload = self._stdout(result)
+            if len(payload) != count:
+                raise GuestObserverRuntimeError(
+                    "guest observer journal read stopped before its published fence"
+                )
+            return finish_observation(
+                cursor=cursor,
+                snapshot=snapshot,
+                payload=payload,
+                truncated=available > count,
+            )
+        except Exception as exc:
+            return GuestObservation.unavailable(str(exc))
 
 
 @dataclass
@@ -427,6 +700,7 @@ def attribute_processes(
     windows: list[ToolWindow],
     *,
     clock_error_ns: int | None = None,
+    origin_host_mono: float | None = None,
 ) -> tuple[list[dict[str, Any]], dict[int, int]]:
     """Map observed process starts to every plausible tool window.
 
@@ -464,8 +738,13 @@ def attribute_processes(
                 "started_offset_ms": max(
                     0,
                     round(
-                        (process.started_guest_mono_ns - observation.origin_guest_mono_ns)
-                        / 1_000_000
+                        (
+                            process.started_host_mono - origin_host_mono
+                            if origin_host_mono is not None
+                            else (process.started_guest_mono_ns - observation.origin_guest_mono_ns)
+                            / 1_000_000_000
+                        )
+                        * 1_000
                     ),
                 ),
                 "duration_ms": process.duration_ms,
@@ -497,9 +776,12 @@ __all__ = [
     "GUEST_OBSERVER_STATUS",
     "GUEST_OBSERVER_VERSION",
     "MAX_OBSERVATION_BYTES",
+    "MAX_OBSERVED_PROCESSES",
     "GuestObservation",
+    "GuestObserverController",
     "GuestObserverCursor",
     "GuestObserverProtocolError",
+    "GuestObserverRuntimeError",
     "GuestObserverSnapshot",
     "add_process_counts",
     "attribute_processes",

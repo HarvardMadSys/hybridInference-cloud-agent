@@ -10,6 +10,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -27,6 +28,7 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.session_supervisor import SessionDescriptor, SessionLease
+from cloud_agent_host.shared_session_supervisor import SharedTurnTelemetry
 from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
@@ -1434,8 +1436,93 @@ async def test_shared_turn_reports_activation_boundary_failure_before_result(tmp
 
     frames = [json.loads(line) for line in response.text.splitlines() if line]
     assert response.status_code == 200
-    assert frames == [{"kind": "error", "detail": "member permission normalization failed"}]
+    assert frames[0]["kind"] == "error"
+    assert frames[0]["detail"] == "member permission normalization failed"
+    assert frames[0]["resources"]["process_observation_complete"] is False
+    assert frames[0]["resources"]["tool_calls"] == []
     assert supervisor.calls == ["start", "complete", "abort"]
+
+
+@pytest.mark.asyncio
+async def test_shared_stream_error_still_returns_closed_guest_telemetry(tmp_path):
+    """An exception cannot turn a captured short process into fallback zero."""
+
+    class Turn:
+        @staticmethod
+        def lines():
+            yield SimpleNamespace(
+                event_type="tool_use",
+                payload={"id": "toolu_failed", "name": "Bash"},
+                raw_line='{"type":"tool_use"}',
+            )
+            raise RuntimeError("stream exploded")
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    process = GuestProcess(
+        process_seq=1,
+        uid=11001,
+        pid=700,
+        tgid=700,
+        ppid=41,
+        comm="tiny",
+        executable="/bin/tiny",
+        started_guest_mono_ns=10,
+        exited_guest_mono_ns=20,
+        started_host_mono=1e20,
+        exited_host_mono=1e20,
+        exit_code=1,
+        observed_fork=True,
+        observed_exec=True,
+        observed_exit=True,
+    )
+    telemetry = SharedTurnTelemetry(
+        observation=GuestObservation(
+            source="kata-guest-ebpf-v1",
+            complete=True,
+            lost_events=0,
+            truncated=False,
+            processes=(process,),
+            origin_guest_mono_ns=0,
+        )
+    )
+
+    class Supervisor:
+        @staticmethod
+        def start_turn(*_args, **_kwargs):
+            return Turn()
+
+        @staticmethod
+        def abort_turn(*_args, **_kwargs):
+            return telemetry
+
+    root, _repo = _workspace(tmp_path)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        shared_session_supervisor=Supervisor(),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/turn",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json={
+                "token": "lease-token",
+                "prompt": "test",
+                "model": "model",
+                "reasoning_effort": None,
+            },
+        )
+
+    frames = [json.loads(line) for line in response.text.splitlines() if line]
+    error = next(frame for frame in frames if frame["kind"] == "error")
+    assert error["detail"] == "stream exploded"
+    assert error["resources"]["process_observation_complete"] is True
+    assert error["resources"]["processes"][0]["pid"] == 700
 
 
 @pytest.mark.asyncio
@@ -1554,6 +1641,88 @@ async def test_shared_turn_returns_uid_filtered_guest_processes_without_sampler_
             "tool_call_seqs": [1],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_shared_turn_applies_exact_guest_tool_marks(tmp_path):
+    """Shared-live must consume hook marks, not leave every call message-timed."""
+    marks: dict[str, float] = {}
+
+    class Turn:
+        @staticmethod
+        def lines():
+            yield SimpleNamespace(
+                event_type="tool_use",
+                payload={"id": "toolu_exact", "name": "Bash"},
+                raw_line='{"type":"tool_use"}',
+            )
+            marks["pre"] = time.monotonic()
+            time.sleep(0.001)
+            marks["post"] = time.monotonic()
+            yield SimpleNamespace(
+                event_type="tool_result",
+                payload={"tool_use_id": "toolu_exact"},
+                raw_line='{"type":"tool_result"}',
+            )
+
+        @staticmethod
+        def wait():
+            return SimpleNamespace(
+                status="completed",
+                final_output="done",
+                exit_code=0,
+                usage=None,
+                raw=None,
+            )
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    class Supervisor:
+        @staticmethod
+        def start_turn(*_args, **_kwargs):
+            return Turn()
+
+        @staticmethod
+        def complete_turn(*_args, **_kwargs):
+            return SharedTurnTelemetry(
+                observation=GuestObservation.unavailable("not Kata in this fixture"),
+                tool_marks=(
+                    (marks["pre"], "pre", "toolu_exact"),
+                    (marks["post"], "post", "toolu_exact"),
+                ),
+            )
+
+        @staticmethod
+        def abort_turn(*_args, **_kwargs):
+            raise AssertionError("completed turn was aborted")
+
+    root, _repo = _workspace(tmp_path)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        shared_session_supervisor=Supervisor(),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/turn",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json={
+                "token": "lease-token",
+                "prompt": "test",
+                "model": "model",
+                "reasoning_effort": None,
+            },
+        )
+
+    frames = [json.loads(line) for line in response.text.splitlines() if line]
+    result = next(frame for frame in frames if frame["kind"] == "result")
+    (tool_call,) = result["resources"]["tool_calls"]
+    assert tool_call["timing_source"] == "exact"
+    assert tool_call["duration_ms"] <= 2
 
 
 @pytest.mark.asyncio

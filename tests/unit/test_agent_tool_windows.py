@@ -300,6 +300,46 @@ def test_the_reader_only_takes_marks_written_after_it_was_built(tmp_path):
     assert [mark[2] for mark in reader.read()] == ["new"]
 
 
+def test_the_remote_reader_fences_retained_marks_and_bounds_the_slice():
+    """A Docker-owned state layer has the same per-turn append-only fence."""
+    content = bytearray(b"100.0 pre old\n")
+    reads: list[tuple[int, int]] = []
+
+    def remote_read(offset: int, count: int) -> bytes:
+        reads.append((offset, count))
+        return bytes(content[offset : offset + count])
+
+    reader = ToolMarkReader(
+        None,
+        remote_size=lambda: len(content),
+        remote_read=remote_read,
+    )
+    content.extend(b"101.0 pre new\n101.5 post new\n")
+
+    assert [mark[2] for mark in reader.read()] == ["new", "new"]
+    assert reads == [(len(b"100.0 pre old\n"), 1024 * 1024)]
+
+
+def test_a_failed_remote_fence_never_replays_an_older_turn():
+    reads: list[tuple[int, int]] = []
+
+    def remote_size() -> int:
+        raise OSError("unreadable")
+
+    def remote_read(offset: int, count: int) -> bytes:
+        reads.append((offset, count))
+        return b"100.0 pre stale\n100.1 post stale\n"
+
+    reader = ToolMarkReader(
+        None,
+        remote_size=remote_size,
+        remote_read=remote_read,
+    )
+
+    assert reader.read() == []
+    assert reads == []
+
+
 def test_a_malformed_mark_is_skipped_not_raised(tmp_path):
     path = tmp_path / TOOL_MARK_FILE
     reader = ToolMarkReader(str(tmp_path))
