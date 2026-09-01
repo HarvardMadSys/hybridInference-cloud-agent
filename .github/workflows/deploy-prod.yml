@@ -46,6 +46,10 @@ permissions:
 jobs:
   deploy:
     name: Deploy control plane + web
+    # The retained executor is the only topology. Host deployment publishes
+    # the exact target-SHA readiness capability first; deploy.sh then performs
+    # a fresh heartbeat and reverse-broker probe before replacing this stack.
+    needs: deploy-host
     runs-on: [self-hosted, Linux, deploy-cloud-agent-control-prod]
     # Records the deployment and gives protection rules somewhere to live.
     # Required-reviewer rules need a public repository or a paid plan, so on
@@ -115,9 +119,9 @@ jobs:
 
   deploy-host:
     name: Deploy sandbox host
-    # The other machine, and deliberately not `needs:`-ed to the job above: they
-    # are separate hosts, and a control plane that fails to come up is not a
-    # reason to leave the sandbox host on an older commit — nor the reverse.
+    # Host first. New host code remains compatible with the currently running
+    # control plane; the inverse is not safe now that the control plane has no
+    # legacy executor endpoints.
     runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-prod]
     environment: production
     timeout-minutes: 45
@@ -170,6 +174,11 @@ jobs:
           # stray. Naming it keeps the guard pointed at what it is actually for:
           # a second copy of *this* stack under a name nobody meant.
           SIBLING_COMPOSE_PROJECTS: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
+          AGENT_HOST_SLOTS: ${{ vars.PROD_HOST_SLOTS || '3' }}
+          AGENT_RUNNER_REPLICAS: ${{ vars.PROD_HOST_SLOTS || '3' }}
+          AGENT_CHAT_IDLE_TIMEOUT_S: "1800"
+          # Daemon-owned retained state, never a per-chat bind mount.
+          AGENT_RETAINED_DOCKER_DATA_ROOT: ${{ vars.PROD_RETAINED_DOCKER_DATA_ROOT || '/var/lib/docker' }}
         run: bash deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now

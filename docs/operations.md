@@ -290,24 +290,18 @@ so compose insists on creating it. A network of that name created by hand
 beforehand is refused with a label mismatch — let compose own it, or point the
 tier variables at names compose does not declare.
 
-### 1. The workflow must be on the default branch
+### 1. Only enrolled sandbox hosts run jobs
 
-A workflow is only *registered* once its file exists on the default branch
-(`main`). Until then it cannot be triggered **by any means** — not
-`repository_dispatch`, not the schedule, and not `workflow_dispatch` even with
-an explicit `--ref dev`. Verified rather than assumed:
+The old manually dispatched `agent-job-runner` Actions workflow is deleted. It
+was a disposable one-shot substrate using the unisolated `process` backend and
+a shared dispatcher credential; keeping it manual would still leave a second
+executable topology behind the UI. There is no GitHub Actions fallback.
 
-```console
-$ gh workflow list --all | grep agent-job-runner      # absent
-$ gh api -X POST .../workflows/agent-job-runner.yml/dispatches -f ref=dev
-{"message":"Not Found","status":"404"}
-```
-
-So the Actions path is gated on a production release, not on configuration.
-
-Self-hosted runners have no such constraint: they poll `/v1/agent/worker/claim`
-and can run as soon as the gateway is deployed. That is the shorter path to a
-first real job.
+Deploy at least one host through `deploy/host/deploy.sh`, enroll it with the
+control plane, and let its runner replicas poll `/v1/agent/worker/claim`. A
+runner cannot claim until its exact replica attests the retained protocol,
+container image/runtime pins, broker configuration, execution profile, and
+host capacity.
 
 ### 2. Credentials
 

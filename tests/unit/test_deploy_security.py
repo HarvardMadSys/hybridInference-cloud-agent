@@ -21,7 +21,6 @@ REPO = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO / "deploy/host/docker-compose.sandbox.yml"
 SANDBOX_DOCKERFILE = REPO / "deploy/sandbox/Dockerfile.agent-sandbox"
 CODEX_REQUIREMENTS = REPO / "deploy/sandbox/codex-requirements.toml"
-WORKFLOW = REPO / ".github/workflows/agent-job-runner.yml"
 
 
 @pytest.fixture(scope="module")

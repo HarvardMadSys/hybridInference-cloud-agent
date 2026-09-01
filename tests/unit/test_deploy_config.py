@@ -202,9 +202,6 @@ def test_codex_mcp_is_constrained_to_an_empty_requirements_allowlist():
     assert requirements == {"mcp_servers": {}}
     assert "codex-requirements.toml /etc/codex/requirements.toml" in _DOCKERFILE.read_text()
 
-    workflow = Path(__file__).resolve().parents[2] / ".github/workflows/agent-job-runner.yml"
-    assert "codex-requirements.toml /etc/codex/requirements.toml" in workflow.read_text()
-
 
 # ── the chain from compose file to a running sandbox ───────────────────
 #
@@ -439,6 +436,27 @@ def test_staging_deploy_enables_one_consistent_shared_live_rollout() -> None:
     assert "STAGING_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
 
 
+def test_production_deploy_uses_the_same_host_first_topology() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-prod.yml").read_text())
+    jobs = workflow["jobs"]
+    assert jobs["deploy"]["needs"] == "deploy-host"
+    assert "needs" not in jobs["deploy-host"]
+    host_deploy = next(
+        step for step in jobs["deploy-host"]["steps"] if step.get("name") == "Deploy"
+    )
+    host_env = host_deploy["env"]
+
+    for removed in (
+        "AGENT_RESTARTABLE_SANDBOX",
+        "AGENT_SHARED_LIVE_SANDBOX",
+        "STAGING_SHARED_LIVE_SANDBOX",
+    ):
+        assert removed not in host_env
+    assert "PROD_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
+    assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
+    assert "PROD_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
+
+
 def test_target_commit_can_activate_staging_under_the_default_branch_workflow() -> None:
     """Readiness is unconditional and no stale feature flag can bypass it."""
     for relative in (
@@ -658,48 +676,6 @@ def test_the_proxy_config_is_generated_by_the_validating_renderer(compose: dict)
     assert any(volume.endswith(":ro") for volume in proxy["volumes"]), (
         "the proxy can rewrite the allowlist it is enforcing"
     )
-
-
-def test_both_substrates_pin_the_same_agent_cli_versions():
-    """A job must not behave differently depending on which substrate claims it.
-
-    The Actions runner installs the CLIs itself while the container backend
-    gets them from the sandbox image. When those drift, the same job produces
-    different results — or fails on one substrate only — for a reason nothing
-    in the job's own record explains. `latest` on the Actions side already cost
-    a real run once.
-    """
-    # One of the two substrates is the Actions workflow, and the public export
-    # replaces .github/workflows/ wholesale — so in an exported tree there is
-    # no second thing to agree with, and "they pin the same versions" is not a
-    # claim that can be false there. Skipped rather than excluding the file:
-    # the other twenty cases here assert the sandbox image and the runner
-    # compose, both of which travel and are worth running downstream.
-    path = Path(__file__).resolve().parents[2] / ".github/workflows/agent-job-runner.yml"
-    if not path.exists():
-        pytest.skip("no Actions workflow in this tree — only one substrate to check")
-    workflow = path.read_text()
-    image = _DOCKERFILE.read_text()
-
-    for name in (
-        "CLAUDE_CODE_VERSION",
-        "CODEX_VERSION",
-        "PI_VERSION",
-        "OPENCODE_VERSION",
-        "KILO_VERSION",
-    ):
-        pinned = re.search(rf"^ARG {name}=(\S+)$", image, re.MULTILINE)
-        assert pinned, f"{name} must be pinned in the sandbox image"
-        assert f'{name}: "{pinned.group(1)}"' in workflow, (
-            f"{name} differs between the sandbox image and the Actions workflow"
-        )
-
-    # pi, OpenCode, and Kilo are reached through wrappers, so a substrate that
-    # installs the CLI but not the wrapper produces jobs that die at spawn
-    # with "binary missing" — both substrates must ship all of them.
-    for wrapper in ("pi-freeinference", "opencode-freeinference", "kilo-freeinference"):
-        assert wrapper in image, f"the sandbox image does not install {wrapper}"
-        assert wrapper in workflow, f"the Actions runner does not install {wrapper}"
 
 
 def test_the_runner_reads_the_bounds_the_overlay_configures(monkeypatch, compose: dict):

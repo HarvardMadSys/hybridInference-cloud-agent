@@ -223,7 +223,10 @@ To finish it:
 3. **Set the repository variables** the workflow refuses to run without:
    `PROD_CONTROL_DEPLOY_ROOT`, `PROD_SANDBOX_DEPLOY_ROOT` and
    `PROD_SANDBOX_COMPOSE_PROJECT`. `PROD_CONTROL_COMPOSE_PROJECT` only if that
-   machine runs another stack of this service.
+   machine runs another stack of this service. `PROD_HOST_SLOTS` defaults to
+   three and drives both scheduler slots and runner replicas;
+   `PROD_RETAINED_DOCKER_DATA_ROOT` defaults to `/var/lib/docker` and must name
+   the daemon's actual durable data root.
 4. **Configure the production gateway first** — `IDENTITY_JWT_PRIVATE_KEY`,
    `IDENTITY_ALLOWED_REDIRECTS`, and a `GATEWAY_GRANT_DISPATCH_TOKEN` that is
    *not* staging's — then confirm it from outside:
@@ -237,10 +240,10 @@ To finish it:
    rewrite is the user-visible cutover, and it must come last: set before this
    service exists, it hands `/agents` to nothing.
 
-Order matters throughout, and in one direction. This service calls the
-gateway's identity and `/internal/*` routes; the gateway calls nothing here. A
-control plane deployed ahead of the gateway that serves it is one calling
-routes that answer 404.
+Order matters throughout. Configure the gateway first. Within this service,
+the production workflow then deploys the sandbox host first and replaces the
+control plane only after the target-SHA heartbeat and reverse-broker readiness
+fence passes.
 
 Rollback is the same as staging's: dispatch **Deploy Prod** with `sha` set to
 the commit to go back to.

@@ -233,7 +233,7 @@ admin router.
 
 | Path | Where it went |
 |---|---|
-| `.github/workflows/agent-job-runner.yml` | this repo, `.github/workflows/` |
+| ~~`.github/workflows/agent-job-runner.yml`~~ | ~~this repo, `.github/workflows/`~~ **Removed 2026-09-02:** the manually dispatched disposable/process runner contradicted the retained-only topology; enrolled sandbox hosts are the sole execution substrate. |
 | `deploy/docker/Dockerfile.agent-runner` | `deploy/host/` |
 | `deploy/docker/Dockerfile.agent-sandbox` | `deploy/sandbox/` |
 | `deploy/docker/Dockerfile.agent-egress-proxy` | `deploy/host/` |
