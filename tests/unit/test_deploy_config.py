@@ -431,6 +431,7 @@ def test_staging_deploy_enables_one_consistent_shared_live_rollout() -> None:
         assert "AGENT_SHARED_LIVE_SANDBOX" not in env
         assert "AGENT_RESTARTABLE_SANDBOX" not in env
         assert "STAGING_SHARED_LIVE_SANDBOX" not in env
+    assert control_env["COMPOSE_PROJECT"] == "${{ vars.STAGING_CONTROL_COMPOSE_PROJECT }}"
     assert "STAGING_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
     assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
     assert "STAGING_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]

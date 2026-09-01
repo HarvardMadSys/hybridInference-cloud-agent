@@ -11,22 +11,18 @@ Bring up the control plane and one runner host on a single machine, point them
 at a **staging** gateway, and drive one real job from an empty workspace to a
 pull request on a scratch repository.
 
-> **Partly executed: sections 1–2, without containers.** The rest has not been
-> run. See the log at the bottom for exactly what was and was not covered — the
-> short version is that the control plane starts, migrates and serves on its
-> own, and everything involving a sandbox, a gateway or a host is untouched.
+> **The external staging-to-GitHub runbook below remains partly executed.** See
+> the dated log at the bottom for exactly what reached staging. The Docker-only
+> local stack linked above now separately proves image builds, migrations,
+> browser/control-plane/host wiring, retained sandboxes, and all five CLI
+> session paths; it does not prove an external provider or real pull-request
+> publication.
 >
-> **The original note, still true of the rest.** It was written from the code and the
-> deployment files, and E11's acceptance is a runbook *written from what was
-> actually executed*. Until someone runs it and fills in the log at the bottom,
-> treat every step as a claim to be checked rather than a route known to work
-> — and **when a step is wrong, fix this file in the same sitting**. A runbook
-> corrected a week later is a runbook nobody trusts.
->
-> Two things in particular are unverified by anything: the control-plane image
-> has never been built locally (no Docker daemon was available where it was
-> written; CI's `docker-build` matrix builds it), and no step here has been run
-> against a live gateway.
+> The remaining staging steps were written from code and deployment files.
+> Until someone runs them and fills in the log, treat each as a claim to check,
+> not a route known to work — and fix any incorrect step in the same sitting.
+> The still-unverified boundary here is the live external gateway/GitHub path,
+> not whether the standalone images and retained topology can run locally.
 
 ## What this proves, and what it does not
 

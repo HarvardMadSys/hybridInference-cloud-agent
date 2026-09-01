@@ -2294,11 +2294,24 @@ def _workspace_id(job: dict[str, Any]) -> str:
 
 def _workspace_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
     """Map private broker failures onto bounded owner-facing errors."""
-    status = exc.status_code if exc.status_code in {400, 404, 408, 409, 413, 429} else 503
+    missing_workspace = _workspace_not_materialized(exc)
+    status = (
+        409
+        if missing_workspace
+        else exc.status_code
+        if exc.status_code in {400, 404, 408, 409, 413, 429}
+        else 503
+    )
+    message = "This chat has no retained workspace." if missing_workspace else exc.message
     return HTTPException(
         status_code=status,
-        detail={"error": {"type": "workspace_unavailable", "message": exc.message}},
+        detail={"error": {"type": "workspace_unavailable", "message": message}},
     )
+
+
+def _workspace_not_materialized(exc: WorkspaceBrokerError) -> bool:
+    """Recognize the shared-only broker's missing-workspace response."""
+    return exc.status_code == 404 and exc.message == "shared chat workspace is not materialized"
 
 
 async def _workspace_broker_for_job(
@@ -2315,7 +2328,7 @@ async def _workspace_broker_for_job(
 
 def _terminal_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
     """Preserve terminal errors while presenting a missing workspace as a conflict."""
-    if exc.status_code == 404 and exc.message == "workspace is not materialized":
+    if _workspace_not_materialized(exc):
         return HTTPException(
             status_code=409,
             detail={
@@ -2515,7 +2528,7 @@ async def write_agent_job_workspace_file(
             **(await broker.write_file(_workspace_id(job), safe_path, body.content))
         )
     except WorkspaceBrokerError as exc:
-        if exc.status_code == 404 and exc.message == "workspace is not materialized":
+        if _workspace_not_materialized(exc):
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -2555,7 +2568,7 @@ async def run_agent_job_terminal_command(
         )
         return AgentTerminalResponse(**result)
     except WorkspaceBrokerError as exc:
-        if exc.status_code == 404 and exc.message == "workspace is not materialized":
+        if _workspace_not_materialized(exc):
             raise HTTPException(
                 status_code=409,
                 detail="This retained terminal workspace is not materialized.",
@@ -2768,7 +2781,7 @@ async def get_agent_job_git_workspace(
             **(await broker.git(_workspace_id(job), base_sha=job.get("base_sha")))
         )
     except WorkspaceBrokerError as exc:
-        if exc.status_code == 404 and exc.message == "workspace is not materialized":
+        if _workspace_not_materialized(exc):
             return AgentGitWorkspaceResponse(available=False)
         raise _workspace_broker_http_error(exc) from exc
 

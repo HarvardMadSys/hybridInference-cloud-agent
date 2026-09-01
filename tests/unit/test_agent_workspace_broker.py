@@ -22,6 +22,7 @@ from cloud_agent_host.workspace_broker import (
     _TerminalSession,
     create_app,
 )
+from cloud_agent_host.workspace_broker_client import WorkspaceBrokerClient
 
 
 class _TerminalProcess(TerminalProcess):
@@ -266,6 +267,14 @@ async def test_legacy_lifecycle_and_host_workspace_routes_do_not_exist():
     assert old_acquire.status_code == 404
     assert host_workspace.status_code == 404
     assert host_workspace.json()["detail"] == "shared chat workspace is not materialized"
+    for method in (
+        "acquire_chat_sandbox",
+        "note_chat_process_started",
+        "settle_chat_sandbox",
+        "abandon_chat_sandbox",
+        "chat_sandbox_status",
+    ):
+        assert not hasattr(WorkspaceBrokerClient, method)
 
 
 @pytest.mark.asyncio

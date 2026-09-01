@@ -442,7 +442,7 @@ class AgentWorkspaceResponse(BaseModel):
 
 
 class AgentWorkspaceWriteRequest(BaseModel):
-    """Replace one UTF-8 file in a live worktree."""
+    """Replace one UTF-8 file in a retained workspace."""
 
     content: str = Field(..., max_length=2 * 1024 * 1024)
 

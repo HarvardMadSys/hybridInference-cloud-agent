@@ -2131,6 +2131,33 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeAgentJobStore
     ]
 
 
+async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """The broker's shared-only 404 describes the workspace, not a file path."""
+    from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+
+    class Broker:
+        async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
+            return None
+
+        async def files(self, _workspace_id: str, _path: str):
+            raise WorkspaceBrokerError(404, "shared chat workspace is not materialized")
+
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: Broker())
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        _attach_shared_workspace(store, job_id)
+        response = await client.get(f"/v1/agent/jobs/{job_id}/files")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == {
+        "type": "workspace_unavailable",
+        "message": "This chat has no retained workspace.",
+    }
+
+
 async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn_url(
     store: FakeAgentJobStore, monkeypatch
 ):
@@ -2784,7 +2811,7 @@ async def test_terminal_routes_report_missing_broker_and_workspace_as_conflicts(
 
         class MissingWorkspaceBroker(_TerminalSessionBroker):
             async def create_terminal(self, workspace_id: str, *, rows: int, cols: int):
-                raise WorkspaceBrokerError(404, "workspace is not materialized")
+                raise WorkspaceBrokerError(404, "shared chat workspace is not materialized")
 
         monkeypatch.setattr(
             broker_routing,

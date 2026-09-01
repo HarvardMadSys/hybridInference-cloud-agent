@@ -89,6 +89,10 @@ jobs:
           # machine's path. Named here so production and staging are configured
           # the same way rather than one by variable and one by default.
           DEPLOY_ROOT: ${{ vars.STAGING_CONTROL_DEPLOY_ROOT }}
+          # Use the same project identity as the status/operations step. If the
+          # deployment has a non-default project, omitting this would build and
+          # replace `cloudagent` while reporting a different stack as healthy.
+          COMPOSE_PROJECT: ${{ vars.STAGING_CONTROL_COMPOSE_PROJECT }}
         run: bash deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
