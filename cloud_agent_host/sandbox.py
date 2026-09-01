@@ -627,9 +627,16 @@ class _ObservedContainerProcess(_PopenProcess):
         """Fence a later turn on this still-resident Kata process."""
         with self._lifecycle_lock:
             if self._container_removed or self._process.poll() is not None:
+                detail = "resident Kata process is no longer running"
+                # A failed attempt to fence a new turn must not let the next
+                # finish call replay the last successful turn's observation.
+                # Preserve an existing open cursor for cleanup, but otherwise
+                # replace that stale terminal result with the current failure.
+                if self._cursor is None:
+                    self._last_observation = GuestObservation.unavailable(detail)
                 return GuestObserverCursor.unavailable(
                     self._cursor_uid,
-                    "resident Kata process is no longer running",
+                    detail,
                 )
             if self._cursor is not None:
                 # A missing close must never silently widen the next turn to

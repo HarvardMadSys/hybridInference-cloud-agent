@@ -32,44 +32,149 @@ static bool id_byte(unsigned char value)
            (value >= '0' && value <= '9') || value == '_' || value == '-';
 }
 
+static bool json_space(unsigned char value)
+{
+    return value == ' ' || value == '\t' || value == '\r' || value == '\n';
+}
+
+static bool hex_byte(unsigned char value)
+{
+    return (value >= '0' && value <= '9') ||
+           (value >= 'a' && value <= 'f') ||
+           (value >= 'A' && value <= 'F');
+}
+
+static bool scan_json_string(const char *payload, size_t length, size_t *cursor,
+                             size_t *content_start, size_t *content_length,
+                             bool *escaped)
+{
+    size_t start;
+
+    if (*cursor >= length || payload[*cursor] != '"')
+        return false;
+    *cursor += 1;
+    start = *cursor;
+    *escaped = false;
+    while (*cursor < length) {
+        unsigned char byte = (unsigned char)payload[*cursor];
+
+        if (byte == '"') {
+            *content_start = start;
+            *content_length = *cursor - start;
+            *cursor += 1;
+            return true;
+        }
+        if (byte < 0x20)
+            return false;
+        if (byte != '\\') {
+            *cursor += 1;
+            continue;
+        }
+        *escaped = true;
+        *cursor += 1;
+        if (*cursor >= length)
+            return false;
+        byte = (unsigned char)payload[*cursor];
+        if (byte == 'u') {
+            if (length - *cursor <= 4)
+                return false;
+            for (size_t index = 1; index <= 4; ++index) {
+                if (!hex_byte((unsigned char)payload[*cursor + index]))
+                    return false;
+            }
+            *cursor += 5;
+        } else if (strchr("\"\\/bfnrt", (int)byte) != NULL) {
+            *cursor += 1;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
 static bool extract_tool_use_id(const char *payload, size_t length,
                                 char output[FI_TOOL_MARK_ID_BYTES])
 {
-    static const char key[] = "\"tool_use_id\"";
+    static const char key[] = "tool_use_id";
+    char stack[64];
+    size_t cursor = 0;
+    size_t depth = 0;
+    size_t matches = 0;
     bool found = false;
 
-    for (size_t start = 0; start + sizeof(key) - 1 < length; ++start) {
-        char candidate[FI_TOOL_MARK_ID_BYTES] = {0};
-        size_t cursor;
-        size_t used = 0;
+    memset(output, 0, FI_TOOL_MARK_ID_BYTES);
+    while (cursor < length && json_space((unsigned char)payload[cursor]))
+        cursor += 1;
+    if (cursor >= length || payload[cursor] != '{')
+        return false;
+    stack[depth++] = '{';
+    cursor += 1;
 
-        if (memcmp(payload + start, key, sizeof(key) - 1) != 0)
+    while (cursor < length && depth > 0) {
+        unsigned char byte = (unsigned char)payload[cursor];
+
+        if (byte == '"') {
+            size_t string_cursor = cursor;
+            size_t content_start = 0;
+            size_t content_length = 0;
+            bool escaped = false;
+
+            if (!scan_json_string(payload, length, &string_cursor,
+                                  &content_start, &content_length, &escaped))
+                return false;
+            size_t after = string_cursor;
+            while (after < length && json_space((unsigned char)payload[after]))
+                after += 1;
+            if (depth == 1 && !escaped && content_length == sizeof(key) - 1 &&
+                memcmp(payload + content_start, key, sizeof(key) - 1) == 0 &&
+                after < length && payload[after] == ':') {
+                size_t value_cursor = after + 1;
+                size_t value_start = 0;
+                size_t value_length = 0;
+                bool value_escaped = false;
+
+                matches += 1;
+                if (matches != 1)
+                    return false;
+                while (value_cursor < length &&
+                       json_space((unsigned char)payload[value_cursor]))
+                    value_cursor += 1;
+                if (!scan_json_string(payload, length, &value_cursor,
+                                      &value_start, &value_length, &value_escaped) ||
+                    value_escaped || value_length == 0 ||
+                    value_length >= FI_TOOL_MARK_ID_BYTES)
+                    return false;
+                for (size_t index = 0; index < value_length; ++index) {
+                    if (!id_byte((unsigned char)payload[value_start + index]))
+                        return false;
+                }
+                memcpy(output, payload + value_start, value_length);
+                output[value_length] = '\0';
+                found = true;
+                cursor = value_cursor;
+                continue;
+            }
+            cursor = string_cursor;
             continue;
-        cursor = start + sizeof(key) - 1;
-        while (cursor < length &&
-               (payload[cursor] == ' ' || payload[cursor] == '\t' ||
-                payload[cursor] == '\r' || payload[cursor] == '\n'))
-            cursor += 1;
-        if (cursor >= length || payload[cursor++] != ':')
-            continue;
-        while (cursor < length &&
-               (payload[cursor] == ' ' || payload[cursor] == '\t' ||
-                payload[cursor] == '\r' || payload[cursor] == '\n'))
-            cursor += 1;
-        if (cursor >= length || payload[cursor++] != '"')
-            continue;
-        while (cursor < length && id_byte((unsigned char)payload[cursor]) &&
-               used < FI_TOOL_MARK_ID_BYTES - 1) {
-            candidate[used++] = payload[cursor++];
         }
-        if (used == 0 || cursor >= length || payload[cursor] != '"')
-            continue;
-        candidate[used] = '\0';
-        memcpy(output, candidate, used + 1);
-        found = true;
-        start = cursor;
+        if (byte == '{' || byte == '[') {
+            if (depth >= sizeof(stack))
+                return false;
+            stack[depth++] = (char)byte;
+        } else if (byte == '}' || byte == ']') {
+            char expected = byte == '}' ? '{' : '[';
+
+            if (depth == 0 || stack[depth - 1] != expected)
+                return false;
+            depth -= 1;
+        }
+        cursor += 1;
     }
-    return found;
+    if (depth != 0)
+        return false;
+    while (cursor < length && json_space((unsigned char)payload[cursor]))
+        cursor += 1;
+    return found && cursor == length;
 }
 
 static size_t read_payload(char payload[MAX_HOOK_PAYLOAD_BYTES + 1])
@@ -194,10 +299,23 @@ int main(int argc, char **argv)
         static const char sample[] =
             "{\"tool_input\":\"\\\"tool_use_id\\\":\\\"fake\\\"\","
             "\"tool_use_id\":\"toolu_self_test\"}";
+        static const char nested_after[] =
+            "{\"tool_use_id\":\"top_level\","
+            "\"tool_input\":{\"tool_use_id\":\"nested_fake\"}}";
+        static const char nested_before[] =
+            "{\"tool_input\":{\"tool_use_id\":\"nested_fake\"},"
+            "\"tool_use_id\":\"top_level\"}";
+        static const char duplicate[] =
+            "{\"tool_use_id\":\"one\",\"tool_use_id\":\"two\"}";
         char parsed[FI_TOOL_MARK_ID_BYTES] = {0};
 
         if (!extract_tool_use_id(sample, sizeof(sample) - 1, parsed) ||
-            strcmp(parsed, "toolu_self_test") != 0)
+            strcmp(parsed, "toolu_self_test") != 0 ||
+            !extract_tool_use_id(nested_after, sizeof(nested_after) - 1, parsed) ||
+            strcmp(parsed, "top_level") != 0 ||
+            !extract_tool_use_id(nested_before, sizeof(nested_before) - 1, parsed) ||
+            strcmp(parsed, "top_level") != 0 ||
+            extract_tool_use_id(duplicate, sizeof(duplicate) - 1, parsed))
             return 1;
         printf("freeinference-tool-mark-v%d\n", FI_TOOL_MARK_VERSION);
         return 0;

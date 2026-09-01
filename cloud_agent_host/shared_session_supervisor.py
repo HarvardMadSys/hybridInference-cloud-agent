@@ -284,15 +284,30 @@ class SharedChatSessionSupervisor:
                 for member in group.members.values()
                 if member.transport is not None
             ]
+            observations = [
+                (group.spec, member.observer_cursor)
+                for group in self._groups.values()
+                for member in group.members.values()
+                if member.observer_cursor is not None
+            ]
             for group in self._groups.values():
                 for member in group.members.values():
                     member.transport = None
                     member.current_turn = None
+                    member.observer_cursor = None
+                    member.tool_mark_reader = None
                     if member.resident_state == "live":
                         member.resident_state = "restarting"
         for transport in transports:
             with contextlib.suppress(Exception):
                 transport.close()
+        # Closing a transport ends the member workload. Drain afterwards so
+        # the manager also releases its per-container active-cursor fence;
+        # otherwise restarting this supervisor object can suppress safe
+        # journal rotation for the rest of the container lifetime.
+        for spec, cursor in observations:
+            with contextlib.suppress(Exception):
+                self._manager.finish_guest_observation(spec, cursor)
 
     def reconcile(self) -> list[SharedSessionDescriptor]:
         """Discover only containers labelled for the shared-live protocol."""
@@ -822,7 +837,17 @@ class SharedChatSessionSupervisor:
         with self._lock:
             group, member = self._leased_member(thread_id, token)
             transport = member.transport
+            observer_cursor = member.observer_cursor
+            # ``complete_turn`` may have cleared ``current_turn`` and then
+            # failed before releasing the lock. Abandon owns this member's
+            # teardown, so the lock state itself is the authoritative cleanup
+            # signal here.
+            release_turn_lock = member.turn_lock.locked()
             member.transport = None
+            member.current_turn = None
+            member.activation_processes = None
+            member.observer_cursor = None
+            member.tool_mark_reader = None
             member.lease_token = None
             member.lease_owner = None
             member.context_status = "lost" if lost else member.context_status
@@ -832,6 +857,12 @@ class SharedChatSessionSupervisor:
         if transport is not None:
             with contextlib.suppress(Exception):
                 transport.close()
+        if observer_cursor is not None:
+            with contextlib.suppress(Exception):
+                self._manager.finish_guest_observation(group.spec, observer_cursor)
+        if release_turn_lock:
+            with contextlib.suppress(RuntimeError):
+                member.turn_lock.release()
         return descriptor
 
     def residency_lost(
@@ -847,7 +878,10 @@ class SharedChatSessionSupervisor:
                 return self._descriptor(group, member)
             turn = member.current_turn
             transport = member.transport
+            observer_cursor = member.observer_cursor
             member.transport = None
+            member.observer_cursor = None
+            member.tool_mark_reader = None
             member.residency_generation = 0
             member.resident_state = "restarting" if member.native_session_id else "stopped"
         if turn is not None:
@@ -856,6 +890,9 @@ class SharedChatSessionSupervisor:
         if transport is not None:
             with contextlib.suppress(Exception):
                 transport.close()
+        if observer_cursor is not None:
+            with contextlib.suppress(Exception):
+                self._manager.finish_guest_observation(group.spec, observer_cursor)
         with self._lock:
             return self._descriptor(group, member)
 
@@ -1291,6 +1328,11 @@ class SharedChatSessionSupervisor:
                 for member in group.members.values()
                 if member.transport is not None
             ]
+            observations = [
+                (group.spec, member.observer_cursor)
+                for member in group.members.values()
+                if member.observer_cursor is not None
+            ]
             interrupted_turn_locks: list[Any] = []
             for member in group.members.values():
                 if member.current_turn is not None and member.turn_lock.locked():
@@ -1298,6 +1340,8 @@ class SharedChatSessionSupervisor:
                 member.transport = None
                 member.current_turn = None
                 member.activation_processes = None
+                member.observer_cursor = None
+                member.tool_mark_reader = None
                 member.lease_token = None
                 member.lease_owner = None
                 member.resident_state = "lost" if reason == "lost" else "stopped"
@@ -1307,6 +1351,9 @@ class SharedChatSessionSupervisor:
             for transport in transports:
                 with contextlib.suppress(Exception):
                     transport.close()
+            for spec, cursor in observations:
+                with contextlib.suppress(Exception):
+                    self._manager.finish_guest_observation(spec, cursor)
             for turn_lock in interrupted_turn_locks:
                 with contextlib.suppress(RuntimeError):
                     turn_lock.release()

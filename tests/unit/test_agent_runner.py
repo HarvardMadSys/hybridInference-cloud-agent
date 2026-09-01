@@ -1792,6 +1792,96 @@ def test_a_turn_on_the_surviving_process_reports_hot(tmp_path):
     assert not process.killed
 
 
+def test_a_live_process_that_dies_before_hot_admission_does_not_open_a_cursor(tmp_path):
+    """A cursor belongs to an attempted prompt, not the preceding idle turn."""
+
+    class DiedBetweenChecks:
+        def __init__(self) -> None:
+            self.alive_checks = 0
+            self.observation_begins = 0
+            self.observation_finishes = 0
+
+        def process_alive(self) -> bool:
+            self.alive_checks += 1
+            return self.alive_checks == 1
+
+        def begin_guest_observation(self):
+            self.observation_begins += 1
+            return GuestObserverCursor(uid=10001, available=True)
+
+        def finish_guest_observation(self, _cursor):
+            self.observation_finishes += 1
+            return GuestObservation(
+                source="prior-turn-observation",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+            )
+
+    runtime = ClaudeCodeRuntime()
+    process = _ResidentProcess()
+    process.feed = [_result_line()]
+    stale = DiedBetweenChecks()
+    entry = _resident_entry(tmp_path)
+    entry.live_session = stale
+    pool = _DetachPool()
+    control = FakeControl()
+
+    exit_code, _tail, _errors = run_agent(
+        runtime,
+        job=_hot_job(),
+        workdir=entry.workdir,
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=_LiveSpawnBackend(process),
+        state_dir=entry.state_dir,
+        resident=entry,
+        residents=pool,
+        live_out={},
+    )
+
+    assert exit_code == 0
+    assert pool.detached == ["t-hot"]
+    assert stale.observation_begins == 0
+    assert stale.observation_finishes == 0
+    assert control.resources[0].get("process_observer") is None
+
+
+def test_a_hot_turn_reports_an_observer_start_failure_as_incomplete(tmp_path):
+    runtime = ClaudeCodeRuntime()
+    process = _ResidentProcess()
+    entry = _resident_entry(tmp_path)
+    entry.live_session = _spawned_live_session(runtime, process, entry.state_dir)
+
+    def fail_observation():
+        raise RuntimeError("observer fence failed")
+
+    entry.live_session.begin_guest_observation = fail_observation
+    process.feed = [_result_line()]
+    control = FakeControl()
+
+    exit_code, _tail, _errors = run_agent(
+        runtime,
+        job=_hot_job(),
+        workdir=entry.workdir,
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=_LiveSpawnBackend(process),
+        state_dir=entry.state_dir,
+        resident=entry,
+        residents=_DetachPool(),
+        live_out={},
+    )
+
+    assert exit_code == 0
+    assert control.resources[0]["process_observation_complete"] is False
+    assert control.resources[0]["process_observer"] is None
+
+
 def test_the_first_live_turn_spawns_on_the_residency_grant(tmp_path):
     """No process yet: the turn spawns one over the resident workspace, on the
     residency's credential and with a live stdin — warm_native this turn

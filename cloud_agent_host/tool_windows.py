@@ -58,6 +58,12 @@ MAX_TOOL_CALLS = 500
 #: cannot widen every row that carries it.
 MAX_TOOL_NAME = 120
 
+#: The worker request and database row both bound this identifier. Enforce the
+#: same limit while tracking so a malformed runtime event cannot retain an
+#: unbounded dictionary key and then make the entire resource report fail
+#: validation at the end of an otherwise successful turn.
+MAX_TOOL_USE_ID = 200
+
 # Exact marks are an optional precision upgrade, never an unbounded telemetry
 # channel. A turn that exceeds this simply stays message-timed.
 MAX_TOOL_MARK_BYTES = 1024 * 1024
@@ -120,9 +126,13 @@ class ToolWindowTracker:
     """
 
     def __init__(self, *, limit: int = MAX_TOOL_CALLS) -> None:
-        self._limit = limit
-        self._open: dict[str, ToolWindow] = {}
-        self._closed: list[ToolWindow] = []
+        self._limit = max(0, int(limit))
+        # The public contract says call_seq is issuance order. Keep one bounded
+        # list in that order and let open ids point into it; moving completed
+        # calls into a separate list would silently reorder parallel calls by
+        # whichever result happened to arrive first.
+        self._windows: list[ToolWindow] = []
+        self._open: dict[str, int] = {}
         self._dropped = 0
 
     def observe(self, event_type: str, payload: dict[str, Any] | None, *, mono: float) -> None:
@@ -130,29 +140,35 @@ class ToolWindowTracker:
         fields = payload or {}
         if event_type == "tool_use":
             tool_use_id = _text(fields.get("id"))
-            if not tool_use_id:
+            if not tool_use_id or len(tool_use_id) > MAX_TOOL_USE_ID:
                 # Without an id there is nothing to pair a result against, so
                 # the call could only ever be reported unfinished. A row that
                 # says "unfinished" about a call that finished is worse than
-                # no row.
+                # no row. Say explicitly that the resulting list is partial.
+                self._dropped += 1
                 return
-            self._open[tool_use_id] = ToolWindow(
-                tool_use_id=tool_use_id,
-                tool=(_text(fields.get("name")) or "tool")[:MAX_TOOL_NAME],
-                opened_mono=mono,
+            if tool_use_id in self._open or len(self._windows) >= self._limit:
+                # Concurrent duplicate ids cannot be paired honestly, and an
+                # open-call storm must not grow memory past the wire cap.
+                self._dropped += 1
+                return
+            self._open[tool_use_id] = len(self._windows)
+            self._windows.append(
+                ToolWindow(
+                    tool_use_id=tool_use_id,
+                    tool=(_text(fields.get("name")) or "tool")[:MAX_TOOL_NAME],
+                    opened_mono=mono,
+                )
             )
         elif event_type == "tool_result":
             tool_use_id = _text(fields.get("tool_use_id"))
-            window = self._open.pop(tool_use_id, None) if tool_use_id else None
-            if window is None:
+            index = self._open.pop(tool_use_id, None) if tool_use_id else None
+            if index is None:
                 return
-            self._append(dataclasses.replace(window, closed_mono=mono))
-
-    def _append(self, window: ToolWindow) -> None:
-        if len(self._closed) >= self._limit:
-            self._dropped += 1
-            return
-        self._closed.append(window)
+            self._windows[index] = dataclasses.replace(
+                self._windows[index],
+                closed_mono=mono,
+            )
 
     def apply_marks(self, marks: list[tuple[float, str, str]]) -> int:
         """Narrow windows to the boundaries the sandbox's own hooks recorded.
@@ -167,42 +183,48 @@ class ToolWindowTracker:
 
         Returns how many windows were upgraded, for the caller to log.
         """
-        opened: dict[str, float] = {}
-        closed: dict[str, float] = {}
+        by_id: dict[str, list[tuple[float, str]]] = {}
         for when, phase, tool_use_id in marks:
-            target = opened if phase == "pre" else closed
-            # First pre and last post: a call retried inside one attempt would
-            # otherwise take the widest possible span rather than its own.
-            if phase == "pre" and tool_use_id in target:
+            if phase not in {"pre", "post"}:
                 continue
-            target[tool_use_id] = when
+            by_id.setdefault(tool_use_id, []).append((when, phase))
         upgraded = 0
-        for index, window in enumerate(self._closed):
-            start, end = opened.get(window.tool_use_id), closed.get(window.tool_use_id)
-            if start is None or end is None or end < start:
+        for index, window in enumerate(self._windows):
+            if window.closed_mono is None:
                 continue
-            if start < window.opened_mono or end > (window.closed_mono or start):
+            candidates = [
+                (when, phase)
+                for when, phase in by_id.get(window.tool_use_id, [])
+                if window.opened_mono <= when <= window.closed_mono
+            ]
+            opened = [when for when, phase in candidates if phase == "pre"]
+            closed = [when for when, phase in candidates if phase == "post"]
+            # More than one possible boundary is ambiguity, not precision.
+            # This also keeps a reused id from cross-pairing two calls.
+            if len(opened) != 1 or len(closed) != 1 or closed[0] < opened[0]:
                 continue
-            self._closed[index] = dataclasses.replace(
-                window, opened_mono=start, closed_mono=end, source="exact"
+            self._windows[index] = dataclasses.replace(
+                window,
+                opened_mono=opened[0],
+                closed_mono=closed[0],
+                source="exact",
             )
             upgraded += 1
         return upgraded
 
     def windows(self) -> list[ToolWindow]:
-        """Every call this attempt issued, finished ones first.
+        """Every call this attempt issued, in the order it was issued.
 
-        Calls still open when the turn ended are included with no close time.
-        A turn that ends mid-call is the shape of a timeout or a cancel, and
-        dropping those rows would delete the evidence.
+        Calls still open when the turn ended are included in issuance order
+        with no close time. A turn that ends mid-call is the shape of a timeout
+        or a cancel, and dropping those rows would delete the evidence.
         """
-        room = max(0, self._limit - len(self._closed))
-        return [*self._closed, *list(self._open.values())[:room]]
+        return list(self._windows)
 
     @property
     def truncated(self) -> bool:
         """Whether this attempt issued more calls than are being reported."""
-        return self._dropped > 0 or len(self._open) > max(0, self._limit - len(self._closed))
+        return self._dropped > 0
 
 
 def _row(window: ToolWindow, call_seq: int) -> dict[str, Any]:

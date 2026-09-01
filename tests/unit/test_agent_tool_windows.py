@@ -182,13 +182,26 @@ def test_an_unclosed_call_survives_into_the_report():
     assert not tracker.truncated
 
 
-def test_finished_calls_are_reported_in_the_order_they_finished():
+def test_parallel_calls_are_reported_in_the_order_they_were_issued():
     tracker = ToolWindowTracker()
     tracker.observe("tool_use", {"id": "a", "name": "Bash"}, mono=1.0)
     tracker.observe("tool_use", {"id": "b", "name": "Read"}, mono=1.1)
     tracker.observe("tool_result", {"tool_use_id": "b"}, mono=1.2)
     tracker.observe("tool_result", {"tool_use_id": "a"}, mono=4.0)
-    assert [w.tool for w in tracker.windows()] == ["Read", "Bash"]
+    assert [w.tool for w in tracker.windows()] == ["Bash", "Read"]
+
+
+def test_parallel_open_calls_are_bounded_while_the_turn_is_still_running():
+    tracker = ToolWindowTracker(limit=3)
+    for index in range(10_000):
+        tracker.observe(
+            "tool_use",
+            {"id": f"t{index}", "name": "Read"},
+            mono=float(index),
+        )
+
+    assert len(tracker.windows()) == 3
+    assert tracker.truncated
 
 
 def test_a_turn_past_the_cap_says_so_rather_than_keeping_a_quiet_prefix():
@@ -212,6 +225,14 @@ def test_a_hostile_tool_name_cannot_widen_the_row():
     assert len(window.tool) == 120
 
 
+def test_a_tool_id_too_large_for_the_wire_is_not_retained():
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "x" * 201, "name": "Read"}, mono=1.0)
+
+    assert tracker.windows() == []
+    assert tracker.truncated
+
+
 # --- hook marks: the exact windows -------------------------------------------
 
 
@@ -227,6 +248,24 @@ def test_marks_narrow_a_window_and_label_it_exact():
     assert upgraded == 1
     assert window.source == "exact"
     assert window.duration_ms == 6_000
+
+
+def test_duplicate_marks_do_not_claim_an_ambiguous_exact_window():
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
+
+    upgraded = tracker.apply_marks(
+        [
+            (2.0, "pre", "t1"),
+            (3.0, "pre", "t1"),
+            (8.0, "post", "t1"),
+        ]
+    )
+
+    (window,) = tracker.windows()
+    assert upgraded == 0
+    assert window.source == "message"
 
 
 def test_a_mark_outside_the_window_it_would_narrow_is_refused():

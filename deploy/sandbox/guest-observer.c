@@ -45,7 +45,13 @@ struct observer {
     uint64_t event_seq;
     uint64_t poll_seq;
     uint64_t journal_bytes;
+    uint64_t journal_dev;
+    uint64_t journal_ino;
+    /* Process loss determines whether the eBPF census is complete. Malformed
+     * or backpressured optional tool marks must not let an untrusted sender
+     * relabel an otherwise complete process census as kernel-event loss. */
     uint64_t journal_dropped;
+    uint64_t tool_mark_dropped;
 };
 
 static void handle_signal(int signo)
@@ -332,12 +338,12 @@ static void drain_tool_marks(struct observer *observer)
             (mark.phase != FI_TOOL_MARK_PRE && mark.phase != FI_TOOL_MARK_POST) ||
             mark.mono_ns == 0 || !tool_mark_id_valid(mark.tool_use_id) ||
             !trusted_tool_mark_sender(credential->pid)) {
-            observer->journal_dropped += 1;
+            observer->tool_mark_dropped += 1;
             continue;
         }
         char acknowledged = 1;
         if (journal_tool_mark(observer, &mark, credential) < 0) {
-            observer->journal_dropped += 1;
+            observer->tool_mark_dropped += 1;
             acknowledged = 2;
         }
         (void)sendto(observer->tool_mark_fd, &acknowledged, 1, MSG_NOSIGNAL,
@@ -384,14 +390,19 @@ static int publish_status(const struct observer *observer)
         sizeof(status),
         "{\"version\":%d,\"ready\":true,\"pid\":%ld,\"poll_seq\":%" PRIu64
         ",\"event_seq\":%" PRIu64 ",\"lost\":%" PRIu64
-        ",\"journal_dropped\":%" PRIu64 ",\"journal_bytes\":%" PRIu64 "}\n",
+        ",\"journal_dropped\":%" PRIu64 ",\"tool_mark_dropped\":%" PRIu64
+        ",\"journal_bytes\":%" PRIu64 ",\"journal_dev\":%" PRIu64
+        ",\"journal_ino\":%" PRIu64 "}\n",
         FI_OBSERVER_VERSION,
         (long)getpid(),
         observer->poll_seq,
         observer->event_seq,
         lost,
         observer->journal_dropped,
-        observer->journal_bytes);
+        observer->tool_mark_dropped,
+        observer->journal_bytes,
+        observer->journal_dev,
+        observer->journal_ino);
     if (length <= 0 || (size_t)length >= sizeof(status))
         return -1;
     snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", STATUS_PATH, (long)getpid());
@@ -494,6 +505,8 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     observer.journal_bytes = (uint64_t)journal.st_size;
+    observer.journal_dev = (uint64_t)journal.st_dev;
+    observer.journal_ino = (uint64_t)journal.st_ino;
     observer.tool_mark_fd = open_tool_mark_socket();
     if (observer.tool_mark_fd < 0) {
         perror("open tool mark socket");

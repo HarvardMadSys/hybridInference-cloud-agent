@@ -9,6 +9,7 @@ import pytest
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_SOURCE,
+    MAX_OBSERVED_TOOL_MARKS,
     GuestObserverController,
     GuestObserverCursor,
     GuestObserverProtocolError,
@@ -83,6 +84,8 @@ def test_snapshot_contract_requires_ready_versioned_monotonic_state():
                 "lost": 0,
                 "journal_dropped": 0,
                 "journal_bytes": 81,
+                "journal_dev": 7,
+                "journal_ino": 19,
             },
             "journal_size": 81,
             "guest_mono_ns": 123456,
@@ -110,6 +113,8 @@ def test_snapshot_refuses_a_status_that_could_make_no_events_look_complete():
                         "lost": 0,
                         "journal_dropped": 0,
                         "journal_bytes": 0,
+                        "journal_dev": 7,
+                        "journal_ino": 19,
                     },
                     "journal_size": 0,
                     "guest_mono_ns": 1,
@@ -135,6 +140,34 @@ def test_idle_rotation_failure_never_rejects_the_next_turn(monkeypatch):
     monkeypatch.setattr(controller, "start", fail_start)
 
     assert controller.rotate_if_needed() is False
+
+
+def test_a_replaced_journal_cannot_look_like_the_same_observer_after_pid_reuse(
+    monkeypatch,
+):
+    controller = GuestObserverController(
+        capture=lambda *_args: None,
+        privileged=lambda *_args: None,
+    )
+    cursor = _cursor(observer_pid=91, journal_dev=7, journal_ino=19)
+    replaced = _snapshot(
+        status=GuestObserverStatus(
+            pid=91,
+            poll_seq=11,
+            event_seq=20,
+            lost=4,
+            journal_dropped=2,
+            journal_bytes=100,
+            journal_dev=7,
+            journal_ino=20,
+        )
+    )
+    monkeypatch.setattr(controller, "snapshot", lambda **_kwargs: replaced)
+
+    observation = controller.finish(cursor)
+
+    assert observation.complete is False
+    assert "journal changed" in (observation.detail or "")
 
 
 def test_a_sub_millisecond_process_survives_without_any_sampler_reading():
@@ -210,6 +243,32 @@ def test_authenticated_guest_marks_share_the_uid_and_monotonic_fence():
         (11.001, "pre", "toolu_1"),
         (11.004, "post", "toolu_1"),
     )
+
+
+def test_tool_mark_overflow_cannot_downgrade_a_complete_process_census():
+    marks = b"".join(
+        _event(
+            seq,
+            "tool_pre",
+            1_000_000_000 + seq,
+            pid=50,
+            tool_use_id=f"toolu_{seq}",
+        )
+        for seq in range(1, MAX_OBSERVED_TOOL_MARKS + 2)
+    )
+    process_seq = MAX_OBSERVED_TOOL_MARKS + 2
+    payload = marks + _event(process_seq, "fork", 1_001_000_000)
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    assert observation.complete is True
+    assert len(observation.tool_marks) == MAX_OBSERVED_TOOL_MARKS
+    assert [process.pid for process in observation.processes] == [42]
 
 
 @pytest.mark.parametrize(

@@ -68,6 +68,11 @@ class GuestObserverStatus:
     lost: int
     journal_dropped: int
     journal_bytes: int = 0
+    # The observer publishes the identity from its already-open fd. A PID can
+    # be reused; this pair proves that a closing fence still names the exact
+    # append-only journal that the opening fence named.
+    journal_dev: int = 0
+    journal_ino: int = 0
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,8 @@ class GuestObserverCursor:
     poll_seq: int = 0
     observer_pid: int = 0
     event_seq: int = 0
+    journal_dev: int = 0
+    journal_ino: int = 0
     guest_mono_ns: int = 0
     # Add this to a guest monotonic timestamp to place it on the broker host's
     # monotonic axis.  ``clock_error_ns`` is half the Docker-exec round trip;
@@ -231,8 +238,13 @@ class GuestObserverController:
             "        raise RuntimeError('observer status did not advance')\n"
             "    time.sleep(0.01)\n"
             "size = int(status.get('journal_bytes', -1))\n"
-            "actual_size = os.path.getsize(events_path) if os.path.exists(events_path) else 0\n"
-            "if size < 0 or actual_size < size:\n"
+            "journal_dev = int(status.get('journal_dev', -1))\n"
+            "journal_ino = int(status.get('journal_ino', -1))\n"
+            "journal = os.stat(events_path)\n"
+            "actual_size = int(journal.st_size)\n"
+            "if (size < 0 or actual_size < size or journal_dev < 0 or journal_ino <= 0 "
+            "        or int(journal.st_dev) != journal_dev "
+            "        or int(journal.st_ino) != journal_ino):\n"
             "    raise RuntimeError('observer journal is behind its published fence')\n"
             "print(json.dumps({'status': status, 'journal_size': size, "
             "'guest_mono_ns': time.monotonic_ns()}, separators=(',', ':')))\n"
@@ -385,6 +397,8 @@ class GuestObserverController:
             poll_seq=snapshot.status.poll_seq,
             observer_pid=snapshot.status.pid,
             event_seq=snapshot.status.event_seq,
+            journal_dev=snapshot.status.journal_dev,
+            journal_ino=snapshot.status.journal_ino,
             guest_mono_ns=snapshot.guest_mono_ns,
             mono_offset_ns=host_midpoint - snapshot.guest_mono_ns,
             clock_error_ns=max(0, (host_after - host_before) // 2),
@@ -401,6 +415,11 @@ class GuestObserverController:
             closing = self.snapshot()
             if closing.status.pid != cursor.observer_pid:
                 return GuestObservation.unavailable("guest observer restarted mid-turn")
+            if (
+                closing.status.journal_dev != cursor.journal_dev
+                or closing.status.journal_ino != cursor.journal_ino
+            ):
+                return GuestObservation.unavailable("guest observer journal changed mid-turn")
             if closing.status.event_seq < cursor.event_seq:
                 return GuestObservation.unavailable("guest observer event sequence reset mid-turn")
             # Cross two publications after the closing snapshot. The first may
@@ -408,6 +427,11 @@ class GuestObserverController:
             snapshot = self.snapshot(after_poll_seq=closing.status.poll_seq + 1)
             if snapshot.status.pid != cursor.observer_pid:
                 return GuestObservation.unavailable("guest observer restarted while flushing")
+            if (
+                snapshot.status.journal_dev != cursor.journal_dev
+                or snapshot.status.journal_ino != cursor.journal_ino
+            ):
+                return GuestObservation.unavailable("guest observer journal changed while flushing")
             if snapshot.status.event_seq < closing.status.event_seq:
                 return GuestObservation.unavailable(
                     "guest observer event sequence reset while flushing"
@@ -500,6 +524,8 @@ def parse_status(value: Any) -> GuestObserverStatus:
         lost=integer("lost"),
         journal_dropped=integer("journal_dropped"),
         journal_bytes=integer("journal_bytes"),
+        journal_dev=integer("journal_dev"),
+        journal_ino=integer("journal_ino", positive=True),
     )
 
 
@@ -637,7 +663,11 @@ def parse_events(
                     raise GuestObserverProtocolError("guest tool mark id is malformed")
                 _integer(event, "pid", positive=True)
                 if len(tool_marks) >= MAX_OBSERVED_TOOL_MARKS:
-                    malformed = True
+                    # Exact boundaries are an optional precision layer. A
+                    # same-UID caller can invoke the fixed helper and exhaust
+                    # this cap, but that must not relabel the independent eBPF
+                    # process census as incomplete. Missing pairs simply keep
+                    # their calls on message-level timing.
                     continue
                 tool_marks.append(
                     (

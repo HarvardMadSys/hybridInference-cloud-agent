@@ -63,6 +63,8 @@ def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
                 "lost": status.lost,
                 "journal_dropped": status.journal_dropped,
                 "journal_bytes": status.journal_bytes,
+                "journal_dev": status.journal_dev,
+                "journal_ino": status.journal_ino,
             },
             "journal_size": snapshot.journal_size,
             "guest_mono_ns": snapshot.guest_mono_ns,
@@ -149,12 +151,12 @@ def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
 
 def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
     closing = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 20, 8, 0, 0, 0),
+        status=GuestObserverStatus(91, 20, 8, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=2_000_000_000,
     )
     flushed = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 22, 8, 0, 0, 0),
+        status=GuestObserverStatus(91, 22, 8, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=2_050_000_000,
     )
@@ -182,6 +184,8 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
         poll_seq=3,
         observer_pid=91,
         event_seq=7,
+        journal_dev=7,
+        journal_ino=19,
         guest_mono_ns=1_000_000_000,
         available=True,
     )
@@ -203,7 +207,7 @@ def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     ready = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 1, 0, 0, 0, 0),
+        status=GuestObserverStatus(91, 1, 0, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=1,
     )
@@ -243,6 +247,8 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
                 "lost": 0,
                 "journal_dropped": 0,
                 "journal_bytes": 0,
+                "journal_dev": 7,
+                "journal_ino": 19,
             },
             "journal_size": 0,
             "guest_mono_ns": 2_050_000_000,
@@ -266,7 +272,7 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
 
 def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
     snapshot = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 21, 8, 0, 0, 10),
+        status=GuestObserverStatus(91, 21, 8, 0, 0, 10, 7, 19),
         journal_size=10,
         guest_mono_ns=2_050_000_000,
     )
@@ -284,6 +290,8 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
         offset=0,
         observer_pid=91,
         event_seq=7,
+        journal_dev=7,
+        journal_ino=19,
         guest_mono_ns=1_000_000_000,
         available=True,
     )

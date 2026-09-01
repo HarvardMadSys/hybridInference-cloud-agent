@@ -1327,6 +1327,7 @@ def run_agent(
     observation_cursor = None
     observation_started = False
     live_observation_cursor = None
+    live_observation_error: str | None = None
     live_observation_owner = (
         resident.live_session
         if resident is not None
@@ -1351,7 +1352,21 @@ def run_agent(
             observation_cursor = None
             print(f"guest process observer unavailable: {exc}", file=sys.stderr)
 
-    if live_observation_owner is not None:
+    def begin_live_turn_observation(owner: Any) -> None:
+        """Fence a surviving one-shot guest only when its prompt is attempted.
+
+        The outer frame identifies the owner early so it can always close the
+        cursor, but starting the cursor here avoids charging idle activity (or
+        a previous turn's terminal observation) when the process dies before
+        ``_run_agent`` reaches the HOT rung and falls back to a fresh process.
+        """
+        nonlocal live_observation_cursor, live_observation_error
+        if (
+            owner is not live_observation_owner
+            or live_observation_cursor is not None
+            or live_observation_error is not None
+        ):
+            return
         begin_live_observation = getattr(
             live_observation_owner,
             "begin_guest_observation",
@@ -1361,7 +1376,9 @@ def run_agent(
             try:
                 live_observation_cursor = begin_live_observation()
             except Exception as exc:
+                live_observation_error = str(exc)
                 print(f"resident guest process observer unavailable: {exc}", file=sys.stderr)
+
     # Constructed before the turn so it remembers where the mark file already
     # ended: a resident session writes every turn's marks to the same file.
     kata_tool_marks = getattr(backend, "runtime", None) == KATA_RUNTIME
@@ -1404,6 +1421,7 @@ def run_agent(
             tool_windows=tool_windows,
             observed_processes=observed_processes,
             begin_guest_observation=begin_turn_observation,
+            begin_live_guest_observation=begin_live_turn_observation,
         )
     finally:
         with contextlib.suppress(Exception):
@@ -1417,7 +1435,9 @@ def run_agent(
                     observation = GuestObservation.unavailable(str(exc))
                 if observation is not None:
                     observations.append(observation)
-            if live_observation_owner is not None and live_observation_cursor is not None:
+            if live_observation_error is not None:
+                observations.append(GuestObservation.unavailable(live_observation_error))
+            elif live_observation_owner is not None and live_observation_cursor is not None:
                 finish_live_observation = getattr(
                     live_observation_owner,
                     "finish_guest_observation",
@@ -1526,6 +1546,7 @@ def _run_agent(
     tool_windows: ToolWindowTracker,
     observed_processes: list[SandboxProcess],
     begin_guest_observation: Any,
+    begin_live_guest_observation: Any,
 ) -> tuple[int, str, list[str]]:
     """Run the agent, streaming its output back as normalized events.
 
@@ -1700,6 +1721,7 @@ def _run_agent(
             if state_dir is not None:
                 backend.adopt_workdir(state_dir)
             try:
+                begin_live_guest_observation(live)
                 begin_guest_observation()
                 turn = live.start_turn(
                     TurnInput(

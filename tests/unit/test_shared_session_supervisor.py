@@ -998,6 +998,71 @@ def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup(
     ]
 
 
+def test_lost_shared_residency_releases_its_active_observer_cursor():
+    manager = _Manager()
+    manager.backend.runtime = KATA_RUNTIME
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+
+    supervisor.residency_lost("athr_source", generation=1)
+
+    assert manager.events[-1] == ("observe-finish", 11001)
+
+
+def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch):
+    manager = _Manager()
+    manager.backend.runtime = KATA_RUNTIME
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    supervisor.abandon("athr_source", lease.token, lost=True)
+
+    assert manager.events[-1] == ("observe-finish", 11001)
+
+
 def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
     """The supervisor must carry the retained hook slice to the broker."""
 

@@ -259,6 +259,13 @@ def test_observed_live_kata_turn_refences_without_destroying_the_guest(monkeypat
     process.kill()
     assert events[-5:] == ["rotate", "begin", "terminate", "finish", "remove"]
 
+    stale_cursor = process.begin_guest_observation()
+    stale_result = process.finish_guest_observation()
+    assert stale_cursor.available is False
+    assert stale_result.complete is False
+    assert stale_result.source is None
+    assert events[-1] == "remove"
+
 
 def test_container_terminal_keeps_isolation_and_adds_a_named_tty():
     """Terminal management must not weaken the ordinary sandbox boundary."""
