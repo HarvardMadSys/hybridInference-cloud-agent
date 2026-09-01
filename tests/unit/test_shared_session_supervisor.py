@@ -1039,6 +1039,59 @@ def test_lost_shared_residency_preserves_observation_until_turn_closes():
     ]
 
 
+def test_supervisor_close_releases_an_active_turn_observation_and_member_lock():
+    manager = _Manager()
+    manager.backend.runtime = KATA_RUNTIME
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+
+    supervisor.close()
+
+    assert manager.events[-1] == ("observe-finish", 11001)
+    assert member.turn_lock.locked() is False
+    assert member.activation_processes is None
+
+
+def test_supervisor_close_does_not_steal_an_initialization_lock():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+    supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    member.turn_lock.acquire()
+
+    supervisor.close()
+
+    assert member.turn_lock.locked() is True
+    member.turn_lock.release()
+
+
 def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch):
     manager = _Manager()
     manager.backend.runtime = KATA_RUNTIME

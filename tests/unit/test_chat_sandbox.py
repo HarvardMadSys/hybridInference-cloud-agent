@@ -127,6 +127,7 @@ def test_create_command_has_stable_identity_and_no_chat_state_mount_or_secret():
     assert "--cap-drop ALL" in joined
     assert "--security-opt no-new-privileges" in joined
     assert "--pids-limit 512" in joined
+    assert "sleep 2147483647 & child=$!" in command[-1]
 
 
 def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
@@ -313,6 +314,7 @@ def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
             self.pid = 91
             self.size = 0
             self.starts = 0
+            self.restart_choices: list[bool] = []
 
         def snapshot(self, **_kwargs):
             return GuestObserverSnapshot(
@@ -332,7 +334,8 @@ def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
             self.start()
             return True
 
-        def begin(self, *, user_uid):
+        def begin(self, *, user_uid, restart_if_missing=True):
+            self.restart_choices.append(restart_if_missing)
             return GuestObserverCursor(
                 uid=user_uid,
                 observer_pid=self.pid,
@@ -361,6 +364,7 @@ def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
     third = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
 
     assert controller.starts == 1
+    assert controller.restart_choices == [True, False, True]
     assert third.observer_pid == 92
 
 

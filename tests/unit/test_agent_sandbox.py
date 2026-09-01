@@ -173,6 +173,7 @@ def test_observed_kata_turn_starts_ebpf_before_agent_and_drains_before_remove(mo
     assert launch[launch.index("--runtime") + 1] == KATA_RUNTIME
     assert launch[launch.index("--user") + 1] == "10001:10001"
     assert launch[launch.index("--cap-add") + 1] == "BPF"
+    assert "sleep 2147483647 & child=$!" in launch[-1]
     assert not any(value == "TOKEN=turn-secret" for value in launch)
     agent_exec = popen_commands[0]
     assert agent_exec[:2] == ["docker", "exec"]

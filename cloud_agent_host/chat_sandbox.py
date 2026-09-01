@@ -80,12 +80,13 @@ MEMBER_UID_LIMIT = 128
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 
 # PID 1 contains no chat credential and owns no chat state outside the
-# container writable layer.  A reconnectable protocol bridge may later replace
-# this small loop as a latency optimization; continuity does not depend on it.
-# The loop is still preferable to ``tail -f /dev/null`` because it handles
-# Docker's SIGTERM deterministically and reaps its one child.
+# container writable layer. A reconnectable protocol bridge may later replace
+# this inert process as a latency optimization; continuity does not depend on
+# it. Docker's ``--init`` owns signal forwarding/reaping, while one never-
+# respawned child avoids manufacturing a same-UID process event every hour.
 _INIT_COMMAND = (
-    "trap 'exit 0' TERM INT; while :; do sleep 3600 & child=$!; wait $child || true; done"
+    'trap \'kill "$child" 2>/dev/null; wait "$child"; exit 0\' TERM INT; '
+    'sleep 2147483647 & child=$!; wait "$child"'
 )
 
 
@@ -1537,7 +1538,14 @@ class ChatSandboxManager:
             active = self._guest_observer_active.setdefault(key, {})
             if not active:
                 controller.rotate_if_needed(threshold=GUEST_OBSERVER_ROTATE_BYTES)
-            cursor = controller.begin(user_uid=user_uid)
+            cursor = controller.begin(
+                user_uid=user_uid,
+                # Never sacrifice concurrent member observations to admit one
+                # more turn. If the singleton is temporarily unreadable, this
+                # cursor is explicitly unavailable; cleanup of existing owners
+                # makes a later idle begin eligible to restart it.
+                restart_if_missing=not active,
+            )
             if cursor.available:
                 # A restart invalidates every old-pid cursor already; do not
                 # let abandoned bookkeeping suppress future safe rotations.

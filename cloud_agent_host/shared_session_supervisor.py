@@ -290,10 +290,21 @@ class SharedChatSessionSupervisor:
                 for member in group.members.values()
                 if member.observer_cursor is not None
             ]
+            turn_locks = [
+                member.turn_lock
+                for group in self._groups.values()
+                for member in group.members.values()
+                # An initialization may also hold this lock, but its context
+                # manager is still alive and owns the release. Only a detached
+                # admitted turn loses the normal ``complete_turn`` release
+                # path when ``close`` clears ``current_turn`` below.
+                if member.current_turn is not None and member.turn_lock.locked()
+            ]
             for group in self._groups.values():
                 for member in group.members.values():
                     member.transport = None
                     member.current_turn = None
+                    member.activation_processes = None
                     member.observer_cursor = None
                     member.tool_mark_reader = None
                     if member.resident_state == "live":
@@ -308,6 +319,13 @@ class SharedChatSessionSupervisor:
         for spec, cursor in observations:
             with contextlib.suppress(Exception):
                 self._manager.finish_guest_observation(spec, cursor)
+        # ``close`` may be used by a supervisor restart in the same process,
+        # not only interpreter shutdown. Do not leave a detached active turn's
+        # member lock permanently acquired after its transport and observation
+        # have both been closed.
+        for turn_lock in turn_locks:
+            with contextlib.suppress(RuntimeError):
+                turn_lock.release()
 
     def reconcile(self) -> list[SharedSessionDescriptor]:
         """Discover only containers labelled for the shared-live protocol."""

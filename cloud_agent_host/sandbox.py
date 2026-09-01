@@ -114,14 +114,16 @@ if getent hosts "$host" >/dev/null 2>&1; then echo dns-only; else echo unresolve
 # same mechanism with a different isolation boundary underneath.
 KATA_RUNTIME = "io.containerd.kata.v2"
 
-# A one-shot Kata turn keeps a tiny non-root init alive while the trusted guest
-# observer is started and the agent is attached with ``docker exec``. This is
-# the private PID-file location used to interrupt only that agent tree before
-# the guest is destroyed on timeout/cancellation.
+# A one-shot Kata turn keeps one inert non-root process alive while the trusted
+# guest observer is started and the agent is attached with ``docker exec``.
+# It never respawns, so it cannot become a false same-UID process observation.
+# This is the private PID-file location used to interrupt only the agent tree
+# before the guest is destroyed on timeout/cancellation.
 _ONE_SHOT_ACTIVATION_TMPFS = "/run/freeinference-turn"
 _ONE_SHOT_PIDFILE = f"{_ONE_SHOT_ACTIVATION_TMPFS}/agent.pid"
 _ONE_SHOT_INIT_COMMAND = (
-    "trap 'exit 0' TERM INT; while :; do sleep 3600 & child=$!; wait $child || true; done"
+    'trap \'kill "$child" 2>/dev/null; wait "$child"; exit 0\' TERM INT; '
+    'sleep 2147483647 & child=$!; wait "$child"'
 )
 
 # Image labels carrying the CLI versions baked into a sandbox image, e.g.

@@ -379,10 +379,22 @@ class GuestObserverController:
                 return False
             return True
 
-    def begin(self, *, user_uid: int) -> GuestObserverCursor:
-        """Fence the journal immediately before one prompt is admitted."""
+    def begin(
+        self,
+        *,
+        user_uid: int,
+        restart_if_missing: bool = True,
+    ) -> GuestObserverCursor:
+        """Fence the journal immediately before one prompt is admitted.
+
+        A shared guest can already have observations in flight.  Their caller
+        passes ``restart_if_missing=False`` so a transient snapshot failure for
+        this new turn cannot restart the singleton and invalidate every older
+        cursor.  Once those owners close, the next idle begin may recover it.
+        """
         try:
-            self.ensure()
+            if restart_if_missing:
+                self.ensure()
             opening = self.snapshot()
             # The publication just read may have been written by a poll that
             # started before this opening fence. Cross the following complete
@@ -427,6 +439,11 @@ class GuestObserverController:
                 return GuestObservation.unavailable("guest observer journal changed mid-turn")
             if closing.status.event_seq < cursor.event_seq:
                 return GuestObservation.unavailable("guest observer event sequence reset mid-turn")
+            if (
+                closing.status.lost < cursor.lost
+                or closing.status.journal_dropped < cursor.journal_dropped
+            ):
+                return GuestObservation.unavailable("guest observer loss counters reset mid-turn")
             # Cross two publications after the closing snapshot. The first may
             # already be in flight after its poll; the second closes that tail.
             snapshot = self.snapshot(after_poll_seq=closing.status.poll_seq + 1)
@@ -440,6 +457,13 @@ class GuestObserverController:
             if snapshot.status.event_seq < closing.status.event_seq:
                 return GuestObservation.unavailable(
                     "guest observer event sequence reset while flushing"
+                )
+            if (
+                snapshot.status.lost < closing.status.lost
+                or snapshot.status.journal_dropped < closing.status.journal_dropped
+            ):
+                return GuestObservation.unavailable(
+                    "guest observer loss counters reset while flushing"
                 )
             if snapshot.journal_size < cursor.offset:
                 return GuestObservation.unavailable("guest observer journal restarted mid-turn")
@@ -638,7 +662,10 @@ def parse_events(
     finished: list[_MutableProcess] = []
     tool_marks: list[tuple[float, str, str]] = []
     next_process_seq = 1
-    previous_event_seq = 0
+    # The byte fence and event fence describe the same append-only journal.
+    # Re-reading an event from at or before the cursor means those two fences
+    # disagreed, so the result must be partial rather than double-charging it.
+    previous_event_seq = cursor.event_seq
     for raw_line in payload.splitlines():
         if not raw_line:
             continue

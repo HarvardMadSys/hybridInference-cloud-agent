@@ -14,6 +14,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverController,
     GuestObserverCursor,
     GuestObserverProtocolError,
+    GuestObserverRuntimeError,
     GuestObserverSnapshot,
     GuestObserverStatus,
     attribute_processes,
@@ -171,6 +172,31 @@ def test_a_replaced_journal_cannot_look_like_the_same_observer_after_pid_reuse(
     assert "journal changed" in (observation.detail or "")
 
 
+def test_regressed_loss_counters_cannot_look_like_a_complete_observation(monkeypatch):
+    controller = GuestObserverController(
+        capture=lambda *_args: pytest.fail("a reset fence must be rejected before journal read"),
+        privileged=lambda *_args: None,
+    )
+    regressed = _snapshot(
+        status=GuestObserverStatus(
+            pid=91,
+            poll_seq=11,
+            event_seq=9,
+            lost=3,
+            journal_dropped=2,
+            journal_bytes=100,
+            journal_dev=7,
+            journal_ino=19,
+        )
+    )
+    monkeypatch.setattr(controller, "snapshot", lambda **_kwargs: regressed)
+
+    observation = controller.finish(_cursor(observer_pid=91, journal_dev=7, journal_ino=19))
+
+    assert observation.complete is False
+    assert "loss counters reset" in (observation.detail or "")
+
+
 def test_a_journal_replaced_after_the_final_snapshot_is_refused(tmp_path, monkeypatch):
     """The fd opened for the read must still be the cursor's exact journal."""
     replacement = tmp_path / "events.jsonl"
@@ -251,6 +277,28 @@ def test_begin_crosses_a_complete_poll_before_publishing_its_fence(monkeypatch):
     assert cursor.guest_mono_ns == 2_000_000_000
 
 
+def test_active_shared_observations_never_restart_on_a_new_snapshot_failure(monkeypatch):
+    controller = GuestObserverController(
+        capture=lambda *_args: None,
+        privileged=lambda *_args: pytest.fail("an active sibling forbids observer restart"),
+    )
+    monkeypatch.setattr(
+        controller,
+        "ensure",
+        lambda: pytest.fail("restart recovery must stay disabled while a cursor is active"),
+    )
+
+    def unavailable_snapshot(**_kwargs):
+        raise GuestObserverRuntimeError("transient docker exec failure")
+
+    monkeypatch.setattr(controller, "snapshot", unavailable_snapshot)
+
+    cursor = controller.begin(user_uid=11004, restart_if_missing=False)
+
+    assert cursor.available is False
+    assert "transient docker exec failure" in (cursor.detail or "")
+
+
 def test_late_journal_delivery_cannot_charge_a_pre_turn_process():
     payload = b"".join(
         [
@@ -270,6 +318,19 @@ def test_late_journal_delivery_cannot_charge_a_pre_turn_process():
 
     assert observation.complete is True
     assert [process.pid for process in observation.processes] == [42]
+
+
+def test_an_event_at_or_before_the_cursor_sequence_makes_the_slice_partial():
+    observation = finish_observation(
+        cursor=_cursor(event_seq=5),
+        snapshot=_snapshot(),
+        payload=_event(5, "fork", 1_001_000_000),
+        truncated=False,
+    )
+
+    assert observation.complete is False
+    assert observation.truncated is True
+    assert observation.processes == ()
 
 
 def test_a_sub_millisecond_process_survives_without_any_sampler_reading():
