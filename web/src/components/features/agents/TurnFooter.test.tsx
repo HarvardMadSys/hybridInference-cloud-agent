@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 // No user-event dependency in this repo; fireEvent is the house click.
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -550,6 +550,15 @@ describe('per-call resources, through both real adapters', () => {
     expect(screen.getAllByText('Bash').length).toBeGreaterThan(1);
   });
 
+  it('renders and ranks the recorded duration instead of the wider event window', () => {
+    const exactLong = { ...measuredLongCall, timing_source: 'exact', duration_ms: 10 };
+    openTable(withCalls([exactLong, unmeasuredShortCall]));
+
+    expect(screen.getByText('10ms')).toBeInTheDocument();
+    expect(screen.queryByText('9.5s')).toBeNull();
+    expect(screen.getByText(/Longest call:/)).toHaveTextContent('Read · 35ms');
+  });
+
   it('says when the list is not every call the turn made', () => {
     openTable(withCalls([measuredLongCall, unmeasuredShortCall], true));
 
@@ -603,6 +612,12 @@ describe('per-call resources, through both real adapters', () => {
     openTable(withCalls([exact, unmeasuredShortCall]));
 
     expect(screen.getByText(/1 of 2 durations/)).toBeInTheDocument();
+    expect(
+      within(screen.getByText('cargo build').closest('tr')!).getByText('sandbox timing'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByText('src/main.rs').closest('tr')!).getByText('outside bracket'),
+    ).toBeInTheDocument();
   });
 
   it('renders dashes rather than nothing when no measurement was reported', () => {

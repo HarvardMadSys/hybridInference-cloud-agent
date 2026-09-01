@@ -217,23 +217,6 @@ function resourceStats(resources: TurnResources): { label: string; value: string
   ].filter((stat): stat is { label: string; value: string } => Boolean(stat.value));
 }
 
-/**
- * The measurement for one row, or null when the sampler never saw the call.
- *
- * Two readings is the floor for a number to exist at all: one reading of a
- * cumulative counter is a level, not a consumption. Below that the call is
- * unmeasured, which is the ordinary outcome — the sandbox is read once a
- * second and most calls are far shorter than that.
- */
-function measurementFor(
-  timing: ToolTiming,
-  calls: Map<string, ToolCallResources>,
-): ToolCallResources | null {
-  const call = timing.toolUseId ? calls.get(timing.toolUseId) : undefined;
-  if (!call || call.sampleCount < 2) return null;
-  return call;
-}
-
 /** A measured cell, or the dash that says nothing was measured here. */
 function MeasuredCell({ value, shared }: { value: string | null; shared: boolean }) {
   if (value === null) {
@@ -341,10 +324,23 @@ function ToolTimingTable({
     for (const call of calls) index.set(call.toolUseId, call);
     return index;
   }, [calls]);
-  const measurements = timings.map((timing) => measurementFor(timing, byId));
-  const longest = longestCall(timings);
-  const anyUnmeasured = measurements.some((call) => call === null);
-  const anyShared = measurements.some((call) => call !== null && !call.exclusive);
+  const rows = timings.map((timing) => {
+    const recorded = timing.toolUseId ? byId.get(timing.toolUseId) : undefined;
+    return {
+      timing: {
+        ...timing,
+        // A recorded null means the call never returned. Fall back only when
+        // this attempt has no resource row for the call at all.
+        ms: recorded ? recorded.durationMs : timing.ms,
+      },
+      measurement: recorded && recorded.sampleCount >= 2 ? recorded : null,
+      processCount: recorded?.processCount ?? 0,
+      timingSource: recorded?.timingSource ?? 'message',
+    };
+  });
+  const longest = longestCall(rows.map((row) => row.timing));
+  const anyUnmeasured = rows.some((row) => row.measurement === null);
+  const anyShared = rows.some((row) => row.measurement !== null && !row.measurement.exclusive);
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -367,10 +363,8 @@ function ToolTimingTable({
           </tr>
         </thead>
         <tbody>
-          {timings.map((timing, index) => {
-            const call = measurements[index];
-            const observedCall = timing.toolUseId ? byId.get(timing.toolUseId) : undefined;
-            const processCount = observedCall?.processCount ?? 0;
+          {rows.map((row, index) => {
+            const { measurement: call, processCount, timing, timingSource } = row;
             return (
               <tr
                 key={`${timing.tool}-${index}`}
@@ -387,6 +381,9 @@ function ToolTimingTable({
                 </td>
                 <td className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
                   {formatDuration(timing.ms) ?? 'unfinished'}
+                  <span className="block text-[10px] text-gray-400 dark:text-gray-500">
+                    {timingSource === 'exact' ? 'sandbox timing' : 'outside bracket'}
+                  </span>
                 </td>
                 <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
                   {processObservationComplete || processCount > 0 ? processCount : '—'}
