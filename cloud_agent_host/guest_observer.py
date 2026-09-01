@@ -22,11 +22,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host.tool_windows import TOOL_MARK_HELPER
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cloud_agent_host.tool_windows import ToolWindow
-
 
 GUEST_OBSERVER_VERSION = 1
 GUEST_OBSERVER_SOURCE = "kata-guest-ebpf-v1"
@@ -39,8 +40,14 @@ GUEST_OBSERVER_BINARY = "/usr/local/libexec/freeinference-guest-observer"
 # observer itself has a larger lifetime cap; this one bounds one broker result.
 MAX_OBSERVATION_BYTES = 4 * 1024 * 1024
 MAX_OBSERVED_PROCESSES = 4096
+MAX_OBSERVED_TOOL_MARKS = 1000
 MAX_COMM_BYTES = 64
 MAX_EXECUTABLE_BYTES = 512
+
+# Restart an idle retained/shared observer before the C helper's 64 MiB hard
+# cap.  The 16 MiB reserve covers ordinary activity while a later turn is
+# active; an individual hostile storm is still bounded and reported partial.
+GUEST_OBSERVER_ROTATE_BYTES = 48 * 1024 * 1024
 
 
 class GuestObserverProtocolError(ValueError):
@@ -136,6 +143,9 @@ class GuestObservation:
     lost_events: int
     truncated: bool
     processes: tuple[GuestProcess, ...] = ()
+    # Guest-root accepted boundary records, already bridged onto the broker's
+    # monotonic clock.  They share the process journal's UID/loss fence.
+    tool_marks: tuple[tuple[float, str, str], ...] = ()
     origin_guest_mono_ns: int = 0
     clock_error_ns: int = 0
     detail: str | None = None
@@ -330,6 +340,32 @@ class GuestObserverController:
                 problem = str(exc)
                 time.sleep(0.05)
         raise GuestObserverRuntimeError(problem)
+
+    def rotate_if_needed(self, *, threshold: int = GUEST_OBSERVER_ROTATE_BYTES) -> bool:
+        """Reset an idle lifetime journal before its hard cap is exhausted.
+
+        The caller must own the lifecycle guarantee that no cursor is active.
+        This method serializes against starts, rechecks the published fence,
+        and returns whether it replaced the observer.
+        """
+        bounded_threshold = max(1, int(threshold))
+        with self._lock:
+            try:
+                snapshot = self.snapshot(wait_s=0)
+            except Exception:
+                # ``begin`` will perform normal stale/missing recovery. A
+                # failed read is not evidence that a live journal is large.
+                return False
+            if snapshot.journal_size < bounded_threshold:
+                return False
+            try:
+                self.start()
+            except Exception:
+                # Rotation is telemetry maintenance, never a reason to reject
+                # the user's next turn. ``begin`` will retry or return an
+                # explicit unavailable cursor.
+                return False
+            return True
 
     def begin(self, *, user_uid: int) -> GuestObserverCursor:
         """Fence the journal immediately before one prompt is admitted."""
@@ -542,7 +578,7 @@ def parse_events(
     payload: bytes,
     *,
     cursor: GuestObserverCursor,
-) -> tuple[tuple[GuestProcess, ...], bool]:
+) -> tuple[tuple[GuestProcess, ...], tuple[tuple[float, str, str], ...], bool]:
     """Reconstruct every process of ``cursor.uid`` from one journal slice.
 
     The return flag is true when input was malformed or exceeded the process
@@ -550,7 +586,7 @@ def parse_events(
     telemetry never fails the user's agent turn.
     """
     if not cursor.available:
-        return (), False
+        return (), (), False
     malformed = False
     if payload and not payload.endswith(b"\n"):
         # A snapshot may catch the observer in its one short write.  Ignore the
@@ -560,6 +596,7 @@ def parse_events(
         malformed = True
     active: dict[int, _MutableProcess] = {}
     finished: list[_MutableProcess] = []
+    tool_marks: list[tuple[float, str, str]] = []
     next_process_seq = 1
     previous_event_seq = 0
     for raw_line in payload.splitlines():
@@ -583,9 +620,33 @@ def parse_events(
             if uid != cursor.uid:
                 continue
             kind = event.get("kind")
-            if kind not in {"fork", "exec", "exit"}:
+            if kind not in {"fork", "exec", "exit", "tool_pre", "tool_post"}:
                 raise GuestObserverProtocolError("guest process event kind is unknown")
             mono_ns = _integer(event, "mono_ns", positive=True)
+            if kind in {"tool_pre", "tool_post"}:
+                tool_use_id = event.get("tool_use_id")
+                if (
+                    not isinstance(tool_use_id, str)
+                    or not tool_use_id
+                    or len(tool_use_id) > 200
+                    or any(
+                        not (character.isascii() and (character.isalnum() or character in "_-"))
+                        for character in tool_use_id
+                    )
+                ):
+                    raise GuestObserverProtocolError("guest tool mark id is malformed")
+                _integer(event, "pid", positive=True)
+                if len(tool_marks) >= MAX_OBSERVED_TOOL_MARKS:
+                    malformed = True
+                    continue
+                tool_marks.append(
+                    (
+                        (mono_ns + cursor.mono_offset_ns) / 1_000_000_000,
+                        "pre" if kind == "tool_pre" else "post",
+                        tool_use_id,
+                    )
+                )
+                continue
             pid = _integer(event, "pid", positive=True)
             tgid = _integer(event, "tgid", positive=True)
             ppid_raw = _integer(event, "ppid")
@@ -662,7 +723,11 @@ def parse_events(
     bounded = finished[:MAX_OBSERVED_PROCESSES]
     if len(finished) > len(bounded):
         malformed = True
-    return tuple(_finish_process(item, cursor) for item in bounded), malformed
+    return (
+        tuple(_finish_process(item, cursor) for item in bounded),
+        tuple(tool_marks),
+        malformed,
+    )
 
 
 def finish_observation(
@@ -681,7 +746,7 @@ def finish_observation(
         0,
         snapshot.status.journal_dropped - cursor.journal_dropped,
     )
-    processes, malformed = parse_events(payload, cursor=cursor)
+    processes, tool_marks, malformed = parse_events(payload, cursor=cursor)
     was_truncated = truncated or journal_dropped > 0 or malformed
     return GuestObservation(
         source=GUEST_OBSERVER_SOURCE,
@@ -689,6 +754,7 @@ def finish_observation(
         lost_events=lost + journal_dropped,
         truncated=was_truncated,
         processes=processes,
+        tool_marks=tool_marks,
         origin_guest_mono_ns=cursor.guest_mono_ns,
         clock_error_ns=cursor.clock_error_ns,
         detail=(detail[:300] if detail else None),
@@ -717,15 +783,22 @@ def attribute_processes(
     rows: list[dict[str, Any]] = []
     ordered = sorted(observation.processes, key=lambda item: item.process_seq)
     for process in ordered:
+        # Claude's boundary hook is instrumentation, not user workload. The
+        # command shell ``exec``s this immutable helper, so a complete eBPF
+        # lifecycle always leaves this exact executable identity on the row.
+        # Keep the row so the census still says every process existed, but do
+        # not charge it to a tool's workload process count.
+        platform_process = process.executable == TOOL_MARK_HELPER
         call_seqs: list[int] = []
-        for index, window in enumerate(windows, start=1):
-            end = window.closed_mono
-            if process.started_host_mono + error_s < window.opened_mono:
-                continue
-            if end is not None and process.started_host_mono - error_s > end:
-                continue
-            call_seqs.append(index)
-            counts[index] += 1
+        if not platform_process:
+            for index, window in enumerate(windows, start=1):
+                end = window.closed_mono
+                if process.started_host_mono + error_s < window.opened_mono:
+                    continue
+                if end is not None and process.started_host_mono - error_s > end:
+                    continue
+                call_seqs.append(index)
+                counts[index] += 1
         rows.append(
             {
                 "process_seq": process.process_seq,
@@ -772,11 +845,13 @@ __all__ = [
     "GUEST_OBSERVER_BINARY",
     "GUEST_OBSERVER_EVENTS",
     "GUEST_OBSERVER_ROOT",
+    "GUEST_OBSERVER_ROTATE_BYTES",
     "GUEST_OBSERVER_SOURCE",
     "GUEST_OBSERVER_STATUS",
     "GUEST_OBSERVER_VERSION",
     "MAX_OBSERVATION_BYTES",
     "MAX_OBSERVED_PROCESSES",
+    "MAX_OBSERVED_TOOL_MARKS",
     "GuestObservation",
     "GuestObserverController",
     "GuestObserverCursor",

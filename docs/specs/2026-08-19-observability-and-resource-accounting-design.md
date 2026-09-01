@@ -289,9 +289,10 @@ Consequences:
 sandbox (docker, per residency)      runner (a container beside it)     control plane host
 ─────────────────────────────       ───────────────────────────        ──────────────────
 harness + tool children              ResourceSampler (1 Hz, via the      worker API (exists):
-  [claude: hook markers ——►          daemon's /containers/{id}/stats)     events, continuity,
-   container-local journal]          │                                    + NEW resource rollups
-                                     ├─► window rollup at turn/idle close ─► Postgres rows
+  │                                  daemon's /containers/{id}/stats)     events, continuity,
+  ├─ claude marker ─┐                │                                    + NEW resource rollups
+  └─ fork/exec/exit ┴─► guest-root   ├─ process/mark journal reader
+                       eBPF observer ├─► window rollup at turn/idle close ─► Postgres rows
 squid egress                         │                                    agent_job_events (exists)
   access log (bytes/verdict) ──►     egress log parser ─────────────────► net flow rows
                                      │
@@ -327,15 +328,27 @@ runtime; an unreadable backend yields `coverage = 0`, honestly, not zeros.
 **Per-tool mechanics.** For `message`-level drivers, a call's window is
 [`tool_use` arrival, matching `tool_result` arrival] joined on
 `tool_use_id` — includes model "thinking" time before execution starts, which
-is why it is labelled `message`, not `exact`. For claude-code `exact`: the
-sandbox image's settings gain PreToolUse/PostToolUse hooks that append one
-JSON line `{tool, tool_use_id, phase, t_mono}` to an append-only file on the
-container writable layer; the supervisor tails it through Docker exec. Hooks
-are **passive by contract**: log-only command, short timeout, exit 0 always; a
-hook that cannot write must not block the tool (contract test 7). Hook config
-lives in the sandbox image / injected home — platform infrastructure, never
-the user's repository, and patch-gated out of any diff like the rest of the
-injected home.
+is why it is labelled `message`, not `exact`. For claude-code `exact`, each
+PreToolUse/PostToolUse hook `exec`s one immutable, image-bundled helper. The
+helper timestamps before reading stdin and sends one bounded mark to a Unix
+datagram socket owned by the Kata guest-root observer. The observer requires
+kernel-supplied peer credentials, verifies `/proc/<pid>/exe` names the fixed
+helper inode, and appends the mark to the same root-only, loss-accounted journal
+as eBPF fork/exec/exit events. Its lifecycle remains visible in the complete
+census, but that exact executable identity excludes it from per-tool workload
+counts. Trusted
+non-Kata development falls back to the old bounded state-file reader; Kata
+never treats that agent-writable file as an attribution authority.
+
+Hooks remain **passive by contract**: one bounded helper, short timeout, and
+exit 0 for every invalid input or output failure. A hook that cannot record a
+mark leaves the window message-level and must not block the tool. The root-only
+journal prevents repository code from editing, truncating, or directly
+injecting records. Exact tool attribution is still diagnostic rather than a
+security or billing boundary: code running as the Agent CLI's UID can invoke
+the marker helper itself. That limitation cannot be removed while hooks and
+tools intentionally share one UID; the independent eBPF process census remains
+the authoritative record of which processes existed.
 
 **Attribution.** A delta between two samples is assigned to the tool windows
 open during that interval. One open window: exclusive. `n` overlapping
@@ -377,9 +390,12 @@ egress_flows: attempt_id nullable (idle flows keep residency ids), ts_start,
 **Costs, honestly.** 1 Hz × a handful of sandboxes is negligible CPU and no
 sandbox-visible overhead. Postgres grows by one row per attempt, ≤500 per
 attempt for tools, one per egress connection; all bounded, all indexed by
-attempt. The hook file grows within a turn and is truncated at turn close.
+attempt. The trusted non-Kata fallback mark file has a 1 MiB lifetime cap.
 The standing cost of having eyes is one checker loop, one aggregate API,
-and a few console pages — zero new services (O1).
+and a few console pages — zero new services (O1). The guest journal has a
+64 MiB hard cap. Any reusable guest rotates it at 48 MiB only when no turn
+cursor is active; a single process storm that exhausts the remaining reserve
+is reported incomplete rather than silently losing processes.
 
 ## 7. Signal catalog (initial; the allowlist test pins it)
 
@@ -420,7 +436,7 @@ or stopped-container disk/admission saturation.
 |---|---|
 | Sampler crashes mid-turn | Turn unaffected; rollup ships with `coverage < 1`; ops record |
 | Attached export backend down (if any) | emit() drops per SDK policy; Postgres facts, console, and checker unaffected (O1) |
-| Hook file absent / harness without hooks | `source = message` windows; no error |
+| Marker unavailable / harness without hooks | `source = message` windows; no error |
 | Hook cannot execute | Tool proceeds (passive contract); coverage of `exact` windows only |
 | Parallel tool calls | `overlap_n > 1`, shared fields only |
 | Squid log rotation / parse gap | Flow gap; `unclassified` absorbs it; gap counter |

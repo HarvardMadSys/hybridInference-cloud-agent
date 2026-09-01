@@ -7,7 +7,9 @@ import json
 import pytest
 
 from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_SOURCE,
+    GuestObserverController,
     GuestObserverCursor,
     GuestObserverProtocolError,
     GuestObserverSnapshot,
@@ -16,7 +18,7 @@ from cloud_agent_host.guest_observer import (
     finish_observation,
     parse_snapshot,
 )
-from cloud_agent_host.tool_windows import ToolWindow
+from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolWindow
 
 
 def _cursor(**overrides) -> GuestObserverCursor:
@@ -116,6 +118,25 @@ def test_snapshot_refuses_a_status_that_could_make_no_events_look_complete():
         )
 
 
+def test_idle_rotation_failure_never_rejects_the_next_turn(monkeypatch):
+    controller = GuestObserverController(
+        capture=lambda *_args: None,
+        privileged=lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        controller,
+        "snapshot",
+        lambda **_kwargs: _snapshot(journal_size=GUEST_OBSERVER_ROTATE_BYTES),
+    )
+
+    def fail_start():
+        raise RuntimeError("guest restart failed")
+
+    monkeypatch.setattr(controller, "start", fail_start)
+
+    assert controller.rotate_if_needed() is False
+
+
 def test_a_sub_millisecond_process_survives_without_any_sampler_reading():
     payload = b"".join(
         [
@@ -160,6 +181,35 @@ def test_member_uid_is_the_attribution_fence_for_concurrent_siblings():
     )
 
     assert [process.pid for process in observation.processes] == [42]
+
+
+def test_authenticated_guest_marks_share_the_uid_and_monotonic_fence():
+    payload = b"".join(
+        [
+            _event(1, "tool_pre", 1_001_000_000, pid=50, tool_use_id="toolu_1"),
+            _event(
+                2,
+                "tool_post",
+                1_003_000_000,
+                uid=11004,
+                pid=51,
+                tool_use_id="sibling",
+            ),
+            _event(3, "tool_post", 1_004_000_000, pid=50, tool_use_id="toolu_1"),
+        ]
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    assert observation.tool_marks == (
+        (11.001, "pre", "toolu_1"),
+        (11.004, "post", "toolu_1"),
+    )
 
 
 @pytest.mark.parametrize(
@@ -207,6 +257,41 @@ def test_process_start_is_attributed_even_when_it_fits_between_sampler_ticks():
     assert counts == {1: 1}
     assert rows[0]["tool_call_seqs"] == [1]
     assert rows[0]["started_offset_ms"] == 1
+
+
+def test_tool_marker_instrumentation_is_not_counted_as_user_workload():
+    payload = b"".join(
+        [
+            _event(1, "fork", 1_001_000_000, pid=41, tgid=41, filename=""),
+            _event(
+                2,
+                "exec",
+                1_001_100_000,
+                pid=41,
+                tgid=41,
+                comm="freeinference-t",
+                filename=TOOL_MARK_HELPER,
+            ),
+            _event(3, "exit", 1_001_500_000, pid=41, tgid=41),
+            _event(4, "fork", 1_002_000_000, pid=42, tgid=42, filename=""),
+            _event(5, "exec", 1_002_100_000, pid=42, tgid=42),
+            _event(6, "exit", 1_002_600_000, pid=42, tgid=42),
+        ]
+    )
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+    windows = [ToolWindow("one", "Bash", opened_mono=11.000, closed_mono=11.010)]
+
+    rows, counts = attribute_processes(observation, windows)
+
+    assert [row["pid"] for row in rows] == [41, 42]
+    assert rows[0]["executable"] == TOOL_MARK_HELPER
+    assert rows[0]["tool_call_seqs"] == []
+    assert counts == {1: 1}
 
 
 def test_overlapping_tool_windows_keep_ambiguity_instead_of_picking_one():

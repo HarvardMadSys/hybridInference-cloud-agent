@@ -38,6 +38,7 @@ import dataclasses
 import os
 import pathlib
 import re
+import shlex
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -62,11 +63,16 @@ MAX_TOOL_NAME = 120
 MAX_TOOL_MARK_BYTES = 1024 * 1024
 
 
-#: Where the sandbox's hooks append their boundary marks, relative to the
-#: state mount both sides share. Not JSON: three fields, space separated, one
-#: line per mark, appended under ``O_APPEND`` so concurrent tool calls cannot
-#: interleave a line.
+#: Legacy non-Kata fallback for boundary marks, relative to the state mount.
+#: Kata sends the same bounded fields to the guest-root observer instead; the
+#: agent-writable fallback is never trusted there.
 TOOL_MARK_FILE = "tool-marks.log"
+TOOL_MARK_SANDBOX_PATH = f"/agent-state/{TOOL_MARK_FILE}"
+
+#: The immutable image helper used by Claude's command hooks.  ``exec``-ing
+#: this binary gives the eBPF census one recognizable instrumentation process
+#: instead of the former shell + date + sed process tree.
+TOOL_MARK_HELPER = "/usr/local/libexec/freeinference-tool-mark"
 
 #: What the hook is allowed to have extracted. Bounding the charset is what
 #: keeps a tool argument from writing a second line into the mark file: an id
@@ -298,45 +304,24 @@ def tool_time_ms(windows: list[ToolWindow]) -> int:
     return max(0, round(total * 1000))
 
 
-#: The sed program that lifts the call id out of the hook payload on stdin.
-#:
-#: Greedy by design, so it takes the *last* occurrence on the line — which is
-#: the real one: the CLI builds both payloads with ``tool_use_id`` as the final
-#: key, so anything echoing that name inside a tool argument appears earlier.
-#: The bounded charset is the other half: an id that does not match is not
-#: written at all, so a tool argument cannot forge a second line into the file.
-_MARK_SED = r's/.*"tool_use_id": *"\([A-Za-z0-9_-]\{1,200\}\)".*/\1/p'
-
-#: One hook body, with ``PHASE`` and ``MARKS`` substituted before use.
-#:
-#: A shell rather than the node already in the image: node costs tens of
-#: milliseconds to start, and the median tool call is 35 ms, so the observer
-#: would have become the largest thing it measured. Two forked shells cost
-#: about 0.6 ms of it, measured on the sandbox base image.
-#:
-#: The timestamp is taken *before* stdin is read, so the mark is the boundary
-#: rather than the boundary plus however long the payload took to arrive.
-_HOOK_COMMAND = (
-    "t=$(date +%s.%N 2>/dev/null); "
-    "i=$(sed -n '" + _MARK_SED + "' 2>/dev/null); "
-    '[ -n "$t" ] && [ -n "$i" ] && '
-    'printf \'%s %s %s\\n\' "$t" PHASE "$i" >> MARKS 2>/dev/null; '
-    "exit 0"
-)
-
-
 def hook_settings(mark_path: str) -> dict[str, Any]:
     """The claude-code settings that make a turn's tool boundaries visible.
 
-    Passive by contract, and the shape of the command is the contract: it
-    takes its timestamp before it reads anything, extracts the call id with
-    one `sed`, writes one short line, and exits 0 whatever happened. It never
-    inspects a result, never blocks, and cannot fail a tool — a hook that
-    cannot write simply leaves the call message-level.
-
-    The command's shape is the contract; see :data:`_HOOK_COMMAND`.
+    Passive by contract. The shell ``exec`` replaces itself with one immutable
+    image helper, which timestamps before reading stdin and always exits zero.
+    In Kata that helper sends the mark to the guest-root observer; trusted
+    non-Kata development falls back to the bounded legacy state file. If an
+    older image lacks the helper the shell exits zero and the call simply stays
+    message-level.
     """
-    command = _HOOK_COMMAND.replace("MARKS", mark_path)
+    if mark_path != TOOL_MARK_SANDBOX_PATH:
+        raise ValueError("tool mark path must use the fixed sandbox state location")
+    helper = shlex.quote(TOOL_MARK_HELPER)
+    marks = shlex.quote(mark_path)
+
+    def command(phase: str) -> str:
+        return f"if [ -x {helper} ]; then exec {helper} {phase} {marks}; fi; exit 0"
+
     return {
         "hooks": {
             event: [
@@ -345,7 +330,7 @@ def hook_settings(mark_path: str) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": command.replace("PHASE", phase),
+                            "command": command(phase),
                             "timeout": 5,
                         }
                     ],
@@ -363,10 +348,10 @@ class ToolMarkReader:
     a resident session writes every turn's marks to the same file, and reading
     from the top would give turn two the boundaries of turn one.
 
-    The marks carry a wall clock because that is what a shell can cheaply
-    produce; the samples carry a monotonic one. The offset between them is
-    taken once, here, and the tracker refuses any mark that lands outside the
-    window it is meant to narrow — which is what a clock step would produce.
+    Legacy marks carry a wall clock while samples carry a monotonic one. The
+    offset between them is taken once, here, and the tracker refuses any mark
+    that lands outside the window it is meant to narrow. Kata does not use
+    this reader: its guest-root journal carries monotonic marks directly.
     """
 
     def __init__(
@@ -437,6 +422,8 @@ __all__ = [
     "MAX_TOOL_CALLS",
     "MAX_TOOL_MARK_BYTES",
     "TOOL_MARK_FILE",
+    "TOOL_MARK_HELPER",
+    "TOOL_MARK_SANDBOX_PATH",
     "ToolMarkReader",
     "ToolWindow",
     "ToolWindowTracker",

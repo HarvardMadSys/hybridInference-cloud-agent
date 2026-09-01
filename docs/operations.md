@@ -471,13 +471,18 @@ guest, then exercises the same fixed privileged exec used to start the bundled
 observer and requires all three lifecycle probes to attach. A missing BPF
 syscall, BTF image, tracepoint, or exec-time permission is therefore a
 deployment failure before the runner can claim work, not an empty process list
-under a completed turn. See Kata's
+under a completed turn. The same probe also requires the fixed tool-marker
+helper used by Claude's exact boundaries. See Kata's
 [debug-kernel build contract](https://github.com/kata-containers/kata-containers/blob/main/tools/packaging/kernel/README.md#debug-kernel).
 
 Only that fixed, image-bundled observer runs as guest root. Agent CLIs and
 repository code still run under their per-member UIDs with all capabilities
-dropped and `no-new-privileges`; they cannot read or forge the root-only
-journal. Kata containers retain `CAP_BPF` in the bounding set only so Docker's
+dropped and `no-new-privileges`; they cannot read, edit, or directly inject
+records into the root-only journal. Claude's fixed non-root marker helper talks
+to it over a credential-checked Unix socket. A same-UID tool can still execute
+that helper, so exact per-tool association is diagnostic, never a security or
+billing authority; the eBPF lifecycle census itself is independent of marks.
+Kata containers retain `CAP_BPF` in the bounding set only so Docker's
 creation-time seccomp profile admits the later helper syscall. Non-root agent
 processes still have empty permitted and effective capability sets, and
 `no-new-privileges` prevents them from promoting that bounding bit. CPU and

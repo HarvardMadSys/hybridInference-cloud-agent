@@ -10,10 +10,14 @@ genuinely used no CPU.
 
 from __future__ import annotations
 
+import pytest
+
 from cloud_agent_host.resources import Sample
 from cloud_agent_host.tool_windows import (
     MAX_TOOL_CALLS,
     TOOL_MARK_FILE,
+    TOOL_MARK_HELPER,
+    TOOL_MARK_SANDBOX_PATH,
     ToolMarkReader,
     ToolWindow,
     ToolWindowTracker,
@@ -366,8 +370,8 @@ def test_a_missing_mark_file_is_simply_no_marks(tmp_path):
 
 
 def test_the_hook_is_passive_by_construction():
-    """It writes and exits 0; it never inspects a result or blocks a call."""
-    settings = hook_settings("/agent-state/tool-marks.log")
+    """It execs one fixed helper and cannot fail or block a tool call."""
+    settings = hook_settings(TOOL_MARK_SANDBOX_PATH)
     commands = [
         entry["hooks"][0]["command"]
         for entry in (*settings["hooks"]["PreToolUse"], *settings["hooks"]["PostToolUse"])
@@ -375,20 +379,23 @@ def test_the_hook_is_passive_by_construction():
     assert len(commands) == 2
     for command in commands:
         assert command.endswith("exit 0")
-        assert ">> /agent-state/tool-marks.log" in command
+        assert f"exec {TOOL_MARK_HELPER}" in command
+        assert "/agent-state/tool-marks.log" in command
+        assert "$(" not in command
+        assert "sed" not in command
+        assert "date" not in command
         assert "rm " not in command
     assert " pre " in commands[0] and " post " in commands[1]
 
 
-def test_the_hook_takes_its_timestamp_before_it_reads_anything():
-    """Otherwise the mark is the boundary plus however long stdin took."""
-    command = hook_settings("/m")["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    assert command.index("date +%s.%N") < command.index("sed -n")
+def test_the_hook_rejects_any_non_platform_mark_path():
+    with pytest.raises(ValueError, match="fixed sandbox state"):
+        hook_settings("/agent-state/path with spaces.log")
 
 
 def test_every_hook_carries_a_timeout():
     """A hook without one could hold a tool call for as long as it liked."""
-    settings = hook_settings("/m")
+    settings = hook_settings(TOOL_MARK_SANDBOX_PATH)
     for event in ("PreToolUse", "PostToolUse"):
         assert settings["hooks"][event][0]["hooks"][0]["timeout"] == 5
 

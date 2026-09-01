@@ -229,10 +229,16 @@ def test_observed_live_kata_turn_refences_without_destroying_the_guest(monkeypat
             truncated=False,
         )
 
+    def rotate(_controller, *, threshold):
+        assert threshold == sandbox_mod.GUEST_OBSERVER_ROTATE_BYTES
+        events.append("rotate")
+        return False
+
     monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(sandbox_mod.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(sandbox_mod.GuestObserverController, "begin", begin)
     monkeypatch.setattr(sandbox_mod.GuestObserverController, "finish", finish)
+    monkeypatch.setattr(sandbox_mod.GuestObserverController, "rotate_if_needed", rotate)
     backend = ContainerBackend(image="img:1", network="agent-net", runtime=KATA_RUNTIME)
     process = backend.spawn(
         SandboxSpec(
@@ -247,11 +253,11 @@ def test_observed_live_kata_turn_refences_without_destroying_the_guest(monkeypat
     assert events == ["begin", "finish"]
     process.begin_guest_observation()
     process.finish_guest_observation()
-    assert events == ["begin", "finish", "begin", "finish"]
+    assert events == ["begin", "finish", "rotate", "begin", "finish"]
 
     process.begin_guest_observation()
     process.kill()
-    assert events[-4:] == ["begin", "terminate", "finish", "remove"]
+    assert events[-5:] == ["rotate", "begin", "terminate", "finish", "remove"]
 
 
 def test_container_terminal_keeps_isolation_and_adds_a_named_tty():
@@ -771,7 +777,9 @@ def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_imag
         if argv[1] == "exec":
             return SimpleNamespace(
                 returncode=0,
-                stdout="guest-kernel\nfreeinference-guest-observer-v1\n",
+                stdout=(
+                    "guest-kernel\nfreeinference-guest-observer-v1\nfreeinference-tool-mark-v1\n"
+                ),
                 stderr="",
             )
         if argv[1:3] == ["network", "inspect"]:
@@ -798,6 +806,7 @@ def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_imag
     assert "--privileged" in probe
     assert probe[probe.index("--user") + 1] == "0:0"
     assert "freeinference-guest-observer" in probe[-1]
+    assert "freeinference-tool-mark" in probe[-1]
     assert any(argv[1:3] == ["rm", "--force"] for argv in calls)
     stamp = backend.version_stamp()
     assert stamp["host_kernel"] == "host-kernel"
@@ -1371,6 +1380,7 @@ def _inspect_json(**overrides):
                 "org.freeinference.runtime.codex.version": "0.5.0",
                 "org.freeinference.helper.claude-agent-sdk.version": "0.2.148",
                 "org.freeinference.helper.guest-observer.version": "1",
+                "org.freeinference.helper.tool-mark.version": "1",
                 "org.freeinference.runtime..version": "nameless",
                 "org.opencontainers.image.source": "irrelevant",
             }
@@ -1400,6 +1410,7 @@ def test_version_stamp_reads_runtime_digest_and_baked_versions(monkeypatch):
     assert stamp["helper_versions"] == {
         "claude-agent-sdk": "0.2.148",
         "guest-observer": "1",
+        "tool-mark": "1",
     }
     backend.version_stamp()
     assert len(calls) == 1  # cached — the image is pinned for this process

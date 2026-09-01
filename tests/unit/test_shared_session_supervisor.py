@@ -943,7 +943,21 @@ def test_turn_boundary_preserves_reviewed_resident_tree_and_reaps_new_processes(
 
 
 def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup():
-    manager = _Manager()
+    class Manager(_Manager):
+        def finish_guest_observation(self, spec, cursor):
+            observation = super().finish_guest_observation(spec, cursor)
+            return replace(
+                observation,
+                tool_marks=(
+                    (10.0, "pre", "toolu_1"),
+                    (10.1, "post", "toolu_1"),
+                ),
+            )
+
+        def tool_mark_reader(self, _spec):
+            raise AssertionError("Kata must not trust the agent-owned mark file")
+
+    manager = Manager()
     manager.backend.runtime = KATA_RUNTIME
     factory = _TransportFactory()
     supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
@@ -968,9 +982,13 @@ def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup(
         model="glm-5.1",
         reasoning_effort=None,
     )
-    observation = supervisor.complete_turn("athr_source", lease.token, turn)
+    telemetry = supervisor.complete_turn("athr_source", lease.token, turn)
 
-    assert observation.complete is True
+    assert telemetry.complete is True
+    assert telemetry.tool_marks == (
+        (10.0, "pre", "toolu_1"),
+        (10.1, "post", "toolu_1"),
+    )
     assert manager.events[-5:] == [
         ("census", 0),
         ("observe-begin", 11001),

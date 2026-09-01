@@ -86,6 +86,7 @@ from cloud_agent_host.runtimes import (
     registered_runtimes,
 )
 from cloud_agent_host.sandbox import (
+    KATA_RUNTIME,
     SANDBOX_PATH,
     ContainerBackend,
     SandboxBackend,
@@ -1363,14 +1364,19 @@ def run_agent(
                 print(f"resident guest process observer unavailable: {exc}", file=sys.stderr)
     # Constructed before the turn so it remembers where the mark file already
     # ended: a resident session writes every turn's marks to the same file.
+    kata_tool_marks = getattr(backend, "runtime", None) == KATA_RUNTIME
     mark_reader = (
-        getattr(backend, "tool_mark_reader", None) if runtime.name == "claude-code" else None
+        getattr(backend, "tool_mark_reader", None)
+        if runtime.name == "claude-code" and not kata_tool_marks
+        else None
     )
     try:
         tool_marks = (
             mark_reader()
             if mark_reader is not None
-            else ToolMarkReader(state_dir if runtime.name == "claude-code" else None)
+            else ToolMarkReader(
+                state_dir if runtime.name == "claude-code" and not kata_tool_marks else None
+            )
         )
     except Exception as exc:
         print(f"exact tool marks unavailable: {exc}", file=sys.stderr)
@@ -1438,8 +1444,13 @@ def run_agent(
                     observation = GuestObservation.unavailable(str(exc))
                 if observation is not None:
                     observations.append(observation)
-            # Marks first: they narrow the windows the attribution then reads.
-            tool_windows.apply_marks(tool_marks.read())
+            # Kata marks come from the guest-root journal under the same UID
+            # and loss fence as process events. Never mix in the agent-writable
+            # legacy file there; it remains only the trusted-runc fallback.
+            marks = list(tool_marks.read())
+            for observation in observations:
+                marks.extend(observation.tool_marks)
+            tool_windows.apply_marks(marks)
             windows = tool_windows.windows()
             # After ``stop``, because it takes the window's closing reading:
             # attributing before it would hide whatever the last call did.

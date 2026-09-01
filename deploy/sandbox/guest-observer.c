@@ -8,20 +8,25 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "guest-observer.h"
+#include "tool-mark.h"
 
 #define OBSERVER_ROOT "/run/freeinference-observer"
 #define EVENTS_PATH OBSERVER_ROOT "/events.jsonl"
@@ -29,12 +34,14 @@
 #define BPF_OBJECT_PATH "/usr/local/libexec/freeinference-guest-observer.bpf.o"
 #define MAX_JOURNAL_BYTES (64ULL * 1024ULL * 1024ULL)
 #define MAX_LINKS 8
+#define MAX_TOOL_MARKS_PER_POLL 1024
 
 static volatile sig_atomic_t exiting;
 
 struct observer {
     int events_fd;
     int lost_map_fd;
+    int tool_mark_fd;
     uint64_t event_seq;
     uint64_t poll_seq;
     uint64_t journal_bytes;
@@ -196,6 +203,148 @@ static int journal_event(void *context, void *payload, size_t payload_size)
     return 0;
 }
 
+static bool tool_mark_id_valid(const char tool_use_id[FI_TOOL_MARK_ID_BYTES])
+{
+    size_t length = strnlen(tool_use_id, FI_TOOL_MARK_ID_BYTES);
+
+    if (length == 0 || length >= FI_TOOL_MARK_ID_BYTES)
+        return false;
+    for (size_t index = 0; index < length; ++index) {
+        unsigned char byte = (unsigned char)tool_use_id[index];
+
+        if (!((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+              (byte >= '0' && byte <= '9') || byte == '_' || byte == '-'))
+            return false;
+    }
+    return true;
+}
+
+static bool trusted_tool_mark_sender(pid_t pid)
+{
+    char executable[64];
+    struct stat expected;
+    struct stat actual;
+    int length;
+
+    if (pid <= 1 || stat(FI_TOOL_MARK_HELPER, &expected) < 0)
+        return false;
+    length = snprintf(executable, sizeof(executable), "/proc/%ld/exe", (long)pid);
+    if (length <= 0 || (size_t)length >= sizeof(executable) ||
+        stat(executable, &actual) < 0)
+        return false;
+    return expected.st_dev == actual.st_dev && expected.st_ino == actual.st_ino;
+}
+
+static int journal_tool_mark(struct observer *observer,
+                             const struct fi_tool_mark *mark,
+                             const struct ucred *credential)
+{
+    const char *kind = mark->phase == FI_TOOL_MARK_PRE ? "tool_pre" : "tool_post";
+    char line[512];
+    int length;
+
+    observer->event_seq += 1;
+    length = snprintf(
+        line,
+        sizeof(line),
+        "{\"version\":%d,\"seq\":%" PRIu64 ",\"kind\":\"%s\","
+        "\"mono_ns\":%" PRIu64 ",\"uid\":%u,\"pid\":%ld,"
+        "\"tool_use_id\":\"%s\"}\n",
+        FI_OBSERVER_VERSION,
+        observer->event_seq,
+        kind,
+        mark->mono_ns,
+        (unsigned int)credential->uid,
+        (long)credential->pid,
+        mark->tool_use_id);
+    if (length <= 0 || (size_t)length >= sizeof(line) ||
+        observer->journal_bytes + (uint64_t)length > MAX_JOURNAL_BYTES)
+        return -1;
+    if (write_all(observer->events_fd, line, (size_t)length) < 0)
+        return -1;
+    observer->journal_bytes += (uint64_t)length;
+    return 0;
+}
+
+static int open_tool_mark_socket(void)
+{
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    int enabled = 1;
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+
+    if (fd < 0)
+        return -1;
+    if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &enabled, sizeof(enabled)) < 0)
+        goto error;
+    memcpy(address.sun_path, FI_TOOL_MARK_SOCKET, sizeof(FI_TOOL_MARK_SOCKET));
+    if (unlink(FI_TOOL_MARK_SOCKET) < 0 && errno != ENOENT)
+        goto error;
+    if (bind(fd, (const struct sockaddr *)&address,
+             offsetof(struct sockaddr_un, sun_path) + sizeof(FI_TOOL_MARK_SOCKET)) < 0)
+        goto error;
+    if (chmod(FI_TOOL_MARK_SOCKET, 0222) < 0)
+        goto error;
+    return fd;
+
+error:
+    close(fd);
+    unlink(FI_TOOL_MARK_SOCKET);
+    return -1;
+}
+
+static void drain_tool_marks(struct observer *observer)
+{
+    for (unsigned int count = 0; count < MAX_TOOL_MARKS_PER_POLL; ++count) {
+        struct fi_tool_mark mark = {0};
+        struct iovec iov = {.iov_base = &mark, .iov_len = sizeof(mark)};
+        struct sockaddr_un peer = {0};
+        char control[CMSG_SPACE(sizeof(struct ucred))] = {0};
+        struct msghdr message = {
+            .msg_name = &peer,
+            .msg_namelen = sizeof(peer),
+            .msg_iov = &iov,
+            .msg_iovlen = 1,
+            .msg_control = control,
+            .msg_controllen = sizeof(control),
+        };
+        struct ucred *credential = NULL;
+        ssize_t received = recvmsg(observer->tool_mark_fd, &message, MSG_DONTWAIT);
+
+        if (received < 0 && errno == EINTR) {
+            count -= count > 0 ? 1U : 0U;
+            continue;
+        }
+        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return;
+        if (received < 0)
+            return;
+        for (struct cmsghdr *header = CMSG_FIRSTHDR(&message); header != NULL;
+             header = CMSG_NXTHDR(&message, header)) {
+            if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_CREDENTIALS &&
+                header->cmsg_len >= CMSG_LEN(sizeof(struct ucred))) {
+                credential = (struct ucred *)CMSG_DATA(header);
+                break;
+            }
+        }
+        if (received != (ssize_t)sizeof(mark) || (message.msg_flags & MSG_TRUNC) != 0 ||
+            message.msg_namelen == 0 ||
+            credential == NULL || mark.version != FI_TOOL_MARK_VERSION ||
+            (mark.phase != FI_TOOL_MARK_PRE && mark.phase != FI_TOOL_MARK_POST) ||
+            mark.mono_ns == 0 || !tool_mark_id_valid(mark.tool_use_id) ||
+            !trusted_tool_mark_sender(credential->pid)) {
+            observer->journal_dropped += 1;
+            continue;
+        }
+        char acknowledged = 1;
+        if (journal_tool_mark(observer, &mark, credential) < 0) {
+            observer->journal_dropped += 1;
+            acknowledged = 2;
+        }
+        (void)sendto(observer->tool_mark_fd, &acknowledged, 1, MSG_NOSIGNAL,
+                     (const struct sockaddr *)&peer, message.msg_namelen);
+    }
+}
+
 static uint64_t lost_total(int map_fd)
 {
     int cpus = libbpf_num_possible_cpus();
@@ -278,7 +427,7 @@ int main(int argc, char **argv)
     struct ring_buffer *ring = NULL;
     struct bpf_program *program;
     struct bpf_link *links[MAX_LINKS] = {0};
-    struct observer observer = {.events_fd = -1, .lost_map_fd = -1};
+    struct observer observer = {.events_fd = -1, .lost_map_fd = -1, .tool_mark_fd = -1};
     size_t link_count = 0;
     bool self_test = argc == 2 && strcmp(argv[1], "--self-test") == 0;
     int result = 1;
@@ -345,9 +494,19 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     observer.journal_bytes = (uint64_t)journal.st_size;
+    observer.tool_mark_fd = open_tool_mark_socket();
+    if (observer.tool_mark_fd < 0) {
+        perror("open tool mark socket");
+        goto cleanup;
+    }
     ring = ring_buffer__new(ring_map_fd, journal_event, &observer, NULL);
     if (!ring) {
         fprintf(stderr, "cannot open guest observer ring buffer\n");
+        goto cleanup;
+    }
+    int ring_poll_fd = ring_buffer__epoll_fd(ring);
+    if (ring_poll_fd < 0) {
+        fprintf(stderr, "cannot poll guest observer ring buffer\n");
         goto cleanup;
     }
     signal(SIGINT, handle_signal);
@@ -358,11 +517,30 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     while (!exiting) {
-        int polled = ring_buffer__poll(ring, 50);
+        struct pollfd waiters[] = {
+            {.fd = ring_poll_fd, .events = POLLIN},
+            {.fd = observer.tool_mark_fd, .events = POLLIN},
+        };
+        int polled = poll(waiters, 2, 50);
 
-        if (polled < 0 && polled != -EINTR) {
-            fprintf(stderr, "guest observer ring poll failed: %d\n", polled);
+        if (polled < 0 && errno != EINTR) {
+            perror("guest observer poll");
             goto cleanup;
+        }
+        if ((waiters[0].revents | waiters[1].revents) &
+            (POLLERR | POLLHUP | POLLNVAL)) {
+            fprintf(stderr, "guest observer poll descriptor failed\n");
+            goto cleanup;
+        }
+        if ((waiters[1].revents & POLLIN) != 0)
+            drain_tool_marks(&observer);
+        if ((waiters[0].revents & POLLIN) != 0) {
+            int consumed = ring_buffer__consume(ring);
+
+            if (consumed < 0) {
+                fprintf(stderr, "guest observer ring consume failed: %d\n", consumed);
+                goto cleanup;
+            }
         }
         observer.poll_seq += 1;
         if (publish_status(&observer) < 0) {
@@ -373,11 +551,15 @@ int main(int argc, char **argv)
     result = 0;
 
 cleanup:
-    if (!self_test)
+    if (!self_test) {
         unlink(STATUS_PATH);
+        unlink(FI_TOOL_MARK_SOCKET);
+    }
     ring_buffer__free(ring);
     if (observer.events_fd >= 0)
         close(observer.events_fd);
+    if (observer.tool_mark_fd >= 0)
+        close(observer.tool_mark_fd);
     destroy_links(links, link_count);
     bpf_object__close(object);
     return result;

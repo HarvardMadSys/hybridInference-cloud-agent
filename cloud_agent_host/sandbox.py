@@ -53,12 +53,14 @@ from cloud_agent_host.egress_proxy import CANARY_HOST
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
+    GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_VERSION,
     GuestObservation,
     GuestObserverController,
     GuestObserverCursor,
 )
 from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.tool_windows import TOOL_MARK_HELPER
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -636,6 +638,8 @@ class _ObservedContainerProcess(_PopenProcess):
                 self._last_observation = GuestObservation.unavailable(
                     "previous resident Kata turn did not close its observer fence"
                 )
+            else:
+                self._controller.rotate_if_needed(threshold=GUEST_OBSERVER_ROTATE_BYTES)
             self._cursor = self._controller.begin(user_uid=self._cursor_uid)
             return self._cursor
 
@@ -1307,10 +1311,15 @@ class ContainerBackend(SandboxBackend):
             return
         if self.runtime == KATA_RUNTIME:
             expected_observer = f"freeinference-guest-observer-v{GUEST_OBSERVER_VERSION}"
-            if len(lines) != 2 or lines[1] != expected_observer:
+            if (
+                len(lines) != 3
+                or lines[1] != expected_observer
+                or lines[2] != "freeinference-tool-mark-v1"
+            ):
                 raise SandboxError(
-                    "the Kata guest kernel could not start the eBPF process observer; "
-                    "install a Kata debug/eBPF kernel with BTF support"
+                    "the Kata guest could not start the eBPF process observer and "
+                    "trusted tool-marker helper; install the matching sandbox image "
+                    "and a Kata debug/eBPF kernel with BTF support"
                 )
         self._kernel_probe["guest_kernel"] = guest_kernel
 
@@ -1380,7 +1389,8 @@ class ContainerBackend(SandboxBackend):
                     container_name,
                     "/bin/sh",
                     "-c",
-                    f"uname -r && exec {GUEST_OBSERVER_BINARY} --self-test",
+                    f"uname -r && {GUEST_OBSERVER_BINARY} --self-test "
+                    f"&& exec {TOOL_MARK_HELPER} --self-test",
                 ],
                 capture_output=True,
                 text=True,

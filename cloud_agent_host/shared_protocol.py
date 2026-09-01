@@ -20,4 +20,5 @@ SHARED_SANDBOX_RUNTIME_PINS = {
 SHARED_SANDBOX_HELPER_PINS = {
     "claude-agent-sdk": "0.2.148",
     "guest-observer": "1",
+    "tool-mark": "1",
 }

@@ -520,6 +520,7 @@ class SharedChatSessionSupervisor:
             group.idle_deadline = None
         if not member.turn_lock.acquire(blocking=False):
             raise SessionBusy(f"chat {thread_id!r} already has a running turn")
+        observer_cursor: GuestObserverCursor | None = None
         try:
             activation_processes = self._manager.capture_member_processes(
                 group.spec,
@@ -527,11 +528,14 @@ class SharedChatSessionSupervisor:
                 user_uid=MEMBER_UID_BASE + member.resident_slot_id,
                 user_gid=self._manager.backend.gid,
             )
-            observer_cursor: GuestObserverCursor | None = None
             mark_reader_factory = getattr(self._manager, "tool_mark_reader", None)
             tool_mark_reader = (
                 mark_reader_factory(group.spec)
-                if mark_reader_factory is not None and transport.launch.runtime_id == "claude-code"
+                if (
+                    mark_reader_factory is not None
+                    and transport.launch.runtime_id == "claude-code"
+                    and self._manager.backend.runtime != KATA_RUNTIME
+                )
                 else None
             )
             if self._manager.backend.runtime == KATA_RUNTIME:
@@ -566,6 +570,9 @@ class SharedChatSessionSupervisor:
                 reasoning_effort=reasoning_effort,
             )
         except Exception:
+            if observer_cursor is not None:
+                with contextlib.suppress(Exception):
+                    self._manager.finish_guest_observation(group.spec, observer_cursor)
             member.turn_lock.release()
             raise
         admitted = False
@@ -590,6 +597,9 @@ class SharedChatSessionSupervisor:
         if not admitted:
             with contextlib.suppress(Exception):
                 turn.interrupt()
+            if observer_cursor is not None:
+                with contextlib.suppress(Exception):
+                    self._manager.finish_guest_observation(group.spec, observer_cursor)
             with contextlib.suppress(Exception):
                 self._manager.reap_member_processes_except(
                     group.spec,
@@ -641,7 +651,10 @@ class SharedChatSessionSupervisor:
                     observation = GuestObservation.unavailable(str(exc))
         telemetry = SharedTurnTelemetry(
             observation=observation,
-            tool_marks=tuple(tool_mark_reader.read() if tool_mark_reader is not None else ()),
+            tool_marks=(
+                tuple(tool_mark_reader.read() if tool_mark_reader is not None else ())
+                + observation.tool_marks
+            ),
         )
         boundary_error: Exception | None = None
         try:

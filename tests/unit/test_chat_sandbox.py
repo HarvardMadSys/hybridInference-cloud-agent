@@ -29,6 +29,8 @@ from cloud_agent_host.egress import EgressPolicy, EgressTier
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
+    GUEST_OBSERVER_ROTATE_BYTES,
+    GuestObservation,
     GuestObserverController,
     GuestObserverCursor,
     GuestObserverSnapshot,
@@ -293,6 +295,67 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
     assert "published fence" in (observation.detail or "")
 
 
+def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
+    )
+
+    class Controller:
+        def __init__(self):
+            self.pid = 91
+            self.size = 0
+            self.starts = 0
+
+        def snapshot(self, **_kwargs):
+            return GuestObserverSnapshot(
+                status=GuestObserverStatus(self.pid, 1, 0, 0, 0, self.size),
+                journal_size=self.size,
+                guest_mono_ns=1,
+            )
+
+        def start(self):
+            self.starts += 1
+            self.pid += 1
+            self.size = 0
+
+        def rotate_if_needed(self, *, threshold):
+            if self.size < threshold:
+                return False
+            self.start()
+            return True
+
+        def begin(self, *, user_uid):
+            return GuestObserverCursor(
+                uid=user_uid,
+                observer_pid=self.pid,
+                offset=self.size,
+                available=True,
+            )
+
+        def finish(self, _cursor):
+            return GuestObservation(
+                source="kata-guest-ebpf-v1",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+            )
+
+    controller = Controller()
+    monkeypatch.setattr(manager, "_guest_observer_controller", lambda _spec: controller)
+
+    first = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
+    controller.size = GUEST_OBSERVER_ROTATE_BYTES
+    second = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE + 1)
+    assert controller.starts == 0
+
+    manager.finish_guest_observation(_spec(), first)
+    manager.finish_guest_observation(_spec(), second)
+    third = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
+
+    assert controller.starts == 1
+    assert third.observer_pid == 92
+
+
 def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):
     """Capabilityless guest root cannot traverse the 2770 agent-state tree."""
     manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
@@ -311,6 +374,19 @@ def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):
         (manager.backend.uid, manager.backend.gid),
         (manager.backend.uid, manager.backend.gid),
     ]
+
+
+def test_kata_never_reads_the_agent_writable_tool_mark_file(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="agent-net", runtime=KATA_RUNTIME)
+    )
+    monkeypatch.setattr(
+        manager,
+        "exec_capture",
+        lambda *_args, **_kwargs: pytest.fail("Kata mark file must not be read"),
+    )
+
+    assert manager.tool_mark_reader(_spec()).read() == []
 
 
 def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch, tmp_path):

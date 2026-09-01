@@ -40,12 +40,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY deploy/sandbox/guest-observer.h \
      deploy/sandbox/guest-observer.bpf.c \
-     deploy/sandbox/guest-observer.c ./
+     deploy/sandbox/guest-observer.c \
+     deploy/sandbox/tool-mark.h \
+     deploy/sandbox/tool-mark.c ./
 RUN clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
         -I"/usr/include/$(gcc -dumpmachine)" \
         -c guest-observer.bpf.c -o freeinference-guest-observer.bpf.o \
     && gcc -O2 -Wall -Wextra -Werror guest-observer.c \
-        -o freeinference-guest-observer -lbpf -lelf -lz
+        -o freeinference-guest-observer -lbpf -lelf -lz \
+    && gcc -O2 -Wall -Wextra -Werror tool-mark.c \
+        -o freeinference-tool-mark
 
 FROM node:22-bookworm-slim
 
@@ -181,6 +185,7 @@ RUN python3 -m venv /opt/claude-agent-sdk \
 LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.helper.claude-agent-sdk.version="0.2.148" \
       org.freeinference.helper.guest-observer.version="1" \
+      org.freeinference.helper.tool-mark.version="1" \
       org.freeinference.runtime.codex.version="${CODEX_VERSION}" \
       org.freeinference.runtime.pi.version="${PI_VERSION}" \
       org.freeinference.runtime.opencode.version="${OPENCODE_VERSION}" \
@@ -209,10 +214,13 @@ COPY --from=guest-observer-build /src/freeinference-guest-observer \
      /usr/local/libexec/freeinference-guest-observer
 COPY --from=guest-observer-build /src/freeinference-guest-observer.bpf.o \
      /usr/local/libexec/freeinference-guest-observer.bpf.o
+COPY --from=guest-observer-build /src/freeinference-tool-mark \
+     /usr/local/libexec/freeinference-tool-mark
 RUN chmod 0755 /usr/local/bin/pi-freeinference /usr/local/bin/opencode-freeinference \
         /usr/local/bin/kilo-freeinference /usr/local/bin/http-agent-live-bridge \
         /usr/local/bin/claude-session-fork \
         /usr/local/libexec/freeinference-guest-observer \
+        /usr/local/libexec/freeinference-tool-mark \
     && chmod 0644 /usr/local/libexec/freeinference-guest-observer.bpf.o
 
 # `--ignore-user-config` does not suppress a trusted repository's

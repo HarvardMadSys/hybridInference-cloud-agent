@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_ROOT,
+    GUEST_OBSERVER_ROTATE_BYTES,
     GuestObservation,
     GuestObserverController,
     GuestObserverCursor,
@@ -216,7 +217,11 @@ class ChatSandboxManager:
         # Only one of them may perform the singleton helper's cleanup/start
         # sequence; otherwise two healthy turns can restart each other's
         # observer before either prompt reaches the resident CLI.
-        self._guest_observer_lock = threading.Lock()
+        self._guest_observer_lock = threading.RLock()
+        # Per-container cursors prevent journal rotation from invalidating a
+        # concurrent shared-live turn. Values retain the observer pid too, so
+        # a helper restart makes stale cursor bookkeeping self-cleaning.
+        self._guest_observer_active: dict[str, dict[int, int]] = {}
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.
@@ -1526,7 +1531,26 @@ class ChatSandboxManager:
         """Fence the journal immediately before one member prompt is admitted."""
         if self.backend.runtime != KATA_RUNTIME:
             return GuestObserverCursor.unavailable(user_uid, "sandbox is not a Kata guest")
-        return self._guest_observer_controller(spec).begin(user_uid=user_uid)
+        controller = self._guest_observer_controller(spec)
+        key = spec.container_name
+        with self._guest_observer_lock:
+            active = self._guest_observer_active.setdefault(key, {})
+            if not active:
+                controller.rotate_if_needed(threshold=GUEST_OBSERVER_ROTATE_BYTES)
+            cursor = controller.begin(user_uid=user_uid)
+            if cursor.available:
+                # A restart invalidates every old-pid cursor already; do not
+                # let abandoned bookkeeping suppress future safe rotations.
+                active = {
+                    token: observer_pid
+                    for token, observer_pid in active.items()
+                    if observer_pid == cursor.observer_pid
+                }
+                active[id(cursor)] = cursor.observer_pid
+                self._guest_observer_active[key] = active
+            elif not active:
+                self._guest_observer_active.pop(key, None)
+            return cursor
 
     def finish_guest_observation(
         self,
@@ -1534,10 +1558,25 @@ class ChatSandboxManager:
         cursor: GuestObserverCursor | None,
     ) -> GuestObservation:
         """Drain and read exactly one cursor's bounded member event slice."""
-        return self._guest_observer_controller(spec).finish(cursor)
+        try:
+            return self._guest_observer_controller(spec).finish(cursor)
+        finally:
+            if cursor is not None:
+                key = spec.container_name
+                with self._guest_observer_lock:
+                    active = self._guest_observer_active.get(key)
+                    if active is not None:
+                        active.pop(id(cursor), None)
+                        if not active:
+                            self._guest_observer_active.pop(key, None)
 
     def tool_mark_reader(self, spec: ChatSandboxSpec) -> ToolMarkReader:
         """Return a bounded reader for hook marks inside one retained container."""
+        if self.backend.runtime == KATA_RUNTIME:
+            # Kata accepts marks only through the guest-root observer socket.
+            # The agent-owned compatibility file is deliberately not an
+            # attribution authority in an untrusted sandbox.
+            return ToolMarkReader(None)
         path = f"{CHAT_STATE_DIR}/{TOOL_MARK_FILE}"
 
         def remote_size() -> int:
@@ -1596,8 +1635,9 @@ class ChatSandboxManager:
 
         Docker-owned retained state has no corresponding host path. Writing it
         with :mod:`pathlib` on the broker would configure the broker itself,
-        not the Agent CLI. A group-writable mark file is created at the same
-        boundary so concurrent shared members can append one atomic line each.
+        not the Agent CLI. A group-writable compatibility file supports trusted
+        non-Kata development. Kata ignores that file and accepts marks only in
+        the guest-root observer journal.
         """
         payload = json.dumps(update, separators=(",", ":")).encode()
         if len(payload) > 64 * 1024:
