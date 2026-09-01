@@ -998,7 +998,7 @@ def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup(
     ]
 
 
-def test_lost_shared_residency_releases_its_active_observer_cursor():
+def test_lost_shared_residency_preserves_observation_until_turn_closes():
     manager = _Manager()
     manager.backend.runtime = KATA_RUNTIME
     factory = _TransportFactory()
@@ -1016,7 +1016,7 @@ def test_lost_shared_residency_releases_its_active_observer_cursor():
         lease.token,
         _launch("athr_source", native_session_id="native-source", slot=0),
     )
-    supervisor.start_turn(
+    turn = supervisor.start_turn(
         "athr_source",
         lease.token,
         prompt="work",
@@ -1026,7 +1026,17 @@ def test_lost_shared_residency_releases_its_active_observer_cursor():
 
     supervisor.residency_lost("athr_source", generation=1)
 
-    assert manager.events[-1] == ("observe-finish", 11001)
+    assert turn.interrupted is True
+    assert manager.events[-1] == ("observe-begin", 11001)
+
+    telemetry = supervisor.complete_turn("athr_source", lease.token, turn)
+
+    assert telemetry.complete is True
+    assert manager.events[-3:] == [
+        ("observe-finish", 11001),
+        ("reap-except", 0, ((41, 400),)),
+        ("normalize", 0),
+    ]
 
 
 def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch):

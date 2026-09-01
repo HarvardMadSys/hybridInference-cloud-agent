@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -168,6 +169,107 @@ def test_a_replaced_journal_cannot_look_like_the_same_observer_after_pid_reuse(
 
     assert observation.complete is False
     assert "journal changed" in (observation.detail or "")
+
+
+def test_a_journal_replaced_after_the_final_snapshot_is_refused(tmp_path, monkeypatch):
+    """The fd opened for the read must still be the cursor's exact journal."""
+    replacement = tmp_path / "events.jsonl"
+    replacement.write_bytes(_event(1, "fork", 1_001_000_000))
+    expected_size = replacement.stat().st_size
+    expected_dev, expected_ino = 7, 19
+    snapshot = _snapshot(
+        status=GuestObserverStatus(
+            pid=91,
+            poll_seq=11,
+            event_seq=9,
+            lost=4,
+            journal_dropped=2,
+            journal_bytes=expected_size,
+            journal_dev=expected_dev,
+            journal_ino=expected_ino,
+        ),
+        journal_size=expected_size,
+    )
+
+    def capture(argv, timeout_s):
+        command = list(argv)
+        command[3] = str(replacement)
+        return subprocess.run(
+            command,
+            capture_output=True,
+            timeout=timeout_s,
+            check=False,
+        )
+
+    controller = GuestObserverController(
+        capture=capture,
+        privileged=lambda *_args: None,
+    )
+    monkeypatch.setattr(controller, "snapshot", lambda **_kwargs: snapshot)
+    cursor = _cursor(
+        observer_pid=91,
+        journal_dev=expected_dev,
+        journal_ino=expected_ino,
+    )
+
+    observation = controller.finish(cursor)
+
+    assert observation.complete is False
+    assert "journal changed before read" in (observation.detail or "")
+
+
+def test_begin_crosses_a_complete_poll_before_publishing_its_fence(monkeypatch):
+    opening = _snapshot(
+        status=GuestObserverStatus(91, 20, 8, 4, 2, 100, 7, 19),
+        journal_size=100,
+        guest_mono_ns=1_900_000_000,
+    )
+    flushed = _snapshot(
+        status=GuestObserverStatus(91, 22, 9, 5, 2, 180, 7, 19),
+        journal_size=180,
+        guest_mono_ns=2_000_000_000,
+    )
+    waits: list[int | None] = []
+    controller = GuestObserverController(
+        capture=lambda *_args: None,
+        privileged=lambda *_args: None,
+    )
+    monkeypatch.setattr(controller, "ensure", lambda: None)
+
+    def snapshot(*, after_poll_seq=None, **_kwargs):
+        waits.append(after_poll_seq)
+        return opening if after_poll_seq is None else flushed
+
+    monkeypatch.setattr(controller, "snapshot", snapshot)
+
+    cursor = controller.begin(user_uid=11003)
+
+    assert waits == [None, 21]
+    assert cursor.offset == 180
+    assert cursor.lost == 5
+    assert cursor.event_seq == 9
+    assert cursor.guest_mono_ns == 2_000_000_000
+
+
+def test_late_journal_delivery_cannot_charge_a_pre_turn_process():
+    payload = b"".join(
+        [
+            _event(1, "fork", 999_000_000, pid=41, tgid=41),
+            _event(2, "exit", 999_500_000, pid=41, tgid=41),
+            _event(3, "fork", 1_001_000_000),
+            _event(4, "exit", 1_002_000_000),
+        ]
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    assert observation.complete is True
+    assert [process.pid for process in observation.processes] == [42]
 
 
 def test_a_sub_millisecond_process_survives_without_any_sampler_reading():

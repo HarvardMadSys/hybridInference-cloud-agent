@@ -878,10 +878,17 @@ class SharedChatSessionSupervisor:
                 return self._descriptor(group, member)
             turn = member.current_turn
             transport = member.transport
-            observer_cursor = member.observer_cursor
+            # An active observation belongs to the turn, not to the resident
+            # transport.  Keep it until complete_turn/abort_turn closes the
+            # turn so the events already captured before residency loss are
+            # still returned to the caller.  Drain only an orphaned cursor
+            # when there is no turn left to own it.
+            orphaned_observer_cursor = None
+            if turn is None:
+                orphaned_observer_cursor = member.observer_cursor
+                member.observer_cursor = None
+                member.tool_mark_reader = None
             member.transport = None
-            member.observer_cursor = None
-            member.tool_mark_reader = None
             member.residency_generation = 0
             member.resident_state = "restarting" if member.native_session_id else "stopped"
         if turn is not None:
@@ -890,9 +897,9 @@ class SharedChatSessionSupervisor:
         if transport is not None:
             with contextlib.suppress(Exception):
                 transport.close()
-        if observer_cursor is not None:
+        if orphaned_observer_cursor is not None:
             with contextlib.suppress(Exception):
-                self._manager.finish_guest_observation(group.spec, observer_cursor)
+                self._manager.finish_guest_observation(group.spec, orphaned_observer_cursor)
         with self._lock:
             return self._descriptor(group, member)
 

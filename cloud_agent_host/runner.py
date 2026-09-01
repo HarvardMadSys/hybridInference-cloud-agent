@@ -1502,9 +1502,8 @@ def run_agent(
                 rollup.update(
                     {
                         "process_observer": next(iter(sources)) if len(sources) == 1 else None,
-                        "process_observation_complete": all(
-                            observation.complete for observation in observations
-                        ),
+                        "process_observation_complete": not merged_processes_truncated
+                        and all(observation.complete for observation in observations),
                         "process_events_lost": sum(
                             observation.lost_events for observation in observations
                         ),

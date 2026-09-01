@@ -16,7 +16,12 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host import enrollment, runner as runner_mod
-from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
+from cloud_agent_host.guest_observer import (
+    MAX_OBSERVED_PROCESSES,
+    GuestObservation,
+    GuestObserverCursor,
+    GuestProcess,
+)
 from cloud_agent_host.runner import (
     ClaimedJob,
     LeaseLost,
@@ -463,6 +468,105 @@ def test_retained_hooks_are_installed_before_the_guest_process_fence(tmp_path):
     assert code == 0
     assert events == ["hooks", "begin", "spawn", "finish"]
     assert control.resources[0]["process_observation_complete"] is True
+
+
+def test_merging_more_process_rows_than_the_wire_cap_is_never_complete(tmp_path):
+    def observed_process(sequence: int) -> GuestProcess:
+        return GuestProcess(
+            process_seq=sequence,
+            uid=10001,
+            pid=sequence + 10,
+            tgid=sequence + 10,
+            ppid=1,
+            comm="tiny",
+            executable="/bin/tiny",
+            started_guest_mono_ns=sequence,
+            exited_guest_mono_ns=sequence + 1,
+            started_host_mono=0.0,
+            exited_host_mono=0.0,
+            exit_code=0,
+            observed_fork=True,
+            observed_exec=True,
+            observed_exit=True,
+        )
+
+    class Process:
+        @staticmethod
+        def lines():
+            return iter([_result_line()])
+
+        @staticmethod
+        def kill():
+            return None
+
+        @staticmethod
+        def wait():
+            return 0
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+        @staticmethod
+        def finish_guest_observation():
+            return GuestObservation(
+                source="kata-guest-ebpf-v1",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+                processes=(observed_process(MAX_OBSERVED_PROCESSES + 1),),
+            )
+
+    class Backend:
+        provides_isolation = True
+        is_vm_isolated = True
+
+        @staticmethod
+        def base_env():
+            return {"PATH": "/usr/bin"}
+
+        @staticmethod
+        def adopt_workdir(_path):
+            return None
+
+        @staticmethod
+        def begin_guest_observation():
+            return GuestObserverCursor(uid=10001, available=True)
+
+        @staticmethod
+        def finish_guest_observation(_cursor):
+            return GuestObservation(
+                source="kata-guest-ebpf-v1",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+                processes=tuple(
+                    observed_process(sequence) for sequence in range(1, MAX_OBSERVED_PROCESSES + 1)
+                ),
+            )
+
+        @staticmethod
+        def spawn(_spec):
+            return Process()
+
+    control = FakeControl()
+    code, _tail, _errors = run_agent(
+        ClaudeCodeRuntime(),
+        job=ClaimedJob(**{**_JOB.__dict__, "runtime": "claude-code"}),
+        workdir=str(tmp_path),
+        gateway_base_url="http://gw",
+        control=control,
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=Backend(),
+        export_checkpoint=False,
+    )
+
+    assert code == 0
+    resources = control.resources[0]
+    assert len(resources["processes"]) == MAX_OBSERVED_PROCESSES
+    assert resources["processes_truncated"] is True
+    assert resources["process_observation_complete"] is False
 
 
 @pytest.mark.parametrize(

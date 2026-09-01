@@ -383,8 +383,13 @@ class GuestObserverController:
         """Fence the journal immediately before one prompt is admitted."""
         try:
             self.ensure()
+            opening = self.snapshot()
+            # The publication just read may have been written by a poll that
+            # started before this opening fence. Cross the following complete
+            # poll as well so pre-turn ring-buffer events and loss counters are
+            # part of the baseline rather than the new turn.
             host_before = time.monotonic_ns()
-            snapshot = self.snapshot()
+            snapshot = self.snapshot(after_poll_seq=opening.status.poll_seq + 1)
             host_after = time.monotonic_ns()
         except Exception as exc:
             return GuestObserverCursor.unavailable(user_uid, str(exc))
@@ -443,7 +448,14 @@ class GuestObserverController:
             reader = (
                 "import os, sys\n"
                 "filename, offset, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\n"
+                "expected_dev, expected_ino = int(sys.argv[4]), int(sys.argv[5])\n"
                 "with open(filename, 'rb', buffering=0) as handle:\n"
+                "    journal = os.fstat(handle.fileno())\n"
+                "    if (int(journal.st_dev) != expected_dev "
+                "            or int(journal.st_ino) != expected_ino):\n"
+                "        raise RuntimeError('observer journal changed before read')\n"
+                "    if int(journal.st_size) < offset + count:\n"
+                "        raise RuntimeError('observer journal is behind the read fence')\n"
                 "    handle.seek(offset)\n"
                 "    sys.stdout.buffer.write(handle.read(count))\n"
             )
@@ -455,6 +467,8 @@ class GuestObserverController:
                     GUEST_OBSERVER_EVENTS,
                     str(cursor.offset),
                     str(count),
+                    str(cursor.journal_dev),
+                    str(cursor.journal_ino),
                 ],
                 10.0,
             )
@@ -649,6 +663,12 @@ def parse_events(
             if kind not in {"fork", "exec", "exit", "tool_pre", "tool_post"}:
                 raise GuestObserverProtocolError("guest process event kind is unknown")
             mono_ns = _integer(event, "mono_ns", positive=True)
+            # A kernel event can be timestamped before the opening snapshot yet
+            # reach the userspace journal after its byte fence. The shared guest
+            # monotonic clock is the authoritative lower bound, so never charge
+            # such a late pre-turn event to the newly admitted prompt.
+            if mono_ns <= cursor.guest_mono_ns:
+                continue
             if kind in {"tool_pre", "tool_post"}:
                 tool_use_id = event.get("tool_use_id")
                 if (
