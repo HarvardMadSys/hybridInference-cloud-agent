@@ -175,7 +175,7 @@ export interface AgentJobDirectoryApi {
   kind: 'directory';
   entries: AgentJobFileEntryApi[] | null;
   writable?: boolean;
-  source?: 'workspace' | 'snapshot';
+  source?: 'workspace';
 }
 
 export interface AgentJobFileApi {
@@ -188,7 +188,7 @@ export interface AgentJobFileApi {
   status?: AgentJobFileStatus | null;
   omitted_reason?: string | null;
   writable?: boolean;
-  source?: 'workspace' | 'snapshot';
+  source?: 'workspace';
 }
 
 export interface AgentJobSymlinkApi {
@@ -197,7 +197,7 @@ export interface AgentJobSymlinkApi {
   status?: AgentJobFileStatus | null;
   omitted_reason?: string | null;
   writable?: boolean;
-  source?: 'workspace' | 'snapshot';
+  source?: 'workspace';
 }
 
 export type AgentJobFilesApi = AgentJobDirectoryApi | AgentJobFileApi | AgentJobSymlinkApi;
@@ -651,20 +651,7 @@ export async function listAllAgentThreadEvents(jobId: string): Promise<AgentThre
   }
 }
 
-export async function getAgentJobArtifact(
-  jobId: string,
-  kind: string,
-): Promise<{ content: string; attempt_id: number } | null> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(kind)}`,
-  );
-  // A job that changed nothing legitimately has no patch; that is not an error.
-  if (resp.status === 404) return null;
-  return jsonOrThrow(resp);
-}
-
-/** Browse the live worktree, falling back to an archived snapshot for old jobs. */
+/** Browse the retained container's live worktree. */
 export async function getAgentJobFiles(jobId: string, path = ''): Promise<AgentJobFilesApi> {
   const query = path ? `?path=${encodeURIComponent(path)}` : '';
   const resp = await fetchWithAuth(

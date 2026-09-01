@@ -93,7 +93,7 @@ def _b64decode(value: str) -> bytes:
 # the sandbox's two powers come from two different services.
 #
 # ``full`` is held by the runner (a trusted process outside the sandbox): it
-# reports events, uploads artifacts, renews the lease and drives terminal
+# reports events, renews the lease and drives terminal
 # transitions.
 #
 # ``mcp`` is what a sandbox carries to reach tools, and it is minted and

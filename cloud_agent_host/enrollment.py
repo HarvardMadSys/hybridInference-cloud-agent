@@ -14,10 +14,8 @@ so every consequence that hangs off a host row was inert:
   terminal and git requests are served, and a row without one answers 409 for
   every one of them.
 
-**The credential is per host, and it is not the dispatcher token.** That token
-opens the claim door for every machine in the pool; this one opens it for
-exactly one, and removing the host revokes it. A pool sharing one secret has
-no way to retire a single compromised machine.
+**The credential is per host.** It opens heartbeat and claim for exactly one
+machine, and removing the host revokes it. There is no pool-wide claim secret.
 
 Enrollment is a one-time token spent for a lasting credential. A machine being
 set up has none yet, which is the whole reason the exchange exists; the token
@@ -55,9 +53,8 @@ ENV_ENROLL_TOKEN = "AGENT_ENROLL_TOKEN"
 ENV_HOST_CREDENTIAL = "AGENT_HOST_CREDENTIAL"
 ENV_CREDENTIAL_FILE = "AGENT_HOST_CREDENTIAL_FILE"
 
-#: Where a credential is kept when the deployment names no path. Under the
-#: workdir root so it shares that volume's lifetime: a credential that outlives
-#: the machine it identifies is a credential nobody will think to revoke.
+#: Where a credential is kept when the deployment names no path. Host
+#: infrastructure state is the only host bind in the retained topology.
 DEFAULT_CREDENTIAL_FILE = "/var/lib/hybridinference/agent-host-credential"
 
 #: Fallback cadence, used only until a heartbeat answers. The control plane
@@ -357,12 +354,10 @@ def establish_residency(
 ) -> dict[str, Any] | None:
     """Take residency for a thread this host is running; ``None`` = refused.
 
-    Returns ``{generation, credential, model}`` — ``credential`` may be None
-    (workspace-only residency; turns ride warm_native on per-attempt grants).
-    Every failure is ``None`` rather than an exception: a runner that cannot
-    take residency simply does not keep the workspace hot, and the thread's
-    next turn goes COLD off the checkpoint it already exported — the designed
-    degradation, never an error worth crashing a turn over.
+    Returns ``{generation, credential, model}`` — ``credential`` may be None.
+    Every failure is ``None`` rather than an exception: the supervisor fences
+    that member process, while the chat's native session files remain in the
+    retained container for a later activation.
     """
     try:
         answer = _post(
@@ -558,7 +553,7 @@ class HostHeartbeat:
     def credential(self) -> str:
         """This host's own claim credential, naming the machine.
 
-        What the runner presents instead of the pool-wide dispatcher token
+        What the runner presents when claiming work and heartbeating
         once enrolled. The control plane reads the host from this rather than
         from the request body, so a compromised machine can drain the queue
         but cannot claim as its neighbour — which is the whole reason drain,

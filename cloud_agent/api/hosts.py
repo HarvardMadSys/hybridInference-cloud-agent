@@ -4,19 +4,11 @@ Kept out of ``routes.py``. That file is the moved gateway router and is held to
 a move-as-is diff; these are net-new phase-G surface, and mixing them in would
 make the one file nobody should be editing the file everybody edits.
 
-**Why enrollment exists at all.** Before it, a machine joined the pool by
-polling with the dispatcher credential, and the pool list was therefore a list
-of names anything holding that credential could invent — which #1158's own
-module docstring says plainly, and accepts, because the switch it was built for
-decides where *our* machines run *our* jobs. A pool that grows and shrinks
-needs more than that: a host must be something the platform issued a credential
-to, so that revoking it means something and so that a heartbeat is evidence
-rather than an assertion.
-
-The credential is deliberately **not** the dispatcher token. That token opens
-the claim door for every host; a host credential opens it for exactly one, and
-carries the machine's identity with it, so a compromised host cannot claim as
-its neighbour.
+**Why enrollment exists at all.** A host must be something the platform issued
+a credential to, so revoking it has meaning and a heartbeat/claim is evidence
+rather than a request-body assertion. The credential opens those surfaces for
+exactly one host and carries the machine identity, so a compromised host cannot
+claim as its neighbour. There is no pool-wide claim credential.
 
 Registration is unauthenticated *except* for the enrollment token, and that is
 the point: a machine being set up has no credential yet. The token is
@@ -278,61 +270,53 @@ async def heartbeat_host(
             sandbox_id=beat.sandbox_id,
             container_id=beat.container_id,
             sandbox_generation=beat.generation,
-            activation_generation=beat.activation_generation,
             running=beat.running,
             activity_active=beat.activity_active,
             idle_remaining_seconds=beat.idle_remaining_seconds,
-            shared_live=beat.shared_live,
             members=[member.model_dump() for member in beat.members],
         )
-        if beat.shared_live:
-            for member in beat.members:
-                if member.residency_generation <= 0:
-                    continue
-                # A stopped group has no process that can legitimately use a
-                # residency credential. Release and revoke it instead of
-                # renewing it forever. The database performs this release
-                # under the group's operation and member-attempt fences: this
-                # heartbeat was sampled earlier and must not revoke a grant a
-                # concurrent fork/start minted after that sample.
-                if not beat.running or member.resident_state in {"stopped", "lost"}:
-                    released = await job_store.release_shared_residency_if_quiescent(
-                        thread_id=member.thread_id,
-                        generation=member.residency_generation,
-                        process_generation=member.process_generation,
-                        host=updated["host"],
-                        sandbox_id=beat.sandbox_id,
-                    )
-                    if released and grants is not None:
-                        with contextlib.suppress(Exception):
-                            await grants.revoke(released)
-                    continue
-                # ``starting`` and ``restarting`` are bounded launch windows.
-                # Do not race an in-flight process launch by revoking its new
-                # grant, but also do not renew an old, unattached credential;
-                # it expires naturally unless the member proves LIVE later.
-                if member.resident_state != "live":
-                    continue
-                extended = await job_store.heartbeat_residency(
+        for member in beat.members:
+            if member.residency_generation <= 0:
+                continue
+            # A stopped group has no process that can legitimately use a
+            # residency credential. Release and revoke it instead of renewing
+            # it forever. The database fences this against concurrent starts.
+            if not beat.running or member.resident_state in {"stopped", "lost"}:
+                released = await job_store.release_shared_residency_if_quiescent(
                     thread_id=member.thread_id,
                     generation=member.residency_generation,
+                    process_generation=member.process_generation,
                     host=updated["host"],
-                    ttl_seconds=RESIDENCY_TTL_S,
+                    sandbox_id=beat.sandbox_id,
                 )
-                if extended and grants is not None:
+                if released and grants is not None:
                     with contextlib.suppress(Exception):
-                        await grants.renew(extended)
-                if extended is None and not any(
-                    item.thread_id == member.thread_id
-                    and item.generation == member.residency_generation
-                    for item in lost
-                ):
-                    lost.append(
-                        ResidencyBeat(
-                            thread_id=member.thread_id,
-                            generation=member.residency_generation,
-                        )
+                        await grants.revoke(released)
+                continue
+            # Starting/restarting is a bounded launch window. Renew only a
+            # process that has proved itself LIVE.
+            if member.resident_state != "live":
+                continue
+            extended = await job_store.heartbeat_residency(
+                thread_id=member.thread_id,
+                generation=member.residency_generation,
+                host=updated["host"],
+                ttl_seconds=RESIDENCY_TTL_S,
+            )
+            if extended and grants is not None:
+                with contextlib.suppress(Exception):
+                    await grants.renew(extended)
+            if extended is None and not any(
+                item.thread_id == member.thread_id
+                and item.generation == member.residency_generation
+                for item in lost
+            ):
+                lost.append(
+                    ResidencyBeat(
+                        thread_id=member.thread_id,
+                        generation=member.residency_generation,
                     )
+                )
         if beat.running:
             due = await job_store.due_thread_sandbox_stop(
                 thread_id=beat.thread_id,
@@ -340,7 +324,6 @@ async def heartbeat_host(
                 sandbox_id=beat.sandbox_id,
                 container_id=beat.container_id,
                 sandbox_generation=beat.generation,
-                shared_live=beat.shared_live,
             )
             if due is not None:
                 retained_stops.append(due)

@@ -239,25 +239,6 @@ function ForkIcon() {
   );
 }
 
-function RewindIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2}
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M9 15 3 9l6-6M3 9h12a6 6 0 0 1 0 12h-3"
-      />
-    </svg>
-  );
-}
-
 async function copyMessage(content: string) {
   try {
     await navigator.clipboard.writeText(content);
@@ -330,12 +311,10 @@ function ThreadTurn({
   message,
   busy,
   onFork,
-  onRewind,
 }: {
   message: AgentThreadMessage;
   busy?: boolean;
   onFork?: () => void;
-  onRewind?: () => void;
 }) {
   if (message.role === 'assistant') {
     return (
@@ -362,12 +341,6 @@ function ThreadTurn({
           <CopyIcon />
           Copy
         </MessageActionButton>
-        {onRewind ? (
-          <MessageActionButton label="Edit & rewind" onClick={onRewind} disabled={busy}>
-            <RewindIcon />
-            Edit & rewind
-          </MessageActionButton>
-        ) : null}
       </MessageActions>
     </div>
   );
@@ -443,16 +416,12 @@ function EventRow({
 
 function HistoryTurn({
   turn,
-  previousJobId,
   busy,
   onFork,
-  onRewind,
 }: {
   turn: AgentHistoryTurn;
-  previousJobId?: string;
   busy: boolean;
   onFork?: (jobId: string) => void;
-  onRewind?: (jobId: string, prompt: string) => void;
 }) {
   const hasEventMessages = turn.events.some((event) => event.kind === 'message');
   const toolCalls = turn.events.filter((event) => event.kind === 'tool_use').length;
@@ -465,14 +434,7 @@ function HistoryTurn({
       {turn.messages
         .filter((message) => message.role === 'user')
         .map((message) => (
-          <ThreadTurn
-            key={message.id}
-            message={message}
-            busy={busy}
-            onRewind={
-              previousJobId && onRewind ? () => onRewind(previousJobId, message.content) : undefined
-            }
-          />
+          <ThreadTurn key={message.id} message={message} busy={busy} />
         ))}
       <div aria-label={`Turn ${turn.turnNo} agent activity`} className="mt-2">
         {turn.events.map((event, index) => (
@@ -858,7 +820,7 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
               ? 'Live worktree'
               : loading
                 ? 'Loading…'
-                : 'Archived result'}
+                : 'Unavailable'}
         </span>
         {job.workspaceShared ? (
           <span className="rounded bg-amber-50 dark:bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-300">
@@ -1148,20 +1110,6 @@ export function JobDetail({
     if (!efforts.includes(effort)) setEffort(highestEffort(efforts));
   }, [config, efforts, effort]);
 
-  // An "Edit & rewind" fork leaves the edited prompt behind for its landing
-  // page. Session-scoped and consumed once, so a reload does not resurrect it.
-  useEffect(() => {
-    const key = `agent-rewind-draft-${job.id}`;
-    let draft: string | null = null;
-    try {
-      draft = sessionStorage.getItem(key);
-      if (draft) sessionStorage.removeItem(key);
-    } catch {
-      return;
-    }
-    if (draft) setFollowUp(draft);
-  }, [job.id]);
-
   const selectedAttempt = job.attempts.find((attempt) => attempt.no === attemptNo);
   const visibleEvents = job.events.filter(
     (event) => event.attemptNo === undefined || attemptNo === 0 || event.attemptNo === attemptNo,
@@ -1270,8 +1218,8 @@ export function JobDetail({
   }
 
   // Fork creates a second native session in this chat's shared workspace and
-  // navigates to its copied history; `draft` prefills edit-and-rewind.
-  async function forkFrom(anchorJobId: string, draft?: string) {
+  // navigates to its copied display history.
+  async function forkFrom(anchorJobId: string) {
     if (forking) return;
     if (
       job.workspaceShared &&
@@ -1286,13 +1234,6 @@ export function JobDetail({
     setActionError(null);
     try {
       const fork = await forkAgentJob(anchorJobId);
-      if (draft) {
-        try {
-          sessionStorage.setItem(`agent-rewind-draft-${fork.id}`, draft);
-        } catch {
-          // Blocked storage only loses the prefill, never the fork itself.
-        }
-      }
       toast.success('Conversation forked');
       router.push(`/${fork.id}`);
     } catch (cause: unknown) {
@@ -1304,27 +1245,17 @@ export function JobDetail({
   const allThreadMessages = job.threadMessages ?? [];
   const historyTurns = job.historyTurns;
   // A real API-backed job has reconstructed historical turns. Keep only this
-  // job's durable-message fallback here; fixtures still use the legacy flat
-  // history, and forked turns still need their copied messages.
+  // job's durable-message fallback here; compact fixtures use flat history,
+  // and forked turns still need their copied display messages.
   const threadMessages = historyTurns
     ? allThreadMessages.filter((message) => message.jobId === job.id)
     : allThreadMessages;
-  const lastHistoryJobId = historyTurns?.length
-    ? historyTurns[historyTurns.length - 1].jobId
-    : allThreadMessages.length
-      ? allThreadMessages[allThreadMessages.length - 1].jobId
-      : undefined;
   const canForkAnchor = (anchorJobId: string) => {
-    if (!job.sandboxId) return true;
+    if (!job.sandboxId) return false;
     return Boolean(
       job.workspaceShared && job.nativeForkAvailable && anchorJobId === job.id && !isActive,
     );
   };
-  const rewindPromptAnchor =
-    lastHistoryJobId && lastHistoryJobId !== job.id && canForkAnchor(lastHistoryJobId)
-      ? lastHistoryJobId
-      : null;
-
   return (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
       <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
@@ -1465,50 +1396,30 @@ export function JobDetail({
               </div>
             ) : (
               <div className="flex-1">
-                {historyTurns?.map((turn, index) => (
+                {historyTurns?.map((turn) => (
                   <HistoryTurn
                     key={turn.jobId}
                     turn={turn}
-                    previousJobId={index > 0 ? historyTurns[index - 1].jobId : undefined}
                     busy={forking}
                     onFork={
                       canForkAnchor(turn.jobId)
                         ? (anchorJobId) => void forkFrom(anchorJobId)
                         : undefined
                     }
-                    onRewind={
-                      index > 0 && canForkAnchor(historyTurns[index - 1].jobId)
-                        ? (anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)
+                  />
+                ))}
+                {threadMessages.map((message) => (
+                  <ThreadTurn
+                    key={message.id}
+                    message={message}
+                    busy={forking}
+                    onFork={
+                      message.role === 'assistant' && canForkAnchor(message.jobId)
+                        ? () => void forkFrom(message.jobId)
                         : undefined
                     }
                   />
                 ))}
-                {threadMessages.map((message, index) => {
-                  const previous = index > 0 ? threadMessages[index - 1] : undefined;
-                  const rewindParent =
-                    previous?.jobId ?? (historyTurns ? lastHistoryJobId : undefined);
-                  const rewindAnchor =
-                    message.role === 'user' && rewindParent && rewindParent !== message.jobId
-                      ? rewindParent
-                      : undefined;
-                  return (
-                    <ThreadTurn
-                      key={message.id}
-                      message={message}
-                      busy={forking}
-                      onFork={
-                        message.role === 'assistant' && canForkAnchor(message.jobId)
-                          ? () => void forkFrom(message.jobId)
-                          : undefined
-                      }
-                      onRewind={
-                        rewindAnchor && canForkAnchor(rewindAnchor)
-                          ? () => void forkFrom(rewindAnchor, message.content)
-                          : undefined
-                      }
-                    />
-                  );
-                })}
 
                 {job.historyIncludesPrompt ? null : (
                   <div className="group my-4 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-4 py-3 shadow-subtle">
@@ -1521,16 +1432,6 @@ export function JobDetail({
                         <CopyIcon />
                         Copy
                       </MessageActionButton>
-                      {rewindPromptAnchor ? (
-                        <MessageActionButton
-                          label="Edit & rewind"
-                          onClick={() => void forkFrom(rewindPromptAnchor, job.prompt || job.title)}
-                          disabled={forking}
-                        >
-                          <RewindIcon />
-                          Edit &amp; rewind
-                        </MessageActionButton>
-                      ) : null}
                     </MessageActions>
                   </div>
                 )}

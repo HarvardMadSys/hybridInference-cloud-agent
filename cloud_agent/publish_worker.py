@@ -1,4 +1,4 @@
-"""The publish step: patch → branch → draft PR (issue #1041, P0).
+"""The publish step: immutable group snapshot → branch → draft PR.
 
 This is the last hop of the chain and the one that produces the visible
 product outcome. It runs **in the gateway**, never in the sandbox, for one
@@ -8,21 +8,21 @@ credential-free.
 
 Order of operations is load-bearing:
 
-1. Claim one finished job that has a patch and no PR yet. The claim is atomic
-   (``SKIP LOCKED`` + ``published_pr_url IS NULL``), so several gateway
-   processes can run this loop without racing into duplicate PRs.
+1. Claim one captured group snapshot. The claim is atomic (``SKIP LOCKED``
+   plus a state transition to ``publishing``), so several control-plane
+   processes cannot race into duplicate PRs.
 2. Validate the patch **before** any bytes touch a worktree — the gate is the
    security boundary, and a blocked ``.github/`` change must never reach a
    branch, because pushing it can execute a workflow with repository secrets
    before a human reads the draft PR.
-3. Push the turn onto its conversation's stable ``agent/<thread-id>`` branch
+3. Push the group snapshot onto its stable ``agent/<origin-thread-id>`` branch
    with a pinned refspec.
 4. Open a **draft** PR against the branch the job was started from, so a human
    reviews before anything can merge and the diff is the agent's own work.
 
-A rejected patch fails the job with the reason rather than retrying: gate
-violations are human-review situations, and a retry loop would either spam the
-repository or bury the rejection.
+A rejected patch marks the snapshot/group dirty without rewriting successful
+Agent turns. Gate violations are human-review situations, and a retry loop
+would either spam the repository or bury the rejection.
 """
 
 from __future__ import annotations
@@ -159,17 +159,14 @@ def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
     files = "\n".join(f"- `{path}`" for path in changed_files[:50])
     if len(changed_files) > 50:
         files += f"\n- …and {len(changed_files) - 50} more"
-    if job.get("publication_kind") == "shared_snapshot":
-        included = ", ".join(f"`{item}`" for item in job.get("included_job_ids") or [])
-        attribution = (
-            f"Opened from shared sandbox snapshot `{job['snapshot_id']}` "
-            f"(workspace epoch {job['workspace_epoch']}).\n\n"
-            f"**Included settled turns**\n\n{included or '`unknown`'}\n\n"
-            "The chats share one workspace, so this diff is a group snapshot and is not "
-            "attributed to only one chat.\n\n"
-        )
-    else:
-        attribution = f"Opened by a cloud agent job (`{job['job_id']}`).\n\n"
+    included = ", ".join(f"`{item}`" for item in job.get("included_job_ids") or [])
+    attribution = (
+        f"Opened from shared sandbox snapshot `{job['snapshot_id']}` "
+        f"(workspace epoch {job['workspace_epoch']}).\n\n"
+        f"**Included settled turns**\n\n{included or '`unknown`'}\n\n"
+        "The chats share one workspace, so this diff is a group snapshot and is not "
+        "attributed to only one chat.\n\n"
+    )
     return (
         attribution + f"**Task**\n\n> {job['task_prompt'][:1500]}\n\n"
         f"**Changed files ({len(changed_files)})**\n\n{files}\n\n"
@@ -293,16 +290,12 @@ async def publish_one(
     job_id = job["job_id"]
     base_sha = job["base_sha"]
     pr_base = _pr_base_branch(job, base_branch)
-    shared_snapshot = job.get("publication_kind") == "shared_snapshot"
 
     async def fail(detail: str) -> None:
-        if shared_snapshot:
-            await store.fail_snapshot_publish(
-                snapshot_id=int(job["snapshot_id"]),
-                detail=detail,
-            )
-        else:
-            await store.fail_publish(job_id=job_id, detail=detail)
+        await store.fail_snapshot_publish(
+            snapshot_id=int(job["snapshot_id"]),
+            detail=detail,
+        )
 
     # Re-checked here, before any credential is minted. Publishing happens well
     # after the job ran, and it is the step that asks for *write* authority —
@@ -358,7 +351,7 @@ async def publish_one(
             base_sha=base_sha,
             commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
             allow_workflow_changes=allow_workflow_changes,
-            include_base_bundle=shared_snapshot,
+            include_base_bundle=True,
         )
         pr_url = job.get("parent_pr_url")
         if not pr_url:
@@ -382,18 +375,11 @@ async def publish_one(
         await fail(f"publish failed: {exc}")
         return None
 
-    if shared_snapshot:
-        recorded = await store.record_snapshot_publish(
-            snapshot_id=int(job["snapshot_id"]),
-            pr_url=pr_url,
-            commit_sha=result.commit_sha,
-        )
-    else:
-        recorded = await store.record_publish(
-            job_id=job_id,
-            pr_url=pr_url,
-            commit_sha=result.commit_sha,
-        )
+    recorded = await store.record_snapshot_publish(
+        snapshot_id=int(job["snapshot_id"]),
+        pr_url=pr_url,
+        commit_sha=result.commit_sha,
+    )
     if not recorded:
         # Someone recorded a PR while we worked. The branch we pushed is
         # harmless (it is the same one), but say so rather than pretend.
@@ -403,13 +389,12 @@ async def publish_one(
         )
         return None
 
-    if shared_snapshot:
-        await _import_snapshot_base(
-            store,
-            snapshot=job,
-            commit_sha=result.commit_sha,
-            bundle=result.base_bundle,
-        )
+    await _import_snapshot_base(
+        store,
+        snapshot=job,
+        commit_sha=result.commit_sha,
+        bundle=result.base_bundle,
+    )
 
     logger.info(
         "agent_job_pr_opened",

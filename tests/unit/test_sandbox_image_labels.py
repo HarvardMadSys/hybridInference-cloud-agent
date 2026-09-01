@@ -2,9 +2,9 @@
 
 The stamp pipeline (issue #54) is only as truthful as these labels: the
 runner reads them, the heartbeat reports them, the claim copies them onto
-attempts, and the checkpoint gate compares them before resuming a session.
-A runtime added to the registry without a label degrades all of that to
-"unknown" silently — this test is where that silence becomes a failure.
+attempts, and native-session admission compares them before resuming a
+session. A runtime added to the registry without a label becomes ineligible to
+claim work; this test catches that configuration error at build time.
 """
 
 from __future__ import annotations

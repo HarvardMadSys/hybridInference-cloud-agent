@@ -176,28 +176,28 @@ def test_a_default_the_code_relies_on_is_not_blanked_out(control_plane_env: dict
         )
 
 
-def test_the_runner_credential_is_required(control_plane_env: dict) -> None:
-    """Without it every claim is 401 and the queue never drains — with nothing
-    in this service's logs saying why, because the refusal is correct."""
-    assert ":?" in control_plane_env["AGENT_DISPATCHER_TOKEN"]
+def test_control_plane_has_no_shared_claim_credential(control_plane_env: dict) -> None:
+    """Claims authenticate with enrollment-issued host credentials."""
+    assert "AGENT_DISPATCHER_TOKEN" not in control_plane_env
 
 
 def test_shared_live_readiness_is_proved_before_any_running_service_is_replaced() -> None:
-    """The default-branch workflow can run host and control jobs in parallel.
+    """The target host generation must be usable before the API rolls.
 
-    Building and a one-off query are safe before the barrier. ``compose up``
-    is the first operation that replaces the running control plane, so it must
-    remain strictly after the fresh-heartbeat and reverse-broker proof.
+    The readiness command is an unconditional compatibility fence for the
+    only supported topology. It is not a switch between legacy and retained
+    execution.
     """
     script = DEPLOY_SCRIPT_PATH.read_text()
+    build = script.index("compose build")
     readiness = script.index("python -m cloud_agent.deploy_readiness")
     bring_up = script.index("compose up -d --remove-orphans")
 
-    assert readiness < bring_up
+    assert build < readiness < bring_up
     assert "compose run --rm --no-deps control-plane" in script
-    assert 'if [ "${AGENT_SHARED_LIVE_SANDBOX}" = "1" ]' in script
     assert '--timeout-seconds "${SHARED_READY_TIMEOUT}"' in script
     assert '--expected-deployment-sha "${SHA}"' in script
+    assert "AGENT_SHARED_LIVE_SANDBOX" not in script
 
 
 def _run_control_deploy(
@@ -273,7 +273,7 @@ def _run_control_deploy(
     return result, docker_log.read_text()
 
 
-def test_a_failed_shared_readiness_probe_never_replaces_the_running_stack(
+def test_a_failed_readiness_probe_never_replaces_the_running_stack(
     tmp_path: Path,
 ) -> None:
     result, docker_calls = _run_control_deploy(tmp_path, readiness_exit=17)
@@ -284,7 +284,7 @@ def test_a_failed_shared_readiness_probe_never_replaces_the_running_stack(
     assert " up -d --remove-orphans" not in docker_calls
 
 
-def test_a_successful_shared_readiness_probe_allows_bring_up(tmp_path: Path) -> None:
+def test_a_successful_readiness_probe_allows_the_shared_only_service(tmp_path: Path) -> None:
     result, docker_calls = _run_control_deploy(tmp_path, readiness_exit=0)
 
     assert result.returncode == 0, result.stderr
@@ -293,17 +293,17 @@ def test_a_successful_shared_readiness_probe_allows_bring_up(tmp_path: Path) -> 
     assert " up -d --remove-orphans" in docker_calls
 
 
-def test_default_off_deployments_do_not_acquire_the_shared_readiness_gate(
+def test_removed_default_off_switch_is_inert(
     tmp_path: Path,
 ) -> None:
     result, docker_calls = _run_control_deploy(
         tmp_path,
-        readiness_exit=17,
+        readiness_exit=0,
         shared_live="0",
     )
 
     assert result.returncode == 0, result.stderr
-    assert "cloud_agent.deploy_readiness" not in docker_calls
+    assert "cloud_agent.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" in docker_calls
 
 
@@ -317,8 +317,9 @@ def test_manual_staging_deploy_reads_its_persistent_environment(tmp_path: Path) 
     )
 
     assert result.returncode == 0, result.stderr
-    assert "staging shared-live scheduling gate: 1" in result.stdout
+    assert "shared-live scheduling gate" not in result.stdout
     assert "cloud_agent.deploy_readiness" in docker_calls
+    assert " up -d --remove-orphans" in docker_calls
 
 
 def test_every_configured_file_path_is_actually_mounted(compose: dict) -> None:

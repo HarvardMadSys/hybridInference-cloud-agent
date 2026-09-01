@@ -361,15 +361,12 @@ def test_generic_runtime_streams_raw_and_never_uses_a_shell():
 
 
 def test_registry_resolution_and_refusal():
-    """Known runtimes resolve; unknown ones refuse unless Tier 2 is requested."""
+    """Only runtimes with a registered live-session transport resolve."""
     assert isinstance(get_runtime("claude-code"), ClaudeCodeRuntime)
     assert isinstance(get_runtime("codex"), CodexRuntime)
     assert isinstance(get_runtime("pi"), PiRuntime)
     assert isinstance(get_runtime("opencode"), OpencodeRuntime)
     assert isinstance(get_runtime("kilo"), KiloRuntime)
-    assert isinstance(
-        get_runtime("some-new-cli", generic_command="some-new-cli run"), GenericRuntime
-    )
     with pytest.raises(KeyError):
         get_runtime("does-not-exist")
 

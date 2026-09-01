@@ -29,7 +29,6 @@ vi.mock('@/components/providers', async () => {
 vi.mock('@/lib/api/agents', () => ({
   archiveAgentJob: vi.fn(),
   getAgentJob: vi.fn(),
-  getAgentJobArtifact: vi.fn(),
   getAgentJobFiles: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAgentJobEvents: vi.fn(),

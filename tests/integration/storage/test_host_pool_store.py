@@ -123,7 +123,16 @@ def _kata_attestation(**overrides) -> dict:
     stamp = {
         "sandbox_runtime": "io.containerd.kata.v2",
         "sandbox_image_digest": "sandbox@sha256:claim",
-        "runtime_versions": {"claude-code": "2.1.0"},
+        "shared_sandbox_protocol": "v1",
+        "runner_capabilities": ["shared-sandbox-v1"],
+        "runtime_versions": {
+            "claude-code": "2.1.220",
+            "codex": "0.145.0",
+            "pi": "0.73.1",
+            "opencode": "1.18.9",
+            "kilo": "7.4.17",
+        },
+        "helper_versions": {"claude-agent-sdk": "0.2.148"},
         "host_kernel": "6.8.0-host",
         "guest_kernel": "6.1.0-kata",
     }
@@ -149,6 +158,38 @@ def _shared_attestation(**overrides) -> dict:
     }
     stamp.update(overrides)
     return stamp
+
+
+_DEFAULT_CLAIM_VALUE = object()
+
+
+async def _claim(
+    store: AgentJobStore,
+    *,
+    worker_id: str,
+    lease_ttl_seconds: float,
+    host: str = "",
+    host_credential_hash: str | object = _DEFAULT_CLAIM_VALUE,
+    claim_attestation: dict | object = _DEFAULT_CLAIM_VALUE,
+) -> dict | None:
+    """Claim as an enrolled, exactly attested host unless a test overrides it."""
+    credential = (
+        hash_secret(f"cred-{host}")
+        if host_credential_hash is _DEFAULT_CLAIM_VALUE and host
+        else ("" if host_credential_hash is _DEFAULT_CLAIM_VALUE else host_credential_hash)
+    )
+    attestation = (
+        _shared_attestation() if claim_attestation is _DEFAULT_CLAIM_VALUE else claim_attestation
+    )
+    assert isinstance(credential, str)
+    assert isinstance(attestation, dict)
+    return await store.claim_job(
+        worker_id=worker_id,
+        lease_ttl_seconds=lease_ttl_seconds,
+        host=host,
+        host_credential_hash=credential,
+        claim_attestation=attestation,
+    )
 
 
 # ── G2: enrollment tokens ──────────────────────────────────────────────
@@ -276,16 +317,6 @@ async def test_a_disabled_host_authenticates_nothing(store):
     )
 
 
-async def test_a_host_that_joined_by_polling_holds_no_credential(store):
-    """#1158's door still works, and confers nothing."""
-    await store.touch_runner_host(host="legacy", worker_id="w1")
-
-    row = await store.get_host(host="legacy")
-    assert row["enrolled"] is False
-    assert row["status"] == HOST_ONLINE
-    assert await store.authenticate_host(host="legacy", credential_hash=hash_secret("x")) is None
-
-
 async def test_the_first_heartbeat_promotes_and_records(store):
     await store.register_host(host="runner-a", credential_hash=hash_secret("cred"))
 
@@ -311,7 +342,7 @@ async def test_re_registration_recounts_slots_rather_than_zeroing_them(store):
     """
     await _enrol(store, "runner-a", slots_total=4)
     await _create_job(store)
-    await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
     assert (await store.get_host(host="runner-a"))["slots_used"] == 1
 
     await store.register_host(host="runner-a", credential_hash=hash_secret("new"), slots_total=4)
@@ -373,24 +404,6 @@ async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(store
     assert (await store.get_host(host="runner-a"))["status"] == HOST_DRAINING
 
 
-async def test_the_reaper_never_touches_a_host_that_never_promised_to_heartbeat(store):
-    """The whole pre-G deployment. Marking it offline would stop it claiming.
-
-    A poll-registered host holds no credential and reports no heartbeat, so
-    ``last_heartbeat_at`` is null forever — a reaper that keyed on that alone
-    would take every existing machine out of service on its first pass.
-    """
-    await store.touch_runner_host(host="legacy", worker_id="w1")
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_runner_hosts SET first_seen_at = NOW() - INTERVAL '1 day' "
-            "WHERE host = 'legacy'"
-        )
-
-    assert await store.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
-    assert (await store.get_host(host="legacy"))["status"] == HOST_ONLINE
-
-
 async def test_a_host_that_registered_and_never_came_up_ages_out_of_enrolling(store):
     await store.register_host(host="runner-a", credential_hash=hash_secret("cred"))
     async with store._pool.acquire() as conn:
@@ -430,7 +443,7 @@ async def test_a_claim_takes_a_slot_and_stamps_the_attempt(store):
     await _enrol(store, "runner-a", slots_total=2)
     await _create_job(store)
 
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     assert claim is not None
     assert (await store.get_host(host="runner-a"))["slots_used"] == 1
@@ -468,7 +481,8 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
     )
     await _create_job(store, execution_profile="untrusted-kata-v1")
 
-    claim = await store.claim_job(
+    claim = await _claim(
+        store,
         worker_id="w1",
         lease_ttl_seconds=60,
         host="runner-a",
@@ -486,7 +500,7 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
         )
     assert attempt["sandbox_runtime"] == "io.containerd.kata.v2"
     assert attempt["sandbox_image_digest"] == "sandbox@sha256:claim"
-    assert attempt["runtime_version"] == "2.1.0"
+    assert attempt["runtime_version"] == "2.1.220"
     assert attempt["host_kernel"] == "6.8.0-host"
     assert attempt["guest_kernel"] == "6.1.0-kata"
 
@@ -503,22 +517,23 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
         )
     assert dict(unchanged) == {
         "sandbox_image_digest": "sandbox@sha256:claim",
-        "runtime_version": "2.1.0",
+        "runtime_version": "2.1.220",
     }
 
-    # A legacy trusted claim may omit the attestation and still runs.
+    # Trusted execution changes the isolation profile, not the retained
+    # session protocol: it still needs an exact shared-session attestation.
     await _enrol(store, "runner-b")
     await _create_job(store)
-    bare = await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b")
-    assert bare is not None
+    trusted = await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-b")
+    assert trusted is not None
     async with store._pool.acquire() as conn:
         attempt = await conn.fetchrow(
             "SELECT sandbox_runtime, sandbox_image_digest, runtime_version "
             "FROM agent_attempts WHERE id = $1",
-            bare["attempt_id"],
+            trusted["attempt_id"],
         )
-    assert attempt["sandbox_runtime"] is None
-    assert attempt["runtime_version"] is None
+    assert attempt["sandbox_runtime"] == ""
+    assert attempt["runtime_version"] == "2.1.220"
 
 
 @pytest.mark.parametrize(
@@ -545,7 +560,8 @@ async def test_shared_host_row_cannot_authorize_a_mismatched_polling_replica(sto
     await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2)
     job = await _create_job(store, metadata={"requires": ["shared-sandbox-v1"]})
 
-    claim = await store.claim_job(
+    claim = await _claim(
+        store,
         worker_id="rolling-old-replica",
         lease_ttl_seconds=60,
         host="runner-a",
@@ -560,7 +576,8 @@ async def test_exact_polling_replica_can_claim_shared_work(store):
     await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2)
     job = await _create_job(store, metadata={"requires": ["shared-sandbox-v1"]})
 
-    claim = await store.claim_job(
+    claim = await _claim(
+        store,
         worker_id="rolling-new-replica",
         lease_ttl_seconds=60,
         host="runner-a",
@@ -575,7 +592,8 @@ async def test_runc_replica_skips_secure_work_and_takes_the_next_trusted_job(sto
     secure = await _create_job(store, execution_profile="untrusted-kata-v1")
     trusted = await _create_job(store, task_prompt="trusted", execution_profile="trusted-v1")
 
-    claim = await store.claim_job(
+    claim = await _claim(
+        store,
         worker_id="runc-replica",
         lease_ttl_seconds=60,
         host="runner-a",
@@ -602,7 +620,8 @@ async def test_capability_labels_or_arbitrary_runtime_cannot_claim_secure_work(s
     await _create_job(store, execution_profile="untrusted-kata-v1")
 
     assert (
-        await store.claim_job(
+        await _claim(
+            store,
             worker_id="w1",
             lease_ttl_seconds=60,
             host="runner-a",
@@ -617,20 +636,24 @@ async def test_shared_or_superseded_host_credential_cannot_claim_secure_work(sto
     await _enrol(store, "runner-a")
     job = await _create_job(store, execution_profile="untrusted-kata-v1")
 
-    shared = await store.claim_job(
+    shared = await _claim(
+        store,
         worker_id="shared-dispatcher",
         lease_ttl_seconds=60,
         host="runner-a",
+        host_credential_hash="",
         claim_attestation=_kata_attestation(),
     )
-    stale = await store.claim_job(
+    stale = await _claim(
+        store,
         worker_id="stale-host-token",
         lease_ttl_seconds=60,
         host="runner-a",
         host_credential_hash=hash_secret("wrong"),
         claim_attestation=_kata_attestation(),
     )
-    current = await store.claim_job(
+    current = await _claim(
+        store,
         worker_id="current-host-token",
         lease_ttl_seconds=60,
         host="runner-a",
@@ -651,7 +674,8 @@ async def test_reenrollment_revokes_an_already_authenticated_claim_generation(st
     await _create_job(store, execution_profile="untrusted-kata-v1")
 
     assert (
-        await store.claim_job(
+        await _claim(
+            store,
             worker_id="old",
             lease_ttl_seconds=60,
             host="runner-a",
@@ -660,7 +684,8 @@ async def test_reenrollment_revokes_an_already_authenticated_claim_generation(st
         )
         is None
     )
-    assert await store.claim_job(
+    assert await _claim(
+        store,
         worker_id="new",
         lease_ttl_seconds=60,
         host="runner-a",
@@ -674,8 +699,8 @@ async def test_a_full_host_claims_nothing_more(store):
     await _create_job(store)
     await _create_job(store)
 
-    first = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
-    second = await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-a")
+    first = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    second = await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
     assert first is not None
     assert second is None
@@ -686,9 +711,9 @@ async def test_the_job_a_full_host_could_not_take_is_still_queued(store):
     await _enrol(store, "runner-a", slots_total=1)
     job = await _create_job(store)
     await _create_job(store)
-    await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
-    await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-a")
+    await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
     states = {job["id"]: (await store.get_job(job["id"]))["state"]}
     assert "queued" in states.values() or states[job["id"]] == "running"
@@ -704,7 +729,7 @@ async def test_an_unmetered_host_keeps_claiming(store):
         await _create_job(store)
 
     claims = [
-        await store.claim_job(worker_id=f"w{n}", lease_ttl_seconds=60, host="runner-a")
+        await _claim(store, worker_id=f"w{n}", lease_ttl_seconds=60, host="runner-a")
         for n in range(3)
     ]
 
@@ -717,7 +742,7 @@ async def test_a_draining_host_receives_no_new_claims(store):
     await _create_job(store)
     await store.set_host_status(host="runner-a", status=HOST_DRAINING)
 
-    assert await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
+    assert await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
 
 
 @pytest.mark.parametrize("status", [HOST_ENROLLING, HOST_OFFLINE, HOST_DISABLED])
@@ -729,7 +754,7 @@ async def test_only_an_online_host_claims(store, status):
             "UPDATE agent_runner_hosts SET status = $2 WHERE host = $1", "runner-a", status
         )
 
-    assert await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
+    assert await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
 
 
 async def test_a_host_missing_a_required_capability_skips_that_job(store):
@@ -738,7 +763,7 @@ async def test_a_host_missing_a_required_capability_skips_that_job(store):
     await _create_job(store, metadata={"requires": ["kata"]})
     runnable = await _create_job(store, task_prompt="the plain one")
 
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     assert claim is not None
     assert claim["id"] == runnable["id"]
@@ -748,36 +773,23 @@ async def test_a_host_declaring_a_superset_takes_the_job(store):
     await _enrol(store, "runner-a", slots_total=4, capabilities=["kata", "gpu", "runc"])
     job = await _create_job(store, metadata={"requires": ["kata", "gpu"]})
 
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     assert claim is not None
     assert claim["id"] == job["id"]
 
 
-async def test_a_runner_reporting_no_host_will_not_take_a_job_with_requirements(store):
-    """Fail closed. A requirement nobody can vouch for is not satisfied."""
-    await _create_job(store, metadata={"requires": ["kata"]})
+async def test_a_runner_without_an_enrolled_host_never_claims(store):
+    """The new topology has no anonymous/single-host claim fallback."""
+    await _create_job(store)
 
-    assert await store.claim_job(worker_id="w1", lease_ttl_seconds=60) is None
-
-
-async def test_a_runner_reporting_no_host_still_claims_ordinary_work(store):
-    """E11's single-host setup, unchanged: no slot, no host, no ceremony."""
-    job = await _create_job(store)
-
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60)
-
-    assert claim["id"] == job["id"]
-    assert await store.host_for_attempt(attempt_id=claim["attempt_id"]) is None
-
-
-# ── G4: slots are released, and never go negative ──────────────────────
+    assert await _claim(store, worker_id="w1", lease_ttl_seconds=60) is None
 
 
 async def test_finishing_a_job_gives_the_slot_back(store):
     await _enrol(store, "runner-a", slots_total=1)
     await _create_job(store)
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     await store.transition(
         job_id=claim["id"],
@@ -793,7 +805,7 @@ async def test_finishing_a_job_gives_the_slot_back(store):
 async def test_releasing_an_unstarted_claim_gives_the_slot_back(store):
     await _enrol(store, "runner-a", slots_total=1)
     await _create_job(store)
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     await store.release_claim(
         job_id=claim["id"],
@@ -807,7 +819,7 @@ async def test_releasing_an_unstarted_claim_gives_the_slot_back(store):
 async def test_a_reaped_attempt_gives_the_slot_back(store):
     await _enrol(store, "runner-a", slots_total=1)
     await _create_job(store)
-    await store.claim_job(worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
+    await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
 
     await store.reap_expired(max_attempts=3)
 
@@ -819,8 +831,8 @@ async def test_a_double_terminal_transition_releases_one_slot_not_two(store):
     await _enrol(store, "runner-a", slots_total=2)
     await _create_job(store)
     await _create_job(store)
-    first = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
-    await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-a")
+    first = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
     for _ in range(3):
         await store.transition(
@@ -839,8 +851,8 @@ async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(store):
     await _enrol(store, "runner-a", slots_total=2)
     await _create_job(store)
     await _create_job(store)
-    first = await store.claim_job(worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
-    await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-a")
+    first = await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
+    await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
     await store.reap_expired(max_attempts=3)
     await store.transition(
@@ -873,7 +885,7 @@ async def test_slots_never_go_negative_under_concurrent_release(store):
     claims = []
     for _ in range(4):
         await _create_job(store)
-        claims.append(await store.claim_job(worker_id="w", lease_ttl_seconds=60, host="runner-a"))
+        claims.append(await _claim(store, worker_id="w", lease_ttl_seconds=60, host="runner-a"))
     assert (await store.get_host(host="runner-a"))["slots_used"] == 4
 
     # Every exit path, several times each, all at once.
@@ -915,10 +927,7 @@ async def test_concurrent_claims_never_oversubscribe_a_host(store):
         await _create_job(store)
 
     claims = await asyncio.gather(
-        *(
-            store.claim_job(worker_id=f"w{n}", lease_ttl_seconds=60, host="runner-a")
-            for n in range(8)
-        )
+        *(_claim(store, worker_id=f"w{n}", lease_ttl_seconds=60, host="runner-a") for n in range(8))
     )
 
     granted = [claim for claim in claims if claim is not None]
@@ -937,7 +946,7 @@ async def test_the_release_helper_refuses_to_decrement_past_zero(store):
     """
     await _enrol(store, "runner-a", slots_total=2)
     await _create_job(store)
-    await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     async with store._pool.acquire() as conn:
         for _ in range(5):
@@ -996,7 +1005,7 @@ async def test_removing_keeps_the_row_and_forgetting_drops_it(store):
 async def test_removing_a_busy_host_is_refused_unless_forced(store):
     await _enrol(store, "runner-a", slots_total=2)
     await _create_job(store)
-    await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     assert await store.remove_host(host="runner-a") == "busy"
     assert await store.remove_host(host="runner-a", force=True) == "ok"
@@ -1010,7 +1019,7 @@ async def test_forgetting_a_host_does_not_break_its_attempts(store):
     """
     await _enrol(store, "runner-a", slots_total=2)
     await _create_job(store)
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
     await store.transition(
         job_id=claim["id"],
         attempt_id=claim["attempt_id"],
@@ -1034,9 +1043,9 @@ async def test_the_pin_and_the_pool_both_have_to_agree(store):
     await _create_job(store)
     await store.set_active_runner_host(host="runner-a")
 
-    assert await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b") is None
+    assert await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-b") is None
     await store.set_host_status(host="runner-a", status=HOST_DRAINING)
-    assert await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
+    assert await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
 
 
 # ── P3: thread residency (design §7) ───────────────────────────────────
@@ -1045,17 +1054,9 @@ async def test_the_pin_and_the_pool_both_have_to_agree(store):
 async def _running_claim(store, host: str, **overrides) -> tuple[dict, dict]:
     """A job claimed and running on ``host`` — what earns a residency."""
     job = await _create_job(store, **overrides)
-    claim = await store.claim_job(worker_id=f"w-{host}", lease_ttl_seconds=60, host=host)
+    claim = await _claim(store, worker_id=f"w-{host}", lease_ttl_seconds=60, host=host)
     assert claim is not None and claim["id"] == job["id"]
     return job, claim
-
-
-async def _age_out_of_affinity_hold(store, job_id: str) -> None:
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_jobs SET updated_at = NOW() - interval '31 seconds' WHERE id = $1",
-            job_id,
-        )
 
 
 async def test_residency_is_earned_by_the_running_attempt_only(store):
@@ -1110,7 +1111,7 @@ async def test_an_expired_lease_earns_no_residency(store):
     """Running in name only: the reaper has not passed, the clock has."""
     await _enrol(store, "runner-a")
     job = await _create_job(store)
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
     assert claim is not None
 
     assert (
@@ -1139,15 +1140,14 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store):
     )
     assert (first["generation"], first["status"]) == (1, "hot")
 
-    # The host vanishes; the attempt is released, the turn requeues, and the
-    # affinity hold for the dead host is allowed to expire.
+    # The host vanishes and the attempt is released. The next enrolled host
+    # may claim this synthetic pre-group job and rotate the residency fence.
     await store.release_claim(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
     )
-    await _age_out_of_affinity_hold(store, job["id"])
-    reclaim = await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b")
+    reclaim = await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-b")
     assert reclaim is not None
     second = await store.establish_residency(
         thread_id=job["thread_id"],
@@ -1338,8 +1338,7 @@ async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store):
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
     )
-    await _age_out_of_affinity_hold(store, job["id"])
-    assert await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b")
+    assert await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-b")
     second = await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-b",
@@ -1372,156 +1371,44 @@ async def test_reaped_residencies_carry_their_grant_id(store):
     ]
 
 
-async def test_a_hot_threads_turn_is_held_for_its_resident_host(store):
-    """Affinity is a window, not a pin (design §7)."""
-    await _enrol(store, "runner-a")
-    await _enrol(store, "runner-b")
-    job, claim = await _running_claim(store, "runner-b")
-    await store.establish_residency(
-        thread_id=job["thread_id"],
-        host="runner-b",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    await store.release_claim(
-        job_id=job["id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-    )
-
-    # Held: the stranger gets nothing while the resident host's window runs.
-    assert await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
-    reclaimed = await store.claim_job(worker_id="w2", lease_ttl_seconds=60, host="runner-b")
-    assert reclaimed is not None and reclaimed["id"] == job["id"]
-
-
-async def test_the_affinity_hold_expires_rather_than_stranding_the_turn(store):
-    await _enrol(store, "runner-a")
-    await _enrol(store, "runner-gone")
-    job, claim = await _running_claim(store, "runner-gone")
-    await store.establish_residency(
-        thread_id=job["thread_id"],
-        host="runner-gone",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    await store.release_claim(
-        job_id=job["id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-    )
-    await _age_out_of_affinity_hold(store, job["id"])
-
-    claimed = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
-
-    assert claimed is not None and claimed["id"] == job["id"]
-
-
-async def test_residency_affinity_never_weakens_the_secure_profile_gate(store):
-    """An earned HOT residency is preference, never Kata authorization."""
-    await _enrol(store, "runner-resident")
-    await _enrol(store, "runner-replacement")
-    job = await _create_job(store, execution_profile="untrusted-kata-v1")
-
-    # Establish a real, earned residency from a secure running attempt.  This
-    # exercises the final #58 grant/HOT gate rather than manufacturing a row.
-    first = await store.claim_job(
-        worker_id="resident-kata",
-        lease_ttl_seconds=60,
-        host="runner-resident",
-        host_credential_hash=hash_secret("cred-runner-resident"),
-        claim_attestation=_kata_attestation(),
-    )
-    assert first is not None and first["id"] == job["id"]
-    residency = await store.establish_residency(
-        thread_id=job["thread_id"],
-        host="runner-resident",
-        runtime_id="claude-code",
-        runtime_version=first["runtime_version"],
-        ttl_seconds=60,
-    )
-    assert residency is not None
-    await store.release_claim(
-        job_id=job["id"],
-        attempt_id=first["attempt_id"],
-        lease_generation=first["lease_generation"],
-    )
-
-    # Same host and generation affinity still cannot authorize a runc replica.
-    assert (
-        await store.claim_job(
-            worker_id="resident-runc",
-            lease_ttl_seconds=60,
-            host="runner-resident",
-            host_credential_hash=hash_secret("cred-runner-resident"),
-            claim_attestation=_kata_attestation(sandbox_runtime="", guest_kernel=None),
-        )
-        is None
-    )
-    # The verified replacement is safe, but observes the normal affinity hold
-    # while the resident host might still collect with a conforming replica.
-    assert (
-        await store.claim_job(
-            worker_id="replacement-kata",
-            lease_ttl_seconds=60,
-            host="runner-replacement",
-            host_credential_hash=hash_secret("cred-runner-replacement"),
-            claim_attestation=_kata_attestation(),
-        )
-        is None
-    )
-
-    await _age_out_of_affinity_hold(store, job["id"])
-    claimed = await store.claim_job(
-        worker_id="replacement-kata",
-        lease_ttl_seconds=60,
-        host="runner-replacement",
-        host_credential_hash=hash_secret("cred-runner-replacement"),
-        claim_attestation=_kata_attestation(),
-    )
-
-    assert claimed is not None and claimed["id"] == job["id"]
-
-
-async def test_a_thread_without_a_residency_is_anyones(store):
+async def test_a_new_chat_without_a_group_is_claimable_by_an_enrolled_host(store):
     await _enrol(store, "runner-a")
     job = await _create_job(store)
 
-    claimed = await store.claim_job(worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    claimed = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     assert claimed is not None and claimed["id"] == job["id"]
 
 
-async def test_the_claim_carries_its_own_stamp_across_a_rolling_upgrade(store):
-    """Review finding 3, at the store: each claim carries the version the
-    replica ran *at claim time*; another replica's later claim must not
-    rewrite the first attempt's stamp."""
+async def test_each_claim_keeps_its_own_image_stamp_across_a_rolling_upgrade(store):
+    """A later replica image cannot rewrite an earlier attempt's stamp."""
     await _enrol(store, "runner-a")
     await _create_job(store)
-    claim_one = await store.claim_job(
+    await _create_job(store, task_prompt="second queued chat")
+    claim_one = await _claim(
+        store,
         worker_id="replica-v1",
         lease_ttl_seconds=60,
         host="runner-a",
         host_credential_hash=hash_secret("cred-runner-a"),
-        claim_attestation=_kata_attestation(runtime_versions={"claude-code": "1.0.0"}),
+        claim_attestation=_shared_attestation(sandbox_image_digest="sandbox@sha256:image-v1"),
     )
     assert claim_one is not None
-    assert claim_one["runtime_version"] == "1.0.0"
+    assert claim_one["runtime_version"] == "2.1.220"
+    assert claim_one["sandbox_image_digest"] == "sandbox@sha256:image-v1"
 
-    await _create_job(store)
-    claim_two = await store.claim_job(
+    claim_two = await _claim(
+        store,
         worker_id="replica-v2",
         lease_ttl_seconds=60,
         host="runner-a",
         host_credential_hash=hash_secret("cred-runner-a"),
-        claim_attestation=_kata_attestation(runtime_versions={"claude-code": "2.0.0"}),
+        claim_attestation=_shared_attestation(sandbox_image_digest="sandbox@sha256:image-v2"),
     )
     assert claim_two is not None
 
-    assert claim_two["runtime_version"] == "2.0.0"
-    assert claim_one["runtime_version"] == "1.0.0"  # the stamp is the claim's own
+    assert claim_two["sandbox_image_digest"] == "sandbox@sha256:image-v2"
+    assert claim_one["sandbox_image_digest"] == "sandbox@sha256:image-v1"
 
 
 async def test_warm_native_survives_a_downgrade_by_folding_into_cold_native(store):
@@ -1609,15 +1496,13 @@ def _menu_attestation(menu: list[str] = MENU) -> dict:
     by every replica on a machine is not evidence about the process actually
     taking the job during a rolling deployment.
     """
-    return _kata_attestation(
-        runtime_versions={"claude-code": menu[0]},
-        runtime_versions_available={"claude-code": menu},
-    )
+    return _shared_attestation(runtime_versions_available={"claude-code": menu})
 
 
 async def _menu_claim(store, worker: str, *, menu: list[str] = MENU):
     """Claim as a replica whose image holds ``menu``."""
-    return await store.claim_job(
+    return await _claim(
+        store,
         worker_id=worker,
         lease_ttl_seconds=60,
         host="runner-a",
@@ -1667,47 +1552,6 @@ async def test_clearing_a_selection_returns_to_the_host_default(store):
 
     assert claim is not None
     assert claim["runtime_version"] == "2.1.220"
-
-
-async def test_a_thread_keeps_its_version_when_the_selection_moves(store):
-    """The reason resolution is ordered rather than "latest selection wins".
-
-    Turn one runs the default. An admin switches. Turn two of the *same thread*
-    must still be stamped with the version turn one ran, or the checkpoint gate
-    refuses its session and the conversation silently forgets itself.
-    """
-    await _menu_host(store, "runner-a")
-    first = await _create_job(store)
-    turn_one = await _menu_claim(store, "w1")
-    assert turn_one is not None and turn_one["runtime_version"] == "2.1.220"
-    # Settled with no patch, which is enough for the claim to promote its
-    # follow-up — this test is about versions, not about publishing.
-    await store.transition(
-        job_id=first["id"],
-        attempt_id=turn_one["attempt_id"],
-        lease_generation=turn_one["lease_generation"],
-        from_states=("running",),
-        to_state="succeeded",
-    )
-
-    await store.set_runtime_version(runtime="claude-code", version="2.1.235")
-
-    child = await store.create_follow_up(
-        parent_job_id=first["id"], user_id="u1", prompt="and the docs"
-    )
-    assert child is not None
-    turn_two = await _menu_claim(store, "w2")
-
-    assert turn_two is not None
-    assert turn_two["runtime_version"] == "2.1.220", (
-        "an admin's switch reached into a live thread; its next turn would replay"
-    )
-
-    # And a *new* thread does get the new version — otherwise the selection
-    # would be inert rather than merely non-retroactive.
-    await _create_job(store)
-    fresh = await _menu_claim(store, "w3")
-    assert fresh is not None and fresh["runtime_version"] == "2.1.235"
 
 
 async def test_a_selection_the_image_lost_falls_back_instead_of_parking(store):

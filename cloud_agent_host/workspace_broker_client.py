@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -558,18 +557,8 @@ class WorkspaceBrokerClient:
         )
 
 
-def workspace_broker_from_env() -> WorkspaceBrokerClient | None:
-    """Return the configured broker, or ``None`` for legacy deployments."""
-    url = (os.environ.get("AGENT_WORKSPACE_BROKER_URL") or "").strip()
-    token = (os.environ.get("AGENT_WORKSPACE_BROKER_TOKEN") or "").strip()
-    if not url or not token:
-        return None
-    return WorkspaceBrokerClient(url, token)
-
-
 __all__ = [
     "WorkspaceBrokerClient",
     "WorkspaceBrokerError",
     "WorkspaceBrokerStream",
-    "workspace_broker_from_env",
 ]

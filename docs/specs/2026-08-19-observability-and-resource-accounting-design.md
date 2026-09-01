@@ -388,7 +388,7 @@ API to the console, watched by the checker; bounded dimensions per O7):
 turn duration histogram ×
 (runtime, continuity_mode); turns total × (terminal state, degradation
 reason); continuity mode counter (the §9 aggregate, finally); later persistent
-phase: checkpoint export outcome + size histogram; residency
+phase: Docker data-root backup/restore outcome + size histogram; residency
 establish/loss/takeover counters
 × reason; stop/start/native-resume outcome and duration; running-idle/stopped
 residency gauges; claim-loop lag gauge; event upload queue depth; attempt
@@ -397,8 +397,8 @@ denied); unclassified-bytes gauge; sampler coverage histogram; tool duration
 histogram × (tool_name, source).
 
 **Ops records** (alert-on): attempt terminal failures with error class; later
-persistent phase: checkpoint export failure (already an event — projected,
-not re-emitted);
+persistent phase: retained storage backup/restore failure (projected, not
+re-emitted);
 `residency_unusable`; grant mint/link degradation; reaper actions; sampler
 start/stop/gap.
 
@@ -409,8 +409,8 @@ dedupe key `(attempt_id, client_seq)` carried in attributes.
 checker over Postgres/CP state, posting to its own Slack webhook — the
 `alert_slack` pattern, deliberately never wired into the status-monitor
 control plane): claim loop silent > 2 min; turn
-failure rate; later persistent phase: export failure streak (design §6 says a
-thread quietly loses cold resume — now it pages); denied-CONNECT burst;
+failure rate; later persistent phase: backup/restore failure streak (a retained
+container must never silently lose native context); denied-CONNECT burst;
 unclassified-bytes growth; sampler coverage < 0.9 sustained; running-capacity
 or stopped-container disk/admission saturation.
 

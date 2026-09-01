@@ -566,7 +566,7 @@ describe('JobDetail', () => {
     openWorkspace();
 
     await waitFor(() =>
-      expect(screen.getByLabelText('Git workspace')).toHaveTextContent('Archived result'),
+      expect(screen.getByLabelText('Git workspace')).toHaveTextContent('Unavailable'),
     );
     expect(screen.getByLabelText('Git workspace')).toHaveTextContent('src/example.ts');
     fireEvent.click(screen.getByRole('tab', { name: 'review' }));
@@ -907,35 +907,31 @@ describe('JobDetail', () => {
     expect(screen.getByText(/restores any saved changes/i)).toBeInTheDocument();
   });
 
-  it('forks the conversation from an earlier assistant message', async () => {
+  it('forks the settled current native session', async () => {
     vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_fork' } as never);
-    render(<JobDetail job={makeJob({ threadMessages: HISTORY })} />);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+        })}
+      />,
+    );
 
     fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }));
 
-    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_1'));
     expect(navigation.push).toHaveBeenCalledWith('/ajob_fork');
   });
 
-  it('edit-and-rewind forks the prior turn and leaves the prompt as a draft', async () => {
-    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_fork' } as never);
+  it('does not offer a synthetic fork when no retained sandbox exists', () => {
     render(<JobDetail job={makeJob({ threadMessages: HISTORY })} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit & rewind' }));
-
-    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
-    expect(sessionStorage.getItem('agent-rewind-draft-ajob_fork')).toBe(
-      'Current task\nwith all of its detail.',
-    );
-    expect(navigation.push).toHaveBeenCalledWith('/ajob_fork');
-  });
-
-  it('prefills the composer from a rewind draft exactly once', () => {
-    sessionStorage.setItem('agent-rewind-draft-ajob_1', 'edited prompt');
-    render(<JobDetail job={makeJob()} />);
-
-    expect(screen.getByLabelText('Add a follow-up')).toHaveValue('edited prompt');
-    expect(sessionStorage.getItem('agent-rewind-draft-ajob_1')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit & rewind' })).not.toBeInTheDocument();
   });
 });
 

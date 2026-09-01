@@ -1,23 +1,20 @@
-"""Driver → Session → Turn: the platform's handle on a harness (design §5).
+"""Driver → Session → Turn: the platform's handle on an Agent CLI.
 
-This is the object model the session-resident-threads design commits to
-(``docs/specs/2026-08-17-session-resident-harness-threads-design.md``), layered
-over the dialect adapters in :mod:`cloud_agent_host.runtimes`. The split of
-labour is deliberate and mirrors the design's D7:
+This is the object model used by the retained native-session design
+(``docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md``),
+layered over the dialect adapters in :mod:`cloud_agent_host.runtimes`:
 
 - **runtimes.py** stays the *dialect* layer — how one CLI is invoked and how
   one line of its output maps onto normalized events. It knows nothing about
   sessions or the platform.
-- **drivers.py** is the *contract* layer the runner drives: ``launch`` a
+- **drivers.py** is the *contract* layer the supervisor drives: launch a live
   session, ``start_turn`` on it, iterate its events, ``wait`` for a
-  :class:`TurnResult` whose guarantees the platform can lean on (D9).
+  :class:`TurnResult` whose guarantees the platform can lean on.
 
-One process may still carry only one turn without losing continuity. Codex,
-pi, OpenCode and Kilo persist their own native session data and accept an
-explicit session locator on the next process; Claude additionally implements
-checkpoint export/restore and a live-input transport. PID lifetime is an
-implementation detail — the contract reports whether the next turn receives
-the native context, not whether Linux happened to keep the same child alive.
+Every supported CLI persists native session data inside its retained Docker
+layer and can resume from an explicit session locator. A live process is kept
+while the group is active; after ``docker stop`` the replacement process must
+resume that exact locator from the same container layer.
 
 Synchronous by design: the runner is threaded, and the only transport v1
 drivers own is container stdio. The design doc's async signatures become
@@ -26,10 +23,7 @@ meaningful with the live-input transport and arrive with it.
 
 from __future__ import annotations
 
-import io
 import json
-import pathlib
-import tarfile
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -73,16 +67,12 @@ class DriverError(Exception):
     """Raised when a driver cannot honour a request."""
 
 
-class StateRestoreUnsupported(DriverError):
-    """``launch(state=...)`` before the driver implements restore (P2)."""
-
-
-class StateExportUnsupported(DriverError):
-    """``export_state()`` before the driver implements it (P2)."""
+class SessionStateUnavailable(DriverError):
+    """The retained native state or session locator is unavailable."""
 
 
 class ForkUnsupported(DriverError):
-    """``fork()`` before the driver implements it (D8 v1: none do)."""
+    """The selected driver surface cannot fork a native session."""
 
 
 @dataclass(frozen=True)
@@ -90,17 +80,10 @@ class HarnessCapabilities:
     """What this harness can do, in the design's semantic vocabulary.
 
     Values state what is *implemented and wired*, never what the upstream CLI
-    could theoretically do. Native resume and portable checkpoint export are
-    separate facts: several pinned CLIs now do the former in the retained
-    sandbox, while persistent-storage work for their state is intentionally a
-    later milestone.
+    could theoretically do.
     """
 
-    continuity: Literal["hot", "resume", "replay"] = "replay"
-    #: Whether ``export_state`` produces a self-contained blob suitable for
-    #: storage outside the current sandbox. Native on-disk resume does not
-    #: imply this: the retained-container milestone deliberately lands first.
-    checkpoint_export: bool = False
+    continuity: Literal["resume"] = "resume"
     steering: Literal["mid_turn", "queue_only", "none"] = "none"
     fork: Literal["latest_immediate", "at_latest", "at_anchor", "none"] = "none"
     #: Whether the host supervisor, rather than an individual runner turn,
@@ -109,11 +92,8 @@ class HarnessCapabilities:
     #: A conformance claim, not an upstream marketing claim: two separately
     #: credentialed resident processes may safely operate in one workspace.
     concurrent_shared_workspace: bool = False
-    # Replay rebuilds the conversation as text, so any turn may pick any
-    # model — per-turn switching is the one thing the replay world does
-    # *better* than sessions. Session-capable drivers will downgrade this to
-    # "restart" (claude-code) as the design records.
-    model_switch: Literal["per_turn", "restart", "none"] = "per_turn"
+    # A live process must rotate when a session changes model configuration.
+    model_switch: Literal["restart", "none"] = "restart"
 
 
 @dataclass(frozen=True)
@@ -173,18 +153,6 @@ class HarnessEvent:
 
 
 @dataclass(frozen=True)
-class HarnessState:
-    """One exported harness session: the driver's opaque blob plus its name.
-
-    The platform stores and transports this (encrypted, size-capped) inside a
-    ThreadCheckpoint; only the driver that exported it can interpret ``blob``.
-    """
-
-    session_id: str
-    blob: bytes
-
-
-@dataclass(frozen=True)
 class LaunchContext:
     """Everything a session needs that is not the turn itself.
 
@@ -198,15 +166,12 @@ class LaunchContext:
     gateway_base_url: str
     credential: str
     provides_isolation: bool
-    spawn: Callable[[list[str], dict[str, str]], SandboxProcess]
     base_env: dict[str, str] = field(default_factory=dict)
     mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG
-    #: Host directory the platform bind-mounts at the sandbox's state target.
-    #: ``None`` disables session persistence (and with it export/restore).
+    #: Stable provider-state root inside the retained container. ``None`` is
+    #: accepted only for non-resident dialect tests and setup operations.
     state_dir: str | None = None
-    #: In-sandbox provider state root. Legacy mounts use /agent-state; a
-    #: retained multi-member runtime may select a provider-compatible child
-    #: directory without changing the host-side persistence signal above.
+    #: Provider-compatible member-private state root inside the same container.
     session_state_dir: str = STATE_MOUNT_TARGET
     #: Spawns with a live stdin (SandboxSpec.live_input). ``None`` means this
     #: caller does not offer residency; ``launch_live`` refuses without it.
@@ -299,13 +264,11 @@ class HarnessTurn:
 
 
 class HarnessSession:
-    """A launched harness. Today: one turn, then done (the replay world)."""
+    """Common state for a live Agent CLI session."""
 
     def __init__(self, driver: HarnessDriver, context: LaunchContext) -> None:
         self._driver = driver
         self._context = context
-        self._turn: HarnessTurn | None = None
-        self._turn_done = False
         self._closed = False
 
     @property
@@ -329,65 +292,17 @@ class HarnessSession:
         """
         return None
 
-    def start_turn(self, turn_input: TurnInput) -> HarnessTurn:
-        """Spawn the harness for this turn inside the platform's sandbox."""
-        if self._closed:
-            raise DriverError("session is closed")
-        if self._turn is not None and not self._turn_done:
-            raise DriverError("a turn is already running on this session")
-        if self._turn is not None:
-            # One-shot CLIs cannot take a second turn on one process. The
-            # session that can (HOT, issue #57) overrides this, not callers.
-            raise DriverError(
-                f"the {self._driver.id!r} driver runs one turn per session; "
-                "launch a new session for the next turn"
-            )
-        argv, extra_env = self.runtime.prepare(
-            workdir=self._context.workdir,
-            task_prompt=turn_input.prompt,
-            model=turn_input.model,
-            gateway_base_url=self._context.gateway_base_url,
-            credential=self._context.credential,
-            provides_isolation=self._context.provides_isolation,
-            mcp_config=self._context.mcp_config,
-            reasoning_effort=turn_input.reasoning_effort,
-            **self._extra_prepare_kwargs(),
-        )
-        env = dict(self._context.base_env)
-        env.update(extra_env)
-        process = self._context.spawn(argv, env)
-        self._turn = HarnessTurn(self, process)
-        return self._turn
-
-    def _extra_prepare_kwargs(self) -> dict[str, Any]:
-        """Dialect-specific prepare arguments; the generic session has none."""
-        return {}
-
     def turn_finished(self) -> None:
-        """Recorded by the turn on completion; not a caller API."""
-        self._turn_done = True
-
-    def export_state(self) -> HarnessState:
-        """Refused until a driver implements checkpointing (issue #56)."""
-        raise StateExportUnsupported(
-            f"the {self._driver.id!r} driver does not export session state yet"
-        )
-
-    def fork(self, at: object | None = None) -> HarnessSession:
-        """Refused in v1 (design D8); the signature is the reserved contract."""
-        raise ForkUnsupported(f"the {self._driver.id!r} driver does not fork sessions")
+        """A settled turn leaves the live session ready for another turn."""
+        return
 
     def close(self) -> None:
-        """Release the session; kills a still-running turn."""
+        """Mark a session closed; concrete transports release their process."""
         self._closed = True
-        if self._turn is not None and not self._turn_done:
-            self._turn.cancel()
 
     def stderr_text(self) -> str:
         """Return bounded process diagnostics when this session owns one."""
-        if self._turn is None:
-            return ""
-        return self._turn.stderr_text()
+        return ""
 
     def process_exit_code(self) -> int | None:
         """Return a resident process status when this session owns one."""
@@ -395,7 +310,7 @@ class HarnessSession:
 
 
 class HarnessDriver:
-    """Launches sessions for one registered harness."""
+    """Base metadata for one registered live harness."""
 
     def __init__(self, runtime: AgentRuntime) -> None:
         self.runtime = runtime
@@ -406,81 +321,12 @@ class HarnessDriver:
         return self.runtime.name
 
     def capabilities(self) -> HarnessCapabilities:
-        """The semantic capability row for this harness, as implemented."""
-        return HarnessCapabilities()
-
-    def launch(
-        self,
-        context: LaunchContext,
-        state: HarnessState | None = None,
-    ) -> HarnessSession:
-        """Create a session; ``state`` restores one exported earlier (P2)."""
-        if state is not None:
-            raise StateRestoreUnsupported(
-                f"the {self.id!r} driver does not restore session state yet"
-            )
-        return HarnessSession(self, context)
+        """The semantic capability row for this live harness."""
+        raise NotImplementedError
 
 
-class NativeResumeSession(HarnessSession):
-    """One native session continued by an explicit id on a fresh process."""
-
-    def __init__(
-        self,
-        driver: HarnessDriver,
-        context: LaunchContext,
-        *,
-        resume_session_id: str | None = None,
-    ) -> None:
-        super().__init__(driver, context)
-        self._resume_session_id = resume_session_id
-
-    def _extra_prepare_kwargs(self) -> dict[str, Any]:
-        if self._context.state_dir is None:
-            return {}
-        result: dict[str, Any] = {
-            # A legacy container bind-mounts the host state directory here;
-            # a retained chat owns this path in its Docker writable layer.
-            # The CLI must never receive the host-side path.
-            "session_state_dir": STATE_MOUNT_TARGET,
-            "resume_session_id": self._resume_session_id,
-        }
-        if self._context.activation_dir is not None:
-            result["activation_dir"] = self._context.activation_dir
-        return result
-
-
-class NativeResumeDriver(HarnessDriver):
-    """Shared driver for CLIs with on-disk state plus ``--session <id>``."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise local native resume without claiming portable export."""
-        return HarnessCapabilities(continuity="resume")
-
-    def launch(
-        self,
-        context: LaunchContext,
-        state: HarnessState | None = None,
-    ) -> HarnessSession:
-        """Launch a new native session; portable checkpoint import is deferred."""
-        if state is not None:
-            raise StateRestoreUnsupported(
-                f"the {self.id!r} driver resumes local native state but does not "
-                "import a portable checkpoint yet"
-            )
-        return NativeResumeSession(self, context)
-
-    def launch_resident(self, context: LaunchContext, *, session_id: str) -> HarnessSession:
-        """Resume one explicit native session from the retained state tree."""
-        if context.state_dir is None:
-            raise StateRestoreUnsupported("a native resumed turn needs persistent session state")
-        if not session_id:
-            raise StateRestoreUnsupported("a native resumed turn needs a session locator")
-        return NativeResumeSession(self, context, resume_session_id=session_id)
-
-
-class CodexDriver(NativeResumeDriver):
-    """Codex ``exec resume`` over its persisted rollout files."""
+class CodexDriver(HarnessDriver):
+    """Codex app-server over its persisted rollout files."""
 
     def capabilities(self) -> HarnessCapabilities:
         """Advertise Codex app-server live, interrupt, and native-fork support."""
@@ -493,12 +339,8 @@ class CodexDriver(NativeResumeDriver):
             concurrent_shared_workspace=True,
         )
 
-    def launch_live(
-        self, context: LaunchContext, state: HarnessState | None = None
-    ) -> CodexAppServerSession:
+    def launch_live(self, context: LaunchContext) -> CodexAppServerSession:
         """Start a new persistent Codex app-server thread."""
-        if state is not None:
-            raise StateRestoreUnsupported("Codex portable checkpoint import is not implemented")
         return CodexAppServerSession(self, context)
 
     def launch_resident_live(
@@ -506,12 +348,12 @@ class CodexDriver(NativeResumeDriver):
     ) -> CodexAppServerSession:
         """Resume one Codex thread through a persistent app-server transport."""
         if context.state_dir is None:
-            raise StateRestoreUnsupported("a resident Codex session needs a state mount")
+            raise SessionStateUnavailable("a resident Codex session needs native state")
         return CodexAppServerSession(self, context, resume_session_id=session_id)
 
 
-class PiDriver(NativeResumeDriver):
-    """pi ``--session`` over its persisted JSONL session tree."""
+class PiDriver(HarnessDriver):
+    """pi RPC over its persisted JSONL session tree."""
 
     def capabilities(self) -> HarnessCapabilities:
         """Advertise Pi RPC live, interrupt, and prompt-free fork support."""
@@ -524,18 +366,14 @@ class PiDriver(NativeResumeDriver):
             concurrent_shared_workspace=True,
         )
 
-    def launch_live(
-        self, context: LaunchContext, state: HarnessState | None = None
-    ) -> PiRpcSession:
+    def launch_live(self, context: LaunchContext) -> PiRpcSession:
         """Start a new persistent Pi RPC session."""
-        if state is not None:
-            raise StateRestoreUnsupported("pi portable checkpoint import is not implemented")
         return PiRpcSession(self, context)
 
     def launch_resident_live(self, context: LaunchContext, *, session_id: str) -> PiRpcSession:
         """Resume one Pi session through its persistent RPC transport."""
         if context.state_dir is None:
-            raise StateRestoreUnsupported("a resident pi session needs a state mount")
+            raise SessionStateUnavailable("a resident pi session needs native state")
         return PiRpcSession(self, context, resume_session_id=session_id)
 
     def launch_fork_live(
@@ -546,14 +384,14 @@ class PiDriver(NativeResumeDriver):
     ) -> PiRpcSession:
         """Open pi's prompt-free ``--fork`` RPC process for one probe."""
         if context.state_dir is None:
-            raise StateRestoreUnsupported("a pi native fork needs a state mount")
+            raise SessionStateUnavailable("a pi native fork needs native state")
         if not source_session_id:
             raise ForkUnsupported("a pi native fork needs a source session id")
         return PiRpcSession(self, context, fork_session_id=source_session_id)
 
 
-class OpenCodeDriver(NativeResumeDriver):
-    """OpenCode ``run --session`` over its XDG data store."""
+class OpenCodeDriver(HarnessDriver):
+    """OpenCode serve over its XDG data store."""
 
     def capabilities(self) -> HarnessCapabilities:
         """Advertise OpenCode serve live, interrupt, and native-fork support."""
@@ -566,12 +404,8 @@ class OpenCodeDriver(NativeResumeDriver):
             concurrent_shared_workspace=True,
         )
 
-    def launch_live(
-        self, context: LaunchContext, state: HarnessState | None = None
-    ) -> HttpAgentLiveSession:
+    def launch_live(self, context: LaunchContext) -> HttpAgentLiveSession:
         """Start a new authenticated OpenCode serve session."""
-        if state is not None:
-            raise StateRestoreUnsupported("OpenCode portable checkpoint import is not implemented")
         return HttpAgentLiveSession(self, context)
 
     def launch_resident_live(
@@ -579,12 +413,12 @@ class OpenCodeDriver(NativeResumeDriver):
     ) -> HttpAgentLiveSession:
         """Resume one OpenCode session through its authenticated bridge."""
         if context.state_dir is None:
-            raise StateRestoreUnsupported("a resident OpenCode session needs a state mount")
+            raise SessionStateUnavailable("a resident OpenCode session needs native state")
         return HttpAgentLiveSession(self, context, resume_session_id=session_id)
 
 
-class KiloDriver(NativeResumeDriver):
-    """Kilo ``run --session`` over its XDG data store."""
+class KiloDriver(HarnessDriver):
+    """Kilo serve over its XDG data store."""
 
     def capabilities(self) -> HarnessCapabilities:
         """Advertise Kilo serve live, interrupt, and native-fork support."""
@@ -597,12 +431,8 @@ class KiloDriver(NativeResumeDriver):
             concurrent_shared_workspace=True,
         )
 
-    def launch_live(
-        self, context: LaunchContext, state: HarnessState | None = None
-    ) -> HttpAgentLiveSession:
+    def launch_live(self, context: LaunchContext) -> HttpAgentLiveSession:
         """Start a new authenticated Kilo serve session."""
-        if state is not None:
-            raise StateRestoreUnsupported("Kilo portable checkpoint import is not implemented")
         return HttpAgentLiveSession(self, context)
 
     def launch_resident_live(
@@ -610,7 +440,7 @@ class KiloDriver(NativeResumeDriver):
     ) -> HttpAgentLiveSession:
         """Resume one Kilo session through its authenticated bridge."""
         if context.state_dir is None:
-            raise StateRestoreUnsupported("a resident Kilo session needs a state mount")
+            raise SessionStateUnavailable("a resident Kilo session needs native state")
         return HttpAgentLiveSession(self, context, resume_session_id=session_id)
 
 
@@ -1315,57 +1145,13 @@ class HttpAgentLiveSession(_JsonResidentSession):
 CLAUDE_STATE_CONFIG_DIR = f"{STATE_MOUNT_TARGET}/claude"
 
 
-class ClaudeCodeSession(HarnessSession):
-    """A claude-code session: persistable, restorable, still one turn (COLD)."""
-
-    def __init__(
-        self,
-        driver: HarnessDriver,
-        context: LaunchContext,
-        *,
-        resume_session_id: str | None = None,
-    ) -> None:
-        super().__init__(driver, context)
-        self._resume_session_id = resume_session_id
-
-    def _extra_prepare_kwargs(self) -> dict[str, Any]:
-        if self._context.state_dir is None:
-            return {}
-        return {
-            "config_dir": CLAUDE_STATE_CONFIG_DIR,
-            "resume_session_id": self._resume_session_id,
-        }
-
-    def export_state(self) -> HarnessState:
-        """Package the session tree the turn just wrote (design §6).
-
-        Complete or refuse — never a best-effort partial: a checkpoint that
-        might be half a session is worse than replay, which is always there.
-        """
-        if self._context.state_dir is None:
-            raise StateExportUnsupported("this session ran without a state mount")
-        session_id = getattr(self.runtime, "session_id", None)
-        if not session_id:
-            raise StateExportUnsupported("the CLI never announced a session id")
-        root = pathlib.Path(self._context.state_dir) / "claude"
-        if not any(root.glob(f"projects/*/{session_id}.jsonl")):
-            raise StateExportUnsupported(
-                f"no session file for {session_id!r} under the state mount"
-            )
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-            archive.add(root / "projects", arcname="projects")
-        return HarnessState(session_id=session_id, blob=buffer.getvalue())
-
-
 class ClaudeCodeDriver(HarnessDriver):
-    """Claude Code native resume plus portable checkpoint export (issue #56)."""
+    """Claude Code native live transport, resume, and immediate fork."""
 
     def capabilities(self) -> HarnessCapabilities:
-        """Native resume/export plus the supervisor-owned stream-json pipe."""
+        """Native resume plus the supervisor-owned stream-json pipe."""
         return HarnessCapabilities(
             continuity="resume",
-            checkpoint_export=True,
             steering="mid_turn",
             fork="latest_immediate",
             model_switch="restart",
@@ -1373,75 +1159,25 @@ class ClaudeCodeDriver(HarnessDriver):
             concurrent_shared_workspace=True,
         )
 
-    def launch(self, context: LaunchContext, state: HarnessState | None = None) -> HarnessSession:
-        """Fresh session, or one that continues an exported state's memory."""
-        if state is None:
-            return ClaudeCodeSession(self, context)
-        self._restore(context, state)
-        return ClaudeCodeSession(self, context, resume_session_id=state.session_id)
-
-    def launch_resident(self, context: LaunchContext, *, session_id: str) -> HarnessSession:
-        """A hot turn in a resident workspace: resume from state already on disk.
-
-        No blob restore — the state mount still holds the session files the
-        previous turn wrote. The turn runs the verified one-shot ``--resume``
-        mechanics with **this attempt's own credential in its own process
-        environment**, which is what the credential-rotation experiments
-        (tests/external) proved is the only per-turn key mechanism the pinned
-        CLI actually honours.
-        """
-        if context.state_dir is None:
-            raise StateRestoreUnsupported("a resident turn needs the thread's state mount")
-        return ClaudeCodeSession(self, context, resume_session_id=session_id)
-
-    def launch_live(
-        self, context: LaunchContext, state: HarnessState | None = None
-    ) -> ClaudeCodeLiveSession:
-        """A stdin-fed multi-turn session over a fresh or restored state tree."""
-        if state is not None:
-            self._restore(context, state)
-            return ClaudeCodeLiveSession(self, context, resume_session_id=state.session_id)
+    def launch_live(self, context: LaunchContext) -> ClaudeCodeLiveSession:
+        """Start a fresh stdin-fed multi-turn native session."""
         return ClaudeCodeLiveSession(self, context)
 
     def launch_resident_live(
         self, context: LaunchContext, *, session_id: str
     ) -> ClaudeCodeLiveSession:
-        """The HOT transport: a live process resumed over a resident workspace.
+        """The HOT transport resumed over the retained native-state directory.
 
-        The mirror of :meth:`launch_resident` — same on-disk resume, but the
-        process stays alive after the turn settles and takes the next turn on
-        stdin. Only correct with a residency-lifetime credential in
+        The process stays alive after the turn settles and takes the next turn
+        on stdin. It is only correct with a residency-lifetime credential in
         ``context.credential`` (design §14: the thread-attributed grant that
         host beats renew), because the pinned CLI runs its whole life on its
         launch key — the measured fact that forced warm_native before §14
         relaxed attribution to the thread.
         """
         if context.state_dir is None:
-            raise StateRestoreUnsupported("a resident turn needs the thread's state mount")
+            raise SessionStateUnavailable("a resident turn needs native session state")
         return ClaudeCodeLiveSession(self, context, resume_session_id=session_id)
-
-    @staticmethod
-    def _restore(context: LaunchContext, state: HarnessState) -> None:
-        if context.state_dir is None:
-            raise StateRestoreUnsupported("restore needs a state mount")
-        root = pathlib.Path(context.state_dir) / "claude"
-        root.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(fileobj=io.BytesIO(state.blob), mode="r:gz") as archive:
-            _extract_below(archive, root)
-
-
-def _extract_below(archive: tarfile.TarFile, root: pathlib.Path) -> None:
-    """Extract refusing traversal: a checkpoint is data, not a path authority."""
-    base = root.resolve()
-    for member in archive.getmembers():
-        target = (base / member.name).resolve()
-        if not target.is_relative_to(base):
-            raise DriverError(f"checkpoint entry escapes the state dir: {member.name!r}")
-        if not (member.isfile() or member.isdir()):
-            raise DriverError(f"checkpoint entry has a refused type: {member.name!r}")
-    # The loop above is the filter: only plain files and directories, only
-    # below the state dir. Works on every Python this repo supports.
-    archive.extractall(base)
 
 
 class ClaudeCodeLiveTurn(HarnessTurn):
@@ -1492,7 +1228,7 @@ class ClaudeCodeLiveTurn(HarnessTurn):
         self._session.interrupt_turn()
 
 
-class ClaudeCodeLiveSession(ClaudeCodeSession):
+class ClaudeCodeLiveSession(HarnessSession):
     """A stdin-fed multi-turn session: the process survives between turns.
 
     Measured against the pinned CLI (2.1.220, headless stream-json; see
@@ -1514,7 +1250,8 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
         *,
         resume_session_id: str | None = None,
     ) -> None:
-        super().__init__(driver, context, resume_session_id=resume_session_id)
+        super().__init__(driver, context)
+        self._resume_session_id = resume_session_id
         if context.spawn_live is None:
             raise DriverError("a live session needs a live-input spawn")
         if context.state_dir is None:
@@ -1526,7 +1263,8 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
             credential=context.credential,
             provides_isolation=context.provides_isolation,
             mcp_config=context.mcp_config,
-            **self._extra_prepare_kwargs(),
+            config_dir=CLAUDE_STATE_CONFIG_DIR,
+            resume_session_id=self._resume_session_id,
         )
         self._argv_template = argv
         self._extra_env = extra_env
@@ -1686,15 +1424,19 @@ _DRIVER_TYPES: dict[str, type[HarnessDriver]] = {
 }
 
 
-def get_driver(runtime_id: str, *, generic_command: str | None = None) -> HarnessDriver:
+def get_driver(runtime_id: str) -> HarnessDriver:
     """Resolve a registry id to its driver. Raises ``KeyError`` like get_runtime."""
-    return driver_for(get_runtime(runtime_id, generic_command=generic_command))
+    return driver_for(get_runtime(runtime_id))
 
 
 def driver_for(runtime: AgentRuntime) -> HarnessDriver:
     """The driver for an already-resolved dialect adapter.
 
-    ``getattr`` for the same reason the runner reads backend hooks that way:
-    a hand-rolled adapter without a ``name`` is a generic driver, not a crash.
+    Only the five live-session drivers are executable. A dialect adapter with
+    no registered live transport is rejected instead of silently falling back
+    to the removed one-shot harness.
     """
-    return _DRIVER_TYPES.get(getattr(runtime, "name", "generic"), HarnessDriver)(runtime)
+    driver_type = _DRIVER_TYPES.get(getattr(runtime, "name", ""))
+    if driver_type is None:
+        raise KeyError(getattr(runtime, "name", ""))
+    return driver_type(runtime)

@@ -6,11 +6,11 @@ trusted views: the host row in Postgres and the ability to dial the broker with
 the pool credential.  A runner checking either from its own network would be
 answering a different question.
 
-The staging deploy runs this command *before* replacing the live control-plane
-container.  That ordering is the bootstrap fence for ``workflow_run``: GitHub
-may still execute an older, parallel workflow from the default branch, but a
-control plane cannot enable shared scheduling until a newly heartbeating host
-has proved the complete path.
+The deploy runs this command *before* replacing the live control-plane
+container. The host has already deployed first; this is the second half of the
+rolling compatibility fence. A control plane cannot replace the current API
+until a newly heartbeating host at the exact target commit has proved the
+complete path. There is no alternate executor to enable or fall back to.
 """
 
 from __future__ import annotations

@@ -1,8 +1,7 @@
 """Docker-owned, restartable sandboxes for agent chats.
 
-This module is the storage/lifecycle boundary for the restartable execution
-mode.  A chat sandbox is deliberately different from :class:`SandboxBackend`'s
-legacy ``docker run --rm`` process:
+This module is the storage/lifecycle boundary for retained execution. A chat
+sandbox has the following invariants:
 
 * its name and ownership labels are stable for the lifetime of a chat;
 * it has no bind or volume carrying workspace/session state;
@@ -107,11 +106,13 @@ class ChatSandboxSpec:
     memory_limit: str = "4g"
     cpu_limit: str = "2"
     stop_timeout_s: int = 10
-    shared_live: bool = False
+    shared_live: Literal[True] = True
     resident_slot_capacity: int = 8
     labels: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.shared_live is not True:
+            raise ValueError("retained chat sandboxes are always shared-live groups")
         for name, value in (
             ("thread_id", self.thread_id),
             ("sandbox_id", self.sandbox_id),
@@ -177,9 +178,8 @@ class ChatSandboxSpec:
             labels[CHAT_RUNTIME_VERSION_LABEL] = self.runtime_version
         if self.sandbox_image_digest:
             labels[CHAT_IMAGE_DIGEST_LABEL] = self.sandbox_image_digest
-        if self.shared_live:
-            labels[CHAT_SHARED_LABEL] = "true"
-            labels[CHAT_RESIDENT_CAPACITY_LABEL] = str(self.resident_slot_capacity)
+        labels[CHAT_SHARED_LABEL] = "true"
+        labels[CHAT_RESIDENT_CAPACITY_LABEL] = str(self.resident_slot_capacity)
         labels.update(self.labels)
         return labels
 
@@ -287,16 +287,15 @@ class ChatSandboxManager:
                 f"uid={self.backend.uid},gid={self.backend.gid}"
             ),
         ]
-        if spec.shared_live:
-            for slot_id in range(spec.resident_slot_capacity):
-                uid = MEMBER_UID_BASE + slot_id
-                argv += [
-                    "--tmpfs",
-                    (
-                        f"{MEMBER_TMPFS_ROOT}/{slot_id}:rw,nosuid,nodev,noexec,"
-                        f"mode=0700,uid={uid},gid={self.backend.gid}"
-                    ),
-                ]
+        for slot_id in range(spec.resident_slot_capacity):
+            uid = MEMBER_UID_BASE + slot_id
+            argv += [
+                "--tmpfs",
+                (
+                    f"{MEMBER_TMPFS_ROOT}/{slot_id}:rw,nosuid,nodev,noexec,"
+                    f"mode=0700,uid={uid},gid={self.backend.gid}"
+                ),
+            ]
         if self.backend.runtime:
             argv += ["--runtime", self.backend.runtime]
         argv += self.backend.extra_args
@@ -636,7 +635,7 @@ class ChatSandboxManager:
             rf"{re.escape(MEMBER_TMPFS_ROOT)}/([0-9]+)/resident-[0-9a-f]{{32}}\.pid",
             pidfile,
         )
-        if not spec.shared_live or match is None:
+        if match is None:
             raise ValueError("process-scoped kill requires a shared member PID file")
         slot_id = int(match.group(1))
         if slot_id >= spec.resident_slot_capacity:
@@ -654,7 +653,7 @@ class ChatSandboxManager:
         user_gid: int,
     ) -> None:
         """Kill unattached live CLI trees in exactly one private member slot."""
-        if not spec.shared_live or not 0 <= slot_id < spec.resident_slot_capacity:
+        if not 0 <= slot_id < spec.resident_slot_capacity:
             raise ValueError("resident slot is outside this shared sandbox")
         if user_uid != MEMBER_UID_BASE + slot_id:
             raise ValueError("resident slot does not match its member uid")
@@ -780,7 +779,7 @@ class ChatSandboxManager:
         slot_id: int,
         user_uid: int,
     ) -> None:
-        if not spec.shared_live or not 0 <= slot_id < spec.resident_slot_capacity:
+        if not 0 <= slot_id < spec.resident_slot_capacity:
             raise ValueError("resident slot is outside this shared sandbox")
         if user_uid != MEMBER_UID_BASE + slot_id:
             raise ValueError("resident slot does not match its member uid")
@@ -815,8 +814,6 @@ class ChatSandboxManager:
 
     def prepare_shared_workspace(self, spec: ChatSandboxSpec) -> None:
         """Make the imported owner tree writable through the shared group."""
-        if not spec.shared_live:
-            raise ValueError("shared workspace preparation requires shared_live")
         script = (
             "set -eu; "
             f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev -type d "
@@ -846,7 +843,7 @@ class ChatSandboxManager:
         user_gid: int,
     ) -> None:
         """Expose one member's credential-free workspace/state writes to peers."""
-        if not spec.shared_live or not 0 <= slot_id < spec.resident_slot_capacity:
+        if not 0 <= slot_id < spec.resident_slot_capacity:
             raise ValueError("resident slot is outside this shared sandbox")
         if user_uid != MEMBER_UID_BASE + slot_id:
             raise ValueError("resident slot does not match its member uid")
@@ -913,8 +910,6 @@ class ChatSandboxManager:
         Git capture exec starts after this census and is the sole new writer;
         admissions remain blocked by the supervisor until thaw completes.
         """
-        if not spec.shared_live:
-            raise ValueError("writer freeze requires a shared-live sandbox")
         if not re.fullmatch(r"[0-9a-f]{32}", token):
             raise ValueError("snapshot freeze token is invalid")
         unique_slots = sorted(set(slot_ids))
@@ -1016,8 +1011,6 @@ class ChatSandboxManager:
         require_exact_census: bool = True,
     ) -> None:
         """Resume exactly the frozen PID/start pairs and detect new writers."""
-        if not spec.shared_live:
-            raise ValueError("writer thaw requires a shared-live sandbox")
         if not re.fullmatch(
             rf"{re.escape(ACTIVATION_TMPFS)}/snapshot-[0-9a-f]{{32}}\.pids", manifest
         ):
@@ -1231,13 +1224,12 @@ class ChatSandboxManager:
         # ``setsid`` loses this exec's controlling terminal.  Monitor mode is
         # disabled so commands launched by the shell remain in the signalable
         # group recorded in the pidfile.
-        shared_umask = "umask 0002; " if spec.shared_live else ""
         script = (
             'pidfile="$1"; '
             'printf "%s\\n" "$$" > "$pidfile" || exit 126; '
             'cleanup() { rm -f "$pidfile"; }; '
             "trap 'cleanup' EXIT; "
-            f"{shared_umask}"
+            "umask 0002; "
             '/bin/sh +m -i; status=$?; exit "$status"'
         )
         command = self.build_exec_command(
@@ -1641,7 +1633,7 @@ class _RetainedExecProcess(SandboxProcess):
         return self._process.poll()
 
     def kill(self) -> None:
-        """Kill only one shared member, or use the legacy container backstop."""
+        """Kill one shared member, stopping the container only as a backstop."""
         try:
             if self._process_pidfile is not None:
                 assert self._user_uid is not None and self._user_gid is not None
@@ -1892,14 +1884,9 @@ class RetainedChatBackend(SandboxBackend):
             cols=cols,
         )
 
-    def adopt_workdir(self, path: str) -> None:
-        """Docker-layer paths are created for the sandbox uid in the image."""
-        if path not in {CHAT_WORKDIR, CHAT_STATE_DIR}:
-            raise SandboxError(f"retained backend does not own host path {path!r}")
-
-    def preflight(self, workdir_root: str | None = None) -> None:
+    def preflight(self) -> None:
         """Use the container backend checks without probing a host bind mount."""
-        self.manager.backend.preflight(workdir_root=None)
+        self.manager.backend.preflight()
 
     def check_gateway_reachable(self, base_url: str) -> None:
         """Delegate the backend's isolated gateway reachability probe."""

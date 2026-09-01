@@ -31,6 +31,12 @@ from cloud_agent.api.deps import (
     get_log_store,
 )
 from cloud_agent.storage.store import AgentJobStore
+from cloud_agent_host.shared_protocol import (
+    SHARED_SANDBOX_CAPABILITY,
+    SHARED_SANDBOX_HELPER_PINS,
+    SHARED_SANDBOX_PROTOCOL,
+    SHARED_SANDBOX_RUNTIME_PINS,
+)
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -56,6 +62,19 @@ _TABLES_IN_FK_ORDER = (
 )
 _OWNER = "user-owner"
 _TEST_MODEL = "glm-5.1"
+
+
+def _claim_body(worker_id: str) -> dict[str, Any]:
+    return {
+        "worker_id": worker_id,
+        "attestation": {
+            "sandbox_image_digest": "sha256:lifecycle-test-image",
+            "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
+            "runner_capabilities": [SHARED_SANDBOX_CAPABILITY],
+            "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+            "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
+        },
+    }
 
 
 class _FakeGateway:
@@ -103,6 +122,7 @@ async def api(monkeypatch):
     import asyncpg
 
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "lifecycle-test-secret")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "lifecycle-broker-secret")
     # The allowlist is empty unless a deployment sets it, and an unentitled
     # repo is refused at creation, so declare the one repo these tests use.
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
@@ -134,6 +154,16 @@ async def api(monkeypatch):
         for table in _TABLES_IN_FK_ORDER:
             await conn.execute(f"DELETE FROM {table}")
         await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
+    await store.register_host(
+        host="runner-test",
+        credential_hash="test-credential-hash",
+        capabilities=[SHARED_SANDBOX_CAPABILITY],
+        slots_total=4,
+    )
+    await store.record_host_heartbeat(
+        host="runner-test",
+        capabilities=[SHARED_SANDBOX_CAPABILITY],
+    )
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
@@ -159,8 +189,11 @@ async def api(monkeypatch):
         "role": "internal",
         "authenticated": True,
     }
-    # /worker/claim is machine-to-machine; stand in for the dispatcher credential.
-    app.dependency_overrides[agent_jobs_router.verify_dispatcher_access] = lambda: "dispatcher@test"
+    # /worker/claim is machine-to-machine; stand in for an enrolled host credential.
+    app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
+        "host": "runner-test",
+        "credential_hash": "test-credential-hash",
+    }
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -173,75 +206,6 @@ async def api(monkeypatch):
     await pool.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Broken upstream since 2026-07-29, not by this migration. Commit 6de7248f "
-        "(PR #1098) deleted the /worker/jobs/{id}/publish/begin and /publish/complete "
-        "endpoints — a full-scope worker token could set published_pr_url from an "
-        "arbitrary string, mark the job succeeded, and make the real publisher skip it "
-        "forever. The router at the freeze commit therefore has no such routes and "
-        "answers 404, while this test still posts to them; the last commit to touch "
-        "that path here is 741be616, which created the file. It was never caught "
-        "because the dbtest tier does not run in CI. Restoring the endpoints would "
-        "restore the hole, and rewriting the test to drive the publish worker is a "
-        "rewrite a migration task must not perform — so it is recorded, not repaired. "
-        "The property PR #1098 added is covered, and passing, in "
-        "test_agent_jobs_api.py::test_a_worker_cannot_write_the_publish_record. "
-        "strict=True so this fails loudly the moment someone fixes it."
-    ),
-)
-async def test_full_lifecycle_create_to_published_pr(api):
-    """create → claim → events → artifact → publish → owner sees the PR."""
-    client, _store, _pool = api
-
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix the flaky test", "model": "glm-5.1"},
-    )
-    assert created.status_code == 201
-    job_id = created.json()["id"]
-
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-    assert claim.status_code == 200
-    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
-
-    for text in ("thinking", "editing"):
-        event = await client.post(
-            f"/v1/agent/worker/jobs/{job_id}/events",
-            json={"event_type": "message", "payload": {"text": text}},
-            headers=auth,
-        )
-        assert event.status_code == 201
-
-    artifact = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/artifacts",
-        json={"kind": "patch", "content": "diff --git a/x b/x"},
-        headers=auth,
-    )
-    assert artifact.status_code == 201
-
-    assert (
-        await client.post(f"/v1/agent/worker/jobs/{job_id}/publish/begin", headers=auth)
-    ).status_code == 200
-    assert (
-        await client.post(
-            f"/v1/agent/worker/jobs/{job_id}/publish/complete",
-            json={"pr_url": "https://github.com/owner/name/pull/7"},
-            headers=auth,
-        )
-    ).status_code == 200
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-    assert job["state"] == "succeeded"
-    assert job["published_pr_url"] == "https://github.com/owner/name/pull/7"
-
-    events = (await client.get(f"/v1/agent/jobs/{job_id}/events")).json()
-    assert [event["seq"] for event in events["events"]] == [1, 2]
-    patch = (await client.get(f"/v1/agent/jobs/{job_id}/artifacts/patch")).json()
-    assert patch["content"] == "diff --git a/x b/x"
-
-
 async def test_reaped_worker_token_is_rejected_end_to_end(api):
     """A zombie worker's token parses but every write is fenced out with 409."""
     client, store, pool = api
@@ -251,7 +215,7 @@ async def test_reaped_worker_token_is_rejected_end_to_end(api):
         json={"repo": "owner/name", "task_prompt": "slow task", "model": "glm-5.1"},
     )
     job_id = created.json()["id"]
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))
     zombie_auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     attempt_id = claim.json()["attempt_id"]
 
@@ -265,18 +229,17 @@ async def test_reaped_worker_token_is_rejected_end_to_end(api):
     actions = await store.reap_expired(max_attempts=3)
     assert actions[0]["action"] == "queued"
 
-    # Every write path of the zombie is now rejected.
+    # Every remaining worker write path of the zombie is now rejected.
     for path, payload in (
         (f"/v1/agent/worker/jobs/{job_id}/heartbeat", {}),
         (f"/v1/agent/worker/jobs/{job_id}/events", {"event_type": "message"}),
-        (f"/v1/agent/worker/jobs/{job_id}/artifacts", {"kind": "patch", "content": "x"}),
         (f"/v1/agent/worker/jobs/{job_id}/finish", {"state": "succeeded"}),
     ):
         response = await client.post(path, json=payload, headers=zombie_auth)
         assert response.status_code == 409, path
 
     # A fresh worker takes over and can write.
-    retry = await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})
+    retry = await client.post("/v1/agent/worker/claim", json=_claim_body("w2"))
     assert retry.json()["attempt_no"] == 2
     live_auth = {"Authorization": f"Bearer {retry.json()['worker_token']}"}
     assert (
@@ -301,7 +264,7 @@ async def test_cancel_running_job_is_delivered_via_heartbeat(api):
         json={"repo": "owner/name", "task_prompt": "long task", "model": "glm-5.1"},
     )
     job_id = created.json()["id"]
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
     cancel = await client.post(f"/v1/agent/jobs/{job_id}/cancel")

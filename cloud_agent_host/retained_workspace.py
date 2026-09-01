@@ -1,9 +1,8 @@
 """Bounded workspace file I/O through a retained container's exec boundary.
 
-The broker cannot resolve a host path for restartable chats.  These helpers
-run a fixed, unprivileged program inside the exact labelled container and keep
-the legacy response schema.  Request data is passed as argv/stdin, never
-interpolated into code or a shell command.
+The broker cannot resolve a host path for retained chats. These helpers run a
+fixed, unprivileged program inside the exact labelled container. Request data
+is passed as argv/stdin, never interpolated into code or a shell command.
 """
 
 from __future__ import annotations
@@ -179,15 +178,12 @@ finally:
 _WRITE_PROGRAM = r"""
 import os, stat, sys
 
-root_path, relative, max_raw, shared_raw = sys.argv[1:]
+root_path, relative, max_raw = sys.argv[1:]
 max_bytes = int(max_raw)
-if shared_raw not in ("0", "1"):
-    raise SystemExit(40)
-shared_live = shared_raw == "1"
-# Fork siblings use distinct UIDs and one shared GID. Keep shared-live files
-# group-writable, while preserving the legacy retained path's original mode.
-os.umask(0o002 if shared_live else 0o022)
-create_mode = 0o664 if shared_live else 0o644
+# Fork siblings use distinct UIDs and one shared GID, so every owner-authored
+# file must remain writable by the whole chat group.
+os.umask(0o002)
+create_mode = 0o664
 parts = [] if not relative else relative.split("/")
 if not parts or any(not part or part in (".", "..") for part in parts):
     raise SystemExit(40)
@@ -321,7 +317,6 @@ def write_retained_file(
             CHAT_WORKDIR,
             relative,
             str(max_write_bytes),
-            "1" if backend.spec.shared_live else "0",
         ],
         workdir="/",
         timeout_s=60,

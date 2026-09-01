@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getAgentJob,
-  getAgentJobArtifact,
   getAgentJobFiles,
+  getAgentJobGit,
   getAgentJobThread,
   listAllAgentThreadEvents,
   listAgentJobs,
@@ -287,15 +287,16 @@ export function useAgentJob(jobId: string): {
     };
   }, [jobId, tick]);
 
-  // The patch only exists once the job produced one; a 404 means "this job
-  // changed nothing", which is a real outcome rather than a failure.
+  // Diff state belongs to the retained group workspace, not to a per-turn
+  // artifact uploaded by the runner. Fork siblings therefore see the same
+  // current workspace diff, matching the Git panel below.
   const state = api?.state;
   useEffect(() => {
     if (!jobId || !state) return undefined;
     let cancelled = false;
-    getAgentJobArtifact(jobId, 'patch')
-      .then((artifact) => {
-        if (!cancelled) setPatch(artifact?.content ?? null);
+    getAgentJobGit(jobId)
+      .then((workspace) => {
+        if (!cancelled) setPatch(workspace.available ? workspace.patch : null);
       })
       .catch(() => {
         if (!cancelled) setPatch(null);
@@ -343,8 +344,8 @@ export function useAgentJob(jobId: string): {
   // workspace snapshot is captured and published. The SSE correctly closes
   // at the turn boundary, so keep only that small, asynchronous tail live;
   // otherwise the badge and draft-PR link remain stale until a full reload.
-  // Ordinary and legacy jobs never enter this loop, and terminal publication
-  // states stop it immediately after the next response.
+  // Jobs without a retained group never enter this loop, and terminal
+  // publication states stop it immediately after the next response.
   const publicationActive = hasActiveWorkspacePublication(api);
   useEffect(() => {
     if (!jobId || !publicationActive) return undefined;
@@ -390,7 +391,7 @@ export interface WorkspaceFilesState {
   file: AgentJobFileApi | AgentJobSymlinkApi | null;
   fileLoading: boolean;
   fileError: string | null;
-  source: 'workspace' | 'snapshot' | null;
+  source: 'workspace' | null;
   toggleDirectory: (path: string) => void;
   openFile: (path: string) => void;
   closeFile: () => void;
@@ -418,7 +419,7 @@ export function useWorkspaceFiles(
   const [file, setFile] = useState<AgentJobFileApi | AgentJobSymlinkApi | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
-  const [source, setSource] = useState<'workspace' | 'snapshot' | null>(null);
+  const [source, setSource] = useState<'workspace' | null>(null);
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((value) => value + 1), []);
 

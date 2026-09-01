@@ -33,7 +33,7 @@ export const AGENT_JOBS: AgentJob[] = [
     events: [
       {
         kind: 'lifecycle',
-        text: 'Sandbox provisioned · fs snapshot restored, setup skipped (42s)',
+        text: 'Retained sandbox restarted · native session restored, setup skipped (42s)',
       },
       {
         kind: 'thinking',
@@ -152,7 +152,7 @@ export const AGENT_JOBS: AgentJob[] = [
     sandbox: 'actions-dogfood',
     attempts: [{ no: 1, status: 'finished' }],
     events: [
-      { kind: 'lifecycle', text: 'Sandbox provisioned · fs snapshot restored (40s)' },
+      { kind: 'lifecycle', text: 'Retained sandbox restarted · native session restored (40s)' },
       { kind: 'lifecycle', text: 'Draft PR #1044 opened on agent/job-4c8d' },
     ],
     eventCount: 214,
@@ -189,7 +189,7 @@ export const AGENT_JOBS: AgentJob[] = [
     sandbox: 'actions-dogfood',
     attempts: [{ no: 1, status: 'finished' }],
     events: [
-      { kind: 'lifecycle', text: 'Sandbox provisioned · fs snapshot restored (38s)' },
+      { kind: 'lifecycle', text: 'Retained sandbox restarted · native session restored (38s)' },
       { kind: 'lifecycle', text: 'Draft PR #1045 opened on agent/job-4c8e' },
     ],
     eventCount: 241,

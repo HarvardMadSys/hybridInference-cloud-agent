@@ -15,8 +15,8 @@ Ships in the sandbox image (reviewed and pinned there, like the CLI itself).
 Same properties as the pi/opencode wrappers, deliberately:
 
 - **The prompt never passes through a shell.** argv in, argv out, one exec.
-- **The config never lives in the job worktree.** Retained execution puts it
-  in activation tmpfs; legacy execution falls back to the container's HOME.
+- **The config never lives in the workspace.** It is written into the
+  member's activation tmpfs.
 - **json.dump does the quoting**, so a model id or URL cannot corrupt it.
 """
 

@@ -1,10 +1,8 @@
-"""Two credentials never resolve to one secret.
+"""Two credential surfaces never resolve to one configured secret.
 
-`AGENT_WORKSPACE_BROKER_TOKEN` was wired to `${AGENT_DISPATCHER_TOKEN}` in both
-services of the remote-runner stack. They authorize different things — the
-broker serves workspace files and terminals, the dispatcher token claims jobs —
-so anything that reached the broker's credential could also claim work as that
-host. Documented as two permissions, deployed as one.
+The broker serves workspace files and terminals; enrollment issues the
+per-host heartbeat/claim credential. They are separate permissions and the
+host credential is not an operator-provided Compose substitution at all.
 
 Nothing caught it because each variable was correct on its own: present,
 required, no default. The defect only exists in the relationship between two

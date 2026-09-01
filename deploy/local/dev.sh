@@ -4,7 +4,6 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 ENV_FILE="$SCRIPT_DIR/.env.local"
-PROJECT_NAME=freeinference-local
 
 if command -v docker-compose >/dev/null 2>&1; then
   COMPOSE=docker-compose
@@ -18,9 +17,17 @@ fi
 compose() {
   # Intentional word splitting: COMPOSE is either one command or `docker compose`.
   # shellcheck disable=SC2086
-  $COMPOSE --env-file "$ENV_FILE" --project-name "$PROJECT_NAME" \
+  $COMPOSE --env-file "$ENV_FILE" --project-name "$(local_project_name)" \
     -f "$REPO_ROOT/deploy/control-plane/docker-compose.yml" \
     -f "$SCRIPT_DIR/docker-compose.yml" "$@"
+}
+
+local_project_name() {
+  project_name=${LOCAL_PROJECT_NAME:-}
+  if [ -z "$project_name" ] && [ -f "$ENV_FILE" ]; then
+    project_name=$(sed -n 's/^LOCAL_PROJECT_NAME=//p' "$ENV_FILE" | tail -n 1)
+  fi
+  printf '%s\n' "${project_name:-freeinference-local}"
 }
 
 random_hex() {
@@ -39,7 +46,6 @@ ensure_env() {
   session_secret=$(random_hex)
   control_secret=$(random_hex)
   source_secret=$(random_hex)
-  dispatcher_token=$(random_hex)
   broker_token=$(random_hex)
 
   {
@@ -55,7 +61,6 @@ ensure_env() {
       "AGENT_SESSION_SECRET=$session_secret" \
       "AGENT_CONTROL_TOKEN_SECRET=$control_secret" \
       "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY=$source_secret" \
-      "AGENT_DISPATCHER_TOKEN=$dispatcher_token" \
       "AGENT_WORKSPACE_BROKER_TOKEN=$broker_token" \
       "LOCAL_ENROLL_TOKEN=$enroll_token" \
       "LOCAL_ENROLL_TOKEN_SHA256=$enroll_hash" \
@@ -71,6 +76,8 @@ ensure_env() {
       'AGENT_WEB_BIND=127.0.0.1' \
       'AGENT_WEB_PORT=13003' \
       'LOCAL_EDGE_PORT=13002' \
+      'LOCAL_PROJECT_NAME=freeinference-local' \
+      'LOCAL_AGENT_EGRESS_NETWORK=freeinference-local-agent-egress' \
       'GATEWAY_AUTHORIZE_URL=http://localhost:13002/authorize' \
       'AGENT_SESSION_REDIRECT_URI=http://localhost:13002/api/v1/session/callback' \
       'AGENT_WEB_BASE_URL=http://localhost:13002' \
@@ -109,12 +116,20 @@ local_base_url() {
 
 wait_ready() {
   base_url=$(local_base_url)
+  expected_stack=$(local_project_name)
   attempts=0
-  until curl --fail --silent --show-error "$base_url/health" >/dev/null \
+  until health=$(curl --fail --silent --show-error "$base_url/health") \
+    && actual_stack=$(printf '%s' "$health" | python3 -c \
+      'import json, sys; print(json.load(sys.stdin).get("stack_id", ""))') \
+    && [ "$actual_stack" = "$expected_stack" ] \
     && curl --fail --silent --show-error "$base_url/api/healthz" >/dev/null; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 90 ]; then
-      echo "Local stack did not become ready. Recent logs:" >&2
+      echo "Local stack '$expected_stack' did not become ready at $base_url." >&2
+      if [ "${actual_stack:-}" ]; then
+        echo "That port answered as a different stack: '$actual_stack'." >&2
+      fi
+      echo "Recent logs:" >&2
       compose logs --tail=120 >&2
       return 1
     fi
@@ -156,96 +171,13 @@ case "$command" in
     wait_ready
     exec python3 "$SCRIPT_DIR/smoke.py" "${2:-$(local_base_url)}"
     ;;
-  legacy-smoke)
-    ensure_env
-    wait_ready
-    base_url=${2:-$(local_base_url)}
-    if [ -d /private/tmp ]; then
-      # Docker Desktop/Colima shares /private/tmp, but not macOS's per-user
-      # /private/var/folders/... value of TMPDIR.
-      legacy_tmp_base=/private/tmp
-    else
-      legacy_tmp_base=${TMPDIR:-/tmp}
-    fi
-    legacy_root=$(mktemp -d "$legacy_tmp_base/freeinference-legacy-smoke.XXXXXX")
-    legacy_root=$(CDPATH= cd -- "$legacy_root" && pwd -P)
-    legacy_runner_stopped=0
-    legacy_runner_container=
-    legacy_control_plane_default_off=0
-    legacy_shared_live_value=${LOCAL_SHARED_LIVE_SANDBOX:-1}
-    export LOCAL_SHARED_LIVE_SANDBOX
-    legacy_job_id=
-    legacy_verified=0
-    cleanup_legacy_smoke() {
-      if [ -n "$legacy_job_id" ] && [ "$legacy_verified" -eq 0 ]; then
-        python3 "$SCRIPT_DIR/legacy_smoke.py" cancel "$base_url" "$legacy_job_id" \
-          >/dev/null 2>&1 || true
-      fi
-      if [ -n "$legacy_runner_container" ]; then
-        docker stop "$legacy_runner_container" >/dev/null 2>&1 || true
-        legacy_runner_container=
-      fi
-      if [ "$legacy_control_plane_default_off" -eq 1 ]; then
-        LOCAL_SHARED_LIVE_SANDBOX=$legacy_shared_live_value
-        compose up --detach --force-recreate control-plane >/dev/null 2>&1 || true
-        legacy_control_plane_default_off=0
-      fi
-      if [ "$legacy_runner_stopped" -eq 1 ]; then
-        compose start runner >/dev/null 2>&1 || true
-      fi
-      case "$legacy_root" in
-        */freeinference-legacy-smoke.*)
-          rm -rf -- "$legacy_root"
-          ;;
-      esac
-    }
-    trap cleanup_legacy_smoke EXIT
-    trap 'exit 130' INT TERM
-
-    # Start the explicitly default-off runner first and wait for its heartbeat
-    # to remove shared-sandbox-v1 from this host. Job requirements are chosen
-    # at create time, so queuing first would permanently mark the smoke job as
-    # shared even though the process that claims it has both retained feature
-    # flags disabled. The temporary same-path bind models the production
-    # mixed-mode host mount; it is test data and is removed on every exit.
-    legacy_runner_stopped=1
-    compose stop runner
-    LOCAL_SHARED_LIVE_SANDBOX=0
-    compose up --detach --force-recreate control-plane
-    legacy_control_plane_default_off=1
-    wait_ready
-    legacy_runner_container=$(compose run --detach --rm --no-deps \
-      -e AGENT_RESTARTABLE_SANDBOX=0 \
-      -e AGENT_RESTARTABLE_RUNTIMES= \
-      -e AGENT_SHARED_LIVE_SANDBOX=0 \
-      -e AGENT_SHARED_LIVE_RUNTIMES= \
-      -v "$legacy_root:$legacy_root" \
-      runner python -m cloud_agent_host.runner \
-      --loop --workdir-root "$legacy_root/workspaces" --workspace-ttl 0 \
-      --host local-docker)
-    python3 "$SCRIPT_DIR/legacy_smoke.py" wait-default-off "$base_url" local-docker
-    legacy_job_id=$(python3 "$SCRIPT_DIR/legacy_smoke.py" create "$base_url")
-    python3 "$SCRIPT_DIR/legacy_smoke.py" verify "$base_url" "$legacy_job_id"
-    legacy_verified=1
-
-    docker stop "$legacy_runner_container" >/dev/null
-    legacy_runner_container=
-    LOCAL_SHARED_LIVE_SANDBOX=$legacy_shared_live_value
-    compose up --detach --force-recreate control-plane
-    legacy_control_plane_default_off=0
-    wait_ready
-    compose start runner
-    legacy_runner_stopped=0
-    trap - EXIT INT TERM
-    cleanup_legacy_smoke
-    ;;
   config)
     ensure_env
     compose config --quiet
     echo "Local Compose configuration is valid."
     ;;
   *)
-    echo "Usage: $0 {up|start|stop|status|logs [service]|smoke|legacy-smoke|config}" >&2
+    echo "Usage: $0 {up|start|stop|status|logs [service]|smoke|config}" >&2
     exit 2
     ;;
 esac

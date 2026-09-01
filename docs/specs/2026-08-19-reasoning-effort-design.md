@@ -150,7 +150,7 @@ reasoning_efforts: tuple[str, ...] = ()   # empty = cannot express effort
 
 | Runtime | v1 declaration | How it is expressed | Status |
 |---|---|---|---|
-| claude-code | `("low", "medium", "high", "xhigh", "max")` | `--effort <v>` on the argv, one-shot and `prepare_live` alike | **Verified against the pinned 2.1.220**: reaches the wire as `output_config.effort`. See §7.1 for what that capture also revealed |
+| claude-code | `("low", "medium", "high", "xhigh", "max")` | `--effort <v>` on the resident live-session argv | **Verified against the pinned 2.1.220**: reaches the wire as `output_config.effort`. See §7.1 for what that capture also revealed |
 | codex | `("none", "minimal", "low", "medium", "high", "xhigh", "max")` | `-c model_reasoning_effort="<v>"` alongside the existing `-c` provider flags | **Verified against the pinned 0.145.0**: reaches the wire as `reasoning.effort` in the `/v1/responses` body, which the gateway's Responses translation already maps. The draft deferred this as unverified; verifying took one local capture and the answer was yes |
 | pi | `("minimal", "low", "medium", "high")` | `--thinking <v>` **plus** `"reasoning": true` in the provider entry the wrapper writes | **Verified against the pinned 0.73.1.** Two of its six flag levels are dropped from the declaration: `xhigh` arrives as `high`, `off` sends nothing. The flag is inert without the provider declaration, which is why the wrapper changed too |
 | opencode / kilo | `("none", "minimal", "low", "medium", "high", "xhigh", "max")` | `models.<id>.options.reasoningEffort` in the wrapper's config — no CLI flag exists | **Verified against the pinned 1.18.9 / 7.4.17.** Tier 2 for events, which says nothing about this: expressing a documented config option is not the normalization work tiering is about |
@@ -289,8 +289,8 @@ Both pinned CLIs were captured against a local recording endpoint on
 
 Remaining, unchanged in kind: a CLI bump that moves either field should
 fail a test before it fails a user, so re-capture on version bumps.
-2. **Unit, agent repo:** argv contains `--effort` iff set (one-shot and
-   live); 400 on out-of-set values and on effort-with-empty-set;
+2. **Unit, agent repo:** the live launch contains `--effort` iff set;
+   400 on out-of-set values and on effort-with-empty-set;
    follow-up inherit / `"auto"` reset; config maps empty-safe.
 3. **Unit, gateway:** `output_config.effort` → `reasoning_effort` for a
    supporting model; out-of-set dropped with warning; unsupported model

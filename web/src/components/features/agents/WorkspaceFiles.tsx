@@ -439,9 +439,8 @@ function PaneMessage({ children }: { children: React.ReactNode }) {
  * Two-pane workspace browser: a lazily expanded tree beside a file viewer.
  *
  * Read-only: the workspace write endpoint exists, but changing a run's files
- * by hand belongs in the conversation, not in this pane. The header still says
- * whether this is the live worktree or an archived snapshot, because that
- * decides whether what you are reading can still change.
+ * by hand belongs in the conversation, not in this pane. Every successful
+ * response comes from the retained container's current workspace.
  */
 export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean }) {
   const {
@@ -500,9 +499,7 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
     ? 'Unavailable'
     : (file?.source ?? source) === 'workspace'
       ? 'Live worktree'
-      : root?.entries || file
-        ? 'Archived snapshot'
-        : 'Loading…';
+      : 'Loading…';
 
   return (
     <section

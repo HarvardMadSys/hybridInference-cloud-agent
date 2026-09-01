@@ -259,7 +259,7 @@ class ResidentTransportFactory:
         launch: ResidentLaunch,
         state_dir: str,
     ) -> None:
-        """Create a member-owned provider home, importing legacy state once."""
+        """Create the member-owned provider home used by this shared group."""
         if launch.runtime_id == "codex":
             self._prepare_codex_member_state(spec, launch, state_dir)
             return
@@ -271,26 +271,16 @@ class ResidentTransportFactory:
         launch: ResidentLaunch,
         state_dir: str,
     ) -> None:
-        """Create an isolated OpenCode/Kilo XDG root for one membership.
-
-        Pre-fork retained containers stored each HTTP runtime directly below
-        ``/agent-state``. Import that tree only when resuming a known native
-        session. New memberships start empty, while native-fork children are
-        populated by :meth:`_clone_private_member_state` before they open.
-        """
+        """Create an isolated OpenCode/Kilo XDG root for one membership."""
         runtime_id = launch.runtime_id
         if runtime_id not in {"opencode", "kilo"}:
             raise DriverError(f"runtime {runtime_id!r} has no private HTTP state home")
         uid = MEMBER_UID_BASE + launch.slot_id
-        source_dir = f"{CHAT_STATE_DIR}/{runtime_id}"
         script = (
-            'set -eu; source="$1"; target="$2"; native="$3"; runtime="$4"; '
+            'set -eu; target="$1"; runtime="$2"; '
             'marker="$target/.freeinference-member-state-v1"; umask 0007; '
             'mkdir -p -- "$target"; '
             'if test ! -e "$marker"; then '
-            '  if test -n "$native" && test -d "$source"; then '
-            '    cp -R -- "$source" "$target/"; '
-            "  fi; "
             '  rm -rf -- "$target/$runtime/state/$runtime/locks"; '
             '  : > "$marker"; '
             "fi"
@@ -302,9 +292,7 @@ class ResidentTransportFactory:
                 "-c",
                 script,
                 "sh",
-                source_dir,
                 state_dir,
-                launch.native_session_id or "",
                 runtime_id,
             ],
             workdir="/",
@@ -324,33 +312,14 @@ class ResidentTransportFactory:
         launch: ResidentLaunch,
         state_dir: str,
     ) -> None:
-        """Create one UID-owned Codex home, importing a legacy root once.
-
-        Older retained containers stored Codex directly under /agent-state.
-        When such a chat is resumed after rollout, copy only provider state and
-        deliberately exclude platform journals, other runtimes, and ephemeral
-        lock/temp directories. New chats copy just the harmless bootstrap
-        config and let Codex initialize the rest itself.
-        """
+        """Create one UID-owned Codex home from the image bootstrap config."""
         uid = MEMBER_UID_BASE + launch.slot_id
         script = (
-            'set -eu; source="$1"; target="$2"; native="$3"; '
+            'set -eu; source="$1"; target="$2"; '
             'marker="$target/.freeinference-member-state-v1"; umask 0007; '
             'mkdir -p -- "$target"; '
             'if test ! -e "$marker"; then '
-            "  imported=0; "
-            '  if test -n "$native" && test -d "$source/sessions" && '
-            '     find "$source/sessions" -type f -name "rollout-*-$native.jsonl" '
-            "       -print -quit | grep -q .; then "
-            '    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do '
-            '      test -e "$entry" || continue; name=${entry##*/}; '
-            '      case "$name" in '
-            "        codex-members|.platform|tmp|.tmp|claude|pi|opencode|kilo) continue;; "
-            "      esac; "
-            '      cp -R -- "$entry" "$target/"; '
-            "    done; imported=1; "
-            "  fi; "
-            '  if test "$imported" -eq 0 && test -f "$source/config.toml"; then '
+            '  if test -f "$source/config.toml"; then '
             '    cp -- "$source/config.toml" "$target/config.toml"; '
             "  fi; "
             '  mkdir -p -- "$target/tmp" "$target/.tmp"; : > "$marker"; '
@@ -365,7 +334,6 @@ class ResidentTransportFactory:
                 "sh",
                 CHAT_STATE_DIR,
                 state_dir,
-                launch.native_session_id or "",
             ],
             workdir="/",
             timeout_s=120,
@@ -521,14 +489,6 @@ class ResidentTransportFactory:
             gateway_base_url=launch.gateway_base_url,
             credential=launch.credential,
             provides_isolation=True,
-            spawn=lambda argv, env: self._manager.spawn(
-                spec,
-                argv,
-                env=env,
-                workdir=CHAT_WORKDIR,
-                user_uid=uid,
-                user_gid=self._manager.backend.gid,
-            ),
             spawn_live=spawn_live,
             base_env=base_env,
             mcp_config=RuntimeMCPConfig(

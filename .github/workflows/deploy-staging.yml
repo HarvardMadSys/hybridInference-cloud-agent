@@ -37,6 +37,12 @@ permissions:
 jobs:
   deploy:
     name: Deploy control plane + web
+    # The host publishes an exact target-SHA capability only after every
+    # runner, broker, tunnel and retained Docker root passes its local checks.
+    # The control-plane deploy then performs a fresh-heartbeat and reverse
+    # broker probe before replacing the API. This is the rolling-deploy fence
+    # for the only supported topology, not a legacy/new-mode switch.
+    needs: deploy-host
     # `CI` is one workflow with a `CI Gate` job precisely so this condition can
     # be a single conclusion. It was four workflows until #31; gating on one of
     # four would have meant treating "that workflow was filtered out" and "that
@@ -45,13 +51,6 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.conclusion == 'success') }}
-    # Shared-live scheduling is enabled only after the host deployment has
-    # proved that every runner locally attests shared-sandbox-v1. The target
-    # control-plane script then requires a fresh heartbeat and reverse broker
-    # probe before replacing anything. A new host remains backward-compatible
-    # with the old control plane; the reverse order parks every new chat on a
-    # capability no healthy host may claim.
-    needs: deploy-host
     runs-on: [self-hosted, Linux, deploy-cloud-agent-control-staging]
     # Records the deployment, so staging appears in the repository's
     # Deployments panel beside production instead of being visible only to
@@ -59,9 +58,8 @@ jobs:
     # `workflow_run` job is filed under the default branch, so filtering the
     # run list by `dev` shows nothing and reads as "it never deployed".
     #
-    # Both jobs write to this one environment, matching production. The host
-    # records first; this job records only after that prerequisite is green, so
-    # the final successful deployment represents both halves of shared-live.
+    # Both jobs write to this one environment, matching production. This job
+    # depends on the host, so its successful record represents both halves.
     environment: staging
     timeout-minutes: 30
 
@@ -91,12 +89,6 @@ jobs:
           # machine's path. Named here so production and staging are configured
           # the same way rather than one by variable and one by default.
           DEPLOY_ROOT: ${{ vars.STAGING_CONTROL_DEPLOY_ROOT }}
-          # One rollout value drives both sides of the protocol. The repository
-          # variable is the emergency off switch; unset means staging exercises
-          # the feature PR #90 added instead of silently staying on legacy.
-          DEPLOYMENT_ENVIRONMENT: staging
-          STAGING_SHARED_LIVE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
-          AGENT_SHARED_LIVE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
         run: bash deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
@@ -114,9 +106,10 @@ jobs:
 
   deploy-host:
     name: Deploy runner host
-    # The other machine. It goes first because it can serve the old control
-    # plane while proving the new capability; the control-plane job then turns
-    # scheduling on only after this job is green.
+    # Host first: new host code remains compatible with the currently running
+    # control plane, while the new control plane intentionally has no legacy
+    # executor endpoints. Its ready marker lets the dependent job prove this
+    # exact generation before making the irreversible half of the rollout.
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
@@ -157,13 +150,6 @@ jobs:
           # rather than guessing when it is empty.
           COMPOSE_PROJECT: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
           SIBLING_COMPOSE_PROJECTS: ${{ vars.PROD_SANDBOX_COMPOSE_PROJECT }}
-          DEPLOYMENT_ENVIRONMENT: staging
-          # Keep the broker, runners and control plane on one rollout value.
-          # Setting STAGING_SHARED_LIVE_SANDBOX=0 is the emergency off switch
-          # for creation of new groups; durable existing groups remain pinned.
-          STAGING_SHARED_LIVE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
-          AGENT_RESTARTABLE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
-          AGENT_SHARED_LIVE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
           # One capacity value drives both the number of synchronous runner
           # executors and the scheduler slots they advertise. Letting these
           # drift can claim three simultaneous turns with only one process

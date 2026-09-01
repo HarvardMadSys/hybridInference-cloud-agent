@@ -26,8 +26,6 @@ RUNNER_SCRIPT = REPO_ROOT / "deploy/host/sandbox_host.sh"
 HOST_KERNEL = "6.8.0-51-generic"
 GUEST_KERNEL = "6.12.0-kata"
 
-GUEST_KERNEL = "6.12.0-kata"
-
 
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body)
@@ -62,9 +60,10 @@ def _host(
         fake_bin / "docker",
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
-        'case "$1" in\n'
+        'case "$*" in\n'
+        "  'info --format {{.DockerRootDir}}') echo /var/lib/docker; exit 0 ;;\n"
         "  info) exit 0 ;;\n"
-        f"  run) {run_body}"
+        f"  run*) {run_body}"
         "  *) exit 0 ;;\n"
         "esac\n",
     )
@@ -81,6 +80,7 @@ def _host(
         "APP_DIR": str(app_dir),
         "KATA_SETUP_SCRIPT": str(kata_script),
         "DOCKER_LOG": str(tmp_path / "docker.log"),
+        "AGENT_ENROLL_TOKEN": "test-enrollment-token",
         # Otherwise the caller's own environment decides the backend and the
         # .env precedence under test never runs.
         "AGENT_SANDBOX_BACKEND": "",

@@ -140,6 +140,11 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "freeinference-local-gateway",
+        # ``dev.sh`` compares this with the Compose project it launched.  A
+        # generic 200 response is not enough on developer machines where an
+        # SSH tunnel or another local stack may already own the requested
+        # loopback port.
+        "stack_id": (os.environ.get("LOCAL_STACK_ID") or "").strip(),
         "model": MODEL_ID,
         "completed_concurrency_probes": completed,
     }

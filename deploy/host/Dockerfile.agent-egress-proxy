@@ -9,7 +9,7 @@
 # It holds no credentials and mounts no socket. Its whole job is to accept
 # CONNECT for a host on the generated allowlist and refuse everything else,
 # which is why it is a separate image from the runner: the runner is trusted
-# and holds the dispatcher token, and nothing that talks to an untrusted
+# and holds enrolled-host credentials, and nothing that talks to an untrusted
 # sandbox should share an image with it.
 #
 # The configuration is NOT baked in. It is rendered by

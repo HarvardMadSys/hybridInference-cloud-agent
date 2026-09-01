@@ -30,6 +30,10 @@ log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
 
 [ -n "${SHA}" ] || die "no commit given: deploy.sh <sha>"
+[[ "${HEALTH_TIMEOUT}" =~ ^[1-9][0-9]*$ ]] \
+  || die "HEALTH_TIMEOUT must be a positive integer (got '${HEALTH_TIMEOUT}')"
+[[ "${SHARED_READY_TIMEOUT}" =~ ^[1-9][0-9]*$ ]] \
+  || die "SHARED_READY_TIMEOUT must be a positive integer (got '${SHARED_READY_TIMEOUT}')"
 
 cd "${DEPLOY_ROOT}" 2>/dev/null || die "${DEPLOY_ROOT} does not exist"
 
@@ -55,9 +59,7 @@ fi
 
 [ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this deployment's secrets and is deliberately not in git"
 
-# Read values the same way Compose will: an explicit process value wins over
-# this deployment's persistent, untracked .env. Defined before bring-up because
-# staging's shared-live scheduling gate is deployment policy, not a secret.
+# Read one value from the deployment's persistent, untracked .env.
 from_env() {
   local value
   value="$(grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
@@ -65,40 +67,6 @@ from_env() {
   value="${value%\'}"; value="${value#\'}"
   printf '%s' "$value"
 }
-
-# GitHub runs a workflow_run from the default branch's workflow definition,
-# while this script comes from the dev commit being deployed. Recognise the old
-# workflow by its stable name so the commit that adds staging rollout policy can
-# activate itself immediately; the updated workflow also passes the explicit
-# environment name for every later run.
-DEPLOYMENT_ENVIRONMENT="${DEPLOYMENT_ENVIRONMENT:-$(from_env DEPLOYMENT_ENVIRONMENT)}"
-if [ -z "${DEPLOYMENT_ENVIRONMENT}" ] && [ "${GITHUB_WORKFLOW:-}" = "Deploy Staging" ]; then
-  DEPLOYMENT_ENVIRONMENT=staging
-fi
-if [ "${DEPLOYMENT_ENVIRONMENT}" = "staging" ]; then
-  staging_rollout="${STAGING_SHARED_LIVE_SANDBOX:-$(from_env STAGING_SHARED_LIVE_SANDBOX)}"
-  if [ -z "${staging_rollout}" ] && [ "${AGENT_SHARED_LIVE_SANDBOX+x}" = x ]; then
-    staging_rollout="${AGENT_SHARED_LIVE_SANDBOX}"
-  fi
-  # Ignore an old generic default-off line in staging's persistent .env. The
-  # environment-specific override above remains available during the one run
-  # where GitHub still evaluates the workflow definition from main.
-  AGENT_SHARED_LIVE_SANDBOX="${staging_rollout:-1}"
-  export AGENT_SHARED_LIVE_SANDBOX
-  log "staging shared-live scheduling gate: ${AGENT_SHARED_LIVE_SANDBOX}"
-else
-  shared_live="${AGENT_SHARED_LIVE_SANDBOX:-$(from_env AGENT_SHARED_LIVE_SANDBOX)}"
-  AGENT_SHARED_LIVE_SANDBOX="${shared_live:-0}"
-fi
-case "${AGENT_SHARED_LIVE_SANDBOX}" in
-  0|1) ;;
-  *) die "AGENT_SHARED_LIVE_SANDBOX must be 0 or 1, got '${AGENT_SHARED_LIVE_SANDBOX}'" ;;
-esac
-case "${SHARED_READY_TIMEOUT}" in
-  ''|*[!0-9]*) die "SHARED_READY_TIMEOUT must be a positive integer, got '${SHARED_READY_TIMEOUT}'" ;;
-  0) die "SHARED_READY_TIMEOUT must be greater than zero" ;;
-esac
-export AGENT_SHARED_LIVE_SANDBOX
 
 PREVIOUS="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 log "previous: ${PREVIOUS}"
@@ -134,23 +102,18 @@ compose() {
 log "building images"
 compose build
 
-# GitHub evaluates `workflow_run` from the default branch, so the first dev
-# merge carrying `needs: deploy-host` still runs the older parallel workflow.
-# Do not let that bootstrap race turn scheduling on while its host job is still
-# building — or after that job has failed.  A one-off container from the target
-# image reads the existing database and waits for a capability heartbeat newer
-# than its own start, then dials the reported broker from the control-plane
-# network with the real broker credential.  Nothing running is replaced until
-# both proofs pass.  The same barrier remains useful after the workflow update:
-# it turns the job dependency into an end-to-end assertion rather than trust in
-# a green job name.
-if [ "${AGENT_SHARED_LIVE_SANDBOX}" = "1" ]; then
-  log "waiting for a fresh shared-live host heartbeat and control-plane-to-broker probe"
-  compose run --rm --no-deps control-plane \
-    python -m cloud_agent.deploy_readiness \
-      --timeout-seconds "${SHARED_READY_TIMEOUT}" \
-      --expected-deployment-sha "${SHA}"
-fi
+# The retained/shared-live topology is the only executable path, so there is
+# no old control-plane/runner protocol to fall back to during a rolling
+# deployment. The host job deploys first and publishes the exact target SHA
+# only after its runners, broker, tunnel and Docker data root pass their local
+# checks. This reverse probe then proves a fresh heartbeat and that the control
+# plane can actually dial every eligible broker before replacing live API
+# containers. It is a compatibility fence, not a feature switch.
+log "waiting for target ${SHA} host readiness and reverse broker probes"
+compose run --rm --no-deps control-plane \
+  python -m cloud_agent.deploy_readiness \
+    --timeout-seconds "${SHARED_READY_TIMEOUT}" \
+    --expected-deployment-sha "${SHA}"
 
 # `up -d` with no service list brings the whole stack to the file's desired
 # state, which is what makes this idempotent. It also runs `migrate` — the

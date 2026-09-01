@@ -23,7 +23,6 @@
 # Required in .env on this host:
 #
 #   COMPOSE_PROJECT                this stack's compose project, unique on this machine
-#   AGENT_DISPATCHER_TOKEN         same value as on the gateway
 #   AGENT_SANDBOX_IMAGE            image the sandboxes run
 #   AGENT_TUNNEL_SSH_DESTINATION   user@gateway-host
 #   AGENT_TUNNEL_SSH_KEY           path to this host's tunnel key (mounted ro)
@@ -66,44 +65,6 @@ env_or_dotenv() {
   value="${value%\'}"; value="${value#\'}"
   printf '%s' "$value"
 }
-
-# A workflow_run executes the workflow definition from GitHub's default branch,
-# even when it deploys a newer commit from dev. Deployment behaviour that lives
-# only in deploy-staging.yml therefore takes effect one main sync too late. Keep
-# the non-secret staging policy in the target commit's script as well: the old
-# workflow still exports GITHUB_WORKFLOW=Deploy Staging when it calls us.
-staging_default() {
-  local name="$1" fallback="$2" value
-  value="$(env_or_dotenv "$name")"
-  value="${value:-$fallback}"
-  printf -v "$name" '%s' "$value"
-  export "${name?}"
-}
-
-DEPLOYMENT_ENVIRONMENT="${DEPLOYMENT_ENVIRONMENT:-$(env_or_dotenv DEPLOYMENT_ENVIRONMENT)}"
-if [[ -z "$DEPLOYMENT_ENVIRONMENT" && "${GITHUB_WORKFLOW:-}" == "Deploy Staging" ]]; then
-  DEPLOYMENT_ENVIRONMENT=staging
-fi
-if [[ "$DEPLOYMENT_ENVIRONMENT" == "staging" ]]; then
-  # PR #90's compose defaults both gates to 0. Do not let those legacy-safe
-  # defaults in an old persistent .env defeat staging's checked-in rollout
-  # policy. A process-level value from the updated workflow wins; during the
-  # one default-branch bootstrap window, STAGING_SHARED_LIVE_SANDBOX in .env is
-  # the explicit emergency override.
-  staging_rollout="$(env_or_dotenv STAGING_SHARED_LIVE_SANDBOX)"
-  if [[ -z "$staging_rollout" && "${AGENT_SHARED_LIVE_SANDBOX+x}" == x ]]; then
-    staging_rollout="$AGENT_SHARED_LIVE_SANDBOX"
-  fi
-  staging_rollout="${staging_rollout:-1}"
-  AGENT_RESTARTABLE_SANDBOX="$staging_rollout"
-  AGENT_SHARED_LIVE_SANDBOX="$staging_rollout"
-  export AGENT_RESTARTABLE_SANDBOX AGENT_SHARED_LIVE_SANDBOX
-  staging_default AGENT_HOST_SLOTS 3
-  staging_default AGENT_RUNNER_REPLICAS 3
-  staging_default AGENT_CHAT_IDLE_TIMEOUT_S 1800
-  staging_default AGENT_RETAINED_DOCKER_DATA_ROOT /var/lib/docker
-  log "staging retained/shared-live rollout policy loaded"
-fi
 
 # Read through env_or_dotenv, and therefore only after it exists. Taking these
 # from the shell environment alone silently ignored `.env` — the file this
@@ -190,7 +151,7 @@ require_env() {
   # legibly: a missing token as a 401 per claim, a missing key as a container
   # that restarts forever, a missing known_hosts as a refusal nobody reads.
   local missing=() name
-  for name in AGENT_DISPATCHER_TOKEN AGENT_SANDBOX_IMAGE \
+  for name in AGENT_SANDBOX_IMAGE \
               AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_KEY \
               AGENT_TUNNEL_SSH_KNOWN_HOSTS; do
     [[ -n "$(env_or_dotenv "$name")" ]] || missing+=("$name")
@@ -199,28 +160,24 @@ require_env() {
     die "missing in .env: ${missing[*]} (see ENVIRONMENT.md)"
   fi
 
-  # On a machine running two environments, the three state roots must be said
-  # out loud. They are host paths bind-mounted into the containers, and they
-  # default to the same three directories for every stack — so two stacks that
-  # accept the defaults do not merely sit beside each other, they share:
+  # On a machine running two environments, the enrollment-state root must be
+  # said out loud. It is the only host path bind-mounted into the runner stack.
+  # Chat files live exclusively in each sandbox container's Docker writable
+  # layer; there is no host workspace or snapshot bind mount.
   #
   #   AGENT_HOST_STATE_ROOT   the enrolment credential. The control plane reads
   #                           the host *from the credential*, not from the claim
   #                           body, so the second stack registers as the first
   #                           one — `AGENT_RUNNER_HOST` cannot correct it.
-  #   AGENT_WORKDIR_ROOT      every job's checkout, patch and workspace.
-  #   AGENT_SNAPSHOT_ROOT     the same, kept for a week.
-  #
   # Required only when a sibling is named, because that is exactly when the
-  # defaults stop being safe — a single-stack host has nothing to collide with
-  # and should not have to configure paths it does not care about.
+  # enrollment default stops being safe.
   if [[ -n "$(env_or_dotenv SIBLING_COMPOSE_PROJECTS)" ]]; then
     local missing_roots=()
-    for name in AGENT_HOST_STATE_ROOT AGENT_WORKDIR_ROOT AGENT_SNAPSHOT_ROOT; do
+    for name in AGENT_HOST_STATE_ROOT; do
       [[ -n "$(env_or_dotenv "$name")" ]] || missing_roots+=("$name")
     done
     if [[ ${#missing_roots[@]} -gt 0 ]]; then
-      die "this host runs another environment (SIBLING_COMPOSE_PROJECTS is set), so ${missing_roots[*]} must name paths of this stack's own — unset they default to /var/lib/hybridinference/*, which both stacks would then share: one environment's jobs reading the other's workspaces, and both claiming as whichever host enrolled first."
+      die "this host runs another environment (SIBLING_COMPOSE_PROJECTS is set), so ${missing_roots[*]} must name a path of this stack's own; otherwise both stacks claim as whichever host enrolled first."
     fi
   fi
 
@@ -231,23 +188,8 @@ require_env() {
   [[ -s "$known" ]] || die \
     "AGENT_TUNNEL_SSH_KNOWN_HOSTS=$known is missing or empty. Create it with
      'ssh-keyscan <gateway-host> > $known' and check the fingerprint before
-     trusting it — this file is what stops the dispatcher credential going to
+     trusting it — this file is what stops the enrolled-host credential going to
      whatever answers on that address."
-}
-
-# Retained/shared-live is a coordinated deployment mode, not a collection of
-# independent booleans. Runtime code still accepts an empty/0 gate for rolling
-# compatibility, but a host deployment accepts only the two values operators
-# can reason about. In particular, "false" must not be treated as enabled by
-# Python merely because it is a non-empty string.
-deployment_flag_enabled() {
-  local name="$1" value
-  value="$(env_or_dotenv "$name")"
-  case "$value" in
-    ""|0) return 1 ;;
-    1) return 0 ;;
-    *) die "$name must be 0 or 1, got '$value'" ;;
-  esac
 }
 
 normalise_host_path() {
@@ -259,18 +201,8 @@ normalise_host_path() {
 }
 
 validate_retained_config() {
-  local restartable=0 shared_live=0
-  if deployment_flag_enabled AGENT_RESTARTABLE_SANDBOX; then restartable=1; fi
-  if deployment_flag_enabled AGENT_SHARED_LIVE_SANDBOX; then shared_live=1; fi
-
-  if [[ "$shared_live" -eq 1 && "$restartable" -ne 1 ]]; then
-    die "AGENT_SHARED_LIVE_SANDBOX=1 requires AGENT_RESTARTABLE_SANDBOX=1 on the workspace broker and runners"
-  fi
-  [[ "$restartable" -eq 1 ]] || return 0
-
   # The control plane reconciles retained Docker state through authenticated
-  # host heartbeats. A pool-less runner can execute legacy jobs but cannot own
-  # a durable chat. Check the host-side credential before spending time on an
+  # host heartbeats. Check the host-side credential before spending time on an
   # image build; the runner performs the authoritative token exchange later.
   local state_root enroll_token
   state_root="$(env_or_dotenv AGENT_HOST_STATE_ROOT)"
@@ -280,24 +212,23 @@ validate_retained_config() {
     die "retained sandbox mode requires AGENT_ENROLL_TOKEN or the persisted host credential at ${state_root%/}/credential"
   fi
 
-  if [[ "$shared_live" -eq 1 ]]; then
-    local slots runner_replicas resident_capacity
-    slots="$(env_or_dotenv AGENT_HOST_SLOTS)"
-    [[ "$slots" =~ ^[0-9]+$ && "$slots" -ge 2 ]] \
-      || die "AGENT_SHARED_LIVE_SANDBOX=1 requires AGENT_HOST_SLOTS to be an integer >= 2 (got '${slots:-unset}')"
-    runner_replicas="$(env_or_dotenv AGENT_RUNNER_REPLICAS)"
-    runner_replicas="${runner_replicas:-3}"
-    [[ "$runner_replicas" =~ ^[0-9]+$ && "$runner_replicas" -ge 2 ]] \
-      || die "AGENT_SHARED_LIVE_SANDBOX=1 requires AGENT_RUNNER_REPLICAS to be an integer >= 2 (got '${runner_replicas:-unset}')"
-    [[ "$slots" -le "$runner_replicas" ]] \
-      || die "AGENT_HOST_SLOTS=$slots overstates AGENT_RUNNER_REPLICAS=$runner_replicas; one runner executes one turn, so shared-live slots cannot exceed executors"
-    resident_capacity="$(env_or_dotenv AGENT_SHARED_RESIDENT_CAPACITY)"
-    resident_capacity="${resident_capacity:-8}"
-    [[ "$resident_capacity" =~ ^[0-9]+$ \
-       && "$resident_capacity" -ge 2 \
-       && "$resident_capacity" -le 128 ]] \
-      || die "AGENT_SHARED_RESIDENT_CAPACITY must be an integer from 2 through 128 (got '$resident_capacity')"
-  fi
+  local slots runner_replicas resident_capacity
+  slots="$(env_or_dotenv AGENT_HOST_SLOTS)"
+  slots="${slots:-3}"
+  [[ "$slots" =~ ^[0-9]+$ && "$slots" -ge 2 ]] \
+    || die "AGENT_HOST_SLOTS must be an integer >= 2 (got '${slots:-unset}')"
+  runner_replicas="$(env_or_dotenv AGENT_RUNNER_REPLICAS)"
+  runner_replicas="${runner_replicas:-3}"
+  [[ "$runner_replicas" =~ ^[0-9]+$ && "$runner_replicas" -ge 2 ]] \
+    || die "AGENT_RUNNER_REPLICAS must be an integer >= 2 (got '${runner_replicas:-unset}')"
+  [[ "$slots" -le "$runner_replicas" ]] \
+    || die "AGENT_HOST_SLOTS=$slots overstates AGENT_RUNNER_REPLICAS=$runner_replicas; one runner executes one turn, so shared-live slots cannot exceed executors"
+  resident_capacity="$(env_or_dotenv AGENT_SHARED_RESIDENT_CAPACITY)"
+  resident_capacity="${resident_capacity:-8}"
+  [[ "$resident_capacity" =~ ^[0-9]+$ \
+     && "$resident_capacity" -ge 2 \
+     && "$resident_capacity" -le 128 ]] \
+    || die "AGENT_SHARED_RESIDENT_CAPACITY must be an integer from 2 through 128 (got '$resident_capacity')"
 
   # Chat files live in Docker's writable layer. Verify the daemon whose socket
   # the broker receives is the daemon backed by the configured storage root;
@@ -317,6 +248,10 @@ validate_retained_config() {
   log "retained storage verified at ${actual_root}; enrolled host state is available"
 }
 
+# The topology is unconditional, but a rolling deployment still needs to prove
+# which code generation is online before the control plane replaces its API.
+# This marker is runner infrastructure metadata, not chat state and not a
+# feature switch; chat workspaces remain exclusively in Docker writable layers.
 shared_live_ready_file() {
   local state_root
   state_root="$(env_or_dotenv AGENT_HOST_STATE_ROOT)"
@@ -332,9 +267,8 @@ write_shared_live_marker() {
     || die "shared-live ready marker must be an absolute file path (got '$ready_file')"
   mkdir -p "$ready_dir" \
     || die "could not create shared-live marker directory $ready_dir"
-  # The marker is not a credential. A plain overwrite is deliberately
-  # fail-closed: while a reader observes an empty/partial value it omits the
-  # target-commit capability and the control-plane barrier keeps waiting.
+  # While this plain overwrite is empty or partial, runners omit the exact-SHA
+  # capability. That makes an interrupted write fail closed.
   printf '%s\n' "$value" > "$ready_file" \
     || die "could not write shared-live marker $ready_file"
   chmod 0644 "$ready_file" \
@@ -344,7 +278,6 @@ write_shared_live_marker() {
 }
 
 prepare_shared_live_marker() {
-  deployment_flag_enabled AGENT_SHARED_LIVE_SANDBOX || return 0
   local deployment_sha
   deployment_sha="${AGENT_DEPLOYMENT_SHA:-}"
   if [[ -z "$deployment_sha" ]]; then
@@ -359,7 +292,6 @@ prepare_shared_live_marker() {
 }
 
 complete_shared_live_marker() {
-  deployment_flag_enabled AGENT_SHARED_LIVE_SANDBOX || return 0
   local requested_sha="${1:-}" deployment_sha ready_file current
   deployment_sha="${requested_sha:-${AGENT_DEPLOYMENT_SHA:-}}"
   [[ -n "$deployment_sha" ]] || die "no deployment SHA was supplied for shared-live readiness"
@@ -375,8 +307,6 @@ complete_shared_live_marker() {
 }
 
 check_shared_live_stack() {
-  deployment_flag_enabled AGENT_SHARED_LIVE_SANDBOX || return 0
-
   # Ask every running replica to attest the exact image labels, helper pins,
   # runtime drivers, broker settings and slot count used by the claim path.
   # Inspecting only its environment would call a half-configured host ready —
@@ -592,13 +522,8 @@ cmd_up() {
      or shared-live attestation error, then re-run 'check'."
   fi
   if [[ "${DEFER_SHARED_READY_MARKER:-0}" != "1" ]]; then
-    # A direct `sandbox_host.sh up` has no deploy.sh wrapper to record the
-    # checkout it just proved. Keep the same ordering as the CD path: the
-    # operator-facing record lands before the heartbeat may attest it.
-    if deployment_flag_enabled AGENT_SHARED_LIVE_SANDBOX; then
-      printf '%s\n' "${AGENT_DEPLOYMENT_SHA}" > .deployed-sha \
-        || die "could not record shared-live target ${AGENT_DEPLOYMENT_SHA} in .deployed-sha"
-    fi
+    printf '%s\n' "${AGENT_DEPLOYMENT_SHA}" > .deployed-sha \
+      || die "could not record shared-live target ${AGENT_DEPLOYMENT_SHA} in .deployed-sha"
     complete_shared_live_marker
   fi
   log "done. 'deploy/host/sandbox_host.sh status' shows the live tail."

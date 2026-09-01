@@ -125,7 +125,7 @@ So the freeze is applied at the edge, in front of the gateway, on three routes:
 ```text
 POST /v1/agent/jobs                      # create
 POST /v1/agent/jobs/{job_id}/follow-ups  # next turn in a thread
-POST /v1/agent/jobs/{job_id}/fork        # shared-live: immediate same-container native fork; legacy modes retain their compatibility behavior
+POST /v1/agent/jobs/{job_id}/fork        # immediate same-container native-session fork
 ```
 
 **And the source-control routes, which is easy to miss** — the freeze is about
@@ -255,31 +255,25 @@ A copy would produce connections that list correctly and fail at first use.
 
 ## 6. Point the runner host at the new control plane
 
-The control plane can enrol hosts (`POST /v1/agent/host/register`, then
-`/heartbeat`), but the runner in `cloud_agent_host/` does not call either
-endpoint yet — it claims with `AGENT_DISPATCHER_TOKEN` and reports its name in
-the claim body. So re-pointing is an environment edit, and enrollment is
-something to fold in when the host half lands.
+The control plane enrols hosts (`POST /v1/agent/host/register`, then
+`/heartbeat`). A one-time `AGENT_ENROLL_TOKEN` is exchanged for a persisted
+credential bound to the host name; claims and heartbeats authenticate with
+that credential. Request-body host names are not identity.
 
 - [ ] Set on the runner host:
-      - `AGENT_GATEWAY_URL` → the new control plane's origin (this is also what
-        the sandbox is handed today — see the blocker table; if the E9 split has
-        landed, set `AGENT_CONTROL_PLANE_URL` for claims and leave
-        `AGENT_GATEWAY_URL` pointing at the inference gateway).
-      - `AGENT_DISPATCHER_TOKEN` → the new stack's value. It must **not** be the
-        old one: a token that opens both stacks is a token that survived a
-        migration whose whole point was that credentials do not.
-      - `AGENT_RUNNER_HOST` → the machine's name, unchanged.
-      - `AGENT_WORKSPACE_BROKER_URL` → unchanged; the broker is on the same host.
-      - `AGENT_WORKDIR_ROOT` → **unchanged while legacy/default-off jobs still
-        run**, so their host worktrees survive. Restartable chats do not use
-        this path; remove the bind only in a later retained-only cutover.
+      - `AGENT_CONTROL_PLANE_URL` → the new control plane's claim/register/
+        heartbeat endpoint.
+      - `AGENT_GATEWAY_URL` → the inference gateway reached by sandboxes.
+      - `AGENT_ENROLL_TOKEN` → a new single-use token bound to this host; remove
+        it after the persisted credential is written.
+      - `AGENT_RUNNER_HOST` → the enrolled machine name.
+      - `AGENT_WORKSPACE_BROKER_URL` and
+        `AGENT_WORKSPACE_BROKER_TOKEN` → the advertised broker and the same
+        environment secret configured on the control plane.
 - [ ] Start the runner and the broker. Confirm the startup line names the new
       host and the sandbox backend, and that preflight passed.
-- [ ] Confirm on the new control plane that the host appears
-      (`GET /admin/agent/runner-hosts` — while the runner claims with the
-      dispatcher token, a machine joins the pool by polling rather than by
-      being registered).
+- [ ] Confirm on the new control plane that the enrolled host appears online
+      with a fresh heartbeat and usable broker (`GET /admin/agent/runner-hosts`).
 - [ ] Leave the pool **unpinned**. The new database's `agent_runner_policy`
       singleton has `active_host = NULL`, which means claiming is unrestricted;
       pinning to a host that has not polled yet is refused, and pinning at all
@@ -347,9 +341,8 @@ GitLab connection re-made there. Those rows stay in the new database and are
 not copied back.
 
 1. [ ] Stop the runner on the runner host.
-2. [ ] Restore the runner's environment to the old values
-       (`AGENT_GATEWAY_URL`, `AGENT_DISPATCHER_TOKEN`). Both must change back
-       together — the old stack will not accept the new token.
+2. [ ] Restore the runner's old control-plane/gateway endpoints and its old
+       enrolled-host credential as one unit.
 3. [ ] Point the agent domain back at the old frontend, or remove the redirect.
 4. [ ] Remove the edge rules from steps 2 and 3, in that order: unblock
        `/worker/claim` **before** unblocking creation, or the first job created

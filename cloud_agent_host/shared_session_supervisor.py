@@ -37,7 +37,7 @@ from cloud_agent_host.resident_transport import (
     ResidentTurn,
 )
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.session_supervisor import (
+from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
     DEFAULT_SWEEP_INTERVAL_S,
     SessionBusy,
@@ -274,8 +274,6 @@ class SharedChatSessionSupervisor:
         expected_container_id: str | None = None,
     ) -> list[SharedSessionDescriptor]:
         """Install the control plane's authoritative member aliases."""
-        if not spec.shared_live:
-            raise ValueError("a shared supervisor requires shared_live sandbox identity")
         if not members:
             raise ValueError("a shared sandbox manifest cannot be empty")
         seen_slots: set[int] = set()

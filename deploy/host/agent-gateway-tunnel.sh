@@ -15,7 +15,7 @@
 # path.)
 #
 # SSH rather than plain TCP because the hop crosses a shared network and the
-# traffic is not incidental: every claim carries the dispatcher credential, and
+# traffic is not incidental: every claim carries an enrolled-host credential, and
 # every job call carries a capability token for that job. Those must not cross
 # a lab LAN in the clear, and it lets the gateway keep listening on loopback.
 set -eu
@@ -62,7 +62,7 @@ die() { printf '[agent-gateway-tunnel] ERROR: %s\n' "$*" >&2; exit 1; }
     "no known_hosts at $KNOWN_HOSTS. Generate it on the runner host with
      'ssh-keyscan -p $SSH_PORT <gateway-host>', check the fingerprint, and mount
      it. This is not disabled by an option: an unverified hop would leak the
-     dispatcher credential to anything that answers."
+     enrolled-host credential to anything that answers."
 
 # Both or neither. A port with no bind address is a loopback-only forward: it
 # binds successfully on the far host, ssh reports nothing wrong, and the

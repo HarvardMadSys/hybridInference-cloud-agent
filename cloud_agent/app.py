@@ -149,13 +149,30 @@ async def _reconcile_settled_terminals(store: AgentJobStore) -> None:
     it. A single env-configured client here would resume one host's terminals
     and quietly report success for every other host's.
     """
-    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent.broker_routing import broker_for_job, hydrate_shared_broker
     from cloud_agent.terminal_coordination import resume_settled_terminal
 
     for job_id in await store.list_terminal_resumes_pending():
-        broker = await broker_for_job(store, job_id)
-        if await resume_settled_terminal(job_id, broker=broker):
-            await store.mark_terminal_resume_complete(job_id=job_id)
+        try:
+            job = await store.get_job(job_id)
+            if job is None or job.get("thread_sandbox") is None:
+                # No retained group exists to resume (for example, a queued
+                # job cancelled before its first claim). This marker has no
+                # external side effect behind it and can be retired.
+                await store.mark_terminal_resume_complete(job_id=job_id)
+                continue
+            broker = await hydrate_shared_broker(job, await broker_for_job(store, job_id))
+            if await resume_settled_terminal(str(job["thread_id"]), broker=broker):
+                await store.mark_terminal_resume_complete(job_id=job_id)
+        except Exception:
+            # One unavailable host must not prevent reconciliation of markers
+            # owned by every other host in this pass. The marker remains set,
+            # so this exact job is retried on the next pass.
+            logger.warning(
+                "Settled terminal reconciliation failed",
+                exc_info=True,
+                extra={"event": "agent_terminal_reconcile_failed", "job_id": job_id},
+            )
 
 
 async def _revoke_dead_grants(store: AgentJobStore, grants: Any) -> None:
@@ -634,15 +651,6 @@ async def reap_expired_attempts(
                 logger.info(
                     "agent_attempts_reaped",
                     extra={"event": "agent_attempts_reaped", "count": len(actions)},
-                )
-            # A job the publisher took and never finished is invisible to the
-            # pass above: that scans running attempts, and this job's attempt
-            # finished before publishing began.
-            stalled = await store.reap_stalled_publishes()
-            if stalled:
-                logger.warning(
-                    "agent_publishes_stalled",
-                    extra={"event": "agent_publishes_stalled", "job_ids": stalled},
                 )
             snapshot_reaper = getattr(store, "reap_stalled_sandbox_snapshot_captures", None)
             if snapshot_reaper is not None:

@@ -15,7 +15,7 @@ things had to stay true across that move, and each fails silently:
   which is what CI does — would produce an image with no CLI in it.
 * **Verified.** Every pin is checked against the binary at build time. The
   labels are derived from these arguments, and the whole version-stamp
-  pipeline (heartbeat → attempt record → checkpoint gate) treats a label as
+  pipeline (heartbeat → attempt record → native-session admission) treats a label as
   fact. An unverified pin lets `latest` produce an image whose label is a lie.
 
 Read from the files rather than duplicated here on purpose: a list of the five
@@ -144,7 +144,7 @@ def test_the_example_offers_every_pin() -> None:
 _BASE_ENV = "\n".join(
     [
         "COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-staging",
-        "AGENT_DISPATCHER_TOKEN=t",
+        "AGENT_ENROLL_TOKEN=test-enrollment-token",
         "AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:staging",
         "AGENT_TUNNEL_SSH_DESTINATION=user@gateway",
         "AGENT_TUNNEL_SSH_KEY=/dev/null",
@@ -175,6 +175,10 @@ def _up(tmp_path: Path, dotenv: str) -> str:
     docker.write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'if [ "$*" = "info --format {{.DockerRootDir}}" ]; then\n'
+        '  printf "/var/lib/docker\\n"\n'
+        "  exit 0\n"
+        "fi\n"
         'if [ "$1" = compose ]; then\n'
         '  printf "compose-env image=%s replicas=%s\\n" '
         '"${AGENT_SANDBOX_IMAGE:-}" "${AGENT_RUNNER_REPLICAS:-}" >> "$DOCKER_LOG"\n'
@@ -192,6 +196,12 @@ def _up(tmp_path: Path, dotenv: str) -> str:
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "APP_DIR": str(app_dir),
             "DOCKER_LOG": str(log),
+            # Production reaches `up` through deploy.sh, which supplies the
+            # exact target generation and a writable host-state root. These
+            # tests stop at build argument construction, but must still model
+            # that unconditional rolling-deploy contract.
+            "AGENT_DEPLOYMENT_SHA": "test-deployment-sha",
+            "AGENT_HOST_STATE_ROOT": str(tmp_path / "host-state"),
             # The caller's own environment must not stand in for the .env
             # under test — every pin is read through the same precedence.
             "COMPOSE_PROJECT": "",

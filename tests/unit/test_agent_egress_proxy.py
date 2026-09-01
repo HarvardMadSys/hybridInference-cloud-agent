@@ -151,7 +151,7 @@ def test_the_environment_adds_to_the_built_in_registries_rather_than_replacing_t
 def test_the_default_list_carries_no_write_capable_endpoint():
     """The selection rule is exfiltration, not download safety.
 
-    The sandbox is disposable and unprivileged, so fetching something hostile
+    The sandbox is retained and unprivileged, so fetching something hostile
     is already priced in. What matters is whether a listed host can *receive* a
     private repository — `api.github.com` can (an issue body), and is therefore
     absent while `github.com` is present.

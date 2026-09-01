@@ -305,6 +305,7 @@ def _build_app(store: FakeHostPoolStore) -> FastAPI:
 @pytest_asyncio.fixture()
 async def client(monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
 
     async def _no_audit(*_args, **_kwargs):
         return None
@@ -322,6 +323,7 @@ async def client(monkeypatch):
 async def residency_client(monkeypatch):
     """Like ``client``, plus a recording grant client behind the dependency."""
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
 
     async def _no_audit(*_args, **_kwargs):
         return None
@@ -338,6 +340,17 @@ async def residency_client(monkeypatch):
         yield async_client, store, grants
 
 
+def _registration_body(token: str, name: str, **overrides) -> dict[str, Any]:
+    """Build the minimum retained-host enrollment payload."""
+    return {
+        "enroll_token": token,
+        "name": name,
+        "slots_total": 3,
+        "broker_url": "http://broker.test:8092",
+        **overrides,
+    }
+
+
 async def _enroll(client, store, name="runner-a", **body) -> str:
     """Issue a token for ``name``, redeem it, and return the host credential."""
     issued = await client.post(
@@ -346,7 +359,7 @@ async def _enroll(client, store, name="runner-a", **body) -> str:
     assert issued.status_code == 200
     response = await client.post(
         "/v1/agent/host/register",
-        json={"enroll_token": issued.json()["enroll_token"], "name": name, **body},
+        json=_registration_body(issued.json()["enroll_token"], name, **body),
     )
     assert response.status_code == 200, response.text
     return response.json()["credential"]
@@ -390,10 +403,10 @@ async def test_a_replayed_enrollment_token_is_refused(client):
     token = issued.json()["enroll_token"]
 
     first = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
     second = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
 
     assert first.status_code == 200
@@ -430,7 +443,7 @@ async def test_a_typo_cannot_evict_a_live_host(client):
     token = issued.json()["enroll_token"]
 
     typo = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
 
     assert typo.status_code == 401
@@ -441,7 +454,7 @@ async def test_a_typo_cannot_evict_a_live_host(client):
     # And the token survives the typo, so the machine it was minted for can
     # still use it — a spent token would mean re-issuing one per mistake.
     retry = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-b"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-b")
     )
     assert retry.status_code == 200
     assert store.rows["runner-b"]["status"] == HOST_ENROLLING
@@ -456,7 +469,7 @@ async def test_a_token_admits_only_the_name_it_was_issued_for(client):
 
     response = await async_client.post(
         "/v1/agent/host/register",
-        json={"enroll_token": issued.json()["enroll_token"], "name": "runner-c"},
+        json=_registration_body(issued.json()["enroll_token"], "runner-c"),
     )
 
     assert response.status_code == 401
@@ -511,7 +524,7 @@ async def test_an_expired_enrollment_token_is_refused(client):
     store.tokens[hash_secret(token)]["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
 
     response = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
 
     assert response.status_code == 401
@@ -521,7 +534,7 @@ async def test_an_invented_enrollment_token_is_refused(client):
     async_client, _ = client
 
     response = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": "made-up", "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body("made-up", "runner-a")
     )
 
     assert response.status_code == 401
@@ -778,8 +791,8 @@ class ClaimRecorder(FakeHostPoolStore):
         *,
         worker_id: str,
         lease_ttl_seconds: float,
-        host: str | None = None,
-        host_credential_hash: str | None = None,
+        host: str,
+        host_credential_hash: str,
         claim_attestation: dict[str, Any] | None = None,
     ):
         self.claims.append(
@@ -795,12 +808,12 @@ class ClaimRecorder(FakeHostPoolStore):
 
 @pytest_asyncio.fixture()
 async def claim_client(monkeypatch):
-    """The moved worker router, with only E7's raising placeholder supplied."""
+    """The worker router using its real enrolled-host claim authenticator."""
     from cloud_agent.api import routes
     from cloud_agent.api.deps import get_agent_app_credentials
 
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
-    monkeypatch.setenv("AGENT_DISPATCHER_TOKEN", "the-shared-dispatcher-token")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
 
     store = ClaimRecorder()
     app = FastAPI()
@@ -814,13 +827,7 @@ async def claim_client(monkeypatch):
 
 
 async def test_a_host_credential_names_the_claiming_machine(claim_client):
-    """The body cannot rename a machine that authenticated as itself.
-
-    The shared dispatcher token says "a runner" and not "which", so #1158's
-    pool is a list of names anything holding it can invent. A host credential
-    is the fix, and it is only a fix if the claim reads the name from the
-    credential rather than from the request.
-    """
+    """The claim reads the machine name only from its enrolled credential."""
     async_client, store = claim_client
     from cloud_agent.tokens import mint_host_token
 
@@ -831,7 +838,6 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
         "/v1/agent/worker/claim",
         json={
             "worker_id": "w1",
-            "host": "runner-b",
             "attestation": {
                 "sandbox_runtime": "io.containerd.kata.v2",
                 "host_kernel": "host",
@@ -858,9 +864,8 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
                 # Non-CLI helpers (currently the Claude Agent SDK fork
                 # helper) are attested separately from runtime binaries.
                 "helper_versions": {},
-                # Shared-live claims additionally carry a process-local
-                # protocol/version fence. Legacy callers omit both fields,
-                # which the wire model normalizes to these safe defaults.
+                # Shared-live claims carry a process-local protocol/version
+                # fence; omitted values normalize to safe non-attestation.
                 "shared_sandbox_protocol": None,
                 "runner_capabilities": [],
                 "host_kernel": "host",
@@ -870,28 +875,39 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
     ]
 
 
-async def test_the_shared_dispatcher_token_still_reports_its_host_in_the_body(claim_client):
-    """#1158's path, untouched. Existing runners keep working unchanged."""
+async def test_request_body_host_identity_is_rejected(claim_client):
+    """A stale or malicious caller cannot supply a host name in JSON."""
     async_client, store = claim_client
+    from cloud_agent.tokens import mint_host_token
+
+    credential = mint_host_token(host="runner-a")
+    store.seed("runner-a", credential_hash=hash_secret(credential), enrolled=True)
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
         json={
             "worker_id": "w1",
             "host": "runner-b",
-            "attestation": {
-                "sandbox_runtime": "io.containerd.kata.v2",
-                "host_kernel": "host",
-                "guest_kernel": "guest",
-            },
         },
-        headers={"Authorization": "Bearer the-shared-dispatcher-token"},
+        headers={"Authorization": f"Bearer {credential}"},
     )
 
-    assert response.status_code == 200
-    assert store.claims[0]["host"] == "runner-b"
-    assert store.claims[0]["host_credential_hash"] is None
-    assert store.claims[0]["claim_attestation"]["guest_kernel"] == "guest"
+    assert response.status_code == 422
+    assert store.claims == []
+
+
+async def test_pool_wide_token_is_not_a_claim_credential(claim_client):
+    """Pool-wide bearer strings no longer open the cross-tenant claim route."""
+    async_client, store = claim_client
+
+    response = await async_client.post(
+        "/v1/agent/worker/claim",
+        json={"worker_id": "w1"},
+        headers={"Authorization": "Bearer pool-wide-token"},
+    )
+
+    assert response.status_code == 401
+    assert store.claims == []
 
 
 async def test_a_revoked_host_credential_cannot_claim(claim_client):
@@ -1254,7 +1270,7 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
                     "running": True,
                     "activity_active": False,
                     "idle_remaining_seconds": 1799.5,
-                    "shared_live": False,
+                    "shared_live": True,
                     "members": [],
                 }
             ]
@@ -1270,14 +1286,38 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
             "sandbox_id": "asbx_1",
             "container_id": "0123456789abcdef",
             "sandbox_generation": 3,
-            "activation_generation": 7,
             "running": True,
             "activity_active": False,
             "idle_remaining_seconds": 1799.5,
-            "shared_live": False,
             "members": [],
         }
     ]
+
+
+async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency_client):
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_old",
+                    "sandbox_id": "asbx_old",
+                    "container_id": "0123456789abcdef",
+                    "generation": 1,
+                    "activation_generation": 1,
+                    "running": True,
+                    "shared_live": False,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 422
+    assert store.sandbox_observations == []
 
 
 async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residency_client):
@@ -1309,7 +1349,7 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residenc
 
     assert response.status_code == 200, response.text
     assert response.json()["retained_sandboxes_stop"] == [
-        {**store.sandbox_stop_due, "shared_live": False}
+        {**store.sandbox_stop_due, "shared_live": True}
     ]
 
 
@@ -1343,7 +1383,7 @@ async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(re
 
     assert response.status_code == 200, response.text
     assert response.json()["retained_sandboxes_stop"] == [
-        {**store.sandbox_stop_due, "shared_live": False}
+        {**store.sandbox_stop_due, "shared_live": True}
     ]
 
 

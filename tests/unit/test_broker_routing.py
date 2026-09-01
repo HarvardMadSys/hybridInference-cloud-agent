@@ -1,10 +1,10 @@
-"""Requests reach the machine holding the worktree, not the configured one.
+"""Requests reach the enrolled host that owns the retained container.
 
 The bug this prevents is quiet, which is why it gets its own file. With one
-`AGENT_WORKSPACE_BROKER_URL` and several hosts, a file listing for a job on
-host B is answered by host A's broker: not an error, not a 500 — a plausible
-directory listing of the wrong disk. Everything here is about which base URL a
-request actually goes to.
+With a process-global fallback and several hosts, a file listing for a job on
+host B could be answered by host A's broker: not an error, not a 500 — a
+plausible directory listing of the wrong container. Everything here is about
+the persisted host ownership fence.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from cloud_agent.broker_routing import broker_for_attempt, broker_for_job, hydra
 from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
 
 BROKER_TOKEN_ENV = "AGENT_WORKSPACE_BROKER_TOKEN"
-BROKER_URL_ENV = "AGENT_WORKSPACE_BROKER_URL"
 
 
 class FakeRoutingStore:
@@ -43,7 +42,6 @@ def _base_url(client: Any) -> str:
 @pytest.fixture(autouse=True)
 def _broker_env(monkeypatch):
     monkeypatch.setenv(BROKER_TOKEN_ENV, "shared-broker-token")
-    monkeypatch.delenv(BROKER_URL_ENV, raising=False)
 
 
 async def test_two_hosts_two_brokers():
@@ -62,40 +60,18 @@ async def test_two_hosts_two_brokers():
     assert _base_url(second) == "http://broker-b:8092"
 
 
-async def test_an_attempt_with_no_host_falls_back_to_the_single_host_env(monkeypatch):
-    """E11's setup, and every job that predates the pool, must keep working."""
-    monkeypatch.setenv(BROKER_URL_ENV, "http://legacy-broker:8092")
-    store = FakeRoutingStore({})
-
-    broker = await broker_for_attempt(store, 7)
-
-    assert _base_url(broker) == "http://legacy-broker:8092"
+async def test_an_attempt_without_enrolled_host_ownership_has_no_broker():
+    assert await broker_for_attempt(FakeRoutingStore(), 7) is None
+    assert await broker_for_attempt(FakeRoutingStore(), None) is None
 
 
-async def test_no_attempt_at_all_falls_back_to_the_env(monkeypatch):
-    monkeypatch.setenv(BROKER_URL_ENV, "http://legacy-broker:8092")
-
-    assert (
-        _base_url(await broker_for_attempt(FakeRoutingStore(), None)) == "http://legacy-broker:8092"
-    )
-
-
-async def test_a_host_without_a_broker_url_does_not_fall_back(monkeypatch):
-    """The one fallback that would be actively wrong.
-
-    Falling back here routes host B's request to host A's broker, and the
-    result is not an error — it is an answer about the wrong machine's disk.
-    Answering "no broker" surfaces as the 409 a deployment without one already
-    produces, which is a question an operator can act on.
-    """
-    monkeypatch.setenv(BROKER_URL_ENV, "http://legacy-broker:8092")
+async def test_a_host_without_a_broker_url_is_unroutable():
     store = FakeRoutingStore({1: {"host": "runner-a", "broker_url": None}})
 
     assert await broker_for_attempt(store, 1) is None
 
 
-async def test_a_host_with_a_blank_broker_url_is_treated_as_having_none(monkeypatch):
-    monkeypatch.setenv(BROKER_URL_ENV, "http://legacy-broker:8092")
+async def test_a_host_with_a_blank_broker_url_is_treated_as_having_none():
     store = FakeRoutingStore({1: {"host": "runner-a", "broker_url": "   "}})
 
     assert await broker_for_attempt(store, 1) is None
@@ -134,30 +110,20 @@ async def test_shared_child_workspace_hydrates_its_db_owned_alias_before_use():
     assert broker.registered == [sandbox]
 
 
-async def test_legacy_workspace_hydration_is_a_noop():
+async def test_missing_shared_membership_has_no_broker_route():
     class Broker:
         async def register_shared_sandbox(self, sandbox):  # pragma: no cover - must stay unused
             raise AssertionError(sandbox)
 
     broker = Broker()
 
-    assert await hydrate_shared_broker({"thread_sandbox": None}, broker) is broker
+    assert await hydrate_shared_broker({"thread_sandbox": None}, broker) is None
 
 
-async def test_a_job_with_no_running_attempt_falls_back_to_the_env(monkeypatch):
-    monkeypatch.setenv(BROKER_URL_ENV, "http://legacy-broker:8092")
-
-    broker = await broker_for_job(FakeRoutingStore(), "job-unknown")
-
-    assert _base_url(broker) == "http://legacy-broker:8092"
-
-
-async def test_no_store_at_all_falls_back_to_the_env(monkeypatch):
-    """An unconfigured deployment keeps whatever behaviour it had."""
-    monkeypatch.setenv(BROKER_URL_ENV, "http://legacy-broker:8092")
-
-    assert _base_url(await broker_for_attempt(None, 1)) == "http://legacy-broker:8092"
-    assert _base_url(await broker_for_job(None, "job-1")) == "http://legacy-broker:8092"
+async def test_a_job_without_enrolled_host_ownership_has_no_broker():
+    assert await broker_for_job(FakeRoutingStore(), "job-unknown") is None
+    assert await broker_for_attempt(None, 1) is None
+    assert await broker_for_job(None, "job-1") is None
 
 
 async def test_every_broker_shares_the_one_token_today():
@@ -314,8 +280,22 @@ class TestBrokerProbe:
         assert calls["n"] == 2
 
     @pytest.mark.asyncio
-    async def test_no_broker_url_is_not_a_fault(self, monkeypatch) -> None:
-        """The pre-pool single-host shape reports none and reads the env."""
+    async def test_no_broker_url_is_a_readiness_fault(self, monkeypatch) -> None:
+        """Every retained host must advertise the broker that owns its chats."""
         calls = self._health(monkeypatch, None)
-        assert await broker_routing.probe_broker("h1", None) is None
+        assert await broker_routing.probe_broker("h1", None) == (
+            "host did not advertise a workspace broker URL"
+        )
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_no_control_plane_broker_credential_is_a_readiness_fault(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv(BROKER_TOKEN_ENV, raising=False)
+        calls = self._health(monkeypatch, None)
+
+        assert await broker_routing.probe_broker("h1", "http://broker:8092") == (
+            "control plane has no workspace broker credential"
+        )
         assert calls["n"] == 0

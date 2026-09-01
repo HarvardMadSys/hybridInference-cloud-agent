@@ -9,6 +9,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SANDBOX_HOST = REPO_ROOT / "deploy/host/sandbox_host.sh"
 HOST_DEPLOY = REPO_ROOT / "deploy/host/deploy.sh"
+HOST_COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
+CONTROL_COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -19,19 +21,13 @@ def _write_executable(path: Path, body: str) -> None:
 def _host(
     tmp_path: Path,
     *,
-    restartable: str = "1",
-    shared: str = "1",
-    slots: str = "3",
+    slots: str | None = "3",
     replicas: str = "3",
     running_replicas: int = 3,
     credential: bool = True,
     configured_root: str = "/var/lib/docker",
     daemon_root: str = "/var/lib/docker",
     capability: str = "shared-sandbox-v1",
-    include_rollout: bool = True,
-    github_workflow: str = "",
-    deployment_environment: str = "",
-    staging_override: str = "",
     credential_rejected: bool = False,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
@@ -49,17 +45,9 @@ def _host(
         f"AGENT_HOST_STATE_ROOT={state_root}",
         f"AGENT_RETAINED_DOCKER_DATA_ROOT={configured_root}",
     ]
-    if include_rollout:
-        dotenv += [
-            f"AGENT_RESTARTABLE_SANDBOX={restartable}",
-            f"AGENT_SHARED_LIVE_SANDBOX={shared}",
-            f"AGENT_HOST_SLOTS={slots}",
-            f"AGENT_RUNNER_REPLICAS={replicas}",
-        ]
-    if staging_override:
-        dotenv.append(f"STAGING_SHARED_LIVE_SANDBOX={staging_override}")
-    if deployment_environment:
-        dotenv.append(f"DEPLOYMENT_ENVIRONMENT={deployment_environment}")
+    if slots is not None:
+        dotenv.append(f"AGENT_HOST_SLOTS={slots}")
+    dotenv.append(f"AGENT_RUNNER_REPLICAS={replicas}")
     (app_dir / ".env").write_text("\n".join([*dotenv, ""]))
 
     fake_bin = tmp_path / "bin"
@@ -86,8 +74,6 @@ def _host(
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "APP_DIR": str(app_dir),
-        "GITHUB_WORKFLOW": github_workflow,
-        "DEPLOYMENT_ENVIRONMENT": "",
     }
     # Exercise the same .env path an operator uses, independent of the test
     # process's own environment.
@@ -95,16 +81,14 @@ def _host(
         "COMPOSE_PROJECT",
         "AGENT_SANDBOX_BACKEND",
         "AGENT_SANDBOX_IMAGE",
-        "AGENT_RESTARTABLE_SANDBOX",
-        "AGENT_SHARED_LIVE_SANDBOX",
         "AGENT_HOST_SLOTS",
         "AGENT_RUNNER_REPLICAS",
         "AGENT_SHARED_RESIDENT_CAPACITY",
         "AGENT_HOST_STATE_ROOT",
         "AGENT_DEPLOYMENT_SHA",
+        "AGENT_SHARED_LIVE_READY_FILE",
         "AGENT_ENROLL_TOKEN",
         "AGENT_RETAINED_DOCKER_DATA_ROOT",
-        "STAGING_SHARED_LIVE_SANDBOX",
     ):
         env[name] = ""
     return env
@@ -121,100 +105,34 @@ def _run(env: dict[str, str], *command: str) -> subprocess.CompletedProcess[str]
     )
 
 
-def test_shared_live_refuses_a_half_enabled_host(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, restartable="0"), "preflight")
-
-    assert result.returncode != 0
-    assert "requires AGENT_RESTARTABLE_SANDBOX=1" in result.stderr
-
-
-def test_default_branch_workflow_activates_the_target_commits_staging_policy(
-    tmp_path: Path,
-) -> None:
-    """workflow_run uses main's YAML but dev's deployment script."""
-    result = _run(
-        _host(
-            tmp_path,
-            include_rollout=False,
-            github_workflow="Deploy Staging",
-        ),
-        "preflight",
+def test_shared_live_is_the_only_deployment_mode() -> None:
+    """No configuration can route a job back to one-shot execution."""
+    sources = "\n".join(
+        path.read_text() for path in (SANDBOX_HOST, HOST_DEPLOY, HOST_COMPOSE, CONTROL_COMPOSE)
     )
-
-    assert result.returncode == 0, result.stderr
-    assert "staging retained/shared-live rollout policy loaded" in result.stdout
-    assert "retained storage verified" in result.stdout
-
-
-def test_manual_staging_check_loads_policy_from_persistent_environment(tmp_path: Path) -> None:
-    result = _run(
-        _host(
-            tmp_path,
-            include_rollout=False,
-            deployment_environment="staging",
-        ),
-        "preflight",
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "staging retained/shared-live rollout policy loaded" in result.stdout
-    assert "retained storage verified" in result.stdout
+    for removed in (
+        "AGENT_RESTARTABLE_SANDBOX",
+        "AGENT_SHARED_LIVE_SANDBOX",
+        "STAGING_SHARED_LIVE_SANDBOX",
+    ):
+        assert removed not in sources
 
 
-def test_staging_policy_overrides_an_old_generic_default_off_dotenv(tmp_path: Path) -> None:
-    result = _run(
-        _host(
-            tmp_path,
-            restartable="0",
-            shared="0",
-            github_workflow="Deploy Staging",
-        ),
-        "preflight",
-    )
+def test_target_sha_marker_is_a_rollout_fence_not_a_topology_switch() -> None:
+    """The marker can delay rollout but cannot select a legacy executor."""
+    host_script = SANDBOX_HOST.read_text()
+    host_deploy = HOST_DEPLOY.read_text()
 
-    assert result.returncode == 0, result.stderr
-    assert "retained storage verified" in result.stdout
-
-
-def test_staging_policy_has_an_explicit_emergency_off_switch(tmp_path: Path) -> None:
-    result = _run(
-        _host(
-            tmp_path,
-            github_workflow="Deploy Staging",
-            staging_override="0",
-        ),
-        "preflight",
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "retained storage verified" not in result.stdout
-
-
-def test_shared_live_requires_explicit_host_capacity(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, slots=""), "preflight")
-
-    assert result.returncode != 0
-    assert "AGENT_HOST_SLOTS" in result.stderr
-    assert ">= 2" in result.stderr
-
-
-def test_shared_live_refuses_more_slots_than_runner_executors(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, slots="3", replicas="2"), "preflight")
-
-    assert result.returncode != 0
-    assert "overstates AGENT_RUNNER_REPLICAS=2" in result.stderr
-
-
-def test_shared_live_check_requires_every_configured_runner_to_be_alive(tmp_path: Path) -> None:
-    result = _run(_host(tmp_path, replicas="3", running_replicas=1), "check")
-
-    assert result.returncode != 0
-    assert "only 1 of 3 configured runner replicas are running" in result.stderr
+    assert "AGENT_DEPLOYMENT_SHA" in host_deploy
+    assert "shared-live-ready" in host_script
+    assert "mark-ready" in host_script
+    assert "AGENT_RESTARTABLE_SANDBOX" not in host_script
+    assert "AGENT_SHARED_LIVE_SANDBOX" not in host_script
 
 
 def test_only_the_pending_target_commit_can_be_marked_ready(tmp_path: Path) -> None:
     env = _host(tmp_path)
-    marker = Path(env["APP_DIR"]).parent / "host-state/shared-live-ready"
+    marker = tmp_path / "host-state/shared-live-ready"
     marker.write_text("pending:target-sha\n")
 
     wrong = _run(env, "mark-ready", "other-sha")
@@ -234,6 +152,27 @@ def test_host_deploy_publishes_readiness_only_after_recording_the_target() -> No
 
     assert 'AGENT_DEPLOYMENT_SHA="${SHA}"' in script
     assert deferred_up < deployed_sha < mark_ready
+
+
+def test_shared_live_capacity_defaults_are_deployable(tmp_path: Path) -> None:
+    result = _run(_host(tmp_path, slots=None), "preflight")
+
+    assert result.returncode == 0, result.stderr
+    assert "retained storage verified" in result.stdout
+
+
+def test_shared_live_refuses_more_slots_than_runner_executors(tmp_path: Path) -> None:
+    result = _run(_host(tmp_path, slots="3", replicas="2"), "preflight")
+
+    assert result.returncode != 0
+    assert "overstates AGENT_RUNNER_REPLICAS=2" in result.stderr
+
+
+def test_shared_live_check_requires_every_configured_runner_to_be_alive(tmp_path: Path) -> None:
+    result = _run(_host(tmp_path, replicas="3", running_replicas=1), "check")
+
+    assert result.returncode != 0
+    assert "only 1 of 3 configured runner replicas are running" in result.stderr
 
 
 def test_retained_mode_requires_an_enrolled_host_identity(tmp_path: Path) -> None:

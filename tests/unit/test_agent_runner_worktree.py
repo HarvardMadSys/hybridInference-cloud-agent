@@ -1,17 +1,8 @@
-"""The runner's checkout step, against real git.
-
-This exists because of a specific failure: the self-hosted runner created an
-empty temporary directory per job and ran the agent in it. Nothing errored.
-The agent had no code to read, produced no changes, and the job was recorded as
-a clean success — the worst possible shape for a bug, since every observable
-signal said the system worked.
-
-So these tests run real git against a real repository rather than mocking it.
-A mock would have agreed with the broken version.
-"""
+"""Real-git tests for the trusted initial checkout streamed into a chat."""
 
 from __future__ import annotations
 
+import base64
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -21,11 +12,7 @@ from cloud_agent_host.runner import (
     WorktreeError,
     _assert_no_credential_on_disk,
     _auth_env,
-    align_existing_checkout,
-    apply_context_patch,
-    build_patch,
     checkout_output_branch,
-    existing_checkout_sha,
     prepare_worktree,
     repo_clone_base_url,
 )
@@ -35,7 +22,6 @@ if TYPE_CHECKING:
 
 
 def _git(*args: str, cwd: Path) -> str:
-    """Run git in a test fixture repository."""
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -64,60 +50,17 @@ def test_clone_origin_defaults_to_github_and_accepts_a_local_git_service():
 
 def test_clone_origin_never_sends_a_credential_over_plaintext():
     with pytest.raises(WorktreeError, match="refusing to send a repository credential"):
-        repo_clone_base_url({"AGENT_REPO_CLONE_BASE_URL": "git://local-repo"}, clone_token="secret")
-
+        repo_clone_base_url({"AGENT_REPO_CLONE_BASE_URL": "git://local-repo"}, clone_token="x")
     assert (
         repo_clone_base_url(
-            {"AGENT_REPO_CLONE_BASE_URL": "https://git.example.test"}, clone_token="secret"
+            {"AGENT_REPO_CLONE_BASE_URL": "https://git.example.test"}, clone_token="x"
         )
         == "https://git.example.test"
     )
 
 
-def test_follow_up_restores_parent_patch_before_the_next_run(tmp_path: Path):
-    """A fresh sandbox continues from the parent run's working tree."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git("init", cwd=repo)
-    (repo / "answer.txt").write_text("before\n", encoding="utf-8")
-    _git("add", "answer.txt", cwd=repo)
-    _git("commit", "-m", "base", cwd=repo)
-    patch = """diff --git a/answer.txt b/answer.txt
-index 90be1c5..3bd1f0e 100644
---- a/answer.txt
-+++ b/answer.txt
-@@ -1 +1 @@
--before
-+after
-"""
-
-    apply_context_patch(str(repo), patch)
-
-    assert (repo / "answer.txt").read_text(encoding="utf-8") == "after\n"
-
-
-def test_follow_up_refuses_an_unsafe_parent_patch(tmp_path: Path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git("init", cwd=repo)
-    unsafe = """diff --git a/.github/workflows/pwn.yml b/.github/workflows/pwn.yml
-new file mode 100644
---- /dev/null
-+++ b/.github/workflows/pwn.yml
-@@ -0,0 +1 @@
-+run: echo no
-"""
-
-    with pytest.raises(WorktreeError, match="unsafe parent context patch"):
-        apply_context_patch(str(repo), unsafe)
-
-
 @pytest.fixture()
 def remote(tmp_path: Path) -> tuple[str, str, str, str]:
-    """A servable repository with two commits.
-
-    Returns ``(remote_base, repo, first_sha, head_sha)``.
-    """
     source = tmp_path / "source"
     source.mkdir()
     _git("init", "--quiet", "--initial-branch", "main", ".", cwd=source)
@@ -125,14 +68,11 @@ def remote(tmp_path: Path) -> tuple[str, str, str, str]:
     _git("add", "-A", cwd=source)
     _git("commit", "--quiet", "-m", "first", cwd=source)
     first = _git("rev-parse", "HEAD", cwd=source).strip()
-
     (source / "second.txt").write_text("later\n")
     _git("add", "-A", cwd=source)
     _git("commit", "--quiet", "-m", "second", cwd=source)
     head = _git("rev-parse", "HEAD", cwd=source).strip()
 
-    # Serve it as `owner/name.git` under a base directory, so the runner's
-    # "{base}/{repo}.git" URL construction is exercised as written.
     bare = tmp_path / "remotes" / "owner" / "name.git"
     bare.parent.mkdir(parents=True)
     subprocess.run(
@@ -143,26 +83,21 @@ def remote(tmp_path: Path) -> tuple[str, str, str, str]:
     return f"file://{tmp_path / 'remotes'}", "owner/name", first, head
 
 
-def test_the_agent_gets_a_populated_worktree(tmp_path: Path, remote):
-    """The whole point: a job directory that actually contains the repository."""
+def test_initial_chat_checkout_is_populated_and_has_no_push_remote(tmp_path: Path, remote):
     base, repo, _first, head = remote
     workdir = tmp_path / "job"
     workdir.mkdir()
 
     resolved = prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
 
-    assert (workdir / "hello.py").read_text() == "def hello():\n    return 1\n"
     assert resolved == head
+    assert (workdir / "hello.py").read_text() == "def hello():\n    return 1\n"
+    assert _git("remote", cwd=workdir).strip() == ""
 
 
-def test_a_pinned_commit_is_the_one_checked_out(tmp_path: Path, remote):
-    """An owner who names a commit gets that commit, not the branch tip.
-
-    Checked by content, not just by sha: the second commit adds a file, so its
-    absence is direct evidence the older tree was materialized.
-    """
+def test_a_pinned_commit_is_the_one_streamed_into_the_container(tmp_path: Path, remote):
     base, repo, first, head = remote
-    assert first != head, "the fixture must have two distinct commits to distinguish"
+    assert first != head
     workdir = tmp_path / "job"
     workdir.mkdir()
 
@@ -173,357 +108,62 @@ def test_a_pinned_commit_is_the_one_checked_out(tmp_path: Path, remote):
     assert not (workdir / "second.txt").exists()
 
 
-def test_a_populated_worktree_produces_a_real_patch(tmp_path: Path, remote):
-    """Checkout → edit → patch. The chain the empty directory silently broke."""
+def test_checkout_uses_the_publishers_output_branch(tmp_path: Path, remote):
     base, repo, _first, _head = remote
     workdir = tmp_path / "job"
     workdir.mkdir()
     prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
 
-    (workdir / "hello.py").write_text('def hello():\n    """Say hello."""\n    return 1\n')
-    (workdir / "brand_new.txt").write_text("added by the agent\n")
-
-    patch = build_patch(str(workdir))
-
-    assert "hello.py" in patch
-    # `git add -A -N` is what makes a file the agent created show up at all.
-    assert "brand_new.txt" in patch
-    assert "Say hello." in patch
+    assert checkout_output_branch(str(workdir), "athr_example") == "agent/athr_example"
+    assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
 
 
-def test_a_durable_workspace_uses_the_publishers_output_branch(tmp_path: Path, remote):
-    base, repo, _first, _head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-
-    branch = checkout_output_branch(str(workdir), "athr_example")
-
-    assert branch == "agent/athr_example"
-    assert _git("branch", "--show-current", cwd=workdir).strip() == branch
-
-
-def test_patch_keeps_terminal_commits_relative_to_the_pinned_base(tmp_path: Path, remote):
-    base, repo, _first, head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=head, remote_base=base)
-    checkout_output_branch(str(workdir), "athr_example")
-    (workdir / "terminal.txt").write_text("committed from terminal\n")
-    _git("add", "terminal.txt", cwd=workdir)
-    _git("commit", "-m", "terminal commit", cwd=workdir)
-
-    patch = build_patch(str(workdir), base_sha=head)
-
-    assert "terminal.txt" in patch
-    assert "+committed from terminal" in patch
-    assert _git("status", "--porcelain", cwd=workdir).strip() == ""
-
-
-def test_patch_fails_when_the_pinned_base_is_missing(tmp_path: Path, remote):
-    base, repo, _first, _head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-
-    with pytest.raises(WorktreeError, match="could not build"):
-        build_patch(str(workdir), base_sha="deadbeef")
-
-
-def test_an_unreachable_repository_fails_the_job_with_a_reason(tmp_path: Path):
-    """A clone that cannot happen must say so, not run an agent on nothing."""
-    workdir = tmp_path / "job"
-    workdir.mkdir()
+def test_an_unreachable_repository_fails_with_a_reason(tmp_path: Path):
     with pytest.raises(WorktreeError, match="could not fetch"):
         prepare_worktree(
-            workdir=str(workdir),
+            workdir=str(tmp_path),
             repo="owner/missing",
             base_sha=None,
-            remote_base=f"file://{tmp_path}",
+            remote_base="file:///definitely-not-present",
         )
 
 
-@pytest.mark.parametrize("repo", ["not-a-slug", "--upload-pack=sh", "a/b/c", ""])
+@pytest.mark.parametrize(
+    "repo",
+    ("", "owner", "owner/name/extra", "../name", "owner/../name", "owner/name.git/other"),
+)
 def test_a_malformed_repo_never_reaches_git(tmp_path: Path, repo: str):
-    """Values interpolated into a URL and git's argv are shape-checked first."""
     with pytest.raises(WorktreeError, match="owner/name"):
         prepare_worktree(workdir=str(tmp_path), repo=repo, base_sha=None)
 
 
 def test_a_non_commit_base_sha_is_refused(tmp_path: Path):
-    """git reads a leading `-` as an option even where an operand belongs."""
     with pytest.raises(WorktreeError, match="commit hash"):
-        prepare_worktree(workdir=str(tmp_path), repo="o/n", base_sha="--upload-pack=/bin/sh")
+        prepare_worktree(workdir=str(tmp_path), repo="owner/name", base_sha="--upload-pack=/bin/sh")
 
 
 def test_the_clone_credential_stays_out_of_git_argv_and_config():
-    """The token travels in the environment, where `ps` cannot read it."""
     env = _auth_env("ghs_secret")
-    assert "ghs_secret" not in " ".join(env.values())  # base64, not plaintext
+    assert "ghs_secret" not in " ".join(env)
+    encoded = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+    assert base64.b64decode(encoded).decode() == "x-access-token:ghs_secret"
     assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
-    # Config supplied this way applies to the one invocation and is never
-    # written to .git/config, which the sandbox can read.
-    assert env["GIT_CONFIG_COUNT"] == "1"
     assert _auth_env(None) == {}
 
 
 def test_a_credential_left_on_disk_stops_the_job(tmp_path: Path):
-    """Better to fail than to mount a worktree carrying a GitHub token."""
-    git_dir = tmp_path / ".git"
-    git_dir.mkdir()
-    (git_dir / "config").write_text("url = https://x-access-token:ghs_leaked@github.com/o/n\n")
-
-    with pytest.raises(WorktreeError, match="clone credential"):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("token=ghs_leaked")
+    with pytest.raises(WorktreeError, match="credential was written"):
         _assert_no_credential_on_disk(str(tmp_path), "ghs_leaked")
 
-    # And a clean tree passes, so the check is not vacuously true.
-    (git_dir / "config").write_text("url = https://github.com/o/n\n")
+    (tmp_path / ".git" / "config").write_text("safe")
     _assert_no_credential_on_disk(str(tmp_path), "ghs_leaked")
 
 
-def test_a_real_checkout_leaves_no_remote_to_push_to(tmp_path: Path, remote):
-    """No remote recorded: the runner is not given a push path it must not use."""
+def test_a_missing_pinned_commit_stops_initialization(tmp_path: Path, remote):
     base, repo, _first, _head = remote
     workdir = tmp_path / "job"
     workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-
-    config = (workdir / ".git" / "config").read_text()
-    assert "[remote " not in config
-
-
-def test_an_existing_checkout_is_reused_rather_than_cloned_over(tmp_path: Path, remote):
-    """The Actions dogfood checks the repository out itself."""
-    base, repo, _first, head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-    _git("remote", "add", "origin", "https://github.com/owner/name.git", cwd=workdir)
-
-    assert existing_checkout_sha(str(workdir), repo) == head
-
-
-def test_the_wrong_repository_is_refused_not_worked_on(tmp_path: Path, remote):
-    """A patch against the wrong repo looks plausible and applies to nothing."""
-    base, repo, _first, _head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-    _git("remote", "add", "origin", "https://github.com/someone/else.git", cwd=workdir)
-
-    with pytest.raises(WorktreeError, match="wrong repository"):
-        existing_checkout_sha(str(workdir), repo)
-
-
-def test_an_empty_directory_is_not_mistaken_for_a_checkout(tmp_path: Path):
-    """Returning a sha here would skip the clone and reinstate the bug."""
-    assert existing_checkout_sha(str(tmp_path), "o/n") is None
-
-
-def test_a_pinned_commit_wins_over_a_pre_populated_checkout(tmp_path: Path, remote):
-    """The Actions runner checks out the trigger ref, not the job's commit.
-
-    Running the agent on the wrong tree is not a visible failure: the store
-    keeps the owner's pinned sha, so the publisher applies a patch generated
-    against one commit onto a different one. `--3way` makes that *usually*
-    succeed, which is worse than failing — the PR looks plausible and encodes
-    changes nobody wrote.
-    """
-    base, repo, first, head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    # Stand in for actions/checkout: the worktree is on the branch tip.
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-    _git("remote", "add", "origin", "https://github.com/owner/name.git", cwd=workdir)
-    # ...with full history available, as `fetch-depth: 0` gives.
-    _git("fetch", "--quiet", "--unshallow", base + "/" + repo + ".git", cwd=workdir)
-
-    checked_out = existing_checkout_sha(str(workdir), repo)
-    assert checked_out == head
-
-    aligned = align_existing_checkout(str(workdir), checked_out=checked_out, base_sha=first)
-
-    assert aligned == first
-    assert not (workdir / "second.txt").exists(), "the worktree must be on the pinned commit"
-
-
-def test_an_unchanged_checkout_is_left_alone(tmp_path: Path, remote):
-    """No pinned commit, or already on it: do not touch the worktree."""
-    base, repo, _first, head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-
-    assert align_existing_checkout(str(workdir), checked_out=head, base_sha=None) == head
-    assert align_existing_checkout(str(workdir), checked_out=head, base_sha=head) == head
-    # An abbreviated pin resolves to the same commit rather than a needless switch.
-    assert align_existing_checkout(str(workdir), checked_out=head, base_sha=head[:8]) == head
-
-
-def test_a_pinned_commit_the_worktree_lacks_stops_the_job(tmp_path: Path, remote):
-    """Better to fail than to silently produce a patch against another tree."""
-    base, repo, _first, head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-
-    with pytest.raises(WorktreeError, match="does not contain"):
-        align_existing_checkout(str(workdir), checked_out=head, base_sha="0" * 40)
-
-
-def test_building_the_patch_gives_up_rather_than_hanging_forever(monkeypatch):
-    """A worktree whose git config never returns must not pin the lease open.
-
-    The final `git diff` runs against a tree the agent owned all run, including
-    its `.git/config`. A `diff.external` that blocks would otherwise leave the
-    runner reading forever while the heartbeat keeps renewing the lease — so
-    the attempt never expires, the reaper never takes it, and a --loop runner
-    claims nothing again.
-    """
-    import threading
-
-    from cloud_agent_host import runner as runner_module
-
-    release = threading.Event()
-
-    class HangingProcess:
-        def __init__(self) -> None:
-            self.killed = False
-
-        def lines(self):
-            release.wait(timeout=30)
-            return iter(())
-
-        def kill(self) -> None:
-            self.killed = True
-            release.set()
-
-        def wait(self) -> int:
-            return 0
-
-    process = HangingProcess()
-    monkeypatch.setattr(runner_module, "_PATCH_TIMEOUT_S", 0.5)
-
-    with pytest.raises(WorktreeError, match="exceeded"):
-        runner_module._read_bounded(process, deadline_s=0.5, max_bytes=1024)
-
-    assert process.killed, "the sandbox process must be killed, not merely abandoned"
-
-
-def test_building_the_patch_refuses_unbounded_output():
-    """A patch that grows without end must not be buffered into the runner."""
-    from cloud_agent_host import runner as runner_module
-
-    class FloodProcess:
-        def __init__(self) -> None:
-            self.killed = False
-
-        def lines(self):
-            while not self.killed:
-                yield "x" * 1024 + "\n"
-
-        def kill(self) -> None:
-            self.killed = True
-
-        def wait(self) -> int:
-            return 0
-
-    process = FloodProcess()
-
-    with pytest.raises(WorktreeError, match="bytes"):
-        runner_module._read_bounded(process, deadline_s=30, max_bytes=4096)
-
-    assert process.killed
-
-
-def test_building_the_patch_rejects_a_failed_git_process():
-    """A bad base or hostile config must fail the job, not look like an empty diff."""
-    from cloud_agent_host import runner as runner_module
-
-    class FailedProcess:
-        def lines(self):
-            return iter(())
-
-        def kill(self) -> None:
-            raise AssertionError("a completed process must not be killed")
-
-        def wait(self) -> int:
-            return 128
-
-        def stderr_text(self) -> str:
-            return "fatal: bad revision"
-
-    with pytest.raises(WorktreeError, match="bad revision"):
-        runner_module._read_bounded(FailedProcess(), deadline_s=30, max_bytes=4096)
-
-
-# ── denied egress is the data P0 exists to produce ─────────────────────
-
-
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("curl: (6) Could not resolve host: telemetry.example.com", "telemetry.example.com"),
-        ("Error: getaddrinfo ENOTFOUND registry.npmjs.org", "registry.npmjs.org"),
-        (
-            "urllib.error.URLError: <urlopen error [Errno -3] Temporary failure in name "
-            "resolution> while fetching https://pypi.org/simple/",
-            "pypi.org",
-        ),
-        ("fatal: unable to access 'https://github.com/o/n': Connection refused", "github.com"),
-    ],
-)
-def test_a_blocked_call_is_recognised_with_its_host(text: str, expected: str):
-    """On a deny-all network the denial surfaces as the tool's own failure."""
-    from cloud_agent_host.runner import detect_blocked_egress
-
-    assert detect_blocked_egress(text) == expected
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "",
-        "SyntaxError: invalid syntax",
-        "test failed: expected 3, got 4",
-        "Could not resolve host",  # a denial with no host is not evidence
-        "npm ERR! missing script: build",
-    ],
-)
-def test_an_ordinary_failure_is_not_reported_as_egress(text: str):
-    """A false "the sandbox tried to phone home" is worse than a missed one.
-
-    The record exists to justify what an external default should allow, so it
-    has to mean something. Every failing command is not a denial.
-    """
-    from cloud_agent_host.runner import detect_blocked_egress
-
-    assert detect_blocked_egress(text) is None
-
-
-def test_a_repository_whose_name_merely_ends_the_same_is_refused(tmp_path: Path, remote):
-    """`endswith` accepted `acme/foo` for a job targeting `me/foo`.
-
-    The agent would then run against the wrong codebase and produce a patch
-    that applies to nothing — and nothing downstream would have caught it,
-    because the patch itself is well-formed.
-    """
-    base, repo, _first, _head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-    _git("remote", "add", "origin", "https://github.com/evilowner/name.git", cwd=workdir)
-
-    with pytest.raises(WorktreeError, match="wrong repository"):
-        existing_checkout_sha(str(workdir), "owner/name")
-
-
-def test_the_exact_repository_is_still_accepted(tmp_path: Path, remote):
-    """Tightening the comparison must not reject the legitimate case."""
-    base, repo, _first, head = remote
-    workdir = tmp_path / "job"
-    workdir.mkdir()
-    prepare_worktree(workdir=str(workdir), repo=repo, base_sha=None, remote_base=base)
-    _git("remote", "add", "origin", "git@github.com:owner/name.git", cwd=workdir)
-
-    assert existing_checkout_sha(str(workdir), repo) == head
+    with pytest.raises(WorktreeError, match="could not fetch"):
+        prepare_worktree(workdir=str(workdir), repo=repo, base_sha="0" * 40, remote_base=base)

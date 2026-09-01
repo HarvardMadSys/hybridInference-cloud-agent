@@ -89,7 +89,6 @@ def _live(
         gateway_base_url="http://gw",
         credential="agr",
         provides_isolation=True,
-        spawn=lambda argv, env: (_ for _ in ()).throw(AssertionError("one-shot spawn used")),
         mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
         state_dir=str(state_dir),
         spawn_live=spawn_live,
@@ -211,7 +210,7 @@ def test_launch_resident_live_resumes_the_threads_session(tmp_path):
 def test_launch_resident_live_needs_the_state_mount(tmp_path):
     context, _ = _live(_LiveProcess(), tmp_path)
     object.__setattr__(context, "state_dir", None)
-    with pytest.raises(DriverError, match="state mount"):
+    with pytest.raises(DriverError, match="native session state"):
         ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(context, session_id="s")
 
 

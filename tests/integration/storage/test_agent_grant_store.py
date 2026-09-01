@@ -27,6 +27,12 @@ import pytest
 import pytest_asyncio
 
 from cloud_agent.storage.store import AgentJobStore
+from cloud_agent_host.shared_protocol import (
+    SHARED_SANDBOX_CAPABILITY,
+    SHARED_SANDBOX_HELPER_PINS,
+    SHARED_SANDBOX_PROTOCOL,
+    SHARED_SANDBOX_RUNTIME_PINS,
+)
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -91,7 +97,19 @@ async def store():
 
 
 async def _claimed(store: AgentJobStore, *, prompt: str = "fix it") -> dict:
-    """Create a job and claim it, returning the claim."""
+    """Create a job and claim it through the enrolled shared-live contract."""
+    credential_hash = "grant-runner-credential-hash"
+    if await store.get_host(host="grant-runner") is None:
+        await store.register_host(
+            host="grant-runner",
+            credential_hash=credential_hash,
+            capabilities=[SHARED_SANDBOX_CAPABILITY],
+            slots_total=8,
+        )
+        await store.record_host_heartbeat(
+            host="grant-runner",
+            capabilities=[SHARED_SANDBOX_CAPABILITY],
+        )
     await store.create_job(
         user_id="user-owner",
         repo="owner/name",
@@ -99,7 +117,19 @@ async def _claimed(store: AgentJobStore, *, prompt: str = "fix it") -> dict:
         runtime="claude-code",
         model="glm-5.1",
     )
-    claim = await store.claim_job(worker_id="w1", lease_ttl_seconds=300.0)
+    claim = await store.claim_job(
+        worker_id="w1",
+        lease_ttl_seconds=300.0,
+        host="grant-runner",
+        host_credential_hash=credential_hash,
+        claim_attestation={
+            "sandbox_image_digest": "sha256:grant-test-image",
+            "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
+            "runner_capabilities": [SHARED_SANDBOX_CAPABILITY],
+            "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+            "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
+        },
+    )
     assert claim is not None
     return claim
 

@@ -7,7 +7,7 @@ installation token for that string — a read token for the runner to clone with
 and a write token for the publisher to push with. Neither asks whose repository
 it is. A user could therefore name any repository the App happens to be
 installed on, have the platform clone it into a sandbox, and read the contents
-back through their own job's events and patch artifact. That is a confused
+back through their own job's events and retained workspace. That is a confused
 deputy: the requester supplies the target, the platform supplies the authority.
 
 P0 is a single-tenant dogfood ("repo == our own"), so the entitlement is an

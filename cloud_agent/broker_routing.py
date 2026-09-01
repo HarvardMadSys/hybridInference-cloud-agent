@@ -1,27 +1,11 @@
-"""Which workspace broker holds this job's worktree.
+"""Resolve the workspace broker that owns a retained chat group.
 
-Before the pool there was one answer, in one environment variable: a single
-runner host, a single broker, `AGENT_WORKSPACE_BROKER_URL`. With several hosts
-that variable is not merely incomplete, it is *wrong in a specific way* — every
-file read, terminal keystroke and git status for every job goes to whichever
-machine the control plane happens to be configured for, so a job running on
-host B shows host A's worktree, or nothing at all. Silently, and only for the
-jobs that landed on the wrong machine.
-
-So the broker is resolved from the attempt: the attempt records its host, the
-host records its broker.
-
-**Two fallbacks, and the difference matters.**
-
-- *No host on the attempt* — the pre-pool case, and E11's single-host setup —
-  falls back to the environment. That is the configuration the env var was
-  always describing, and it must keep working without anybody enrolling
-  anything.
-- *A host with no broker URL* does **not** fall back. It answers "no broker",
-  which surfaces as the same 409 a deployment without a broker already
-  produces. Falling back there would mean routing host B's request to host A's
-  broker, and the failure mode of that is not an error — it is an answer about
-  the wrong machine's disk.
+Every executable attempt belongs to an enrolled host. The attempt records that
+host and the host heartbeat records its broker URL, so files, terminals, Git,
+fork, snapshots, and native-session operations all route through the same
+durable ownership record. There is deliberately no process-global fallback:
+using one would make a missing host fence silently address another machine's
+container.
 
 **The token is still global.** Host rows carry a URL, not a credential; every
 broker in the pool authenticates the same `AGENT_WORKSPACE_BROKER_TOKEN`. That
@@ -42,7 +26,6 @@ from urllib.parse import urlparse
 from cloud_agent_host.workspace_broker_client import (
     WorkspaceBrokerClient,
     WorkspaceBrokerError,
-    workspace_broker_from_env,
 )
 
 if TYPE_CHECKING:
@@ -114,17 +97,12 @@ def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
 async def broker_for_attempt(
     store: AgentJobStore | None, attempt_id: int | None
 ) -> WorkspaceBrokerClient | None:
-    """Resolve the broker holding the worktree of ``attempt_id``.
-
-    ``None`` for the attempt id means the caller has no attempt in hand — a
-    job that never ran, or one whose current attempt was released — and that
-    takes the environment fallback, exactly as it did before the pool existed.
-    """
+    """Resolve the enrolled host broker holding ``attempt_id``'s container."""
     if store is not None and attempt_id is not None:
         host = await store.host_for_attempt(attempt_id=attempt_id)
         if host is not None:
             return _client_for(host)
-    return workspace_broker_from_env()
+    return None
 
 
 async def broker_for_job(
@@ -135,7 +113,7 @@ async def broker_for_job(
         host = await store.host_for_job(job_id=job_id)
         if host is not None:
             return _client_for(host)
-    return workspace_broker_from_env()
+    return None
 
 
 async def hydrate_shared_broker(
@@ -149,7 +127,9 @@ async def hydrate_shared_broker(
     when no subsequent Agent turn has happened yet.
     """
     sandbox = job.get("thread_sandbox")
-    if broker is not None and isinstance(sandbox, dict) and sandbox.get("shared_live") is True:
+    if not isinstance(sandbox, dict) or sandbox.get("shared_live") is not True:
+        return None
+    if broker is not None:
         await broker.register_shared_sandbox(sandbox)
     return broker
 
@@ -186,9 +166,7 @@ async def probe_broker(host: str, broker_url: str | None, *, force: bool = False
     """
     url = (broker_url or "").strip()
     if not url:
-        # No broker URL is a deployment shape, not a fault: the pre-pool
-        # single-host setup has none and reads the environment instead.
-        return None
+        return "host did not advertise a workspace broker URL"
 
     now = time.monotonic()
     cached = _PROBE_CACHE.get(host)
@@ -197,9 +175,7 @@ async def probe_broker(host: str, broker_url: str | None, *, force: bool = False
 
     client = _client_for({"broker_url": url})
     if client is None:
-        # No token configured on this side. Not the host's fault and not
-        # something its operator can fix from over there.
-        return None
+        return "control plane has no workspace broker credential"
 
     try:
         await client.health()

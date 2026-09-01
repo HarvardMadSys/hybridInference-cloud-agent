@@ -174,8 +174,8 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     return null;
   }
 
-  // Diff is rendered from the complete patch artifact rather than a stream
-  // marker that only says whether an artifact was stored.
+  // Diff is rendered from the retained workspace rather than a stream marker
+  // that only says whether files changed.
   if (type === 'diff') return null;
 
   // An unrecognized kind still appears, rather than silently disappearing.

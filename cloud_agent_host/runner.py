@@ -4,13 +4,12 @@ Runs inside the sandbox (GitHub Actions for the P0 dogfood, a VM later) and is
 the only component that ever touches agent output. Its shape follows from the
 adjudicated security model rather than convenience:
 
-- **One credential.** The dispatcher claims a job with its own credential and
-  hands the runner a per-attempt capability token. That token is all the
-  sandbox gets: it authorizes both event reporting *and* model calls, and it
-  stops working the moment the job's fence moves. No GitHub token, no API key.
-- **Patch-out, not push.** The runner never pushes. It emits a patch as an
-  artifact; the trusted publisher outside the sandbox validates and pushes it.
-  That is why the runner needs no git write credential at all.
+- **Narrow credentials.** The enrolled host claims work with its own identity
+  and receives per-attempt credentials. Only the inference grant and MCP token
+  enter the sandbox; the worker-control token stays in this trusted process.
+- **Snapshot-out, not push.** The runner never pushes. The trusted publisher
+  captures and validates a quiescent shared-workspace snapshot, then pushes it.
+  That is why neither the runner nor the sandbox needs a git write credential.
 - **Heartbeats are how cancellation arrives.** A background thread renews the
   lease and watches the reply for ``cancel_requested``; the agent is killed on
   the next beat. Losing the lease (409) is fatal by design — a runner whose
@@ -26,8 +25,6 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
-import hashlib
-import json
 import os
 import pathlib
 import queue
@@ -46,7 +43,6 @@ from typing import Any
 import httpx
 
 from cloud_agent_host.chat_sandbox import (
-    CHAT_STATE_DIR,
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
@@ -55,74 +51,51 @@ from cloud_agent_host.chat_sandbox import (
 from cloud_agent_host.drivers import (
     LINE,
     DriverError,
-    HarnessState,
-    LaunchContext,
-    TurnInput,
     driver_for,
 )
-from cloud_agent_host.enrollment import (
-    HostHeartbeat,
-    ensure_enrolled,
-    establish_residency,
-    release_residency,
-)
+from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
 from cloud_agent_host.logging_utils import configure_process_logging
-from cloud_agent_host.patch_gate import branch_name_for, validate_patch
-from cloud_agent_host.residency import ResidentEntry, ResidentPool
+from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import ResourceSampler, daemon_reachable
 from cloud_agent_host.runtimes import (
-    EMPTY_RUNTIME_MCP_CONFIG,
     AgentRuntime,
     NormalizedEvent,
-    RuntimeMCPConfig,
     get_runtime,
     registered_runtimes,
 )
 from cloud_agent_host.sandbox import (
-    SANDBOX_PATH,
     ContainerBackend,
     SandboxBackend,
     SandboxError,
-    SandboxProcess,
     SandboxSpec,
     build_backend_from_env,
-    runtime_bin_dir,
 )
-from cloud_agent_host.session_supervisor import DEFAULT_CHAT_IDLE_TIMEOUT_S
+from cloud_agent_host.session_lifecycle import DEFAULT_CHAT_IDLE_TIMEOUT_S
 from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorClient,
     SessionSupervisorError,
 )
-from cloud_agent_host.setup import build_cache_from_env, run_setup
+from cloud_agent_host.setup import run_setup
 from cloud_agent_host.shared_protocol import (
+    SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
-from cloud_agent_host.workspace_paths import purge_stale_workspaces, workspace_path
-from cloud_agent_host.workspace_snapshot import (
-    build_retained_workspace_snapshot,
-    build_workspace_snapshot,
-)
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
 DEFAULT_AGENT_TIMEOUT_S = 3600.0
-DEFAULT_WORKSPACE_TTL_S = 7 * 24 * 60 * 60
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
 _GIT_TIMEOUT_S = 300.0
-# Bounds on the final in-sandbox `git diff`. Generous for a real patch, finite
-# because the worktree's git configuration belongs to the agent by then.
-_PATCH_TIMEOUT_S = 300.0
-_PATCH_MAX_BYTES = 8 * 1024 * 1024
 
 # Both are interpolated into a URL and handed to git, which reads a leading
 # `-` as an option even where an operand belongs. Validate the shape here as
-# well as at the API edge: this process holds the dispatcher credential.
+# well as at the API edge: this trusted process handles clone credentials.
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
 _REPO_SLUG = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 
@@ -210,9 +183,10 @@ class WorktreeError(Exception):
 
 @dataclass
 class ClaimedJob:
-    """What the dispatcher handed us."""
+    """What the control plane handed the enrolled host."""
 
     job_id: str
+    thread_id: str
     attempt_id: int
     attempt_no: int
     repo: str
@@ -243,18 +217,8 @@ class ClaimedJob:
     # in the runner — it is never put in .git/config and never enters the
     # sandbox environment. ``None`` for a public repository.
     clone_token: str | None = None
-    thread_id: str | None = None
     parent_job_id: str | None = None
     turn_no: int = 1
-    # Prior platform messages are runtime-neutral. They let a follow-up keep
-    # its conversational context even when the next turn switches harnesses.
-    context_messages: list[dict[str, str]] = field(default_factory=list)
-    # The prior successful run's edits, re-applied before the next sandbox is
-    # started. Credentials still never cross the sandbox boundary.
-    context_patch: str | None = None
-    # The parent turn's ThreadCheckpoint envelope, already decrypted and gated
-    # by the control plane. None means replay (design §9).
-    context_checkpoint: dict[str, Any] | None = None
     # MCP servers this job was granted. Names only: the runner learns nothing
     # about where they actually are, because the sandbox reaches them through
     # the gateway's proxy rather than directly.
@@ -264,8 +228,9 @@ class ClaimedJob:
     # ``None`` from a control plane that predates selection — the image's
     # symlinked default then applies, which is what that control plane means.
     runtime_version: str | None = None
-    # Durable one-chat/one-container mapping. Null is the legacy/new-thread
-    # path; once present the scheduler pins this thread to its owning host.
+    # Durable shared-container membership. It is absent only until the first
+    # claimed turn reserves its sandbox; every executable claim uses this
+    # topology and remains pinned to the owning host afterwards.
     thread_sandbox: dict[str, Any] | None = None
 
     @classmethod
@@ -273,7 +238,7 @@ class ClaimedJob:
         """Build from the claim endpoint's response."""
         return cls(
             job_id=body["job_id"],
-            thread_id=body.get("thread_id"),
+            thread_id=body["thread_id"],
             parent_job_id=body.get("parent_job_id"),
             turn_no=int(body.get("turn_no") or 1),
             attempt_id=body["attempt_id"],
@@ -289,15 +254,10 @@ class ClaimedJob:
             # the same thing as Auto — no separate "unknown" state to carry.
             reasoning_effort=body.get("reasoning_effort"),
             worker_token=body["worker_token"],
-            # Older gateways return only worker_token; fall back so a
-            # runner can still talk to one that predates scoped tokens.
-            sandbox_token=body.get("sandbox_token") or body["worker_token"],
+            sandbox_token=body["sandbox_token"],
             mcp_token=body.get("mcp_token") or "",
             mcp_base_url=body.get("mcp_base_url") or "",
             clone_token=body.get("clone_token") or None,
-            context_messages=list(body.get("context_messages") or []),
-            context_patch=body.get("context_patch") or None,
-            context_checkpoint=body.get("context_checkpoint") or None,
             mcp_servers=list(body.get("mcp_servers") or []),
             runtime_version=body.get("runtime_version") or None,
             thread_sandbox=(
@@ -355,13 +315,6 @@ class ControlPlane:
         """Renew the lease and learn whether cancellation is pending."""
         return self._post(
             f"/v1/agent/worker/jobs/{self.job_id}/heartbeat", {"lease_ttl_seconds": ttl}
-        )
-
-    def save_artifact(self, kind: str, content: str) -> None:
-        """Store an artifact produced by this attempt."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/artifacts",
-            {"kind": kind, "content": content},
         )
 
     def report_continuity(self, mode: str, *, context_status: str | None = None) -> None:
@@ -521,7 +474,7 @@ class ControlPlane:
         )
 
     def suspend_terminals(self, phase: str) -> None:
-        """Freeze owner PTYs before workspace preparation or artifact capture."""
+        """Freeze owner PTYs before workspace preparation or group snapshot capture."""
         self._post(
             f"/v1/agent/worker/jobs/{self.job_id}/terminals/suspend",
             {"phase": phase},
@@ -590,38 +543,30 @@ class Heartbeater:
 def claim(
     *,
     base_url: str,
-    dispatcher_token: str,
+    host_credential: str,
     worker_id: str,
     lease_ttl: float,
-    host: str | None = None,
     attestation: dict[str, Any] | None = None,
 ) -> ClaimedJob | None:
-    """Claim the next queued job with the dispatcher credential.
+    """Claim the next queued job with this enrolled host's credential.
 
-    The dispatcher credential is used here and nowhere else — it does not
-    travel into the agent's environment.
-
-    ``host`` names the machine this runner sits on, which is how it joins the
-    pool an operator picks from. Replicas on one machine share it; it is not
-    ``worker_id``, which is deliberately unique per replica.
+    The credential names the machine, so the body cannot claim as another
+    host. It remains in the trusted runner and never enters the agent process.
     """
     payload: dict[str, Any] = {"worker_id": worker_id, "lease_ttl_seconds": lease_ttl}
-    if host:
-        payload["host"] = host
     if attestation:
         payload["attestation"] = attestation
     try:
-        # this legacy base_url still also feeds sandbox gateway traffic below.
         response = httpx.post(
             f"{base_url.rstrip('/')}/v1/agent/worker/claim",
             json=payload,
-            headers={"Authorization": f"Bearer {dispatcher_token}"},
+            headers={"Authorization": f"Bearer {host_credential}"},
             timeout=30.0,
         )
     except httpx.TransportError as exc:
         # Tagged at the one place where "the gateway is unreachable" also means
         # "no job was claimed". The same error from a later call — an event, an
-        # artifact, a terminal transition — happens with an attempt already
+        # group snapshot, a terminal transition — happens with an attempt already
         # running, and reporting *that* as an unreached gateway would hide the
         # job an operator has to go look at.
         raise ClaimUnreachable(str(exc)) from exc
@@ -652,54 +597,14 @@ def _run_git(
     )
 
 
-def apply_context_patch(workdir: str, patch: str) -> None:
-    """Safely rehydrate a successful parent run into a fresh worktree."""
-    gate = validate_patch(patch)
-    if not gate.ok:
-        raise WorktreeError(
-            "refusing unsafe parent context patch: " + "; ".join(gate.violations[:3])
-        )
-    applied = _run_git(["apply", "--whitespace=nowarn"], cwd=workdir, input_text=patch)
-    if applied.returncode != 0:
-        raise WorktreeError(f"could not restore parent changes: {applied.stderr.strip()[:500]}")
-
-
-def conversation_prompt(job: ClaimedJob, *, max_context_chars: int = 40_000) -> str:
-    """Build a bounded, runtime-neutral prompt for a follow-up turn."""
-    if not job.context_messages:
-        return job.task_prompt
-    rendered: list[str] = []
-    remaining = max_context_chars
-    # Prefer the newest context when a long-running thread exceeds the bound.
-    for message in reversed(job.context_messages):
-        role = str(message.get("role") or "user").upper()
-        content = str(message.get("content") or "").strip()
-        if not content:
-            continue
-        chunk = f"{role}: {content}"
-        if len(chunk) > remaining:
-            chunk = chunk[-remaining:]
-        rendered.append(chunk)
-        remaining -= len(chunk)
-        if remaining <= 0:
-            break
-    rendered.reverse()
-    history = "\n\n".join(rendered)
-    return (
-        "Continue an existing coding task in the current worktree. Previous successful "
-        "edits have already been restored. Preserve them unless the new request asks otherwise.\n\n"
-        f"Conversation so far:\n{history}\n\nNEW USER REQUEST:\n{job.task_prompt}"
-    )
-
-
 def _auth_env(clone_token: str | None) -> dict[str, str]:
     """Carry the clone credential in git's environment, never in argv.
 
     ``GIT_CONFIG_COUNT`` sets config for this invocation only. That matters
-    twice over: the token never lands in ``.git/config`` (where the agent would
-    read it out of the worktree we are about to mount), and it never appears in
-    the process arguments (where any other user on the runner host could see it
-    in ``ps`` for the duration of the fetch).
+    twice over: the token never lands in ``.git/config`` (which is about to be
+    archived into the chat container), and it never appears in process
+    arguments (where another user on the runner host could see it in ``ps``
+    during the fetch).
     """
     if not clone_token:
         return {}
@@ -714,11 +619,10 @@ def _auth_env(clone_token: str | None) -> dict[str, str]:
 def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
     """Fail rather than mount a worktree that carries the clone credential.
 
-    The whole patch-out design rests on no repository credential reaching the
-    sandbox, and this tree is about to be bind-mounted into it. Asserting the
-    property beats assuming it: git writes several files during a fetch, and a
-    future change to how we authenticate could quietly start recording the
-    token in one of them.
+    No repository credential may reach the sandbox, and this tree is about to
+    be streamed into it. Asserting the property beats assuming it: git writes
+    several files during a fetch, and a future authentication change could
+    quietly start recording the token in one of them.
     """
     if not clone_token:
         return
@@ -753,13 +657,18 @@ def prepare_worktree(
 
     Runs in the **trusted runner**, and deliberately before the agent starts:
     at this point the worktree is ours, not the agent's, so running git here is
-    safe in a way that :func:`build_patch` afterwards is not.
+    safe because later Git inspection runs inside the retained container.
 
     A shallow single-commit fetch, with no remote recorded. Not adding a remote
     is the point — it is what keeps the credential out of ``.git/config``, and
     the runner has no reason to offer the agent a push path it must not use.
     """
-    if not _REPO_SLUG.fullmatch(repo or ""):
+    parts = repo.split("/") if repo else []
+    if (
+        not _REPO_SLUG.fullmatch(repo or "")
+        or len(parts) != 2
+        or any(part in {".", ".."} for part in parts)
+    ):
         raise WorktreeError(f"repo must be 'owner/name', got {repo!r}")
     if base_sha and not _COMMIT_SHA.fullmatch(base_sha):
         raise WorktreeError(f"base_sha must be a commit hash, got {base_sha!r}")
@@ -823,34 +732,6 @@ def repo_clone_base_url(
     return base.rstrip("/")
 
 
-def existing_checkout_sha(workdir: str, repo: str) -> str | None:
-    """Return the checked-out commit if ``workdir`` already holds ``repo``.
-
-    The GitHub Actions dogfood checks the repository out itself, so the runner
-    must use that worktree rather than clone over it. Returns ``None`` when
-    there is nothing usable here, and raises when a worktree exists but is a
-    *different* repository — running a job against the wrong repo would produce
-    a patch that looks plausible and applies to nothing.
-    """
-    if not (pathlib.Path(workdir) / ".git").exists():
-        return None
-    remote = _run_git(["config", "--get", "remote.origin.url"], cwd=workdir).stdout.strip()
-    if remote:
-        # Exact `owner/name`, not a suffix: `endswith` accepted a checkout of
-        # `acme/foo` for a job targeting `me/foo`, and the agent would then run
-        # against the wrong codebase and produce a patch that applies to
-        # nothing.
-        slug = remote.removesuffix(".git").rsplit(":", 1)[-1].strip("/")
-        slug = "/".join(slug.split("/")[-2:])
-        if slug.lower() != repo.lower():
-            raise WorktreeError(
-                f"the working tree holds {slug!r} but this job targets {repo!r}; "
-                "refusing to run an agent against the wrong repository"
-            )
-    head = _run_git(["rev-parse", "HEAD"], cwd=workdir)
-    return head.stdout.strip() if head.returncode == 0 else None
-
-
 def checkout_output_branch(workdir: str, branch_id: str) -> str:
     """Put a fresh durable worktree on the publisher's local output branch."""
     branch = branch_name_for(branch_id)
@@ -862,108 +743,6 @@ def checkout_output_branch(workdir: str, branch_id: str) -> str:
     return branch
 
 
-def align_existing_checkout(workdir: str, *, checked_out: str, base_sha: str | None) -> str:
-    """Move a pre-populated worktree onto the commit the job pinned.
-
-    The Actions runner checks out whatever ref triggered the workflow, which
-    has nothing to do with the commit an owner pinned on their job. Running the
-    agent on the wrong tree is not a visible failure: the store keeps the
-    owner's pinned sha, and the publisher then applies a patch generated
-    against one commit onto a different one. ``--3way`` makes that *usually*
-    succeed, which is worse than failing — the PR looks plausible and encodes
-    changes nobody wrote.
-
-    Returns the commit actually in the worktree afterwards.
-    """
-    if not base_sha:
-        return checked_out
-    if not _COMMIT_SHA.fullmatch(base_sha):
-        raise WorktreeError(f"base_sha must be a commit hash, got {base_sha!r}")
-
-    # The owner may have pinned an abbreviated sha; compare resolved commits.
-    resolved = _run_git(["rev-parse", "--verify", "--quiet", f"{base_sha}^{{commit}}"], cwd=workdir)
-    target = resolved.stdout.strip()
-    if resolved.returncode != 0 or not target:
-        raise WorktreeError(
-            f"the prepared working tree does not contain {base_sha}; refusing to run "
-            "the agent against a different commit than the job pinned"
-        )
-    if target == checked_out:
-        return checked_out
-
-    switched = _run_git(["checkout", "--quiet", "--detach", target], cwd=workdir)
-    if switched.returncode != 0:
-        raise WorktreeError(
-            f"could not check out the pinned commit {base_sha}: {switched.stderr.strip()[:200]}"
-        )
-    return target
-
-
-def build_patch(
-    workdir: str, backend: SandboxBackend | None = None, *, base_sha: str | None = None
-) -> str:
-    """Return the agent's work as a patch, or an empty string if nothing changed.
-
-    Runs git **inside the sandbox**, never in the trusted runner. The agent
-    owns this worktree, including its ``.git/config`` — and git reads that
-    file. A trusted process running ``git diff`` here would execute whatever
-    the agent put in ``diff.external`` (or a textconv filter, or
-    ``core.fsmonitor``), with the runner's privileges: the dispatcher
-    credential, and in the Compose deployment the Docker socket. Generating
-    the patch in the same container the agent already ran in keeps that
-    execution inside the boundary that was built for it.
-
-    A disposable index records intent-to-add entries so new files appear in
-    the diff without changing the owner's real staging state. Nothing is
-    committed or pushed: the trusted publisher owns that side and re-validates
-    the patch before it touches a repository.
-    """
-    if base_sha and not _COMMIT_SHA.fullmatch(base_sha):
-        raise WorktreeError(f"base_sha must be a commit hash, got {base_sha!r}")
-    target = base_sha or "HEAD"
-    # Diff against the pinned base, not necessarily HEAD: the workspace
-    # terminal legitimately lets its owner create local commits, and those
-    # changes still belong in the platform-owned publishing patch.
-    # Use a disposable index: inspecting/publishing a durable worktree must not
-    # leave intent-to-add entries behind in the owner's real Git index.
-    script = (
-        'index_path="${TMPDIR:-/tmp}/hyi-patch-index.$$"; '
-        'rm -f "$index_path"; trap \'rm -f "$index_path"\' EXIT; '
-        f'GIT_INDEX_FILE="$index_path" git read-tree {target} && '
-        'GIT_INDEX_FILE="$index_path" git add -A -N >/dev/null 2>&1 && '
-        f'GIT_INDEX_FILE="$index_path" git diff --binary {target}'
-    )
-    if backend is None:
-        # No sandbox available (unit tests, an operator running by hand). Run
-        # with config sources neutralised — this is weaker than the sandbox,
-        # because repo-local .git/config is still honoured by git, so it is
-        # only appropriate where the worktree is already trusted.
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_SYSTEM": "/dev/null",
-            "GIT_CONFIG_NOSYSTEM": "1",
-        }
-        result = subprocess.run(
-            ["/bin/sh", "-c", script],
-            cwd=workdir,
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise WorktreeError(
-                f"could not build the workspace patch: {result.stderr.strip()[-500:]}"
-            )
-        return result.stdout
-
-    process = backend.spawn(
-        SandboxSpec(argv=["/bin/sh", "-c", script], workdir=workdir, env=_SAFE_DIRECTORY_ENV)
-    )
-    return _read_bounded(process, deadline_s=_PATCH_TIMEOUT_S, max_bytes=_PATCH_MAX_BYTES)
-
-
 def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
     """Drain a sandbox process's stdout under a deadline and a byte cap.
 
@@ -972,7 +751,7 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
     filter, or ``core.fsmonitor``) that never returns would otherwise block
     here forever — and because the heartbeat thread keeps renewing the lease
     until the enclosing ``finally``, the attempt never expires, the reaper
-    never takes it, and a ``--loop`` runner claims nothing further. One hostile
+    never takes it, and this runner claims nothing further. One hostile
     repository would take a runner out permanently.
     """
     chunks: list[str] = []
@@ -1019,163 +798,16 @@ def _read_bounded(process: Any, *, deadline_s: float, max_bytes: int) -> str:
     return "".join(chunks)
 
 
-def save_workspace_snapshot(
-    control: ControlPlane,
-    *,
-    workdir: str,
-    patch: str,
-    retained_backend: RetainedChatBackend | None = None,
-) -> bool:
-    """Store the changed-file overlay without making it job-critical.
-
-    The patch remains the authoritative publishing artifact. Files are a
-    convenience view, so a local read error or an oversized artifact must not
-    turn an otherwise completed agent run into a failed job. Lease loss is
-    different: the attempt is fenced and must stop immediately.
-    """
-    try:
-        content = (
-            build_retained_workspace_snapshot(retained_backend, patch)
-            if retained_backend is not None
-            else build_workspace_snapshot(workdir, patch)
-        )
-        control.save_artifact("workspace_snapshot", content)
-    except LeaseLost:
-        raise
-    except Exception as exc:
-        print(f"workspace snapshot unavailable: {exc}", file=sys.stderr)
-        return False
-    return True
-
-
-def _export_checkpoint(
-    control: ControlPlane, *, session: Any, job: ClaimedJob, backend: Any
-) -> None:
-    """Package the turn's session into a ThreadCheckpoint and hand it up."""
-    try:
-        exported = session.export_state()
-    except DriverError as exc:
-        control.append_event(
-            NormalizedEvent(
-                "lifecycle", {"phase": "checkpoint_export_failed", "detail": str(exc)[:200]}
-            )
-        )
-        return
-    stamper = getattr(backend, "version_stamp", None)
-    stamp: dict[str, Any] = stamper() if stamper is not None else {}
-    envelope = {
-        "harness_state": {
-            "driver": session.runtime.name,
-            "driver_version": (stamp.get("runtime_versions") or {}).get(session.runtime.name, ""),
-            "state_format_version": 1,
-            "runtime_image_digest": stamp.get("sandbox_image_digest", ""),
-            "sha256": hashlib.sha256(exported.blob).hexdigest(),
-            "size": len(exported.blob),
-            "blob": base64.b64encode(exported.blob).decode("ascii"),
-        },
-        "consistency": {"through_turn_id": job.job_id, "attempt_id": job.attempt_id},
-        "session_id": exported.session_id,
-    }
-    try:
-        control.save_artifact("checkpoint", json.dumps(envelope))
-    except LeaseLost:
-        raise
-    except Exception as exc:
-        control.append_event(
-            NormalizedEvent(
-                "lifecycle", {"phase": "checkpoint_export_failed", "detail": str(exc)[:200]}
-            )
-        )
-        return
-    control.append_event(
-        NormalizedEvent("lifecycle", {"phase": "checkpoint_exported", "size": len(exported.blob)})
-    )
-
-
-def _promote_to_resident(
-    control: ControlPlane,
-    *,
-    runtime: AgentRuntime,
-    job: ClaimedJob,
-    backend: Any,
-    workdir: str,
-    state_dir: str,
-    residents: ResidentPool | None,
-    session_id: str | None = None,
-) -> int | None:
-    """Keep this thread's workspace resident; return the generation held.
-
-    Nothing is spawned here: what stays is the worktree, the state mount with
-    the session files the turn just wrote, and the CP-fenced residency row —
-    plus, when the turn ran live, the process the caller attaches right after
-    this with the generation returned here. A follow-up the process cannot
-    serve restarts the CLI with ``--resume`` over the same tree.
-
-    The return value is run_once's receipt: a residency this attempt
-    established or refreshed is dropped unless the attempt confirms success,
-    so a retry can never resume a session a failed attempt already advanced
-    (review: the post-promotion lease-loss leak).
-    """
-    if residents is None or not job.thread_id:
-        return None
-    # A turn on a borrowed live session parses its events through *that*
-    # session's runtime instance, so the caller passes the announced id in;
-    # every restart-shaped path still reads this turn's own runtime.
-    session_id = session_id or getattr(runtime, "session_id", None)
-    if not session_id:
-        return None
-    held = residents.lookup(job.thread_id)
-    if held is not None and held.grant_model is not None and held.grant_model != job.model:
-        # A model switch re-keys the residency (D6 restart + design §14): the
-        # grant is model-scoped, so refreshing in place would pin the thread
-        # to a credential no further turn can use — warm forever. Dropping
-        # first makes the offer below establish a successor generation, whose
-        # mint is scoped to this turn's model.
-        residents.drop(job.thread_id, release=True, generation=held.generation)
-    stamper = getattr(backend, "version_stamp", None)
-    stamp: dict[str, Any] = stamper() if stamper is not None else {}
-    runtime_id = getattr(runtime, "name", "generic")
-    generation = residents.offer(
-        thread_id=job.thread_id,
-        session_id=session_id,
-        workdir=workdir,
-        state_dir=state_dir,
-        runtime_id=runtime_id,
-        runtime_version=(stamp.get("runtime_versions") or {}).get(runtime_id),
-        model=job.model,
-    )
-    control.append_event(
-        NormalizedEvent(
-            "lifecycle",
-            {
-                "phase": (
-                    "residency_established" if generation is not None else "residency_declined"
-                )
-            },
-        )
-    )
-    return generation
-
-
 def _resident_base_ready(workdir: str, job: ClaimedJob, backend: SandboxBackend) -> bool:
-    """Is the turn's pinned base resolvable in the resident tree?
+    """Is the turn's pinned base resolvable in the retained workspace?
 
     Probed **inside the sandbox**, exactly like ``build_patch`` and for the
     same reason: this tree — ``.git/config`` included — has belonged to the
-    agent since adopt, and trusted-runner git against it would execute
+    agent since import, and trusted-runner git against it would execute
     whatever the agent left in ``diff.external`` or ``core.fsmonitor`` with
-    the runner's privileges. git's dubious-ownership refusal enforces the
-    same boundary from the other side — the tree was chowned to the sandbox
-    user at adopt, so runner-side git refuses it outright, which is how the
-    staging acceptance caught the first version of this gate running in the
-    wrong place (every resident turn silently demoted to cold).
-
-    A base the tree cannot resolve ends the residency rather than fetching
-    into it: the fetch would need the clone credential inside a filesystem
-    the agent controlled, and the cold restart this degrades to clones
-    runner-side, before the tree is handed over — where that credential
-    already lives. A publish moving the base mid-thread is rare enough that
-    one honest cold turn is the right price.
+    the runner's privileges. A missing object is imported as a credential-free
+    Git bundle built in a temporary trusted clone; clone credentials never
+    enter the retained container or its agent-controlled filesystem.
     """
     if not job.base_sha:
         return True
@@ -1193,22 +825,6 @@ def _resident_base_ready(workdir: str, job: ClaimedJob, backend: SandboxBackend)
     except WorktreeError:
         return False
     return True
-
-
-def state_from_checkpoint(envelope: dict[str, Any]) -> HarnessState | None:
-    """Decode a claim's checkpoint envelope; ``None`` on any defect (replay)."""
-    harness = envelope.get("harness_state") or {}
-    session_id = str(envelope.get("session_id") or "")
-    blob_b64 = harness.get("blob")
-    if not session_id or not isinstance(blob_b64, str):
-        return None
-    try:
-        blob = base64.b64decode(blob_b64, validate=True)
-    except (ValueError, TypeError):
-        return None
-    if hashlib.sha256(blob).hexdigest() != harness.get("sha256"):
-        return None
-    return HarnessState(session_id=session_id, blob=blob)
 
 
 def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str | None:
@@ -1242,545 +858,21 @@ def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str
     )
 
 
-def _select_runtime_version(
-    env: dict[str, str], *, job: ClaimedJob, backend: SandboxBackend
-) -> None:
-    """Point the sandbox's PATH at the CLI version this attempt is stamped with.
-
-    A PATH prepend is the whole mechanism: every runtime resolves its binary by
-    name — ``binary = "claude"``, and the pi/opencode/kilo wrappers end in
-    ``os.execvp("pi", ...)`` — so neither the adapters nor the wrappers have to
-    know a version was chosen.
-
-    **Raises rather than falling back**, even though ``run_once`` has already
-    reported the same condition as a failed attempt. With the versioned
-    directory absent the binary name still resolves — to the image's symlinked
-    default — and the job would run a different CLI than its attempt records.
-    That row is what the heartbeat, the audit trail and the checkpoint gate all
-    read as fact, and nothing downstream could notice it was wrong. A refused
-    attempt is recoverable; a false record is not.
-    """
-    reason = runtime_version_unavailable(job, backend)
-    if reason is not None:
-        raise SandboxError(reason)
-    if job.runtime_version:
-        bin_dir = runtime_bin_dir(job.runtime, job.runtime_version)
-        env["PATH"] = f"{bin_dir}:{env.get('PATH', SANDBOX_PATH)}"
-
-
-def run_agent(
-    runtime: AgentRuntime,
-    *,
-    job: ClaimedJob,
-    workdir: str,
-    gateway_base_url: str,
-    control: ControlPlane,
-    heart: Heartbeater,
-    timeout_s: float,
-    backend: SandboxBackend,
-    mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-    state: HarnessState | None = None,
-    state_dir: str | None = None,
-    resident: ResidentEntry | None = None,
-    residents: ResidentPool | None = None,
-    live_out: dict[str, Any] | None = None,
-    context_status: str | None = None,
-    strict_native_resume: bool = False,
-    export_checkpoint: bool = True,
-) -> tuple[int, str, list[str]]:
-    """Run the agent, streaming its output back as normalized events.
-
-    This frame exists to own the resource sampler. It is the only one every
-    exit passes: the sampler starts deep inside the turn, at whichever spawn
-    the turn actually uses, and an exception raised while preparing that turn
-    used to leave its thread sampling for the life of the runner process.
-
-    The rollup is reported whether or not anything was read. A window with
-    coverage 0 is the row that says "this turn was not measured", and
-    withholding it is what makes an unmeasured turn indistinguishable from
-    one that consumed nothing — the single distinction this whole signal
-    exists to preserve.
-    """
-    sampler = ResourceSampler(None)
-    try:
-        return _run_agent(
-            runtime,
-            job=job,
-            workdir=workdir,
-            gateway_base_url=gateway_base_url,
-            control=control,
-            heart=heart,
-            timeout_s=timeout_s,
-            backend=backend,
-            mcp_config=mcp_config,
-            state=state,
-            state_dir=state_dir,
-            resident=resident,
-            residents=residents,
-            live_out=live_out,
-            context_status=context_status,
-            strict_native_resume=strict_native_resume,
-            export_checkpoint=export_checkpoint,
-            sampler=sampler,
-        )
-    finally:
-        with contextlib.suppress(Exception):
-            control.report_resources(sampler.stop())
-
-
-def _run_agent(
-    runtime: AgentRuntime,
-    *,
-    job: ClaimedJob,
-    workdir: str,
-    gateway_base_url: str,
-    control: ControlPlane,
-    heart: Heartbeater,
-    timeout_s: float,
-    backend: SandboxBackend,
-    mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-    state: HarnessState | None = None,
-    state_dir: str | None = None,
-    resident: ResidentEntry | None = None,
-    residents: ResidentPool | None = None,
-    live_out: dict[str, Any] | None = None,
-    context_status: str | None = None,
-    strict_native_resume: bool = False,
-    export_checkpoint: bool = True,
-    sampler: ResourceSampler,
-) -> tuple[int, str, list[str]]:
-    """Run the agent, streaming its output back as normalized events.
-
-    Returns ``(exit_code, tail, tool_errors)``. Raises :class:`LeaseLost` if this attempt
-    stops owning the job mid-run.
-
-    ``state`` is the parent turn's exported session (already decrypted and
-    gated by the control plane): restore it and the turn runs with the
-    agent's full memory on just the new prompt. Restore failing — or absent —
-    falls back to the transcript replay this function always ran, inside the
-    same attempt (design §9). ``state_dir`` is the host directory the sandbox
-    persists session files into; without it nothing is exported or restored.
-
-    ``live_out`` is how a surviving process leaves this function: a completed
-    turn on a live session puts ``{"session", "session_id"}`` there, and the
-    caller either attaches the session to the resident pool (which owns its
-    teardown from then on) or closes it. A turn that ends any other way closes
-    a live session it created itself; one borrowed from the pool is closed by
-    the pool teardown its failure triggers.
-    """
-
-    def _report_continuity(mode: str) -> None:
-        """Keep the pre-context-status control-client seam source-compatible."""
-        if context_status is None:
-            control.report_continuity(mode)
-        else:
-            control.report_continuity(mode, context_status=context_status)
-
-    def _spawn_sampled(process: SandboxProcess) -> SandboxProcess:
-        """Point the sampler at the sandbox this turn is about to use.
-
-        Rebinding rather than binding once: every spawn is a *new* container,
-        so a sampler still holding the previous one would keep reporting a
-        container this turn does not own — and, on the hot fallback path, one
-        that is already dead.
-
-        Everything here is contained. This sits directly in the path that
-        starts the agent, so a sampler that raised would not degrade a
-        measurement — it would cost the user their turn.
-        """
-        try:
-            # A VM-isolated runtime (kata) runs the workload inside a guest
-            # kernel; the daemon's accounting for that container describes the
-            # hypervisor, not the agent. Confident numbers about the wrong
-            # thing are worse than none, so it is honestly not measured.
-            sampler.rebind(
-                None
-                if getattr(backend, "is_vm_isolated", False)
-                else getattr(process, "container", None)
-            )
-        except Exception as exc:
-            print(f"resource sampler unavailable: {exc}", file=sys.stderr)
-        return process
-
-    # Hermetic environment, and the *backend's* idea of it rather than the
-    # runner's. For an isolated backend the runner's PATH and HOME name paths
-    # inside the runner's own filesystem: forwarding HOME=/root into a
-    # container that runs unprivileged makes every agent CLI fail on startup
-    # trying to write its config. Inheriting the whole environment would be
-    # worse still — it would hand the agent whatever the host is carrying.
-    base_env = dict(backend.base_env())
-    base_env.update(_SAFE_DIRECTORY_ENV)
-    _select_runtime_version(base_env, job=job, backend=backend)
-
-    driver = driver_for(runtime)
-    context = LaunchContext(
-        workdir=workdir,
-        gateway_base_url=gateway_base_url,
-        # Only the model-scoped credential crosses into the sandbox. The
-        # full capability token — which can write events, artifacts and
-        # terminal states — stays out here with the runner. After E9,
-        # grant scope and TTL bound the sandbox credential; spend remains
-        # subject to the owning user's gateway quota. There is
-        # deliberately no per-job monetary cap.
-        credential=job.sandbox_token,
-        # Runtime-specific permission flags must follow the actual
-        # execution boundary. In particular, Codex cannot nest bubblewrap
-        # inside the capability-dropped container backend.
-        provides_isolation=backend.provides_isolation,
-        # The platform places the process inside the sandbox (design D7);
-        # the driver owns everything on the returned handle's transport.
-        spawn=lambda argv, env: _spawn_sampled(
-            backend.spawn(SandboxSpec(argv=argv, workdir=workdir, env=env, state_dir=state_dir))
-        ),
-        base_env=base_env,
-        # The runner is the only source of this value. Repository contents
-        # never become runtime MCP configuration, and adapters without a
-        # gateway-mediated path reject a non-empty set.
-        mcp_config=mcp_config,
-        state_dir=state_dir,
-    )
-    session = None
-    turn = None
-    turn_input: TurnInput | None = None
-    #: A live session this turn spawned and still owns — closed on every exit
-    #: except the completed hand-off to ``live_out``. One borrowed from the
-    #: pool is the pool's to close, via the entry drop its failure triggers.
-    fresh_live = None
-    hot_ok = (
-        resident is not None
-        and resident.credential is not None
-        and job.model == resident.grant_model
-        and not mcp_config.server_ids
-    )
-    if hot_ok and resident is not None and resident.live_session is not None:
-        # A hot turn spawns nothing, so the spawn seam above never fires. The
-        # rung that reuses a process is exactly the rung whose consumption is
-        # least obvious, so it is measured through the session it inherits.
-        with contextlib.suppress(Exception):
-            sampler.rebind(getattr(resident.live_session, "container", None))
-    stale_process = resident is not None and not hot_ok and resident.live_session is not None
-    if stale_process and residents is not None and job.thread_id:
-        # This turn will advance the thread past the idle process's memory —
-        # another model (D6: restart), or an MCP turn whose relay token a
-        # resident environment cannot carry yet. The process is stale the
-        # moment the turn runs; the workspace stays resident.
-        residents.detach_session(job.thread_id)
-    if hot_ok:
-        assert resident is not None
-        # True HOT (design §7 + §14): the thread's own live process, running
-        # on the residency's thread-attributed grant — minted at establish,
-        # renewed by host beats, revoked at release/lapse/takeover. The
-        # per-attempt token never enters this environment.
-        live = resident.live_session
-        was_alive = live is not None and bool(getattr(live, "process_alive", lambda: False)())
-        if live is not None and not was_alive:
-            # Died idle (or never spawned): not this turn's transport, but
-            # the workspace is intact — respawn below, resume on disk.
-            if residents is not None and job.thread_id:
-                residents.detach_session(job.thread_id)
-            live = None
-        if live is None:
-            launch_resident_live = getattr(driver, "launch_resident_live", None)
-            if launch_resident_live is not None:
-                hot_context = replace(
-                    context,
-                    credential=resident.credential,
-                    # Sampled through the same seam as any other spawn: a
-                    # resident process is still a container this turn runs
-                    # work in, and it was the one rung nothing measured.
-                    spawn_live=lambda argv, env: _spawn_sampled(
-                        backend.spawn(
-                            SandboxSpec(
-                                argv=argv,
-                                workdir=workdir,
-                                env=env,
-                                state_dir=state_dir,
-                                live_input=True,
-                            )
-                        )
-                    ),
-                )
-                try:
-                    live = launch_resident_live(hot_context, session_id=resident.session_id)
-                except DriverError:
-                    live = None
-                else:
-                    fresh_live = live
-        if live is not None:
-            if state_dir is not None:
-                backend.adopt_workdir(state_dir)
-            try:
-                turn = live.start_turn(
-                    TurnInput(
-                        prompt=job.task_prompt,
-                        model=job.model,
-                        reasoning_effort=job.reasoning_effort,
-                    )
-                )
-            except DriverError as exc:
-                # The process is gone, or refused the turn. Close what we
-                # hold and run the ladder from warm in the same tree.
-                if fresh_live is None and residents is not None and job.thread_id:
-                    residents.detach_session(job.thread_id)
-                else:
-                    with contextlib.suppress(Exception):
-                        live.close()
-                fresh_live = None
-                control.append_event(
-                    NormalizedEvent(
-                        "lifecycle", {"phase": "hot_fallback", "detail": str(exc)[:200]}
-                    )
-                )
-            else:
-                session = live
-                turn_input = TurnInput(
-                    prompt=job.task_prompt,
-                    model=job.model,
-                    reasoning_effort=job.reasoning_effort,
-                )
-                # ``hot`` only when the process predates the turn — a fresh
-                # spawn is warm_native whatever transport it runs on, and a
-                # label that overclaims makes the hit-rate lie.
-                _report_continuity("hot" if was_alive else "warm_native")
-    if session is None and resident is not None:
-        # The restart rung over the resident workspace (design §7): a fresh
-        # process resumed with ``--resume``, on this attempt's own token —
-        # the path for threads whose residency has no grant, model switches,
-        # and MCP turns.
-        launch_resident = getattr(driver, "launch_resident", None)
-        try:
-            if launch_resident is None:
-                raise DriverError(f"the {job.runtime!r} driver has no resident turns")
-            session = launch_resident(context, session_id=resident.session_id)
-        except DriverError as exc:
-            if strict_native_resume:
-                raise
-            # Fall through to the ladder in the same tree.
-            control.append_event(
-                NormalizedEvent("lifecycle", {"phase": "warm_fallback", "detail": str(exc)[:200]})
-            )
-            session = None
-        else:
-            turn_input = TurnInput(
-                prompt=job.task_prompt,
-                model=job.model,
-                reasoning_effort=job.reasoning_effort,
-            )
-            _report_continuity("warm_native")
-    if session is None and state is not None:
-        try:
-            session = driver.launch(context, state)
-        except DriverError as exc:
-            # In-attempt fallback (design §9): the turn still runs, on replay,
-            # and the degradation is a first-class row in the owner's stream.
-            control.append_event(
-                NormalizedEvent("lifecycle", {"phase": "cold_fallback", "detail": str(exc)[:200]})
-            )
-            session = None
-        else:
-            # The restored session *is* the memory: only the new prompt goes in.
-            turn_input = TurnInput(
-                prompt=job.task_prompt,
-                model=job.model,
-                reasoning_effort=job.reasoning_effort,
-            )
-            _report_continuity("cold_native")
-    if session is None:
-        session = driver.launch(context)
-        turn_input = TurnInput(
-            prompt=conversation_prompt(job),
-            model=job.model,
-            reasoning_effort=job.reasoning_effort,
-        )
-        if context_status == "new":
-            # A first turn has no earlier context to replay or restore. Keep
-            # the diagnostic rung empty instead of showing a false "replay"
-            # warning in the existing UI.
-            report_context = getattr(control, "report_context_status", None)
-            if report_context is not None:
-                report_context("new")
-        else:
-            _report_continuity("replay")
-    if turn is None:
-        assert turn_input is not None
-        if state_dir is not None:
-            # After restore, before spawn: whatever the driver just wrote (and
-            # the empty dir on a fresh turn) must be writable by the sandbox
-            # user, or the CLI cannot record the very session the next turn
-            # would resume.
-            backend.adopt_workdir(state_dir)
-        turn = session.start_turn(turn_input)
-
-    try:
-        deadline = time.monotonic() + timeout_s
-        tail: list[str] = []
-        # Tool failures the agent may or may not acknowledge. A model that says "I
-        # added the docstring" after its Edit was denied is a real behaviour we
-        # observed, so the runner reports what the tools did rather than trusting
-        # the agent's summary.
-        tool_errors: list[str] = []
-        # One row per host, not per retry: an agent that retries a blocked address
-        # ten times tried to reach one place.
-        denied_hosts: set[str] = set()
-
-        # Read stdout on a separate thread and poll for it here, so cancellation
-        # and the deadline are honoured even when the agent goes quiet. Iterating
-        # the stream directly meant a hung or long-thinking agent — which produces
-        # no lines — was never checked, and ignored an owner's cancel until it
-        # happened to print something.
-        lines: queue.Queue[str | None] = queue.Queue()
-
-        def _pump() -> None:
-            try:
-                for line in turn.raw_lines():
-                    lines.put(line)
-            finally:
-                lines.put(None)
-
-        pump = threading.Thread(target=_pump, daemon=True, name="agent-stdout")
-        pump.start()
-
-        while True:
-            if heart.lease_lost:
-                turn.cancel()
-                if resident is not None and residents is not None and job.thread_id:
-                    # The fence just moved: this workspace's residency must stop
-                    # being reported the moment the turn aborts, not whenever the
-                    # exception finishes unwinding (review finding 2). run_once's
-                    # wrapper repeats this for every other exception; drop is
-                    # idempotent and generation-scoped.
-                    residents.drop(job.thread_id, release=True, generation=resident.generation)
-                raise LeaseLost("lease lost while the agent was running")
-            if heart.cancel_requested:
-                turn.cancel()
-                control.append_event(NormalizedEvent("lifecycle", {"phase": "cancelled_by_owner"}))
-                return 130, "".join(tail), tool_errors
-            if time.monotonic() > deadline:
-                turn.cancel()
-                control.append_event(
-                    NormalizedEvent("error", {"text": f"agent exceeded {timeout_s:.0f}s"})
-                )
-                return 124, "".join(tail), tool_errors
-
-            try:
-                line = lines.get(timeout=_POLL_INTERVAL_S)
-            except queue.Empty:
-                # No output yet; loop so the checks above keep running.
-                continue
-            if line is None:
-                break
-
-            tail.append(line)
-            del tail[:-40]
-            item = turn.event_for_line(line)
-            if item.event_type != LINE:
-                if item.event_type == "tool_result" and (item.payload or {}).get("is_error"):
-                    content = str((item.payload or {}).get("content", ""))
-                    tool_errors.append(content[:200])
-                    blocked = detect_blocked_egress(content)
-                    if blocked and blocked not in denied_hosts:
-                        denied_hosts.add(blocked)
-                        # `host` is what makes this a first-class egress row in the
-                        # owner's stream rather than one more failed command.
-                        control.append_event(NormalizedEvent("error", {"host": blocked}))
-                control.append_event(NormalizedEvent(item.event_type, item.payload))
-
-        result = turn.wait()
-        exit_code = result.exit_code
-        if live_out is not None and result.status == "completed":
-            # What the caller needs to keep the thread resident: the announced
-            # session id (captured by the session's own runtime — for a borrowed
-            # live session that is a previous turn's instance, not this turn's),
-            # and the process itself when it survived its turn.
-            live_out["session_id"] = getattr(session.runtime, "session_id", None)
-            if bool(getattr(session, "process_alive", lambda: False)()):
-                live_out["session"] = session
-        if (
-            result.status == "completed"
-            and state_dir is not None
-            and export_checkpoint
-            and driver.capabilities().checkpoint_export
-        ):
-            # Every settled turn exports (design §6): this is COLD's substrate and
-            # HOT's crash insurance. Failure is non-fatal — the user's work is the
-            # patch, and losing a checkpoint costs one replay, not the turn — but
-            # it is a first-class row, because a thread that quietly went
-            # forgetful is the old bug wearing a new face.
-            _export_checkpoint(control, session=session, job=job, backend=backend)
-        stderr = turn.stderr_text()
-        if stderr.strip():
-            tail.append(stderr[-2000:])
-        if tool_errors:
-            # Surfaced as an event so the owner sees it in the stream, not only in
-            # the final detail string.
-            control.append_event(
-                NormalizedEvent(
-                    "error",
-                    {"detail": f"{len(tool_errors)} tool call(s) failed", "first": tool_errors[0]},
-                )
-            )
-        return exit_code, "".join(tail), tool_errors
-    finally:
-        # Every exit but the completed hand-off closes a live session this
-        # turn spawned: a leaked resident process would keep running — and
-        # keep holding its grant-scoped key — with no entry owning it.
-        if fresh_live is not None and not (
-            live_out is not None and live_out.get("session") is fresh_live
-        ):
-            with contextlib.suppress(Exception):
-                fresh_live.close()
-
-
-def _configured_restartable_runtimes() -> set[str]:
-    """Return the explicit retained-runtime gate, defaulting to every adapter."""
-    raw = os.environ.get("AGENT_RESTARTABLE_RUNTIMES")
-    if not raw:
-        return set(registered_runtimes())
-    return {item.strip() for item in raw.split(",") if item.strip()}
-
-
-def _configured_shared_live_runtimes() -> set[str]:
-    """Return the exact runtimes explicitly admitted to the shared protocol."""
-    raw = os.environ.get("AGENT_SHARED_LIVE_RUNTIMES")
-    if not raw:
-        return set(registered_runtimes())
-    return {item.strip() for item in raw.split(",") if item.strip()}
-
-
-def _restartable_feature_enabled() -> bool:
-    """Whether this host opted into retained Docker lifecycle management."""
-    return os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") not in ("", "0")
-
-
-def _shared_live_feature_enabled() -> bool:
-    """Whether this host can create new shared-live sandbox groups.
-
-    Shared-live is an extension of the restartable supervisor, not an
-    independent execution mode. Requiring both gates here keeps a direct
-    ``docker compose up`` as safe as the deployment script's preflight: a
-    half-enabled runner must never advertise a capability its broker cannot
-    serve.
-    """
-    return _restartable_feature_enabled() and os.environ.get(
-        "AGENT_SHARED_LIVE_SANDBOX", ""
-    ) not in ("", "0")
-
-
 def _shared_live_host_capabilities(
     backend: SandboxBackend,
     stamp: dict[str, Any],
 ) -> list[str]:
     """Advertise shared-v1 only when this exact host can honor its contract."""
-    if not _shared_live_feature_enabled() or not isinstance(backend, ContainerBackend):
+    if not isinstance(backend, ContainerBackend):
         return []
     try:
-        slots = int(os.environ.get("AGENT_HOST_SLOTS") or 0)
+        slots = int(os.environ.get("AGENT_HOST_SLOTS") or 3)
     except ValueError:
         return []
     if slots < 2:
         return []
     try:
-        runner_replicas = int(os.environ.get("AGENT_RUNNER_REPLICAS") or 0)
+        runner_replicas = int(os.environ.get("AGENT_RUNNER_REPLICAS") or 3)
     except ValueError:
         return []
     # A runner executes one claimed turn synchronously. Declaring more host
@@ -1816,7 +908,7 @@ def _shared_live_host_capabilities(
         for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
     ):
         return []
-    for runtime_id in _configured_shared_live_runtimes():
+    for runtime_id in registered_runtimes():
         try:
             capabilities = driver_for(get_runtime(runtime_id)).capabilities()
         except KeyError:
@@ -1827,7 +919,7 @@ def _shared_live_host_capabilities(
             or not capabilities.concurrent_shared_workspace
         ):
             return []
-    capabilities = ["shared-sandbox-v1"]
+    capabilities = [SHARED_SANDBOX_CAPABILITY]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
     if deployment_sha and ready_file:
@@ -1841,55 +933,15 @@ def _shared_live_host_capabilities(
 
 
 def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
-    """Build the exact-replica claim proof, including local rollout config."""
+    """Build the exact-replica proof required for every claim."""
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
     # ``version_stamp`` proves the immutable image. This separately proves the
-    # polling process has the feature flag, broker, slots and driver surfaces
+    # polling process has the broker, slots and driver surfaces
     # needed to use it; a sibling replica's host heartbeat cannot stand in for
     # those process-local facts during a rolling deployment.
     stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
     return stamp
-
-
-def _retained_lifecycle_enabled() -> bool:
-    """Whether either retained protocol needs host lifecycle reconciliation."""
-    return _restartable_feature_enabled()
-
-
-def _shared_live_runtime_enabled(job: ClaimedJob) -> bool:
-    """Route an existing shared member or a capability-gated new chat."""
-    existing = job.thread_sandbox or {}
-    if job.thread_sandbox is not None:
-        # Durable ownership wins over a later rollout-flag change. Silently
-        # switching either direction would create a second workspace.
-        return existing.get("shared_live") is True
-    return _shared_live_feature_enabled() and job.runtime in _configured_shared_live_runtimes()
-
-
-def _restartable_mode_covers_every_runtime() -> bool:
-    """Whether this runner has no legacy job path that needs a host bind."""
-    if _shared_live_feature_enabled() and set(registered_runtimes()) <= (
-        _configured_shared_live_runtimes()
-    ):
-        return True
-    if not _restartable_feature_enabled():
-        return False
-    return set(registered_runtimes()) <= _configured_restartable_runtimes()
-
-
-def _restartable_runtime_enabled(job: ClaimedJob) -> bool:
-    """Whether this turn belongs on the staged retained-container path."""
-    if _shared_live_runtime_enabled(job):
-        return True
-    if job.thread_sandbox is not None:
-        # Once a thread owns Docker-only local state, falling back to a fresh
-        # legacy worktree would be silent context loss. The durable row wins
-        # over a later flag change; rollback must drain/migrate explicitly.
-        return True
-    if not _restartable_feature_enabled():
-        return False
-    return job.runtime in _configured_restartable_runtimes()
 
 
 def _session_supervisor_from_env() -> SessionSupervisorClient:
@@ -1918,17 +970,12 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
         now = time.monotonic()
         idle_timeout_s = _chat_idle_timeout_s()
         for row in rows[:4096]:
-            shared_live = bool(row.get("shared_live"))
-            members = (
-                [dict(item) for item in row.get("members") or [] if isinstance(item, dict)]
-                if shared_live
-                else []
-            )
+            if row.get("shared_live") is not True:
+                raise ValueError("workspace broker returned a non-shared sandbox")
+            members = [dict(item) for item in row.get("members") or [] if isinstance(item, dict)]
             activation_generation = int(row["activation_generation"])
             running = bool(row["running"])
-            active = (bool(row.get("group_busy")) if shared_live else bool(row.get("busy"))) or int(
-                row.get("terminal_count") or 0
-            ) > 0
+            active = bool(row.get("group_busy")) or int(row.get("terminal_count") or 0) > 0
             active = active or int(row.get("operation_count") or 0) > 0
             active = active or bool(row.get("workspace_suspended"))
             deadline = row.get("idle_deadline_monotonic")
@@ -1961,7 +1008,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     "running": running,
                     "activity_active": active if activity_known else None,
                     "idle_remaining_seconds": idle_remaining,
-                    "shared_live": shared_live,
+                    "shared_live": True,
                     "members": members,
                 }
             )
@@ -1985,19 +1032,11 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
         client = _session_supervisor_from_env()
         for command in commands:
             try:
-                if command.get("shared_live"):
-                    client.stop_shared_idle(
-                        str(command["thread_id"]),
-                        generation=int(command["generation"]),
-                        reason=str(command.get("reason") or "idle"),
-                    )
-                else:
-                    client.stop_idle(
-                        str(command["thread_id"]),
-                        generation=int(command["generation"]),
-                        activation_generation=int(command["activation_generation"]),
-                        reason=str(command.get("reason") or "idle"),
-                    )
+                client.stop_shared_idle(
+                    str(command["thread_id"]),
+                    generation=int(command["generation"]),
+                    reason=str(command.get("reason") or "idle"),
+                )
             except (KeyError, TypeError, ValueError, SessionSupervisorError) as exc:
                 # A stale command is expected during a racing acquire. The
                 # next heartbeat reports fresh Docker state and the durable
@@ -2018,19 +1057,14 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
             client.close()
 
 
-def _handle_host_residencies_lost(
-    residents: ResidentPool,
-    lost: list[dict[str, Any]],
-) -> None:
-    """Fence both legacy runner entries and supervisor-owned shared members."""
-    residents.handle_lost(lost)
+def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
+    """Fence supervisor-owned shared members whose renewable grant was lost."""
     client: SessionSupervisorClient | None = None
     try:
         client = _session_supervisor_from_env()
         shared_members = {
             str(member.get("thread_id"))
             for row in client.list()
-            if row.get("shared_live")
             for member in row.get("members") or []
             if isinstance(member, dict) and member.get("thread_id")
         }
@@ -2067,7 +1101,7 @@ def _prepare_retained_checkout(
             clone_token=job.clone_token,
             remote_base=repo_clone_base_url(clone_token=job.clone_token),
         )
-        checkout_output_branch(source, job.thread_id or job.job_id)
+        checkout_output_branch(source, job.thread_id)
         archive = build_source_archive(
             source,
             uid=manager.backend.uid,
@@ -2178,7 +1212,7 @@ def _stream_shared_agent_turn(
 ) -> tuple[int, str, list[str], dict[str, Any] | None]:
     """Relay exactly one broker-framed member turn under its attempt fence."""
     stream = supervisor.start_shared_turn(
-        job.thread_id or "",
+        job.thread_id,
         token=lease_token,
         prompt=job.task_prompt,
         model=job.model,
@@ -2206,16 +1240,16 @@ def _stream_shared_agent_turn(
         while True:
             if heart.lease_lost:
                 with contextlib.suppress(Exception):
-                    supervisor.interrupt_shared(job.thread_id or "", token=lease_token)
+                    supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 raise LeaseLost("lease lost while the shared Agent CLI was running")
             if heart.cancel_requested:
                 with contextlib.suppress(Exception):
-                    supervisor.interrupt_shared(job.thread_id or "", token=lease_token)
+                    supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 control.append_event(NormalizedEvent("lifecycle", {"phase": "cancelled_by_owner"}))
                 return 130, "".join(tail), tool_errors, result_frame
             if time.monotonic() > deadline:
                 with contextlib.suppress(Exception):
-                    supervisor.interrupt_shared(job.thread_id or "", token=lease_token)
+                    supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 control.append_event(
                     NormalizedEvent("error", {"text": f"agent exceeded {timeout_s:.0f}s"})
                 )
@@ -2306,9 +1340,7 @@ def _run_shared_live_attempt(
     stamp = backend.version_stamp()
     existing = job.thread_sandbox or {}
     if existing and existing.get("shared_live") is not True:
-        finish_attempt(
-            "failed", "a legacy retained chat cannot be upgraded to shared-live in place"
-        )
+        finish_attempt("failed", "the control plane returned a non-shared sandbox mapping")
         return 2
     if not existing and not str(stamp.get("sandbox_image_digest") or "").strip():
         finish_attempt("failed", "shared live chat creation requires an inspected image digest")
@@ -2412,7 +1444,7 @@ def _run_shared_live_attempt(
             return
         if supervisor is not None and lease_token is not None:
             with contextlib.suppress(Exception):
-                supervisor.abandon_shared(job.thread_id or "", token=lease_token, lost=lost)
+                supervisor.abandon_shared(job.thread_id, token=lease_token, lost=lost)
         with contextlib.suppress(Exception):
             control.abandon_chat_sandbox(
                 sandbox_generation=spec.generation,
@@ -2480,9 +1512,7 @@ def _run_shared_live_attempt(
                 setup = run_setup(
                     script=job.setup_script,
                     workdir=CHAT_WORKDIR,
-                    repo=job.repo,
                     backend=retained,
-                    cache=None,
                 )
                 control.append_event(
                     NormalizedEvent(
@@ -2731,540 +1761,42 @@ def _run_shared_live_attempt(
                 control.resume_terminals()
 
 
-def _run_retained_attempt(
-    *,
-    runtime: AgentRuntime,
-    job: ClaimedJob,
-    control: ControlPlane,
-    heart: Heartbeater,
-    backend: SandboxBackend,
-    host: str | None,
-    gateway_base_url: str,
-    agent_timeout_s: float,
-    finish_attempt: Any,
-) -> int:
-    """Run one turn in its thread's Docker-owned retained container.
-
-    This is intentionally capability-gated to the five pinned native-session
-    drivers. A runtime that cannot prove native resume is left on the legacy
-    path before it creates a sandbox row; an existing retained row that loses
-    that capability fails loudly instead of rebuilding from transcript.
-    """
-    if not isinstance(backend, ContainerBackend):
-        finish_attempt("failed", "restartable chats require the container or kata backend")
-        return 2
-    if not host or not job.thread_id:
-        finish_attempt("failed", "restartable chats require an enrolled host and thread id")
-        return 2
-    if driver_for(runtime).capabilities().continuity == "replay":
-        finish_attempt(
-            "failed",
-            f"runtime {job.runtime!r} has not passed the restartable native-resume gate",
-        )
-        return 2
-
-    manager = ChatSandboxManager(backend)
-    stamp = backend.version_stamp()
-    existing = job.thread_sandbox or {}
-    if not existing and not str(stamp.get("sandbox_image_digest") or "").strip():
-        # Heartbeats may degrade an unavailable image inspection to an empty
-        # stamp, but a new retained chat cannot: its writable layer is the
-        # only local copy and every retry must recreate from the exact image
-        # that first owned it. Falling back to a mutable tag here would make
-        # the supposedly immutable container identity change across a
-        # pre-creation retry.
-        finish_attempt(
-            "failed",
-            "restartable chat creation requires an inspected sandbox image digest",
-        )
-        return 2
-    if existing and existing.get("runtime_id") != job.runtime:
-        finish_attempt(
-            "failed",
-            "this restartable chat is pinned to runtime "
-            f"{existing.get('runtime_id')!r}; switch Agent CLI by starting a new chat",
-        )
-        return 2
-    if existing and existing.get("execution_profile") != job.execution_profile:
-        finish_attempt("failed", "retained chat execution profile cannot change in place")
-        return 2
-    sandbox_id = str(existing.get("sandbox_id") or f"asbx_{secrets.token_hex(16)}")
-    seed_spec = ChatSandboxSpec(
-        thread_id=job.thread_id,
-        sandbox_id=sandbox_id,
-        generation=int(existing.get("generation") or 1),
-        runtime_id=str(existing.get("runtime_id") or job.runtime),
-        runtime_version=(existing.get("runtime_version") if existing else job.runtime_version),
-        sandbox_image_digest=(
-            existing.get("sandbox_image_digest")
-            if existing
-            else (stamp.get("sandbox_image_digest") or None)
-        ),
-    )
-    if existing:
-        if existing.get("host") != host:
-            finish_attempt("failed", "retained chat was claimed on the wrong host")
-            return 2
-        if existing.get("container_name") != seed_spec.container_name:
-            finish_attempt("failed", "retained chat container identity does not match its labels")
-            return 2
-
-    try:
-        reservation = control.reserve_chat_sandbox(
-            {
-                "sandbox_id": seed_spec.sandbox_id,
-                "container_name": seed_spec.container_name,
-                "runtime_id": seed_spec.runtime_id,
-                "runtime_version": seed_spec.runtime_version,
-                "sandbox_image_digest": (
-                    existing.get("sandbox_image_digest")
-                    if existing
-                    else (stamp.get("sandbox_image_digest") or None)
-                ),
-                "execution_profile": (
-                    str(existing.get("execution_profile")) if existing else job.execution_profile
-                ),
-                "host": host,
-            }
-        )
-    except LeaseLost:
-        return 3
-    except Exception as exc:
-        finish_attempt("failed", f"could not reserve retained chat sandbox: {exc}")
-        return 2
-
-    spec = ChatSandboxSpec(
-        thread_id=job.thread_id,
-        sandbox_id=str(reservation["sandbox_id"]),
-        generation=int(reservation["generation"]),
-        runtime_id=str(reservation["runtime_id"]),
-        runtime_version=reservation.get("runtime_version"),
-        sandbox_image_digest=reservation.get("sandbox_image_digest"),
-    )
-    activation_generation = int(reservation["activation_generation"])
-    has_context = bool(reservation.get("last_settled_job_id"))
-    native_session_id = reservation.get("native_session_id")
-    supervisor: SessionSupervisorClient | None = None
-    lease_token: str | None = None
-    settled = False
-    abandoned = False
-    turn_admitted = False
-    terminals_suspended = False
-    failure_detail: str | None = None
-    context_invalid = False
-    context_status = "restored" if has_context else "new"
-    idle_timeout_s = _chat_idle_timeout_s()
-
-    def abandon_before_finish(*, lost: bool, detail: str | None) -> None:
-        """Quiesce this activation before its attempt becomes terminal."""
-        nonlocal abandoned
-        if abandoned or settled:
-            return
-        if supervisor is not None and lease_token is not None:
-            with contextlib.suppress(Exception):
-                supervisor.abandon(job.thread_id, token=lease_token, lost=lost)
-        with contextlib.suppress(Exception):
-            control.abandon_chat_sandbox(
-                sandbox_generation=spec.generation,
-                activation_generation=activation_generation,
-                lost=lost,
-                detail=detail,
-                idle_timeout_seconds=idle_timeout_s,
-            )
-        abandoned = True
-
-    try:
-        supervisor = _session_supervisor_from_env()
-        try:
-            lease = supervisor.acquire(
-                spec,
-                activation_generation=activation_generation,
-                owner=f"attempt:{job.attempt_id}",
-                has_settled_context=has_context,
-                expected_container_id=reservation.get("container_id"),
-            )
-        except SessionSupervisorError as exc:
-            context_invalid = has_context and exc.status_code == 410
-            raise
-        lease_token = str(lease["token"])
-        if int(lease["activation_generation"]) != activation_generation:
-            raise SandboxError("Session Supervisor returned the wrong activation generation")
-        if reservation.get("container_id") not in {None, lease.get("container_id")}:
-            raise SandboxError("Session Supervisor returned a replacement chat container")
-        context_status = str(lease.get("context_status") or context_status)
-        if context_status not in {"new", "live", "restored"}:
-            raise SandboxError(f"Session Supervisor returned invalid context {context_status!r}")
-        control.mark_chat_sandbox_running(
-            sandbox_generation=spec.generation,
-            activation_generation=activation_generation,
-            container_id=str(lease["container_id"]),
-            context_status=context_status,
-        )
-        retained = RetainedChatBackend(manager, spec)
-        control.append_event(
-            NormalizedEvent(
-                "lifecycle",
-                {
-                    "phase": "started",
-                    "runtime": job.runtime,
-                    "attempt_no": job.attempt_no,
-                    "context_status": context_status,
-                    "container_id": lease["container_id"],
-                    "activation_generation": activation_generation,
-                    **retained.sandbox_metadata(),
-                },
-            )
-        )
-        control.suspend_terminals("workspace_preparing")
-        terminals_suspended = True
-
-        if not has_context:
-            # A checkout or setup failure before prompt admission is retryable
-            # on the same immutable chat/container identity. Remove any
-            # partial import from that failed preparation so Docker's archive
-            # extraction cannot merge it into the next clean checkout.
-            manager.reset_unsettled_state(spec)
-            base_sha = _prepare_retained_checkout(job=job, manager=manager, spec=spec)
-            reused_workspace = False
-        else:
-            if not native_session_id:
-                context_invalid = True
-                raise SandboxError("retained chat has no native Agent CLI session locator")
-            if not _resident_base_ready(CHAT_WORKDIR, job, retained):
-                imported_base = _import_retained_base(job=job, manager=manager, spec=spec)
-                if not _resident_base_ready(CHAT_WORKDIR, job, retained):
-                    context_invalid = True
-                    raise SandboxError(
-                        "retained chat cannot resolve its pinned base commit after import"
-                    )
-                control.append_event(
-                    NormalizedEvent(
-                        "lifecycle",
-                        {
-                            "phase": "base_imported",
-                            "base_sha": imported_base,
-                            "workspace_head_preserved": True,
-                        },
-                    )
-                )
-            base_sha = job.base_sha or _retained_head(retained)
-            reused_workspace = True
-        control.append_event(
-            NormalizedEvent(
-                "lifecycle",
-                {
-                    "phase": "checked_out",
-                    "base_sha": base_sha,
-                    "reused": reused_workspace,
-                    "storage": "docker_writable_layer",
-                },
-            )
-        )
-
-        if job.setup_script and not has_context:
-            setup = run_setup(
-                script=job.setup_script,
-                workdir=CHAT_WORKDIR,
-                repo=job.repo,
-                backend=retained,
-                # A retained chat already keeps its dependency tree. Sharing a
-                # host tar cache would reintroduce the host-state dependency
-                # this mode removes.
-                cache=None,
-            )
-            control.append_event(
-                NormalizedEvent(
-                    "lifecycle",
-                    {"phase": "setup", "cached": False, "ran": setup.ran},
-                )
-            )
-            if setup.exit_code != 0:
-                failure_detail = f"setup failed ({setup.exit_code}): {setup.detail}"
-                abandon_before_finish(lost=False, detail=failure_detail)
-                finish_attempt("failed", failure_detail, base_sha=base_sha)
-                return 1
-
-        version_problem = runtime_version_unavailable(job, retained)
-        if version_problem is not None:
-            failure_detail = version_problem
-            abandon_before_finish(lost=False, detail=failure_detail)
-            finish_attempt("failed", version_problem, base_sha=base_sha)
-            return 1
-        if not retained.has_binary(runtime.binary):
-            failure_detail = f"runtime binary {runtime.binary!r} is not installed"
-            abandon_before_finish(lost=False, detail=failure_detail)
-            finish_attempt("failed", failure_detail, base_sha=base_sha)
-            return 2
-
-        process = supervisor.process_started(job.thread_id, token=lease_token)
-        process_generation = int(process["process_generation"])
-        control.record_chat_process(
-            sandbox_generation=spec.generation,
-            activation_generation=activation_generation,
-            process_generation=process_generation,
-        )
-        resident = (
-            ResidentEntry(
-                thread_id=job.thread_id,
-                generation=spec.generation,
-                session_id=str(native_session_id),
-                workdir=CHAT_WORKDIR,
-                state_dir=CHAT_STATE_DIR,
-                runtime_id=job.runtime,
-                model=job.model,
-            )
-            if has_context
-            else None
-        )
-        live_out: dict[str, Any] = {}
-        control.admit_chat_turn(
-            sandbox_generation=spec.generation,
-            activation_generation=activation_generation,
-        )
-        turn_admitted = True
-        # Setup egress is removed exactly once and never restored. Keep every
-        # failure that is still classified as a safe pre-admission retry on
-        # the setup network; otherwise a transient control-plane error after
-        # this irreversible transition would retry checkout/setup on the
-        # agent-only network and fail for an unrelated reason. From this point
-        # onward the durable admission receipt makes every failure conservative
-        # (STOPPED_DIRTY/LOST), even if stdin was not reached.
-        if has_context:
-            manager.require_network_phase(spec, "agent")
-        else:
-            manager.transition_to_agent_network(spec)
-
-        # Never unfreeze a user terminal while setup egress is still present.
-        control.resume_terminals()
-        terminals_suspended = False
-        exit_code, tail, tool_errors = run_agent(
-            runtime,
-            job=job,
-            workdir=CHAT_WORKDIR,
-            gateway_base_url=gateway_base_url,
-            control=control,
-            heart=heart,
-            timeout_s=agent_timeout_s,
-            backend=retained,
-            mcp_config=RuntimeMCPConfig(
-                server_ids=tuple(job.mcp_servers),
-                base_url=job.mcp_base_url,
-                credential=job.mcp_token,
-            ),
-            state_dir=CHAT_STATE_DIR,
-            resident=resident,
-            live_out=live_out,
-            context_status=context_status,
-            strict_native_resume=has_context,
-            export_checkpoint=False,
-        )
-        live = live_out.pop("session", None)
-        if live is not None:
-            # The reconnectable bridge is the later HOT optimization. Until it
-            # owns the CLI independently of a runner replica, close cleanly and
-            # prove native restore on the next turn (warm_native).
-            with contextlib.suppress(Exception):
-                live.close()
-        next_session_id = live_out.get("session_id") or getattr(runtime, "session_id", None)
-        if exit_code == 130:
-            # Cancellation currently uses the retained process kill backstop,
-            # which stops the whole activation. There is no clean context
-            # boundary to capture after that stop, so do not pretend a patch
-            # exec can run or that the session remains resumable.
-            failure_detail = "cancelled by owner after retained-session admission"
-            abandon_before_finish(lost=True, detail=failure_detail)
-            finish_attempt("cancelled", "cancelled by owner", base_sha=base_sha)
-            return 0
-        if exit_code == 124:
-            failure_detail = "retained agent turn exceeded its execution timeout"
-            abandon_before_finish(lost=True, detail=failure_detail)
-            finish_attempt("failed", failure_detail, base_sha=base_sha)
-            return 1
-        if exit_code == 0:
-            next_session_id = _verified_native_session_id(
-                previous_session_id=(str(native_session_id) if native_session_id else None),
-                observed_session_id=(str(next_session_id) if next_session_id else None),
-                has_context=has_context,
-            )
-
-        control.suspend_terminals("workspace_finalizing")
-        terminals_suspended = True
-        patch = build_patch(CHAT_WORKDIR, retained, base_sha=job.base_sha or base_sha)
-        if patch.strip():
-            control.save_artifact("patch", patch)
-            control.append_event(
-                NormalizedEvent("diff", {"bytes": len(patch.encode()), "stored": True})
-            )
-        else:
-            control.append_event(NormalizedEvent("diff", {"bytes": 0, "stored": False}))
-
-        save_workspace_snapshot(
-            control,
-            workdir=CHAT_WORKDIR,
-            patch=patch,
-            retained_backend=retained,
-        )
-
-        if exit_code != 0:
-            failure_detail = f"agent exited {exit_code}: {tail[-500:]}"
-            abandon_before_finish(lost=True, detail=failure_detail)
-            finish_attempt("failed", failure_detail, base_sha=base_sha)
-            return 1
-        if not patch.strip() and tool_errors:
-            failure_detail = (
-                f"agent produced no changes after {len(tool_errors)} failed tool call(s): "
-                f"{tool_errors[0]}"
-            )
-            abandon_before_finish(lost=True, detail=failure_detail)
-            finish_attempt("failed", failure_detail, base_sha=base_sha)
-            return 1
-
-        # The local lifecycle owner must accept the exact activation before
-        # the control plane advertises a settled/resumable boundary. If the
-        # broker restarted and forgot this lease token, fail closed as LOST;
-        # writing the durable row first would let a failed job masquerade as a
-        # clean native checkpoint.
-        supervisor.settle(
-            job.thread_id,
-            token=lease_token,
-            job_id=job.job_id,
-            context_status=context_status,
-        )
-        control.settle_chat_sandbox(
-            sandbox_generation=spec.generation,
-            activation_generation=activation_generation,
-            context_status=context_status,
-            native_session_id=str(next_session_id),
-            idle_timeout_seconds=idle_timeout_s,
-        )
-        settled = True
-        finish_attempt(
-            "succeeded",
-            "agent completed" if patch.strip() else "agent completed (no changes)",
-            base_sha=base_sha,
-        )
-        terminals_suspended = False
-        return 0
-    except LeaseLost:
-        failure_detail = "attempt lease lost during retained chat execution"
-        return 3
-    except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
-        failure_detail = str(exc)
-        abandon_before_finish(
-            lost=turn_admitted or context_invalid,
-            detail=failure_detail,
-        )
-        with contextlib.suppress(Exception):
-            control.append_event(NormalizedEvent("error", {"text": failure_detail[:1000]}))
-        with contextlib.suppress(Exception):
-            finish_attempt("failed", failure_detail[:1000])
-        return 2
-    except Exception as exc:
-        failure_detail = f"retained chat failed unexpectedly: {exc}"
-        abandon_before_finish(lost=turn_admitted, detail=failure_detail)
-        with contextlib.suppress(Exception):
-            control.append_event(NormalizedEvent("error", {"text": failure_detail[:1000]}))
-            finish_attempt("failed", failure_detail[:1000])
-        return 2
-    finally:
-        if not settled and not abandoned:
-            abandon_before_finish(
-                lost=turn_admitted or context_invalid,
-                detail=failure_detail,
-            )
-        if supervisor is not None:
-            supervisor.close()
-        if terminals_suspended:
-            with contextlib.suppress(Exception):
-                control.resume_terminals()
-
-
 def run_once(
     *,
     base_url: str,
     gateway_url: str = "",
-    dispatcher_token: str,
+    host_credential: str,
     worker_id: str,
-    workdir: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
-    generic_command: str | None = None,
     backend: SandboxBackend | None = None,
-    workspace_root: str | None = None,
     host: str | None = None,
-    residents: ResidentPool | None = None,
 ) -> int:
-    """Claim one job, run it, and report the outcome. Returns a process exit code.
+    """Claim and deliver one turn through the shared retained-session protocol.
 
-    ``backend`` decides where the agent actually executes. When this function
-    builds it, it is also preflighted here — a misconfigured host then fails
-    without first taking a job off the queue and burning one of its attempts.
-
-    A caller that *supplies* a backend has already preflighted it, and must
-    not have it re-checked per call. Preflight spawns several ``docker``
-    subprocesses (version, one network inspect per phase) and logs the
-    shared-kernel warning, so running it per claim meant a standing runner
-    polling every 5s spent ~17k probes and 17k warning lines a day doing
-    nothing — found by watching an idle runner, not by reading it.
+    A runner-created backend is preflighted before claim. The retained
+    container owns the only workspace, so there is deliberately no host
+    worktree argument or bind-mount fallback.
     """
-    # Docker resolves bind sources in the daemon's namespace, not relative to
-    # the runner container.  Keep the one-shot path honest: ``--workdir .``
-    # inside the runner image used to become ``/app`` only after a job had
-    # already been claimed, and every sandbox command then failed with exit
-    # 125.  Normalising first also makes the path that preflight proves exactly
-    # the path later passed to ``docker run --mount``.
-    workdir = str(pathlib.Path(workdir).resolve())
     if backend is None:
         backend = build_backend_from_env()
-        preflight_root = None if _restartable_mode_covers_every_runtime() else workdir
-        if preflight_root is not None:
-            # The normal clone path creates this directory after claim.  A
-            # bind probe has to run before claim, so materialise only the
-            # trusted operator-selected root first.  This also matters under
-            # Docker Desktop/Colima: a child created inside the outer runner
-            # becomes visible to the daemon, while the same child created by
-            # the macOS client may exist only in its file-sharing namespace.
-            try:
-                pathlib.Path(preflight_root).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise SandboxError(
-                    f"could not prepare one-shot workdir {preflight_root!r}: {exc}"
-                ) from exc
-        backend.preflight(workdir_root=preflight_root)
+        backend.preflight()
 
-    attestation = _claim_attestation(backend)
     job = claim(
         base_url=base_url,
-        dispatcher_token=dispatcher_token,
+        host_credential=host_credential,
         worker_id=worker_id,
         lease_ttl=lease_ttl,
-        host=host,
-        attestation=attestation,
+        attestation=_claim_attestation(backend),
     )
     if job is None:
         print("no queued agent job; nothing to do")
         return 0
 
-    restartable = _restartable_runtime_enabled(job)
-    # Long-lived runners give every job a durable worktree.  The browser and
-    # terminal broker address this same directory after the agent exits;
-    # follow-up jobs receive their own worktree and are rehydrated through the
-    # existing, validated context-patch path.
-    #
-    # A restartable chat is the inverse: its only durable workspace is the
-    # retained container's writable layer. Creating a host worktree here would
-    # silently retain a second source of truth and defeat the Docker-only
-    # ownership invariant even if it were never mounted.
-    if workspace_root is not None and not restartable:
-        durable = workspace_path(workspace_root, job.job_id)
-        durable.mkdir(parents=True, exist_ok=True)
-        workdir = str(durable)
-
     print(f"claimed {job.job_id} attempt {job.attempt_no} runtime={job.runtime}")
     control = ControlPlane(base_url, job.worker_token)
     control.job_id = job.job_id
     heart = Heartbeater(control, ttl=lease_ttl, interval=HEARTBEAT_INTERVAL_S)
-    terminals_suspended = False
 
     def finish_attempt(
         state: str,
@@ -3272,425 +1804,32 @@ def run_once(
         *,
         base_sha: str | None = None,
     ) -> None:
-        """Finish through the gateway, which also resumes retained terminals."""
-        nonlocal terminals_suspended
         if base_sha is None:
             control.finish(state, detail)
         else:
             control.finish(state, detail, base_sha=base_sha)
-        terminals_suspended = False
 
     try:
-        runtime = get_runtime(job.runtime, generic_command=generic_command)
+        runtime = get_runtime(job.runtime)
     except KeyError as exc:
         finish_attempt("failed", str(exc))
         control.close()
         return 2
 
-    if restartable:
-        heart.start()
-        try:
-            if _shared_live_runtime_enabled(job):
-                return _run_shared_live_attempt(
-                    runtime=runtime,
-                    job=job,
-                    control=control,
-                    heart=heart,
-                    backend=backend,
-                    host=host,
-                    gateway_base_url=gateway_url,
-                    agent_timeout_s=agent_timeout_s,
-                    finish_attempt=finish_attempt,
-                )
-            return _run_retained_attempt(
-                runtime=runtime,
-                job=job,
-                control=control,
-                heart=heart,
-                backend=backend,
-                host=host,
-                gateway_base_url=gateway_url,
-                agent_timeout_s=agent_timeout_s,
-                finish_attempt=finish_attempt,
-            )
-        finally:
-            heart.stop()
-            control.close()
-
-    # Session persistence, for runtimes whose driver has real continuity. The
-    # state dir is a sibling of the worktree — never inside it, so session
-    # files cannot leak into a patch — and per job, like the worktree itself.
-    state_dir: str | None = None
-    context_state: HarnessState | None = None
-    if driver_for(runtime).capabilities().continuity != "replay":
-        state_path = pathlib.Path(f"{workdir}.state")
-        state_path.mkdir(parents=True, exist_ok=True)
-        state_dir = str(state_path)
-        if job.context_checkpoint:
-            context_state = state_from_checkpoint(job.context_checkpoint)
-
-    # The top rung: this thread may already be resident here (design §7).
-    # Reusing the *workspace* needs the same harness and a base the tree can
-    # resolve; riding the *live process* additionally needs the residency's
-    # grant, its model and an MCP-less turn — run_agent gates that part and
-    # falls to a restart in the same tree when it fails.
-    resident: ResidentEntry | None = None
-    if residents is not None and job.thread_id:
-        entry = residents.lookup(job.thread_id)
-        if entry is not None:
-            # What ends a residency at lookup is a harness switch (another
-            # CLI cannot read this session) and a base the tree cannot
-            # resolve; model switches and MCP turns reuse the workspace and
-            # are gated off the live process further down, in run_agent.
-            if entry.runtime_id != job.runtime:
-                unusable_reason = "harness_switch"
-            elif not _resident_base_ready(entry.workdir, job, backend):
-                unusable_reason = "base_unresolvable"
-            else:
-                unusable_reason = None
-                resident = entry
-                workdir = entry.workdir
-                state_dir = entry.state_dir
-                context_state = None
-            if unusable_reason is not None:
-                # First-class row, not a silent demotion: the staging
-                # acceptance spent an hour blind on exactly this branch —
-                # every turn quietly cold with promotion still succeeding.
-                control.append_event(
-                    NormalizedEvent(
-                        "lifecycle",
-                        {"phase": "residency_unusable", "reason": unusable_reason},
-                    )
-                )
-                # End the residency and run the ladder from COLD — the
-                # checkpoint it exported is the memory this turn resumes.
-                residents.drop(job.thread_id, release=True)
-
-    # Ask the backend, not this host: with an isolated backend the agent CLIs
-    # live in the sandbox image, so probing the runner's own PATH would refuse
-    # every job on a correctly configured machine.
-    if not backend.has_binary(runtime.binary):
-        # Fail the job explicitly rather than letting it hang in `running`
-        # until the reaper eventually gives up on it.
-        control.append_event(
-            NormalizedEvent("error", {"text": f"runtime binary {runtime.binary!r} missing"})
-        )
-        finish_attempt("failed", f"runtime binary {runtime.binary!r} is not installed")
-        control.close()
-        return 2
-
     heart.start()
-    # Set only by the succeeded finish. The finally below redeems it: a
-    # residency this attempt established, refreshed or borrowed survives
-    # *only* a confirmed success — every other exit (failure, cancel, a lease
-    # lost anywhere between promotion and finish, an exception a handler
-    # swallows) drops it, so a retry can never resume a session this attempt
-    # already advanced (review: the post-promotion lease-loss leak).
-    residency_confirmed = False
-    # The receipt: the generation this attempt borrowed or established. The
-    # finally redeems exactly it — a stale cleanup must never end a successor
-    # generation another turn established after ours.
-    residency_generation_held: int | None = resident.generation if resident else None
     try:
-        # A replacement attempt may inherit live user shells from the expired
-        # owner. Freeze their complete process trees before checkout or setup;
-        # stdin fencing alone cannot stop a watcher or background process.
-        terminals_suspended = True
-        control.suspend_terminals("workspace_preparing")
-        control.append_event(
-            NormalizedEvent(
-                "lifecycle",
-                {
-                    "phase": "started",
-                    "runtime": job.runtime,
-                    "attempt_no": job.attempt_no,
-                    **backend.sandbox_metadata(),
-                },
-            )
+        return _run_shared_live_attempt(
+            runtime=runtime,
+            job=job,
+            control=control,
+            heart=heart,
+            backend=backend,
+            host=host,
+            gateway_base_url=gateway_url,
+            agent_timeout_s=agent_timeout_s,
+            finish_attempt=finish_attempt,
         )
-
-        # Give the agent something to work on. Without this the self-hosted
-        # runner ran every job in an empty directory: the agent had no code to
-        # read, and the patch it produced was necessarily empty.
-        #
-        # A resident turn skips all of it: the live tree *is* the state the
-        # conversation has been building, its base was verified resolvable at
-        # lookup, and re-running checkout, context patch or setup over it
-        # would be repaving a road with traffic on it.
-        try:
-            if resident is not None:
-                base_sha = job.base_sha
-                reused_workspace = True
-                checked_out = None
-            elif (checked_out := existing_checkout_sha(workdir, job.repo)) is None:
-                reused_workspace = False
-                base_sha = prepare_worktree(
-                    workdir=workdir,
-                    repo=job.repo,
-                    base_sha=job.base_sha,
-                    clone_token=job.clone_token,
-                    remote_base=repo_clone_base_url(clone_token=job.clone_token),
-                )
-                if workspace_root is not None:
-                    checkout_output_branch(workdir, job.thread_id or job.job_id)
-            else:
-                reused_workspace = True
-                if workspace_root is not None:
-                    # A retry of this same job must preserve edits (and local
-                    # commits) already made in its durable worktree.  Fresh
-                    # follow-up jobs use a different directory, so there is no
-                    # cross-turn base drift to repair here.
-                    base_sha = job.base_sha or checked_out
-                else:
-                    # An externally prepared worktree (the Actions dogfood
-                    # checks the repository out itself) may be on an unrelated
-                    # ref, so the one-shot path still aligns to the pinned base.
-                    base_sha = align_existing_checkout(
-                        workdir, checked_out=checked_out, base_sha=job.base_sha
-                    )
-            # The agent owns this tree from here on, so it must be able to
-            # write to it — and git must not see it as another user's repo.
-            backend.adopt_workdir(workdir)
-        except WorktreeError as exc:
-            control.append_event(NormalizedEvent("error", {"text": str(exc)}))
-            finish_attempt("failed", str(exc))
-            return 2
-        control.append_event(
-            NormalizedEvent(
-                "lifecycle",
-                {
-                    "phase": "checked_out",
-                    "base_sha": base_sha,
-                    # A resident turn skipped the clone entirely — the tree is
-                    # the one this conversation has been building. Reporting
-                    # the same milestone either way told the owner their
-                    # thread had been rebuilt when it had not, and contradicted
-                    # the continuity badge on the very same turn.
-                    "reused": reused_workspace,
-                },
-            )
-        )
-
-        # A durable workspace already contains the preceding turn's edits.
-        # Re-applying the stored context patch would duplicate them (and often
-        # fail halfway through), so patch rehydration is only for fresh/legacy
-        # worktrees.
-        if job.context_patch and not reused_workspace:
-            try:
-                apply_context_patch(workdir, job.context_patch)
-            except WorktreeError as exc:
-                control.append_event(NormalizedEvent("error", {"text": str(exc)}))
-                finish_attempt("failed", str(exc), base_sha=base_sha)
-                return 2
-            control.append_event(
-                NormalizedEvent(
-                    "lifecycle",
-                    {"phase": "context_restored", "parent_job_id": job.parent_job_id},
-                )
-            )
-
-        # Setup runs before the agent and under its own egress tier: it needs
-        # a package registry, and the turn that follows — the one driven by
-        # untrusted model output — does not.
-        if job.setup_script and resident is None:
-            setup = run_setup(
-                script=job.setup_script,
-                workdir=workdir,
-                repo=job.repo,
-                backend=backend,
-                cache=build_cache_from_env(),
-            )
-            control.append_event(
-                NormalizedEvent(
-                    "lifecycle",
-                    {
-                        "phase": "setup",
-                        "cached": setup.restored_from_cache,
-                        "ran": setup.ran,
-                    },
-                )
-            )
-            if setup.exit_code != 0:
-                # A job whose dependencies did not install cannot do the work,
-                # and letting the agent start anyway produces a confusing
-                # failure much later, in the model's voice rather than the
-                # installer's.
-                finish_attempt(
-                    "failed",
-                    f"setup failed ({setup.exit_code}): {setup.detail}",
-                    base_sha=base_sha,
-                )
-                return 1
-
-        # Before the agent, and reported rather than raised: an attempt that
-        # dies on a lease timeout tells an operator nothing, and this one has a
-        # specific, actionable cause.
-        version_problem = runtime_version_unavailable(job, backend)
-        if version_problem is not None:
-            finish_attempt("failed", version_problem, base_sha=base_sha)
-            return 1
-
-        # Everything before this point is trusted workspace preparation.
-        # Retained terminals resume only for the agent execution window.
-        control.resume_terminals()
-        terminals_suspended = False
-
-        live_out: dict[str, Any] = {}
-        try:
-            exit_code, tail, tool_errors = run_agent(
-                runtime,
-                job=job,
-                workdir=workdir,
-                # The gateway, not the control plane. Everything above this
-                # line spoke to the control plane over `base_url`; the
-                # sandbox's model calls go somewhere else entirely, and
-                # conflating the two is what this argument exists to stop.
-                gateway_base_url=gateway_url,
-                control=control,
-                heart=heart,
-                timeout_s=agent_timeout_s,
-                backend=backend,
-                # Opaque ids, straight from the claim. The runner still never
-                # learns where an upstream server is or what credential
-                # reaches it — the relay resolves both. What it does carry
-                # now is the relay's own address and token, which are this
-                # deployment's, not an upstream's.
-                mcp_config=RuntimeMCPConfig(
-                    server_ids=tuple(job.mcp_servers),
-                    base_url=job.mcp_base_url,
-                    credential=job.mcp_token,
-                ),
-                state=context_state,
-                state_dir=state_dir,
-                resident=resident,
-                residents=residents,
-                live_out=live_out,
-            )
-        except BaseException:
-            # A lease lost — or anything else — mid-hot-turn must not leave a
-            # dead residency beating: the pool would keep reporting it, the
-            # control plane would keep its lease alive, and affinity would
-            # keep steering the thread's turns at a workspace whose turn just
-            # aborted. Drop by our own (thread, generation) and re-raise; the
-            # outer handlers own the attempt's fate.
-            if resident is not None and residents is not None and job.thread_id:
-                residents.drop(job.thread_id, release=True, generation=residency_generation_held)
-            raise
-        # A settled turn's workspace is worth keeping — and only a settled
-        # one: promotion happens here, before finish, while the attempt still
-        # earns the residency; the receipt is redeemed in the finally below.
-        # A failed turn keeps nothing; its thread continues COLD off its
-        # checkpoint (or the previous turn's).
-        if exit_code == 0 and state_dir is not None:
-            promoted = _promote_to_resident(
-                control,
-                runtime=runtime,
-                job=job,
-                backend=backend,
-                workdir=workdir,
-                state_dir=state_dir,
-                residents=residents,
-                session_id=live_out.get("session_id"),
-            )
-            if promoted is not None:
-                residency_generation_held = promoted
-            live = live_out.pop("session", None)
-            if live is not None:
-                if promoted is not None and residents is not None and job.thread_id:
-                    # The pool owns the process from here: retire, evict,
-                    # sweep and shutdown all close it. Attach is generation-
-                    # scoped and closes the session itself on a mismatch.
-                    residents.attach_session(job.thread_id, promoted, live)
-                else:
-                    # Survived its turn but has no residency to live in.
-                    with contextlib.suppress(Exception):
-                        live.close()
-        elif resident is not None and residents is not None and job.thread_id:
-            residents.drop(job.thread_id, release=True, generation=residency_generation_held)
-
-        # Freeze both interactive input and already-running terminal process
-        # trees before taking the patch and workspace snapshot. The finish
-        # endpoint resumes them immediately before the terminal state change.
-        terminals_suspended = True
-        control.suspend_terminals("workspace_finalizing")
-        patch = build_patch(workdir, backend, base_sha=job.base_sha or base_sha)
-        if patch.strip():
-            control.save_artifact("patch", patch)
-            control.append_event(
-                NormalizedEvent("diff", {"bytes": len(patch.encode()), "stored": True})
-            )
-        else:
-            control.append_event(NormalizedEvent("diff", {"bytes": 0, "stored": False}))
-
-        save_workspace_snapshot(control, workdir=workdir, patch=patch)
-
-        if exit_code == 130:
-            finish_attempt("cancelled", "cancelled by owner", base_sha=base_sha)
-            return 0
-
-        if exit_code != 0:
-            finish_attempt(
-                "failed",
-                f"agent exited {exit_code}: {tail[-500:]}",
-                base_sha=base_sha,
-            )
-            return 1
-
-        # The publisher runs outside the sandbox and drives publish/*; the
-        # runner's job ends at a validated patch. Leaving the job `running`
-        # would be a lie, so report success and let the publisher take it from
-        # here when a patch exists.
-        if not patch.strip():
-            # No patch is only success if nothing went wrong. A denied write
-            # followed by an agent claiming it succeeded must not be recorded
-            # as a clean run — the owner would see "succeeded" on a job that
-            # did nothing and never learn why.
-            if tool_errors:
-                finish_attempt(
-                    "failed",
-                    f"agent produced no changes after {len(tool_errors)} failed "
-                    f"tool call(s): {tool_errors[0]}",
-                    base_sha=base_sha,
-                )
-                return 1
-            finish_attempt("succeeded", "agent completed (no changes)", base_sha=base_sha)
-            residency_confirmed = True
-            return 0
-
-        finish_attempt("succeeded", "agent completed", base_sha=base_sha)
-        residency_confirmed = True
-        return 0
-    except WorktreeError as exc:
-        # Patch generation raises this on a Git failure, timeout or byte cap.
-        # Left to escape, the job stayed `running` until its lease expired and
-        # was retried — repeating a deterministic failure until the attempt
-        # budget ran out, with nothing in the record saying why.
-        print(f"patch generation failed: {exc}", file=sys.stderr)
-        with contextlib.suppress(Exception):
-            control.append_event(NormalizedEvent("error", {"text": str(exc)}))
-            finish_attempt("failed", str(exc), base_sha=base_sha)
-        return 2
-    except LeaseLost as exc:
-        print(f"lease lost, stopping: {exc}", file=sys.stderr)
-        return 3
     finally:
-        if (
-            not residency_confirmed
-            and residency_generation_held is not None
-            and residents is not None
-            and job.thread_id
-        ):
-            with contextlib.suppress(Exception):
-                residents.drop(job.thread_id, release=True, generation=residency_generation_held)
-        # A surprising runner-side exception must not strand retained user
-        # terminals in a suspended state. A stale attempt cannot resume them:
-        # the worker endpoint fences this call against its live lease.
-        if terminals_suspended:
-            with contextlib.suppress(Exception):
-                control.resume_terminals()
-        if workspace_root is not None:
-            with contextlib.suppress(OSError):
-                os.utime(workdir, None)
         heart.stop()
         control.close()
 
@@ -3776,72 +1915,26 @@ def _runner_version() -> str:
     return (os.environ.get("AGENT_RUNNER_VERSION") or "").strip()
 
 
-def _housekeeping(root: pathlib.Path, workspace_ttl_s: float) -> None:
-    """Reclaim disk between jobs.
-
-    A snapshot cache on the same host as every job worktree must not be the
-    thing that fills the disk. Called from both the working path and the
-    draining one — a drained machine is often drained *because* something is
-    wrong with it, and it is the state a host sits in for hours.
-
-    Every step suppresses its own failure: housekeeping must never be what
-    stops a runner serving.
-    """
-    cache = build_cache_from_env()
-    if cache is not None:
-        with contextlib.suppress(Exception):
-            cache.purge_expired()
-    with contextlib.suppress(Exception):
-        purge_stale_workspaces(root, ttl_seconds=workspace_ttl_s)
-
-
 def run_forever(
     *,
     base_url: str,
     gateway_url: str = "",
-    dispatcher_token: str,
     worker_id: str,
-    workdir_root: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
-    generic_command: str | None = None,
     idle_sleep_s: float = 5.0,
     backend: SandboxBackend | None = None,
-    workspace_ttl_s: float = DEFAULT_WORKSPACE_TTL_S,
     host: str | None = None,
 ) -> int:
-    """Claim and run jobs until interrupted — the long-lived runner.
+    """Claim shared-live turns until interrupted.
 
-    Each agent job gets a stable directory under ``workdir_root``.  Job and
-    user-terminal containers still remain disposable isolation boundaries, but
-    the mounted repository persists so Files, Git and the user terminal all see
-    the same worktree.  The validated job id keeps neighbouring workspaces
-    disjoint even when runners share a host; follow-up turns are rehydrated into
-    their own tree through the existing patch flow.
-
-    A failure in one job must not take the runner down: the store already
-    records the outcome against that job, and a runner that exits on the first
-    bad job turns one broken repository into an outage for every queued job.
+    The host runner owns scheduling and attestation only. The workspace broker
+    owns every retained container and resident Agent CLI process, so this loop
+    never creates or bind-mounts a host worktree.
     """
     backend = backend or build_backend_from_env()
-    root = pathlib.Path(workdir_root)
-    root.mkdir(parents=True, exist_ok=True)
-    # Pass the workdir root so a backend that bind-mounts it can prove the
-    # mount works now, rather than failing every job with an opaque error.
-    # Restartable chats keep the repository in the sandbox container's Docker
-    # writable layer. There is no host worktree to bind-mount, and requiring
-    # one here would defeat the Docker-only storage topology this mode exists
-    # to provide (it also fails for a runner that itself runs in Docker, where
-    # its filesystem path does not exist in the host daemon's namespace).
-    restartable_only = _restartable_mode_covers_every_runtime()
-    backend.preflight(workdir_root=None if restartable_only else str(root))
-    # Whether this runner can measure at all, checked once and said out loud.
-    # The first sampler assumed it ran on the host and read cgroupfs through a
-    # pid; deployed as a container beside its sandboxes, every read failed and
-    # the only symptom was grey text under every turn. An assumption about the
-    # deployment that nothing checks is how that happens twice, so this is the
-    # check. It is a warning, never fatal: a runner that cannot measure must
-    # still run jobs.
+    backend.preflight()
+
     if getattr(backend, "measurable", True):
         unmeasurable = daemon_reachable()
         if unmeasurable:
@@ -3850,126 +1943,70 @@ def run_forever(
                 "normally and report no resource usage.",
                 file=sys.stderr,
             )
-    # The sandbox must be able to reach the gateway it will be handed —
-    # `gateway_url`, not the control plane this runner claims against. Checking
-    # the wrong one proves the runner's own connectivity and says nothing about
-    # the sandbox's, which is the connection that actually fails per job.
     checker = getattr(backend, "check_gateway_reachable", None)
     if checker is not None:
         checker(gateway_url or base_url)
-    where = f" on host {host}" if host else " (no host reported)"
 
-    # Join the pool, if this deployment uses one. `None` means it does not —
-    # neither a stored credential nor an enrollment token — which is the
-    # single-host shape that predates the pool and has to keep working.
-    #
-    # The heartbeat runs whether or not jobs do. A host with nothing to do
-    # must still report, or the reaper marks it offline and stops sending it
-    # work: a pool that empties whenever it is idle.
-    initial_stamper = getattr(backend, "version_stamp", None)
-    initial_stamp: dict[str, Any] = initial_stamper() if initial_stamper is not None else {}
-    host_capabilities = _shared_live_host_capabilities(backend, initial_stamp)
+    stamper = getattr(backend, "version_stamp", None)
+    stamp: dict[str, Any] = stamper() if stamper is not None else {}
+    capabilities = _shared_live_host_capabilities(backend, stamp)
+    if SHARED_SANDBOX_CAPABILITY not in capabilities:
+        raise RuntimeError(
+            "this runner cannot attest shared-sandbox-v1; verify the container "
+            "backend, broker URL/token, host slots, runner replicas, image labels, "
+            "runtime pins, and live-session driver capabilities"
+        )
+    if not host:
+        raise RuntimeError(
+            "shared-live sandbox execution requires AGENT_RUNNER_HOST; every replica "
+            "on one machine must report the same enrolled host name"
+        )
+    slots_total = int(os.environ.get("AGENT_HOST_SLOTS") or 3)
     identity = ensure_enrolled(
         base_url=base_url,
-        host=host or worker_id,
+        host=host,
         broker_url=_broker_url_from_env(),
-        slots_total=int(os.environ.get("AGENT_HOST_SLOTS") or 0) or None,
-        capabilities=host_capabilities,
+        slots_total=slots_total,
+        capabilities=capabilities,
         runner_version=_runner_version(),
     )
-    if _retained_lifecycle_enabled() and identity is None:
+    if identity is None:
         raise RuntimeError(
-            "restartable/shared-live sandbox mode requires an enrolled host identity; "
-            "configure AGENT_ENROLL_TOKEN or a persisted host credential before "
-            "enabling retained chats"
+            "shared-live sandbox execution requires an enrolled host identity; "
+            "configure AGENT_ENROLL_TOKEN or a persisted host credential"
         )
-    pool: HostHeartbeat | None = None
-    residents: ResidentPool | None = None
-    if identity is not None:
-        # Collected once — the image and runtime are pinned for this process's
-        # lifetime — and repeated on every beat so a control plane that lost
-        # the row (or predates the columns) converges on the truth (issue #54).
-        # ``getattr`` for the same reason as ``check_gateway_reachable`` above:
-        # a deployment-owned backend that predates the hook must keep running.
-        stamper = getattr(backend, "version_stamp", None)
-        stamp: dict[str, Any] = stamper() if stamper is not None else initial_stamp
-        # Residency needs an enrolled identity twice over: establish/release
-        # authenticate with the host credential, and the beats ride the same
-        # heartbeat. A pool-less runner (the pre-enrollment shape) simply
-        # never keeps a sandbox — every turn is the ladder from COLD.
-        residents = ResidentPool(
-            establish=lambda **kw: establish_residency(base_url=base_url, identity=identity, **kw),
-            release=lambda thread_id, generation: release_residency(
-                base_url=base_url,
-                identity=identity,
-                thread_id=thread_id,
-                generation=generation,
-            ),
-            ttl_s=float(os.environ.get("AGENT_RESIDENCY_TTL_S") or 1800.0),
-        )
-        pool = HostHeartbeat(
-            base_url=base_url,
-            identity=identity,
-            broker_url=_broker_url_from_env(),
-            slots_total=int(os.environ.get("AGENT_HOST_SLOTS") or 0) or None,
-            # The deployment-ready fence is written only after the host script
-            # has attested every replica and recorded .deployed-sha. Recompute
-            # on each beat so the running processes publish that transition
-            # without a restart; the ordinary shared capability remains fixed
-            # by the immutable image/config checks above.
-            capabilities=lambda: _shared_live_host_capabilities(backend, stamp),
-            runner_version=_runner_version(),
-            sandbox_runtime=stamp.get("sandbox_runtime"),
-            sandbox_image_digest=stamp.get("sandbox_image_digest"),
-            runtime_versions=stamp.get("runtime_versions"),
-            runtime_versions_available=stamp.get("runtime_versions_available"),
-            residency_beats=residents.beats,
-            retained_sandbox_beats=(
-                _retained_sandbox_heartbeat_rows if _retained_lifecycle_enabled() else None
-            ),
-            on_residencies_lost=lambda lost: _handle_host_residencies_lost(residents, lost),
-            on_retained_sandboxes_stop=(
-                _stop_retained_sandboxes if _retained_lifecycle_enabled() else None
-            ),
-        )
-        pool.start()
-        where = f" on host {identity.host} (enrolled)"
 
-    # The durable sandbox row is pinned to the enrolled host identity. The
-    # configured value is only an enrollment hint; after enrollment the
-    # server-returned identity is authoritative.
-    claim_host = identity.host if identity is not None else host
-
+    pool = HostHeartbeat(
+        base_url=base_url,
+        identity=identity,
+        broker_url=_broker_url_from_env(),
+        slots_total=slots_total,
+        capabilities=lambda: _shared_live_host_capabilities(backend, stamp),
+        runner_version=_runner_version(),
+        sandbox_runtime=stamp.get("sandbox_runtime"),
+        sandbox_image_digest=stamp.get("sandbox_image_digest"),
+        runtime_versions=stamp.get("runtime_versions"),
+        runtime_versions_available=stamp.get("runtime_versions_available"),
+        retained_sandbox_beats=_retained_sandbox_heartbeat_rows,
+        on_residencies_lost=_handle_host_residencies_lost,
+        on_retained_sandboxes_stop=_stop_retained_sandboxes,
+    )
+    pool.start()
     _drain_on_sigterm()
 
     print(
-        f"agent runner {worker_id} started{where} (sandbox backend: {backend.name})",
+        f"agent runner {worker_id} started on host {identity.host} (enrolled; "
+        f"sandbox backend: {backend.name})",
         flush=True,
     )
 
     while True:
-        # Checked here, at the top, for the same reason the pool's answer is:
-        # between jobs is the only moment leaving costs nothing. A job already
-        # running is not interrupted — the signal handler only sets the flag.
         if _STOPPING.is_set():
             print("agent runner: stopping after the current job", file=sys.stderr, flush=True)
-            if residents is not None:
-                residents.close_all()
-            if pool is not None:
-                pool.stop()
+            pool.stop()
             return 0
 
-        # **Read the pool's answer before asking for work, not after.** A
-        # runner that claims first and checks second spends an attempt the
-        # operator has already said should not start. `draining` is a human
-        # saying "finish what you have"; a removed credential is the pool
-        # saying this machine is gone.
-        if pool is not None and not pool.claimable:
-            # Draining or gone either way: hot sandboxes are the opposite of
-            # "finish what you have and stop", so quiesce them now. Idempotent
-            # — after the first pass there is nothing left to close.
-            if residents is not None:
-                residents.close_all()
+        if not pool.claimable:
             if pool.removed.is_set():
                 print(
                     "agent runner: this host's credential was rejected; not claiming further work",
@@ -3978,74 +2015,32 @@ def run_forever(
                 )
                 pool.stop()
                 return 0
-            # Draining. Idle rather than exit: the operator may undrain, and a
-            # process that exited would need starting again by hand.
-            #
-            # Housekeeping still runs. `continue` would skip the snapshot-cache
-            # purge and the stale-workspace sweep at the bottom of this loop,
-            # and a machine is most often drained *because* something is wrong
-            # with it — leaving the one state where nothing reclaims disk to be
-            # the state a machine sits in for hours.
-            _housekeeping(root, workspace_ttl_s)
             time.sleep(idle_sleep_s)
             continue
+
         try:
             run_once(
                 gateway_url=gateway_url,
                 base_url=base_url,
-                # **The host's own credential when it has one.** The dispatcher
-                # token is shared by the whole pool, so it says "a runner" and
-                # not "which"; the control plane reads the host from the
-                # credential rather than from the request body, and that is
-                # what makes draining, pinning and revoking mean anything
-                # against a machine that has been taken over. Enrolling a host
-                # and then claiming with the shared token would leave every
-                # per-host control decorative.
-                dispatcher_token=(pool.credential if pool is not None else dispatcher_token),
+                host_credential=pool.credential,
                 worker_id=worker_id,
-                workdir=str(root),
                 lease_ttl=lease_ttl,
                 agent_timeout_s=agent_timeout_s,
-                generic_command=generic_command,
                 backend=backend,
-                workspace_root=str(root),
-                host=claim_host,
-                residents=residents,
+                host=identity.host,
             )
         except KeyboardInterrupt:
-            # Stop reporting before returning. The heartbeat is a daemon
-            # thread, so the process exits either way — but a machine that
-            # keeps saying "still here" while its runner shuts down stays
-            # `active` in the pool until the reaper's timeout, and jobs are
-            # dispatched to it in the meantime.
-            if residents is not None:
-                residents.close_all()
-            if pool is not None:
-                pool.stop()
+            pool.stop()
             return 0
         except ClaimUnreachable as exc:
-            # Raised only by the claim call, so this really does mean no job was
-            # taken. Normal at startup: compose starts the runner and the
-            # gateway together, and the runner wins the race about half the
-            # time. A transport failure *after* a claim falls through to the
-            # handler below, which does not claim otherwise.
             print(
-                f"agent runner: gateway unreachable, retrying: {exc}", file=sys.stderr, flush=True
+                f"agent runner: control plane unreachable, retrying: {exc}",
+                file=sys.stderr,
+                flush=True,
             )
         except Exception as exc:
-            # Keep serving: the store owns this job's outcome, and one bad
-            # repository must not stop every other queued job.
             print(f"agent runner: job failed unexpectedly: {exc}", file=sys.stderr, flush=True)
-        if residents is not None:
-            # Local TTL, beside the other housekeeping: an idle resident past
-            # its lease is released and torn down without waiting for a beat
-            # to be refused.
-            residents.sweep()
-        _housekeeping(root, workspace_ttl_s)
 
-        # `run_once` returns 0 with nothing claimed too; sleeping only when the
-        # queue was empty would need a separate signal, and a short sleep after
-        # any job is harmless next to a job's own runtime.
         time.sleep(idle_sleep_s)
 
 
@@ -4064,15 +2059,11 @@ def _env_float(name: str, fallback: float) -> float:
 def _chat_idle_timeout_s() -> float:
     """Read the one product-level chat inactivity clock.
 
-    ``AGENT_SESSION_IDLE_TIMEOUT_S`` shipped with the restartable preview and
-    remains a compatibility alias.  The canonical name says what this value
-    actually controls: the delay before an otherwise-settled chat container
-    is stopped.  Agent-turn and terminal limits are independent watchdogs and
-    must never be used to decide that a healthy chat is inactive.
+    This controls the delay before an otherwise-settled chat container is
+    stopped. Agent-turn and terminal limits are independent watchdogs and must
+    never be used to decide that a healthy chat is inactive.
     """
-    if os.environ.get("AGENT_CHAT_IDLE_TIMEOUT_S"):
-        return _env_float("AGENT_CHAT_IDLE_TIMEOUT_S", DEFAULT_CHAT_IDLE_TIMEOUT_S)
-    return _env_float("AGENT_SESSION_IDLE_TIMEOUT_S", DEFAULT_CHAT_IDLE_TIMEOUT_S)
+    return _env_float("AGENT_CHAT_IDLE_TIMEOUT_S", DEFAULT_CHAT_IDLE_TIMEOUT_S)
 
 
 def default_worker_id() -> str:
@@ -4102,9 +2093,8 @@ def default_runner_host() -> str | None:
     pool as its own "host" and every restart would add another one — an
     operator picking a machine would be choosing between rows of hex.
 
-    Unset means this runner joins no pool and stays invisible to the switch.
-    That is also the compatible default: with no host pinned, an unreporting
-    runner claims exactly as it always has.
+    The retained-only service requires this value (or enrollment supplies a
+    configured name); an unreported host cannot claim shared work.
     """
     return (os.environ.get("AGENT_RUNNER_HOST") or "").strip() or None
 
@@ -4134,7 +2124,7 @@ def build_parser() -> argparse.ArgumentParser:
             or os.environ.get("AGENT_GATEWAY_URL")
             or os.environ.get("FREEINFERENCE_BASE_URL", "")
         ),
-        help="Control plane: claim, heartbeat, events, artifacts, terminals.",
+        help="Control plane: claim, heartbeat, events, lifecycle, terminals.",
     )
     parser.add_argument(
         "--gateway-url",
@@ -4150,9 +2140,7 @@ def build_parser() -> argparse.ArgumentParser:
             "replica here; joins the pool an admin can switch between."
         ),
     )
-    parser.add_argument("--workdir", default=".")
-    # Read from the environment the way --base-url and --workdir-root already
-    # do. The compose overlay sets AGENT_LEASE_TTL and AGENT_TIMEOUT_S, and
+    # The compose overlay sets AGENT_LEASE_TTL and AGENT_TIMEOUT_S, and
     # neither reached the runner: every self-hosted job used the built-in
     # defaults regardless of what the operator configured, silently.
     parser.add_argument(
@@ -4164,23 +2152,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--agent-timeout",
         type=float,
         default=_env_float("AGENT_TIMEOUT_S", DEFAULT_AGENT_TIMEOUT_S),
-    )
-    parser.add_argument("--generic-command", default=os.environ.get("AGENT_GENERIC_COMMAND"))
-    parser.add_argument(
-        "--loop",
-        action="store_true",
-        help="Keep claiming jobs instead of exiting after one (self-hosted runner).",
-    )
-    parser.add_argument(
-        "--workdir-root",
-        default=os.environ.get("AGENT_WORKDIR_ROOT", "/var/lib/hybridinference/agent-jobs"),
-        help="Where per-job worktrees are retained in --loop mode.",
-    )
-    parser.add_argument(
-        "--workspace-ttl",
-        type=float,
-        default=_env_float("AGENT_WORKSPACE_TTL_S", DEFAULT_WORKSPACE_TTL_S),
-        help="Seconds to retain an idle job workspace (0 disables cleanup).",
     )
     return parser
 
@@ -4196,35 +2167,15 @@ def main(argv: list[str] | None = None) -> int:
     # it every INFO event a runner emits goes nowhere.
     configure_process_logging()
 
-    dispatcher_token = os.environ.get("AGENT_DISPATCHER_TOKEN", "")
-    if not args.base_url or not dispatcher_token:
-        parser.error(
-            "AGENT_CONTROL_PLANE_URL (or AGENT_GATEWAY_URL) and AGENT_DISPATCHER_TOKEN are required"
-        )
+    if not args.base_url:
+        parser.error("AGENT_CONTROL_PLANE_URL (or AGENT_GATEWAY_URL) is required")
 
-    if args.loop:
-        return run_forever(
-            base_url=args.base_url,
-            gateway_url=args.gateway_url or args.base_url,
-            dispatcher_token=dispatcher_token,
-            worker_id=args.worker_id,
-            workdir_root=args.workdir_root,
-            lease_ttl=args.lease_ttl,
-            agent_timeout_s=args.agent_timeout,
-            generic_command=args.generic_command,
-            workspace_ttl_s=args.workspace_ttl,
-            host=args.host,
-        )
-
-    return run_once(
+    return run_forever(
         base_url=args.base_url,
         gateway_url=args.gateway_url or args.base_url,
-        dispatcher_token=dispatcher_token,
         worker_id=args.worker_id,
-        workdir=args.workdir,
         lease_ttl=args.lease_ttl,
         agent_timeout_s=args.agent_timeout,
-        generic_command=args.generic_command,
         host=args.host,
     )
 
@@ -4238,11 +2189,8 @@ __all__ = [
     "ControlPlane",
     "LeaseLost",
     "WorktreeError",
-    "build_patch",
     "checkout_output_branch",
-    "existing_checkout_sha",
     "main",
     "prepare_worktree",
     "run_once",
-    "save_workspace_snapshot",
 ]

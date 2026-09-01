@@ -74,10 +74,9 @@ NOW="$(git rev-parse HEAD)"
 [ "${NOW}" = "${SHA}" ] || die "checkout landed on ${NOW}, expected ${SHA}"
 log "checkout now at ${NOW}"
 
-# The control-plane deployment accepts a shared-live host only after its
-# heartbeat carries this exact target commit. sandbox_host.sh first invalidates
-# the marker, and this wrapper publishes it only after both local readiness and
-# the operator-facing deployed-sha record have succeeded.
+# Every heartbeat carries this exact commit only after sandbox_host.sh has
+# proved all runner replicas and the broker. The control-plane deployment uses
+# it as a rolling-compatibility fence; it is not a topology switch.
 AGENT_DEPLOYMENT_SHA="${SHA}"
 export AGENT_DEPLOYMENT_SHA
 

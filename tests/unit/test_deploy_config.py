@@ -85,11 +85,14 @@ def test_complete_local_host_data_is_docker_owned(local_compose: dict):
 
 
 def test_complete_local_stack_runs_every_native_session_driver(local_compose: dict):
-    services = local_compose["services"]
+    from cloud_agent_host.runtimes import registered_runtimes
+
     expected = {"claude-code", "codex", "pi", "opencode", "kilo"}
+    assert set(registered_runtimes()) == expected
     for service_name in ("runner", "workspace-broker"):
-        configured = services[service_name]["environment"]["AGENT_RESTARTABLE_RUNTIMES"]
-        assert set(configured.split(",")) == expected
+        configured = local_compose["services"][service_name]["environment"]
+        assert "AGENT_RESTARTABLE_RUNTIMES" not in configured
+        assert "AGENT_SHARED_LIVE_RUNTIMES" not in configured
 
 
 def test_complete_local_edge_reresolves_recreated_services():
@@ -143,10 +146,11 @@ def test_default_backend_is_vm_isolated(compose: dict):
     assert "kata" in env["AGENT_SANDBOX_BACKEND"]
 
 
-def test_dispatcher_credential_is_required_not_defaulted(compose: dict):
-    """Starting a runner without a dispatcher credential must fail loudly."""
+def test_runner_uses_enrollment_not_a_shared_claim_secret(compose: dict):
     env = compose["services"]["runner"]["environment"]
-    assert ":?" in env["AGENT_DISPATCHER_TOKEN"]
+    assert "AGENT_DISPATCHER_TOKEN" not in env
+    assert "AGENT_ENROLL_TOKEN" in env
+    assert "AGENT_HOST_CREDENTIAL_FILE" in env
 
 
 def test_compose_only_uses_flags_the_runner_implements(compose: dict):
@@ -367,25 +371,15 @@ def test_a_failed_tunnel_probe_is_not_reported_as_a_successful_start() -> None:
     assert "probe_ok" in script
 
 
-def test_job_worktrees_are_a_host_path_at_the_same_path_inside(compose: dict):
-    """The daemon resolves the runner's bind source on the *host*.
-
-    A named volume satisfies the runner's own file operations and then fails
-    every `docker run --mount` with an opaque exit 125, because the path exists
-    only inside the runner container.
-    """
+def test_job_worktrees_are_not_host_mounted(compose: dict):
+    """Docker writable layers are the only local chat storage."""
     volumes = compose["services"]["runner"]["volumes"]
     workdir_mounts = [v for v in volumes if "agent-jobs" in v]
-    assert workdir_mounts, "the runner needs somewhere to put job worktrees"
-    for mount in workdir_mounts:
-        source, target = _split_mount(mount)[:2]
-        assert source == target, f"bind source and target must match, got {mount}"
-        resolved = _expand(source)
-        assert resolved.startswith("/"), "must be a host path, not a named volume"
+    assert workdir_mounts == []
 
 
-def test_workspace_broker_and_runner_share_the_same_worktrees(compose: dict):
-    """Files, Terminal, and Git must inspect the runner's live job directory."""
+def test_workspace_broker_and_runner_share_no_host_worktree(compose: dict):
+    """Files, Terminal, and Git resolve the shared container through Docker."""
     services = compose["services"]
     runner_mounts = {mount for mount in services["runner"]["volumes"] if "agent-jobs" in mount}
     broker_mounts = {
@@ -393,49 +387,42 @@ def test_workspace_broker_and_runner_share_the_same_worktrees(compose: dict):
     }
 
     assert broker_mounts == runner_mounts
+    assert broker_mounts == set()
+    assert "tmpfs" not in compose["services"]["workspace-broker"]
     # The source also asserted the gateway's own `backend` service pointed at
     # the broker on :8092. Here the gateway is not a service — it is reached
     # through the tunnel — so the caller-side half of that pairing lives in the
     # control plane's configuration, not in this file.
 
 
-def test_restartable_chat_gates_and_timeout_match_between_runner_and_broker(compose: dict):
-    """A runner must not dispatch retained/shared work to a disabled broker."""
+def test_shared_chat_timeout_matches_and_no_legacy_gate_remains(compose: dict):
     services = compose["services"]
     runner_env = services["runner"]["environment"]
     broker_env = services["workspace-broker"]["environment"]
 
-    assert runner_env["AGENT_RESTARTABLE_SANDBOX"] == broker_env["AGENT_RESTARTABLE_SANDBOX"]
-    assert runner_env["AGENT_SHARED_LIVE_SANDBOX"] == broker_env["AGENT_SHARED_LIVE_SANDBOX"]
+    for name in ("AGENT_RESTARTABLE_SANDBOX", "AGENT_SHARED_LIVE_SANDBOX"):
+        assert name not in runner_env
+        assert name not in broker_env
     assert runner_env["AGENT_CHAT_IDLE_TIMEOUT_S"] == broker_env["AGENT_CHAT_IDLE_TIMEOUT_S"]
-    runtime_default = (
-        runner_env["AGENT_RESTARTABLE_RUNTIMES"]
-        .removeprefix("${AGENT_RESTARTABLE_RUNTIMES:-")
-        .removesuffix("}")
-    )
-    assert set(runtime_default.split(",")) == {
-        "claude-code",
-        "codex",
-        "pi",
-        "opencode",
-        "kilo",
-    }
 
 
-def test_runner_deployment_fence_uses_the_persisted_host_state_mount(compose: dict) -> None:
+def test_runner_receives_exact_sha_rollout_metadata(compose: dict) -> None:
+    """Infrastructure metadata shares the host-state mount, never chat data."""
     runner = compose["services"]["runner"]
     env = runner["environment"]
 
-    assert "AGENT_DEPLOYMENT_SHA" in env
-    assert env["AGENT_SHARED_LIVE_READY_FILE"].endswith("/agent-host}/shared-live-ready")
+    assert env["AGENT_DEPLOYMENT_SHA"] == "${AGENT_DEPLOYMENT_SHA:-}"
+    assert "AGENT_HOST_STATE_ROOT" in env["AGENT_SHARED_LIVE_READY_FILE"]
+    assert env["AGENT_SHARED_LIVE_READY_FILE"].endswith("/shared-live-ready")
     assert any("AGENT_HOST_STATE_ROOT" in str(mount) for mount in runner["volumes"])
 
 
 def test_staging_deploy_enables_one_consistent_shared_live_rollout() -> None:
-    """Merging implementation code must actually exercise it in staging."""
+    """The exact target host is proved before the control plane rolls."""
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-staging.yml").read_text())
     jobs = workflow["jobs"]
     assert jobs["deploy"]["needs"] == "deploy-host"
+    assert "needs" not in jobs["deploy-host"]
     control_deploy = next(step for step in jobs["deploy"]["steps"] if step.get("name") == "Deploy")
     host_deploy = next(
         step for step in jobs["deploy-host"]["steps"] if step.get("name") == "Deploy"
@@ -443,36 +430,28 @@ def test_staging_deploy_enables_one_consistent_shared_live_rollout() -> None:
     control_env = control_deploy["env"]
     host_env = host_deploy["env"]
 
-    rollout = control_env["AGENT_SHARED_LIVE_SANDBOX"]
-    assert control_env["DEPLOYMENT_ENVIRONMENT"] == "staging"
-    assert control_env["STAGING_SHARED_LIVE_SANDBOX"] == rollout
-    assert "STAGING_SHARED_LIVE_SANDBOX" in rollout
-    assert "'1'" in rollout, "staging must not silently default back to legacy"
-    assert host_env["AGENT_SHARED_LIVE_SANDBOX"] == rollout
-    assert host_env["AGENT_RESTARTABLE_SANDBOX"] == rollout
-    assert host_env["STAGING_SHARED_LIVE_SANDBOX"] == rollout
-    assert host_env["DEPLOYMENT_ENVIRONMENT"] == "staging"
+    for env in (control_env, host_env):
+        assert "AGENT_SHARED_LIVE_SANDBOX" not in env
+        assert "AGENT_RESTARTABLE_SANDBOX" not in env
+        assert "STAGING_SHARED_LIVE_SANDBOX" not in env
     assert "STAGING_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
     assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
     assert "STAGING_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
 
 
 def test_target_commit_can_activate_staging_under_the_default_branch_workflow() -> None:
-    """A workflow_run reads main's YAML, so target scripts own policy and ordering."""
+    """Readiness is unconditional and no stale feature flag can bypass it."""
     for relative in (
         "deploy/control-plane/deploy.sh",
         "deploy/host/sandbox_host.sh",
     ):
         script = (REPO_ROOT / relative).read_text()
-        assert '"${GITHUB_WORKFLOW:-}"' in script
-        assert "Deploy Staging" in script
-        assert "DEPLOYMENT_ENVIRONMENT" in script
+        assert "STAGING_SHARED_LIVE_SANDBOX" not in script
+        assert "AGENT_SHARED_LIVE_SANDBOX" not in script
 
     control_script = (REPO_ROOT / "deploy/control-plane/deploy.sh").read_text()
     assert "cloud_agent.deploy_readiness" in control_script
-    assert control_script.index("cloud_agent.deploy_readiness") < control_script.index(
-        "compose up -d"
-    )
+    assert "--expected-deployment-sha" in control_script
 
 
 def test_workspace_broker_keeps_execution_off_the_public_gateway(compose: dict):
@@ -489,11 +468,12 @@ def test_workspace_broker_keeps_execution_off_the_public_gateway(compose: dict):
     assert broker["networks"] == ["internal"]
 
 
-def test_runner_retains_live_worktrees_for_workspace_tools(compose: dict):
-    """A finished run must outlive the process long enough to remain inspectable."""
+def test_chat_container_idle_timeout_is_configured(compose: dict):
+    """A settled container remains inspectable until the one chat idle clock."""
     env = compose["services"]["runner"]["environment"]
 
-    assert int(_expand(env["AGENT_WORKSPACE_TTL_S"])) > 0
+    assert int(_expand(env["AGENT_CHAT_IDLE_TIMEOUT_S"])) > 0
+    assert "AGENT_WORKSPACE_TTL_S" not in env
 
 
 def test_the_runner_image_can_actually_start_a_sandbox():
@@ -1254,8 +1234,8 @@ def test_the_tunnel_credential_is_mounted_read_only(remote_compose: dict):
 def test_the_tunnel_refuses_to_skip_host_verification():
     """Encrypting the hop is pointless if anything may answer for the gateway.
 
-    The credentials this tunnel exists to protect — the dispatcher token, every
-    job capability — would go straight to an impostor.
+    The credentials this tunnel exists to protect — the enrolled-host token and
+    every job capability — would go straight to an impostor.
     """
     script = _TUNNEL_ENTRYPOINT.read_text()
     assert "StrictHostKeyChecking=yes" in script

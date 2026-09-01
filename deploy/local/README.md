@@ -27,7 +27,6 @@ protocol is exercised.
 ```bash
 ./deploy/local/dev.sh up
 ./deploy/local/dev.sh smoke
-./deploy/local/dev.sh legacy-smoke
 ```
 
 Then open <http://127.0.0.1:13002>. The first sign-in displays an explicit
@@ -40,6 +39,11 @@ readiness checks, smoke-test URLs, console output, and the default OAuth
 callback allowlist from that value. An explicit
 `LOCAL_IDENTITY_ALLOWED_REDIRECTS` remains authoritative when testing a custom
 identity setup.
+
+For an isolated second stack, also export a distinct `LOCAL_PROJECT_NAME`,
+`LOCAL_AGENT_EGRESS_NETWORK`, `AGENT_NETWORK_NAME`, and the four published
+ports. This keeps its Docker volumes, service discovery, and sandbox egress
+network separate from another checkout's local stack.
 
 `up` may take a while the first time because the sandbox image installs exact
 versions of Claude Code, Codex, Pi, OpenCode, and Kilo. Later builds use Docker
@@ -58,16 +62,6 @@ therefore covers
 `NEW → LIVE → stopped → RESTORED`, prompt-free same-container Fork, concurrent
 source/child admission, group stop/restore, and completion of the final
 quiescent publication snapshot for all five CLIs.
-
-`legacy-smoke` is a separate compatibility check for the rollout's
-default-off path. It briefly stops the retained runners, recreates the local
-control plane with the shared-live rollout gate disabled, and launches one
-explicitly default-off runner with a same-path temporary bind (the topology
-production mixed mode requires). It proves that the job reaches Claude Code,
-exports a checkpoint, and completes in-sandbox patch generation. The temporary
-bind is removed and the normal control plane/runners are restored before exit,
-including after failure; the bind is not part of the normal Docker-only local
-storage topology.
 
 Useful commands:
 

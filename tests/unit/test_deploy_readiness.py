@@ -1,4 +1,4 @@
-"""The control plane does not enable shared-live before the host path exists."""
+"""A control-plane rollout cannot outrun its exact shared-live host path."""
 
 from __future__ import annotations
 

@@ -65,8 +65,8 @@ class _ClaimStore:
         *,
         worker_id: str,
         lease_ttl_seconds: float,
-        host: str | None = None,
-        host_credential_hash: str | None = None,
+        host: str,
+        host_credential_hash: str,
         claim_attestation: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if not self.queued:
@@ -90,9 +90,6 @@ class _ClaimStore:
             "mcp_servers": ["docs"],
             "metadata": {},
         }
-
-    async def follow_up_context(self, *, job_id: str) -> dict[str, Any]:
-        return {"messages": [], "patch": None}
 
     async def release_claim(
         self, *, job_id: str, attempt_id: int, lease_generation: int | None = None
@@ -158,13 +155,17 @@ def _app(store: _ClaimStore, grants: _Grants) -> FastAPI:
     app.dependency_overrides[get_agent_job_store] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[get_grant_client] = lambda: grants
-    app.dependency_overrides[agent_jobs_router.verify_dispatcher_access] = lambda: "dispatcher"
+    app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
+        "host": "runner-test",
+        "credential_hash": "test-credential-hash",
+    }
     return app
 
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "claim-test-secret")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "claim-test-broker-secret")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
     yield
 

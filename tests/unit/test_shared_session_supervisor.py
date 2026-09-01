@@ -20,7 +20,7 @@ from cloud_agent_host.resident_transport import (
     ResidentTransportFactory,
 )
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.session_supervisor import SessionBusy
+from cloud_agent_host.session_lifecycle import SessionBusy
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,

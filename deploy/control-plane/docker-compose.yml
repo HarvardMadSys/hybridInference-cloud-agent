@@ -93,7 +93,6 @@ services:
       # What a runner presents to claim work. Without it every claim is 401 and
       # the queue simply never drains — with nothing in the control plane's own
       # logs saying why, because the refusal is correct.
-      AGENT_DISPATCHER_TOKEN: ${AGENT_DISPATCHER_TOKEN:?the credential runners claim with}
       # The gateway alert relay's door (/v1/agent/service/oncall/*). Optional
       # as a pair: a deployment without on-call sets neither, the door answers
       # 401/503, and nothing else changes. The user id decides whose role and
@@ -109,10 +108,6 @@ services:
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-trusted-v1}
-      # New chats require a host that advertises the complete shared-live
-      # protocol; unset/0 preserves the legacy disposable scheduling path.
-      AGENT_SHARED_LIVE_SANDBOX: ${AGENT_SHARED_LIVE_SANDBOX:-0}
-
       # --- Publishing and source control ------------------------------------
       # The only component that holds a git credential, which is precisely what
       # keeps the sandbox credential-free. Unset means this deployment never
@@ -156,7 +151,7 @@ services:
       # --- Workspaces -------------------------------------------------------
       # Authorizes this service to the hosts' workspace brokers. Per-host
       # broker addresses come from each host's registration row, not from here.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:-}
+      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?shared with every enrolled host workspace broker}
       # Which hosts a registering machine may name as its broker. The token
       # above is shared across the pool, so an address accepted at
       # registration is an address that receives a credential good for every

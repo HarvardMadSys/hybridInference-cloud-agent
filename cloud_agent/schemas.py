@@ -12,7 +12,7 @@ import binascii
 from datetime import datetime  # noqa: TC003
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
@@ -201,10 +201,8 @@ class AgentJobResponse(BaseModel):
     tokens_in: int | None = None
     tokens_out: int | None = None
     model_calls: int | None = None
-    # How this turn was continued and how long it took — recorded per attempt
-    # since the resident design landed, exposed here so the owner can see why
-    # a thread forgot (a ``replay`` turn was rebuilt from transcript) rather
-    # than guess.
+    # Attempt continuity telemetry. New retained jobs report hot/warm/cold
+    # native behavior; replay remains readable only for historical rows.
     #
     # **Populated only by the single-job read** (``GET /jobs/{id}``), which is
     # the one the turn view renders from. List and thread reads leave all
@@ -414,16 +412,6 @@ class AgentThreadStatsResponse(BaseModel):
     timing_source: str
 
 
-class AgentJobArtifactResponse(BaseModel):
-    """One stored artifact (e.g. the produced patch)."""
-
-    job_id: str
-    attempt_id: int
-    kind: str
-    content: str
-    created_at: str | None = None
-
-
 class AgentWorkspaceEntry(BaseModel):
     """One safe child in an agent job's read-only workspace browser."""
 
@@ -450,7 +438,7 @@ class AgentWorkspaceResponse(BaseModel):
     status: Literal["added", "modified", "deleted"] | None = None
     omitted_reason: str | None = None
     writable: bool = False
-    source: Literal["workspace", "snapshot"] = "snapshot"
+    source: Literal["workspace"] = "workspace"
 
 
 class AgentWorkspaceWriteRequest(BaseModel):
@@ -548,7 +536,7 @@ class AgentGitCommit(BaseModel):
 
 
 class AgentGitWorkspaceResponse(BaseModel):
-    """Live diff/status/commit data, or an unavailable legacy-workspace marker."""
+    """Live diff, status, and commit data from the retained workspace."""
 
     available: bool
     branch: str = ""
@@ -588,6 +576,12 @@ class WorkerClaimAttestation(BaseModel):
 class WorkerClaimRequest(BaseModel):
     """Worker request to claim the next queued job."""
 
+    # A stale runner must fail loudly instead of having its request-body host
+    # identity silently discarded. Host identity comes only from the enrolled
+    # credential now; accepting the old field would make a broken rollout look
+    # healthy while the server ignored what the client thought it requested.
+    model_config = ConfigDict(extra="forbid")
+
     worker_id: str = Field(..., description="Stable identifier of the claiming worker.")
     lease_ttl_seconds: float = Field(
         120.0,
@@ -595,24 +589,11 @@ class WorkerClaimRequest(BaseModel):
         le=MAX_LEASE_TTL_SECONDS,
         description="How long the lease is valid without a heartbeat.",
     )
-    # Bounded and charset-checked because it is a primary key an admin reads
-    # off a page and clicks: an unconstrained field here lets a runner write
-    # whatever it likes into the machine list.
-    host: str | None = Field(
-        None,
-        max_length=253,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
-        description=(
-            "Machine this runner sits on, shared by its replicas. Joins the "
-            "pool an operator can pin agent jobs to. Omitted by runners that "
-            "predate host reporting."
-        ),
-    )
     attestation: WorkerClaimAttestation | None = Field(
         None,
         description=(
             "Claim-time runtime/image/version/kernel stamp from this exact runner replica. "
-            "Required for untrusted-kata-v1; trusted-v1 claims may omit it."
+            "Required for every retained/shared claim."
         ),
     )
 
@@ -670,15 +651,15 @@ class WorkerThreadSandbox(BaseModel):
     admitted_at: datetime | None = None
     last_settled_job_id: str | None = None
     native_session_id: str | None = None
-    # Additive shared-live topology. Older workers ignore these fields and
-    # continue to use the one-to-one values above; capable workers require the
-    # host capability before accepting ``shared_live=True``.
-    shared_live: bool = False
+    # Shared-live topology. These values are required by the retained-only
+    # runner even though the database row also carries the container's own
+    # lifecycle fields above.
+    shared_live: Literal[True] = True
     origin_thread_id: str | None = None
     resident_state: Literal["stopped", "starting", "live", "restarting", "lost"] = "stopped"
     residency_generation: int = 0
     resident_slot_id: int | None = None
-    resident_slot_capacity: int = 1
+    resident_slot_capacity: int = Field(8, ge=2, le=128)
     group_last_activity_at: datetime | None = None
     group_members: list[WorkerSandboxMember] = Field(default_factory=list)
 
@@ -687,7 +668,7 @@ class WorkerClaimResponse(BaseModel):
     """A claimed job plus the capability token scoped to this attempt."""
 
     job_id: str
-    thread_id: str | None = None
+    thread_id: str
     parent_job_id: str | None = None
     turn_no: int = 1
     attempt_id: int
@@ -718,8 +699,8 @@ class WorkerClaimResponse(BaseModel):
     thread_sandbox: WorkerThreadSandbox | None = Field(
         None,
         description=(
-            "The retained Docker container already owned by this thread. Null "
-            "for a new or legacy thread; once present, claims stay pinned to its host."
+            "The retained Docker container already owned by this chat group. Null "
+            "only until its first claim reserves one; all claims stay pinned to its host."
         ),
     )
     worker_token: str
@@ -753,23 +734,6 @@ class WorkerClaimResponse(BaseModel):
             "Short-lived read-only credential for this one repository, for the runner to "
             "check it out with. Stays in the runner; never enters the sandbox. Null when "
             "no GitHub App is configured, which is enough for a public repository."
-        ),
-    )
-    context_messages: list[dict[str, str]] = Field(
-        default_factory=list,
-        description="Prior platform conversation turns, excluding the current prompt.",
-    )
-    context_patch: str | None = Field(
-        None,
-        description="Successful parent patch to rehydrate before this follow-up runs.",
-    )
-    context_checkpoint: dict[str, Any] | None = Field(
-        None,
-        description=(
-            "The parent turn's ThreadCheckpoint envelope, decrypted and gated "
-            "(same driver, same CLI version, exported by exactly the turn this "
-            "follow-up continues). Null means replay — the always-available, "
-            "merely forgetful path."
         ),
     )
     mcp_servers: list[str] = Field(
@@ -830,19 +794,6 @@ class WorkerTerminalSuspendRequest(BaseModel):
     phase: Literal["workspace_preparing", "workspace_finalizing"]
 
 
-class WorkerArtifactRequest(BaseModel):
-    """An artifact produced by a worker (e.g. the git patch)."""
-
-    kind: str = Field(..., description="Artifact kind, e.g. 'patch'.")
-    content: str
-
-
-class WorkerArtifactResponse(BaseModel):
-    """Stored artifact id."""
-
-    artifact_id: int
-
-
 class WorkerContinuityRequest(BaseModel):
     """Which continuity rung this attempt is running on (design §9).
 
@@ -866,7 +817,7 @@ class WorkerSandboxReserveRequest(BaseModel):
     sandbox_image_digest: str | None = Field(None, max_length=512)
     execution_profile: ExecutionProfile
     host: str = Field(..., min_length=1, max_length=253)
-    shared_live: bool = False
+    shared_live: Literal[True] = True
     resident_slot_capacity: int = Field(8, ge=2, le=128)
     memory_limit: str = Field("4g", min_length=1, max_length=32)
     cpu_limit: str = Field("2", min_length=1, max_length=32)
@@ -980,12 +931,6 @@ class WorkerFinishRequest(BaseModel):
             "knowing its base, and a job may be submitted without naming a commit."
         ),
     )
-
-
-class WorkerPublishRequest(BaseModel):
-    """Publisher result recorded against the one-shot publish transition."""
-
-    pr_url: str
 
 
 class WorkerAckResponse(BaseModel):
@@ -1380,25 +1325,20 @@ class HostRegisterRequest(BaseModel):  # type: ignore[no-any-unimported]
             "host declares everything the job requires."
         ),
     )
-    slots_total: int | None = Field(
-        None,
+    slots_total: int = Field(
+        ...,
         gt=0,
         le=1024,
-        description="Concurrent attempts to accept. Omit for unmetered (the pre-pool behaviour).",
+        description="Concurrent attempts this enrolled host accepts.",
     )
-    broker_url: str | None = Field(
-        None,
+    broker_url: str = Field(
+        ...,
         max_length=2048,
         description=(
             "Where this host's workspace broker listens, as the control plane "
-            "reaches it. Supply it on every enrolled host that runs jobs: once "
-            "an attempt records this host, the broker is resolved from this "
-            "row and the global AGENT_WORKSPACE_BROKER_URL is NOT consulted. "
-            "Omitting it means file, terminal and git requests for this host's "
-            "jobs answer 'no broker' (409) rather than being served from "
-            "another machine's disk, which is the one fallback that would be "
-            "actively wrong. The env var remains the answer only for attempts "
-            "that record no host at all."
+            "reaches it. Every executable attempt records an enrolled host, and "
+            "files, terminals and Git resolve the broker from that host row. "
+            "Omitting it leaves the host unready and unable to serve chats."
         ),
     )
     runner_version: str | None = Field(None, max_length=128)
@@ -1462,7 +1402,7 @@ class RetainedSandboxBeat(BaseModel):  # type: ignore[no-any-unimported]
             "Null is unknown or currently active, not an immediate deadline."
         ),
     )
-    shared_live: bool = False
+    shared_live: Literal[True] = True
     members: list[WorkerSandboxMember] = Field(default_factory=list, max_length=128)
 
 
@@ -1477,7 +1417,7 @@ class RetainedSandboxStop(BaseModel):  # type: ignore[no-any-unimported]
     # zero. Rejecting it here leaks that reconstructed container in RUNNING.
     activation_generation: int = Field(..., ge=0)
     reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
-    shared_live: bool = False
+    shared_live: Literal[True] = True
 
 
 class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
@@ -1604,8 +1544,8 @@ class HostHeartbeatResponse(BaseModel):  # type: ignore[no-any-unimported]
             "The reported beats whose generation no longer holds its "
             "residency — echoed back with the generation, so a late answer "
             "to an old beat cannot end the successor the host has since "
-            "established. The host retires those workspaces; their threads "
-            "continue COLD off their checkpoints."
+            "established. The host fences those member processes; the retained "
+            "container still owns their native session files."
         ),
     )
     retained_sandboxes_stop: list[RetainedSandboxStop] = Field(

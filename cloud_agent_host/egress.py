@@ -86,7 +86,7 @@ VENDOR_TELEMETRY_DOMAINS = (
 # includes its telemetry, which `check_allowlist` refuses on principle.
 #
 # The selection rule is exfiltration, not download safety. The sandbox is
-# disposable and unprivileged, so "it could fetch something malicious" is
+# retained and unprivileged, so "it could fetch something malicious" is
 # already priced in; what matters is whether a host can *receive* a private
 # repository in a form the sender can read back. `api.github.com` is
 # deliberately absent for exactly that reason: an issue body is durable,

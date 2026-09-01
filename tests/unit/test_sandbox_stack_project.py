@@ -134,7 +134,7 @@ _SHARED_HOST_ENV = "\n".join(
     [
         "COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-prod",
         "SIBLING_COMPOSE_PROJECTS=freeinference-cloud-agent-sandbox-staging",
-        "AGENT_DISPATCHER_TOKEN=t",
+        "AGENT_ENROLL_TOKEN=test-enrollment-token",
         "AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:prod",
         "AGENT_TUNNEL_SSH_DESTINATION=user@gateway",
         "AGENT_TUNNEL_SSH_KEY=/dev/null",
@@ -144,22 +144,18 @@ _SHARED_HOST_ENV = "\n".join(
 )
 
 
-def test_a_shared_machine_must_name_its_own_state_roots(tmp_path: Path) -> None:
-    """Two stacks accepting the default paths do not sit beside each other.
+def test_a_shared_machine_must_name_its_own_host_state_root(tmp_path: Path) -> None:
+    """Two stacks may not share the persisted host enrollment identity.
 
-    The three roots are host directories bind-mounted into the containers, and
-    they default to the same `/var/lib/hybridinference/*` for every stack. The
-    dangerous one is the enrolment credential: the control plane reads a host
-    from the credential rather than from the claim body, so a shared state root
-    means the second stack registers as the first — and `AGENT_RUNNER_HOST`
-    cannot correct it, because nothing consults it after enrolment.
+    Chat data has no host worktree/snapshot root. The one remaining host bind
+    contains the enrolment credential: the control plane reads a host from the
+    credential rather than from the claim body, so sharing it makes the second
+    stack register as the first and AGENT_RUNNER_HOST cannot correct it.
     """
     result = _run(_host(tmp_path, dotenv=_SHARED_HOST_ENV), "up")
 
     assert result.returncode != 0
     assert "AGENT_HOST_STATE_ROOT" in result.stderr
-    assert "AGENT_WORKDIR_ROOT" in result.stderr
-    assert "AGENT_SNAPSHOT_ROOT" in result.stderr
 
 
 def test_a_lone_stack_needs_no_such_thing(tmp_path: Path) -> None:
@@ -177,7 +173,7 @@ def test_a_lone_stack_needs_no_such_thing(tmp_path: Path) -> None:
 
     result = _run(_host(tmp_path, dotenv=alone), "up")
 
-    assert "AGENT_WORKDIR_ROOT" not in result.stderr
+    assert "AGENT_HOST_STATE_ROOT" not in result.stderr
 
 
 def test_the_stray_matcher_still_recognises_this_stack(tmp_path: Path) -> None:

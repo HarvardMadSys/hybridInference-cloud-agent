@@ -256,9 +256,9 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   const timings = useMemo(() => toolTimings(job.events, attemptNo), [job.events, attemptNo]);
   const contextBadge = job.contextStatus ? CONTEXT_LABEL[job.contextStatus] : undefined;
   // NEW/LIVE/RESTORED/LOST is the user-facing correctness contract. The old
-  // HOT/WARM/COLD/REPLAY ladder remains useful for legacy attempts and admin
-  // diagnostics, but showing both on one turn made one fact look like two
-  // independent states. Fall back to it only for rows that predate context.
+  // HOT/WARM/COLD/REPLAY remains useful attempt telemetry and for historical
+  // rows, but showing both on one turn made one fact look like two independent
+  // states. Fall back to it only for rows that predate context status.
   const badge =
     !contextBadge && job.continuityMode ? CONTINUITY_LABEL[job.continuityMode] : undefined;
   const duration = formatDuration(job.durationMs);

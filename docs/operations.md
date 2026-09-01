@@ -18,21 +18,21 @@ in the project's issue history.
 
 ```text
 POST /v1/agent/jobs           owner queues work
-  → dispatcher claims          internal-role credential, mints three tokens
-    → runner checks out        read-only clone credential, never enters the sandbox
-    → sandbox runs the agent   only a model-scoped token crosses the boundary
-      → normalized events      streamed to the owner over SSE
-      → model calls            billed through the gateway into api_logs
-    → patch artifact           the agent never pushes
-  → publisher validates        .github/ block, secret scan, path escape, size
-    → agent/<job-id> branch    pinned refspec, never dev/main
-      → draft PR               a human reviews before anything merges
+  → enrolled host claims       exact shared-live capability attestation
+    → runner creates/starts     one retained Docker group and its writable layer
+      → native Agent CLI        one live process/session per member chat
+      → normalized events       streamed to the owner over SSE
+      → model calls             billed through the gateway into api_logs
+    → quiescent group snapshot  immutable diff; the agent never pushes
+  → publisher validates         .github/ block, secret scan, path escape, size
+    → agent/<origin-chat-id>     one stable branch per workspace group
+      → draft PR                a human reviews before anything merges
 ```
 
 Two properties are load-bearing and easy to break by accident:
 
-- **No repository credential ever enters the sandbox.** The agent emits a
-  patch; the publisher — running in the gateway, outside the sandbox — is the
+- **No repository credential ever enters the sandbox.** The host captures a
+  quiescent group diff; the publisher — running in the control plane, outside the sandbox — is the
   only component holding a GitHub token that can *write*. The runner does hold
   a clone credential, but it is read-only, scoped to the one repository, and
   deliberately never recorded in `.git/config`: the checkout adds no remote,
@@ -45,7 +45,7 @@ Two properties are load-bearing and easy to break by accident:
   that owner's gateway daily quota. **There is no per-job spend cap** — C5/C6
   removed it deliberately, so do not quote one as the bound on a leaked
   credential; the bound is the grant's scope plus its TTL. It cannot write the
-  event log, overwrite the patch, or move the job to a terminal state; the
+  event log, upload a replacement patch, or move the job to a terminal state; the
   runner holds the token that can.
 
 ## Verified
@@ -54,7 +54,7 @@ Against real components on a developer machine:
 
 | | How |
 |---|---|
-| Store: fencing, reaper, one-shot publish | dbtests against Postgres |
+| Store: fencing, reaper, retained-group snapshot publish | dbtests against Postgres |
 | Job API, SSE resume, worker endpoints | live gateway |
 | Per-job credential: auto-revoke ~~, budget 429~~ | live gateway. The struck half exercised a per-job spend cap that no longer exists: C5/C6 replaced it with the owner's gateway daily quota, which this service does not enforce and so cannot verify here |
 | Runner + runtime adapter | real Claude Code CLI, end to end |
@@ -311,24 +311,23 @@ first real job.
 
 ### 2. Credentials
 
-**Dispatcher credential** — set the same `AGENT_DISPATCHER_TOKEN` on the
-gateway and the runner; the claim gate accepts it directly.
+**Host credential** — mint one short-lived enrollment token for a named host:
 
 ```bash
-# both sides — one value, one purpose
-AGENT_DISPATCHER_TOKEN=$(openssl rand -hex 32)
+# Admin API; the response shows the single-use token once.
+POST /admin/agent/runner-hosts/enroll-token
 ```
 
-Prefer this over pointing the runner at `ADMIN_TOKEN` (which the gate still
-accepts, for migration): the runner host executes untrusted repository code
-next door, and the credential it holds should open exactly one door. The
-dedicated token claims work and does nothing else — to every other route it is
-an invalid credential, and rotating it touches nothing but the two settings
-above.
+Put that value in `AGENT_ENROLL_TOKEN` for first start. Registration replaces
+it with a long-lived credential bound to that host and persists the credential
+under `AGENT_HOST_STATE_ROOT`; every heartbeat and claim then authenticates
+with it. A host name in a request is never accepted as identity by itself.
 
-It must not be an ordinary user key: that endpoint takes the oldest queued job
-**across all tenants** and returns its repo, prompt, and a working capability
-token, so an ordinary key there would be a cross-tenant read.
+**Workspace broker credential** — generate one
+`AGENT_WORKSPACE_BROKER_TOKEN` per environment and set the same value on the
+control plane and every host broker. It authorizes file, terminal, Git, and
+session-lifecycle calls. It is not a claim credential and never enters a chat
+container.
 
 **GitHub credential** — install a GitHub App and give the *gateway* its private
 key. Nothing needs to be minted or rotated by hand: the platform signs a
@@ -408,8 +407,9 @@ the runner up that afternoon" is how the first real job actually ran.
 Opting a host in is a one-time `.env` edit:
 
 ```bash
-AGENT_DISPATCHER_TOKEN=<openssl rand -hex 32>   # same value gates /worker/claim
-AGENT_SANDBOX_BACKEND=container                  # host has no Kata shim yet
+AGENT_ENROLL_TOKEN=<single-use token for this host>
+AGENT_WORKSPACE_BROKER_TOKEN=<same environment value as the control plane>
+AGENT_SANDBOX_BACKEND=container  # explicit trusted-repository downgrade
 ```
 
 That second line is a **deliberate downgrade**, and the runner says so on every
@@ -493,65 +493,39 @@ image digest, CLI version and kernel stamp. This matters during rolling deploys,
 when runc and Kata replicas can temporarily share one Host row. A missing probe,
 an old runner, a custom runtime, a self-declared `kata` capability or a revoked
 Host credential simply cannot claim the secure job; there is no fallback to
-runc. `trusted-v1` keeps the legacy claim path only for trusted internal/dev
-repositories. Existing rows migrate to that compatibility profile, while every
-follow-up and fork inherits the profile already stored on its thread.
-Restartable chats additionally carry the original image digest in their immutable
-container labels and use that content-addressed image for any retry that occurs
-before Docker returned a container id; a moved image tag cannot change the chat's
-actual image while its database row still reports the old one.
+runc. `trusted-v1` selects the reviewed shared-kernel boundary for trusted
+internal repositories; it does not select another workspace/session executor.
+Every follow-up and fork inherits the execution profile stored on its thread.
+Retained chats carry the original image digest in immutable container labels
+and use that content-addressed image for a retry before Docker returned a
+container id; a moved image tag cannot change the chat's actual image while its
+database row still reports the old one.
 
 ### How many runners
 
-> **Capability-gated shared-live boundary.** With both
-> `AGENT_RESTARTABLE_SANDBOX=1` and `AGENT_SHARED_LIVE_SANDBOX=1`, and only on a
-> host advertising `shared-sandbox-v1`, the implementation in
-> `specs/2026-08-31-native-session-fork-shared-workspace-design.md` dispatches
-> Claude Code, Codex, Pi, OpenCode, and Kilo turns through one host-level
-> Session Supervisor. An ordinary chat owns one container/workspace and one
-> live CLI transport that remains resident between compatible turns. A
-> latest-settled Fork immediately invokes the pinned CLI's native fork-only
-> surface, adds a second chat/session/process to that same container, and lets
-> source and child run concurrently without a group turn lock. It creates no
-> Docker image/container clone and sends no model prompt. An older-turn Fork
-> still returns `409 historical_snapshot_unavailable` rather than silently
-> choosing newer context.
->
-> Group idle timeout closes every idle resident process and uses `docker stop`,
-> never `docker rm`; the next member operation starts the exact container and
-> lazily resumes that member. Workspace, dependencies, Agent CLI home, and
-> native session data remain in the Docker writable layer. Forked chats share
-> one Git/workspace/publication lineage, with only a bounded quiescent barrier
-> for snapshot capture. Capture runs on a short control-plane schedule separate
-> from attempt/grant reaping. A pending snapshot remains eligible after normal
-> idle stop: the broker starts the exact generation/container, captures it, and
-> re-arms the same group inactivity clock. Historical `legacy_1to1` containers
-> remain readable and resumable, but retained Fork is rejected for them. The
-> Docker-clone broker route, saga, and host implementation are absent. Keep the
-> capability off for general traffic until the exact-runtime
-> live-provider and Kata/gVisor conformance gates pass in the target deployment.
+The retained shared-session topology is unconditional. An ordinary chat is a
+one-member group with one container/workspace and one live CLI transport. Fork
+immediately invokes the pinned CLI's native fork-only surface and adds a second
+chat/session/process to that same container. Parent and child may execute
+concurrently without a group turn lock.
 
-> In shared-live mode, the Docker socket (or mTLS Engine endpoint) is the only
-> host control/data interface for chat state. `AGENT_WORKDIR_ROOT` and the
-> per-job snapshot/state binds documented below are legacy-mode settings and
-> are removed from the restartable supervisor. Infrastructure bootstrap
-> configuration is separate; no repository, workspace, Agent CLI home, or
-> session file is mapped from the host.
+`shared-sandbox-v1` is a claim attestation, not a feature switch. A host must
+advertise it from the exact runner replica that claims the job. Configure at
+least two host slots and runner replicas; staging defaults both to three. One
+runner executes one synchronous turn, so `AGENT_HOST_SLOTS` must not exceed
+`AGENT_RUNNER_REPLICAS`.
 
-> The checked-in production compose remains mixed-mode while shared-live is
-> default-off, so its shared runner/broker still carries the legacy workdir
-> bind. Retained requests do not use that path. The local retained stack uses
-> Docker-managed infrastructure volumes (and chat containers with `Mounts=[]`)
-> so it exercises the Docker-only storage topology; removing the production
-> legacy bind is the later retained-only cutover step.
+The Docker socket (or reviewed mTLS Engine endpoint) is the only host
+control/data interface for chat state. No repository, workspace, Agent CLI
+home, or session file is mapped from the host. Historical rows without a
+shared retained sandbox are non-runnable and fail closed.
 
 ### One chat inactivity clock (and separate safety watchdogs)
 
-`AGENT_CHAT_IDLE_TIMEOUT_S` is the restartable chat's sole lifecycle timeout
-and defaults to **1800 seconds (30 minutes)**. The preview-era
-`AGENT_SESSION_IDLE_TIMEOUT_S` spelling remains a deprecated fallback. Once
-the last turn is durably
-settled and no interactive terminal is attached, the host Session Supervisor
+`AGENT_CHAT_IDLE_TIMEOUT_S` is the sandbox group's sole lifecycle timeout and
+defaults to **1800 seconds (30 minutes)**. Once the latest activity across all
+members is durably settled and no member/broker operation is active, the host
+Session Supervisor
 issues `docker stop`; it never issues `docker rm`. A later acquire starts and
 re-inspects the same labelled container. Supervisor shutdown itself leaves all
 chat containers untouched. After a broker restart the supervisor does not
@@ -572,7 +546,7 @@ active turn.
 
 Before a prompt reaches Agent CLI stdin, the worker persists its `job_id` as
 the sandbox's admission receipt. If that retained activation's attempt lease
-expires, this preview stops it, marks the context LOST, and fails the job; it
+expires, the system stops it, marks the context LOST, and fails the job; it
 does not automatically retry even when the crash may have happened just before
 stdin. Any later messages already waiting behind that turn are failed in the
 same database transaction, and a new follow-up receives
@@ -595,54 +569,47 @@ not deactivate a healthy chat:
   live-process ownership plus renewable inference grant. Losing that lease
   demotes/restarts the member; it does not itself stop a healthy chat group or
   create another inactivity clock;
-- `AGENT_WORKSPACE_TTL_S` defaults to seven days and cleans only legacy host
-  worktrees. It must not address Docker-owned restartable chat state.
+- no workspace-cleanup TTL addresses chat data. This phase never removes a
+  retained sandbox; operators monitor Docker storage separately.
 
-`AGENT_RESTARTABLE_SANDBOX=1` enables retained Docker lifecycle;
-`AGENT_SHARED_LIVE_SANDBOX=1` additionally enables creation of supervisor-owned
-live groups and advertisement of `shared-sandbox-v1` after exact image/runtime
-attestation; the shared gate is invalid on a host unless the restartable gate
-is also enabled. `AGENT_SHARED_LIVE_RUNTIMES` defaults to
-`claude-code,codex,pi,opencode,kilo`. Compatible follow-ups send only the new
-prompt to the same resident process; recovery resumes the pinned native session
-in a replacement process. Latest-settled Fork is immediate and runtime-native
-inside the same container/workspace; older-turn forks fail closed and no new
-shared-live Fork creates a Docker clone. Keep the capability off for general
-traffic until the Kata/gVisor and real-provider matrix passes for every enabled
-CLI. The frontend treats `NEW`, `LIVE`, `RESTORED`, and `LOST` as canonical
-context-correctness states; `hot`, `warm_native`, `cold_native`, and `replay`
-remain diagnostic transport/recovery telemetry.
-
-The staging control-plane deployment does not turn this gate on merely because
-the host job is green. Before replacing the running control-plane container it
-requires a host heartbeat newer than the readiness check, confirms the active
-host pin can serve `shared-sandbox-v1`, and requires that heartbeat to name the
-exact target commit. The host publishes that commit fence only after every
-local runner/broker check and its `.deployed-sha` write succeed. The control
-plane then authenticates to the reported broker from its own network. Without
-an active-host pin, every online host currently advertising the shared
-capability must pass these target-commit and broker checks, because any of them
-may claim the next chat; offline and legacy-only rows do not block. This is also
-the ordering fence for the first `workflow_run`, whose workflow definition can
-still come from an older default branch and start the two deployment jobs in
-parallel.
+There is no retained/shared feature flag or runtime allowlist switch. Claude
+Code, Codex, Pi, OpenCode, and Kilo are claimable only after exact
+image/runtime/helper attestation. Compatible follow-ups send only the new
+prompt to the same resident process; recovery resumes the pinned native
+session in a replacement process. Latest-settled Fork is immediate and native
+inside the same container/workspace. The frontend treats `NEW`, `LIVE`,
+`RESTORED`, and `LOST` as context truth; hot/warm/cold/replay remains diagnostic
+telemetry and never chooses another executor.
 
 After a shared turn settles, its snapshot and draft-PR fields may still change
 asynchronously. The detail view and recent-task list poll only while that
 publication state is pending/capturing/captured/publishing, and stop at
-published/failed; legacy and ordinary terminal jobs do not acquire a background
+published/failed; other terminal jobs do not acquire a background
 polling loop.
 
-The preview does not yet implement R6 disk-pressure admission/alerting or a
-non-mutating pre-prompt context fingerprint. Keep general-traffic rollout off
-until those operational gates and the Kata/live-provider matrix are complete;
-the local stack below is intentionally suitable for functional development,
-not evidence that those production gates have passed.
+Disk-pressure admission/alerting and a non-mutating pre-prompt context
+fingerprint remain deployment hardening work. The local stack below is suitable
+for functional development, not evidence that the production Kata/live-provider
+and operational gates have passed.
+
+### Rolling deployment order
+
+Deploy the sandbox host before the control plane. The host invalidates its
+ready marker, replaces the runner/broker stack, runs the isolation, tunnel,
+runtime and retained Docker-root checks, records `.deployed-sha`, and only then
+publishes an exact `shared-sandbox-deployment:<sha>` capability. The
+control-plane deploy waits for a heartbeat newer than the start of that check
+and reverse-probes every eligible broker before `compose up` can replace the
+API. `SHARED_READY_TIMEOUT` controls that wait and defaults to 900 seconds.
+
+This fence is unconditional because retained/shared-live is the only executor.
+It cannot enable a legacy path and it cannot be bypassed by stale
+`AGENT_RESTARTABLE_*` or `AGENT_SHARED_LIVE_*` values. On failure, the existing
+control plane remains running and the deploy stops for operator repair.
 
 ### Retained Docker storage on a host
 
-Restartable chat state is not under `AGENT_WORKDIR_ROOT` or
-`AGENT_SNAPSHOT_ROOT`. It is the Docker container writable layer, so durable
+Retained chat state is the Docker container writable layer, so durable
 same-host operation attaches storage to the Docker daemon, not to each
 sandbox. A Linux host can use this shape (device and filesystem choices remain
 operator-specific):
@@ -700,10 +667,10 @@ coordination — `claim_job` uses `FOR UPDATE SKIP LOCKED`, so they share one
 queue with no leader and no sharding — and each job's sandbox is capped at
 4g / 2 cpus, so budget roughly that per replica.
 
-When shared-live is enabled, `AGENT_HOST_SLOTS` must not exceed this replica
-count and both values must be at least two. The deployment check also counts
-the actually running replicas before advertising the staging rollout as ready;
-a configured scale is not proof that its containers stayed up.
+`AGENT_HOST_SLOTS` must not exceed the replica count and both values must be at
+least two. The deployment check also counts the actually running replicas
+before declaring the host ready; a configured scale is not proof that its
+containers stayed up.
 
 Do not scale with a `--scale` flag instead: it survives exactly until the next
 `docker compose up` without it, which drops the fleet back to one and presents
@@ -714,9 +681,9 @@ submitting a batch can occupy every replica. Per-user concurrency quotas are
 P1 work.
 
 The script validates the required environment before starting and surfaces
-the runner's own preflight verdict (gateway reachable, image spawnable,
-workdir bind-mountable, egress network resolvable) instead of leaving it in a
-detached log. Equivalent by hand:
+the runner's own preflight verdict (gateway reachable, retained image/runtime
+usable, Docker data-root correct, egress network resolvable) instead of
+leaving it in a detached log. Equivalent by hand:
 
 ```bash
 # Add `--build-arg CLAUDE_CODE_VERSION=<exact version>` (and the equivalents for
@@ -737,15 +704,14 @@ runners share one queue with no leader and no sharding.
 |---|---|---|
 | `AGENT_SANDBOX_BACKEND` | `kata` | `process` (no isolation) refuses to start unless `AGENT_SANDBOX_ALLOW_UNISOLATED=1`. On the default `kata`, deploy refuses until the host has the shim and one real container proves it gets its own kernel; `container` is an explicit, and loudly restated, shared-kernel downgrade |
 | `AGENT_SANDBOX_IMAGE` | required | Image built from `Dockerfile.agent-sandbox` or an equivalent deployment-owned image |
-| `CLAUDE_CODE_VERSION`, `CODEX_VERSION`, `PI_VERSION`, `OPENCODE_VERSION`, `KILO_VERSION` | Dockerfile default | Which agent CLI version this host bakes into its sandbox image. Blank uses the reviewed pin — set one only to run something else here (staging soaking a new CLI, or a rollback). Must be an *exact* version: the build refuses a dist-tag or a range, because the pin is derived into the image labels that the heartbeat reports, the claim stamps onto every attempt, and the checkpoint gate compares before resuming a thread's session. Bumping one changes what the event parser must handle — re-run the agent-loop conformance suite |
+| `CLAUDE_CODE_VERSION`, `CODEX_VERSION`, `PI_VERSION`, `OPENCODE_VERSION`, `KILO_VERSION` | Dockerfile default | Which agent CLI version this host bakes into its sandbox image. Blank uses the reviewed pin — set one only to run something else here (staging soaking a new CLI, or a rollback). Must be an *exact* version: the build refuses a dist-tag or range because native-session admission compares the image label to the attempt pin before resume. Bumping one changes what the live protocol/event parser must handle — re-run the conformance suite |
 | `AGENT_SANDBOX_NETWORK` | `agent-egress` | Declared `internal: true`, so a sandbox reaches the gateway and nothing else. Also the `platform_only` network unless `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` overrides it |
 | `AGENT_EGRESS_SETUP_TIER` / `_AGENT_TIER` | `platform_only` | One of `platform_only` / `trusted` / `custom` / `full`, **per phase**. The design's external-beta shape is setup=`trusted`, agent=`platform_only`; the overlay ships both closed because there is no setup phase yet and no allowlist-fronted network to run one on |
 | `AGENT_EGRESS_NETWORK_*` | — | Network per tier. A tier with no network is an error when a phase selects it, never a fall back to a more open one |
-| `AGENT_SNAPSHOT_ROOT` | — | Where setup snapshots live. A snapshot holds only what the setup script added to the worktree — never the checkout — and is keyed by repository, script, and sandbox image. Unset disables caching, so every job reinstalls. Bind it at the same path inside and out, like the worktrees |
-| `AGENT_SNAPSHOT_TTL_S` | `604800` | Seven days, as the design specifies. A stale entry means a wrong dependency tree |
 | `AGENT_EGRESS_ALLOWLIST` | — | Checked at startup: it may not contain an agent vendor's telemetry domain, which would let a "closed" sandbox report on the repository it was given |
-| `AGENT_WORKDIR_ROOT` | `/var/lib/hybridinference/agent-jobs` | **Legacy/default-off mode only:** a host path bind-mounted at the same path inside the mixed-mode runner/broker. Legacy preflight test-mounts it and fails at startup if unavailable. Restartable chat containers never mount or address it; remove the bind only at retained-only cutover. |
 | `AGENT_RUNNER_HOST` | — | Names the *machine*, shared by its replicas: the unit the admin host switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. Unset keeps the machine out of the pool and changes nothing else |
+| `AGENT_HOST_SLOTS` / `AGENT_RUNNER_REPLICAS` | `3` / `3` | Concurrent turn capacity and synchronous executors. Both must be at least two and slots may not exceed replicas |
+| `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`; provision this root on durable storage. It is verified by the host and broker and is never mounted into a chat container |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
 | `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
@@ -773,8 +739,9 @@ not claim to read their source or publish GitLab merge requests yet.
 
 ### Which machine runs the jobs
 
-**Admin → Settings → Cloud Agent Host.** The list is every machine that has
-polled for work, and the radio button picks the one whose runners may claim.
+**Admin → Settings → Cloud Agent Host.** The list is every enrolled machine
+with authenticated heartbeats, and the radio button picks the one whose
+runners may claim.
 "Any host" is the default and means what it always meant: whoever polls first
 takes the job.
 
@@ -788,30 +755,17 @@ before using it:
   end, holding their leases. The two overlap — a drain would mean waiting for
   the old host to empty first, and this does not do that. Expect the old host
   to stay busy for as long as its longest running job.
-- **A runner reporting no host is refused while any host is pinned.** Failing
-  closed is deliberate: leaving the machine you just switched away from able to
-  claim would make the switch a lie. A runner without `AGENT_RUNNER_HOST` set
-  therefore stops taking work the moment anything is pinned.
-- **A machine joins the pool by polling, not by being registered.** Start a
-  runner there and it appears within seconds — including while it is being
-  turned away, which is what makes it selectable in the first place. Pinning to
-  a name nothing has ever polled from is refused, because the symptom is a
-  queue that hangs with nothing in the logs.
-- **A host name is a scheduling label, not a machine identity.** The runner
-  reports it, so anything holding `AGENT_DISPATCHER_TOKEN` can report any name;
-  two machines configured alike are one entry in the list. The credential is
-  the actual boundary. Use this to decide where *our* machines run *our* jobs,
-  and do not build anything on it that must survive a hostile runner.
+- **An unenrolled runner cannot claim.** The control plane derives the host
+  from its persisted host credential; a request-body name cannot impersonate a
+  pinned machine.
+- **A machine joins through one-time enrollment.** `AGENT_ENROLL_TOKEN` is
+  bound to the chosen host name and redeemed once. Replicas then share the
+  persisted host credential and heartbeat independently of claim traffic.
 - **There is no failover.** Pinning turns the other machines off, so if the
   pinned host's runners stop, the queue stops with them — nothing takes over.
   The admin page warns when the pinned host has not polled recently, but that
-  signal is imperfect in the other direction too: `last_seen` is refreshed by
-  claims alone, so a machine whose runners are all busy on long jobs looks
-  exactly like one that is down. Enrolled hosts now send an independent daemon
-  heartbeat (and shared-live deployment gates on its `last_heartbeat_at`), but
-  the current admin warning still renders the legacy polling timestamp. Use the
-  heartbeat/status fields for operational decisions until that UI warning is
-  switched over.
+  operational signal is the enrolled host heartbeat and broker probe, not
+  whether a runner happened to claim recently.
 
 Adding a *second* machine is not only this switch. A sandbox reaches the
 gateway over a network declared `internal: true`, which resolves nothing off
@@ -846,11 +800,10 @@ The sandbox's world is unchanged: one endpoint, ours. The tunnel is a relay and
 not a proxy — no CONNECT, no caller-chosen destination — so nothing the agent
 sends can widen it.
 
-**Why ssh rather than exposing the gateway's port.** Every claim carries
-`AGENT_DISPATCHER_TOKEN` and every job call carries that job's capability
-token. Binding `8080` to the lab network puts both in cleartext on a shared
-segment. The tunnel keeps the gateway listening on loopback, which is where it
-already listens.
+**Why ssh rather than exposing the gateway's port.** Sandboxes carry scoped
+inference grants and runners carry enrolled-host credentials. Binding either
+service to the lab network puts those capabilities in cleartext on a shared
+segment. The tunnel keeps each service listening on loopback.
 
 ```bash
 deploy/host/sandbox_host.sh up 4     # tunnel + 4 runners
@@ -950,34 +903,31 @@ timeout is the failure this section exists for.
 ### Three things about this topology that look like details and are not
 
 **The runner is not the gateway image.** It builds from
-`Dockerfile.agent-runner`, which adds a Docker client (the container backend
-shells out to `docker` to start each sandbox) and `git` (the runner checks the
-repository out). The gateway image has neither, and a runner built from it
-fails preflight on every host.
+`Dockerfile.agent-runner`, which adds a Docker client to create/inspect the
+retained chat container and `git` to prepare a credential-scrubbed source
+archive. The gateway image has neither, and a runner built from it fails
+preflight on every host.
 
-**The job worktree must be a host path with the same name on both sides.** The
-runner asks the daemon to bind-mount each job directory into the sandbox, and
-the daemon resolves that path on the *host* — not inside the runner container.
-A named volume works for the runner's own file operations and then fails every
-`docker run --mount` with exit 125.
+**There is no host worktree mapping.** For the first turn, the trusted runner
+uses a temporary directory only long enough to fetch the requested commit,
+removes all repository credentials, normalizes ownership in a tar stream, and
+imports that stream into `/workspace` in the retained container. The temporary
+clone is then deleted. All subsequent edits, provider state, terminals, setup
+results, and fork siblings remain in that same Docker writable layer.
 
-**The runner runs as root, and that is the design.** It creates each job
-worktree, checks the repository out, and then chowns the tree to uid 10001 —
-the sandbox image's user — before mounting it. Skip that and the agent cannot
-write a single file, and git refuses to look at the repository at all
-("dubious ownership"). An unprivileged runner falls back to making the tree
-world-writable and logs `agent_sandbox_workdir_world_writable`; that is only
-defensible on a dedicated single-purpose host.
-
-The isolation boundary is between the runner and the sandbox it starts, not
-around the runner. Running the runner unprivileged does not buy isolation — it
-already holds the dispatcher credential and the Docker socket.
+**The Docker socket is the host authority.** Runner and broker can create,
+start, stop, inspect, and exec in chat containers, so isolating those services
+from users matters more than changing their Unix uid. The security boundary is
+the retained sandbox (Kata for untrusted multi-tenant work; plain Docker only
+for trusted repositories), not a host bind mount or a second per-turn
+container.
 
 ### Dependency installation, and the proxy that allows it
 
-A job may carry a `setup_script`. It runs before the agent, under its own
-egress tier, and its result is cached per repository and script — so a retry
-does not reinstall.
+A chat may carry a `setup_script`. It runs inside the retained container before
+the first Agent CLI turn, under its own egress tier. Its files persist in that
+container's Docker writable layer across follow-ups, idle stop/start, and host
+service restarts; there is no host-side setup cache or portable setup archive.
 
 The tier is where the work is. `setup` defaults to `trusted` and `agent` stays
 `platform_only`, which in this deployment means three networks:
@@ -1112,12 +1062,10 @@ up to date. Every deviation from the source text:
   control plane, and the gateway keeps inference, the MCP proxy, and identity.
   The security property the sentence is making — the component holding a
   write-capable GitHub token is outside the sandbox — is unchanged by the move.
-- **`/var/lib/hybridinference/agent-jobs`, `hybridinference-agent-sandbox`, and
-  the other inherited names.** Renaming remains a separate pull request.
-  `AGENT_WORKDIR_ROOT` must stay unchanged for legacy worktrees during the
-  mixed-mode service cutover (see [cutover.md](cutover.md) step 6), but
-  restartable chats live only in Docker writable layers and do not depend on
-  it.
+- **`hybridinference-agent-sandbox` and other inherited image/service names.**
+  Renaming remains a separate pull request. Chat workspaces and session state
+  already live only in Docker writable layers; no inherited host-worktree path
+  participates in execution.
 - **Anything the split itself changes** — the control plane's own URL, host
   enrollment, inference grants. Those belong in [cutover.md](cutover.md) and in
   `ENVIRONMENT.md`, not in a page that was moved rather than rewritten.

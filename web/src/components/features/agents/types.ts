@@ -115,7 +115,7 @@ export interface AgentJob {
   repo: string;
   baseRef?: string;
   baseSha: string;
-  /** Output branch, agent/<thread-id> for conversations or agent/<job-id> for legacy jobs. */
+  /** Output branch for this retained conversation workspace. */
   branch: string;
   runtime: string;
   runtimeVersion?: string;
@@ -150,11 +150,7 @@ export interface AgentJob {
   rawLines: string[];
   gates: AgentGate[];
   usage: { tokensIn: string; tokensOut: string; cachePct: number; turns: number };
-  /**
-   * How this turn was continued. `replay` means it was rebuilt from the
-   * transcript with the agent's working memory lost — the honest answer to
-   * "why did it forget", and the reason this is surfaced at all.
-   */
+  /** Attempt continuity telemetry; `replay` can occur only on historical rows. */
   continuityMode?: 'hot' | 'warm_native' | 'cold_native' | 'replay';
   /** Canonical user-facing context state; independent of process-id reuse. */
   contextStatus?: 'new' | 'live' | 'restored' | 'lost';

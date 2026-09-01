@@ -28,10 +28,10 @@
 # **Each version is verified against its own binary before it counts.** The
 # labels this image carries are derived from these same arguments, and the
 # version-stamp pipeline treats a label as fact: the heartbeat reports it, the
-# claim writes it onto every attempt, and the checkpoint gate compares it before
+# claim writes it onto every attempt, and native-session admission compares it before
 # letting a thread resume its session. A dist-tag or a range would install
 # something the label does not describe, so it is refused here rather than
-# discovered later in a thread that mysteriously forgot itself.
+# discovered later in a thread that would otherwise resume with the wrong binary.
 set -euo pipefail
 
 runtime_id="${1:?runtime id}"

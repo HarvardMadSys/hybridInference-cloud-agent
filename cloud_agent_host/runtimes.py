@@ -281,9 +281,9 @@ class ClaudeCodeRuntime(AgentRuntime):
         # One adapter instance per job (see get_runtime), so this is per-run
         # state — the suppression below cannot leak across jobs.
         self._reported_subtypes: set[str] = set()
-        #: The CLI's own session id, captured from the ``init`` event. This is
-        #: the name of the session file a checkpoint exports and a later turn
-        #: resumes (design §6); ``None`` until the CLI has announced itself.
+        #: The CLI's own session id, captured from the ``init`` event. The
+        #: retained container resumes this native locator directly; ``None``
+        #: until the CLI has announced itself.
         self.session_id: str | None = None
 
     def prepare(
@@ -302,11 +302,11 @@ class ClaudeCodeRuntime(AgentRuntime):
     ) -> tuple[list[str], dict[str, str]]:
         """Build the headless invocation and its environment.
 
-        ``config_dir`` relocates the CLI's config/session storage (the state
-        mount, so session files outlive the container); ``resume_session_id``
-        continues an earlier session with only the new prompt — the COLD
-        restore of design §6. Both are claude-specific and passed only by the
-        claude driver; the generic session never sets them.
+        ``config_dir`` relocates the CLI's config/session storage inside the
+        retained container's writable layer; ``resume_session_id`` continues
+        an earlier native session with only the new prompt after the resident
+        process was replaced. Both are Claude-specific and passed only by the
+        Claude driver; the generic session never sets them.
         """
         argv = [
             self.binary,
@@ -368,9 +368,8 @@ class ClaudeCodeRuntime(AgentRuntime):
             "DISABLE_AUTOUPDATER": "1",
         }
         if config_dir:
-            # Session files land under the state mount instead of the
-            # container's throwaway HOME, which is what makes them exportable
-            # after exit and restorable before the next turn.
+            # Session files land in the retained container layer instead of a
+            # process-private HOME, so docker stop/start can resume them.
             env["CLAUDE_CONFIG_DIR"] = config_dir
         return argv, env
 
@@ -391,9 +390,8 @@ class ClaudeCodeRuntime(AgentRuntime):
 
         ``--input-format stream-json`` keeps the process alive between turns,
         reading user messages from stdin — the terminal-never-closed shape the
-        design's HOT tier is. Everything else (flags, env, MCP pairing) is the
-        one-shot invocation verbatim, built by the same code so the two can
-        never drift.
+        design's HOT tier is. The common argv/env builder stays shared with
+        runtime conformance tests so auth, model, and MCP flags cannot drift.
         """
         argv, env = self.prepare(
             workdir=workdir,
@@ -664,7 +662,7 @@ class CodexRuntime(AgentRuntime):
             "--model",
             model,
             # Beside the other -c overrides, and built by the dialect helper so
-            # the one-shot path cannot spell it differently from anywhere else.
+            # every resident launch uses exactly the same spelling.
             *self.effort_args(reasoning_effort),
             "-c",
             f'model_provider="{provider}"',
@@ -1527,18 +1525,16 @@ def runtime_reasoning_efforts() -> dict[str, list[str]]:
     return efforts
 
 
-def get_runtime(name: str, *, generic_command: str | None = None) -> AgentRuntime:
-    """Return the adapter for a runtime id.
+def get_runtime(name: str) -> AgentRuntime:
+    """Return one of the five live-session runtime adapters.
 
-    Unknown ids fall back to :class:`GenericRuntime` when a command template is
-    supplied, so a Tier 2 runtime needs no code change — and otherwise raise,
-    because silently running the wrong agent is worse than refusing.
+    Unknown ids fail closed. A command template cannot opt a one-shot process
+    into the retained topology because it cannot attest native resume, live
+    transport, immediate fork, or concurrent shared-workspace behavior.
     """
     runtime_cls = _REGISTRY.get(name)
     if runtime_cls is not None:
         return runtime_cls()
-    if generic_command:
-        return GenericRuntime(generic_command)
     known = ", ".join(sorted(_REGISTRY))
     raise KeyError(f"Unknown agent runtime {name!r}. Known: {known}")
 
