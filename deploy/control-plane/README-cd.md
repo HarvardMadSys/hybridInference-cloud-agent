@@ -15,19 +15,111 @@ Two branches, two environments, and they federate with the matching gateway:
 Merging to `dev` deploys. `.github/workflows/deploy-staging.yml` waits for
 `CI` to conclude green on `dev`, then runs a deploy script on each target.
 
-**Two machines, two jobs, neither waiting on the other.** The control plane and
-web app run on spark2 (ARM64); the runners, workspace broker, egress proxy and
-tunnels run on the runner host (x86_64). They are deployed by
+**Two machines, two jobs, host first.** The control plane and web app run on
+spark2 (ARM64); the runners, workspace broker, egress proxy and tunnels run on
+the runner host (x86_64). They are deployed by
 `deploy/control-plane/deploy.sh` and `deploy/host/deploy.sh` respectively, each
-by a runner installed on the machine it deploys. A control plane that fails to
-come up is not a reason to leave the runner host on an older commit, nor the
-reverse.
+by a runner installed on the machine it deploys. The host remains compatible
+with the old control plane and first proves `shared-sandbox-v1`; only then does
+the control-plane job enable scheduling that requires it. If the host fails,
+the control plane stays on the previous commit instead of accepting chats no
+healthy host can claim.
+
+That guarantee does not rest on workflow ordering alone. GitHub evaluates a
+`workflow_run` from the default branch, so the first `dev` merge carrying the
+new `needs: deploy-host` can still start the two older jobs in parallel. Before
+`compose up` replaces anything, the target control-plane image runs a one-off
+readiness command against the existing database. It requires an enrolled,
+online host to send a new `shared-sandbox-v1` heartbeat after the check began.
+That heartbeat must also carry an exact target-commit fence which the host
+publishes only after every local runner/broker check and its `.deployed-sha`
+write succeed. The command respects an active-host pin and dials that host's
+advertised broker from the control-plane network with the real broker
+credential. A failed or incomplete host deploy therefore times out the
+control-plane job while its previous containers continue running.
+
+With no active-host pin, **every** online host that advertises
+`shared-sandbox-v1` must carry the target fence and pass the reverse broker
+probe; any one of them may claim a new shared chat. Offline hosts and online
+legacy hosts without the shared capability are not schedulable for that work
+and do not block the rollout. With a pin, only the pinned host is eligible and
+it must pass the same checks.
+
+The commit fence is host-infrastructure metadata beside the enrolled-host
+credential under `AGENT_HOST_STATE_ROOT`. Only runner containers read that
+directory; it is not a chat workspace, a per-chat bind mount, or a substitute
+for Docker's retained writable layers.
 
 The host script is thin on purpose: `sandbox_host.sh up` already checks
 the daemon, requires the environment, runs the isolation preflight **fail
 closed**, builds the sandbox image, starts the stack, and probes the gateway
 from inside the closed network. Re-implementing any of that in the deploy would
 give it a second opinion about whether the host may run untrusted code.
+
+### Staging retained/shared-live rollout
+
+Staging deliberately exercises the topology shipped in PR #90. The workflow
+passes one value to the control plane, runner, and workspace broker, so a merge
+cannot deploy the implementation while silently continuing to create legacy
+disposable chats:
+
+GitHub evaluates a `workflow_run` using the workflow file on the default branch,
+which can lag `dev`. The target commit's control-plane and host deploy scripts
+therefore recognize `GITHUB_WORKFLOW=Deploy Staging` and apply the same defaults.
+The updated workflow also passes `DEPLOYMENT_ENVIRONMENT=staging` explicitly.
+This duplication is intentional: the very first merge containing a deployment
+policy must not wait for a later `main` sync before that policy takes effect.
+The target control-plane script's pre-`up` readiness barrier supplies the
+ordering that the older workflow file cannot.
+
+Set `DEPLOYMENT_ENVIRONMENT=staging` in both staging machines' `.env` files as
+well. CD passes it explicitly, while the persistent value makes a manual
+`sandbox_host.sh check` or deploy load exactly the same policy after the Actions
+process has exited. The workflow passes `STAGING_SHARED_LIVE_SANDBOX` itself, so
+the repository emergency switch still wins over a stale local override.
+
+- `STAGING_SHARED_LIVE_SANDBOX` defaults to `1`. Set the repository variable to
+  `0` as the emergency switch for **new** groups; it drives both
+  `AGENT_RESTARTABLE_SANDBOX` and `AGENT_SHARED_LIVE_SANDBOX` on the host and
+  the shared-live scheduling gate on the control plane. Existing durable groups
+  stay pinned and must be drained or migrated explicitly. During the first
+  default-branch bootstrap run, the same name may be placed in both machines'
+  `.env` files; this is the only override read before the updated workflow is
+  itself present on `main`.
+- `STAGING_HOST_SLOTS` defaults to `3` and drives both `AGENT_HOST_SLOTS` and
+  `AGENT_RUNNER_REPLICAS`. One runner executes one turn synchronously, so the
+  host refuses shared-live when declared slots exceed configured executors or
+  when fewer than the configured replicas are actually running.
+- `STAGING_RETAINED_DOCKER_DATA_ROOT` defaults to `/var/lib/docker`. Override it
+  when the daemon uses a dedicated durable data-root; this is a daemon path,
+  never a bind mount into a chat container.
+- `AGENT_CHAT_IDLE_TIMEOUT_S` is fixed at 1800 seconds for staging, so an idle
+  group is stopped after 30 minutes and its Docker writable layer is retained.
+
+Before building, `sandbox_host.sh` rejects a half-enabled host, missing enrolled
+identity, invalid slot/capacity, or a daemon whose reported `DockerRootDir` does
+not match the configured retained root. After startup it asks every runner to
+attest `shared-sandbox-v1`, authenticates to the broker health endpoint, proves
+the control-plane tunnel is reachable, and rejects a revoked host credential.
+The control-plane job then requires a fresh authenticated heartbeat in its own
+database, including the exact commit-ready fence written only after the host
+records that target in `.deployed-sha`, and performs the reverse broker probe
+from its own network before it replaces the running service. A green deployment
+therefore proves both directions of the path rather than merely proving that
+feature-gate strings reached Compose.
+
+Production remains default-off. Its workflow does not inject these staging
+values; enable it only as a separate rollout after the production host passes
+the isolation and real-provider conformance gates.
+
+This automatic host-first rollout assumes the staging control plane and its
+database already exist, which is the environment this PR upgrades. For a brand
+new environment, bootstrap in two explicit passes: set
+`STAGING_SHARED_LIVE_SANDBOX=0` and deploy once so the control plane can start
+and the host can enroll; then set it to `1` and dispatch the same commit again.
+The second pass exercises the full fresh-heartbeat and reverse-broker barrier.
+Trying to invent readiness from an absent database would turn a clean bootstrap
+prerequisite into an ambiguous partial deployment.
 
 ## Two stacks per host, and how they stay apart
 
@@ -120,6 +212,9 @@ assuming a rollback is just a redeploy.
 - Write `.deployed-sha` before the health checks pass. That file answers "what
   is actually running here", and writing it early answers it wrongly for every
   failed deploy.
+- Enable shared-live scheduling before a post-check host heartbeat and a
+  control-plane-to-broker health request both succeed. `SHARED_READY_TIMEOUT`
+  controls this deployment-only wait and defaults to 900 seconds.
 
 ## The names
 

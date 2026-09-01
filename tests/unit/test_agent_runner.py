@@ -72,8 +72,10 @@ def test_restartable_preview_defaults_to_every_native_session_driver(monkeypatch
 
 
 def test_shared_live_capability_attests_clis_and_non_menu_helpers(monkeypatch):
+    monkeypatch.setenv("AGENT_RESTARTABLE_SANDBOX", "1")
     monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "1")
     monkeypatch.setenv("AGENT_HOST_SLOTS", "2")
+    monkeypatch.setenv("AGENT_RUNNER_REPLICAS", "2")
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8082")
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
@@ -92,11 +94,90 @@ def test_shared_live_capability_attests_clis_and_non_menu_helpers(monkeypatch):
     assert runner_mod._shared_live_host_capabilities(backend, stamp) == []
 
 
-@pytest.mark.parametrize("capacity", ["nope", "1", "129"])
-def test_shared_live_capability_rejects_invalid_resident_capacity(monkeypatch, capacity):
+def test_shared_live_capability_publishes_only_a_completed_target_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_RESTARTABLE_SANDBOX", "1")
     monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "1")
     monkeypatch.setenv("AGENT_HOST_SLOTS", "2")
+    monkeypatch.setenv("AGENT_RUNNER_REPLICAS", "2")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8082")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
+    monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "target-sha")
+    ready_file = tmp_path / "shared-live-ready"
+    monkeypatch.setenv("AGENT_SHARED_LIVE_READY_FILE", str(ready_file))
+    stamp = {
+        "sandbox_image_digest": "sha256:shared-image",
+        "shared_sandbox_protocol": "v1",
+        "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+        "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+    }
+
+    ready_file.write_text("pending:target-sha\n")
+    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == [
+        "shared-sandbox-v1"
+    ]
+
+    ready_file.write_text("target-sha\n")
+    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == [
+        "shared-sandbox-v1",
+        "shared-sandbox-deployment:target-sha",
+    ]
+
+
+@pytest.mark.parametrize("capacity", ["nope", "1", "129"])
+def test_shared_live_capability_rejects_invalid_resident_capacity(monkeypatch, capacity):
+    monkeypatch.setenv("AGENT_RESTARTABLE_SANDBOX", "1")
+    monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "1")
+    monkeypatch.setenv("AGENT_HOST_SLOTS", "2")
+    monkeypatch.setenv("AGENT_RUNNER_REPLICAS", "2")
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", capacity)
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8082")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
+
+    assert (
+        runner_mod._shared_live_host_capabilities(
+            ContainerBackend(image="img"),
+            {
+                "sandbox_image_digest": "sha256:shared-image",
+                "shared_sandbox_protocol": "v1",
+                "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+                "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+            },
+        )
+        == []
+    )
+
+
+def test_shared_live_capability_requires_restartable_lifecycle(monkeypatch):
+    monkeypatch.setenv("AGENT_RESTARTABLE_SANDBOX", "0")
+    monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "1")
+    monkeypatch.setenv("AGENT_HOST_SLOTS", "2")
+    monkeypatch.setenv("AGENT_RUNNER_REPLICAS", "2")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8082")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
+
+    assert (
+        runner_mod._shared_live_host_capabilities(
+            ContainerBackend(image="img"),
+            {
+                "sandbox_image_digest": "sha256:shared-image",
+                "shared_sandbox_protocol": "v1",
+                "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+                "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+            },
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("slots", "replicas"),
+    [("2", ""), ("2", "1"), ("2", "nope"), ("3", "2")],
+)
+def test_shared_live_capability_requires_enough_runner_executors(monkeypatch, slots, replicas):
+    monkeypatch.setenv("AGENT_RESTARTABLE_SANDBOX", "1")
+    monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "1")
+    monkeypatch.setenv("AGENT_HOST_SLOTS", slots)
+    monkeypatch.setenv("AGENT_RUNNER_REPLICAS", replicas)
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8082")
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
 

@@ -9,6 +9,7 @@ validation and imports the same values so the two claim gates cannot drift.
 from __future__ import annotations
 
 SHARED_SANDBOX_CAPABILITY = "shared-sandbox-v1"
+SHARED_DEPLOYMENT_CAPABILITY_PREFIX = "shared-sandbox-deployment:"
 SHARED_SANDBOX_PROTOCOL = "v1"
 SHARED_SANDBOX_RUNTIME_PINS = {
     "claude-code": "2.1.220",
@@ -18,3 +19,11 @@ SHARED_SANDBOX_RUNTIME_PINS = {
     "kilo": "7.4.17",
 }
 SHARED_SANDBOX_HELPER_PINS = {"claude-agent-sdk": "0.2.148"}
+
+
+def shared_deployment_capability(deployment_sha: str) -> str:
+    """Return the host-ready fence for one exact deployed commit."""
+    normalized = deployment_sha.strip()
+    if not normalized:
+        raise ValueError("deployment SHA must not be empty")
+    return f"{SHARED_DEPLOYMENT_CAPABILITY_PREFIX}{normalized}"

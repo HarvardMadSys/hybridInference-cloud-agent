@@ -601,7 +601,8 @@ not deactivate a healthy chat:
 `AGENT_RESTARTABLE_SANDBOX=1` enables retained Docker lifecycle;
 `AGENT_SHARED_LIVE_SANDBOX=1` additionally enables creation of supervisor-owned
 live groups and advertisement of `shared-sandbox-v1` after exact image/runtime
-attestation. `AGENT_SHARED_LIVE_RUNTIMES` defaults to
+attestation; the shared gate is invalid on a host unless the restartable gate
+is also enabled. `AGENT_SHARED_LIVE_RUNTIMES` defaults to
 `claude-code,codex,pi,opencode,kilo`. Compatible follow-ups send only the new
 prompt to the same resident process; recovery resumes the pinned native session
 in a replacement process. Latest-settled Fork is immediate and runtime-native
@@ -611,6 +612,21 @@ traffic until the Kata/gVisor and real-provider matrix passes for every enabled
 CLI. The frontend treats `NEW`, `LIVE`, `RESTORED`, and `LOST` as canonical
 context-correctness states; `hot`, `warm_native`, `cold_native`, and `replay`
 remain diagnostic transport/recovery telemetry.
+
+The staging control-plane deployment does not turn this gate on merely because
+the host job is green. Before replacing the running control-plane container it
+requires a host heartbeat newer than the readiness check, confirms the active
+host pin can serve `shared-sandbox-v1`, and requires that heartbeat to name the
+exact target commit. The host publishes that commit fence only after every
+local runner/broker check and its `.deployed-sha` write succeed. The control
+plane then authenticates to the reported broker from its own network. Without
+an active-host pin, every online host currently advertising the shared
+capability must pass these target-commit and broker checks, because any of them
+may claim the next chat; offline and legacy-only rows do not block. This is also
+the ordering fence for the first `workflow_run`, whose workflow definition can
+still come from an older default branch and start the two deployment jobs in
+parallel.
+
 After a shared turn settles, its snapshot and draft-PR fields may still change
 asynchronously. The detail view and recent-task list poll only while that
 publication state is pending/capturing/captured/publishing, and stop at
@@ -683,6 +699,11 @@ Set it with `AGENT_RUNNER_REPLICAS` (default 3). Replicas need no
 coordination — `claim_job` uses `FOR UPDATE SKIP LOCKED`, so they share one
 queue with no leader and no sharding — and each job's sandbox is capped at
 4g / 2 cpus, so budget roughly that per replica.
+
+When shared-live is enabled, `AGENT_HOST_SLOTS` must not exceed this replica
+count and both values must be at least two. The deployment check also counts
+the actually running replicas before advertising the staging rollout as ready;
+a configured scale is not proof that its containers stayed up.
 
 Do not scale with a `--scale` flag instead: it survives exactly until the next
 `docker compose up` without it, which drops the fleet back to one and presents
@@ -786,8 +807,11 @@ before using it:
   The admin page warns when the pinned host has not polled recently, but that
   signal is imperfect in the other direction too: `last_seen` is refreshed by
   claims alone, so a machine whose runners are all busy on long jobs looks
-  exactly like one that is down. An independent heartbeat is the fix and is not
-  built yet.
+  exactly like one that is down. Enrolled hosts now send an independent daemon
+  heartbeat (and shared-live deployment gates on its `last_heartbeat_at`), but
+  the current admin warning still renders the legacy polling timestamp. Use the
+  heartbeat/status fields for operational decisions until that UI warning is
+  switched over.
 
 Adding a *second* machine is not only this switch. A sandbox reaches the
 gateway over a network declared `internal: true`, which resolves nothing off

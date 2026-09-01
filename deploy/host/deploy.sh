@@ -74,6 +74,13 @@ NOW="$(git rev-parse HEAD)"
 [ "${NOW}" = "${SHA}" ] || die "checkout landed on ${NOW}, expected ${SHA}"
 log "checkout now at ${NOW}"
 
+# The control-plane deployment accepts a shared-live host only after its
+# heartbeat carries this exact target commit. sandbox_host.sh first invalidates
+# the marker, and this wrapper publishes it only after both local readiness and
+# the operator-facing deployed-sha record have succeeded.
+AGENT_DEPLOYMENT_SHA="${SHA}"
+export AGENT_DEPLOYMENT_SHA
+
 # Which stack this deploy owns. Read the same way `sandbox_host.sh` reads it,
 # from the environment or from this deploy root's `.env`, so the guard below and
 # the bring-up can never disagree about which containers are ours.
@@ -126,10 +133,11 @@ fi
 # broken tunnel into a red deploy instead of jobs that claim and then fail.
 log "handing over to sandbox_host.sh up"
 if [ -n "${REPLICAS:-}" ]; then
-  bash deploy/host/sandbox_host.sh up "${REPLICAS}"
+  DEFER_SHARED_READY_MARKER=1 bash deploy/host/sandbox_host.sh up "${REPLICAS}"
 else
-  bash deploy/host/sandbox_host.sh up
+  DEFER_SHARED_READY_MARKER=1 bash deploy/host/sandbox_host.sh up
 fi
 
 printf '%s\n' "${SHA}" > .deployed-sha
+bash deploy/host/sandbox_host.sh mark-ready "${SHA}"
 log "deployed ${SHA} (was ${PREVIOUS})"

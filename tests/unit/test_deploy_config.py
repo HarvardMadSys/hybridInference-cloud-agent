@@ -399,13 +399,14 @@ def test_workspace_broker_and_runner_share_the_same_worktrees(compose: dict):
     # control plane's configuration, not in this file.
 
 
-def test_restartable_chat_gate_and_timeout_match_between_runner_and_broker(compose: dict):
-    """A runner must not dispatch retained work to a broker with the mode disabled."""
+def test_restartable_chat_gates_and_timeout_match_between_runner_and_broker(compose: dict):
+    """A runner must not dispatch retained/shared work to a disabled broker."""
     services = compose["services"]
     runner_env = services["runner"]["environment"]
     broker_env = services["workspace-broker"]["environment"]
 
     assert runner_env["AGENT_RESTARTABLE_SANDBOX"] == broker_env["AGENT_RESTARTABLE_SANDBOX"]
+    assert runner_env["AGENT_SHARED_LIVE_SANDBOX"] == broker_env["AGENT_SHARED_LIVE_SANDBOX"]
     assert runner_env["AGENT_CHAT_IDLE_TIMEOUT_S"] == broker_env["AGENT_CHAT_IDLE_TIMEOUT_S"]
     runtime_default = (
         runner_env["AGENT_RESTARTABLE_RUNTIMES"]
@@ -419,6 +420,59 @@ def test_restartable_chat_gate_and_timeout_match_between_runner_and_broker(compo
         "opencode",
         "kilo",
     }
+
+
+def test_runner_deployment_fence_uses_the_persisted_host_state_mount(compose: dict) -> None:
+    runner = compose["services"]["runner"]
+    env = runner["environment"]
+
+    assert "AGENT_DEPLOYMENT_SHA" in env
+    assert env["AGENT_SHARED_LIVE_READY_FILE"].endswith("/agent-host}/shared-live-ready")
+    assert any("AGENT_HOST_STATE_ROOT" in str(mount) for mount in runner["volumes"])
+
+
+def test_staging_deploy_enables_one_consistent_shared_live_rollout() -> None:
+    """Merging implementation code must actually exercise it in staging."""
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-staging.yml").read_text())
+    jobs = workflow["jobs"]
+    assert jobs["deploy"]["needs"] == "deploy-host"
+    control_deploy = next(step for step in jobs["deploy"]["steps"] if step.get("name") == "Deploy")
+    host_deploy = next(
+        step for step in jobs["deploy-host"]["steps"] if step.get("name") == "Deploy"
+    )
+    control_env = control_deploy["env"]
+    host_env = host_deploy["env"]
+
+    rollout = control_env["AGENT_SHARED_LIVE_SANDBOX"]
+    assert control_env["DEPLOYMENT_ENVIRONMENT"] == "staging"
+    assert control_env["STAGING_SHARED_LIVE_SANDBOX"] == rollout
+    assert "STAGING_SHARED_LIVE_SANDBOX" in rollout
+    assert "'1'" in rollout, "staging must not silently default back to legacy"
+    assert host_env["AGENT_SHARED_LIVE_SANDBOX"] == rollout
+    assert host_env["AGENT_RESTARTABLE_SANDBOX"] == rollout
+    assert host_env["STAGING_SHARED_LIVE_SANDBOX"] == rollout
+    assert host_env["DEPLOYMENT_ENVIRONMENT"] == "staging"
+    assert "STAGING_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
+    assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
+    assert "STAGING_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
+
+
+def test_target_commit_can_activate_staging_under_the_default_branch_workflow() -> None:
+    """A workflow_run reads main's YAML, so target scripts own policy and ordering."""
+    for relative in (
+        "deploy/control-plane/deploy.sh",
+        "deploy/host/sandbox_host.sh",
+    ):
+        script = (REPO_ROOT / relative).read_text()
+        assert '"${GITHUB_WORKFLOW:-}"' in script
+        assert "Deploy Staging" in script
+        assert "DEPLOYMENT_ENVIRONMENT" in script
+
+    control_script = (REPO_ROOT / "deploy/control-plane/deploy.sh").read_text()
+    assert "cloud_agent.deploy_readiness" in control_script
+    assert control_script.index("cloud_agent.deploy_readiness") < control_script.index(
+        "compose up -d"
+    )
 
 
 def test_workspace_broker_keeps_execution_off_the_public_gateway(compose: dict):

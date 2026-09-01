@@ -173,7 +173,14 @@ def _up(tmp_path: Path, dotenv: str) -> str:
     fake_bin.mkdir(exist_ok=True)
     docker = fake_bin / "docker"
     docker.write_text(
-        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\n[ "$1" = compose ] && exit 1\nexit 0\n'
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'if [ "$1" = compose ]; then\n'
+        '  printf "compose-env image=%s replicas=%s\\n" '
+        '"${AGENT_SANDBOX_IMAGE:-}" "${AGENT_RUNNER_REPLICAS:-}" >> "$DOCKER_LOG"\n'
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n"
     )
     docker.chmod(0o755)
 
@@ -215,6 +222,12 @@ def test_no_override_builds_the_reviewed_image(tmp_path: Path) -> None:
     assert "--build-arg" not in build, (
         f"an unconfigured host passed a build argument anyway: {build}"
     )
+
+
+def test_compose_receives_the_built_image_and_requested_replica_count(tmp_path: Path) -> None:
+    invocations = _up(tmp_path, _BASE_ENV + "AGENT_RUNNER_REPLICAS=4\n")
+
+    assert "compose-env image=freeinference-cloud-agent-job:staging replicas=4" in invocations
 
 
 def test_a_pin_in_dotenv_reaches_docker_build(tmp_path: Path) -> None:

@@ -45,6 +45,13 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.conclusion == 'success') }}
+    # Shared-live scheduling is enabled only after the host deployment has
+    # proved that every runner locally attests shared-sandbox-v1. The target
+    # control-plane script then requires a fresh heartbeat and reverse broker
+    # probe before replacing anything. A new host remains backward-compatible
+    # with the old control plane; the reverse order parks every new chat on a
+    # capability no healthy host may claim.
+    needs: deploy-host
     runs-on: [self-hosted, Linux, deploy-cloud-agent-control-staging]
     # Records the deployment, so staging appears in the repository's
     # Deployments panel beside production instead of being visible only to
@@ -52,10 +59,9 @@ jobs:
     # `workflow_run` job is filed under the default branch, so filtering the
     # run list by `dev` shows nothing and reads as "it never deployed".
     #
-    # Both jobs write to this one environment, matching production above.
-    # They are independent, so a run where one half fails and the other
-    # succeeds later leaves the panel green: the panel answers "did a deploy
-    # happen", and the Actions run answers "did both halves land".
+    # Both jobs write to this one environment, matching production. The host
+    # records first; this job records only after that prerequisite is green, so
+    # the final successful deployment represents both halves of shared-live.
     environment: staging
     timeout-minutes: 30
 
@@ -85,6 +91,12 @@ jobs:
           # machine's path. Named here so production and staging are configured
           # the same way rather than one by variable and one by default.
           DEPLOY_ROOT: ${{ vars.STAGING_CONTROL_DEPLOY_ROOT }}
+          # One rollout value drives both sides of the protocol. The repository
+          # variable is the emergency off switch; unset means staging exercises
+          # the feature PR #90 added instead of silently staying on legacy.
+          DEPLOYMENT_ENVIRONMENT: staging
+          STAGING_SHARED_LIVE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
+          AGENT_SHARED_LIVE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
         run: bash deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
@@ -102,10 +114,9 @@ jobs:
 
   deploy-host:
     name: Deploy runner host
-    # The other machine. Independent of the job above and deliberately not
-    # `needs:`-ed to it: they are separate hosts, and a control plane that fails
-    # to come up is not a reason to leave the runner host on an older commit —
-    # nor the reverse. Both gate on the same CI conclusion.
+    # The other machine. It goes first because it can serve the old control
+    # plane while proving the new capability; the control-plane job then turns
+    # scheduling on only after this job is green.
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
@@ -146,6 +157,23 @@ jobs:
           # rather than guessing when it is empty.
           COMPOSE_PROJECT: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
           SIBLING_COMPOSE_PROJECTS: ${{ vars.PROD_SANDBOX_COMPOSE_PROJECT }}
+          DEPLOYMENT_ENVIRONMENT: staging
+          # Keep the broker, runners and control plane on one rollout value.
+          # Setting STAGING_SHARED_LIVE_SANDBOX=0 is the emergency off switch
+          # for creation of new groups; durable existing groups remain pinned.
+          STAGING_SHARED_LIVE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
+          AGENT_RESTARTABLE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
+          AGENT_SHARED_LIVE_SANDBOX: ${{ vars.STAGING_SHARED_LIVE_SANDBOX || '1' }}
+          # One capacity value drives both the number of synchronous runner
+          # executors and the scheduler slots they advertise. Letting these
+          # drift can claim three simultaneous turns with only one process
+          # available to execute them, silently serialising fork siblings.
+          AGENT_HOST_SLOTS: ${{ vars.STAGING_HOST_SLOTS || '3' }}
+          AGENT_RUNNER_REPLICAS: ${{ vars.STAGING_HOST_SLOTS || '3' }}
+          AGENT_CHAT_IDLE_TIMEOUT_S: "1800"
+          # Docker, not a chat bind mount, owns retained writable layers. Set
+          # the repository variable if this daemon uses a non-default data-root.
+          AGENT_RETAINED_DOCKER_DATA_ROOT: ${{ vars.STAGING_RETAINED_DOCKER_DATA_ROOT || '/var/lib/docker' }}
         run: bash deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now

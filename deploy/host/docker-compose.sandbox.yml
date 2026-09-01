@@ -264,10 +264,20 @@ services:
       # container spends a fresh enrollment token on every restart, and
       # enrollment tokens are single-use.
       AGENT_HOST_CREDENTIAL_FILE: ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/credential
+      # Deployment completion fence. The host writes the exact target commit
+      # only after every local readiness check and .deployed-sha succeed; each
+      # heartbeat re-reads it so the control plane can distinguish a finished
+      # rollout from a runner that happened to start early.
+      AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:-}
+      AGENT_SHARED_LIVE_READY_FILE: ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/shared-live-ready
       # Shared native forks require this to be explicitly set to at least 2.
       # Unset preserves the legacy host's unmetered scheduling behavior while
       # also preventing it from advertising shared-sandbox-v1 by accident.
       AGENT_HOST_SLOTS: ${AGENT_HOST_SLOTS:-}
+      # One process executes one claimed turn at a time. Pass the configured
+      # scale into every replica so its exact claim attestation can refuse a
+      # shared-live capacity that has fewer executors than scheduler slots.
+      AGENT_RUNNER_REPLICAS: ${AGENT_RUNNER_REPLICAS:-3}
       # How this runner reaches its own broker: a service name on this stack's
       # network, which is exactly right here and meaningless anywhere else.
       AGENT_WORKSPACE_BROKER_URL: http://workspace-broker:8092

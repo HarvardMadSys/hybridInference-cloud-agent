@@ -99,6 +99,7 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
+    shared_deployment_capability,
 )
 from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_host.workspace_paths import purge_stale_workspaces, workspace_path
@@ -1746,9 +1747,23 @@ def _configured_shared_live_runtimes() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _restartable_feature_enabled() -> bool:
+    """Whether this host opted into retained Docker lifecycle management."""
+    return os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") not in ("", "0")
+
+
 def _shared_live_feature_enabled() -> bool:
-    """Whether this host opted into creating new shared-live sandbox groups."""
-    return os.environ.get("AGENT_SHARED_LIVE_SANDBOX", "") not in ("", "0")
+    """Whether this host can create new shared-live sandbox groups.
+
+    Shared-live is an extension of the restartable supervisor, not an
+    independent execution mode. Requiring both gates here keeps a direct
+    ``docker compose up`` as safe as the deployment script's preflight: a
+    half-enabled runner must never advertise a capability its broker cannot
+    serve.
+    """
+    return _restartable_feature_enabled() and os.environ.get(
+        "AGENT_SHARED_LIVE_SANDBOX", ""
+    ) not in ("", "0")
 
 
 def _shared_live_host_capabilities(
@@ -1763,6 +1778,16 @@ def _shared_live_host_capabilities(
     except ValueError:
         return []
     if slots < 2:
+        return []
+    try:
+        runner_replicas = int(os.environ.get("AGENT_RUNNER_REPLICAS") or 0)
+    except ValueError:
+        return []
+    # A runner executes one claimed turn synchronously. Declaring more host
+    # slots than configured executors would let the scheduler admit concurrent
+    # fork siblings that this host can only serialize. The host deployment also
+    # verifies that this many containers are actually running before rollout.
+    if runner_replicas < 2 or slots > runner_replicas:
         return []
     try:
         resident_capacity = int(os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or 8)
@@ -1802,7 +1827,17 @@ def _shared_live_host_capabilities(
             or not capabilities.concurrent_shared_workspace
         ):
             return []
-    return ["shared-sandbox-v1"]
+    capabilities = ["shared-sandbox-v1"]
+    deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
+    ready_file = (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
+    if deployment_sha and ready_file:
+        try:
+            ready_sha = pathlib.Path(ready_file).read_text().strip()
+        except OSError:
+            ready_sha = ""
+        if secrets.compare_digest(ready_sha, deployment_sha):
+            capabilities.append(shared_deployment_capability(deployment_sha))
+    return capabilities
 
 
 def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
@@ -1819,9 +1854,7 @@ def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
 
 def _retained_lifecycle_enabled() -> bool:
     """Whether either retained protocol needs host lifecycle reconciliation."""
-    return _shared_live_feature_enabled() or os.environ.get(
-        "AGENT_RESTARTABLE_SANDBOX", ""
-    ) not in ("", "0")
+    return _restartable_feature_enabled()
 
 
 def _shared_live_runtime_enabled(job: ClaimedJob) -> bool:
@@ -1840,7 +1873,7 @@ def _restartable_mode_covers_every_runtime() -> bool:
         _configured_shared_live_runtimes()
     ):
         return True
-    if os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") in ("", "0"):
+    if not _restartable_feature_enabled():
         return False
     return set(registered_runtimes()) <= _configured_restartable_runtimes()
 
@@ -1854,7 +1887,7 @@ def _restartable_runtime_enabled(job: ClaimedJob) -> bool:
         # legacy worktree would be silent context loss. The durable row wins
         # over a later flag change; rollback must drain/migrate explicitly.
         return True
-    if os.environ.get("AGENT_RESTARTABLE_SANDBOX", "") in ("", "0"):
+    if not _restartable_feature_enabled():
         return False
     return job.runtime in _configured_restartable_runtimes()
 
@@ -3879,7 +3912,12 @@ def run_forever(
             identity=identity,
             broker_url=_broker_url_from_env(),
             slots_total=int(os.environ.get("AGENT_HOST_SLOTS") or 0) or None,
-            capabilities=host_capabilities,
+            # The deployment-ready fence is written only after the host script
+            # has attested every replica and recorded .deployed-sha. Recompute
+            # on each beat so the running processes publish that transition
+            # without a restart; the ordinary shared capability remains fixed
+            # by the immutable image/config checks above.
+            capabilities=lambda: _shared_live_host_capabilities(backend, stamp),
             runner_version=_runner_version(),
             sandbox_runtime=stamp.get("sandbox_runtime"),
             sandbox_image_digest=stamp.get("sandbox_image_digest"),

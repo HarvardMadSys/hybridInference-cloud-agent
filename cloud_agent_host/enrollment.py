@@ -47,10 +47,7 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent_host.logging_utils import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 logger = get_logger(__name__)
 
@@ -518,7 +515,7 @@ class HostHeartbeat:
         identity: HostIdentity,
         slots_total: int | None = None,
         broker_url: str | None = None,
-        capabilities: list[str] | None = None,
+        capabilities: list[str] | Callable[[], list[str]] | None = None,
         runner_version: str | None = None,
         sandbox_runtime: str | None = None,
         sandbox_image_digest: str | None = None,
@@ -595,12 +592,15 @@ class HostHeartbeat:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                capabilities = (
+                    self._capabilities() if callable(self._capabilities) else self._capabilities
+                )
                 heartbeat(
                     base_url=self._base_url,
                     identity=self._identity,
                     slots_total=self._slots_total,
                     broker_url=self._broker_url,
-                    capabilities=self._capabilities,
+                    capabilities=capabilities,
                     runner_version=self._runner_version,
                     sandbox_runtime=self._sandbox_runtime,
                     sandbox_image_digest=self._sandbox_image_digest,

@@ -294,6 +294,34 @@ def test_a_heartbeat_does_not_silence_a_healthy_host(monkeypatch) -> None:
     assert beat.claimable, "the host stopped claiming the moment the pool answered"
 
 
+def test_each_heartbeat_recomputes_dynamic_host_capabilities(monkeypatch) -> None:
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    advertised = ["shared-sandbox-v1"]
+    bodies = []
+    beat = enrollment.HostHeartbeat(
+        base_url="http://cp",
+        identity=identity,
+        capabilities=lambda: list(advertised),
+    )
+
+    def record(url, body, bearer=""):
+        bodies.append(body)
+        if len(bodies) == 1:
+            advertised.append("shared-sandbox-deployment:target")
+        else:
+            beat._stop.set()
+        return {"status": "online", "heartbeat_interval_seconds": 0}
+
+    monkeypatch.setattr(enrollment, "_post", record)
+    beat._run()
+
+    assert bodies[0]["capabilities"] == ["shared-sandbox-v1"]
+    assert bodies[1]["capabilities"] == [
+        "shared-sandbox-v1",
+        "shared-sandbox-deployment:target",
+    ]
+
+
 def test_a_rejected_credential_stops_claims_for_good(monkeypatch) -> None:
     """401 and 403 name *this host*; there is nothing to retry."""
     identity = enrollment.HostIdentity(host="h1", credential="c")

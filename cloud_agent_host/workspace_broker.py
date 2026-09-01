@@ -1409,6 +1409,10 @@ def create_app(
         if shared_live_enabled is not None
         else os.environ.get("AGENT_SHARED_LIVE_SANDBOX", "") not in ("", "0")
     )
+    if shared_enabled and not restartable:
+        raise ValueError(
+            "shared-live sandbox mode requires restartable sandbox lifecycle to be enabled"
+        )
     shared_supervisor = shared_session_supervisor
     retained_manager: ChatSandboxManager | None = None
     if (supervisor is None or (shared_supervisor is None and shared_enabled)) and restartable:

@@ -68,6 +68,15 @@ def test_partial_restartable_broker_rollout_keeps_legacy_mount_preflight(monkeyp
     assert _restartable_mode_covers_every_runtime(True) is True
 
 
+def test_shared_live_broker_refuses_without_restartable_lifecycle():
+    with pytest.raises(ValueError, match="requires restartable sandbox lifecycle"):
+        create_app(
+            backend=ProcessBackend(),
+            restartable_enabled=False,
+            shared_live_enabled=True,
+        )
+
+
 class _FakeTerminalProcess(TerminalProcess):
     """Deterministic byte terminal for broker protocol tests."""
 
