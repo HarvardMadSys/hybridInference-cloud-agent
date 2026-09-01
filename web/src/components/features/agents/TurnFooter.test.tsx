@@ -717,9 +717,28 @@ describe('per-call resources, through both real adapters', () => {
     );
 
     expect(
-      screen.getByText(/Process observation is partial \(2 kernel events lost\)/),
+      screen.getByText(/Process observation is partial \(2 process lifecycle events lost\)/),
     ).toBeInTheDocument();
     expect(screen.getByText('≥1')).toBeInTheDocument();
+  });
+
+  it('describes non-loss observer incompleteness without blaming the kernel ring', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({
+            process_observation_complete: false,
+            processes_truncated: true,
+          }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    expect(
+      screen.getByText(/Process observation is partial; bounded observer data was incomplete/),
+    ).toBeInTheDocument();
   });
 
   it('keeps guest process details accessible when a turn emitted no tool event', () => {
@@ -754,7 +773,7 @@ describe('per-call resources, through both real adapters', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
 
     expect(
-      screen.getByText(/Process observation is partial \(1 kernel event lost\)/),
+      screen.getByText(/Process observation is partial \(1 process lifecycle event lost\)/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/observed no child process/)).toBeNull();
   });

@@ -504,8 +504,8 @@ function ProcessObservationTable({
       {!complete ? (
         <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
           Process observation is partial
-          {lost > 0 ? ` (${lost} kernel event${lost === 1 ? '' : 's'} lost)` : ''}
-          {truncated ? '; the bounded journal was truncated' : ''}.
+          {lost > 0 ? ` (${lost} process lifecycle event${lost === 1 ? '' : 's'} lost)` : ''}
+          {truncated ? '; bounded observer data was incomplete' : ''}.
         </p>
       ) : null}
     </div>
