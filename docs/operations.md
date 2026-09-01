@@ -482,8 +482,8 @@ accepts untrusted repositories, after at least one enrolled Kata Host passes
 preflight. A secure job is claimable only when all of the following are true in
 the same claim transaction:
 
-- the caller presents that Host's current per-host credential (the shared
-  dispatcher token is insufficient);
+- the caller presents that Host's current enrollment-issued per-host
+  credential; there is no shared dispatcher-token claim path;
 - the exact runner replica reports `io.containerd.kata.v2`;
 - Python preflight started the configured sandbox image under that runtime and
   observed a non-empty guest kernel different from the Host kernel.
@@ -823,7 +823,7 @@ topology this repository ships.
 |---|---|
 | `AGENT_TUNNEL_SSH_DESTINATION` | `user@gateway-host`. The only address anything on this machine can reach through the tunnel |
 | `AGENT_TUNNEL_SSH_KEY` | Private key, mounted read-only. Give it its own key and restrict it on the gateway: `command="",restrict,port-forwarding,permitopen="127.0.0.1:8080"` — a runner host needs one forwarded port, not a shell |
-| `AGENT_TUNNEL_SSH_KNOWN_HOSTS` | The gateway's host key. **Required**, and host checking is not disableable: an unverified hop would hand the dispatcher credential to whatever answers on that address, which is the attack encrypting it is meant to prevent |
+| `AGENT_TUNNEL_SSH_KNOWN_HOSTS` | The gateway's host key. **Required**, and host checking is not disableable: an unverified hop would hand scoped inference grants and tunnel traffic to whatever answers on that address, which is the attack encrypting it is meant to prevent |
 | `AGENT_TUNNEL_REMOTE_PORT` / `_HOST` | Where the gateway listens *on its own machine*; `127.0.0.1:8080` by default |
 | `AGENT_GATEWAY_HOSTNAME` | The name both the runner and the sandbox resolve the tunnel by, `agent-gateway` by default. **Do not override `AGENT_GATEWAY_URL` with the gateway's real address:** the runner would reach it and the sandbox, on the closed network, would not — jobs would be claimed and then die at their first model call |
 
