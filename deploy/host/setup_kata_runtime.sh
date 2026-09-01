@@ -30,6 +30,7 @@
 #   KATA_SHA256        digest for a version this script does not know
 #   KATA_EXTRACT_ROOT  filesystem root to unpack into (default /) — tests use this
 #   KATA_LINK_DIR      where the shim is linked (default /usr/local/bin)
+#   KATA_CONFIG_PATH   default runtime config to point at the packaged eBPF kernel
 
 set -Eeuo pipefail
 
@@ -70,6 +71,13 @@ KATA_RUNTIME="io.containerd.kata.v2"
 PREFIX="${KATA_EXTRACT_ROOT%/}/opt/kata"
 SHIM_BINARY="${PREFIX}/bin/containerd-shim-kata-v2"
 RUNTIME_BINARY="${PREFIX}/bin/kata-runtime"
+# Kata 3.29+ ships a separate debug kernel built with its reviewed eBPF/BTF
+# fragment.  Process events are observed inside the guest, so merely installing
+# the ordinary VM kernel is not sufficient: the runtime's actual default config
+# must boot this asset.  These paths stay overrideable for release-layout tests
+# and distro packages, but are never a switch that disables the check.
+KATA_CONFIG_PATH="${KATA_CONFIG_PATH:-${PREFIX}/share/defaults/kata-containers/configuration.toml}"
+KATA_DEBUG_KERNEL_PATH="${KATA_DEBUG_KERNEL_PATH:-${PREFIX}/share/kata-containers/vmlinuz-debug.container}"
 # Symlinked rather than added to PATH: containerd is started by systemd, and a
 # symlink into a directory already on the unit's default PATH means its unit
 # file never has to be edited. Upstream recommends this for the same reason.
@@ -157,7 +165,7 @@ links_are_current() {
   local name target
   for name in "${LINKED_COMMANDS[@]}"; do
     # Only what the release actually ships. Requiring a link for a command this
-    # version omits would make `is_installed` permanently false, and a repeat
+    # version omits would make `runtime_is_installed` permanently false, and a repeat
     # run would re-download 1.5 GB every time rather than doing nothing.
     [[ -e "${PREFIX}/bin/${name}" ]] || continue
     target="${KATA_LINK_DIR%/}/${name}"
@@ -167,12 +175,20 @@ links_are_current() {
   return 0
 }
 
-is_installed() {
+runtime_is_installed() {
   local current
   current="$(installed_version 2>/dev/null)" || return 1
   [[ "$current" == "$KATA_VERSION" ]] || return 1
   [[ -x "$SHIM_BINARY" ]] || return 1
   links_are_current
+}
+
+debug_kernel_is_configured() {
+  [[ -e "$KATA_DEBUG_KERNEL_PATH" ]] || return 1
+  [[ -r "$KATA_CONFIG_PATH" ]] || return 1
+  awk -v expected="kernel = \"${KATA_DEBUG_KERNEL_PATH}\"" \
+    '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }' \
+    "$KATA_CONFIG_PATH"
 }
 
 # ── Install ──────────────────────────────────────────────────────────────
@@ -232,6 +248,35 @@ link_binaries() {
   log "linked the shim into ${KATA_LINK_DIR%/} (the daemon finds it there without a unit-file edit)"
 }
 
+configure_ebpf_kernel() {
+  local config_target temporary
+  [[ -e "$KATA_DEBUG_KERNEL_PATH" ]] || die \
+    "${KATA_DEBUG_KERNEL_PATH} is missing. Kata ${KATA_VERSION} must include the eBPF/BTF guest kernel asset."
+  [[ -r "$KATA_CONFIG_PATH" ]] || die \
+    "${KATA_CONFIG_PATH} is missing. Cannot select the Kata guest kernel used by ${KATA_RUNTIME}."
+  config_target="$(readlink -f "$KATA_CONFIG_PATH")"
+  [[ -n "$config_target" && -f "$config_target" ]] || die \
+    "${KATA_CONFIG_PATH} does not resolve to a regular Kata runtime config."
+  temporary="$(mktemp "${config_target}.ebpf.XXXXXX")"
+  if ! awk -v kernel="$KATA_DEBUG_KERNEL_PATH" '
+      !changed && $0 ~ /^[[:space:]]*kernel[[:space:]]*=/ {
+        print "kernel = \"" kernel "\""
+        changed = 1
+        next
+      }
+      { print }
+      END { if (!changed) exit 42 }
+    ' "$config_target" >"$temporary"; then
+    rm -f "$temporary"
+    die "${KATA_CONFIG_PATH} has no active kernel setting to replace."
+  fi
+  chmod 0644 "$temporary"
+  mv -f "$temporary" "$config_target"
+  debug_kernel_is_configured || die \
+    "failed to configure ${KATA_RUNTIME} to boot ${KATA_DEBUG_KERNEL_PATH}."
+  log "configured the Kata eBPF/BTF guest kernel: ${KATA_DEBUG_KERNEL_PATH}"
+}
+
 verify_install() {
   # `kata-runtime check` is upstream's own hardware verdict. It is advisory here
   # rather than fatal: it warns about things (a missing kernel module for one
@@ -250,8 +295,11 @@ cmd_install() {
   require_virtualization
   require_tools
 
-  if is_installed; then
-    log "Kata ${KATA_VERSION} is already installed and linked; nothing to do."
+  if runtime_is_installed; then
+    if ! debug_kernel_is_configured; then
+      configure_ebpf_kernel
+    fi
+    log "Kata ${KATA_VERSION} is already installed, linked, and observer-ready; nothing to download."
     verify_install
     return 0
   fi
@@ -278,6 +326,7 @@ cmd_install() {
   download_and_verify "$archive" "$expected"
   extract "$archive"
   link_binaries
+  configure_ebpf_kernel
   verify_install
 
   log "done. Kata ${KATA_VERSION} is installed; '${0} --check' now passes."
@@ -298,9 +347,13 @@ cmd_check() {
     "${SHIM_BINARY} is missing or not executable. Re-run: sudo ${0}"
   links_are_current || die \
     "the ${KATA_RUNTIME} shim is not linked into ${KATA_LINK_DIR%/}, so the Docker daemon cannot find it. Re-run: sudo ${0}"
+  [[ -e "$KATA_DEBUG_KERNEL_PATH" ]] || die \
+    "the packaged eBPF/BTF guest kernel is missing at ${KATA_DEBUG_KERNEL_PATH}. Re-run: sudo ${0}"
+  debug_kernel_is_configured || die \
+    "${KATA_RUNTIME} is not configured to boot the packaged eBPF/BTF kernel. Re-run: sudo ${0}"
   require_virtualization
 
-  log "Kata ${current} is installed, linked, and this host can start VMs."
+  log "Kata ${current} is installed, observer-ready, and this host can start VMs."
 }
 
 case "${1:-install}" in

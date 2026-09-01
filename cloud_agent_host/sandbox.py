@@ -50,6 +50,7 @@ from cloud_agent_host.egress import (
     build_policy_from_env,
 )
 from cloud_agent_host.egress_proxy import CANARY_HOST
+from cloud_agent_host.guest_observer import GUEST_OBSERVER_BINARY, GUEST_OBSERVER_VERSION
 from cloud_agent_host.logging_utils import get_logger
 
 if TYPE_CHECKING:
@@ -1111,31 +1112,41 @@ class ContainerBackend(SandboxBackend):
         # shared-kernel boundary, not a failed VM probe.
         if not self.runtime or self.runtime == "runc":
             return
-        argv = [
-            self.docker_binary,
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--runtime",
-            self.runtime,
-            "--entrypoint",
-            "/bin/sh",
-            self.image,
-            "-c",
-            "uname -r",
-        ]
-        try:
-            probe = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SandboxError(f"could not probe sandbox runtime {self.runtime!r}: {exc}") from exc
+        if self.runtime == KATA_RUNTIME:
+            probe = self._probe_kata_observer_exec()
+        else:
+            argv = [
+                self.docker_binary,
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--runtime",
+                self.runtime,
+                "--entrypoint",
+                "/bin/sh",
+                self.image,
+                "-c",
+                "uname -r",
+            ]
+            try:
+                probe = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise SandboxError(
+                    f"could not probe sandbox runtime {self.runtime!r}: {exc}"
+                ) from exc
         if probe.returncode != 0:
+            if self.runtime == KATA_RUNTIME:
+                raise SandboxError(
+                    "the Kata guest could not load the eBPF process observer through the "
+                    f"sandbox's privileged exec path: {probe.stderr.strip()[:200]}"
+                )
             raise SandboxError(
                 f"could not start sandbox image {self.image!r} under runtime "
                 f"{self.runtime!r}: {probe.stderr.strip()[:200]}"
@@ -1145,7 +1156,7 @@ class ContainerBackend(SandboxBackend):
             raise SandboxError(
                 f"sandbox runtime {self.runtime!r} returned no guest kernel from uname -r"
             )
-        guest_kernel = lines[-1]
+        guest_kernel = lines[0] if self.runtime == KATA_RUNTIME else lines[-1]
         host_kernel = str(self._kernel_probe["host_kernel"])
         if guest_kernel == host_kernel:
             if self.runtime == KATA_RUNTIME:
@@ -1154,7 +1165,118 @@ class ContainerBackend(SandboxBackend):
                     f"{host_kernel!r}; refusing to claim VM isolation"
                 )
             return
+        if self.runtime == KATA_RUNTIME:
+            expected_observer = f"freeinference-guest-observer-v{GUEST_OBSERVER_VERSION}"
+            if len(lines) != 2 or lines[1] != expected_observer:
+                raise SandboxError(
+                    "the Kata guest kernel could not start the eBPF process observer; "
+                    "install a Kata debug/eBPF kernel with BTF support"
+                )
         self._kernel_probe["guest_kernel"] = guest_kernel
+
+    def _probe_kata_observer_exec(self) -> subprocess.CompletedProcess[str]:
+        """Prove the exact non-root-container/privileged-exec BPF path works.
+
+        ``docker exec --privileged`` expands the new process's capabilities but
+        retains the container's seccomp filter. A standalone privileged
+        ``docker run`` therefore proves the wrong thing: it can load BPF while
+        the retained sandbox path still receives ``EPERM``. The disposable
+        container below has the same capability and no-new-privileges shape as
+        a real chat sandbox. ``CAP_BPF`` stays only in its bounding set because
+        the init and agent UIDs are non-root; it also causes Docker's default
+        seccomp profile to admit the BPF syscall for the fixed privileged exec.
+        """
+        container_name = f"hyi-kata-observer-probe-{secrets.token_hex(12)}"
+        launch = [
+            self.docker_binary,
+            "run",
+            "--rm",
+            "--detach",
+            "--name",
+            container_name,
+            "--network",
+            "none",
+            "--runtime",
+            KATA_RUNTIME,
+            "--user",
+            f"{self.uid}:{self.gid}",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "BPF",
+            "--security-opt",
+            "no-new-privileges",
+            "--entrypoint",
+            "/bin/sh",
+            self.image,
+            "-c",
+            "exec sleep 300",
+        ]
+        try:
+            started = subprocess.run(
+                launch,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxError(f"could not probe sandbox runtime {KATA_RUNTIME!r}: {exc}") from exc
+        if started.returncode != 0:
+            raise SandboxError(
+                f"could not start sandbox image {self.image!r} under runtime "
+                f"{KATA_RUNTIME!r}: {started.stderr.strip()[:200]}"
+            )
+        try:
+            return subprocess.run(
+                [
+                    self.docker_binary,
+                    "exec",
+                    "--privileged",
+                    "--user",
+                    "0:0",
+                    "--workdir",
+                    "/",
+                    container_name,
+                    "/bin/sh",
+                    "-c",
+                    f"uname -r && exec {GUEST_OBSERVER_BINARY} --self-test",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxError(f"could not probe sandbox runtime {KATA_RUNTIME!r}: {exc}") from exc
+        finally:
+            # Exact generated name, and --rm on the container as a second fence.
+            # Cleanup failure is logged rather than masking the observer verdict;
+            # the five-minute sleep still bounds the disposable guest's life.
+            try:
+                removed = subprocess.run(
+                    [self.docker_binary, "rm", "--force", container_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                if removed.returncode != 0:
+                    logger.warning(
+                        "kata_observer_probe_cleanup_failed",
+                        extra={
+                            "event": "kata_observer_probe_cleanup_failed",
+                            "detail": removed.stderr.strip()[:200],
+                        },
+                    )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                logger.warning(
+                    "kata_observer_probe_cleanup_failed",
+                    extra={
+                        "event": "kata_observer_probe_cleanup_failed",
+                        "detail": str(exc)[:200],
+                    },
+                )
 
     def _check_networks_are_closed(self) -> None:
         """Check every network a phase can run on, not just the default one.

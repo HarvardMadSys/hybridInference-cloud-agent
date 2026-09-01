@@ -13,6 +13,7 @@ import type {
   AgentThreadEventApi,
   AgentThreadMessageApi,
   ToolCallResourcesApi,
+  ProcessObservationApi,
 } from '@/lib/api/agents';
 
 import type {
@@ -23,6 +24,7 @@ import type {
   AgentJobState,
   DiffLine,
   ToolCallResources,
+  ProcessObservation,
   TurnResources,
 } from './types';
 
@@ -432,6 +434,11 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
     toolTimeMs: api.tool_time_ms ?? null,
     toolCalls: (api.tool_calls ?? []).map(toToolCallResources),
     toolCallsTruncated: api.tool_calls_truncated === true,
+    processObserver: api.process_observer ?? null,
+    processObservationComplete: api.process_observation_complete === true,
+    processEventsLost: api.process_events_lost ?? 0,
+    processesTruncated: api.processes_truncated === true,
+    processes: (api.processes ?? []).map(toProcessObservation),
   };
 }
 
@@ -457,6 +464,26 @@ function toToolCallResources(api: ToolCallResourcesApi): ToolCallResources {
     cpuUsec: exclusive ? api.cpu_usec_exclusive : api.cpu_usec_shared,
     memPeakBytes: exclusive ? api.mem_peak_exclusive_bytes : api.mem_peak_shared_bytes,
     exclusive,
+    processCount: api.process_count ?? 0,
+  };
+}
+
+function toProcessObservation(api: ProcessObservationApi): ProcessObservation {
+  return {
+    processSeq: api.process_seq,
+    uid: api.uid,
+    pid: api.pid,
+    tgid: api.tgid,
+    ppid: api.ppid,
+    comm: api.comm,
+    executable: api.executable,
+    startedOffsetMs: api.started_offset_ms,
+    durationMs: api.duration_ms,
+    exitCode: api.exit_code,
+    observedFork: api.observed_fork,
+    observedExec: api.observed_exec,
+    observedExit: api.observed_exit,
+    toolCallSeqs: api.tool_call_seqs,
   };
 }
 

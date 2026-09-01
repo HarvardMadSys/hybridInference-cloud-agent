@@ -5077,6 +5077,7 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
                     "measured_span_ms": 8_000,
                     "cpu_usec_exclusive": 4_400_000,
                     "mem_peak_exclusive_bytes": 270_000_000,
+                    "process_count": 1,
                 },
                 {
                     "call_seq": 2,
@@ -5088,6 +5089,27 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
                 },
             ],
             "tool_calls_truncated": True,
+            "process_observer": "kata-guest-ebpf-v1",
+            "process_observation_complete": True,
+            "process_events_lost": 0,
+            "processes": [
+                {
+                    "process_seq": 1,
+                    "uid": 11003,
+                    "pid": 42,
+                    "tgid": 42,
+                    "ppid": 7,
+                    "comm": "tiny",
+                    "executable": "/bin/tiny",
+                    "started_offset_ms": 12,
+                    "duration_ms": 1,
+                    "exit_code": 0,
+                    "observed_fork": True,
+                    "observed_exec": True,
+                    "observed_exit": True,
+                    "tool_call_seqs": [1],
+                }
+            ],
         },
         headers=auth,
     )
@@ -5102,6 +5124,14 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
     assert short_call["timing_source"] == "message", "an unmarked call claimed precision"
     assert long_call["cpu_usec_exclusive"] == 4_400_000
     assert long_call["measured_span_ms"] == 8_000
+    assert long_call["process_count"] == 1
+    assert resources["process_observer"] == "kata-guest-ebpf-v1"
+    assert resources["process_observation_complete"] is True
+    assert resources["process_events_lost"] == 0
+    (process,) = resources["processes"]
+    assert process["executable"] == "/bin/tiny"
+    assert process["duration_ms"] == 1
+    assert process["tool_call_seqs"] == [1]
     # The 97 % case, all the way to the reader: a row, a duration, and no
     # counters at all. A zero here would be a number nobody measured.
     assert short_call["sample_count"] == 0

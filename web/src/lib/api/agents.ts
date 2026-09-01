@@ -43,6 +43,25 @@ export interface ToolCallResourcesApi {
   cpu_usec_shared: number | null;
   mem_peak_exclusive_bytes: number | null;
   mem_peak_shared_bytes: number | null;
+  /** Guest-kernel process starts plausibly belonging to this call. */
+  process_count?: number;
+}
+
+export interface ProcessObservationApi {
+  process_seq: number;
+  uid: number;
+  pid: number;
+  tgid: number;
+  ppid: number | null;
+  comm: string;
+  executable: string | null;
+  started_offset_ms: number;
+  duration_ms: number | null;
+  exit_code: number | null;
+  observed_fork: boolean;
+  observed_exec: boolean;
+  observed_exit: boolean;
+  tool_call_seqs: number[];
 }
 
 export interface AttemptResourcesApi {
@@ -61,6 +80,11 @@ export interface AttemptResourcesApi {
   tool_time_ms?: number | null;
   tool_calls?: ToolCallResourcesApi[];
   tool_calls_truncated?: boolean;
+  process_observer?: string | null;
+  process_observation_complete?: boolean;
+  process_events_lost?: number;
+  processes_truncated?: boolean;
+  processes?: ProcessObservationApi[];
 }
 
 export interface AgentJobApi {

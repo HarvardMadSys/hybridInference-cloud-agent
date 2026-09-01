@@ -24,7 +24,14 @@ from cloud_agent_host.chat_sandbox import (
     _RetainedTerminalProcess,
 )
 from cloud_agent_host.egress import EgressPolicy, EgressTier
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_BINARY,
+    GUEST_OBSERVER_ROOT,
+    GuestObserverCursor,
+    GuestObserverSnapshot,
+    GuestObserverStatus,
+)
+from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 
 
 def _spec() -> ChatSandboxSpec:
@@ -92,6 +99,172 @@ def test_create_command_has_stable_identity_and_no_chat_state_mount_or_secret():
     assert "--cap-drop ALL" in joined
     assert "--security-opt no-new-privileges" in joined
     assert "--pids-limit 512" in joined
+
+
+def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(
+            image="registry/agent:1",
+            network="agent-net",
+            runtime=KATA_RUNTIME,
+        )
+    )
+
+    command = manager.build_create_command(spec)
+    joined = " ".join(command)
+
+    assert f"{GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0" in joined
+    assert "--cap-drop ALL" in joined
+    assert "--cap-add BPF" in joined
+    assert "--security-opt no-new-privileges" in joined
+    assert command[command.index("--runtime") + 1] == KATA_RUNTIME
+
+
+def test_finishing_guest_observation_flushes_after_the_turn_end_fence(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
+    )
+    closing = GuestObserverSnapshot(
+        status=GuestObserverStatus(91, 20, 8, 0, 0, 0),
+        journal_size=0,
+        guest_mono_ns=2_000_000_000,
+    )
+    flushed = GuestObserverSnapshot(
+        status=GuestObserverStatus(91, 22, 8, 0, 0, 0),
+        journal_size=0,
+        guest_mono_ns=2_050_000_000,
+    )
+    waits: list[int | None] = []
+
+    def snapshot(_spec, *, after_poll_seq=None):
+        waits.append(after_poll_seq)
+        return closing if after_poll_seq is None else flushed
+
+    monkeypatch.setattr(manager, "_guest_observer_snapshot", snapshot)
+    monkeypatch.setattr(
+        manager,
+        "exec_capture",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
+    )
+    cursor = GuestObserverCursor(
+        uid=MEMBER_UID_BASE,
+        offset=0,
+        poll_seq=3,
+        observer_pid=91,
+        event_seq=7,
+        guest_mono_ns=1_000_000_000,
+        available=True,
+    )
+
+    observation = manager.finish_guest_observation(_spec(), cursor)
+
+    assert observation.complete is True
+    # The first post-turn publication can have completed its poll before the
+    # closing status was read.  Crossing the following publication proves a
+    # full drain happened after that read.
+    assert waits == [None, 21]
+
+
+def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
+    )
+    calls: list[tuple[list[str], bool]] = []
+
+    def privileged(_spec, argv, *, detach=False, **_kwargs):
+        calls.append((list(argv), detach))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(manager, "_observer_privileged_exec", privileged)
+    monkeypatch.setattr(
+        manager,
+        "_guest_observer_snapshot",
+        lambda _spec: GuestObserverSnapshot(
+            status=GuestObserverStatus(91, 1, 0, 0, 0, 0),
+            journal_size=0,
+            guest_mono_ns=1,
+        ),
+    )
+
+    manager._start_guest_observer(_spec())
+
+    cleanup_argv, cleanup_detached = calls[0]
+    assert cleanup_detached is False
+    assert cleanup_argv[-1] == GUEST_OBSERVER_BINARY
+    compile(cleanup_argv[2], "<guest-observer-cleanup>", "exec")
+    assert "os.path.samefile" in cleanup_argv[2]
+    assert "stale guest observer did not exit" in cleanup_argv[2]
+    assert calls[1] == ([GUEST_OBSERVER_BINARY], True)
+
+
+def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
+    )
+    calls: list[list[str]] = []
+    payload = json.dumps(
+        {
+            "status": {
+                "version": 1,
+                "ready": True,
+                "pid": 91,
+                "poll_seq": 22,
+                "event_seq": 8,
+                "lost": 0,
+                "journal_dropped": 0,
+                "journal_bytes": 0,
+            },
+            "journal_size": 0,
+            "guest_mono_ns": 2_050_000_000,
+        }
+    ).encode()
+
+    def capture(_spec, argv, **_kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout=payload, stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", capture)
+
+    snapshot = manager._guest_observer_snapshot(_spec(), after_poll_seq=21)
+
+    assert snapshot.status.poll_seq == 22
+    command = calls[0]
+    compile(command[2], "<guest-observer-snapshot>", "exec")
+    assert command[-2:] == [GUEST_OBSERVER_BINARY, "21"]
+    assert "os.path.samefile" in command[2]
+
+
+def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
+    )
+    snapshot = GuestObserverSnapshot(
+        status=GuestObserverStatus(91, 21, 8, 0, 0, 10),
+        journal_size=10,
+        guest_mono_ns=2_050_000_000,
+    )
+
+    monkeypatch.setattr(manager, "_guest_observer_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(
+        manager,
+        "exec_capture",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=b"short", stderr=b""),
+    )
+    cursor = GuestObserverCursor(
+        uid=MEMBER_UID_BASE,
+        offset=0,
+        observer_pid=91,
+        event_seq=7,
+        guest_mono_ns=1_000_000_000,
+        available=True,
+    )
+
+    observation = manager.finish_guest_observation(_spec(), cursor)
+
+    assert observation.source is None
+    assert observation.complete is False
+    assert "published fence" in (observation.detail or "")
 
 
 def test_retained_storage_preflight_reads_daemon_root_without_mounting_it(monkeypatch):

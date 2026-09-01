@@ -461,6 +461,30 @@ containerd finds it without a unit-file edit. The version is pinned in the
 script; upgrading is a two-line change there, and `--check` then fails on every
 host still carrying the old one.
 
+The setup also selects the release's packaged `vmlinuz-debug.container` for
+the default Kata configuration. That kernel is built with Kata's reviewed
+eBPF/BTF debug fragment; the ordinary guest kernel is not sufficient for the
+process observer. `--check` verifies both the asset and the active config, and
+runner preflight goes further: it starts a disposable sandbox with the same
+non-root, capability-dropped and `no-new-privileges` shape as a real retained
+guest, then exercises the same fixed privileged exec used to start the bundled
+observer and requires all three lifecycle probes to attach. A missing BPF
+syscall, BTF image, tracepoint, or exec-time permission is therefore a
+deployment failure before the runner can claim work, not an empty process list
+under a completed turn. See Kata's
+[debug-kernel build contract](https://github.com/kata-containers/kata-containers/blob/main/tools/packaging/kernel/README.md#debug-kernel).
+
+Only that fixed, image-bundled observer runs as guest root. Agent CLIs and
+repository code still run under their per-member UIDs with all capabilities
+dropped and `no-new-privileges`; they cannot read or forge the root-only
+journal. Kata containers retain `CAP_BPF` in the bounding set only so Docker's
+creation-time seccomp profile admits the later helper syscall. Non-root agent
+processes still have empty permitted and effective capability sets, and
+`no-new-privileges` prevents them from promoting that bounding bit. CPU and
+memory remain conservative periodic container statistics. Process existence is
+separate, event-driven telemetry: fork/exec/exit survives even when a process
+begins and ends entirely between two statistics samples.
+
 Requirements: an x86_64 Linux host, bare metal or with nested virtualization
 enabled. Kata cannot run without KVM.
 

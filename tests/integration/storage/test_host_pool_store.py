@@ -145,7 +145,10 @@ def _shared_attestation(**overrides) -> dict:
             "opencode": "1.18.9",
             "kilo": "7.4.17",
         },
-        "helper_versions": {"claude-agent-sdk": "0.2.148"},
+        "helper_versions": {
+            "claude-agent-sdk": "0.2.148",
+            "guest-observer": "1",
+        },
     }
     stamp.update(overrides)
     return stamp
@@ -528,7 +531,12 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
         _shared_attestation(runner_capabilities=[]),
         _shared_attestation(sandbox_image_digest=""),
         _shared_attestation(shared_sandbox_protocol="v0"),
-        _shared_attestation(helper_versions={"claude-agent-sdk": "0.2.147"}),
+        _shared_attestation(
+            helper_versions={
+                "claude-agent-sdk": "0.2.147",
+                "guest-observer": "1",
+            }
+        ),
         _shared_attestation(
             runtime_versions={
                 "claude-code": "2.1.219",

@@ -2622,8 +2622,9 @@ def _run_shared_live_attempt(
         )
         turn_admitted = True
         sampler = ResourceSampler(None)
+        result_frame: dict[str, Any] | None = None
         try:
-            exit_code, tail, tool_errors, _ = _stream_shared_agent_turn(
+            exit_code, tail, tool_errors, result_frame = _stream_shared_agent_turn(
                 supervisor=supervisor,
                 job=job,
                 control=control,
@@ -2632,11 +2633,15 @@ def _run_shared_live_attempt(
                 timeout_s=agent_timeout_s,
             )
         finally:
-            # Container totals include concurrent siblings and must not be
-            # duplicated as this member's usage. Report explicit zero coverage
-            # until process-tree accounting lands.
+            # Container totals include concurrent siblings and still remain
+            # unusable here.  The broker instead returns UID-filtered lifecycle
+            # events from the Kata guest; even a process shorter than one stats
+            # tick is represented.  If the stream failed before that result,
+            # retain the explicit zero-coverage fallback.
             with contextlib.suppress(Exception):
-                control.report_resources(sampler.stop())
+                fallback = sampler.stop()
+                observed = result_frame.get("resources") if isinstance(result_frame, dict) else None
+                control.report_resources(observed if isinstance(observed, dict) else fallback)
         if exit_code == 130:
             failure_detail = "cancelled by owner after shared-session admission"
             abandon_before_finish(lost=True, detail=failure_detail)

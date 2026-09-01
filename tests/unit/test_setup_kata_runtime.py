@@ -94,6 +94,15 @@ def _fake_release_tarball(tmp_path: Path, *, version: str = PINNED_VERSION) -> P
         "  check) exit 0 ;;\nesac\n",
     )
     _write_executable(bin_dir / "kata-collect-data.sh", "#!/bin/sh\nexit 0\n")
+    kernel_dir = staging / "opt" / "kata" / "share" / "kata-containers"
+    kernel_dir.mkdir(parents=True)
+    (kernel_dir / "vmlinuz-debug.container").write_bytes(b"debug kernel with BPF and BTF")
+    config_dir = staging / "opt" / "kata" / "share" / "defaults" / "kata-containers"
+    config_dir.mkdir(parents=True)
+    (config_dir / "configuration-qemu.toml").write_text(
+        '[hypervisor.qemu]\nkernel = "/opt/kata/share/kata-containers/vmlinuz.container"\n'
+    )
+    (config_dir / "configuration.toml").symlink_to("configuration-qemu.toml")
 
     archive = tmp_path / f"kata-static-{version}-amd64.tar.zst"
     subprocess.run(
@@ -232,9 +241,31 @@ def test_installs_links_the_shim_and_passes_its_own_check(tmp_path: Path) -> Non
     shim = tmp_path / "usr-local-bin" / "containerd-shim-kata-v2"
     assert shim.is_symlink()
     assert os.readlink(shim) == str(prefix / "bin" / "containerd-shim-kata-v2")
+    config = prefix / "share" / "defaults" / "kata-containers" / "configuration-qemu.toml"
+    assert config.read_text() == (
+        f'[hypervisor.qemu]\nkernel = "{prefix}/share/kata-containers/vmlinuz-debug.container"\n'
+    )
 
     # And the deploy-time check now passes on this host.
     assert _run(tmp_path, "--check").returncode == 0
+
+
+@pytest.mark.skipif(not _HAS_ZSTD, reason="zstd is needed to build a release-shaped fixture")
+def test_install_refuses_a_release_without_the_ebpf_guest_kernel(tmp_path: Path) -> None:
+    """VM isolation alone does not make guest lifecycle tracepoints available."""
+    tarball = _fake_release_tarball(tmp_path)
+    staging_kernel = tmp_path / "staging" / "opt" / "kata" / "share" / "kata-containers"
+    (staging_kernel / "vmlinuz-debug.container").unlink()
+    subprocess.run(
+        f"tar -C {tmp_path / 'staging'} -cf - ./opt | zstd -q -f -o {tarball}",
+        shell=True,
+        check=True,
+    )
+
+    result = _run(tmp_path, tarball=tarball, env_overrides={"KATA_SHA256": _digest(tarball)})
+
+    assert result.returncode != 0
+    assert "eBPF/BTF guest kernel" in result.stderr
 
 
 @pytest.mark.skipif(not _HAS_ZSTD, reason="zstd is needed to build a release-shaped fixture")

@@ -17,4 +17,7 @@ SHARED_SANDBOX_RUNTIME_PINS = {
     "opencode": "1.18.9",
     "kilo": "7.4.17",
 }
-SHARED_SANDBOX_HELPER_PINS = {"claude-agent-sdk": "0.2.148"}
+SHARED_SANDBOX_HELPER_PINS = {
+    "claude-agent-sdk": "0.2.148",
+    "guest-observer": "1",
+}

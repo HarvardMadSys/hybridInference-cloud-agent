@@ -14,12 +14,13 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
+from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransport,
     ResidentTransportFactory,
 )
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.session_supervisor import SessionBusy
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
@@ -105,6 +106,23 @@ class _Manager:
 
     def normalize_member_files(self, spec: ChatSandboxSpec, **kwargs) -> None:
         self.events.append(("normalize", kwargs["slot_id"]))
+
+    def begin_guest_observation(
+        self, spec: ChatSandboxSpec, *, user_uid: int
+    ) -> GuestObserverCursor:
+        self.events.append(("observe-begin", user_uid))
+        return GuestObserverCursor(uid=user_uid, available=True)
+
+    def finish_guest_observation(
+        self, spec: ChatSandboxSpec, cursor: GuestObserverCursor | None
+    ) -> GuestObservation:
+        self.events.append(("observe-finish", None if cursor is None else cursor.uid))
+        return GuestObservation(
+            source="kata-guest-ebpf-v1",
+            complete=True,
+            lost_events=0,
+            truncated=False,
+        )
 
 
 class _Turn:
@@ -922,3 +940,41 @@ def test_turn_boundary_preserves_reviewed_resident_tree_and_reaps_new_processes(
         ("normalize", 0),
     ]
     assert supervisor.status("athr_source").resident_state == "live"
+
+
+def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup():
+    manager = _Manager()
+    manager.backend.runtime = KATA_RUNTIME
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="run a sub-millisecond command",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    observation = supervisor.complete_turn("athr_source", lease.token, turn)
+
+    assert observation.complete is True
+    assert manager.events[-5:] == [
+        ("census", 0),
+        ("observe-begin", 11001),
+        ("observe-finish", 11001),
+        ("reap-except", 0, ((41, 400),)),
+        ("normalize", 0),
+    ]

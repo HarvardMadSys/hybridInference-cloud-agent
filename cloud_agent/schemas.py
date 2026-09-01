@@ -174,10 +174,34 @@ class ToolCallResources(BaseModel):
     cpu_usec_shared: int | None = None
     mem_peak_exclusive_bytes: int | None = None
     mem_peak_shared_bytes: int | None = None
+    #: Kernel-observed processes whose starts plausibly belong to this call.
+    #: Zero proves none only when the attempt's process observation is complete.
+    process_count: int = 0
+
+
+class ProcessObservation(BaseModel):
+    """One process created during a turn, observed by the Kata guest kernel."""
+
+    process_seq: int
+    uid: int
+    pid: int
+    tgid: int
+    ppid: int | None = None
+    comm: str
+    executable: str | None = None
+    #: Start relative to the turn's guest-observer cursor, not wall clock.
+    started_offset_ms: int
+    duration_ms: int | None = None
+    exit_code: int | None = None
+    observed_fork: bool = False
+    observed_exec: bool = False
+    observed_exit: bool = False
+    #: Every plausible call when tool windows overlap; empty is unassigned.
+    tool_call_seqs: list[int] = Field(default_factory=list)
 
 
 class AttemptResources(BaseModel):
-    """What one attempt's sandbox consumed, as measured from the host.
+    """Host resource samples plus Kata guest process lifecycle observations.
 
     Every counter is optional and ``coverage`` is not: a turn the sampler
     could not read reports ``coverage = 0`` with null counters, which a
@@ -204,6 +228,13 @@ class AttemptResources(BaseModel):
     #: True when the attempt issued more calls than ``tool_calls`` reports. A
     #: cap nobody is told about reads exactly like a shorter turn.
     tool_calls_truncated: bool = False
+    #: Null where the sandbox was not a Kata guest or its helper was unavailable.
+    process_observer: str | None = None
+    #: Only true when the observer spanned the turn with no lost/truncated events.
+    process_observation_complete: bool = False
+    process_events_lost: int = 0
+    processes_truncated: bool = False
+    processes: list[ProcessObservation] = Field(default_factory=list)
 
 
 class AgentJobResponse(BaseModel):
@@ -992,6 +1023,26 @@ class WorkerToolCallResources(BaseModel):
     cpu_usec_shared: int | None = Field(None, ge=0)
     mem_peak_exclusive_bytes: int | None = Field(None, ge=0)
     mem_peak_shared_bytes: int | None = Field(None, ge=0)
+    process_count: int = Field(0, ge=0)
+
+
+class WorkerProcessObservation(BaseModel):
+    """One bounded guest-kernel process identity reported by the broker."""
+
+    process_seq: int = Field(..., ge=1)
+    uid: int = Field(..., ge=0)
+    pid: int = Field(..., ge=1)
+    tgid: int = Field(..., ge=1)
+    ppid: int | None = Field(None, ge=1)
+    comm: str = Field(..., min_length=1, max_length=64)
+    executable: str | None = Field(None, max_length=512)
+    started_offset_ms: int = Field(..., ge=0)
+    duration_ms: int | None = Field(None, ge=0)
+    exit_code: int | None = Field(None, ge=0, le=255)
+    observed_fork: bool = False
+    observed_exec: bool = False
+    observed_exit: bool = False
+    tool_call_seqs: list[int] = Field(default_factory=list, max_length=500)
 
 
 class WorkerResourcesRequest(BaseModel):
@@ -1018,6 +1069,14 @@ class WorkerResourcesRequest(BaseModel):
     tool_calls: list[WorkerToolCallResources] = Field(default_factory=list, max_length=500)
     tool_calls_truncated: bool = False
     tool_time_ms: int | None = Field(None, ge=0)
+    process_observer: Literal["kata-guest-ebpf-v1"] | None = None
+    process_observation_complete: bool = False
+    process_events_lost: int = Field(0, ge=0)
+    processes_truncated: bool = False
+    processes: list[WorkerProcessObservation] = Field(
+        default_factory=list,
+        max_length=4096,
+    )
 
 
 class WorkerFinishRequest(BaseModel):

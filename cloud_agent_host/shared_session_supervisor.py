@@ -30,13 +30,17 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatBackend,
     RetainedChatLost,
 )
+from cloud_agent_host.guest_observer import (
+    GuestObservation,
+    GuestObserverCursor,
+)
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransport,
     ResidentTransportFactory,
     ResidentTurn,
 )
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.session_supervisor import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
     DEFAULT_SWEEP_INTERVAL_S,
@@ -148,6 +152,7 @@ class _Member:
     transport: ResidentTransport | None = None
     current_turn: ResidentTurn | None = None
     activation_processes: tuple[tuple[int, int], ...] | None = None
+    observer_cursor: GuestObserverCursor | None = None
     turn_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -477,6 +482,19 @@ class SharedChatSessionSupervisor:
                 user_uid=MEMBER_UID_BASE + member.resident_slot_id,
                 user_gid=self._manager.backend.gid,
             )
+            observer_cursor: GuestObserverCursor | None = None
+            if self._manager.backend.runtime == KATA_RUNTIME:
+                begin_observation = getattr(self._manager, "begin_guest_observation", None)
+                if begin_observation is None:
+                    observer_cursor = GuestObserverCursor.unavailable(
+                        MEMBER_UID_BASE + member.resident_slot_id,
+                        "workspace broker has no guest observer client",
+                    )
+                else:
+                    observer_cursor = begin_observation(
+                        group.spec,
+                        user_uid=MEMBER_UID_BASE + member.resident_slot_id,
+                    )
             with self._lock:
                 current_group = self._members.get(thread_id)
                 current_member = (
@@ -516,6 +534,7 @@ class SharedChatSessionSupervisor:
             if admitted:
                 member.current_turn = turn
                 member.activation_processes = activation_processes
+                member.observer_cursor = observer_cursor
         if not admitted:
             with contextlib.suppress(Exception):
                 turn.interrupt()
@@ -531,14 +550,32 @@ class SharedChatSessionSupervisor:
             raise SessionLeaseLost("shared sandbox lifecycle changed during turn admission")
         return turn
 
-    def complete_turn(self, thread_id: str, token: str, turn: ResidentTurn) -> None:
-        """Release the member's in-flight marker after its result was drained."""
+    def complete_turn(
+        self,
+        thread_id: str,
+        token: str,
+        turn: ResidentTurn,
+    ) -> GuestObservation:
+        """Close observation, then enforce and release the activation boundary."""
         with self._lock:
             group, member = self._leased_member(thread_id, token)
             if member.current_turn is not turn:
                 raise SessionLeaseLost("member turn generation is stale")
             slot_id = member.resident_slot_id
             activation_processes = member.activation_processes
+            observer_cursor = member.observer_cursor
+        observation = GuestObservation.unavailable("sandbox is not a Kata guest")
+        if self._manager.backend.runtime == KATA_RUNTIME:
+            finish_observation = getattr(self._manager, "finish_guest_observation", None)
+            if finish_observation is None:
+                observation = GuestObservation.unavailable(
+                    "workspace broker has no guest observer client"
+                )
+            else:
+                # Close before the member reaper/permission normalizer below:
+                # those are platform processes and must not be billed to the
+                # tool call whose background children they clean up.
+                observation = finish_observation(group.spec, observer_cursor)
         boundary_error: Exception | None = None
         try:
             if activation_processes is None:
@@ -575,6 +612,7 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost("member turn generation is stale")
             member.current_turn = None
             member.activation_processes = None
+            member.observer_cursor = None
             transport = member.transport
             if boundary_error is not None:
                 member.transport = None
@@ -600,6 +638,7 @@ class SharedChatSessionSupervisor:
             raise SandboxError(
                 f"shared member activation boundary failed: {boundary_error}"
             ) from boundary_error
+        return observation
 
     def interrupt(self, thread_id: str, token: str) -> None:
         """Interrupt the exact member activation, leaving siblings untouched."""

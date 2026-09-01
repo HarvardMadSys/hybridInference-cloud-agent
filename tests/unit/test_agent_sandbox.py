@@ -615,7 +615,13 @@ def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_imag
     def fake_run(argv, **kwargs):
         calls.append(argv)
         if argv[1] == "run":
-            return SimpleNamespace(returncode=0, stdout="guest-kernel\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
+        if argv[1] == "exec":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="guest-kernel\nfreeinference-guest-observer-v1\n",
+                stderr="",
+            )
         if argv[1:3] == ["network", "inspect"]:
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="27.0\n", stderr="")
@@ -629,9 +635,18 @@ def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_imag
 
     backend.preflight()
 
-    probe = next(argv for argv in calls if argv[1] == "run")
-    assert probe[probe.index("--runtime") + 1] == KATA_RUNTIME
-    assert probe[probe.index("--entrypoint") + 2] == "registry.example/sandbox@sha256:abc"
+    launch = next(argv for argv in calls if argv[1] == "run")
+    assert launch[launch.index("--runtime") + 1] == KATA_RUNTIME
+    assert launch[launch.index("--user") + 1] != "0:0"
+    assert "--cap-drop" in launch and launch[launch.index("--cap-drop") + 1] == "ALL"
+    assert "--cap-add" in launch and launch[launch.index("--cap-add") + 1] == "BPF"
+    assert "--security-opt" in launch
+    assert launch[launch.index("--entrypoint") + 2] == "registry.example/sandbox@sha256:abc"
+    probe = next(argv for argv in calls if argv[1] == "exec")
+    assert "--privileged" in probe
+    assert probe[probe.index("--user") + 1] == "0:0"
+    assert "freeinference-guest-observer" in probe[-1]
+    assert any(argv[1:3] == ["rm", "--force"] for argv in calls)
     stamp = backend.version_stamp()
     assert stamp["host_kernel"] == "host-kernel"
     assert stamp["guest_kernel"] == "guest-kernel"
@@ -658,6 +673,38 @@ def test_container_preflight_refuses_an_unproved_kernel_boundary(
 
     with pytest.raises(SandboxError, match=message):
         backend._probe_kernel_boundary()
+
+
+def test_kata_preflight_refuses_a_guest_without_the_ebpf_observer_contract(monkeypatch):
+    monkeypatch.setattr(sandbox_mod.os, "uname", lambda: SimpleNamespace(release="host-kernel"))
+    monkeypatch.setattr(
+        sandbox_mod.subprocess,
+        "run",
+        lambda argv, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="guest-kernel\n",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(SandboxError, match="debug/eBPF kernel with BTF"):
+        ContainerBackend(image="img:1", runtime=KATA_RUNTIME)._probe_kernel_boundary()
+
+
+def test_kata_preflight_refuses_when_the_real_privileged_exec_cannot_load_bpf(monkeypatch):
+    monkeypatch.setattr(sandbox_mod.os, "uname", lambda: SimpleNamespace(release="host-kernel"))
+
+    def fake_run(argv, **_kwargs):
+        if argv[1] == "run":
+            return SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
+        if argv[1] == "exec":
+            return SimpleNamespace(returncode=1, stdout="", stderr="Operation not permitted")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
+
+    with pytest.raises(SandboxError, match="privileged exec path: Operation not permitted"):
+        ContainerBackend(image="img:1", runtime=KATA_RUNTIME)._probe_kernel_boundary()
 
 
 def test_plain_runc_cannot_fabricate_a_guest_kernel_attestation(monkeypatch):
@@ -1171,6 +1218,7 @@ def _inspect_json(**overrides):
                 "org.freeinference.runtime.claude-code.version": "1.2.3",
                 "org.freeinference.runtime.codex.version": "0.5.0",
                 "org.freeinference.helper.claude-agent-sdk.version": "0.2.148",
+                "org.freeinference.helper.guest-observer.version": "1",
                 "org.freeinference.runtime..version": "nameless",
                 "org.opencontainers.image.source": "irrelevant",
             }
@@ -1197,7 +1245,10 @@ def test_version_stamp_reads_runtime_digest_and_baked_versions(monkeypatch):
     assert stamp["sandbox_image_digest"] == "registry.example/sandbox@sha256:pinned"
     # Only well-formed version labels count; a nameless runtime id is dropped.
     assert stamp["runtime_versions"] == {"claude-code": "1.2.3", "codex": "0.5.0"}
-    assert stamp["helper_versions"] == {"claude-agent-sdk": "0.2.148"}
+    assert stamp["helper_versions"] == {
+        "claude-agent-sdk": "0.2.148",
+        "guest-observer": "1",
+    }
     backend.version_stamp()
     assert len(calls) == 1  # cached — the image is pinned for this process
 

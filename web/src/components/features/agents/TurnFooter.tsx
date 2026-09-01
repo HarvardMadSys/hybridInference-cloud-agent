@@ -16,7 +16,13 @@
 
 import { useMemo, useState } from 'react';
 
-import type { AgentEvent, AgentJob, ToolCallResources, TurnResources } from './types';
+import type {
+  AgentEvent,
+  AgentJob,
+  ProcessObservation,
+  ToolCallResources,
+  TurnResources,
+} from './types';
 
 /** One tool call's derived window, paired from the event stream. */
 export interface ToolTiming {
@@ -323,10 +329,12 @@ function ToolTimingTable({
   timings,
   calls,
   truncated,
+  processObservationComplete,
 }: {
   timings: ToolTiming[];
   calls: ToolCallResources[];
   truncated: boolean;
+  processObservationComplete: boolean;
 }) {
   const byId = useMemo(() => {
     const index = new Map<string, ToolCallResources>();
@@ -353,6 +361,7 @@ function ToolTimingTable({
             <th className="py-1 font-medium">Tool</th>
             <th className="py-1 font-medium">Detail</th>
             <th className="py-1 text-right font-medium">Duration</th>
+            <th className="py-1 text-right font-medium">Processes</th>
             <th className="py-1 text-right font-medium">CPU</th>
             <th className="py-1 text-right font-medium">Peak mem</th>
           </tr>
@@ -360,6 +369,8 @@ function ToolTimingTable({
         <tbody>
           {timings.map((timing, index) => {
             const call = measurements[index];
+            const observedCall = timing.toolUseId ? byId.get(timing.toolUseId) : undefined;
+            const processCount = observedCall?.processCount ?? 0;
             return (
               <tr
                 key={`${timing.tool}-${index}`}
@@ -376,6 +387,9 @@ function ToolTimingTable({
                 </td>
                 <td className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
                   {formatDuration(timing.ms) ?? 'unfinished'}
+                </td>
+                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                  {processObservationComplete || processCount > 0 ? processCount : '—'}
                 </td>
                 <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
                   <MeasuredCell
@@ -396,7 +410,8 @@ function ToolTimingTable({
       </table>
       {anyUnmeasured ? (
         <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          — means the call was too short to measure: the sandbox is read once a second.
+          — in CPU or memory means the periodic sampler did not span the call. Process counts come
+          from guest-kernel lifecycle events and do not have that sampling-window gap.
         </p>
       ) : null}
       {anyShared ? (
@@ -408,6 +423,79 @@ function ToolTimingTable({
       {truncated ? (
         <p className="text-[11px] text-gray-500 dark:text-gray-400">
           This turn made more calls than are listed here.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ProcessObservationTable({
+  processes,
+  complete,
+  truncated,
+  lost,
+}: {
+  processes: ProcessObservation[];
+  complete: boolean;
+  truncated: boolean;
+  lost: number;
+}) {
+  return (
+    <div className="mt-3">
+      <p className="mb-1 text-[11px] font-medium text-gray-600 dark:text-gray-300">
+        Guest processes
+      </p>
+      {processes.length > 0 ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="text-left text-gray-500 dark:text-gray-400">
+                <th className="py-1 font-medium">Process</th>
+                <th className="py-1 text-right font-medium">PID</th>
+                <th className="py-1 text-right font-medium">Started</th>
+                <th className="py-1 text-right font-medium">Lifetime</th>
+                <th className="py-1 text-right font-medium">Exit</th>
+                <th className="py-1 text-right font-medium">Tool rows</th>
+              </tr>
+            </thead>
+            <tbody>
+              {processes.map((process) => (
+                <tr
+                  key={process.processSeq}
+                  className="border-t border-gray-100 dark:border-white/5"
+                >
+                  <td
+                    className="max-w-48 truncate py-1 pr-3 font-mono text-gray-700 dark:text-gray-300"
+                    title={process.executable ?? process.comm}
+                  >
+                    {process.executable ?? process.comm}
+                  </td>
+                  <td className="py-1 text-right tabular-nums">{process.pid}</td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    +{formatDuration(process.startedOffsetMs)}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {formatDuration(process.durationMs) ?? 'still running'}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">{process.exitCode ?? '—'}</td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {process.toolCallSeqs.length ? process.toolCallSeqs.join(', ') : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : complete ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          The guest kernel observed no child process during this turn.
+        </p>
+      ) : null}
+      {!complete ? (
+        <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+          Process observation is partial
+          {lost > 0 ? ` (${lost} kernel event${lost === 1 ? '' : 's'} lost)` : ''}
+          {truncated ? '; the bounded journal was truncated' : ''}.
         </p>
       ) : null}
     </div>
@@ -438,6 +526,9 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   const duration = formatDuration(job.durationMs);
   const resources = job.resources;
   const stats = resources ? resourceStats(resources) : [];
+  const processes = resources?.processes ?? [];
+  const hasProcessObservation = Boolean(resources?.processObserver);
+  const hasDetails = timings.length > 0 || hasProcessObservation;
   // A sampler that reported at all but covered only part of the window makes
   // every number below a floor. Saying so is the difference between a partial
   // measurement and a wrong one.
@@ -457,8 +548,11 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
             'numbers above are lower bounds rather than totals. This happens when the sandbox ' +
             'took a while to appear, or ended before the turn did.'
           : explained === 'unmeasured'
-            ? 'This turn ran where the platform could not read the sandbox\u2019s counters, so ' +
-              'nothing was measured. That is not the same as a turn that consumed nothing.'
+            ? hasProcessObservation
+              ? 'The periodic sandbox resource counters were unavailable. The guest process ' +
+                'lifecycle events below are a separate, event-driven measurement.'
+              : 'This turn ran where the platform could not read the sandbox\u2019s counters, so ' +
+                'nothing was measured. That is not the same as a turn that consumed nothing.'
             : null;
   const unmeasured = Boolean(resources && stats.length === 0);
 
@@ -471,6 +565,7 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
     !duration &&
     stats.length === 0 &&
     timings.length === 0 &&
+    !hasProcessObservation &&
     !unmeasured
   ) {
     return null;
@@ -528,13 +623,17 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
             resource data unavailable
           </button>
         ) : null}
-        {timings.length > 0 ? (
+        {hasDetails ? (
           <button
             type="button"
             onClick={() => setOpen((value) => !value)}
             className="ml-auto text-gray-500 dark:text-gray-400 underline-offset-2 hover:text-gray-800 dark:hover:text-gray-200 hover:underline"
           >
-            {open ? 'Hide' : `${timings.length} tool ${timings.length === 1 ? 'call' : 'calls'}`}
+            {open
+              ? 'Hide'
+              : timings.length > 0
+                ? `${timings.length} tool ${timings.length === 1 ? 'call' : 'calls'}`
+                : 'Process details'}
           </button>
         ) : null}
       </div>
@@ -543,20 +642,35 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
           {explanation}
         </p>
       ) : null}
-      {open && timings.length > 0 ? (
+      {open && hasDetails ? (
         <div className="mt-2 border-t border-gray-200 dark:border-white/10 pt-2">
-          <TimeSplit
-            durationMs={job.durationMs ?? null}
-            toolTimeMs={resources?.toolTimeMs ?? null}
-          />
-          <ToolTimingTable
-            timings={timings}
-            calls={resources?.toolCalls ?? []}
-            truncated={resources?.toolCallsTruncated === true}
-          />
-          <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-            {timingSourceNote(resources?.toolCalls ?? [], timings.length)}
-          </p>
+          {timings.length > 0 ? (
+            <>
+              <TimeSplit
+                durationMs={job.durationMs ?? null}
+                toolTimeMs={resources?.toolTimeMs ?? null}
+              />
+              <ToolTimingTable
+                timings={timings}
+                calls={resources?.toolCalls ?? []}
+                truncated={resources?.toolCallsTruncated === true}
+                processObservationComplete={resources?.processObservationComplete === true}
+              />
+            </>
+          ) : null}
+          {resources?.processObserver ? (
+            <ProcessObservationTable
+              processes={processes}
+              complete={resources.processObservationComplete === true}
+              truncated={resources.processesTruncated === true}
+              lost={resources.processEventsLost ?? 0}
+            />
+          ) : null}
+          {timings.length > 0 ? (
+            <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+              {timingSourceNote(resources?.toolCalls ?? [], timings.length)}
+            </p>
+          ) : null}
         </div>
       ) : null}
     </section>

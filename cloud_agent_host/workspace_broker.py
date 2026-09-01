@@ -42,8 +42,10 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.drivers import DriverError
+from cloud_agent_host.guest_observer import add_process_counts, attribute_processes
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.resident_transport import ResidentLaunch
+from cloud_agent_host.resources import ResourceSampler
 from cloud_agent_host.retained_workspace import (
     RetainedWorkspaceError,
     read_retained_file,
@@ -70,6 +72,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedMemberManifest,
 )
 from cloud_agent_host.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
+from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
 from cloud_agent_host.workspace_browser import (
     MAX_FILE_PREVIEW_BYTES,
     WorkspacePathError,
@@ -1698,8 +1701,15 @@ def create_app(
 
         def frames():
             turn_completed = False
+            tool_windows = ToolWindowTracker()
+            sampler = ResourceSampler(None)
             try:
                 for event in turn.lines():
+                    tool_windows.observe(
+                        event.event_type,
+                        event.payload,
+                        mono=time.monotonic(),
+                    )
                     yield (
                         json.dumps(
                             {
@@ -1718,8 +1728,24 @@ def create_app(
                 # normalizes shared writes; if either fails the runner must
                 # receive an error frame instead of a result followed by an
                 # opaque settle failure.
-                owner.complete_turn(thread_id, body.token, turn)
+                observation = owner.complete_turn(thread_id, body.token, turn)
                 turn_completed = True
+                windows = tool_windows.windows()
+                tool_calls = attribute(sampler.samples(), windows)
+                processes, process_counts = attribute_processes(observation, windows)
+                resources = sampler.stop()
+                resources.update(
+                    {
+                        "tool_calls": add_process_counts(tool_calls, process_counts),
+                        "tool_calls_truncated": tool_windows.truncated,
+                        "tool_time_ms": tool_time_ms(windows),
+                        "process_observer": observation.source,
+                        "process_observation_complete": observation.complete,
+                        "process_events_lost": observation.lost_events,
+                        "processes_truncated": observation.truncated,
+                        "processes": processes,
+                    }
+                )
                 yield (
                     json.dumps(
                         {
@@ -1730,6 +1756,7 @@ def create_app(
                             "usage": result.usage,
                             "raw": result.raw,
                             "stderr": turn.stderr_text()[-4000:],
+                            "resources": resources,
                         },
                         separators=(",", ":"),
                     )

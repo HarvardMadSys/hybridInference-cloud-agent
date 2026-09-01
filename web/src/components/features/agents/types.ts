@@ -110,6 +110,24 @@ export interface ToolCallResources {
   memPeakBytes: number | null;
   /** Whether the two counters above are this call's alone. */
   exclusive: boolean;
+  processCount?: number;
+}
+
+export interface ProcessObservation {
+  processSeq: number;
+  uid: number;
+  pid: number;
+  tgid: number;
+  ppid: number | null;
+  comm: string;
+  executable: string | null;
+  startedOffsetMs: number;
+  durationMs: number | null;
+  exitCode: number | null;
+  observedFork: boolean;
+  observedExec: boolean;
+  observedExit: boolean;
+  toolCallSeqs: number[];
 }
 
 export interface TurnResources {
@@ -136,6 +154,11 @@ export interface TurnResources {
   toolCalls: ToolCallResources[];
   /** True when the turn issued more calls than `toolCalls` carries. */
   toolCallsTruncated: boolean;
+  processObserver?: string | null;
+  processObservationComplete?: boolean;
+  processEventsLost?: number;
+  processesTruncated?: boolean;
+  processes?: ProcessObservation[];
 }
 
 export interface AgentJob {

@@ -403,7 +403,11 @@ describe('per-call resources, through both real adapters', () => {
     },
   ] as never;
 
-  function withCalls(calls: unknown[], truncated = false) {
+  function withCalls(
+    calls: unknown[],
+    truncated = false,
+    resourceOverrides: Record<string, unknown> = {},
+  ) {
     const adapted = toDisplayJob(apiJob, { events: apiEvents });
     return {
       ...adapted,
@@ -420,6 +424,7 @@ describe('per-call resources, through both real adapters', () => {
         sampler_version: '2',
         tool_calls: calls,
         tool_calls_truncated: truncated,
+        ...resourceOverrides,
       } as never),
     };
   }
@@ -454,6 +459,46 @@ describe('per-call resources, through both real adapters', () => {
     mem_peak_shared_bytes: null,
   };
 
+  const tinyProcess = {
+    process_seq: 1,
+    uid: 11001,
+    pid: 412,
+    tgid: 412,
+    ppid: 41,
+    comm: 'tiny',
+    executable: '/bin/tiny',
+    started_offset_ms: 12,
+    duration_ms: 1,
+    exit_code: 0,
+    observed_fork: true,
+    observed_exec: true,
+    observed_exit: true,
+    tool_call_seqs: [1],
+  };
+
+  function processOnlyResources(resourceOverrides: Record<string, unknown> = {}) {
+    return toTurnResources({
+      cpu_usec: null,
+      mem_peak_bytes: null,
+      mem_avg_bytes: null,
+      io_read_bytes: null,
+      io_write_bytes: null,
+      net_rx_bytes: null,
+      net_tx_bytes: null,
+      sample_count: 0,
+      coverage: 0,
+      sampler_version: '2',
+      tool_calls: [],
+      tool_calls_truncated: false,
+      process_observer: 'kata-guest-ebpf-v1',
+      process_observation_complete: true,
+      process_events_lost: 0,
+      processes_truncated: false,
+      processes: [],
+      ...resourceOverrides,
+    } as never);
+  }
+
   function openTable(job: AgentJob) {
     render(<TurnFooter job={job} />);
     fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
@@ -469,8 +514,10 @@ describe('per-call resources, through both real adapters', () => {
   it('shows a dash for the call too short to measure, never a zero', () => {
     openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
 
-    expect(screen.getAllByText('—')).toHaveLength(2);
-    expect(screen.getByText(/too short to measure/)).toBeInTheDocument();
+    // CPU and memory are unmeasured; process counts are also unknown because
+    // this fixture predates the guest observer. None of those is a measured 0.
+    expect(screen.getAllByText('—')).toHaveLength(4);
+    expect(screen.getByText(/periodic sampler did not span/)).toBeInTheDocument();
     expect(screen.queryByText('0s')).toBeNull();
     expect(screen.queryByText('0B')).toBeNull();
   });
@@ -563,8 +610,76 @@ describe('per-call resources, through both real adapters', () => {
     // daemon could not be read.
     openTable(withCalls([]));
 
-    expect(screen.getAllByText('—')).toHaveLength(4);
-    expect(screen.getByText(/too short to measure/)).toBeInTheDocument();
+    expect(screen.getAllByText('—')).toHaveLength(6);
+    expect(screen.getByText(/periodic sampler did not span/)).toBeInTheDocument();
+  });
+
+  it('renders a sub-tick process delivered by the guest observer', () => {
+    openTable(
+      withCalls([{ ...measuredLongCall, process_count: 1 }, unmeasuredShortCall], false, {
+        process_observer: 'kata-guest-ebpf-v1',
+        process_observation_complete: true,
+        process_events_lost: 0,
+        processes_truncated: false,
+        processes: [tinyProcess],
+      }),
+    );
+
+    expect(screen.getByText('Guest processes')).toBeInTheDocument();
+    expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
+    expect(screen.getByText('+12ms')).toBeInTheDocument();
+    expect(screen.queryByText(/Process observation is partial/)).toBeNull();
+  });
+
+  it('does not present a lossy guest observation as a complete process census', () => {
+    openTable(
+      withCalls([measuredLongCall, unmeasuredShortCall], false, {
+        process_observer: 'kata-guest-ebpf-v1',
+        process_observation_complete: false,
+        process_events_lost: 2,
+        processes_truncated: false,
+        processes: [tinyProcess],
+      }),
+    );
+
+    expect(
+      screen.getByText(/Process observation is partial \(2 kernel events lost\)/),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps guest process details accessible when a turn emitted no tool event', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({ processes: [tinyProcess] }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    expect(screen.getByText('Guest processes')).toBeInTheDocument();
+    expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
+  });
+
+  it('shows loss explicitly even when no process row survived', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({
+            process_observation_complete: false,
+            process_events_lost: 1,
+          }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    expect(
+      screen.getByText(/Process observation is partial \(1 kernel event lost\)/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/observed no child process/)).toBeNull();
   });
 });
 

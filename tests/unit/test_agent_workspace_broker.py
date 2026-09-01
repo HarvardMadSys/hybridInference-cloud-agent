@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.sandbox import (
     ProcessBackend,
     SandboxBackend,
@@ -1435,6 +1436,124 @@ async def test_shared_turn_reports_activation_boundary_failure_before_result(tmp
     assert response.status_code == 200
     assert frames == [{"kind": "error", "detail": "member permission normalization failed"}]
     assert supervisor.calls == ["start", "complete", "abort"]
+
+
+@pytest.mark.asyncio
+async def test_shared_turn_returns_uid_filtered_guest_processes_without_sampler_reads(tmp_path):
+    """A sub-tick process reaches the runner in the result frame as an event row."""
+
+    class Turn:
+        @staticmethod
+        def lines():
+            return iter(
+                [
+                    SimpleNamespace(
+                        event_type="tool_use",
+                        payload={"id": "toolu_tiny", "name": "Bash"},
+                        raw_line='{"type":"tool_use"}',
+                    )
+                ]
+            )
+
+        @staticmethod
+        def wait():
+            return SimpleNamespace(
+                status="completed",
+                final_output="done",
+                exit_code=0,
+                usage=None,
+                raw=None,
+            )
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    class ObserverSupervisor:
+        @staticmethod
+        def start_turn(*_args, **_kwargs):
+            return Turn()
+
+        @staticmethod
+        def complete_turn(*_args, **_kwargs):
+            process = GuestProcess(
+                process_seq=1,
+                uid=11001,
+                pid=412,
+                tgid=412,
+                ppid=41,
+                comm="tiny",
+                executable="/bin/tiny",
+                started_guest_mono_ns=1_001_000_000,
+                exited_guest_mono_ns=1_001_600_000,
+                # The call remains open at turn end, so any later process start
+                # is conservatively attributable without patching the clock.
+                started_host_mono=1e20,
+                exited_host_mono=1e20,
+                exit_code=0,
+                observed_fork=True,
+                observed_exec=True,
+                observed_exit=True,
+            )
+            return GuestObservation(
+                source="kata-guest-ebpf-v1",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+                processes=(process,),
+                origin_guest_mono_ns=1_000_000_000,
+            )
+
+        @staticmethod
+        def abort_turn(*_args, **_kwargs):
+            raise AssertionError("completed turn was aborted")
+
+    root, _repo = _workspace(tmp_path)
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        workdir_root=str(root),
+        token="broker-secret",
+        shared_session_supervisor=ObserverSupervisor(),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/turn",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json={
+                "token": "lease-token",
+                "prompt": "test",
+                "model": "model",
+                "reasoning_effort": None,
+            },
+        )
+
+    frames = [json.loads(line) for line in response.text.splitlines() if line]
+    result = next(frame for frame in frames if frame["kind"] == "result")
+    resources = result["resources"]
+    assert resources["sample_count"] == 0
+    assert resources["coverage"] == 0.0
+    assert resources["process_observation_complete"] is True
+    assert resources["process_events_lost"] == 0
+    assert resources["tool_calls"][0]["process_count"] == 1
+    assert resources["processes"] == [
+        {
+            "process_seq": 1,
+            "uid": 11001,
+            "pid": 412,
+            "tgid": 412,
+            "ppid": 41,
+            "comm": "tiny",
+            "executable": "/bin/tiny",
+            "started_offset_ms": 1,
+            "duration_ms": 1,
+            "exit_code": 0,
+            "observed_fork": True,
+            "observed_exec": True,
+            "observed_exit": True,
+            "tool_call_seqs": [1],
+        }
+    ]
 
 
 @pytest.mark.asyncio

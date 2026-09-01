@@ -134,7 +134,10 @@ def _shared_claim_attestation() -> dict[str, object]:
             "opencode": "1.18.9",
             "kilo": "7.4.17",
         },
-        "helper_versions": {"claude-agent-sdk": "0.2.148"},
+        "helper_versions": {
+            "claude-agent-sdk": "0.2.148",
+            "guest-observer": "1",
+        },
     }
 
 
@@ -3444,6 +3447,7 @@ def _tool_call(seq: int, name: str, **overrides: object) -> dict[str, object]:
         "cpu_usec_shared": None,
         "mem_peak_exclusive_bytes": None,
         "mem_peak_shared_bytes": None,
+        "process_count": 0,
         **overrides,
     }
 
@@ -3463,6 +3467,10 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
             "sampler_version": "2",
             "tool_calls_truncated": True,
             "tool_time_ms": 9_543,
+            "process_observer": "kata-guest-ebpf-v1",
+            "process_observation_complete": True,
+            "process_events_lost": 0,
+            "processes_truncated": False,
             "tool_calls": [
                 _tool_call(
                     1,
@@ -3473,8 +3481,27 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
                     measured_span_ms=8_000,
                     cpu_usec_exclusive=4_400_000,
                     mem_peak_exclusive_bytes=270_000_000,
+                    process_count=1,
                 ),
                 _tool_call(2, "Read"),
+            ],
+            "processes": [
+                {
+                    "process_seq": 1,
+                    "uid": 11001,
+                    "pid": 412,
+                    "tgid": 412,
+                    "ppid": 41,
+                    "comm": "tiny",
+                    "executable": "/bin/tiny",
+                    "started_offset_ms": 12,
+                    "duration_ms": 1,
+                    "exit_code": 0,
+                    "observed_fork": True,
+                    "observed_exec": True,
+                    "observed_exit": True,
+                    "tool_call_seqs": [1],
+                }
             ],
         },
     )
@@ -3487,6 +3514,16 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
     assert [first["tool_name"], second["tool_name"]] == ["Bash", "Read"]
     assert [first["timing_source"], second["timing_source"]] == ["exact", "message"]
     assert first["cpu_usec_exclusive"] == 4_400_000
+    assert first["process_count"] == 1
+    assert telemetry["process_observer"] == "kata-guest-ebpf-v1"
+    assert telemetry["process_observation_complete"] is True
+    assert telemetry["process_events_lost"] == 0
+    assert telemetry["processes_truncated"] is False
+    (process,) = telemetry["processes"]
+    assert process["uid"] == 11001
+    assert process["executable"] == "/bin/tiny"
+    assert process["duration_ms"] == 1
+    assert process["tool_call_seqs"] == [1]
     # Null rather than zero, in the database itself: this is the row that says
     # the call was too short for the sampler to have seen anything.
     assert second["cpu_usec_exclusive"] is None
