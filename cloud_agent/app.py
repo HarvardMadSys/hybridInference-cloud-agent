@@ -666,47 +666,6 @@ async def reap_expired_attempts(
                             "snapshot_ids": stalled_snapshot_publishes,
                         },
                     )
-            stalled_forks = await store.reap_stalled_sandbox_forks()
-            if stalled_forks:
-                from cloud_agent.broker_routing import broker_for_job
-
-                cleaned: list[str] = []
-                for operation in stalled_forks:
-                    broker = await broker_for_job(store, operation["source_job_id"])
-                    if broker is None:
-                        continue
-                    try:
-                        await broker.rollback_chat_sandbox_fork(
-                            operation["source_thread_id"],
-                            operation_id=operation["id"],
-                            source_sandbox_id=operation["source_sandbox_id"],
-                            target_thread_id=operation["target_thread_id"],
-                            target_sandbox_id=operation["target_sandbox_id"],
-                            target_generation=1,
-                            expected_container_id=operation.get("target_container_id"),
-                        )
-                        await store.complete_retained_fork_cleanup(operation_id=operation["id"])
-                        cleaned.append(operation["id"])
-                    except Exception:
-                        # ``cleanup_pending`` remains durable and is returned on
-                        # the next pass. Never trade an unreachable host for a
-                        # forgotten Docker clone/image.
-                        logger.warning(
-                            "agent_sandbox_fork_cleanup_failed",
-                            extra={
-                                "event": "agent_sandbox_fork_cleanup_failed",
-                                "operation_id": operation["id"],
-                            },
-                            exc_info=True,
-                        )
-                logger.warning(
-                    "agent_sandbox_forks_stalled",
-                    extra={
-                        "event": "agent_sandbox_forks_stalled",
-                        "operation_ids": [operation["id"] for operation in stalled_forks],
-                        "cleaned_operation_ids": cleaned,
-                    },
-                )
             stalled_session_forks = await store.reap_stalled_session_forks()
             if stalled_session_forks:
                 from cloud_agent.broker_routing import broker_for_job

@@ -385,68 +385,6 @@ class WorkspaceBrokerClient:
             json={"token": token, "lost": lost},
         )
 
-    async def fork_chat_sandbox(
-        self,
-        source_thread_id: str,
-        *,
-        operation_id: str,
-        source_sandbox_id: str,
-        source_generation: int,
-        source_activation_generation: int,
-        source_container_id: str,
-        source_anchor_job_id: str,
-        source_native_session_id: str,
-        target_thread_id: str,
-        target_sandbox_id: str,
-        target_generation: int = 1,
-    ) -> dict[str, Any]:
-        """Commit and clone one latest-settled retained chat idempotently."""
-        return await self._sandbox_request(
-            "POST",
-            source_thread_id,
-            "fork",
-            json={
-                "operation_id": operation_id,
-                "source_sandbox_id": source_sandbox_id,
-                "source_generation": source_generation,
-                "source_activation_generation": source_activation_generation,
-                "source_container_id": source_container_id,
-                "source_anchor_job_id": source_anchor_job_id,
-                "source_native_session_id": source_native_session_id,
-                "target_thread_id": target_thread_id,
-                "target_sandbox_id": target_sandbox_id,
-                "target_generation": target_generation,
-            },
-            timeout=420,
-        )
-
-    async def rollback_chat_sandbox_fork(
-        self,
-        source_thread_id: str,
-        *,
-        operation_id: str,
-        source_sandbox_id: str,
-        target_thread_id: str,
-        target_sandbox_id: str,
-        target_generation: int = 1,
-        expected_container_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Compensate only the exact incomplete clone owned by a fork saga."""
-        return await self._sandbox_request(
-            "POST",
-            source_thread_id,
-            "fork-rollback",
-            json={
-                "operation_id": operation_id,
-                "source_sandbox_id": source_sandbox_id,
-                "target_thread_id": target_thread_id,
-                "target_sandbox_id": target_sandbox_id,
-                "target_generation": target_generation,
-                "expected_container_id": expected_container_id,
-            },
-            timeout=120,
-        )
-
     async def chat_sandbox_status(self, thread_id: str) -> dict[str, Any]:
         """Inspect the exact retained container recorded for a thread."""
         return await self._sandbox_request("GET", thread_id)

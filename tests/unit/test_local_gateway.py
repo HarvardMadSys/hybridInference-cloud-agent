@@ -25,6 +25,16 @@ def local_gateway_state(monkeypatch):
     monkeypatch.setenv("LOCAL_IDENTITY_ALLOWED_REDIRECTS", "http://127.0.0.1:13002/callback")
 
 
+def test_default_identity_redirects_follow_the_configured_edge_port(monkeypatch) -> None:
+    monkeypatch.delenv("LOCAL_IDENTITY_ALLOWED_REDIRECTS")
+    monkeypatch.setenv("LOCAL_EDGE_PORT", "23002")
+
+    assert gateway._allowed_redirects() == {
+        "http://127.0.0.1:23002/callback",
+        "http://localhost:23002/callback",
+    }
+
+
 async def test_pkce_identity_internal_contracts_and_inference_grant() -> None:
     verifier = "v" * 64
     challenge = (

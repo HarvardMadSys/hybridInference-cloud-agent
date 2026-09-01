@@ -207,37 +207,11 @@ class ChatSandboxIdleStopRequest(BaseModel):
     """Durable control-plane fence authorizing one retained-container stop."""
 
     generation: int = Field(..., ge=1)
-    # Full-fork targets have no agent activation yet. A broker reconstructed
-    # after a pre-turn file/terminal wake therefore stops the exact generation
-    # zero container under the control plane's durable fence.
+    # A broker reconstructed before the first agent activation may observe a
+    # generation-zero container after a file/terminal wake. The durable stop
+    # fence must still be able to name that exact container.
     activation_generation: int = Field(..., ge=0)
     reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
-
-
-class ChatSandboxForkRequest(BaseModel):
-    """Durable identities for one latest-settled full Docker clone."""
-
-    operation_id: str = Field(..., min_length=1, max_length=256)
-    source_sandbox_id: str = Field(..., min_length=1, max_length=256)
-    source_generation: int = Field(..., ge=1)
-    source_activation_generation: int = Field(..., ge=0)
-    source_container_id: str = Field(..., min_length=1, max_length=256)
-    source_anchor_job_id: str = Field(..., min_length=1, max_length=256)
-    source_native_session_id: str = Field(..., min_length=1, max_length=512)
-    target_thread_id: str = Field(..., min_length=1, max_length=256)
-    target_sandbox_id: str = Field(..., min_length=1, max_length=256)
-    target_generation: int = Field(1, ge=1)
-
-
-class ChatSandboxForkRollbackRequest(BaseModel):
-    """Exact target ownership needed to compensate an incomplete fork."""
-
-    operation_id: str = Field(..., min_length=1, max_length=256)
-    source_sandbox_id: str = Field(..., min_length=1, max_length=256)
-    target_thread_id: str = Field(..., min_length=1, max_length=256)
-    target_sandbox_id: str = Field(..., min_length=1, max_length=256)
-    target_generation: int = Field(1, ge=1)
-    expected_container_id: str | None = Field(None, min_length=1, max_length=256)
 
 
 class SharedSandboxMemberRequest(BaseModel):
@@ -2140,56 +2114,6 @@ def create_app(
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
         return asdict(descriptor)
-
-    @app.post("/sandboxes/{thread_id}/fork")
-    async def fork_chat_sandbox(
-        thread_id: str,
-        body: ChatSandboxForkRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Create/adopt an isolated Docker clone for one durable fork saga."""
-        owner = require_supervisor()
-        try:
-            result = await asyncio.to_thread(
-                owner.fork_settled,
-                thread_id,
-                operation_id=body.operation_id,
-                source_sandbox_id=body.source_sandbox_id,
-                source_generation=body.source_generation,
-                source_activation_generation=body.source_activation_generation,
-                source_container_id=body.source_container_id,
-                source_anchor_job_id=body.source_anchor_job_id,
-                source_native_session_id=body.source_native_session_id,
-                target_thread_id=body.target_thread_id,
-                target_sandbox_id=body.target_sandbox_id,
-                target_generation=body.target_generation,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        return asdict(result)
-
-    @app.post("/sandboxes/{thread_id}/fork-rollback")
-    async def rollback_chat_sandbox_fork(
-        thread_id: str,
-        body: ChatSandboxForkRollbackRequest,
-        _: None = Depends(authenticate),
-    ) -> dict[str, Any]:
-        """Remove only an incomplete target carrying this fork's labels."""
-        owner = require_supervisor()
-        try:
-            removed = await asyncio.to_thread(
-                owner.rollback_fork,
-                thread_id,
-                operation_id=body.operation_id,
-                source_sandbox_id=body.source_sandbox_id,
-                target_thread_id=body.target_thread_id,
-                target_sandbox_id=body.target_sandbox_id,
-                target_generation=body.target_generation,
-                expected_container_id=body.expected_container_id,
-            )
-        except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
-        return {"removed": removed}
 
     @app.get("/sandboxes/{thread_id}")
     async def chat_sandbox_status(

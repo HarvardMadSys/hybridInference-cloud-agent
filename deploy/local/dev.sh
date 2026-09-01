@@ -82,10 +82,33 @@ ensure_env() {
   echo "Generated $ENV_FILE with local-only random credentials."
 }
 
+local_edge_port() {
+  edge_port=${LOCAL_EDGE_PORT:-}
+  if [ -z "$edge_port" ]; then
+    edge_port=$(sed -n 's/^LOCAL_EDGE_PORT=//p' "$ENV_FILE" | tail -n 1)
+  fi
+  case "$edge_port" in
+    '' | *[!0-9]*)
+      echo "LOCAL_EDGE_PORT must be an integer from 1 to 65535." >&2
+      return 1
+      ;;
+  esac
+  if [ "$edge_port" -lt 1 ] || [ "$edge_port" -gt 65535 ]; then
+    echo "LOCAL_EDGE_PORT must be an integer from 1 to 65535." >&2
+    return 1
+  fi
+  printf '%s\n' "$edge_port"
+}
+
+local_base_url() {
+  printf 'http://127.0.0.1:%s\n' "$(local_edge_port)"
+}
+
 wait_ready() {
+  base_url=$(local_base_url)
   attempts=0
-  until curl --fail --silent --show-error "http://127.0.0.1:13002/health" >/dev/null \
-    && curl --fail --silent --show-error "http://127.0.0.1:13002/api/healthz" >/dev/null; do
+  until curl --fail --silent --show-error "$base_url/health" >/dev/null \
+    && curl --fail --silent --show-error "$base_url/api/healthz" >/dev/null; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 90 ]; then
       echo "Local stack did not become ready. Recent logs:" >&2
@@ -103,14 +126,14 @@ case "$command" in
     compose build sandbox-image
     compose up --detach --build
     wait_ready
-    echo "Local Cloud Agent is ready: http://127.0.0.1:13002"
+    echo "Local Cloud Agent is ready: $(local_base_url)"
     echo "Run '$0 smoke' for an automated login/config/agent lifecycle check."
     ;;
   start)
     ensure_env
     compose start
     wait_ready
-    echo "Local Cloud Agent is ready: http://127.0.0.1:13002"
+    echo "Local Cloud Agent is ready: $(local_base_url)"
     ;;
   stop)
     ensure_env
@@ -128,12 +151,12 @@ case "$command" in
   smoke)
     ensure_env
     wait_ready
-    exec python3 "$SCRIPT_DIR/smoke.py" "${2:-http://127.0.0.1:13002}"
+    exec python3 "$SCRIPT_DIR/smoke.py" "${2:-$(local_base_url)}"
     ;;
   legacy-smoke)
     ensure_env
     wait_ready
-    base_url=${2:-http://127.0.0.1:13002}
+    base_url=${2:-$(local_base_url)}
     if [ -d /private/tmp ]; then
       # Docker Desktop/Colima shares /private/tmp, but not macOS's per-user
       # /private/var/folders/... value of TMPDIR.

@@ -525,9 +525,10 @@ actual image while its database row still reports the old one.
 > for snapshot capture. Capture runs on a short control-plane schedule separate
 > from attempt/grant reaping. A pending snapshot remains eligible after normal
 > idle stop: the broker starts the exact generation/container, captures it, and
-> re-arms the same group inactivity clock. Historical `legacy_1to1` containers remain readable and
-> resumable, but no new retained Docker-clone Fork is created by the shared-live
-> route. Keep the capability off for general traffic until the exact-runtime
+> re-arms the same group inactivity clock. Historical `legacy_1to1` containers
+> remain readable and resumable, but retained Fork is rejected for them. The
+> Docker-clone broker route, saga, and host implementation are absent. Keep the
+> capability off for general traffic until the exact-runtime
 > live-provider and Kata/gVisor conformance gates pass in the target deployment.
 
 > In shared-live mode, the Docker socket (or mTLS Engine endpoint) is the only

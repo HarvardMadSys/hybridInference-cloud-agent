@@ -60,8 +60,6 @@ CHAT_CPU_LIMIT_LABEL = "org.freeinference.chat-cpu-limit"
 CHAT_STOP_TIMEOUT_LABEL = "org.freeinference.chat-stop-timeout-seconds"
 CHAT_SHARED_LABEL = "org.freeinference.chat-shared-live"
 CHAT_RESIDENT_CAPACITY_LABEL = "org.freeinference.chat-resident-slot-capacity"
-CHAT_FORK_OPERATION_LABEL = "org.freeinference.chat-fork-operation"
-CHAT_FORK_SOURCE_SANDBOX_LABEL = "org.freeinference.chat-fork-source-sandbox"
 CHAT_CONTAINER_PREFIX = "freeinference-chat"
 CHAT_WORKDIR = "/workspace"
 CHAT_STATE_DIR = "/agent-state"
@@ -70,7 +68,6 @@ MEMBER_TMPFS_ROOT = "/run/agent-members"
 MEMBER_UID_BASE = 11001
 MEMBER_UID_LIMIT = 128
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
-_DOCKER_IMAGE_ID = re.compile(r"sha256:[0-9a-fA-F]{64}")
 
 # PID 1 contains no chat credential and owns no chat state outside the
 # container writable layer.  A reconnectable protocol bridge may later replace
@@ -266,10 +263,10 @@ class ChatSandboxManager:
             CHAT_WORKDIR,
             "--user",
             f"{self.backend.uid}:{self.backend.gid}",
-            # Ordinary new chats begin in setup egress. A full-sandbox clone
-            # has already completed setup and is created directly on the
-            # narrower agent network; putting it back on setup egress would be
-            # both unnecessary and a security regression.
+            # Ordinary new chats begin in setup egress. Reconstructed shared
+            # groups may already have completed setup and therefore start on
+            # the narrower agent network; widening them again would be a
+            # security regression.
             "--network",
             self.backend.network_for_phase(network_phase),
             "--memory",
@@ -1467,138 +1464,6 @@ class ChatSandboxManager:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
-    def commit(self, spec: ChatSandboxSpec, repository: str) -> str:
-        """Snapshot a settled container for a platform-owned full sandbox fork."""
-        current = self._require(spec)
-        if not repository or any(char.isspace() or char == "\x00" for char in repository):
-            raise ValueError("snapshot repository must be one Docker image reference")
-        result = self._run(
-            [
-                self.backend.docker_binary,
-                "commit",
-                "--pause=true",
-                current.container_id,
-                repository,
-            ],
-            timeout=300,
-        )
-        if result.returncode != 0:
-            raise SandboxError("chat sandbox commit failed: " + result.stderr.strip()[:300])
-        # Docker Desktop 4.4x writes a ``--pause`` deprecation notice to
-        # stdout before the actual receipt. Never feed that untrusted prose
-        # back into ``docker create`` as an image reference: select exactly one
-        # structurally valid content id instead.
-        image_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        image_ids = [line for line in image_ids if _DOCKER_IMAGE_ID.fullmatch(line)]
-        if len(image_ids) != 1:
-            raise SandboxError("chat sandbox commit returned an invalid image id receipt")
-        return image_ids[0]
-
-    def flush_for_snapshot(self, spec: ChatSandboxSpec) -> None:
-        """Flush a running, settled container's filesystem before ``commit``.
-
-        Native CLI processes have already exited at the settled boundary. The
-        explicit sync closes the remaining kernel writeback gap; Docker's
-        pause barrier then freezes the writable layer while it is committed.
-        A stopped container is already quiescent and cannot be ``exec``-ed.
-        """
-        current = self._require(spec)
-        if not current.running:
-            return
-        result = self.exec_capture(spec, ["/bin/sync"], workdir="/", timeout_s=60)
-        if result.returncode != 0:
-            raise SandboxError(
-                "chat sandbox snapshot flush failed: "
-                + result.stderr.decode("utf-8", "replace")[:300]
-            )
-
-    def remove(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        container_id: str,
-    ) -> bool:
-        """Remove only an exact, label-verified incomplete clone container.
-
-        This is intentionally not a general chat cleanup API. Callers must
-        present the immutable target spec and the exact Docker object id, so a
-        stale rollback cannot delete a newer container occupying the name.
-        """
-        current = self.inspect(spec.container_name)
-        if current is None:
-            return False
-        self._verify_identity(current, spec)
-        if current.container_id != container_id:
-            raise SandboxError("refusing to remove a different retained chat container")
-        if current.status is ChatSandboxStatus.PAUSED:
-            raise SandboxError("refusing to remove a paused retained chat container")
-        if current.running:
-            current = self.stop(spec)
-        result = self._run(
-            [self.backend.docker_binary, "container", "rm", current.container_id],
-            timeout=60,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "chat sandbox rollback removal failed: " + result.stderr.strip()[:300]
-            )
-        if self.inspect(spec.container_name) is not None:
-            raise SandboxError("Docker reported clone removal but the container still exists")
-        return True
-
-    @staticmethod
-    def snapshot_repository(operation_id: str) -> str:
-        """Return a deterministic, Docker-safe temporary tag for one fork saga."""
-        if not operation_id or "\x00" in operation_id or len(operation_id) > 256:
-            raise ValueError("fork operation id must be a non-empty opaque id")
-        digest = hashlib.sha256(operation_id.encode()).hexdigest()[:32]
-        return f"freeinference-chat-fork:{digest}"
-
-    def remove_image_reference(self, repository: str) -> bool:
-        """Untag one platform-owned snapshot without forcing layer deletion."""
-        if not repository or any(char.isspace() or char == "\x00" for char in repository):
-            raise ValueError("snapshot repository must be one Docker image reference")
-        inspected = self._run(
-            [self.backend.docker_binary, "image", "inspect", repository],
-            timeout=30,
-        )
-        if inspected.returncode != 0:
-            lowered = inspected.stderr.lower()
-            if "no such image" in lowered or "no such object" in lowered:
-                return False
-            raise SandboxError("snapshot image inspect failed: " + inspected.stderr.strip()[:300])
-        removed = self._run(
-            [self.backend.docker_binary, "image", "rm", repository],
-            timeout=60,
-        )
-        if removed.returncode != 0:
-            raise SandboxError("snapshot image untag failed: " + removed.stderr.strip()[:300])
-        return True
-
-    def image_id(self, repository: str) -> str | None:
-        """Resolve a deterministic snapshot tag for crash-safe fork retries."""
-        if not repository or any(char.isspace() or char == "\x00" for char in repository):
-            raise ValueError("snapshot repository must be one Docker image reference")
-        inspected = self._run(
-            [
-                self.backend.docker_binary,
-                "image",
-                "inspect",
-                "--format={{.Id}}",
-                repository,
-            ],
-            timeout=30,
-        )
-        if inspected.returncode != 0:
-            lowered = inspected.stderr.lower()
-            if "no such image" in lowered or "no such object" in lowered:
-                return None
-            raise SandboxError("snapshot image inspect failed: " + inspected.stderr.strip()[:300])
-        image_id = inspected.stdout.strip()
-        if not image_id:
-            raise SandboxError("snapshot image inspection returned no image id")
-        return image_id
-
     def _require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
         current = self.inspect(spec.container_name)
         if current is None:
@@ -2044,8 +1909,6 @@ class RetainedChatBackend(SandboxBackend):
 __all__ = [
     "ACTIVATION_TMPFS",
     "CHAT_CONTAINER_PREFIX",
-    "CHAT_FORK_OPERATION_LABEL",
-    "CHAT_FORK_SOURCE_SANDBOX_LABEL",
     "CHAT_GENERATION_LABEL",
     "CHAT_IMAGE_DIGEST_LABEL",
     "CHAT_RESIDENT_CAPACITY_LABEL",

@@ -52,7 +52,6 @@ _TABLES_IN_FK_ORDER = (
     "agent_job_artifacts",
     "agent_job_events",
     "agent_thread_sandboxes",
-    "agent_sandbox_forks",
     "agent_thread_residencies",
     "agent_attempts",
     "agent_jobs",

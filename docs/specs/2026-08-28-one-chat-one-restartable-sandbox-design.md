@@ -3,12 +3,12 @@
 - **Status:** historical v5 baseline. New capable chats are superseded by
   `2026-08-31-native-session-fork-shared-workspace-design.md`; `legacy_1to1`
   retains only its one-process-per-turn resume behavior for rolling
-  compatibility. The current Fork API does not create a new Docker clone for
-  either mode.
+  compatibility and rejects retained Fork. The Docker-clone implementation
+  described below was removed before merge.
 - **Date:** 2026-08-28
-- **Scope:** Docker-owned same-host storage, live interaction while running,
-  native Agent CLI resume after `docker stop` / `docker start`, and an
-  isolated full-sandbox clone at the latest settled turn
+- **Historical scope:** Docker-owned same-host storage, live interaction while
+  running, native Agent CLI resume after `docker stop` / `docker start`, and a
+  proposed isolated full-sandbox clone at the latest settled turn
 - **Defers:** sandbox cleanup, container removal, persistent/cold storage,
   cross-host restore, and recovery after container loss
 - **Supersedes for new work:** the runtime lifecycle, WARM ownership, fork,
@@ -22,11 +22,11 @@
   while Docker runs, and performs immediate native Agent CLI forks whose chats
   run concurrently in one retained container/workspace.
 
-> The runner-owned one-process-per-turn path and full Docker-clone Fork below
-> document the v5/`legacy_1to1` compatibility baseline. They are not the
-> behavior of a new `shared-sandbox-v1` chat. The current Fork API creates no
-> new retained Docker-clone fork in either mode; the old clone code remains
-> only to reconcile or clean an already-recorded historical saga.
+> The runner-owned one-process-per-turn path remains the `legacy_1to1`
+> compatibility baseline. The full Docker-clone Fork sections below document a
+> superseded proposal only: its route, host implementation, saga table, and
+> acceptance test were removed before merge. The current Fork API either makes
+> a shared native-session fork or rejects the retained legacy chat.
 
 ---
 

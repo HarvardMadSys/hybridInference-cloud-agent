@@ -770,36 +770,6 @@ def test_setup_network_is_replaced_by_agent_network_before_agent_exec(monkeypatc
     assert ["docker", "network", "disconnect", "setup-net", "sha256:container-one"] in calls
 
 
-def test_commit_uses_dockers_pause_barrier_and_returns_the_image_id(monkeypatch):
-    spec = _spec()
-    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
-    payload = _inspect_payload(spec, status="exited", running=False)
-    calls: list[list[str]] = []
-
-    def fake_run(argv, **_kwargs):
-        calls.append(list(argv))
-        if argv[1:3] == ["container", "inspect"]:
-            return SimpleNamespace(returncode=0, stdout=payload, stderr="")
-        return SimpleNamespace(
-            returncode=0,
-            stdout=(
-                f"Flag --pause has been deprecated, and enabled by default.\nsha256:{'f' * 64}\n"
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
-
-    assert manager.commit(spec, "freeinference-fork:operation-1") == f"sha256:{'f' * 64}"
-    assert calls[-1] == [
-        "docker",
-        "commit",
-        "--pause=true",
-        "sha256:container-one",
-        "freeinference-fork:operation-1",
-    ]
-
-
 @pytest.mark.parametrize(
     "field,value,message",
     [

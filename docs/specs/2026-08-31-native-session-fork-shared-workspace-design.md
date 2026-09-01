@@ -534,10 +534,9 @@ publisher finishing. Section 9 defines the ordering and retry rules.
 
 Existing retained chats migrate one-to-one into a group plus one membership
 without changing their container id, Docker name, state, native session id, or
-behavior. Existing Docker-cloned chats remain independent historical groups,
-but no new Docker clone is created after cutover. Old clone saga rows remain
-auditable and their code path is retired only after in-flight operations are
-reconciled.
+behavior. The unreleased Docker-clone route, host implementation, saga table,
+and migration were removed before cutover, so the released schema has no clone
+operations to preserve or reconcile.
 
 Backfill does not pretend an old container acquired binaries, Linux identities,
 tmpfs slots, or permissions from a newer image. A group is shared-fork capable
@@ -706,7 +705,12 @@ billing identity is the chat/thread. Attempt-fenced runtime events preserve the
 turn's reported usage, but the implementation does not claim a per-turn split
 of the gateway ledger for a credential reused across turns. Turn timeout and
 cancellation first invoke the exact transport's native interrupt for that
-activation; an unhealthy transport takes the member-only process restart path.
+activation. Before prompt admission, cancellation can release the turn without
+changing native context. After admission, the current contract cannot prove an
+atomic settled boundary between the CLI consuming the prompt and acknowledging
+the interrupt, so it stops that member transport and marks only that membership
+LOST rather than risk replaying the same prompt. Sibling members and the shared
+container remain intact.
 The current Docker sampler, however, reports cumulative container counters and
 cannot truthfully charge the same CPU/memory/I/O to two overlapping jobs. The
 shared mode must either add process-tree sampling rooted at each member wrapper
@@ -1114,7 +1118,7 @@ for each enabled CLI plus Kata/gVisor validation remain rollout gates.
 | Driver | Provides exact-version supervisor-live transport, native interrupt/resume, native fork-only receipts, and concurrent shared-state gates |
 | Retained fork route | Bypasses Docker commit/create/fingerprint clone and synchronously materializes the member-only native fork before returning success |
 | Fork recovery | Uses client idempotency, PREPARING/MATERIALIZED/READY saga states, and a credential-free in-container receipt journal |
-| Migrations | Preserve old clone audit rows, retire new clone creation, and add group/membership/native-edge/fork-operation records |
+| Migrations | Add group/membership/native-edge/fork-operation records directly after the restartable-sandbox ledger; create no Docker-clone saga table |
 | Patch/publisher | Uses ordered group snapshots, one lineage branch, imported published bases, and a bounded quiescent capture coordinator instead of per-job authority |
 | Frontend | Allows simultaneous chat Running states and displays shared/racing workspace semantics |
 | Runner topology | Keeps idle transports in the supervisor and requires two or more turn executors/slots for simultaneous A/B turns |
@@ -1142,7 +1146,9 @@ production acceptance contract is:
    immediately after Fork, and can both start turns at the same time.
 4. Neither member receives sandbox-busy merely because the sibling is active.
 5. Each member admits at most one unresolved message and streams/interrupts
-   only its own activation while leaving a healthy resident transport alive.
+   only its own activation. Normal settlement leaves the healthy resident
+   transport alive; post-admission cancel/timeout fails only that member closed
+   as LOST unless a future runtime contract can prove an atomic clean boundary.
 6. The parent remains on its source native id, the child is already on its
    distinct forked id, and parent-first, child-first, and simultaneous next
    messages all go directly to the already-live transports without another
@@ -1210,8 +1216,8 @@ production acceptance contract is:
     from WARM to HOT without cloning a container or treating a lost in-memory
     timer as an immediate timeout.
 26. An additive migration backfills every existing retained chat into one
-    group/member pair, historical Docker clones remain independent groups, and
-    old hosts cannot claim `shared-sandbox-v1` work during rolling rollout.
+    group/member pair, creates no Docker-clone records, and old hosts cannot
+    claim `shared-sandbox-v1` work during rolling rollout.
 27. A turn that forks, double-forks, calls `setsid`, and ignores TERM has all
     activation descendants reaped while its reviewed idle CLI root survives;
     full member restart clears the entire UID without signalling a sibling.

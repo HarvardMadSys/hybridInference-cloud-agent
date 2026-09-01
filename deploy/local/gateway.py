@@ -99,10 +99,10 @@ def _error(status: int, kind: str, message: str) -> ContractError:
 
 
 def _allowed_redirects() -> set[str]:
-    raw = os.environ.get(
-        "LOCAL_IDENTITY_ALLOWED_REDIRECTS",
-        "http://127.0.0.1:13002/callback,http://localhost:13002/callback",
-    )
+    edge_port = os.environ.get("LOCAL_EDGE_PORT", "13002").strip() or "13002"
+    raw = (os.environ.get("LOCAL_IDENTITY_ALLOWED_REDIRECTS") or "").strip()
+    if not raw:
+        raw = f"http://127.0.0.1:{edge_port}/callback,http://localhost:{edge_port}/callback"
     return {entry.strip() for entry in raw.split(",") if entry.strip()}
 
 

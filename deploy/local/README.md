@@ -34,6 +34,13 @@ Then open <http://127.0.0.1:13002>. The first sign-in displays an explicit
 local consent page. The generated credentials live in the git-ignored
 `deploy/local/.env.local` with mode `0600`.
 
+To use another loopback port, change `LOCAL_EDGE_PORT` in `.env.local` before
+starting the stack, or export it for that invocation. `dev.sh` derives
+readiness checks, smoke-test URLs, console output, and the default OAuth
+callback allowlist from that value. An explicit
+`LOCAL_IDENTITY_ALLOWED_REDIRECTS` remains authoritative when testing a custom
+identity setup.
+
 `up` may take a while the first time because the sandbox image installs exact
 versions of Claude Code, Codex, Pi, OpenCode, and Kilo. Later builds use Docker
 layer cache.

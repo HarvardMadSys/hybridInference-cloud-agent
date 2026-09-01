@@ -48,6 +48,12 @@ def test_complete_local_stack_exposes_only_its_loopback_edge(local_compose: dict
     services = local_compose["services"]
 
     assert services["edge"]["ports"] == ["127.0.0.1:${LOCAL_EDGE_PORT:-13002}:8088"]
+    assert services["local-gateway"]["environment"]["LOCAL_EDGE_PORT"] == (
+        "${LOCAL_EDGE_PORT:-13002}"
+    )
+    assert services["local-gateway"]["environment"]["LOCAL_IDENTITY_ALLOWED_REDIRECTS"] == (
+        "${LOCAL_IDENTITY_ALLOWED_REDIRECTS:-}"
+    )
     assert "ports" not in services["local-gateway"]
     assert "ports" not in services["local-repo"]
 

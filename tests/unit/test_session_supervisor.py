@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 
@@ -35,10 +34,6 @@ class _Manager:
         self.created = 0
         self.started = 0
         self.stopped = 0
-        self.committed = 0
-        self.removed = 0
-        self.exec_calls: list[tuple[list[str], bytes | None]] = []
-        self.images: dict[str, str] = {}
         self.stale_terminal_reaps: list[str] = []
 
     @staticmethod
@@ -124,46 +119,6 @@ class _Manager:
 
     def reap_stale_terminal_processes(self, spec: ChatSandboxSpec) -> None:
         self.stale_terminal_reaps.append(spec.thread_id)
-
-    @staticmethod
-    def snapshot_repository(operation_id: str) -> str:
-        return f"fork:{operation_id}"
-
-    def image_id(self, repository: str) -> str | None:
-        return self.images.get(repository)
-
-    def flush_for_snapshot(self, spec: ChatSandboxSpec) -> None:
-        assert spec.container_name in self.items
-
-    def commit(self, spec: ChatSandboxSpec, repository: str) -> str:
-        assert spec.container_name in self.items
-        self.committed += 1
-        self.images[repository] = "sha256:fork-image"
-        return "sha256:fork-image"
-
-    def exec_capture(
-        self,
-        spec: ChatSandboxSpec,
-        argv: list[str],
-        *,
-        input_bytes: bytes | None = None,
-        **_kwargs,
-    ):
-        assert self.items[spec.container_name][1].running
-        self.exec_calls.append((argv, input_bytes))
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-
-    def remove(self, spec: ChatSandboxSpec, *, container_id: str) -> bool:
-        item = self.items.get(spec.container_name)
-        if item is None:
-            return False
-        assert item[1].container_id == container_id
-        self.items.pop(spec.container_name)
-        self.removed += 1
-        return True
-
-    def remove_image_reference(self, repository: str) -> bool:
-        return self.images.pop(repository, None) is not None
 
 
 def _spec(thread: str = "athr_1", sandbox: str = "asbx_1") -> ChatSandboxSpec:
@@ -550,103 +505,6 @@ def test_close_does_not_stop_retained_chat_state():
 
     assert manager.stopped == 0
     assert manager.items[_spec().container_name][1].running is True
-
-
-def test_full_fork_clones_settled_state_rewrites_identity_and_is_idempotent():
-    manager = _Manager()
-    supervisor = ChatSessionSupervisor(manager, clock=_Clock())
-    source = _spec()
-    lease = supervisor.acquire(source, owner="attempt:1", has_settled_context=False)
-    supervisor.settle("athr_1", lease.token, job_id="ajob_1", context_status="new")
-
-    kwargs = {
-        "operation_id": "afork_1",
-        "source_sandbox_id": source.sandbox_id,
-        "source_generation": source.generation,
-        "source_activation_generation": lease.activation_generation,
-        "source_container_id": lease.container_id,
-        "source_anchor_job_id": "ajob_1",
-        "source_native_session_id": "native-session-1",
-        "target_thread_id": "athr_fork",
-        "target_sandbox_id": "asbx_fork",
-    }
-    first = supervisor.fork_settled("athr_1", **kwargs)
-    second = supervisor.fork_settled("athr_1", **kwargs)
-
-    assert first == second
-    assert first.target_container_id != first.source_container_id
-    assert first.snapshot_image_digest == "sha256:fork-image"
-    assert manager.committed == 1
-    assert supervisor.status("athr_1").running is True
-    target = supervisor.status("athr_fork")
-    assert target.running is False
-    assert target.context_status == "restored"
-    branch_calls = [argv for argv, _ in manager.exec_calls if "git update-ref" in " ".join(argv)]
-    assert branch_calls
-    assert branch_calls[-1][-1] == "agent/athr_fork"
-    metadata = [body for _, body in manager.exec_calls if body]
-    assert metadata and b'"native_session_id":"native-session-1"' in metadata[-1]
-
-
-def test_full_fork_refuses_an_active_terminal_without_touching_the_source():
-    manager = _Manager()
-    supervisor = ChatSessionSupervisor(manager, clock=_Clock())
-    source = _spec()
-    lease = supervisor.acquire(source, owner="attempt:1", has_settled_context=False)
-    supervisor.settle("athr_1", lease.token, job_id="ajob_1", context_status="new")
-    supervisor.terminal_opened("athr_1")
-
-    with pytest.raises(SessionBusy, match="active workspace users"):
-        supervisor.fork_settled(
-            "athr_1",
-            operation_id="afork_1",
-            source_sandbox_id=source.sandbox_id,
-            source_generation=1,
-            source_activation_generation=1,
-            source_container_id=lease.container_id,
-            source_anchor_job_id="ajob_1",
-            source_native_session_id="native-session-1",
-            target_thread_id="athr_fork",
-            target_sandbox_id="asbx_fork",
-        )
-
-    assert manager.committed == 0
-    assert supervisor.status("athr_1").running is True
-
-
-def test_fork_rollback_removes_only_the_exact_labelled_target():
-    manager = _Manager()
-    supervisor = ChatSessionSupervisor(manager, clock=_Clock())
-    source = _spec()
-    lease = supervisor.acquire(source, owner="attempt:1", has_settled_context=False)
-    supervisor.settle("athr_1", lease.token, job_id="ajob_1", context_status="new")
-    result = supervisor.fork_settled(
-        "athr_1",
-        operation_id="afork_1",
-        source_sandbox_id=source.sandbox_id,
-        source_generation=1,
-        source_activation_generation=1,
-        source_container_id=lease.container_id,
-        source_anchor_job_id="ajob_1",
-        source_native_session_id="native-session-1",
-        target_thread_id="athr_fork",
-        target_sandbox_id="asbx_fork",
-    )
-
-    removed = supervisor.rollback_fork(
-        "athr_1",
-        operation_id="afork_1",
-        source_sandbox_id=source.sandbox_id,
-        target_thread_id="athr_fork",
-        target_sandbox_id="asbx_fork",
-        expected_container_id=result.target_container_id,
-    )
-
-    assert removed is True
-    assert manager.removed == 1
-    assert source.container_name in manager.items
-    with pytest.raises(SandboxError, match="no retained sandbox"):
-        supervisor.status("athr_fork")
 
 
 def test_durable_idle_stop_cannot_race_a_suspended_workspace():

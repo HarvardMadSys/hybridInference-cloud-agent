@@ -25,7 +25,7 @@ from cloud_agent_host.sandbox import (
     SandboxSpec,
     TerminalProcess,
 )
-from cloud_agent_host.session_supervisor import SandboxForkResult, SessionDescriptor, SessionLease
+from cloud_agent_host.session_supervisor import SessionDescriptor, SessionLease
 from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
@@ -1106,26 +1106,6 @@ class _FakeSessionSupervisor:
             idle_deadline_monotonic=None,
         )
 
-    def fork_settled(self, thread_id: str, **kwargs):
-        self.calls.append(("fork", thread_id, kwargs))
-        return SandboxForkResult(
-            operation_id=kwargs["operation_id"],
-            source_thread_id=thread_id,
-            source_sandbox_id=kwargs["source_sandbox_id"],
-            source_container_id=kwargs["source_container_id"],
-            target_thread_id=kwargs["target_thread_id"],
-            target_sandbox_id=kwargs["target_sandbox_id"],
-            target_container_id="container-fork",
-            target_container_name="freeinference-chat-fork",
-            snapshot_image_digest="sha256:fork-image",
-            source_fingerprint="sha256:fork-image",
-            target_fingerprint="sha256:fork-image",
-        )
-
-    def rollback_fork(self, thread_id: str, **kwargs):
-        self.calls.append(("fork-rollback", thread_id, kwargs))
-        return True
-
     def operation_opened(self, thread_id: str):
         self.calls.append(("operation_opened", thread_id))
         return "operation-token", self._descriptor(thread_id)
@@ -1347,7 +1327,7 @@ async def test_broker_exposes_authenticated_restartable_sandbox_lifecycle(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_broker_accepts_a_generation_zero_fork_target_idle_stop(tmp_path):
+async def test_broker_accepts_a_generation_zero_pre_activation_idle_stop(tmp_path):
     root, _repo = _workspace(tmp_path)
     supervisor = _FakeSessionSupervisor()
     app = create_app(
@@ -1455,55 +1435,6 @@ async def test_shared_turn_reports_activation_boundary_failure_before_result(tmp
     assert response.status_code == 200
     assert frames == [{"kind": "error", "detail": "member permission normalization failed"}]
     assert supervisor.calls == ["start", "complete", "abort"]
-
-
-@pytest.mark.asyncio
-async def test_broker_exposes_fenced_full_sandbox_fork_and_rollback(tmp_path):
-    root, _repo = _workspace(tmp_path)
-    supervisor = _FakeSessionSupervisor()
-    app = create_app(
-        backend=ProcessBackend(acknowledged_unsafe=True),
-        workdir_root=str(root),
-        token="broker-secret",
-        session_supervisor=supervisor,
-    )
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    fork_body = {
-        "operation_id": "afork_1",
-        "source_sandbox_id": "asbx_1",
-        "source_generation": 1,
-        "source_activation_generation": 2,
-        "source_container_id": "container-one",
-        "source_anchor_job_id": "ajob_1",
-        "source_native_session_id": "native-session-1",
-        "target_thread_id": "athr_fork",
-        "target_sandbox_id": "asbx_fork",
-        "target_generation": 1,
-    }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
-        forked = await client.post(
-            "/sandboxes/athr_1/fork",
-            headers=headers,
-            json=fork_body,
-        )
-        rolled_back = await client.post(
-            "/sandboxes/athr_1/fork-rollback",
-            headers=headers,
-            json={
-                "operation_id": "afork_1",
-                "source_sandbox_id": "asbx_1",
-                "target_thread_id": "athr_fork",
-                "target_sandbox_id": "asbx_fork",
-                "target_generation": 1,
-                "expected_container_id": "container-fork",
-            },
-        )
-
-    assert forked.status_code == 200, forked.text
-    assert forked.json()["snapshot_image_digest"] == "sha256:fork-image"
-    assert rolled_back.json() == {"removed": True}
-    assert supervisor.calls[-2][0] == "fork"
-    assert supervisor.calls[-1][0] == "fork-rollback"
 
 
 @pytest.mark.asyncio

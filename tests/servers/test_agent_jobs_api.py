@@ -76,7 +76,6 @@ class FakeAgentJobStore:
         self.runner_hosts: dict[str, dict[str, Any]] = {}
         self.active_host: str | None = None
         self.mcp_connections: dict[str, list[dict[str, Any]]] = {}
-        self.sandbox_forks: dict[str, dict[str, Any]] = {}
         self.session_forks: dict[str, dict[str, Any]] = {}
         self._next_event_id = 1
         self._next_job = 1
@@ -293,110 +292,6 @@ class FakeAgentJobStore:
                 }
             )
         return self.jobs[copied_id[source["id"]]]
-
-    async def prepare_retained_fork(
-        self, *, source_job_id: str, user_id: str
-    ) -> dict[str, Any] | None:
-        source = self.jobs.get(source_job_id)
-        if source is None or source["user_id"] != user_id:
-            return None
-        if source["state"] not in {"succeeded", "failed", "cancelled"}:
-            return {"error": "not_settled"}
-        sandbox = source.get("thread_sandbox")
-        if not isinstance(sandbox, dict):
-            return {"error": "not_retained"}
-        latest = max(
-            (job for job in self.jobs.values() if job["thread_id"] == source["thread_id"]),
-            key=lambda job: job["turn_no"],
-        )
-        if latest["id"] != source_job_id:
-            return {"error": "not_latest_settled"}
-        existing = next(
-            (
-                operation
-                for operation in self.sandbox_forks.values()
-                if operation["source_thread_id"] == source["thread_id"]
-                and operation["state"] == "preparing"
-            ),
-            None,
-        )
-        if existing is not None:
-            return existing
-        operation_id = f"afork_{len(self.sandbox_forks) + 1:04d}"
-        operation = {
-            "id": operation_id,
-            "state": "preparing",
-            "user_id": user_id,
-            "source_thread_id": source["thread_id"],
-            "origin_thread_id": sandbox.get("origin_thread_id", source["thread_id"]),
-            "source_job_id": source_job_id,
-            "source_sandbox_id": sandbox["sandbox_id"],
-            "source_sandbox_generation": sandbox.get("generation", 1),
-            "source_activation_generation": sandbox.get("activation_generation", 1),
-            "source_container_id": sandbox["container_id"],
-            "source_native_session_id": sandbox.get("native_session_id", "native-session-1"),
-            "target_thread_id": f"athr_fork_{self._next_job:04d}",
-            "target_sandbox_id": f"asbx_fork_{len(self.sandbox_forks) + 1:04d}",
-        }
-        self.sandbox_forks[operation_id] = operation
-        return operation
-
-    async def finalize_retained_fork(
-        self,
-        *,
-        operation_id: str,
-        target_container_id: str,
-        target_container_name: str,
-        snapshot_image_digest: str,
-        source_fingerprint: str | None,
-        target_fingerprint: str | None,
-    ) -> dict[str, Any] | None:
-        operation = self.sandbox_forks.get(operation_id)
-        if operation is None or operation["state"] != "preparing":
-            return None
-        copied = await self.fork_thread(
-            source_job_id=operation["source_job_id"],
-            user_id=operation["user_id"],
-        )
-        if copied is None or copied["thread_id"] != operation["target_thread_id"]:
-            return None
-        sandbox = {
-            "thread_id": copied["thread_id"],
-            "sandbox_id": operation["target_sandbox_id"],
-            "generation": 1,
-            "container_id": target_container_id,
-            "container_name": target_container_name,
-            "sandbox_image_digest": snapshot_image_digest,
-            "native_session_id": operation["source_native_session_id"],
-            "state": "stopped",
-            "context_status": "restored",
-        }
-        for job in self.jobs.values():
-            if job["thread_id"] == copied["thread_id"]:
-                job["thread_sandbox"] = sandbox
-        operation.update(
-            state="ready",
-            target_container_id=target_container_id,
-            source_fingerprint=source_fingerprint,
-            target_fingerprint=target_fingerprint,
-        )
-        return copied
-
-    async def abort_retained_fork(
-        self,
-        *,
-        operation_id: str,
-        detail: str,
-        cleanup_pending: bool = False,
-    ) -> dict[str, Any] | None:
-        operation = self.sandbox_forks.get(operation_id)
-        if operation is not None and operation["state"] == "preparing":
-            operation.update(
-                state="failed",
-                last_error=detail,
-                cleanup_pending=cleanup_pending,
-            )
-        return operation
 
     async def prepare_session_fork(
         self,

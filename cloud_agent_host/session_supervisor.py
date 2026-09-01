@@ -13,8 +13,6 @@ the supervisor never removes or eagerly stops a retained container.
 
 from __future__ import annotations
 
-import contextlib
-import json
 import secrets
 import threading
 import time
@@ -23,8 +21,6 @@ from typing import TYPE_CHECKING, Literal
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_CPU_LIMIT_LABEL,
-    CHAT_FORK_OPERATION_LABEL,
-    CHAT_FORK_SOURCE_SANDBOX_LABEL,
     CHAT_GENERATION_LABEL,
     CHAT_IMAGE_DIGEST_LABEL,
     CHAT_MEMORY_LIMIT_LABEL,
@@ -40,7 +36,6 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatBackend,
     RetainedChatLost,
 )
-from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.sandbox import SandboxError
 
 if TYPE_CHECKING:
@@ -95,23 +90,6 @@ class SessionDescriptor:
     context_status: ContextStatus
 
 
-@dataclass(frozen=True)
-class SandboxForkResult:
-    """Docker result bound to one durable full-sandbox fork operation."""
-
-    operation_id: str
-    source_thread_id: str
-    source_sandbox_id: str
-    source_container_id: str
-    target_thread_id: str
-    target_sandbox_id: str
-    target_container_id: str
-    target_container_name: str
-    snapshot_image_digest: str
-    source_fingerprint: str
-    target_fingerprint: str
-
-
 @dataclass
 class _SessionEntry:
     spec: ChatSandboxSpec
@@ -123,8 +101,6 @@ class _SessionEntry:
     terminal_tokens: set[str] = field(default_factory=set)
     operation_tokens: set[str] = field(default_factory=set)
     workspace_suspended: bool = False
-    fork_operation_id: str | None = None
-    fork_mutex: threading.Lock = field(default_factory=threading.Lock, repr=False)
     last_settled_job_id: str | None = None
     idle_deadline: float | None = None
     context_status: ContextStatus = "new"
@@ -510,355 +486,6 @@ class ChatSessionSupervisor:
             entry.inspection = current
             return self._descriptor(entry)
 
-    def fork_settled(
-        self,
-        source_thread_id: str,
-        *,
-        operation_id: str,
-        source_sandbox_id: str,
-        source_generation: int,
-        source_activation_generation: int,
-        source_container_id: str,
-        source_anchor_job_id: str,
-        source_native_session_id: str,
-        target_thread_id: str,
-        target_sandbox_id: str,
-        target_generation: int = 1,
-    ) -> SandboxForkResult:
-        """Clone one latest-settled Docker sandbox at a quiescent boundary.
-
-        The database owns the durable PREPARING fence. This host-side half is
-        idempotent under its operation/target ids: after a coordinator crash it
-        adopts and finishes the exact labelled target, or reuses the exact
-        still-tagged snapshot, instead of taking a newer snapshot silently.
-        """
-        if not operation_id or not source_anchor_job_id or not source_native_session_id:
-            raise ValueError("fork operation, anchor, and native session ids are required")
-        if target_thread_id == source_thread_id or target_sandbox_id == source_sandbox_id:
-            raise ValueError("a fork target must have independent chat and sandbox identities")
-
-        with self._lock:
-            source = self._entry(source_thread_id)
-            fork_mutex = source.fork_mutex
-
-        with fork_mutex:
-            with self._lock:
-                source = self._entry(source_thread_id)
-                if (
-                    source.spec.sandbox_id != source_sandbox_id
-                    or source.spec.generation != source_generation
-                ):
-                    raise SessionLeaseLost("fork source sandbox generation is stale")
-                current = self._manager.require_existing(
-                    source.spec,
-                    container_id=source_container_id,
-                )
-                source.inspection = current
-                if source.activation_generation not in {0, source_activation_generation}:
-                    raise SessionLeaseLost("fork source activation generation is stale")
-
-                existing = self._inspect_fork_target(
-                    operation_id=operation_id,
-                    source_sandbox_id=source_sandbox_id,
-                    target_thread_id=target_thread_id,
-                    target_sandbox_id=target_sandbox_id,
-                    target_generation=target_generation,
-                )
-                if existing is None:
-                    if source.lease_token is not None:
-                        raise SessionBusy(f"chat {source_thread_id!r} has an active turn")
-                    if source.terminal_tokens or source.operation_tokens:
-                        raise SessionBusy(f"chat {source_thread_id!r} has active workspace users")
-                    if source.workspace_suspended:
-                        raise SessionBusy(f"chat {source_thread_id!r} workspace is suspended")
-                    source.workspace_suspended = True
-                    source.fork_operation_id = operation_id
-                    source.idle_deadline = None
-
-            repository = self._manager.snapshot_repository(operation_id)
-            target_spec: ChatSandboxSpec | None = None
-            target_container_id: str | None = None
-            try:
-                if existing is None:
-                    self._manager.require_network_phase(source.spec, "agent")
-                    image_id = self._manager.image_id(repository)
-                    if image_id is None:
-                        self._manager.flush_for_snapshot(source.spec)
-                        image_id = self._manager.commit(source.spec, repository)
-                    target_spec = self._fork_target_spec(
-                        source.spec,
-                        operation_id=operation_id,
-                        source_sandbox_id=source_sandbox_id,
-                        target_thread_id=target_thread_id,
-                        target_sandbox_id=target_sandbox_id,
-                        target_generation=target_generation,
-                        image_id=image_id,
-                    )
-                    target = self._manager.create(
-                        target_spec,
-                        image=image_id,
-                        network_phase="agent",
-                    )
-                else:
-                    target_spec, target = existing
-                    image_id = target_spec.sandbox_image_digest
-                    assert image_id is not None
-                target_container_id = target.container_id
-                target = self._finish_fork_target(
-                    target_spec,
-                    operation_id=operation_id,
-                    source_thread_id=source_thread_id,
-                    source_sandbox_id=source_sandbox_id,
-                    source_anchor_job_id=source_anchor_job_id,
-                    source_native_session_id=source_native_session_id,
-                )
-                canonical_spec = ChatSandboxSpec(
-                    thread_id=target_spec.thread_id,
-                    sandbox_id=target_spec.sandbox_id,
-                    generation=target_spec.generation,
-                    runtime_id=target_spec.runtime_id,
-                    runtime_version=target_spec.runtime_version,
-                    sandbox_image_digest=target_spec.sandbox_image_digest,
-                    memory_limit=target_spec.memory_limit,
-                    cpu_limit=target_spec.cpu_limit,
-                    stop_timeout_s=target_spec.stop_timeout_s,
-                )
-                with self._lock:
-                    self._entries[target_thread_id] = _SessionEntry(
-                        spec=canonical_spec,
-                        inspection=target,
-                        context_status="restored",
-                    )
-                # The stopped target keeps the image layers reachable by id;
-                # the temporary tag is no longer part of recovery.
-                with contextlib.suppress(SandboxError):
-                    self._manager.remove_image_reference(repository)
-                return SandboxForkResult(
-                    operation_id=operation_id,
-                    source_thread_id=source_thread_id,
-                    source_sandbox_id=source_sandbox_id,
-                    source_container_id=source_container_id,
-                    target_thread_id=target_thread_id,
-                    target_sandbox_id=target_sandbox_id,
-                    target_container_id=target.container_id,
-                    target_container_name=target.name,
-                    snapshot_image_digest=image_id,
-                    source_fingerprint=image_id,
-                    target_fingerprint=image_id,
-                )
-            except Exception:
-                if target_spec is not None and target_container_id is not None:
-                    with contextlib.suppress(SandboxError):
-                        self._manager.remove(target_spec, container_id=target_container_id)
-                with contextlib.suppress(SandboxError):
-                    self._manager.remove_image_reference(repository)
-                with self._lock:
-                    target_entry = self._entries.get(target_thread_id)
-                    if (
-                        target_entry is not None
-                        and target_entry.spec.sandbox_id == target_sandbox_id
-                    ):
-                        self._entries.pop(target_thread_id, None)
-                raise
-            finally:
-                with self._lock:
-                    source = self._entries.get(source_thread_id)
-                    if source is not None and source.fork_operation_id == operation_id:
-                        source.fork_operation_id = None
-                        source.workspace_suspended = False
-                        if (
-                            source.lease_token is None
-                            and not source.terminal_tokens
-                            and not source.operation_tokens
-                            and source.inspection.running
-                        ):
-                            source.idle_deadline = self._clock() + self._idle_timeout_s
-
-    def rollback_fork(
-        self,
-        source_thread_id: str,
-        *,
-        operation_id: str,
-        source_sandbox_id: str,
-        target_thread_id: str,
-        target_sandbox_id: str,
-        target_generation: int = 1,
-        expected_container_id: str | None = None,
-    ) -> bool:
-        """Idempotently remove only this operation's incomplete target."""
-        with self._lock:
-            source = self._entries.get(source_thread_id)
-            fork_mutex = source.fork_mutex if source is not None else threading.Lock()
-        # A timed-out HTTP client does not cancel the worker running in
-        # ``to_thread``. Serialize compensation with that worker so rollback
-        # can never remove a target while it is still being initialized.
-        with fork_mutex:
-            repository = self._manager.snapshot_repository(operation_id)
-            existing = self._inspect_fork_target(
-                operation_id=operation_id,
-                source_sandbox_id=source_sandbox_id,
-                target_thread_id=target_thread_id,
-                target_sandbox_id=target_sandbox_id,
-                target_generation=target_generation,
-            )
-            removed = False
-            if existing is not None:
-                target_spec, inspection = existing
-                if (
-                    expected_container_id is not None
-                    and inspection.container_id != expected_container_id
-                ):
-                    raise SessionLeaseLost("fork rollback target container is stale")
-                removed = self._manager.remove(target_spec, container_id=inspection.container_id)
-            with self._lock:
-                entry = self._entries.get(target_thread_id)
-                if entry is not None and entry.spec.sandbox_id == target_sandbox_id:
-                    self._entries.pop(target_thread_id, None)
-            with contextlib.suppress(SandboxError):
-                self._manager.remove_image_reference(repository)
-            return removed
-
-    def _inspect_fork_target(
-        self,
-        *,
-        operation_id: str,
-        source_sandbox_id: str,
-        target_thread_id: str,
-        target_sandbox_id: str,
-        target_generation: int,
-    ) -> tuple[ChatSandboxSpec, ChatSandboxInspection] | None:
-        name = ChatSandboxSpec(
-            thread_id=target_thread_id,
-            sandbox_id=target_sandbox_id,
-            generation=target_generation,
-            runtime_id="fork-target-lookup",
-        ).container_name
-        inspection = self._manager.inspect(name)
-        if inspection is None:
-            return None
-        labels = inspection.labels
-        if (
-            labels.get(CHAT_FORK_OPERATION_LABEL) != operation_id
-            or labels.get(CHAT_FORK_SOURCE_SANDBOX_LABEL) != source_sandbox_id
-        ):
-            raise SandboxError("fork target name is occupied by another Docker object")
-        spec = self._spec_from_inspection(inspection)
-        if (
-            spec.thread_id != target_thread_id
-            or spec.sandbox_id != target_sandbox_id
-            or spec.generation != target_generation
-            or spec.sandbox_image_digest is None
-        ):
-            raise SandboxError("fork target has stale or incomplete identity labels")
-        verified = self._fork_target_spec(
-            spec,
-            operation_id=operation_id,
-            source_sandbox_id=source_sandbox_id,
-            target_thread_id=target_thread_id,
-            target_sandbox_id=target_sandbox_id,
-            target_generation=target_generation,
-            image_id=spec.sandbox_image_digest,
-        )
-        self._manager.require_existing(verified, container_id=inspection.container_id)
-        return verified, inspection
-
-    @staticmethod
-    def _fork_target_spec(
-        source: ChatSandboxSpec,
-        *,
-        operation_id: str,
-        source_sandbox_id: str,
-        target_thread_id: str,
-        target_sandbox_id: str,
-        target_generation: int,
-        image_id: str,
-    ) -> ChatSandboxSpec:
-        return ChatSandboxSpec(
-            thread_id=target_thread_id,
-            sandbox_id=target_sandbox_id,
-            generation=target_generation,
-            runtime_id=source.runtime_id,
-            runtime_version=source.runtime_version,
-            sandbox_image_digest=image_id,
-            memory_limit=source.memory_limit,
-            cpu_limit=source.cpu_limit,
-            stop_timeout_s=source.stop_timeout_s,
-            labels={
-                CHAT_FORK_OPERATION_LABEL: operation_id,
-                CHAT_FORK_SOURCE_SANDBOX_LABEL: source_sandbox_id,
-            },
-        )
-
-    def _finish_fork_target(
-        self,
-        spec: ChatSandboxSpec,
-        *,
-        operation_id: str,
-        source_thread_id: str,
-        source_sandbox_id: str,
-        source_anchor_job_id: str,
-        source_native_session_id: str,
-    ) -> ChatSandboxInspection:
-        target = self._manager.start(spec)
-        self._manager.require_network_phase(spec, "agent")
-        branch = branch_name_for(spec.thread_id)
-        branch_result = self._manager.exec_capture(
-            spec,
-            [
-                "/bin/sh",
-                "-c",
-                'set -eu; branch="$1"; git update-ref "refs/heads/$branch" HEAD; '
-                'git symbolic-ref HEAD "refs/heads/$branch"',
-                "sh",
-                branch,
-            ],
-            timeout_s=60,
-        )
-        if branch_result.returncode != 0:
-            raise SandboxError(
-                "fork target branch rewrite failed: "
-                + branch_result.stderr.decode("utf-8", "replace")[:300]
-            )
-        metadata = json.dumps(
-            {
-                "fork_operation_id": operation_id,
-                "native_session_id": source_native_session_id,
-                "sandbox_generation": spec.generation,
-                "sandbox_id": spec.sandbox_id,
-                "source_anchor_job_id": source_anchor_job_id,
-                "source_sandbox_id": source_sandbox_id,
-                "source_thread_id": source_thread_id,
-                "thread_id": spec.thread_id,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
-        metadata_result = self._manager.exec_capture(
-            spec,
-            [
-                "/bin/sh",
-                "-c",
-                "set -eu; umask 077; dir=/agent-state/.freeinference; "
-                'mkdir -p "$dir"; tmp="$dir/chat.json.tmp.$$"; '
-                "trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; "
-                'cat > "$tmp"; chmod 600 "$tmp"; mv "$tmp" "$dir/chat.json"; trap - EXIT',
-            ],
-            workdir="/",
-            timeout_s=60,
-            input_bytes=metadata,
-        )
-        if metadata_result.returncode != 0:
-            raise SandboxError(
-                "fork target identity write failed: "
-                + metadata_result.stderr.decode("utf-8", "replace")[:300]
-            )
-        self._manager.flush_for_snapshot(spec)
-        target = self._manager.stop(spec)
-        self._manager.require_network_phase(spec, "agent")
-        if target.running:
-            raise SandboxError("fork target did not reach a stopped ready boundary")
-        return target
-
     def stop_if_idle(
         self,
         thread_id: str,
@@ -1013,7 +640,6 @@ __all__ = [
     "DEFAULT_SWEEP_INTERVAL_S",
     "ChatSessionSupervisor",
     "ContextStatus",
-    "SandboxForkResult",
     "SessionBusy",
     "SessionDescriptor",
     "SessionLease",

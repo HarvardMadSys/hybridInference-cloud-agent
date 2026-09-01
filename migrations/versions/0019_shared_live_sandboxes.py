@@ -11,7 +11,7 @@ silently upgraded to concurrent execution.  Only newly capability-gated
 ``shared_live`` groups use these tables as their lifecycle authority.
 
 Revision ID: 0019_shared_live_sandboxes
-Revises: 0018_full_sandbox_forks
+Revises: 0017_restartable_chat_sandboxes
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0019_shared_live_sandboxes"
-down_revision = "0018_full_sandbox_forks"
+down_revision = "0017_restartable_chat_sandboxes"
 branch_labels = None
 depends_on = None
 
