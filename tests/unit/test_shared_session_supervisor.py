@@ -14,7 +14,11 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.guest_observer import GuestObservation, GuestObserverCursor
+from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_SOURCE,
+    GuestObservation,
+    GuestObserverCursor,
+)
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransport,
@@ -996,6 +1000,41 @@ def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup(
         ("reap-except", 0, ((41, 400),)),
         ("normalize", 0),
     ]
+
+
+def test_kata_observer_failure_keeps_the_source_and_reports_a_gap():
+    class Manager(_Manager):
+        def finish_guest_observation(self, _spec, _cursor):
+            return GuestObservation.unavailable("observer stopped")
+
+    manager = Manager()
+    manager.backend.runtime = KATA_RUNTIME
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+
+    telemetry = supervisor.complete_turn("athr_source", lease.token, turn)
+
+    assert telemetry.source == GUEST_OBSERVER_SOURCE
+    assert telemetry.complete is False
 
 
 def test_lost_shared_residency_preserves_observation_until_turn_closes():

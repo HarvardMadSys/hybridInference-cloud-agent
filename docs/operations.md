@@ -468,11 +468,13 @@ process observer. `--check` verifies both the asset and the active config, and
 runner preflight goes further: it starts a disposable sandbox with the same
 non-root, capability-dropped and `no-new-privileges` shape as a real retained
 guest, then exercises the same fixed privileged exec used to start the bundled
-observer and requires all three lifecycle probes to attach. A missing BPF
-syscall, BTF image, tracepoint, or exec-time permission is therefore a
-deployment failure before the runner can claim work, not an empty process list
-under a completed turn. The same probe also requires the fixed tool-marker
-helper used by Claude's exact boundaries. See Kata's
+observer. Its self-test requires all three lifecycle probes to attach, executes
+one short-lived child, and requires that child's fork, exec, and exit records to
+arrive through the ring buffer. A missing BPF syscall, BTF image, tracepoint,
+event-delivery path, or exec-time permission is therefore a deployment failure
+before the runner can claim work, not an empty process list under a completed
+turn. The same probe also requires the fixed tool-marker helper used by Claude's
+exact boundaries. See Kata's
 [debug-kernel build contract](https://github.com/kata-containers/kata-containers/blob/main/tools/packaging/kernel/README.md#debug-kernel).
 
 Only that fixed, image-bundled observer runs as guest root. Agent CLIs and
@@ -489,6 +491,9 @@ processes still have empty permitted and effective capability sets, and
 memory remain conservative periodic container statistics. Process existence is
 separate, event-driven telemetry: fork/exec/exit survives even when a process
 begins and ends entirely between two statistics samples.
+The per-turn table is therefore a lifecycle census of process starts observed
+after that turn's cursor, not a point-in-time snapshot of resident processes
+that were already running before the turn.
 
 Requirements: an x86_64 Linux host, bare metal or with nested virtualization
 enabled. Kata cannot run without KVM.

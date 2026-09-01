@@ -7,6 +7,7 @@
 #include <bpf/libbpf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <inttypes.h>
 #include <poll.h>
 #include <signal.h>
@@ -17,11 +18,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -31,10 +34,28 @@
 #define OBSERVER_ROOT "/run/freeinference-observer"
 #define EVENTS_PATH OBSERVER_ROOT "/events.jsonl"
 #define STATUS_PATH OBSERVER_ROOT "/status.json"
+#define OBSERVER_BINARY_PATH "/usr/local/libexec/freeinference-guest-observer"
 #define BPF_OBJECT_PATH "/usr/local/libexec/freeinference-guest-observer.bpf.o"
 #define MAX_JOURNAL_BYTES (64ULL * 1024ULL * 1024ULL)
 #define MAX_LINKS 8
 #define MAX_TOOL_MARKS_PER_POLL 1024
+#define SELF_TEST_TIMEOUT_MS 2000
+#define SELF_TEST_UID 65534U
+
+enum self_test_event_flag {
+    SELF_TEST_FORK = 1U << 0,
+    SELF_TEST_EXEC = 1U << 1,
+    SELF_TEST_EXIT = 1U << 2,
+};
+
+struct self_test_state {
+    uint32_t target_pid;
+    uint8_t events;
+    char target_comm[FI_TASK_COMM_LEN];
+    bool malformed;
+    bool exec_mismatch;
+    bool uid_mismatch;
+};
 
 static volatile sig_atomic_t exiting;
 
@@ -154,6 +175,163 @@ static const char *event_kind(uint8_t kind)
     default:
         return NULL;
     }
+}
+
+static int self_test_event(void *context, void *payload, size_t payload_size)
+{
+    struct self_test_state *state = context;
+    const struct fi_process_event *event = payload;
+    uint8_t flag;
+
+    if (payload_size != sizeof(*event)) {
+        state->malformed = true;
+        return 0;
+    }
+    /* Thread lifecycle is intentionally outside the process census. The PID
+     * returned by fork is namespaced while task_struct.pid is guest-global,
+     * so the uniquely named fork event is the bridge between those views. */
+    if (event->pid == 0 || event->pid != event->tgid)
+        return 0;
+    if (state->target_pid == 0) {
+        if (event->kind != FI_PROCESS_FORK ||
+            strncmp(event->comm, state->target_comm, sizeof(event->comm)) != 0)
+            return 0;
+        state->target_pid = event->pid;
+    } else if (event->pid != state->target_pid) {
+        return 0;
+    }
+    if (event->uid != SELF_TEST_UID)
+        state->uid_mismatch = true;
+    switch (event->kind) {
+    case FI_PROCESS_FORK:
+        flag = SELF_TEST_FORK;
+        break;
+    case FI_PROCESS_EXEC:
+        if (strncmp(event->filename, OBSERVER_BINARY_PATH, sizeof(event->filename)) != 0)
+            state->exec_mismatch = true;
+        flag = SELF_TEST_EXEC;
+        break;
+    case FI_PROCESS_EXIT:
+        flag = SELF_TEST_EXIT;
+        break;
+    default:
+        state->malformed = true;
+        return 0;
+    }
+    state->events |= flag;
+    return 0;
+}
+
+static bool self_test_complete(const struct self_test_state *state)
+{
+    const uint8_t expected = SELF_TEST_FORK | SELF_TEST_EXEC | SELF_TEST_EXIT;
+
+    return state->target_pid != 0 && !state->malformed && !state->exec_mismatch &&
+           !state->uid_mismatch && state->events == expected;
+}
+
+static int monotonic_ms(uint64_t *value)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return -1;
+    *value = (uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_nsec / 1000000ULL;
+    return 0;
+}
+
+static int exercise_lifecycle_events(int ring_map_fd, struct ring_buffer **ring_out)
+{
+    struct self_test_state state = {0};
+    struct ring_buffer *ring;
+    pid_t child;
+    int child_status = 0;
+    bool child_reaped = false;
+    uint64_t started_ms;
+
+    ring = ring_buffer__new(ring_map_fd, self_test_event, &state, NULL);
+    if (!ring) {
+        fprintf(stderr, "cannot open guest observer ring buffer during self-test\n");
+        return -1;
+    }
+    *ring_out = ring;
+    if (snprintf(state.target_comm, sizeof(state.target_comm), "fi-p-%08x",
+                 (unsigned int)getpid()) <= 0 ||
+        prctl(PR_SET_NAME, state.target_comm, 0, 0, 0) < 0) {
+        perror("name guest observer self-test child");
+        return -1;
+    }
+    /* Prove the UID filter agents rely on, not merely a privileged root
+     * event path. The BPF object and links are already loaded; closing their
+     * fds during cleanup does not require retaining privilege. */
+    if (setgroups(0, NULL) < 0 || setgid((gid_t)SELF_TEST_UID) < 0 ||
+        setuid((uid_t)SELF_TEST_UID) < 0) {
+        perror("drop guest observer self-test privilege");
+        return -1;
+    }
+    child = fork();
+    if (child < 0) {
+        perror("fork guest observer self-test child");
+        return -1;
+    }
+    if (child == 0) {
+        execl(OBSERVER_BINARY_PATH, OBSERVER_BINARY_PATH, "--self-test-child", NULL);
+        _exit(127);
+    }
+    if (monotonic_ms(&started_ms) < 0) {
+        perror("read guest observer self-test clock");
+        goto child_cleanup;
+    }
+
+    while (true) {
+        int consumed;
+        uint64_t current_ms;
+
+        consumed = ring_buffer__poll(ring, 50);
+        if (consumed < 0 && consumed != -EINTR) {
+            fprintf(stderr, "guest observer ring poll failed during self-test: %d\n", consumed);
+            goto child_cleanup;
+        }
+        if (!child_reaped) {
+            pid_t waited = waitpid(child, &child_status, WNOHANG);
+
+            if (waited == child)
+                child_reaped = true;
+            else if (waited < 0 && errno != EINTR) {
+                perror("wait for guest observer self-test child");
+                goto child_cleanup;
+            }
+        }
+        if (child_reaped && self_test_complete(&state))
+            break;
+        if (monotonic_ms(&current_ms) < 0) {
+            perror("read guest observer self-test clock");
+            goto child_cleanup;
+        }
+        if (current_ms - started_ms >= SELF_TEST_TIMEOUT_MS)
+            break;
+    }
+    if (!child_reaped) {
+        fprintf(stderr, "guest observer self-test child did not exit\n");
+        goto child_cleanup;
+    }
+    if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        fprintf(stderr, "guest observer self-test child failed\n");
+        return -1;
+    }
+    if (!self_test_complete(&state)) {
+        fprintf(stderr, "guest observer did not deliver fork/exec/exit through the ring buffer\n");
+        return -1;
+    }
+    return 0;
+
+child_cleanup:
+    if (!child_reaped) {
+        (void)kill(child, SIGKILL);
+        while (waitpid(child, &child_status, 0) < 0 && errno == EINTR)
+            ;
+    }
+    return -1;
 }
 
 static int journal_event(void *context, void *payload, size_t payload_size)
@@ -441,8 +619,11 @@ int main(int argc, char **argv)
     struct observer observer = {.events_fd = -1, .lost_map_fd = -1, .tool_mark_fd = -1};
     size_t link_count = 0;
     bool self_test = argc == 2 && strcmp(argv[1], "--self-test") == 0;
+    bool self_test_child = argc == 2 && strcmp(argv[1], "--self-test-child") == 0;
     int result = 1;
 
+    if (self_test_child)
+        return 0;
     if (argc > 2 || (argc == 2 && !self_test)) {
         fprintf(stderr, "usage: %s [--self-test]\n", argv[0]);
         return 2;
@@ -486,6 +667,8 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     if (self_test) {
+        if (exercise_lifecycle_events(ring_map_fd, &ring) < 0)
+            goto cleanup;
         printf("freeinference-guest-observer-v%d\n", FI_OBSERVER_VERSION);
         result = 0;
         goto cleanup;

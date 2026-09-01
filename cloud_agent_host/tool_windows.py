@@ -255,14 +255,19 @@ def _overlap_count(window: ToolWindow, windows: list[ToolWindow], start: float, 
     """
     shared = 1
     for other in windows:
-        if other is window or other.closed_mono is None:
+        if other is window:
             continue
-        if other.opened_mono <= end and other.closed_mono >= start:
+        if other.opened_mono <= end and (other.closed_mono is None or other.closed_mono >= start):
             shared += 1
     return shared
 
 
-def attribute(samples: list[Sample], windows: list[ToolWindow]) -> list[dict[str, Any]]:
+def attribute(
+    samples: list[Sample],
+    windows: list[ToolWindow],
+    *,
+    windows_complete: bool = True,
+) -> list[dict[str, Any]]:
     """One row per tool call, carrying only what its own readings support.
 
     The rows are returned for every call, measured or not. A call with no
@@ -271,7 +276,9 @@ def attribute(samples: list[Sample], windows: list[ToolWindow]) -> list[dict[str
     call was too short to measure" and "this call used nothing", and only the
     first of those is ever true here.
     """
-    readings = [sample for sample in samples if _readable(sample)]
+    # A dropped window may overlap every retained call. Without its boundary,
+    # no retained row can honestly call a sandbox-wide delta exclusive.
+    readings = [sample for sample in samples if _readable(sample)] if windows_complete else []
     rows: list[dict[str, Any]] = []
     for index, window in enumerate(windows, start=1):
         row = _row(window, index)
@@ -298,16 +305,19 @@ def attribute(samples: list[Sample], windows: list[ToolWindow]) -> list[dict[str
     return rows
 
 
-def tool_time_ms(windows: list[ToolWindow]) -> int:
+def tool_time_ms(windows: list[ToolWindow]) -> int | None:
     """How long the turn spent inside tool calls: the union, never the sum.
 
     Parallel calls overlap, and adding their durations produces a number that
     can exceed the turn itself — which a reader would rightly report as a bug.
-    The union is the honest answer to "how much of this turn was the sandbox
-    doing something", and the remainder is what the turn spent waiting on the
-    model: measured on production, that remainder is over 98 % of the wall
-    clock, and it is the most explanatory number the footer can carry.
+    The union is the honest answer to "how much of this turn was bracketed by
+    tool-call events". The remainder is non-tool time: model work plus harness
+    and platform overhead, which this measurement cannot separate. An open
+    call makes even that two-way split incomplete, so return no number rather
+    than silently counting the unfinished call as non-tool time.
     """
+    if any(window.closed_mono is None for window in windows):
+        return None
     spans = sorted((w.opened_mono, w.closed_mono) for w in windows if w.closed_mono is not None)
     total = 0.0
     current_start: float | None = None
@@ -353,7 +363,7 @@ def hook_settings(mark_path: str) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": command(phase),
-                            "timeout": 5,
+                            "timeout": 1,
                         }
                     ],
                 }

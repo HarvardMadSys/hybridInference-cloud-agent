@@ -1025,6 +1025,21 @@ class WorkerToolCallResources(BaseModel):
     mem_peak_shared_bytes: int | None = Field(None, ge=0)
     process_count: int = Field(0, ge=0)
 
+    @model_validator(mode="after")
+    def counters_match_the_window_evidence(self) -> WorkerToolCallResources:
+        """A worker cannot relabel shared or unmeasured counters as exact."""
+        exclusive = self.cpu_usec_exclusive is not None or self.mem_peak_exclusive_bytes is not None
+        shared = self.cpu_usec_shared is not None or self.mem_peak_shared_bytes is not None
+        if exclusive and shared:
+            raise ValueError("a tool row cannot mix exclusive and shared counters")
+        if self.overlap_n == 1 and shared:
+            raise ValueError("a non-overlapping tool row cannot carry shared counters")
+        if self.overlap_n > 1 and exclusive:
+            raise ValueError("an overlapping tool row cannot carry exclusive counters")
+        if self.sample_count < 2 and (exclusive or shared or self.measured_span_ms is not None):
+            raise ValueError("fewer than two samples cannot support a tool measurement")
+        return self
+
 
 class WorkerProcessObservation(BaseModel):
     """One bounded guest-kernel process identity reported by the broker."""
@@ -1077,6 +1092,43 @@ class WorkerResourcesRequest(BaseModel):
         default_factory=list,
         max_length=4096,
     )
+
+    @model_validator(mode="after")
+    def completeness_flags_match_their_evidence(self) -> WorkerResourcesRequest:
+        """Refuse combinations that would make a gap render as certainty."""
+        if self.tool_calls_truncated:
+            has_call_measurement = any(
+                call.sample_count > 0
+                or call.measured_span_ms is not None
+                or call.cpu_usec_exclusive is not None
+                or call.cpu_usec_shared is not None
+                or call.mem_peak_exclusive_bytes is not None
+                or call.mem_peak_shared_bytes is not None
+                for call in self.tool_calls
+            )
+            if has_call_measurement or self.tool_time_ms is not None:
+                raise ValueError(
+                    "a truncated tool-window list cannot support attribution or a time split"
+                )
+        if (
+            any(call.duration_ms is None for call in self.tool_calls)
+            and self.tool_time_ms is not None
+        ):
+            raise ValueError("an unfinished tool call cannot support a complete time split")
+        if self.process_observation_complete and (
+            self.process_observer is None
+            or self.process_events_lost != 0
+            or self.processes_truncated
+        ):
+            raise ValueError("complete process observation contradicts its loss metadata")
+        if self.process_observer is None and (
+            self.processes
+            or self.process_events_lost > 0
+            or self.processes_truncated
+            or any(call.process_count > 0 for call in self.tool_calls)
+        ):
+            raise ValueError("process rows require a named guest observer")
+        return self
 
 
 class WorkerFinishRequest(BaseModel):

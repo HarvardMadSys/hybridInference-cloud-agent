@@ -560,9 +560,15 @@ describe('per-call resources, through both real adapters', () => {
   });
 
   it('says when the list is not every call the turn made', () => {
-    openTable(withCalls([measuredLongCall, unmeasuredShortCall], true));
+    openTable(
+      withCalls([measuredLongCall, unmeasuredShortCall], true, {
+        tool_time_ms: 9_535,
+      }),
+    );
 
     expect(screen.getByText(/more calls than are listed/)).toBeInTheDocument();
+    expect(screen.queryByText('4.4s')).toBeNull();
+    expect(screen.queryByText(/outside tools/)).toBeNull();
   });
 
   it('says where the turn\u2019s time actually went', () => {
@@ -580,7 +586,7 @@ describe('per-call resources, through both real adapters', () => {
 
     // The most explanatory number on the footer: on the production turns this
     // was built against, the sandbox was busy for about 1% of the wall clock.
-    expect(screen.getByText(/waiting on the model/)).toBeInTheDocument();
+    expect(screen.getByText(/outside tools/)).toBeInTheDocument();
     expect(screen.getByText('49.6s')).toBeInTheDocument();
   });
 
@@ -589,7 +595,7 @@ describe('per-call resources, through both real adapters', () => {
     render(<TurnFooter job={{ ...withSplit, durationMs: 3_559_000 }} />);
     fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
 
-    expect(screen.queryByText(/waiting on the model/)).toBeNull();
+    expect(screen.queryByText(/outside tools/)).toBeNull();
   });
 
   it('says a message-level duration brackets the call rather than timing it', () => {
@@ -620,6 +626,59 @@ describe('per-call resources, through both real adapters', () => {
     ).toBeInTheDocument();
   });
 
+  it('never reuses one recorded row for two malformed duplicate tool ids', () => {
+    const duplicateEvents: AgentEvent[] = [
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'first duplicate',
+        id: 'duplicate',
+        durationMs: 100,
+      },
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'second duplicate',
+        id: 'duplicate',
+        durationMs: 200,
+      },
+    ];
+    render(
+      <TurnFooter
+        job={job({
+          events: duplicateEvents,
+          resources: {
+            ...RESOURCES,
+            toolCallsTruncated: true,
+            toolCalls: [
+              {
+                toolUseId: 'duplicate',
+                toolName: 'Bash',
+                timingSource: 'exact',
+                durationMs: 10,
+                sampleCount: 0,
+                overlapN: 1,
+                measuredSpanMs: null,
+                cpuUsec: null,
+                memPeakBytes: null,
+                exclusive: false,
+                processCount: 0,
+              },
+            ],
+          },
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
+
+    expect(
+      within(screen.getByText('first duplicate').closest('tr')!).getByText('sandbox timing'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByText('second duplicate').closest('tr')!).getByText('outside bracket'),
+    ).toBeInTheDocument();
+  });
+
   it('renders dashes rather than nothing when no measurement was reported', () => {
     // Every turn recorded before this shipped, and every turn on a host whose
     // daemon could not be read.
@@ -640,7 +699,7 @@ describe('per-call resources, through both real adapters', () => {
       }),
     );
 
-    expect(screen.getByText('Guest processes')).toBeInTheDocument();
+    expect(screen.getByText('Guest process starts')).toBeInTheDocument();
     expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
     expect(screen.getByText('+12ms')).toBeInTheDocument();
     expect(screen.queryByText(/Process observation is partial/)).toBeNull();
@@ -648,7 +707,7 @@ describe('per-call resources, through both real adapters', () => {
 
   it('does not present a lossy guest observation as a complete process census', () => {
     openTable(
-      withCalls([measuredLongCall, unmeasuredShortCall], false, {
+      withCalls([{ ...measuredLongCall, process_count: 1 }, unmeasuredShortCall], false, {
         process_observer: 'kata-guest-ebpf-v1',
         process_observation_complete: false,
         process_events_lost: 2,
@@ -660,6 +719,7 @@ describe('per-call resources, through both real adapters', () => {
     expect(
       screen.getByText(/Process observation is partial \(2 kernel events lost\)/),
     ).toBeInTheDocument();
+    expect(screen.getByText('≥1')).toBeInTheDocument();
   });
 
   it('keeps guest process details accessible when a turn emitted no tool event', () => {
@@ -673,7 +733,7 @@ describe('per-call resources, through both real adapters', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
 
-    expect(screen.getByText('Guest processes')).toBeInTheDocument();
+    expect(screen.getByText('Guest process starts')).toBeInTheDocument();
     expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
   });
 
@@ -682,7 +742,9 @@ describe('per-call resources, through both real adapters', () => {
       <TurnFooter
         job={job({
           resources: processOnlyResources({
-            process_observation_complete: false,
+            // Even if an older/bad row claims completeness, explicit loss is
+            // authoritative and the adapter must keep the UI conservative.
+            process_observation_complete: true,
             process_events_lost: 1,
           }),
         })}

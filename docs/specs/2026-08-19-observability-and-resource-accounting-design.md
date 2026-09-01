@@ -327,8 +327,10 @@ runtime; an unreadable backend yields `coverage = 0`, honestly, not zeros.
 
 **Per-tool mechanics.** For `message`-level drivers, a call's window is
 [`tool_use` arrival, matching `tool_result` arrival] joined on
-`tool_use_id` — includes model "thinking" time before execution starts, which
-is why it is labelled `message`, not `exact`. For claude-code `exact`, each
+`tool_use_id`. The model has already produced the call by the opening event;
+the wider window is labelled `message`, not `exact`, because it also contains
+the harness/platform delay around the actual execution. For claude-code
+`exact`, each
 PreToolUse/PostToolUse hook `exec`s one immutable, image-bundled helper. The
 helper timestamps before reading stdin and sends one bounded mark to a Unix
 datagram socket owned by the Kata guest-root observer. The observer requires
@@ -340,9 +342,10 @@ counts. Trusted
 non-Kata development falls back to the old bounded state-file reader; Kata
 never treats that agent-writable file as an attribution authority.
 
-Hooks remain **passive by contract**: one bounded helper, short timeout, and
-exit 0 for every invalid input or output failure. A hook that cannot record a
-mark leaves the window message-level and must not block the tool. The root-only
+Hooks remain **passive by contract**: one bounded helper, a 25 ms non-blocking
+stdin deadline plus a one-second outer CLI timeout, and exit 0 for every
+invalid input or output failure. A hook that cannot record a mark leaves the
+window message-level and must not block the tool. The root-only
 journal prevents repository code from editing, truncating, or directly
 injecting records. Exact tool attribution is still diagnostic rather than a
 security or billing boundary: code running as the Agent CLI's UID can invoke

@@ -31,6 +31,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_SOURCE,
     GuestObservation,
     GuestObserverCursor,
 )
@@ -665,7 +666,8 @@ class SharedChatSessionSupervisor:
             finish_observation = getattr(self._manager, "finish_guest_observation", None)
             if finish_observation is None:
                 observation = GuestObservation.unavailable(
-                    "workspace broker has no guest observer client"
+                    "workspace broker has no guest observer client",
+                    source=GUEST_OBSERVER_SOURCE,
                 )
             else:
                 # Close before the member reaper/permission normalizer below:
@@ -673,15 +675,22 @@ class SharedChatSessionSupervisor:
                 # tool call whose background children they clean up.
                 try:
                     finished = finish_observation(group.spec, observer_cursor)
-                    observation = (
-                        finished
-                        if isinstance(finished, GuestObservation)
-                        else GuestObservation.unavailable(
-                            "workspace broker returned invalid process telemetry"
+                    if isinstance(finished, GuestObservation):
+                        observation = (
+                            finished
+                            if finished.source is not None
+                            else replace(finished, source=GUEST_OBSERVER_SOURCE)
                         )
-                    )
+                    else:
+                        observation = GuestObservation.unavailable(
+                            "workspace broker returned invalid process telemetry",
+                            source=GUEST_OBSERVER_SOURCE,
+                        )
                 except Exception as exc:
-                    observation = GuestObservation.unavailable(str(exc))
+                    observation = GuestObservation.unavailable(
+                        str(exc),
+                        source=GUEST_OBSERVER_SOURCE,
+                    )
         telemetry = SharedTurnTelemetry(
             observation=observation,
             tool_marks=(

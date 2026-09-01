@@ -1731,7 +1731,11 @@ def create_app(
                 tool_windows.apply_marks(list(telemetry.tool_marks))
                 windows = tool_windows.windows()
                 resources = sampler.stop()
-                tool_calls = attribute(sampler.samples(), windows)
+                tool_calls = attribute(
+                    sampler.samples(),
+                    windows,
+                    windows_complete=not tool_windows.truncated,
+                )
                 processes, process_counts = attribute_processes(
                     telemetry.observation,
                     windows,
@@ -1740,7 +1744,7 @@ def create_app(
                     {
                         "tool_calls": add_process_counts(tool_calls, process_counts),
                         "tool_calls_truncated": tool_windows.truncated,
-                        "tool_time_ms": tool_time_ms(windows),
+                        "tool_time_ms": (None if tool_windows.truncated else tool_time_ms(windows)),
                         "process_observer": telemetry.observation.source,
                         "process_observation_complete": telemetry.observation.complete,
                         "process_events_lost": telemetry.observation.lost_events,

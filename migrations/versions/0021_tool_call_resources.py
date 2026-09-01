@@ -60,11 +60,30 @@ def upgrade() -> None:
             PRIMARY KEY (attempt_id, call_seq),
             CHECK (overlap_n >= 1),
             CHECK (process_count >= 0),
-            -- A number is exclusive or shared, never both: the pair of columns
-            -- exists so the distinction cannot be lost, and a row holding both
-            -- would have lost it.
-            CHECK (cpu_usec_exclusive IS NULL OR cpu_usec_shared IS NULL),
-            CHECK (mem_peak_exclusive_bytes IS NULL OR mem_peak_shared_bytes IS NULL)
+            -- A row has one attribution class across every counter, and that
+            -- class must agree with whether its sampled span overlapped.
+            CHECK (NOT (
+                (cpu_usec_exclusive IS NOT NULL OR mem_peak_exclusive_bytes IS NOT NULL)
+                AND
+                (cpu_usec_shared IS NOT NULL OR mem_peak_shared_bytes IS NOT NULL)
+            )),
+            CHECK (
+                (overlap_n = 1
+                    AND cpu_usec_shared IS NULL
+                    AND mem_peak_shared_bytes IS NULL)
+                OR
+                (overlap_n > 1
+                    AND cpu_usec_exclusive IS NULL
+                    AND mem_peak_exclusive_bytes IS NULL)
+            ),
+            -- A single level from a cumulative counter is not consumption.
+            CHECK (sample_count >= 2 OR (
+                measured_span_ms IS NULL
+                AND cpu_usec_exclusive IS NULL
+                AND cpu_usec_shared IS NULL
+                AND mem_peak_exclusive_bytes IS NULL
+                AND mem_peak_shared_bytes IS NULL
+            ))
         )
         """
     )
@@ -75,13 +94,8 @@ def upgrade() -> None:
     # The union of the turn's tool windows, never their sum: parallel calls
     # overlap, and a sum can exceed the turn it belongs to. Nullable because a
     # turn recorded before this shipped has no answer, which is not zero.
-    op.execute(
-        "ALTER TABLE agent_attempt_resources ADD COLUMN IF NOT EXISTS tool_time_ms BIGINT"
-    )
-    op.execute(
-        "ALTER TABLE agent_attempt_resources "
-        "ADD COLUMN IF NOT EXISTS process_observer TEXT"
-    )
+    op.execute("ALTER TABLE agent_attempt_resources ADD COLUMN IF NOT EXISTS tool_time_ms BIGINT")
+    op.execute("ALTER TABLE agent_attempt_resources ADD COLUMN IF NOT EXISTS process_observer TEXT")
     op.execute(
         "ALTER TABLE agent_attempt_resources "
         "ADD COLUMN IF NOT EXISTS process_observation_complete BOOLEAN NOT NULL DEFAULT FALSE"
@@ -132,15 +146,10 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Remove per-call and guest-process observation storage."""
     op.execute("DROP TABLE IF EXISTS agent_process_observations")
+    op.execute("ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS processes_truncated")
+    op.execute("ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS process_events_lost")
     op.execute(
-        "ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS processes_truncated"
-    )
-    op.execute(
-        "ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS process_events_lost"
-    )
-    op.execute(
-        "ALTER TABLE agent_attempt_resources "
-        "DROP COLUMN IF EXISTS process_observation_complete"
+        "ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS process_observation_complete"
     )
     op.execute("ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS process_observer")
     op.execute("ALTER TABLE agent_attempt_resources DROP COLUMN IF EXISTS tool_time_ms")

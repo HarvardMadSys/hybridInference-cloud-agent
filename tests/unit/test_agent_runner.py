@@ -17,6 +17,7 @@ import pytest
 
 from cloud_agent_host import enrollment, runner as runner_mod
 from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_SOURCE,
     MAX_OBSERVED_PROCESSES,
     GuestObservation,
     GuestObserverCursor,
@@ -30,7 +31,12 @@ from cloud_agent_host.runner import (
     run_agent,
 )
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, GenericRuntime, RuntimeMCPConfig
-from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
+from cloud_agent_host.sandbox import (
+    KATA_RUNTIME,
+    ContainerBackend,
+    ProcessBackend,
+    SandboxError,
+)
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -1896,6 +1902,60 @@ def test_a_turn_on_the_surviving_process_reports_hot(tmp_path):
     assert not process.killed
 
 
+def test_a_hot_kata_turn_does_not_report_hypervisor_stats_as_agent_usage(
+    tmp_path,
+    monkeypatch,
+):
+    """HOT bypasses spawn, but must keep the same Kata sampler policy."""
+    bindings: list[str | None] = []
+
+    class Sampler:
+        def __init__(self, container):
+            bindings.append(container)
+
+        def rebind(self, container):
+            bindings.append(container)
+
+        @staticmethod
+        def stop():
+            return {"sample_count": 0, "coverage": 0.0, "sampler_version": "test"}
+
+        @staticmethod
+        def samples():
+            return []
+
+    class KataBackend(_LiveSpawnBackend):
+        is_vm_isolated = True
+
+    class ContainerProcess(_ResidentProcess):
+        container = "kata-container"
+
+    monkeypatch.setattr(runner_mod, "ResourceSampler", Sampler)
+    runtime = ClaudeCodeRuntime()
+    process = ContainerProcess()
+    entry = _resident_entry(tmp_path)
+    entry.live_session = _spawned_live_session(runtime, process, entry.state_dir)
+    process.feed = [_result_line()]
+
+    exit_code, _tail, _errors = run_agent(
+        runtime,
+        job=_hot_job(),
+        workdir=entry.workdir,
+        gateway_base_url="http://gw",
+        control=FakeControl(),
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=KataBackend(process),
+        state_dir=entry.state_dir,
+        resident=entry,
+        residents=_DetachPool(),
+        live_out={},
+    )
+
+    assert exit_code == 0
+    assert bindings == [None, None]
+
+
 def test_a_live_process_that_dies_before_hot_admission_does_not_open_a_cursor(tmp_path):
     """A cursor belongs to an attempted prompt, not the preceding idle turn."""
 
@@ -1954,6 +2014,10 @@ def test_a_live_process_that_dies_before_hot_admission_does_not_open_a_cursor(tm
 
 
 def test_a_hot_turn_reports_an_observer_start_failure_as_incomplete(tmp_path):
+    class KataBackend(_LiveSpawnBackend):
+        runtime = KATA_RUNTIME
+        is_vm_isolated = True
+
     runtime = ClaudeCodeRuntime()
     process = _ResidentProcess()
     entry = _resident_entry(tmp_path)
@@ -1974,7 +2038,7 @@ def test_a_hot_turn_reports_an_observer_start_failure_as_incomplete(tmp_path):
         control=control,
         heart=FakeHeart(),
         timeout_s=30,
-        backend=_LiveSpawnBackend(process),
+        backend=KataBackend(process),
         state_dir=entry.state_dir,
         resident=entry,
         residents=_DetachPool(),
@@ -1983,7 +2047,7 @@ def test_a_hot_turn_reports_an_observer_start_failure_as_incomplete(tmp_path):
 
     assert exit_code == 0
     assert control.resources[0]["process_observation_complete"] is False
-    assert control.resources[0]["process_observer"] is None
+    assert control.resources[0]["process_observer"] == GUEST_OBSERVER_SOURCE
 
 
 def test_the_first_live_turn_spawns_on_the_residency_grant(tmp_path):

@@ -3466,7 +3466,7 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
             "sample_count": 12,
             "coverage": 1.0,
             "sampler_version": "2",
-            "tool_calls_truncated": True,
+            "tool_calls_truncated": False,
             "tool_time_ms": 9_543,
             "process_observer": "kata-guest-ebpf-v1",
             "process_observation_complete": True,
@@ -3509,7 +3509,7 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
 
     telemetry = await store.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
-    assert telemetry["tool_calls_truncated"] is True
+    assert telemetry["tool_calls_truncated"] is False
     assert telemetry["tool_time_ms"] == 9_543
     first, second = telemetry["tool_calls"]
     assert [first["tool_name"], second["tool_name"]] == ["Bash", "Read"]

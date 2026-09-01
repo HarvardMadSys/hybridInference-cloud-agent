@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from cloud_agent.schemas import WorkerResourcesRequest, WorkerToolCallResources
 from cloud_agent_host.resources import Sample
 from cloud_agent_host.tool_windows import (
     MAX_TOOL_CALLS,
@@ -87,6 +88,21 @@ def test_parallel_calls_share_their_readings_and_none_of_them_is_exclusive():
         assert row["cpu_usec_shared"] is not None
 
 
+def test_an_unfinished_parallel_call_prevents_a_false_exclusive_number():
+    """An open-ended call may have produced any reading after it opened."""
+    windows = [
+        ToolWindow("finished", "Bash", opened_mono=2.0, closed_mono=6.0),
+        ToolWindow("open", "Bash", opened_mono=3.0),
+    ]
+
+    finished, open_call = attribute(_second_by_second(13), windows)
+
+    assert finished["overlap_n"] == 2
+    assert finished["cpu_usec_exclusive"] is None
+    assert finished["cpu_usec_shared"] is not None
+    assert open_call["cpu_usec_exclusive"] is None
+
+
 def test_a_serial_neighbour_does_not_make_a_call_shared():
     """Calls that merely follow one another each own their own readings."""
     windows = [
@@ -144,6 +160,95 @@ def test_no_samples_at_all_still_produces_every_row():
     rows = attribute([], windows)
     assert [row["tool_name"] for row in rows] == ["Bash", "Read"]
     assert all(row["sample_count"] == 0 for row in rows)
+
+
+def test_an_incomplete_window_list_never_claims_a_delta_is_exclusive():
+    """A dropped call may overlap any retained row, so attribution is unsafe."""
+    windows = [ToolWindow("kept", "Bash", opened_mono=0.5, closed_mono=4.5)]
+
+    (row,) = attribute(_second_by_second(6), windows, windows_complete=False)
+
+    assert row["sample_count"] == 0
+    assert row["cpu_usec_exclusive"] is None
+    assert row["mem_peak_exclusive_bytes"] is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"overlap_n": 2, "cpu_usec_exclusive": 10},
+        {"overlap_n": 1, "cpu_usec_shared": 10},
+        {
+            "overlap_n": 2,
+            "cpu_usec_shared": 10,
+            "mem_peak_exclusive_bytes": 20,
+        },
+        {"sample_count": 1, "measured_span_ms": 1},
+    ],
+)
+def test_the_worker_schema_refuses_false_per_call_precision(overrides):
+    values = {
+        "call_seq": 1,
+        "tool_use_id": "toolu_1",
+        "tool_name": "Bash",
+        "sample_count": 2,
+        **overrides,
+    }
+    with pytest.raises(ValueError):
+        WorkerToolCallResources(**values)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "tool_calls_truncated": True,
+            "tool_time_ms": 10,
+        },
+        {
+            "tool_calls_truncated": True,
+            "tool_calls": [
+                {
+                    "call_seq": 1,
+                    "tool_use_id": "toolu_1",
+                    "tool_name": "Bash",
+                    "sample_count": 2,
+                    "measured_span_ms": 1,
+                    "cpu_usec_exclusive": 10,
+                }
+            ],
+        },
+        {
+            "tool_calls": [
+                {
+                    "call_seq": 1,
+                    "tool_use_id": "toolu_1",
+                    "tool_name": "Bash",
+                    "duration_ms": None,
+                }
+            ],
+            "tool_time_ms": 10,
+        },
+        {
+            "process_observer": "kata-guest-ebpf-v1",
+            "process_observation_complete": True,
+            "process_events_lost": 1,
+        },
+        {
+            "tool_calls": [
+                {
+                    "call_seq": 1,
+                    "tool_use_id": "toolu_1",
+                    "tool_name": "Bash",
+                    "process_count": 1,
+                }
+            ],
+        },
+    ],
+)
+def test_the_worker_rollup_refuses_completeness_without_evidence(payload):
+    with pytest.raises(ValueError):
+        WorkerResourcesRequest(sampler_version="2", **payload)
 
 
 # --- the tracker -------------------------------------------------------------
@@ -436,7 +541,7 @@ def test_every_hook_carries_a_timeout():
     """A hook without one could hold a tool call for as long as it liked."""
     settings = hook_settings(TOOL_MARK_SANDBOX_PATH)
     for event in ("PreToolUse", "PostToolUse"):
-        assert settings["hooks"][event][0]["hooks"][0]["timeout"] == 5
+        assert settings["hooks"][event][0]["hooks"][0]["timeout"] == 1
 
 
 # --- where the turn's time went ----------------------------------------------
@@ -459,9 +564,9 @@ def test_serial_calls_add_up():
     assert tool_time_ms(windows) == 3_000
 
 
-def test_a_call_that_never_returned_contributes_no_time():
-    """Its end is unknown, and guessing it would inflate the split."""
-    assert tool_time_ms([ToolWindow("a", "Bash", opened_mono=0.0)]) == 0
+def test_a_call_that_never_returned_makes_the_split_unavailable():
+    """Zero would count the whole unfinished call as non-tool time."""
+    assert tool_time_ms([ToolWindow("a", "Bash", opened_mono=0.0)]) is None
 
 
 def test_a_turn_with_no_calls_spent_no_time_in_them():

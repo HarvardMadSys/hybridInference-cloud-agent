@@ -158,10 +158,15 @@ class GuestObservation:
     detail: str | None = None
 
     @classmethod
-    def unavailable(cls, detail: str | None) -> GuestObservation:
+    def unavailable(
+        cls,
+        detail: str | None,
+        *,
+        source: str | None = None,
+    ) -> GuestObservation:
         """Return no rows while preserving why zero rows prove nothing."""
         return cls(
-            source=None,
+            source=source,
             complete=False,
             lost_events=0,
             truncated=False,

@@ -5088,7 +5088,7 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
                     "overlap_n": 1,
                 },
             ],
-            "tool_calls_truncated": True,
+            "tool_calls_truncated": False,
             "process_observer": "kata-guest-ebpf-v1",
             "process_observation_complete": True,
             "process_events_lost": 0,
@@ -5116,7 +5116,7 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
     assert ack.status_code == 200, ack.text
 
     resources = (await client.get(f"/v1/agent/jobs/{job_id}")).json()["resources"]
-    assert resources["tool_calls_truncated"] is True
+    assert resources["tool_calls_truncated"] is False
     assert resources["tool_time_ms"] == 9_543
     long_call, short_call = resources["tool_calls"]
     assert long_call["tool_name"] == "Bash"

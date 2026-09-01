@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -14,7 +15,6 @@
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -23,6 +23,7 @@
 
 #define MAX_HOOK_PAYLOAD_BYTES (64U * 1024U)
 #define MAX_LEGACY_MARK_BYTES (1024U * 1024U)
+#define MAX_STDIN_WAIT_MS 25U
 #define DEFAULT_MARK_PATH "/agent-state/tool-marks.log"
 
 static bool id_byte(unsigned char value)
@@ -177,20 +178,62 @@ static bool extract_tool_use_id(const char *payload, size_t length,
     return found && cursor == length;
 }
 
+static uint64_t timespec_ns(const struct timespec *value)
+{
+    return (uint64_t)value->tv_sec * 1000000000ULL + (uint64_t)value->tv_nsec;
+}
+
 static size_t read_payload(char payload[MAX_HOOK_PAYLOAD_BYTES + 1])
 {
     size_t used = 0;
+    struct timespec started;
+    uint64_t started_ns;
+    uint64_t deadline_ns;
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+
+    /* Claude normally writes the complete JSON document before this process
+     * gets scheduled, so the fast path below never waits. A broken producer
+     * that leaves the pipe open must cost exact-boundary coverage, not hold a
+     * tool call until Claude's outer hook timeout. */
+    if (flags < 0 || fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0 ||
+        clock_gettime(CLOCK_MONOTONIC, &started) < 0)
+        return MAX_HOOK_PAYLOAD_BYTES + 1;
+    started_ns = timespec_ns(&started);
+    deadline_ns = started_ns + (uint64_t)MAX_STDIN_WAIT_MS * 1000000ULL;
 
     while (used < MAX_HOOK_PAYLOAD_BYTES + 1) {
+        struct timespec now;
+        uint64_t now_ns;
         ssize_t result = read(STDIN_FILENO, payload + used,
                               MAX_HOOK_PAYLOAD_BYTES + 1 - used);
 
+        if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+            return MAX_HOOK_PAYLOAD_BYTES + 1;
+        now_ns = timespec_ns(&now);
+        if (now_ns >= deadline_ns)
+            return MAX_HOOK_PAYLOAD_BYTES + 1;
         if (result > 0) {
             used += (size_t)result;
             continue;
         }
         if (result < 0 && errno == EINTR)
             continue;
+        if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd waiter = {.fd = STDIN_FILENO, .events = POLLIN | POLLHUP};
+            uint64_t remaining_ns;
+            int wait_ms;
+            int polled;
+
+            remaining_ns = deadline_ns - now_ns;
+            wait_ms = (int)((remaining_ns + 999999ULL) / 1000000ULL);
+            polled = poll(&waiter, 1, wait_ms);
+            if (polled < 0 && errno == EINTR)
+                continue;
+            if (polled <= 0 ||
+                (waiter.revents & (POLLIN | POLLHUP)) == 0)
+                return MAX_HOOK_PAYLOAD_BYTES + 1;
+            continue;
+        }
         if (result < 0)
             return MAX_HOOK_PAYLOAD_BYTES + 1;
         break;
@@ -198,14 +241,44 @@ static size_t read_payload(char payload[MAX_HOOK_PAYLOAD_BYTES + 1])
     return used;
 }
 
+static bool bounded_stdin_self_test(void)
+{
+    char payload[MAX_HOOK_PAYLOAD_BYTES + 1];
+    struct timespec started;
+    struct timespec finished;
+    int pipes[2];
+    size_t result;
+    uint64_t elapsed_ms;
+
+    if (pipe2(pipes, O_CLOEXEC) < 0 ||
+        dup2(pipes[0], STDIN_FILENO) < 0) {
+        return false;
+    }
+    close(pipes[0]);
+    /* Keep the write end open and empty: a blocking reader never sees EOF. */
+    if (clock_gettime(CLOCK_MONOTONIC, &started) < 0) {
+        close(pipes[1]);
+        return false;
+    }
+    result = read_payload(payload);
+    if (clock_gettime(CLOCK_MONOTONIC, &finished) < 0) {
+        close(pipes[1]);
+        return false;
+    }
+    close(pipes[1]);
+    elapsed_ms = (timespec_ns(&finished) - timespec_ns(&started)) / 1000000ULL;
+    return result > MAX_HOOK_PAYLOAD_BYTES && elapsed_ms <= 250;
+}
+
 static bool send_trusted_mark(const struct fi_tool_mark *mark)
 {
     struct sockaddr_un server = {.sun_family = AF_UNIX};
     struct sockaddr_un client = {.sun_family = AF_UNIX};
-    struct timeval timeout = {.tv_sec = 0, .tv_usec = 10000};
-    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    struct pollfd waiter;
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     char acknowledged = 0;
     int client_name_length;
+    int polled;
     ssize_t sent;
 
     if (fd < 0)
@@ -223,12 +296,17 @@ static bool send_trusted_mark(const struct fi_tool_mark *mark)
     memcpy(server.sun_path, FI_TOOL_MARK_SOCKET, sizeof(FI_TOOL_MARK_SOCKET));
     if (connect(fd, (const struct sockaddr *)&server,
                 offsetof(struct sockaddr_un, sun_path) +
-                    sizeof(FI_TOOL_MARK_SOCKET)) < 0 ||
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
+                    sizeof(FI_TOOL_MARK_SOCKET)) < 0)
         goto done;
     sent = send(fd, mark, sizeof(*mark), MSG_NOSIGNAL);
-    if (sent == (ssize_t)sizeof(*mark) && recv(fd, &acknowledged, 1, 0) == 1 &&
-        acknowledged == 1) {
+    if (sent != (ssize_t)sizeof(*mark))
+        goto done;
+    waiter.fd = fd;
+    waiter.events = POLLIN;
+    waiter.revents = 0;
+    polled = poll(&waiter, 1, 10);
+    if (polled > 0 && (waiter.revents & POLLIN) != 0 &&
+        recv(fd, &acknowledged, 1, MSG_DONTWAIT) == 1 && acknowledged == 1) {
         close(fd);
         return true;
     }
@@ -293,6 +371,7 @@ int main(int argc, char **argv)
     struct timespec wall = {0};
     const char *phase;
     const char *legacy_path;
+    bool observer_socket_present;
     size_t payload_size;
 
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0) {
@@ -316,6 +395,8 @@ int main(int argc, char **argv)
             !extract_tool_use_id(nested_before, sizeof(nested_before) - 1, parsed) ||
             strcmp(parsed, "top_level") != 0 ||
             extract_tool_use_id(duplicate, sizeof(duplicate) - 1, parsed))
+            return 1;
+        if (!bounded_stdin_self_test())
             return 1;
         printf("freeinference-tool-mark-v%d\n", FI_TOOL_MARK_VERSION);
         return 0;
@@ -344,7 +425,11 @@ int main(int argc, char **argv)
     if (payload_size > MAX_HOOK_PAYLOAD_BYTES ||
         !extract_tool_use_id(payload, payload_size, mark.tool_use_id))
         return 0;
-    if (!send_trusted_mark(&mark))
+    /* Kata ignores the agent-writable compatibility file. If its trusted
+     * observer socket exists but is backpressured, fail open immediately
+     * instead of adding a filesystem write that cannot recover precision. */
+    observer_socket_present = access(FI_TOOL_MARK_SOCKET, F_OK) == 0;
+    if (!send_trusted_mark(&mark) && !observer_socket_present)
         write_legacy_mark(legacy_path, phase, mark.tool_use_id, &wall);
     return 0;
 }

@@ -421,6 +421,22 @@ function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
 /** Build the UI job model from the API job plus whatever else we have. */
 /** Rename the host's rollup into the UI's shape, keeping every null a null. */
 export function toTurnResources(api: AttemptResourcesApi): TurnResources {
+  const toolCallsTruncated = api.tool_calls_truncated === true;
+  const toolCalls = (api.tool_calls ?? []).map((call) => {
+    const adapted = toToolCallResources(call);
+    if (!toolCallsTruncated) return adapted;
+    return {
+      ...adapted,
+      sampleCount: 0,
+      measuredSpanMs: null,
+      cpuUsec: null,
+      memPeakBytes: null,
+      exclusive: false,
+    };
+  });
+  const processObserver = api.process_observer ?? null;
+  const processEventsLost = api.process_events_lost ?? 0;
+  const processesTruncated = api.processes_truncated === true;
   return {
     cpuUsec: api.cpu_usec,
     memPeakBytes: api.mem_peak_bytes,
@@ -431,13 +447,17 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
     netTxBytes: api.net_tx_bytes,
     sampleCount: api.sample_count,
     coverage: api.coverage,
-    toolTimeMs: api.tool_time_ms ?? null,
-    toolCalls: (api.tool_calls ?? []).map(toToolCallResources),
-    toolCallsTruncated: api.tool_calls_truncated === true,
-    processObserver: api.process_observer ?? null,
-    processObservationComplete: api.process_observation_complete === true,
-    processEventsLost: api.process_events_lost ?? 0,
-    processesTruncated: api.processes_truncated === true,
+    toolTimeMs: toolCallsTruncated ? null : (api.tool_time_ms ?? null),
+    toolCalls,
+    toolCallsTruncated,
+    processObserver,
+    processObservationComplete:
+      processObserver !== null &&
+      api.process_observation_complete === true &&
+      processEventsLost === 0 &&
+      !processesTruncated,
+    processEventsLost,
+    processesTruncated,
     processes: (api.processes ?? []).map(toProcessObservation),
   };
 }

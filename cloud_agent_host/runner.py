@@ -67,6 +67,7 @@ from cloud_agent_host.enrollment import (
     release_residency,
 )
 from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_SOURCE,
     MAX_OBSERVED_PROCESSES,
     GuestObservation,
     add_process_counts,
@@ -1474,7 +1475,11 @@ def run_agent(
             windows = tool_windows.windows()
             # After ``stop``, because it takes the window's closing reading:
             # attributing before it would hide whatever the last call did.
-            tool_calls = attribute(sampler.samples(), windows)
+            tool_calls = attribute(
+                sampler.samples(),
+                windows,
+                windows_complete=not tool_windows.truncated,
+            )
             if observations:
                 processes: list[dict[str, Any]] = []
                 merged_processes_truncated = False
@@ -1499,10 +1504,18 @@ def run_agent(
                     for observation in observations
                     if observation.source is not None
                 }
+                process_observer = (
+                    next(iter(sources))
+                    if len(sources) == 1
+                    else GUEST_OBSERVER_SOURCE
+                    if kata_tool_marks
+                    else None
+                )
                 rollup.update(
                     {
-                        "process_observer": next(iter(sources)) if len(sources) == 1 else None,
+                        "process_observer": process_observer,
                         "process_observation_complete": not merged_processes_truncated
+                        and len(sources) == 1
                         and all(observation.complete for observation in observations),
                         "process_events_lost": sum(
                             observation.lost_events for observation in observations
@@ -1516,9 +1529,9 @@ def run_agent(
                 )
             rollup["tool_calls"] = tool_calls
             rollup["tool_calls_truncated"] = tool_windows.truncated
-            # The union, so the reader can see how much of the turn was the
-            # sandbox working and how much was waiting on the model.
-            rollup["tool_time_ms"] = tool_time_ms(windows)
+            # The union, so the reader can see tool-bracketed versus non-tool
+            # time. An incomplete call list cannot support that split.
+            rollup["tool_time_ms"] = None if tool_windows.truncated else tool_time_ms(windows)
             control.report_resources(rollup)
 
 
@@ -1668,7 +1681,11 @@ def _run_agent(
         # rung that reuses a process is exactly the rung whose consumption is
         # least obvious, so it is measured through the session it inherits.
         with contextlib.suppress(Exception):
-            sampler.rebind(getattr(resident.live_session, "container", None))
+            sampler.rebind(
+                None
+                if getattr(backend, "is_vm_isolated", False)
+                else getattr(resident.live_session, "container", None)
+            )
     stale_process = resident is not None and not hot_ok and resident.live_session is not None
     if stale_process and residents is not None and job.thread_id:
         # This turn will advance the thread past the idle process's memory —

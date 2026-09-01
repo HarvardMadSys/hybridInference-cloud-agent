@@ -10,8 +10,8 @@
 //      sampler reports `coverage`, and anything short of a full window is
 //      labelled a floor rather than quietly rounded into a total.
 //   2. Timings derived from message arrival are labelled approximate. A tool
-//      row's window starts when the model asked for the call, which includes
-//      the model's own thinking before the tool ever ran, until per-call
+//      row's window starts after the model has produced the call and brackets
+//      execution with platform event-processing delay until per-call
 //      boundaries land.
 
 import { useMemo, useState } from 'react';
@@ -147,11 +147,11 @@ export function formatCpu(usec: number | null | undefined): string | null {
  * pairing below is the fallback for rows that were never folded — a call
  * whose payload carried its own output, or a stream that ended mid-call.
  *
- * Message-level by construction: the window opens when the model asked for
- * the call, not when the sandbox began running it, so it carries whatever
- * thinking preceded execution. Unpaired calls keep their row with a null
- * duration rather than being dropped — a call that never returned is exactly
- * what a reader is looking for.
+ * Message-level by construction: the window opens when the platform parses
+ * the model's call, not when the sandbox begins running it, so it brackets
+ * execution with platform delay on either side. Unpaired calls keep their row
+ * with a null duration rather than being dropped — a call that never returned
+ * is exactly what a reader is looking for.
  */
 export function toolTimings(events: AgentEvent[], attemptNo?: number): ToolTiming[] {
   const scoped =
@@ -256,8 +256,8 @@ function longestCall(timings: ToolTiming[]): ToolTiming | null {
  * The most explanatory number the footer can carry, and it costs no new
  * measurement: both halves were already recorded. On the production turns
  * this was built against, the sandbox was busy for around one percent of the
- * turn and the rest was spent waiting on the model — which is the answer to
- * "why was this slow" far more often than any tool row is.
+ * turn. The remainder was dominated by model work, but this measurement also
+ * includes harness and platform overhead and does not pretend to separate it.
  *
  * Tool time is the union of the calls' windows, never their sum, so it can
  * never exceed the turn it belongs to.
@@ -277,7 +277,8 @@ function TimeSplit({
       <span className="tabular-nums text-gray-800 dark:text-gray-200">
         {formatDuration(toolTimeMs)}
       </span>{' '}
-      in tools, <span className="tabular-nums">{formatDuration(rest)}</span> waiting on the model.
+      in tools, <span className="tabular-nums">{formatDuration(rest)}</span> outside tools (model +
+      platform overhead).
     </p>
   );
 }
@@ -320,12 +321,20 @@ function ToolTimingTable({
   processObservationComplete: boolean;
 }) {
   const byId = useMemo(() => {
-    const index = new Map<string, ToolCallResources>();
-    for (const call of calls) index.set(call.toolUseId, call);
+    const index = new Map<string, ToolCallResources[]>();
+    for (const call of calls) {
+      const matches = index.get(call.toolUseId) ?? [];
+      matches.push(call);
+      index.set(call.toolUseId, matches);
+    }
     return index;
   }, [calls]);
+  const usedById = new Map<string, number>();
   const rows = timings.map((timing) => {
-    const recorded = timing.toolUseId ? byId.get(timing.toolUseId) : undefined;
+    const matches = timing.toolUseId ? byId.get(timing.toolUseId) : undefined;
+    const used = timing.toolUseId ? (usedById.get(timing.toolUseId) ?? 0) : 0;
+    const recorded = matches?.[used];
+    if (timing.toolUseId && recorded) usedById.set(timing.toolUseId, used + 1);
     return {
       timing: {
         ...timing,
@@ -357,7 +366,7 @@ function ToolTimingTable({
             <th className="py-1 font-medium">Tool</th>
             <th className="py-1 font-medium">Detail</th>
             <th className="py-1 text-right font-medium">Duration</th>
-            <th className="py-1 text-right font-medium">Processes</th>
+            <th className="py-1 text-right font-medium">Process starts</th>
             <th className="py-1 text-right font-medium">CPU</th>
             <th className="py-1 text-right font-medium">Peak mem</th>
           </tr>
@@ -386,7 +395,11 @@ function ToolTimingTable({
                   </span>
                 </td>
                 <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
-                  {processObservationComplete || processCount > 0 ? processCount : '—'}
+                  {processObservationComplete
+                    ? processCount
+                    : processCount > 0
+                      ? `≥${processCount}`
+                      : '—'}
                 </td>
                 <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
                   <MeasuredCell
@@ -407,8 +420,8 @@ function ToolTimingTable({
       </table>
       {anyUnmeasured ? (
         <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          — in CPU or memory means the periodic sampler did not span the call. Process counts come
-          from guest-kernel lifecycle events and do not have that sampling-window gap.
+          — in CPU or memory means the periodic sampler did not span the call. Process-start counts
+          come from guest-kernel lifecycle events and do not have that sampling-window gap.
         </p>
       ) : null}
       {anyShared ? (
@@ -440,7 +453,7 @@ function ProcessObservationTable({
   return (
     <div className="mt-3">
       <p className="mb-1 text-[11px] font-medium text-gray-600 dark:text-gray-300">
-        Guest processes
+        Guest process starts
       </p>
       {processes.length > 0 ? (
         <div className="overflow-x-auto">
@@ -485,7 +498,7 @@ function ProcessObservationTable({
         </div>
       ) : complete ? (
         <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          The guest kernel observed no child process during this turn.
+          The guest kernel observed no child-process start during this turn.
         </p>
       ) : null}
       {!complete ? (
