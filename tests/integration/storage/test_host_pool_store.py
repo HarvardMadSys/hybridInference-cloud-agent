@@ -148,6 +148,7 @@ def _shared_attestation(**overrides) -> dict:
         "helper_versions": {
             "claude-agent-sdk": "0.2.148",
             "guest-observer": "1",
+            "tool-mark": "1",
         },
     }
     stamp.update(overrides)
@@ -535,6 +536,7 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
             helper_versions={
                 "claude-agent-sdk": "0.2.147",
                 "guest-observer": "1",
+                "tool-mark": "1",
             }
         ),
         _shared_attestation(

@@ -137,6 +137,7 @@ def _shared_claim_attestation() -> dict[str, object]:
         "helper_versions": {
             "claude-agent-sdk": "0.2.148",
             "guest-observer": "1",
+            "tool-mark": "1",
         },
     }
 
