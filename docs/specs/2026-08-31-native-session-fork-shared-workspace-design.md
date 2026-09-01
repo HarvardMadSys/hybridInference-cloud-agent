@@ -1129,11 +1129,13 @@ already the shared workspace/state location.
 
 ## 13. Acceptance and regression gates
 
-The repository's automated suite covers the control-plane, host, database,
-Docker primitive, and frontend contracts below. Real-provider checks for every
-exact runtime and Kata/gVisor isolation remain deployment rollout gates; this
-document does not relabel those external checks as locally completed. The full
-production acceptance contract is:
+The list below is the full production acceptance contract, not a claim that
+every item has already run in repository CI. The automated suite covers the
+landed control-plane, host, database, Docker-primitive, and frontend portions;
+section 14 records the remaining stress, real-provider, isolation, and
+environment-specific rollout gates. In particular, local fake-provider or
+sequential-driver coverage must not be relabelled as real-provider,
+Kata/gVisor, OOM/container-exit, or adversarial multi-process validation.
 
 1. A normal running chat gets exactly one container, one membership, and one
    supervisor-owned live CLI process; two sequential compatible turns reuse
@@ -1189,7 +1191,8 @@ production acceptance contract is:
     and stale generation/container receipts are rejected.
 18. Timeout/cancel targets the exact member. Per-member resource counters come
     from its process tree or are explicitly unavailable; container totals are
-    not duplicated. A container OOM/exit is tested as a group failure.
+    not duplicated. Before production enablement, a container OOM/unexpected
+    exit must be tested and observed as a group failure.
 19. Existing non-forked retained, follow-up, terminal, file/Git, MCP,
     reasoning-effort, cancellation, publication, legacy disposable, auth,
     egress, and frontend tests remain green.
@@ -1289,6 +1292,11 @@ repository test cannot honestly substitute for:
   runtime that will be enabled;
 - the required Kata/gVisor and adversarial isolation validation for untrusted
   multi-tenant repositories;
+- container OOM/unexpected-exit reconciliation plus the adversarial
+  multi-process, crash, simultaneous-Fork, and broker-restart stress cases in
+  the production acceptance contract;
+- disk-pressure admission/alerting and the non-mutating pre-prompt context
+  fingerprint described in the operations rollout boundary;
 - at least two runner executors/host turn slots and enough Docker CPU/memory for
   the chosen member concurrency; and
 - gradual capability/feature-flag rollout with monitoring of residency loss,
