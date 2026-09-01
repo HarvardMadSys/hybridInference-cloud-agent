@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 
@@ -73,6 +74,7 @@ def test_retained_writer_uses_stdin_and_refuses_symlink_targets(tmp_path):
         str(tmp_path),
         "note.txt",
         "100",
+        "0",
     ]
 
     written = subprocess.run(command, input=b"after\n", capture_output=True, check=False)
@@ -81,10 +83,34 @@ def test_retained_writer_uses_stdin_and_refuses_symlink_targets(tmp_path):
 
     os.symlink(target, tmp_path / "linked.txt")
     refused = subprocess.run(
-        [*command[:-2], "linked.txt", "100"],
+        [*command[:-3], "linked.txt", "100", "0"],
         input=b"overwrite",
         capture_output=True,
         check=False,
     )
     assert refused.returncode == 49
     assert target.read_text() == "after\n"
+
+
+def test_retained_writer_preserves_legacy_mode_and_groups_shared_members(tmp_path):
+    command = [
+        sys.executable,
+        "-c",
+        _WRITE_PROGRAM,
+        str(tmp_path),
+        "legacy.txt",
+        "100",
+        "0",
+    ]
+
+    legacy_written = subprocess.run(command, input=b"legacy\n", capture_output=True, check=False)
+    shared_written = subprocess.run(
+        [*command[:-3], "shared.txt", "100", "1"],
+        input=b"shared\n",
+        capture_output=True,
+        check=False,
+    )
+
+    assert legacy_written.returncode == shared_written.returncode == 0
+    assert stat.S_IMODE((tmp_path / "legacy.txt").stat().st_mode) == 0o644
+    assert stat.S_IMODE((tmp_path / "shared.txt").stat().st_mode) == 0o664

@@ -1234,11 +1234,13 @@ class ChatSandboxManager:
         # ``setsid`` loses this exec's controlling terminal.  Monitor mode is
         # disabled so commands launched by the shell remain in the signalable
         # group recorded in the pidfile.
+        shared_umask = "umask 0002; " if spec.shared_live else ""
         script = (
             'pidfile="$1"; '
             'printf "%s\\n" "$$" > "$pidfile" || exit 126; '
             'cleanup() { rm -f "$pidfile"; }; '
             "trap 'cleanup' EXIT; "
+            f"{shared_umask}"
             '/bin/sh +m -i; status=$?; exit "$status"'
         )
         command = self.build_exec_command(

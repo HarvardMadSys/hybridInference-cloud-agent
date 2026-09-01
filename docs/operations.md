@@ -522,7 +522,10 @@ actual image while its database row still reports the old one.
 > lazily resumes that member. Workspace, dependencies, Agent CLI home, and
 > native session data remain in the Docker writable layer. Forked chats share
 > one Git/workspace/publication lineage, with only a bounded quiescent barrier
-> for snapshot capture. Historical `legacy_1to1` containers remain readable and
+> for snapshot capture. Capture runs on a short control-plane schedule separate
+> from attempt/grant reaping. A pending snapshot remains eligible after normal
+> idle stop: the broker starts the exact generation/container, captures it, and
+> re-arms the same group inactivity clock. Historical `legacy_1to1` containers remain readable and
 > resumable, but no new retained Docker-clone Fork is created by the shared-live
 > route. Keep the capability off for general traffic until the exact-runtime
 > live-provider and Kata/gVisor conformance gates pass in the target deployment.
@@ -607,6 +610,11 @@ traffic until the Kata/gVisor and real-provider matrix passes for every enabled
 CLI. The frontend treats `NEW`, `LIVE`, `RESTORED`, and `LOST` as canonical
 context-correctness states; `hot`, `warm_native`, `cold_native`, and `replay`
 remain diagnostic transport/recovery telemetry.
+After a shared turn settles, its snapshot and draft-PR fields may still change
+asynchronously. The detail view and recent-task list poll only while that
+publication state is pending/capturing/captured/publishing, and stop at
+published/failed; legacy and ordinary terminal jobs do not acquire a background
+polling loop.
 
 The preview does not yet implement R6 disk-pressure admission/alerting or a
 non-mutating pre-prompt context fingerprint. Keep general-traffic rollout off

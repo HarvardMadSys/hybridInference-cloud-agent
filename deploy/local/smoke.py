@@ -25,6 +25,8 @@ from typing import Any
 TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 JOB_TIMEOUT_S = 240
 IDLE_STOP_TIMEOUT_S = 100
+SNAPSHOT_TIMEOUT_S = 100
+CONCURRENT_RUNNING_TIMEOUT_S = 30
 RUNTIMES = ("claude-code", "codex", "pi", "opencode", "kilo")
 
 
@@ -139,6 +141,28 @@ def wait_job(client: Client, job_id: str) -> dict[str, Any]:
     raise RuntimeError(f"job {job_id} did not settle within {JOB_TIMEOUT_S}s")
 
 
+def wait_concurrently_running(client: Client, source_job_id: str, child_job_id: str) -> None:
+    """Prove two fork siblings are admitted together, not merely queued together."""
+    deadline = time.monotonic() + CONCURRENT_RUNNING_TIMEOUT_S
+    last_states: tuple[str, str] = ("", "")
+    while time.monotonic() < deadline:
+        source = client.request(f"/api/v1/agent/jobs/{urllib.parse.quote(source_job_id)}")
+        child = client.request(f"/api/v1/agent/jobs/{urllib.parse.quote(child_job_id)}")
+        states = (str(source.get("state") or ""), str(child.get("state") or ""))
+        if states != last_states:
+            print(f"  concurrent states: source={states[0]} child={states[1]}", flush=True)
+            last_states = states
+        if states == ("running", "running"):
+            return
+        if states[0] in TERMINAL_STATES or states[1] in TERMINAL_STATES:
+            break
+        time.sleep(0.1)
+    raise RuntimeError(
+        "fork siblings were never simultaneously RUNNING; "
+        f"last states were source={last_states[0]} child={last_states[1]}"
+    )
+
+
 def chat_container(sandbox_id: str) -> tuple[str, str, str]:
     listed = subprocess.run(
         [
@@ -182,6 +206,26 @@ def wait_stopped(sandbox_id: str) -> str:
             return container_id
         time.sleep(2)
     raise RuntimeError("retained container was not docker-stopped after the inactivity timeout")
+
+
+def wait_workspace_published(client: Client, job_id: str) -> None:
+    """Require the asynchronous shared capture to leave its pending queue."""
+    deadline = time.monotonic() + SNAPSHOT_TIMEOUT_S
+    last_state = ""
+    while time.monotonic() < deadline:
+        job = client.request(f"/api/v1/agent/jobs/{urllib.parse.quote(job_id)}")
+        state = str(job.get("workspace_publication_state") or "")
+        if state != last_state:
+            print(f"  snapshot for {job_id}: {state or 'missing'}", flush=True)
+            last_state = state
+        if state == "published":
+            return
+        if state == "failed":
+            raise RuntimeError(f"shared snapshot for {job_id} failed: {job.get('detail')}")
+        time.sleep(1)
+    raise RuntimeError(
+        f"shared snapshot for {job_id} remained {last_state or 'missing'} for {SNAPSHOT_TIMEOUT_S}s"
+    )
 
 
 def main() -> int:
@@ -328,18 +372,40 @@ def main() -> int:
         # Queue both before awaiting either. With two host slots this crosses
         # the real no-group-turn-lock path: source and child own distinct
         # attempts, grants, resident processes, and native session ids.
+        concurrency_probe_key = f"{runtime}-{secrets.token_hex(8)}"
+        concurrency_probe = f"[local-concurrency-probe:{concurrency_probe_key}]"
         source_follow_up = client.request(
             f"/api/v1/agent/jobs/{urllib.parse.quote(str(source['id']))}/follow-ups",
             method="POST",
-            body={"prompt": f"Continue the source {runtime} session after its native fork."},
+            body={
+                "prompt": (
+                    f"Continue the source {runtime} session after its native fork. "
+                    f"{concurrency_probe}"
+                )
+            },
         )
         child_follow_up = client.request(
             f"/api/v1/agent/jobs/{urllib.parse.quote(str(forked['id']))}/follow-ups",
             method="POST",
-            body={"prompt": f"Continue the child {runtime} session after its native fork."},
+            body={
+                "prompt": (
+                    f"Continue the child {runtime} session after its native fork. "
+                    f"{concurrency_probe}"
+                )
+            },
+        )
+        wait_concurrently_running(
+            client,
+            str(source_follow_up["id"]),
+            str(child_follow_up["id"]),
         )
         source_live = wait_job(client, str(source_follow_up["id"]))
         child_live = wait_job(client, str(child_follow_up["id"]))
+        completed_probes = client.request("/health").get("completed_concurrency_probes") or []
+        if concurrency_probe_key not in completed_probes:
+            raise RuntimeError(
+                f"{runtime} turns were RUNNING but did not overlap at the inference barrier"
+            )
         for side, turn in (("source", source_live), ("child", child_live)):
             if turn.get("context_status") != "live":
                 raise RuntimeError(
@@ -373,11 +439,17 @@ def main() -> int:
         stopped_id = wait_stopped(sandbox_id)
         if stopped_id != original_id:
             raise RuntimeError(f"{runtime} child wake changed the next group idle stop target")
+        wait_workspace_published(client, str(restored_child["id"]))
+        # Snapshot capture may legitimately have won just after idle stop and
+        # started the exact container. It must then obey the same group clock.
+        stopped_id = wait_stopped(sandbox_id)
+        if stopped_id != original_id:
+            raise RuntimeError(f"{runtime} snapshot capture replaced the retained container")
 
     print(
         "PASS: OAuth + all five CLIs NEW → LIVE → docker stop → RESTORED; "
         "all five native-fork source/child sessions stay LIVE in one workspace; "
-        "group stop → child RESTORED; all containers keep mounts=[]",
+        "group stop → child RESTORED; snapshots publish; all containers keep mounts=[]",
         flush=True,
     )
     return 0

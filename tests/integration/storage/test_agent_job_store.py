@@ -311,6 +311,8 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
         await store.record_sandbox_snapshot_capture(
             snapshot_id=capture["snapshot_id"],
             sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
             workspace_epoch=capture["workspace_epoch"],
             base_sha=capture["base_sha"],
             patch=patch,
@@ -360,6 +362,171 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert group["published_base_sha"] == commit_sha
     assert group["snapshot_state"] == "quiescent"
     assert await store.pending_snapshot_base_import() is None
+
+
+async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
+    store: AgentJobStore,
+):
+    """An idle Docker stop must not strand the final publication snapshot."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-shared-stopped-snapshot",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-shared-stopped-snapshot",
+        idle_timeout_seconds=15,
+        base_sha=job["base_sha"],
+    )
+    assert await store.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = 'stopped', idle_deadline = NULL WHERE id = $1",
+            sandbox["sandbox_id"],
+        )
+
+    capture = await store.claim_due_sandbox_snapshot()
+
+    assert capture is not None
+    assert capture["sandbox_id"] == sandbox["sandbox_id"]
+    async with store._pool.acquire() as conn:
+        capturing = await conn.fetchrow(
+            "SELECT state, snapshot_state FROM agent_sandboxes WHERE id = $1",
+            sandbox["sandbox_id"],
+        )
+    assert capturing is not None
+    assert capturing["state"] == "stopped"
+    assert capturing["snapshot_state"] == "snapshotting"
+
+    # A valid receipt proves that the host started the exact container before
+    # running Git. Durable state follows that Docker fact and re-arms timeout.
+    assert (
+        await store.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch="",
+            content_sha256=hashlib.sha256(b"").hexdigest(),
+        )
+        == "published"
+    )
+    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert durable is not None
+    assert durable["state"] == "running"
+    assert durable["workspace_publication_state"] == "published"
+    assert durable["idle_deadline"] is not None
+
+
+async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_container(
+    store: AgentJobStore,
+):
+    """Capture completion is fenced by the Docker generation and exact id."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-before-replacement",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-before-replacement",
+        idle_timeout_seconds=15,
+        base_sha=job["base_sha"],
+    )
+    assert await store.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    capture = await store.claim_due_sandbox_snapshot()
+    assert capture is not None
+
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET generation = generation + 1,
+                container_id = 'container-after-replacement',
+                state = 'stopped', snapshot_state = 'quiescent'
+            WHERE id = $1
+            """,
+            sandbox["sandbox_id"],
+        )
+
+    assert (
+        await store.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch="",
+            content_sha256=hashlib.sha256(b"").hexdigest(),
+        )
+        is None
+    )
+    assert not await store.defer_sandbox_snapshot_capture(
+        snapshot_id=capture["snapshot_id"],
+        sandbox_id=capture["sandbox_id"],
+        sandbox_generation=capture["generation"],
+        container_id=capture["container_id"],
+        detail="receipt lost its lifecycle fence",
+        dirty=True,
+    )
+    async with store._pool.acquire() as conn:
+        group = await conn.fetchrow(
+            """
+            SELECT generation, container_id, state, snapshot_state
+            FROM agent_sandboxes WHERE id = $1
+            """,
+            sandbox["sandbox_id"],
+        )
+        snapshot_state = await conn.fetchval(
+            "SELECT state FROM agent_sandbox_snapshots WHERE id = $1",
+            capture["snapshot_id"],
+        )
+    assert group is not None
+    assert dict(group) == {
+        "generation": capture["generation"] + 1,
+        "container_id": "container-after-replacement",
+        "state": "stopped",
+        "snapshot_state": "quiescent",
+    }
+    assert snapshot_state == "failed"
 
 
 @pytest.mark.parametrize(
@@ -412,6 +579,9 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
     if failure_mode == "capture_dirty":
         assert await store.defer_sandbox_snapshot_capture(
             snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
             detail="unsafe writer census",
             dirty=True,
         )
@@ -424,6 +594,8 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
         assert await store.record_sandbox_snapshot_capture(
             snapshot_id=capture["snapshot_id"],
             sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
             workspace_epoch=capture["workspace_epoch"],
             base_sha=capture["base_sha"],
             patch=patch,

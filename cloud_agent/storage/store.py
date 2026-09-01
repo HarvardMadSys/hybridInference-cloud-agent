@@ -6257,7 +6257,7 @@ class AgentJobStore:
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
                 WHERE s.state = 'pending'
                   AND g.mode = 'shared_live'
-                  AND g.state = 'running'
+                  AND g.state IN ('running', 'stopped')
                   AND g.snapshot_state = 'pending'
                   AND g.active_operation_count = 0
                   AND NOT EXISTS (
@@ -6313,6 +6313,8 @@ class AgentJobStore:
         *,
         snapshot_id: int,
         sandbox_id: str,
+        sandbox_generation: int,
+        container_id: str,
         workspace_epoch: int,
         base_sha: str,
         patch: str,
@@ -6327,6 +6329,37 @@ class AgentJobStore:
         if not secrets.compare_digest(digest, content_sha256):
             raise ValueError("sandbox snapshot content hash does not match its patch")
         async with self._pool.acquire() as conn, conn.transaction():
+            capture = await conn.fetchval(
+                """
+                SELECT sandbox_id FROM agent_sandbox_snapshots
+                WHERE id = $1 AND sandbox_id = $2 AND workspace_epoch = $3
+                  AND base_sha = $4 AND state = 'capturing'
+                FOR UPDATE
+                """,
+                snapshot_id,
+                sandbox_id,
+                workspace_epoch,
+                base_sha,
+            )
+            if capture is None:
+                return None
+            # Lock and revalidate the exact Docker lifecycle identity before
+            # accepting an asynchronous host receipt. A stale capture from a
+            # superseded generation must not mark its replacement RUNNING or
+            # become that replacement's publication base.
+            group = await conn.fetchval(
+                """
+                SELECT id FROM agent_sandboxes
+                WHERE id = $1 AND generation = $2 AND container_id = $3
+                  AND snapshot_state = 'snapshotting'
+                FOR UPDATE
+                """,
+                sandbox_id,
+                sandbox_generation,
+                container_id,
+            )
+            if group is None:
+                return None
             state = "captured" if patch.strip() else "published"
             row = await conn.fetchrow(
                 """
@@ -6369,9 +6402,12 @@ class AgentJobStore:
                         THEN NOW() + make_interval(secs => g.idle_timeout_seconds)
                         ELSE NULL END,
                     updated_at = NOW()
-                WHERE g.id = $1 AND g.snapshot_state = 'snapshotting'
+                WHERE g.id = $1 AND g.generation = $2 AND g.container_id = $3
+                  AND g.snapshot_state = 'snapshotting'
                 """,
                 sandbox_id,
+                sandbox_generation,
+                container_id,
             )
         return state
 
@@ -6379,6 +6415,9 @@ class AgentJobStore:
         self,
         *,
         snapshot_id: int,
+        sandbox_id: str,
+        sandbox_generation: int,
+        container_id: str,
         detail: str,
         dirty: bool = False,
     ) -> bool:
@@ -6386,19 +6425,54 @@ class AgentJobStore:
         next_state = "failed" if dirty else "pending"
         group_state = "dirty" if dirty else "pending"
         async with self._pool.acquire() as conn, conn.transaction():
-            sandbox_id = await conn.fetchval(
+            claimed_sandbox_id = await conn.fetchval(
+                """
+                SELECT sandbox_id FROM agent_sandbox_snapshots
+                WHERE id = $1 AND state = 'capturing'
+                FOR UPDATE
+                """,
+                snapshot_id,
+            )
+            if claimed_sandbox_id is None:
+                return False
+            if str(claimed_sandbox_id) != sandbox_id:
+                raise ValueError("snapshot claim belongs to a different sandbox")
+            group = await conn.fetchval(
+                """
+                SELECT id FROM agent_sandboxes
+                WHERE id = $1 AND generation = $2 AND container_id = $3
+                  AND snapshot_state = 'snapshotting'
+                FOR UPDATE
+                """,
+                sandbox_id,
+                sandbox_generation,
+                container_id,
+            )
+            if group is None:
+                # The async result belongs to an obsolete Docker identity.
+                # Make that immutable snapshot visibly failed, but leave the
+                # successor group's lifecycle fields untouched.
+                await conn.execute(
+                    """
+                    UPDATE agent_sandbox_snapshots
+                    SET state = 'failed',
+                        last_error = 'snapshot capture lost its sandbox lifecycle fence',
+                        updated_at = NOW()
+                    WHERE id = $1 AND state = 'capturing'
+                    """,
+                    snapshot_id,
+                )
+                return False
+            await conn.execute(
                 """
                 UPDATE agent_sandbox_snapshots
                 SET state = $2, last_error = $3, updated_at = NOW()
                 WHERE id = $1 AND state = 'capturing'
-                RETURNING sandbox_id
                 """,
                 snapshot_id,
                 next_state,
                 detail[:2000],
             )
-            if sandbox_id is None:
-                return False
             await conn.execute(
                 """
                 UPDATE agent_sandboxes
@@ -6413,11 +6487,14 @@ class AgentJobStore:
                         ELSE NULL END,
                     last_error = CASE WHEN $2 = 'dirty' THEN $3 ELSE last_error END,
                     updated_at = NOW()
-                WHERE id = $1 AND snapshot_state = 'snapshotting'
+                WHERE id = $1 AND generation = $4 AND container_id = $5
+                  AND snapshot_state = 'snapshotting'
                 """,
                 sandbox_id,
                 group_state,
                 detail[:2000],
+                sandbox_generation,
+                container_id,
             )
         return True
 

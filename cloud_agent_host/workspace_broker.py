@@ -38,6 +38,7 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
+    RetainedChatBackend,
     RetainedChatLost,
 )
 from cloud_agent_host.drivers import DriverError
@@ -1253,8 +1254,14 @@ def _run_terminal(
     backend: SandboxBackend, workdir: Path | str, request: TerminalRequest
 ) -> dict[str, Any]:
     marker = secrets.token_hex(16)
+    shared_umask = (
+        "umask 0002; "
+        if isinstance(backend, RetainedChatBackend) and backend.spec.shared_live
+        else ""
+    )
     script = (
-        'cd "$WORKSPACE_CWD" 2>/dev/null || { printf "invalid working directory\\n" >&2; '
+        shared_umask
+        + 'cd "$WORKSPACE_CWD" 2>/dev/null || { printf "invalid working directory\\n" >&2; '
         "exit 125; }; "
         'eval "$WORKSPACE_COMMAND"; status=$?; '
         f'printf "\\n__HYI_{marker}_CWD__%s\\n__HYI_{marker}_STATUS__%s\\n" "$PWD" "$status"'

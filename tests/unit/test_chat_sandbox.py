@@ -542,8 +542,17 @@ def test_shared_writer_manifest_rejects_values_outside_the_identity_fence(payloa
         ChatSandboxManager._parse_frozen_processes(payload, allowed_uids={10001})
 
 
-def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(monkeypatch):
-    spec = _spec()
+@pytest.mark.parametrize("shared_live", [False, True])
+def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(
+    monkeypatch, shared_live
+):
+    spec = ChatSandboxSpec(
+        thread_id="athr_01",
+        sandbox_id="asbx_01",
+        generation=3,
+        runtime_id="claude-code",
+        shared_live=shared_live,
+    )
     manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
     payload = _inspect_payload(spec, status="running", running=True)
     popen_calls: list[tuple[list[str], dict]] = []
@@ -577,6 +586,7 @@ def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(monke
     assert "--tty" in command
     assert 'printf "%s\\n" "$$" > "$pidfile"' in script
     assert "/bin/sh +m -i" in script
+    assert ("umask 0002" in script) is shared_live
     assert "setsid" not in script
     assert " &" not in script
     assert kwargs["start_new_session"] is True

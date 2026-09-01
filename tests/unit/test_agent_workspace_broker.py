@@ -17,6 +17,7 @@ import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from cloud_agent_host.chat_sandbox import RetainedChatBackend
 from cloud_agent_host.sandbox import (
     ProcessBackend,
     SandboxBackend,
@@ -28,7 +29,9 @@ from cloud_agent_host.session_supervisor import SandboxForkResult, SessionDescri
 from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
+    TerminalRequest,
     _restartable_mode_covers_every_runtime,
+    _run_terminal,
     _terminal_sse_frame,
     _TerminalSession,
     create_app,
@@ -284,6 +287,50 @@ async def test_broker_terminal_and_git_operate_on_the_same_worktree(tmp_path):
         ["git", "status", "--porcelain"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout
     assert status == "?? terminal.txt\n", "Git inspection must not mutate the real index"
+
+
+def test_shared_retained_one_shot_terminal_uses_group_writable_umask():
+    class Process:
+        @staticmethod
+        def lines():
+            return iter(())
+
+        @staticmethod
+        def kill():
+            raise AssertionError("the bounded command must not be killed")
+
+        @staticmethod
+        def wait():
+            return 0
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    class Backend(RetainedChatBackend):
+        def __init__(self):
+            self.spec = SimpleNamespace(shared_live=True)
+            self.seen: SandboxSpec | None = None
+
+        @staticmethod
+        def base_env():
+            return {}
+
+        def spawn(self, spec):
+            self.seen = spec
+            return Process()
+
+    backend = Backend()
+
+    result = _run_terminal(
+        backend,
+        "/workspace",
+        TerminalRequest(command="touch shared.txt", cwd="/workspace", timeout_seconds=1),
+    )
+
+    assert result["exit_code"] == 0
+    assert backend.seen is not None
+    assert backend.seen.argv[-1].startswith("umask 0002; ")
 
 
 @pytest.mark.asyncio

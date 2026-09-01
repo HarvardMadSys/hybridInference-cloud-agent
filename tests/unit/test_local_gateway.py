@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 from urllib.parse import parse_qs, urlparse
@@ -18,6 +19,8 @@ def local_gateway_state(monkeypatch):
     gateway._codes.clear()
     gateway._grants.clear()
     gateway._grant_tokens.clear()
+    gateway._concurrency_probes.clear()
+    gateway._completed_concurrency_probes.clear()
     monkeypatch.setenv("LOCAL_GATEWAY_DISPATCH_TOKEN", "local-dispatch")
     monkeypatch.setenv("LOCAL_IDENTITY_ALLOWED_REDIRECTS", "http://127.0.0.1:13002/callback")
 
@@ -122,3 +125,53 @@ async def test_codes_are_one_time_and_dispatch_errors_keep_contract_shape() -> N
     assert replay.json()["error"]["type"] == "invalid_grant"
     assert unauthorized.status_code == 401
     assert unauthorized.json()["error"]["type"] == "unauthorized"
+
+
+async def test_concurrent_fork_probe_requires_two_current_inputs(monkeypatch) -> None:
+    monkeypatch.setattr(gateway, "CONCURRENT_FORK_PROBE_WAIT_S", 0.1)
+    monkeypatch.setattr(gateway, "CONCURRENT_FORK_PROBE_HOLD_S", 0.001)
+    await gateway._hold_concurrent_fork_probe({"input": "ordinary turn"})
+    first = asyncio.create_task(
+        gateway._hold_concurrent_fork_probe({"input": "source [local-concurrency-probe:codex]"})
+    )
+    await asyncio.sleep(0)
+    assert not first.done()
+    second = asyncio.create_task(
+        gateway._hold_concurrent_fork_probe({"input": "child [local-concurrency-probe:codex]"})
+    )
+
+    await asyncio.gather(first, second)
+
+    assert gateway._concurrency_probes == {}
+    assert set(gateway._completed_concurrency_probes) == {"codex"}
+
+
+async def test_concurrent_fork_probe_ignores_a_marker_only_in_history(monkeypatch) -> None:
+    monkeypatch.setattr(gateway, "CONCURRENT_FORK_PROBE_WAIT_S", 0.001)
+
+    await gateway._hold_concurrent_fork_probe(
+        {
+            "messages": [
+                {"role": "user", "content": "old [local-concurrency-probe:codex]"},
+                {"role": "assistant", "content": "done"},
+                {"role": "user", "content": "ordinary new turn"},
+            ]
+        }
+    )
+
+    assert gateway._concurrency_probes == {}
+    assert not gateway._completed_concurrency_probes
+
+
+async def test_concurrent_fork_probe_fails_a_serialized_single_arrival(monkeypatch) -> None:
+    monkeypatch.setattr(gateway, "CONCURRENT_FORK_PROBE_WAIT_S", 0.001)
+
+    with pytest.raises(gateway.ContractError) as captured:
+        await gateway._hold_concurrent_fork_probe(
+            {"input": "source [local-concurrency-probe:serialized]"}
+        )
+
+    assert captured.value.status == 400
+    assert captured.value.kind == "concurrency_probe_timeout"
+    assert gateway._concurrency_probes == {}
+    assert not gateway._completed_concurrency_probes

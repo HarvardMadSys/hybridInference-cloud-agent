@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
 
-import { applyAgentLifecycleEvent } from './useAgentJobs';
+import {
+  applyAgentLifecycleEvent,
+  hasActiveWorkspacePublication,
+  isActiveWorkspacePublicationState,
+} from './useAgentJobs';
 
 const JOB = {
   state: 'queued',
@@ -55,5 +59,51 @@ describe('applyAgentLifecycleEvent', () => {
 
     const replacement = applyAgentLifecycleEvent(ready, lifecycle(11, 'workspace_ready'));
     expect(applyAgentLifecycleEvent(replacement, superseded(10))).toBe(replacement);
+  });
+});
+
+describe('hasActiveWorkspacePublication', () => {
+  it.each(['pending', 'capturing', 'captured', 'publishing'] as const)(
+    'keeps a shared terminal job fresh while its snapshot is %s',
+    (workspace_publication_state) => {
+      expect(
+        hasActiveWorkspacePublication({
+          ...JOB,
+          state: 'succeeded',
+          workspace_shared: true,
+          workspace_publication_state,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.each(['published', 'failed', null] as const)(
+    'stops refreshing once shared publication is %s',
+    (workspace_publication_state) => {
+      expect(
+        hasActiveWorkspacePublication({
+          ...JOB,
+          state: 'succeeded',
+          workspace_shared: true,
+          workspace_publication_state,
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it('does not add publication polling to the legacy job path', () => {
+    expect(
+      hasActiveWorkspacePublication({
+        ...JOB,
+        workspace_shared: false,
+        workspace_publication_state: 'pending',
+      }),
+    ).toBe(false);
+  });
+
+  it('uses the same active-state rule for detail and sidebar refreshes', () => {
+    expect(isActiveWorkspacePublicationState('capturing')).toBe(true);
+    expect(isActiveWorkspacePublicationState('published')).toBe(false);
+    expect(isActiveWorkspacePublicationState(undefined)).toBe(false);
   });
 });

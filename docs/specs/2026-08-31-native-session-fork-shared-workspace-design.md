@@ -825,15 +825,23 @@ barrier**:
    the retained native/workspace state immediately; it no longer waits for its
    parent's per-job patch to publish.
 2. Settling a member records its group workspace epoch and marks publication
-   pending. The coordinator waits until the active mutation count reaches zero
+   pending. An independent control-plane coordinator checks this queue on a
+   short bounded schedule; Docker/Git latency therefore cannot delay the
+   attempt/grant reaper. It waits until the active mutation count reaches zero
    and any previous snapshot has published, then CASes the group from
-   QUIESCENT to SNAPSHOTTING. Active Agent turns, writer-capable terminals, and
-   file/Git mutations count; read-only views do not. The host also compares the
-   process census with its generation-labelled operation ledger. An unknown
-   writer process keeps publication pending/dirty instead of being ignored as
-   quiescent. Idle resident Agent CLI roots are explicitly non-mutating: they
-   stay alive and do not delay the snapshot.
-3. New mutating admission waits only for the bounded in-sandbox Git diff
+   QUIESCENT to SNAPSHOTTING. A group that reached its idle deadline and is
+   already STOPPED remains capture-eligible: the host starts that exact fenced
+   container, captures it, and re-arms its ordinary group idle deadline. Active
+   Agent turns, writer-capable terminals, and file/Git mutations count;
+   read-only views do not. The host also compares the process census with its
+   generation-labelled operation ledger. An unknown writer process keeps
+   publication pending/dirty instead of being ignored as quiescent. Idle
+   resident Agent CLI roots are explicitly non-mutating: they stay alive and do
+   not delay the snapshot.
+3. Every capture request and receipt is fenced by sandbox id, lifecycle
+   generation, exact container id, workspace epoch, and Git base. A stale host
+   result cannot mark a replacement container running or become its publication
+   base. New mutating admission waits only for the bounded in-sandbox Git diff
    capture; a message arriving in that brief window remains queued on its
    membership rather than being sent to the idle CLI. No resident process is
    closed and no already-running turn is interrupted. The diff is generated
@@ -978,7 +986,10 @@ configuration, and native-store permissions. Each CLI must prove that a
 different slot can resume the membership id selected by the platform without
 corrupting concurrent siblings. A wrapper uses group-preserving umask/modes
 and normalizes only credential-free native state at reviewed flush/close
-boundaries so a restarted slot can resume it.
+boundaries so a restarted slot can resume it. The same group-preserving umask
+applies to interactive terminals, one-shot terminal commands, and Web file
+writes; otherwise a `0644` file created outside the Agent turn would strand
+the next sibling UID even though both chats correctly share the workspace.
 
 Codex, OpenCode, and Kilo cannot safely share one live provider home across
 fork siblings. Codex 0.145.0 performs owner-only chmod and SQLite/config
@@ -1167,7 +1178,9 @@ production acceptance contract is:
     lazily while untouched siblings remain WARM.
 17. Publication waits for a bounded quiescent snapshot, coalesces one shared
     workspace epoch, keeps idle CLI roots alive, and never blocks an
-    already-running Agent turn.
+    already-running Agent turn. A pending snapshot remains claimable after the
+    normal idle `docker stop`; capture starts only the exact fenced container,
+    and stale generation/container receipts are rejected.
 18. Timeout/cancel targets the exact member. Per-member resource counters come
     from its process tree or are explicitly unavailable; container totals are
     not duplicated. A container OOM/exit is tested as a group failure.

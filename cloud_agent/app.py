@@ -11,11 +11,15 @@ store's policy. It never dies on an error, because a transient database blip
 must not permanently stop reaping — a stopped reaper is invisible until jobs
 start hanging.
 
+**The snapshot coordinator** asks an owning workspace broker for short,
+quiescent Git captures. It has its own schedule so a slow Docker/Git operation
+cannot delay grant renewal or attempt recovery.
+
 **The publisher is the only component holding a git credential**, which is
 precisely what keeps the sandbox credential-free. A deployment without one
 simply never publishes, rather than failing to start.
 
-Both are background tasks held in a module-level set: a task the loop can
+All three are background tasks held in a module-level set: a task the loop can
 garbage-collect mid-run is a task that stops silently.
 """
 
@@ -56,6 +60,7 @@ _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 #: number of its own precisely so it cannot drift from the grant TTL that is
 #: derived from it; the invariant is stated where those constants live.
 REAP_INTERVAL_S = RENEWAL_INTERVAL_S
+SNAPSHOT_CAPTURE_INTERVAL_S = 5.0
 MAX_ATTEMPTS = 3
 
 #: The gateway refusals that are a verdict on the grant itself.
@@ -472,14 +477,17 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
     from cloud_agent.broker_routing import broker_for_job
     from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
 
-    broker = await broker_for_job(store, snapshot["anchor_job_id"])
-    if broker is None:
-        await store.defer_sandbox_snapshot_capture(
-            snapshot_id=int(snapshot["snapshot_id"]),
-            detail="the owning workspace broker is unavailable",
-        )
-        return
     try:
+        broker = await broker_for_job(store, snapshot["anchor_job_id"])
+        if broker is None:
+            await store.defer_sandbox_snapshot_capture(
+                snapshot_id=int(snapshot["snapshot_id"]),
+                sandbox_id=str(snapshot["sandbox_id"]),
+                sandbox_generation=int(snapshot["generation"]),
+                container_id=str(snapshot["container_id"]),
+                detail="the owning workspace broker is unavailable",
+            )
+            return
         receipt = await broker.capture_shared_snapshot(snapshot)
         expected = {
             "snapshot_id": int(snapshot["snapshot_id"]),
@@ -498,6 +506,8 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         recorded = await store.record_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),
+            sandbox_generation=int(snapshot["generation"]),
+            container_id=str(snapshot["container_id"]),
             workspace_epoch=int(snapshot["workspace_epoch"]),
             base_sha=str(snapshot["base_sha"]),
             patch=patch,
@@ -508,15 +518,62 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
     except WorkspaceBrokerError as exc:
         await store.defer_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
+            sandbox_id=str(snapshot["sandbox_id"]),
+            sandbox_generation=int(snapshot["generation"]),
+            container_id=str(snapshot["container_id"]),
             detail=str(exc),
             dirty=exc.status_code in {410, 422, 502},
         )
     except ValueError as exc:
         await store.defer_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
+            sandbox_id=str(snapshot["sandbox_id"]),
+            sandbox_generation=int(snapshot["generation"]),
+            container_id=str(snapshot["container_id"]),
             detail=str(exc),
             dirty=True,
         )
+    except asyncio.CancelledError:
+        # A graceful control-plane stop must not leave this claim invisible
+        # until the much longer stalled-capture timeout elapses.
+        with contextlib.suppress(Exception):
+            await store.defer_sandbox_snapshot_capture(
+                snapshot_id=int(snapshot["snapshot_id"]),
+                sandbox_id=str(snapshot["sandbox_id"]),
+                sandbox_generation=int(snapshot["generation"]),
+                container_id=str(snapshot["container_id"]),
+                detail="snapshot coordinator stopped during capture",
+            )
+        raise
+    except Exception as exc:
+        # Routing/database surprises are retryable infrastructure failures.
+        # Release the durable claim before surfacing it to the coordinator's
+        # log-and-continue boundary.
+        with contextlib.suppress(Exception):
+            await store.defer_sandbox_snapshot_capture(
+                snapshot_id=int(snapshot["snapshot_id"]),
+                sandbox_id=str(snapshot["sandbox_id"]),
+                sandbox_generation=int(snapshot["generation"]),
+                container_id=str(snapshot["container_id"]),
+                detail=str(exc) or type(exc).__name__,
+            )
+        raise
+
+
+async def coordinate_shared_snapshots(
+    store: AgentJobStore,
+    *,
+    interval_seconds: float = SNAPSHOT_CAPTURE_INTERVAL_S,
+) -> None:
+    """Capture shared-workspace publication snapshots on an independent clock."""
+    if interval_seconds <= 0:
+        raise ValueError("snapshot capture interval must be positive")
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await _capture_due_shared_snapshot(store)
+        except Exception:
+            logger.warning("Shared workspace snapshot pass failed", exc_info=True)
 
 
 async def reap_expired_attempts(
@@ -569,10 +626,6 @@ async def reap_expired_attempts(
             await _reap_lapsed_residencies(store, grants)
         except Exception:
             logger.warning("Residency reaper pass failed", exc_info=True)
-        try:
-            await _capture_due_shared_snapshot(store)
-        except Exception:
-            logger.warning("Shared workspace snapshot pass failed", exc_info=True)
         try:
             actions = await store.reap_expired(max_attempts=max_attempts)
             await _cleanup_reaped_shared_residencies(store, actions, grants)
@@ -814,20 +867,29 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     # `create_mcp_app` says no.
     if background:
         reaper = asyncio.create_task(reap_expired_attempts(store, grants=app.state.grants))
+        snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(store))
         _BACKGROUND_TASKS.add(reaper)
+        _BACKGROUND_TASKS.add(snapshot_coordinator)
         reaper.add_done_callback(_BACKGROUND_TASKS.discard)
+        snapshot_coordinator.add_done_callback(_BACKGROUND_TASKS.discard)
         app.state.reaper_task = reaper
+        app.state.snapshot_task = snapshot_coordinator
         _start_publisher(app, store)
         logger.info("cloud agent control plane started")
     else:
         app.state.reaper_task = None
+        app.state.snapshot_task = None
         app.state.publish_task = None
         logger.info("cloud agent relay listener started")
 
     try:
         yield
     finally:
-        for task in (app.state.reaper_task, app.state.publish_task):
+        for task in (
+            app.state.reaper_task,
+            app.state.snapshot_task,
+            app.state.publish_task,
+        ):
             if task is None:
                 continue
             task.cancel()

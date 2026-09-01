@@ -43,10 +43,14 @@ through **each of those five real CLI binaries**, waits for every chat group to
 stop at the idle deadline, and proves each third turn restores the same
 mount-free container id. It then immediately native-forks every latest settled
 session, verifies source and child are independently LIVE inside the same
-container/workspace, queues turns on both sides without a group turn lock, and
-wakes the stopped group from the child. A passing result therefore covers
+container/workspace, holds the local model responses long enough to observe
+both post-fork turns simultaneously `RUNNING`, and requires both CLI processes
+to overlap at a two-party local inference barrier before either receives its
+response. It then wakes the stopped group from the child. A passing result
+therefore covers
 `NEW → LIVE → stopped → RESTORED`, prompt-free same-container Fork, concurrent
-source/child admission, and group stop/restore for all five CLIs.
+source/child admission, group stop/restore, and completion of the final
+quiescent publication snapshot for all five CLIs.
 
 `legacy-smoke` is a separate compatibility check for the rollout's
 default-off path. It briefly stops the retained runners, recreates the local

@@ -26,6 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
 _CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
 _LOCAL_COMPOSE = REPO_ROOT / "deploy/local/docker-compose.yml"
+_LOCAL_EDGE_DOCKERFILE = REPO_ROOT / "deploy/local/Dockerfile.edge"
+_LOCAL_NGINX = REPO_ROOT / "deploy/local/nginx.conf"
 _DOCKERFILE = Path(__file__).resolve().parents[2] / "deploy/sandbox/Dockerfile.agent-sandbox"
 _CODEX_REQUIREMENTS = Path(__file__).resolve().parents[2] / "deploy/sandbox/codex-requirements.toml"
 
@@ -82,6 +84,16 @@ def test_complete_local_stack_runs_every_native_session_driver(local_compose: di
     for service_name in ("runner", "workspace-broker"):
         configured = services[service_name]["environment"]["AGENT_RESTARTABLE_RUNTIMES"]
         assert set(configured.split(",")) == expected
+
+
+def test_complete_local_edge_reresolves_recreated_services():
+    """Rebuilding one service must not strand the still-running edge on its old IP."""
+    config = _LOCAL_NGINX.read_text()
+
+    assert "FROM nginx:1.27.5-alpine" in _LOCAL_EDGE_DOCKERFILE.read_text()
+    assert "resolver 127.0.0.11" in config
+    for upstream in ("control-plane:8000", "web:3000", "local-gateway:8080"):
+        assert f"server {upstream} resolve;" in config
 
 
 def test_root_mounted_web_build_accepts_an_explicit_empty_base_path():

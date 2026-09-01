@@ -19,6 +19,7 @@ from cloud_agent_host.resident_transport import (
     ResidentTransport,
     ResidentTransportFactory,
 )
+from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.session_supervisor import SessionBusy
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
@@ -510,6 +511,45 @@ def test_snapshot_refuses_active_mutations_instead_of_serializing_normal_work():
     assert supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""}) == {
         "patch": ""
     }
+
+
+def test_snapshot_starts_the_exact_idle_stopped_container_and_rearms_idle():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30)
+    supervisor.register_manifest(_spec(), _members())
+    before = manager.stop(_spec())
+
+    result = supervisor.capture_snapshot(
+        "athr_source",
+        capture=lambda _backend: {"patch": "diff --git a/a b/a\n"},
+    )
+
+    after = supervisor.status("athr_source")
+    assert result == {"patch": "diff --git a/a b/a\n"}
+    assert after.container_id == before.container_id
+    assert after.running is True
+    assert after.snapshotting is False
+    assert after.idle_deadline_monotonic is not None
+    assert manager.events[0] == ("freeze", (0, 1))
+    assert manager.events[-1][0] == "thaw"
+
+
+def test_snapshot_start_failure_releases_the_admission_barrier():
+    class StartFailureManager(_Manager):
+        def start(self, spec):
+            raise SandboxError("docker start failed")
+
+    manager = StartFailureManager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    manager.stop(_spec())
+
+    with pytest.raises(SandboxError, match="docker start failed"):
+        supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""})
+
+    status = supervisor.status("athr_source")
+    assert status.running is False
+    assert status.snapshotting is False
 
 
 def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():

@@ -12,6 +12,7 @@ lifecycle without requiring a paid provider credential.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import html
@@ -20,6 +21,7 @@ import os
 import secrets
 import threading
 import time
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
@@ -35,6 +37,9 @@ CLIENT_ID = "cloud-agent"
 CODE_TTL_S = 60
 IDENTITY_TTL_S = 600
 GRANT_TTL_MAX_S = 900
+CONCURRENT_FORK_PROBE_WAIT_S = 15.0
+CONCURRENT_FORK_PROBE_HOLD_S = 1.0
+CONCURRENT_FORK_PROBE_PREFIX = "[local-concurrency-probe:"
 
 app = FastAPI(title="FreeInference local gateway", docs_url=None, redoc_url=None)
 
@@ -42,6 +47,8 @@ _lock = threading.Lock()
 _codes: dict[str, dict[str, Any]] = {}
 _grants: dict[str, dict[str, Any]] = {}
 _grant_tokens: dict[str, str] = {}
+_concurrency_probes: dict[str, dict[str, Any]] = {}
+_completed_concurrency_probes: deque[str] = deque(maxlen=128)
 
 
 def _b64url(raw: bytes) -> str:
@@ -121,7 +128,14 @@ def _pkce_challenge(verifier: str) -> str:
 @app.get("/health")
 async def health() -> dict[str, Any]:
     """Health used by the runner's real sandbox-network preflight."""
-    return {"ok": True, "service": "freeinference-local-gateway", "model": MODEL_ID}
+    with _lock:
+        completed = sorted(_completed_concurrency_probes)
+    return {
+        "ok": True,
+        "service": "freeinference-local-gateway",
+        "model": MODEL_ID,
+        "completed_concurrency_probes": completed,
+    }
 
 
 @app.get("/authorize", response_class=HTMLResponse)
@@ -357,6 +371,87 @@ def _require_grant(x_api_key: str | None, authorization: str | None, model: str)
         raise _error(401, "invalid_grant", "The inference grant is invalid or expired.")
 
 
+def _content_text(value: Any) -> str:
+    """Flatten the current provider input without treating old history as current."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_content_text(item) for item in value)
+    if isinstance(value, dict):
+        for key in ("text", "content", "input_text", "input"):
+            if key in value:
+                return _content_text(value[key])
+    return ""
+
+
+def _current_user_text(body: dict[str, Any]) -> str:
+    """Return only the latest user input across the supported provider shapes."""
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            if isinstance(message, dict) and message.get("role") == "user":
+                return _content_text(message.get("content"))
+    provider_input = body.get("input")
+    if isinstance(provider_input, list):
+        for item in reversed(provider_input):
+            if isinstance(item, dict) and item.get("role") == "user":
+                return _content_text(item.get("content"))
+        return _content_text(provider_input[-1]) if provider_input else ""
+    return _content_text(provider_input)
+
+
+def _concurrency_probe_key(body: dict[str, Any]) -> str | None:
+    text = _current_user_text(body)
+    start = text.find(CONCURRENT_FORK_PROBE_PREFIX)
+    if start < 0:
+        return None
+    start += len(CONCURRENT_FORK_PROBE_PREFIX)
+    end = text.find("]", start)
+    key = text[start:end] if end >= 0 else ""
+    if not key or any(
+        character not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for character in key
+    ):
+        return None
+    return key
+
+
+async def _hold_concurrent_fork_probe(body: dict[str, Any]) -> None:
+    """Require both marked fork siblings to overlap at the inference boundary."""
+    key = _concurrency_probe_key(body)
+    if key is None:
+        return
+    with _lock:
+        probe = _concurrency_probes.get(key)
+        if probe is None:
+            probe = {"event": asyncio.Event(), "arrivals": 0, "departures": 0}
+            _concurrency_probes[key] = probe
+        probe["arrivals"] += 1
+        if probe["arrivals"] >= 2:
+            _completed_concurrency_probes.append(key)
+            probe["event"].set()
+        event = probe["event"]
+    try:
+        await asyncio.wait_for(event.wait(), timeout=CONCURRENT_FORK_PROBE_WAIT_S)
+    except TimeoutError as exc:
+        with _lock:
+            if _concurrency_probes.get(key) is probe:
+                _concurrency_probes.pop(key, None)
+        raise _error(
+            400,
+            "concurrency_probe_timeout",
+            "The two local native-fork sessions did not reach inference concurrently.",
+        ) from exc
+    try:
+        # Leave enough overlap for the owner API assertion to observe both
+        # jobs RUNNING after the stronger gateway-level proof has succeeded.
+        await asyncio.sleep(CONCURRENT_FORK_PROBE_HOLD_S)
+    finally:
+        with _lock:
+            probe["departures"] += 1
+            if probe["departures"] >= 2 and _concurrency_probes.get(key) is probe:
+                _concurrency_probes.pop(key, None)
+
+
 def _anthropic_sse(message_id: str) -> list[bytes]:
     text = "Local gateway response: the agent CLI, grant, and sandbox network are working."
 
@@ -418,6 +513,7 @@ async def anthropic_messages(
     body = await request.json()
     model = str(body.get("model") or "")
     _require_grant(x_api_key, authorization, model)
+    await _hold_concurrent_fork_probe(body)
     message_id = f"msg_local_{secrets.token_hex(8)}"
     if body.get("stream") is False:
         return {
@@ -474,6 +570,7 @@ async def openai_chat_completions(
     body = await request.json()
     model = str(body.get("model") or "")
     _require_grant(None, authorization, model)
+    await _hold_concurrent_fork_probe(body)
     completion_id = f"chatcmpl-local-{secrets.token_hex(8)}"
     if body.get("stream"):
         return StreamingResponse(
@@ -500,6 +597,7 @@ async def openai_responses(request: Request, authorization: str | None = Header(
     body = await request.json()
     model = str(body.get("model") or "")
     _require_grant(None, authorization, model)
+    await _hold_concurrent_fork_probe(body)
     response_id = f"resp_local_{secrets.token_hex(8)}"
     text = "Local gateway response: the agent CLI and sandbox are working."
     response = {

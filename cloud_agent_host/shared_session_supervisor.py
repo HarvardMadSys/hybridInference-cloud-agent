@@ -981,7 +981,9 @@ class SharedChatSessionSupervisor:
         The metadata lock is held only while installing/removing the barrier.
         Docker exec and Git work happen outside it, so status/read paths stay
         responsive.  New turns, forks, terminals, and mutating broker
-        operations observe ``snapshotting`` and wait/retry.
+        operations observe ``snapshotting`` and wait/retry.  A normal idle
+        stop is not a reason to abandon publication: start that exact retained
+        container, capture it, and arm its ordinary idle deadline again.
         """
         with self._lock:
             group, _ = self._member(thread_id)
@@ -994,17 +996,24 @@ class SharedChatSessionSupervisor:
             current = self._manager.inspect(group.spec.container_name)
             if current is None:
                 raise RetainedChatLost("shared sandbox container is missing")
-            if not current.running:
-                raise SessionBusy("shared workspace stopped before snapshot capture")
             group.inspection = current
             group.snapshotting = True
             group.idle_deadline = None
+            lifecycle_generation = group.lifecycle_generation
             slots = [member.resident_slot_id for member in group.members.values()]
 
         manifest: str | None = None
         capture_error: BaseException | None = None
         result: dict[str, Any] | None = None
         try:
+            if not current.running:
+                started = self._manager.start(group.spec)
+                with self._lock:
+                    if group.stopping or group.lifecycle_generation != lifecycle_generation:
+                        raise SessionLeaseLost(
+                            "shared sandbox lifecycle changed while starting snapshot capture"
+                        )
+                    group.inspection = started
             manifest = self._manager.freeze_shared_writers(
                 group.spec,
                 slot_ids=slots,

@@ -34,6 +34,26 @@ const ACTIVE_ATTEMPT_PHASES = new Set([
   'workspace_finalizing',
 ]);
 
+const ACTIVE_WORKSPACE_PUBLICATION_STATES = new Set([
+  'pending',
+  'capturing',
+  'captured',
+  'publishing',
+]);
+
+/** Whether one shared-workspace publication still changes owner-visible data. */
+export function isActiveWorkspacePublicationState(state: unknown): boolean {
+  return typeof state === 'string' && ACTIVE_WORKSPACE_PUBLICATION_STATES.has(state);
+}
+
+/** Whether a finished shared turn still has owner-visible state to publish. */
+export function hasActiveWorkspacePublication(job: AgentJobApi | null): boolean {
+  return (
+    job?.workspace_shared === true &&
+    isActiveWorkspacePublicationState(job.workspace_publication_state)
+  );
+}
+
 /** Apply one live attempt-state event to the cached owner-facing job row. */
 export function applyAgentLifecycleEvent(
   current: AgentJobApi,
@@ -102,7 +122,13 @@ export function useAgentJobList(
 
   // Only poll while something can still change; a list of finished jobs does
   // not need a request every ten seconds.
-  const hasLive = jobs.some((job) => job.state === 'running' || job.state === 'queued');
+  const hasLive = jobs.some(
+    (job) =>
+      job.state === 'running' ||
+      job.state === 'queued' ||
+      (job.workspaceShared === true &&
+        isActiveWorkspacePublicationState(job.workspacePublicationState)),
+  );
   useEffect(() => {
     if (!hasLive) return undefined;
     const timer = setInterval(reload, pollMs);
@@ -312,6 +338,35 @@ export function useAgentJob(jobId: string): {
     });
     return () => controller.abort();
   }, [currentTurnNo, jobId, isLive, reload]);
+
+  // A shared turn reaches its terminal job state before its quiescent
+  // workspace snapshot is captured and published. The SSE correctly closes
+  // at the turn boundary, so keep only that small, asynchronous tail live;
+  // otherwise the badge and draft-PR link remain stale until a full reload.
+  // Ordinary and legacy jobs never enter this loop, and terminal publication
+  // states stop it immediately after the next response.
+  const publicationActive = hasActiveWorkspacePublication(api);
+  useEffect(() => {
+    if (!jobId || !publicationActive) return undefined;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      // Publication changes only fields on the job row. Fetching the complete
+      // conversation and event history every five seconds would add load and
+      // briefly reset unrelated UI state for no benefit.
+      void getAgentJob(jobId)
+        .then((latest) => {
+          if (!cancelled) setApi(latest);
+        })
+        .catch(() => {
+          // This is a background freshness aid. Keep the last good terminal
+          // view on a transient failure and try again on the next interval.
+        });
+    }, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [jobId, publicationActive]);
 
   const job = api ? toDisplayJob(api, { events, patch, thread, threadEvents }) : null;
   // Both shapes, deliberately: `job.events` is the chat view's *reading* of
