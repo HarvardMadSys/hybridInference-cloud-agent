@@ -184,8 +184,11 @@ def _unavailable_response(reason: str) -> RedirectResponse:
     )
     if not _env(ENV_WEB_BASE_URL):
         raise _sign_in_unavailable(reason)
+    # `/login` rather than the app root: that page is the one that can say what
+    # is wrong, and it is reachable without a session. This is the one route of
+    # the web app this service names, and it names it for that reason.
     return RedirectResponse(
-        f"{_web_destination('/')}?{urlencode({SIGN_IN_ERROR_PARAM: 'unavailable'})}",
+        f"{_web_destination('/login')}?{urlencode({SIGN_IN_ERROR_PARAM: 'unavailable'})}",
         status_code=303,
     )
 

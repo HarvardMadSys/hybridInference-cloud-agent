@@ -1,14 +1,19 @@
 'use client';
 
-// Recreated. The source repo's version pushed unauthenticated visitors at its
-// own `/login` page; this service has no login page and no password to check.
-// An unauthenticated visitor is handed to the control plane, which runs the
-// whole round trip to the gateway's consent page and brings them back signed
-// in — no PKCE, no code, and no callback route in this app.
+// An unauthenticated visitor is sent to this app's own `/login`, which names
+// the app and the authority before handing them on. It used to redirect
+// straight at the control plane, which meant somebody who had never seen this
+// service was bounced through two redirects into a consent screen for a third
+// one — indistinguishable, from the outside, from a hijack.
+//
+// `/login` sits outside the `(agents)` route group, so it is not behind this
+// component; sending an unauthenticated visitor to a protected login page is a
+// loop.
 
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/components/providers';
-import { beginSignIn, SignInNotConfigured } from '@/lib/auth/signin';
+import { basePath } from '@/config/env';
+import { safeReturnTo } from '@/lib/auth/signin';
 
 /**
  * Set by the control plane when it cannot sign anyone in.
@@ -37,15 +42,12 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
       setError('Sign-in is not configured for this deployment.');
       return;
     }
-    const returnTo = `${window.location.pathname}${window.location.search}`;
-    beginSignIn(returnTo).catch((err) => {
-      started.current = false;
-      setError(
-        err instanceof SignInNotConfigured
-          ? 'Sign-in is not configured for this deployment.'
-          : 'Could not start sign-in. Please try again.',
-      );
-    });
+    const returnTo = safeReturnTo(`${window.location.pathname}${window.location.search}`);
+    // A full navigation rather than a router push: `/login` is outside this
+    // layout, and pushing it would mount the login page inside the shell that
+    // is still deciding nobody is signed in.
+    const query = new URLSearchParams({ return_to: returnTo });
+    window.location.assign(`${basePath}/login?${query.toString()}`);
   }, [state.loading, state.isAuthenticated]);
 
   if (error) {

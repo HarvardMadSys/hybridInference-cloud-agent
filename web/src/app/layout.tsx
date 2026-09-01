@@ -14,8 +14,10 @@ import { themeBootScript } from '@/lib/theme';
 // not appear in URLs, so `/`, `/[jobId]`, `/archived`, `/connected` and
 // `/integrations` are exactly the routes F3 asks for.
 //
-// `/callback` sits outside the group on purpose: it runs before there is a
-// session, so it must not be behind the shell's `ProtectedRoute`.
+// `/login` sits outside the group on purpose: it runs before there is a
+// session, so it must not be behind the shell's `ProtectedRoute`. (`/callback`
+// used to live here for the same reason; the code exchange moved into the
+// control plane, so this app no longer has one.)
 
 export const metadata = {
   title: config.appName,

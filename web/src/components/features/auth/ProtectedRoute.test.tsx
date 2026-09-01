@@ -57,7 +57,11 @@ describe('ProtectedRoute', () => {
   });
   afterEach(() => cleanup());
 
-  it('hands an unauthenticated visitor to the control plane, with where to come back to', async () => {
+  it("sends an unauthenticated visitor to this app's own login page", async () => {
+    // Not straight at the control plane. Somebody who has never seen this
+    // service should be told what it is and which authority they are about to
+    // authenticate against, rather than arriving at a third party's consent
+    // screen having been bounced through two redirects.
     vi.mocked(getSessionUser).mockResolvedValue(null);
 
     renderApp();
@@ -65,7 +69,7 @@ describe('ProtectedRoute', () => {
     await waitFor(() => expect(assign).toHaveBeenCalledOnce());
     const url = new URL(assign.mock.calls[0][0] as string, 'https://agents.example.org');
 
-    expect(url.pathname).toBe('/v1/session/login');
+    expect(url.pathname).toBe('/login');
     expect(url.searchParams.get('return_to')).toBe('/task-1?tab=diff');
     expect(screen.queryByText('task list')).not.toBeInTheDocument();
   });

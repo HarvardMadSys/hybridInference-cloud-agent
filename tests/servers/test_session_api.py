@@ -267,8 +267,10 @@ async def test_a_deployment_with_no_gateway_sends_the_visitor_back_with_a_reason
         response = await _begin(client)
 
     assert response.status_code == 303
+    # `/login`, not the app root: that page is reachable without a session and
+    # is the one that can say what is wrong.
     assert response.headers["location"] == (
-        f"{_WEB_BASE_URL}/?{session_router.SIGN_IN_ERROR_PARAM}=unavailable"
+        f"{_WEB_BASE_URL}/login?{session_router.SIGN_IN_ERROR_PARAM}=unavailable"
     )
     assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
 
