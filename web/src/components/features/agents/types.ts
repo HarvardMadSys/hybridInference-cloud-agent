@@ -111,6 +111,23 @@ export interface ToolCallResources {
   /** Whether the two counters above are this call's alone. */
   exclusive: boolean;
   processCount?: number;
+  /**
+   * What the processes this call alone started consumed, accounted by the
+   * guest kernel as each exited. Independent of the sampler: a 35 ms call
+   * has exact numbers here if its child exited. CPU and I/O are sums, the
+   * peak is the largest single process. Null when no exited process belonged
+   * to this call alone, or the kernel does not account that counter.
+   */
+  processCpuUsec?: number | null;
+  processMemPeakBytes?: number | null;
+  processIoReadBytes?: number | null;
+  processIoWriteBytes?: number | null;
+  /**
+   * A process this call may own was left out of those numbers — shared with
+   * an overlapping call, or still running when the turn ended — so they are
+   * floors rather than totals.
+   */
+  processResourcesPartial?: boolean;
 }
 
 export interface ProcessObservation {
@@ -128,6 +145,13 @@ export interface ProcessObservation {
   observedExec: boolean;
   observedExit: boolean;
   toolCallSeqs: number[];
+  /** Exit-time accounting for the whole thread group; null until it exited. */
+  cpuUsec?: number | null;
+  memPeakBytes?: number | null;
+  ioReadBytes?: number | null;
+  ioWriteBytes?: number | null;
+  ioRcharBytes?: number | null;
+  ioWcharBytes?: number | null;
 }
 
 export interface TurnResources {

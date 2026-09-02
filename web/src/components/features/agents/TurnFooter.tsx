@@ -231,6 +231,53 @@ function MeasuredCell({ value, shared }: { value: string | null; shared: boolean
 }
 
 /**
+ * One call's CPU or memory, from whichever source could actually say.
+ *
+ * The sampler's reading is shown when it spanned the call. Otherwise the
+ * guest kernel's exit-time accounting of the call's own processes is shown,
+ * marked so the reader knows it counts child processes only — work the
+ * agent did inside its own resident process is in neither number. A floor,
+ * where a process the call may own was left out, is prefixed rather than
+ * silently rounded into a total.
+ */
+function ConsumptionCell({
+  sampled,
+  shared,
+  accounted,
+  partial,
+}: {
+  sampled: string | null;
+  shared: boolean;
+  accounted: string | null;
+  partial: boolean;
+}) {
+  if (sampled !== null) {
+    return <MeasuredCell value={sampled} shared={shared} />;
+  }
+  if (accounted === null) {
+    return <MeasuredCell value={null} shared={false} />;
+  }
+  return (
+    <span>
+      {partial ? '≥' : ''}
+      {accounted}
+      <span className="ml-0.5 text-gray-400 dark:text-gray-500">ᵖ</span>
+    </span>
+  );
+}
+
+/** Read and write bytes as one cell, or the dash when neither was accounted. */
+function formatIo(
+  read: number | null | undefined,
+  write: number | null | undefined,
+): string | null {
+  const shownRead = formatBytes(read);
+  const shownWrite = formatBytes(write);
+  if (shownRead === null && shownWrite === null) return null;
+  return `r${shownRead ?? '—'} w${shownWrite ?? '—'}`;
+}
+
+/**
  * The longest call in the turn, which is as close to "the expensive one" as
  * this measurement gets.
  *
@@ -345,10 +392,26 @@ function ToolTimingTable({
       measurement: recorded && recorded.sampleCount >= 2 ? recorded : null,
       processCount: recorded?.processCount ?? 0,
       timingSource: recorded?.timingSource ?? 'message',
+      // Exit-time accounting of the call's own processes: present whenever
+      // something that belonged to this call alone exited, however short.
+      accountedCpuUsec: recorded?.processCpuUsec ?? null,
+      accountedMemPeakBytes: recorded?.processMemPeakBytes ?? null,
+      accountedPartial: recorded?.processResourcesPartial === true,
     };
   });
   const longest = longestCall(rows.map((row) => row.timing));
-  const anyUnmeasured = rows.some((row) => row.measurement === null);
+  const anyAccounted = rows.some(
+    (row) =>
+      row.measurement === null &&
+      (row.accountedCpuUsec !== null || row.accountedMemPeakBytes !== null),
+  );
+  const anyAccountedPartial = rows.some((row) => row.measurement === null && row.accountedPartial);
+  const anyUnmeasured = rows.some(
+    (row) =>
+      row.measurement === null &&
+      row.accountedCpuUsec === null &&
+      row.accountedMemPeakBytes === null,
+  );
   const anyShared = rows.some((row) => row.measurement !== null && !row.measurement.exclusive);
 
   return (
@@ -373,7 +436,15 @@ function ToolTimingTable({
         </thead>
         <tbody>
           {rows.map((row, index) => {
-            const { measurement: call, processCount, timing, timingSource } = row;
+            const {
+              measurement: call,
+              processCount,
+              timing,
+              timingSource,
+              accountedCpuUsec,
+              accountedMemPeakBytes,
+              accountedPartial,
+            } = row;
             return (
               <tr
                 key={`${timing.tool}-${index}`}
@@ -402,15 +473,19 @@ function ToolTimingTable({
                       : '—'}
                 </td>
                 <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
-                  <MeasuredCell
-                    value={call ? formatCpu(call.cpuUsec) : null}
+                  <ConsumptionCell
+                    sampled={call ? formatCpu(call.cpuUsec) : null}
                     shared={call ? !call.exclusive : false}
+                    accounted={formatCpu(accountedCpuUsec)}
+                    partial={accountedPartial}
                   />
                 </td>
                 <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
-                  <MeasuredCell
-                    value={call ? formatBytes(call.memPeakBytes) : null}
+                  <ConsumptionCell
+                    sampled={call ? formatBytes(call.memPeakBytes) : null}
                     shared={call ? !call.exclusive : false}
+                    accounted={formatBytes(accountedMemPeakBytes)}
+                    partial={accountedPartial}
                   />
                 </td>
               </tr>
@@ -418,10 +493,24 @@ function ToolTimingTable({
           })}
         </tbody>
       </table>
+      {anyAccounted ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          ᵖ CPU and peak memory accounted by the guest kernel as the call&apos;s own processes
+          exited, exact for a call of any length. They cover child processes only, not work done
+          inside the agent&apos;s own process; peak memory is the largest single process.
+        </p>
+      ) : null}
+      {anyAccountedPartial ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          ≥ marks a call whose numbers leave out a process it may own: one shared with an
+          overlapping call, or one still running when the turn ended.
+        </p>
+      ) : null}
       {anyUnmeasured ? (
         <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          — in CPU or memory means the periodic sampler did not span the call. Process-start counts
-          come from guest-kernel lifecycle events and do not have that sampling-window gap.
+          — in CPU or memory means the periodic sampler did not span the call and no exited child
+          process was accounted to it alone. Process-start counts come from guest-kernel lifecycle
+          events and do not have that sampling-window gap.
         </p>
       ) : null}
       {anyShared ? (
@@ -464,6 +553,9 @@ function ProcessObservationTable({
                 <th className="py-1 text-right font-medium">PID</th>
                 <th className="py-1 text-right font-medium">Started</th>
                 <th className="py-1 text-right font-medium">Lifetime</th>
+                <th className="py-1 text-right font-medium">CPU</th>
+                <th className="py-1 text-right font-medium">Peak RSS</th>
+                <th className="py-1 text-right font-medium">I/O</th>
                 <th className="py-1 text-right font-medium">Exit</th>
                 <th className="py-1 text-right font-medium">Tool rows</th>
               </tr>
@@ -487,6 +579,15 @@ function ProcessObservationTable({
                   <td className="py-1 pl-3 text-right tabular-nums">
                     {formatDuration(process.durationMs) ?? 'still running'}
                   </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {formatCpu(process.cpuUsec) ?? '—'}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {formatBytes(process.memPeakBytes) ?? '—'}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {formatIo(process.ioReadBytes, process.ioWriteBytes) ?? '—'}
+                  </td>
                   <td className="py-1 pl-3 text-right tabular-nums">{process.exitCode ?? '—'}</td>
                   <td className="py-1 pl-3 text-right tabular-nums">
                     {process.toolCallSeqs.length ? process.toolCallSeqs.join(', ') : '—'}
@@ -495,6 +596,12 @@ function ProcessObservationTable({
               ))}
             </tbody>
           </table>
+          <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+            CPU, peak RSS and I/O are the guest kernel&apos;s accounting of each process at exit, so
+            a process still running shows none. I/O is bytes the process itself read from and
+            dirtied to storage, so a write served from cache can still count and a read hit in cache
+            does not.
+          </p>
         </div>
       ) : complete ? (
         <p className="text-[11px] text-gray-500 dark:text-gray-400">

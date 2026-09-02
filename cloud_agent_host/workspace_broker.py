@@ -45,6 +45,7 @@ from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.guest_observer import (
     GuestObservation,
     add_process_counts,
+    add_process_resources,
     attribute_processes,
 )
 from cloud_agent_host.logging_utils import get_logger
@@ -1742,7 +1743,10 @@ def create_app(
                 )
                 resources.update(
                     {
-                        "tool_calls": add_process_counts(tool_calls, process_counts),
+                        "tool_calls": add_process_resources(
+                            add_process_counts(tool_calls, process_counts),
+                            processes,
+                        ),
                         "tool_calls_truncated": tool_windows.truncated,
                         "tool_time_ms": (None if tool_windows.truncated else tool_time_ms(windows)),
                         "process_observer": telemetry.observation.source,

@@ -131,6 +131,18 @@ class GuestProcess:
     observed_fork: bool
     observed_exec: bool
     observed_exit: bool
+    # What the process consumed, read by the guest kernel as each of its
+    # threads exited and folded into the group leader here. Null until the
+    # leader's exit was observed, and null for any counter this kernel does
+    # not account, so a process that outlived the turn reports no consumption
+    # rather than zero. CPU is the group's own time and excludes children,
+    # which have rows of their own; the peak is the group's high-water RSS.
+    cpu_usec: int | None = None
+    mem_peak_bytes: int | None = None
+    io_read_bytes: int | None = None
+    io_write_bytes: int | None = None
+    io_rchar_bytes: int | None = None
+    io_wchar_bytes: int | None = None
 
     @property
     def duration_ms(self) -> int | None:
@@ -535,6 +547,67 @@ class _MutableProcess:
     observed_fork: bool = False
     observed_exec: bool = False
     observed_exit: bool = False
+    cpu_ns: int | None = None
+    mem_peak_bytes: int | None = None
+    io_read_bytes: int | None = None
+    io_write_bytes: int | None = None
+    io_rchar_bytes: int | None = None
+    io_wchar_bytes: int | None = None
+
+    def absorb(self, counters: dict[str, int]) -> None:
+        """Fold one exiting task's counters into its thread group.
+
+        Sums for time and bytes, because each task reports only its own
+        share. A maximum for the peak, because the kernel settles it once,
+        on whichever thread empties the group, and every other thread's
+        exit still carries the value it saw.
+        """
+        for name in (
+            "cpu_ns",
+            "io_read_bytes",
+            "io_write_bytes",
+            "io_rchar_bytes",
+            "io_wchar_bytes",
+        ):
+            value = counters.get(name)
+            if value is not None:
+                setattr(self, name, (getattr(self, name) or 0) + value)
+        peak = counters.get("mem_peak_bytes")
+        if peak is not None:
+            self.mem_peak_bytes = max(self.mem_peak_bytes or 0, peak)
+
+
+# Bits of the journal's ``counters`` field, matching ``fi_process_counter``
+# in the observer's header. A clear bit is a counter this kernel did not
+# expose; the loader leaves its keys out of the record entirely.
+_COUNTER_CPU = 1
+_COUNTER_MAXRSS = 2
+_COUNTER_IO = 4
+_COUNTER_XACCT = 8
+
+
+def _exit_counters(event: dict[str, Any]) -> dict[str, int]:
+    """The exit-time counters one task's record carries, keyed by our names.
+
+    Absent bits are absent keys: a kernel built without task I/O accounting
+    produces exits with no ``read_bytes`` at all, which must reach the reader
+    as unavailable rather than as a zero that looks like a measurement.
+    """
+    raw_bits = event.get("counters", 0)
+    if isinstance(raw_bits, bool) or not isinstance(raw_bits, int) or raw_bits < 0:
+        raise GuestObserverProtocolError("guest process exit counters flag is malformed")
+    counters: dict[str, int] = {}
+    if raw_bits & _COUNTER_CPU:
+        counters["cpu_ns"] = _integer(event, "cpu_ns")
+    if raw_bits & _COUNTER_MAXRSS:
+        counters["mem_peak_bytes"] = _integer(event, "maxrss_bytes")
+    if raw_bits & _COUNTER_IO:
+        counters["io_read_bytes"] = _integer(event, "read_bytes")
+        counters["io_write_bytes"] = _integer(event, "write_bytes")
+    if raw_bits & _COUNTER_XACCT:
+        counters["io_rchar_bytes"] = _integer(event, "rchar")
+        counters["io_wchar_bytes"] = _integer(event, "wchar")
+    return counters
 
 
 def _bounded_text(value: Any, limit: int) -> str:
@@ -622,6 +695,12 @@ def _decoded_exit_code(raw: int) -> int:
 
 def _finish_process(item: _MutableProcess, cursor: GuestObserverCursor) -> GuestProcess:
     offset = cursor.mono_offset_ns
+    # Counters are reported only once the leader has exited: before that the
+    # group is still running and any partial thread sum would read as the
+    # whole. What is reported can still be a floor when a thread outlives
+    # the observation window, which the row's ``duration`` cannot show; the
+    # per-call aggregation says so instead.
+    settled = item.observed_exit
     return GuestProcess(
         process_seq=item.process_seq,
         uid=item.uid,
@@ -640,6 +719,12 @@ def _finish_process(item: _MutableProcess, cursor: GuestObserverCursor) -> Guest
         observed_fork=item.observed_fork,
         observed_exec=item.observed_exec,
         observed_exit=item.observed_exit,
+        cpu_usec=(item.cpu_ns // 1000 if settled and item.cpu_ns is not None else None),
+        mem_peak_bytes=item.mem_peak_bytes if settled else None,
+        io_read_bytes=item.io_read_bytes if settled else None,
+        io_write_bytes=item.io_write_bytes if settled else None,
+        io_rchar_bytes=item.io_rchar_bytes if settled else None,
+        io_wchar_bytes=item.io_wchar_bytes if settled else None,
     )
 
 
@@ -665,6 +750,10 @@ def parse_events(
         malformed = True
     active: dict[int, _MutableProcess] = {}
     finished: list[_MutableProcess] = []
+    # Every group this slice created, live or exited, keyed by leader pid: a
+    # thread can exit after its leader's record was already closed, and its
+    # share of the group's CPU still belongs to that row.
+    by_tgid: dict[int, _MutableProcess] = {}
     tool_marks: list[tuple[float, str, str]] = []
     next_process_seq = 1
     # The byte fence and event fence describe the same append-only journal.
@@ -734,7 +823,13 @@ def parse_events(
             ppid_raw = _integer(event, "ppid")
             # sched_process_fork also fires for threads.  PR89's contract is
             # process/tool accounting, so retain leaders and omit thread rows.
+            # A thread's exit still carries its own share of the group's
+            # counters, which belongs to the leader's row.
             if pid != tgid:
+                if kind == "exit":
+                    group = by_tgid.get(tgid)
+                    if group is not None:
+                        group.absorb(_exit_counters(event))
                 continue
             comm = _bounded_text(event.get("comm"), MAX_COMM_BYTES) or "process"
             executable = _bounded_text(event.get("filename"), MAX_EXECUTABLE_BYTES) or None
@@ -758,6 +853,7 @@ def parse_events(
                 )
                 next_process_seq += 1
                 active[pid] = current
+                by_tgid[pid] = current
             elif kind == "exec":
                 if current is None:
                     # The observer may have started after fork but before exec;
@@ -775,6 +871,7 @@ def parse_events(
                     )
                     next_process_seq += 1
                     active[pid] = current
+                    by_tgid[pid] = current
                 current.observed_exec = True
                 current.comm = comm
                 current.executable = executable or current.executable
@@ -788,6 +885,12 @@ def parse_events(
                 raw_exit = event.get("exit_code")
                 if isinstance(raw_exit, bool) or not isinstance(raw_exit, int):
                     raise GuestObserverProtocolError("guest process exit status is not an integer")
+                # Counters before the lifecycle flags: a malformed counter
+                # leaves the row alive and unexited, and the outer handler
+                # marks the slice partial, rather than closing a row whose
+                # consumption was half-read.
+                counters = _exit_counters(event)
+                current.absorb(counters)
                 current.exited_ns = mono_ns
                 current.exit_code = _decoded_exit_code(raw_exit)
                 current.observed_exit = True
@@ -908,6 +1011,12 @@ def attribute_processes(
                 "observed_exec": process.observed_exec,
                 "observed_exit": process.observed_exit,
                 "tool_call_seqs": call_seqs,
+                "cpu_usec": process.cpu_usec,
+                "mem_peak_bytes": process.mem_peak_bytes,
+                "io_read_bytes": process.io_read_bytes,
+                "io_write_bytes": process.io_write_bytes,
+                "io_rchar_bytes": process.io_rchar_bytes,
+                "io_wchar_bytes": process.io_wchar_bytes,
             }
         )
     return rows, counts
@@ -921,6 +1030,62 @@ def add_process_counts(
     return [
         {**row, "process_count": counts.get(int(row.get("call_seq") or 0), 0)} for row in tool_calls
     ]
+
+
+def _combined(rows: list[dict[str, Any]], name: str, *, peak: bool) -> int | None:
+    """One counter across a call's processes, or null if any lacked it."""
+    values = [row.get(name) for row in rows]
+    if not values or any(value is None for value in values):
+        return None
+    numbers = [int(value) for value in values]
+    return max(numbers) if peak else sum(numbers)
+
+
+def add_process_resources(
+    tool_calls: list[dict[str, Any]],
+    processes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Charge each call with what the processes it alone started consumed.
+
+    This is the per-call CPU, peak memory and I/O the periodic sampler can
+    never give a 35 ms call: the guest kernel accounted every process at its
+    exit, and a process attributed to exactly one call is charged to it in
+    full. CPU and I/O are sums over those processes, each of which reported
+    only its own share; the peak is the largest single process, not a sum,
+    because their peaks did not necessarily coincide.
+
+    The number is a floor whenever the call had a process it cannot own
+    outright: one that overlapping windows attributed to several calls, or
+    one still running when the turn closed. Such calls are marked partial
+    and the ambiguous process is charged to none of them, so a sum shown as
+    exact never contains another call's work. Work the agent did inside its
+    own resident process belongs to no call and appears nowhere here.
+    """
+    exclusive: dict[int, list[dict[str, Any]]] = {}
+    partial: set[int] = set()
+    for row in processes:
+        seqs = [int(seq) for seq in row.get("tool_call_seqs") or []]
+        if not seqs:
+            continue
+        if len(seqs) > 1 or not row.get("observed_exit"):
+            partial.update(seqs)
+            continue
+        exclusive.setdefault(seqs[0], []).append(row)
+    charged: list[dict[str, Any]] = []
+    for call in tool_calls:
+        seq = int(call.get("call_seq") or 0)
+        rows = exclusive.get(seq, [])
+        charged.append(
+            {
+                **call,
+                "process_cpu_usec": _combined(rows, "cpu_usec", peak=False),
+                "process_mem_peak_bytes": _combined(rows, "mem_peak_bytes", peak=True),
+                "process_io_read_bytes": _combined(rows, "io_read_bytes", peak=False),
+                "process_io_write_bytes": _combined(rows, "io_write_bytes", peak=False),
+                "process_resources_partial": seq in partial,
+            }
+        )
+    return charged
 
 
 __all__ = [
@@ -941,6 +1106,7 @@ __all__ = [
     "GuestObserverRuntimeError",
     "GuestObserverSnapshot",
     "add_process_counts",
+    "add_process_resources",
     "attribute_processes",
     "finish_observation",
     "parse_snapshot",

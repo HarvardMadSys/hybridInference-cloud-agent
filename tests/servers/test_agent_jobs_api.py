@@ -5078,6 +5078,11 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
                     "cpu_usec_exclusive": 4_400_000,
                     "mem_peak_exclusive_bytes": 270_000_000,
                     "process_count": 1,
+                    "process_cpu_usec": 15_000,
+                    "process_mem_peak_bytes": 2_228_224,
+                    "process_io_read_bytes": 0,
+                    "process_io_write_bytes": 8_388_608,
+                    "process_resources_partial": True,
                 },
                 {
                     "call_seq": 2,
@@ -5108,6 +5113,12 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
                     "observed_exec": True,
                     "observed_exit": True,
                     "tool_call_seqs": [1],
+                    "cpu_usec": 15_000,
+                    "mem_peak_bytes": 2_228_224,
+                    "io_read_bytes": 0,
+                    "io_write_bytes": 8_388_608,
+                    "io_rchar_bytes": 8_390_683,
+                    "io_wchar_bytes": 8_388_701,
                 }
             ],
         },
@@ -5125,6 +5136,12 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
     assert long_call["cpu_usec_exclusive"] == 4_400_000
     assert long_call["measured_span_ms"] == 8_000
     assert long_call["process_count"] == 1
+    assert long_call["process_cpu_usec"] == 15_000
+    assert long_call["process_mem_peak_bytes"] == 2_228_224
+    assert long_call["process_io_write_bytes"] == 8_388_608
+    assert long_call["process_resources_partial"] is True
+    assert short_call["process_cpu_usec"] is None
+    assert short_call["process_resources_partial"] is False
     assert resources["process_observer"] == "kata-guest-ebpf-v1"
     assert resources["process_observation_complete"] is True
     assert resources["process_events_lost"] == 0
@@ -5132,6 +5149,10 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
     assert process["executable"] == "/bin/tiny"
     assert process["duration_ms"] == 1
     assert process["tool_call_seqs"] == [1]
+    assert process["cpu_usec"] == 15_000
+    assert process["mem_peak_bytes"] == 2_228_224
+    assert process["io_write_bytes"] == 8_388_608
+    assert process["io_rchar_bytes"] == 8_390_683
     # The 97 % case, all the way to the reader: a row, a duration, and no
     # counters at all. A zero here would be a number nobody measured.
     assert short_call["sample_count"] == 0

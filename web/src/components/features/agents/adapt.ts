@@ -425,6 +425,9 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
   const toolCalls = (api.tool_calls ?? []).map((call) => {
     const adapted = toToolCallResources(call);
     if (!toolCallsTruncated) return adapted;
+    // A dropped call may have started processes the retained rows now
+    // claim; nothing per-call survives a truncated list, exit-accounted or
+    // sampled alike.
     return {
       ...adapted,
       sampleCount: 0,
@@ -432,6 +435,11 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
       cpuUsec: null,
       memPeakBytes: null,
       exclusive: false,
+      processCpuUsec: null,
+      processMemPeakBytes: null,
+      processIoReadBytes: null,
+      processIoWriteBytes: null,
+      processResourcesPartial: false,
     };
   });
   const processObserver = api.process_observer ?? null;
@@ -485,6 +493,11 @@ function toToolCallResources(api: ToolCallResourcesApi): ToolCallResources {
     memPeakBytes: exclusive ? api.mem_peak_exclusive_bytes : api.mem_peak_shared_bytes,
     exclusive,
     processCount: api.process_count ?? 0,
+    processCpuUsec: api.process_cpu_usec ?? null,
+    processMemPeakBytes: api.process_mem_peak_bytes ?? null,
+    processIoReadBytes: api.process_io_read_bytes ?? null,
+    processIoWriteBytes: api.process_io_write_bytes ?? null,
+    processResourcesPartial: api.process_resources_partial === true,
   };
 }
 
@@ -504,6 +517,12 @@ function toProcessObservation(api: ProcessObservationApi): ProcessObservation {
     observedExec: api.observed_exec,
     observedExit: api.observed_exit,
     toolCallSeqs: api.tool_call_seqs,
+    cpuUsec: api.cpu_usec ?? null,
+    memPeakBytes: api.mem_peak_bytes ?? null,
+    ioReadBytes: api.io_read_bytes ?? null,
+    ioWriteBytes: api.io_write_bytes ?? null,
+    ioRcharBytes: api.io_rchar_bytes ?? null,
+    ioWcharBytes: api.io_wchar_bytes ?? null,
   };
 }
 

@@ -487,10 +487,21 @@ billing authority; the eBPF lifecycle census itself is independent of marks.
 Kata containers retain `CAP_BPF` in the bounding set only so Docker's
 creation-time seccomp profile admits the later helper syscall. Non-root agent
 processes still have empty permitted and effective capability sets, and
-`no-new-privileges` prevents them from promoting that bounding bit. CPU and
-memory remain conservative periodic container statistics. Process existence is
-separate, event-driven telemetry: fork/exec/exit survives even when a process
-begins and ends entirely between two statistics samples.
+`no-new-privileges` prevents them from promoting that bounding bit. Turn-level
+CPU and memory remain conservative periodic container statistics. Process
+existence is separate, event-driven telemetry: fork/exec/exit survives even
+when a process begins and ends entirely between two statistics samples, and
+the exit record carries what that process consumed — its own CPU time, the
+group's peak RSS, and the bytes it read from and dirtied to storage — as the
+guest kernel settled them. Those are the per-call CPU, memory and I/O numbers
+under Kata: a process is charged to the tool call whose window alone contains
+its start, and a process that overlapping calls could both own, or that was
+still running at turn end, is charged to neither and marks those calls as
+partial. Work done inside the Agent CLI's own process belongs to no call.
+The self-test in preflight also requires the exit record's CPU and peak-RSS
+counters to be present, so a guest kernel whose BTF does not relocate them
+fails deployment rather than reporting zeros; storage and read/write byte
+accounting are kernel configuration and arrive as unavailable when absent.
 The per-turn table is therefore a lifecycle census of process starts observed
 after that turn's cursor, not a point-in-time snapshot of resident processes
 that were already running before the turn.

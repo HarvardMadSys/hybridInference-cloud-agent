@@ -45,6 +45,18 @@ export interface ToolCallResourcesApi {
   mem_peak_shared_bytes: number | null;
   /** Guest-kernel process starts plausibly belonging to this call. */
   process_count?: number;
+  /**
+   * What the processes this call alone started consumed, from the guest
+   * kernel's exit-time accounting. Sums for CPU and I/O, the largest single
+   * process for the peak. Null where nothing exited that belonged to this
+   * call alone, or where the kernel does not account that counter.
+   */
+  process_cpu_usec?: number | null;
+  process_mem_peak_bytes?: number | null;
+  process_io_read_bytes?: number | null;
+  process_io_write_bytes?: number | null;
+  /** A process this call may own was left out, so the numbers are floors. */
+  process_resources_partial?: boolean;
 }
 
 export interface ProcessObservationApi {
@@ -62,6 +74,13 @@ export interface ProcessObservationApi {
   observed_exec: boolean;
   observed_exit: boolean;
   tool_call_seqs: number[];
+  /** Exit-time accounting for the thread group; null until it exited. */
+  cpu_usec?: number | null;
+  mem_peak_bytes?: number | null;
+  io_read_bytes?: number | null;
+  io_write_bytes?: number | null;
+  io_rchar_bytes?: number | null;
+  io_wchar_bytes?: number | null;
 }
 
 export interface AttemptResourcesApi {

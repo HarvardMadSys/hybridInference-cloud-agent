@@ -17,6 +17,7 @@ from cloud_agent_host.guest_observer import (
     GuestObserverRuntimeError,
     GuestObserverSnapshot,
     GuestObserverStatus,
+    add_process_resources,
     attribute_processes,
     finish_observation,
     parse_snapshot,
@@ -544,3 +545,223 @@ def test_an_exit_only_baseline_process_is_not_manufactured_into_turn_usage():
 
     assert observation.complete is True
     assert observation.processes == ()
+
+
+# Exit records as the loader actually writes them, captured from a run on a
+# Linux 6.8 kernel: ``dd`` wrote 8 MiB, ``cat`` read it back from the page
+# cache. The read shows up in ``rchar`` and not in ``read_bytes``; the write
+# shows up in both. That asymmetry is the kernel's accounting, not ours.
+_DD_EXIT = {
+    "counters": 15,
+    "cpu_ns": 15_000_000,
+    "maxrss_bytes": 2_228_224,
+    "read_bytes": 0,
+    "write_bytes": 8_388_608,
+    "rchar": 8_390_683,
+    "wchar": 8_388_701,
+}
+
+
+def test_an_exit_record_carries_what_the_process_consumed():
+    payload = b"".join(
+        [
+            _event(1, "fork", 1_001_000_000, filename=""),
+            _event(2, "exec", 1_001_100_000, comm="dd", filename="/usr/bin/dd"),
+            _event(3, "exit", 1_001_700_000, comm="dd", **_DD_EXIT),
+        ]
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    assert observation.complete is True
+    (process,) = observation.processes
+    assert process.cpu_usec == 15_000
+    assert process.mem_peak_bytes == 2_228_224
+    assert process.io_read_bytes == 0
+    assert process.io_write_bytes == 8_388_608
+    assert process.io_rchar_bytes == 8_390_683
+    assert process.io_wchar_bytes == 8_388_701
+
+
+def test_thread_exits_fold_into_their_leader_even_after_it_exited():
+    """Each task reports its own share; the group's row is their sum.
+
+    The kernel settles the peak on whichever thread empties the group, so
+    the leader's own exit can carry a zero there while a later thread's
+    carries the real value. The row must end up with the sum of the CPU and
+    the maximum of the peak, whatever order the exits arrived in.
+    """
+    payload = b"".join(
+        [
+            _event(1, "fork", 1_001_000_000),
+            # A thread being created is not a process start.
+            _event(2, "fork", 1_001_050_000, pid=43, tgid=42),
+            _event(3, "exit", 1_001_500_000, counters=3, cpu_ns=4_000_000, maxrss_bytes=0),
+            _event(
+                4,
+                "exit",
+                1_001_600_000,
+                pid=43,
+                tgid=42,
+                counters=3,
+                cpu_ns=6_000_000,
+                maxrss_bytes=4_096_000,
+            ),
+        ]
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    assert observation.complete is True
+    (process,) = observation.processes
+    assert process.pid == 42
+    assert process.cpu_usec == 10_000
+    assert process.mem_peak_bytes == 4_096_000
+    # Bits 4 and 8 were clear: this kernel accounted no I/O, which is not
+    # the same as a process that did none.
+    assert process.io_read_bytes is None
+    assert process.io_write_bytes is None
+    assert process.io_rchar_bytes is None
+
+
+def test_a_process_that_outlived_the_turn_reports_no_consumption():
+    payload = _event(1, "fork", 1_001_000_000) + _event(
+        2,
+        "exit",
+        1_001_200_000,
+        pid=43,
+        tgid=42,
+        counters=1,
+        cpu_ns=6_000_000,
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    (process,) = observation.processes
+    assert process.observed_exit is False
+    # A thread's share arrived, but the group is still running: a partial
+    # sum shown as the process's consumption would read as the whole.
+    assert process.cpu_usec is None
+    assert process.mem_peak_bytes is None
+
+
+def test_a_malformed_counter_leaves_the_row_open_and_the_slice_partial():
+    payload = _event(1, "fork", 1_001_000_000) + _event(
+        2,
+        "exit",
+        1_001_700_000,
+        counters=1,
+        cpu_ns="fifteen",
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    assert observation.complete is False
+    (process,) = observation.processes
+    assert process.observed_exit is False
+    assert process.cpu_usec is None
+
+
+def test_process_rows_carry_the_counters_onto_the_wire():
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=_event(1, "fork", 1_001_000_000) + _event(2, "exit", 1_002_000_000, **_DD_EXIT),
+        truncated=False,
+    )
+
+    rows, _counts = attribute_processes(observation, [])
+
+    assert rows[0]["cpu_usec"] == 15_000
+    assert rows[0]["mem_peak_bytes"] == 2_228_224
+    assert rows[0]["io_write_bytes"] == 8_388_608
+    assert rows[0]["io_rchar_bytes"] == 8_390_683
+
+
+def _process_row(seqs: list[int], **overrides) -> dict:
+    row = {
+        "tool_call_seqs": seqs,
+        "observed_exit": True,
+        "cpu_usec": 1_000,
+        "mem_peak_bytes": 1_310_720,
+        "io_read_bytes": 0,
+        "io_write_bytes": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_a_call_is_charged_only_with_processes_it_owns_outright():
+    calls = [
+        {"call_seq": 1, "process_count": 3},
+        {"call_seq": 2, "process_count": 1},
+        {"call_seq": 3, "process_count": 0},
+    ]
+    processes = [
+        _process_row([1], cpu_usec=15_000, mem_peak_bytes=2_228_224, io_write_bytes=8_388_608),
+        _process_row([1]),
+        # Overlapping windows: plausibly either call, so charged to neither.
+        _process_row([1, 2], cpu_usec=99_000, mem_peak_bytes=99_000_000),
+        # The marker helper, or anything else no window claimed.
+        _process_row([], cpu_usec=5),
+    ]
+
+    first, second, third = add_process_resources(calls, processes)
+
+    assert first["process_cpu_usec"] == 16_000
+    assert first["process_mem_peak_bytes"] == 2_228_224, "peaks are a maximum, not a sum"
+    assert first["process_io_write_bytes"] == 8_388_608
+    assert first["process_io_read_bytes"] == 0
+    assert first["process_resources_partial"] is True
+    assert second["process_cpu_usec"] is None
+    assert second["process_resources_partial"] is True
+    assert third["process_cpu_usec"] is None
+    assert third["process_resources_partial"] is False
+
+
+def test_a_process_still_running_makes_its_call_a_floor():
+    (call,) = add_process_resources(
+        [{"call_seq": 1, "process_count": 2}],
+        [
+            _process_row([1], cpu_usec=2_000),
+            _process_row([1], observed_exit=False, cpu_usec=None, mem_peak_bytes=None),
+        ],
+    )
+
+    assert call["process_cpu_usec"] == 2_000
+    assert call["process_resources_partial"] is True
+
+
+def test_a_counter_this_kernel_lacks_makes_the_total_unavailable_not_smaller():
+    (call,) = add_process_resources(
+        [{"call_seq": 1, "process_count": 2}],
+        [
+            _process_row([1], cpu_usec=2_000, io_read_bytes=None, io_write_bytes=None),
+            _process_row([1], cpu_usec=3_000, io_read_bytes=None, io_write_bytes=None),
+        ],
+    )
+
+    assert call["process_cpu_usec"] == 5_000
+    assert call["process_io_read_bytes"] is None
+    assert call["process_io_write_bytes"] is None
+    assert call["process_resources_partial"] is False

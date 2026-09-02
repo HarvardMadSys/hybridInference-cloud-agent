@@ -3483,6 +3483,11 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
                     cpu_usec_exclusive=4_400_000,
                     mem_peak_exclusive_bytes=270_000_000,
                     process_count=1,
+                    process_cpu_usec=15_000,
+                    process_mem_peak_bytes=2_228_224,
+                    process_io_read_bytes=0,
+                    process_io_write_bytes=8_388_608,
+                    process_resources_partial=True,
                 ),
                 _tool_call(2, "Read"),
             ],
@@ -3502,6 +3507,12 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
                     "observed_exec": True,
                     "observed_exit": True,
                     "tool_call_seqs": [1],
+                    "cpu_usec": 15_000,
+                    "mem_peak_bytes": 2_228_224,
+                    "io_read_bytes": 0,
+                    "io_write_bytes": 8_388_608,
+                    "io_rchar_bytes": 8_390_683,
+                    "io_wchar_bytes": 8_388_701,
                 }
             ],
         },
@@ -3516,6 +3527,13 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
     assert [first["timing_source"], second["timing_source"]] == ["exact", "message"]
     assert first["cpu_usec_exclusive"] == 4_400_000
     assert first["process_count"] == 1
+    assert first["process_cpu_usec"] == 15_000
+    assert first["process_mem_peak_bytes"] == 2_228_224
+    assert first["process_io_read_bytes"] == 0
+    assert first["process_io_write_bytes"] == 8_388_608
+    assert first["process_resources_partial"] is True
+    assert second["process_cpu_usec"] is None
+    assert second["process_resources_partial"] is False
     assert telemetry["process_observer"] == "kata-guest-ebpf-v1"
     assert telemetry["process_observation_complete"] is True
     assert telemetry["process_events_lost"] == 0
@@ -3525,6 +3543,11 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
     assert process["executable"] == "/bin/tiny"
     assert process["duration_ms"] == 1
     assert process["tool_call_seqs"] == [1]
+    assert process["cpu_usec"] == 15_000
+    assert process["mem_peak_bytes"] == 2_228_224
+    assert process["io_write_bytes"] == 8_388_608
+    assert process["io_rchar_bytes"] == 8_390_683
+    assert process["io_wchar_bytes"] == 8_388_701
     # Null rather than zero, in the database itself: this is the row that says
     # the call was too short for the sampler to have seen anything.
     assert second["cpu_usec_exclusive"] is None

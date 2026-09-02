@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from cloud_agent.schemas import WorkerResourcesRequest, WorkerToolCallResources
+from cloud_agent.schemas import (
+    WorkerProcessObservation,
+    WorkerResourcesRequest,
+    WorkerToolCallResources,
+)
 from cloud_agent_host.resources import Sample
 from cloud_agent_host.tool_windows import (
     MAX_TOOL_CALLS,
@@ -184,6 +188,10 @@ def test_an_incomplete_window_list_never_claims_a_delta_is_exclusive():
             "mem_peak_exclusive_bytes": 20,
         },
         {"sample_count": 1, "measured_span_ms": 1},
+        # Exit-accounted numbers need a process to have been accounted.
+        {"process_count": 0, "process_cpu_usec": 10},
+        {"process_count": 0, "process_mem_peak_bytes": 10},
+        {"process_count": 0, "process_resources_partial": True},
     ],
 )
 def test_the_worker_schema_refuses_false_per_call_precision(overrides):
@@ -196,6 +204,23 @@ def test_the_worker_schema_refuses_false_per_call_precision(overrides):
     }
     with pytest.raises(ValueError):
         WorkerToolCallResources(**values)
+
+
+def test_a_process_that_has_not_exited_cannot_carry_exit_counters():
+    values = {
+        "process_seq": 1,
+        "uid": 11001,
+        "pid": 412,
+        "tgid": 412,
+        "comm": "tiny",
+        "started_offset_ms": 12,
+        "observed_fork": True,
+        "observed_exit": False,
+        "cpu_usec": 15_000,
+    }
+    with pytest.raises(ValueError):
+        WorkerProcessObservation(**values)
+    assert WorkerProcessObservation(**{**values, "observed_exit": True}).cpu_usec == 15_000
 
 
 @pytest.mark.parametrize(

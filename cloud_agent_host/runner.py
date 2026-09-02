@@ -71,6 +71,7 @@ from cloud_agent_host.guest_observer import (
     MAX_OBSERVED_PROCESSES,
     GuestObservation,
     add_process_counts,
+    add_process_resources,
     attribute_processes,
 )
 from cloud_agent_host.logging_utils import configure_process_logging
@@ -1498,7 +1499,10 @@ def run_agent(
                         processes.append(row)
                     for call_seq, count in counts.items():
                         process_counts[call_seq] += count
-                tool_calls = add_process_counts(tool_calls, process_counts)
+                tool_calls = add_process_resources(
+                    add_process_counts(tool_calls, process_counts),
+                    processes,
+                )
                 sources = {
                     observation.source
                     for observation in observations

@@ -3818,9 +3818,13 @@ class AgentJobStore:
                         attempt_id, call_seq, tool_use_id, tool_name, timing_source,
                         duration_ms, sample_count, overlap_n, measured_span_ms,
                         cpu_usec_exclusive, cpu_usec_shared,
-                        mem_peak_exclusive_bytes, mem_peak_shared_bytes, process_count
+                        mem_peak_exclusive_bytes, mem_peak_shared_bytes, process_count,
+                        process_cpu_usec, process_mem_peak_bytes,
+                        process_io_read_bytes, process_io_write_bytes,
+                        process_resources_partial
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                            $15, $16, $17, $18, $19)
                     """,
                     [
                         (
@@ -3838,6 +3842,11 @@ class AgentJobStore:
                             call.get("mem_peak_exclusive_bytes"),
                             call.get("mem_peak_shared_bytes"),
                             int(call.get("process_count") or 0),
+                            call.get("process_cpu_usec"),
+                            call.get("process_mem_peak_bytes"),
+                            call.get("process_io_read_bytes"),
+                            call.get("process_io_write_bytes"),
+                            bool(call.get("process_resources_partial")),
                         )
                         for call in tool_calls
                     ],
@@ -3852,10 +3861,12 @@ class AgentJobStore:
                     INSERT INTO agent_process_observations (
                         attempt_id, process_seq, uid, pid, tgid, ppid, comm, executable,
                         started_offset_ms, duration_ms, exit_code,
-                        observed_fork, observed_exec, observed_exit, tool_call_seqs
+                        observed_fork, observed_exec, observed_exit, tool_call_seqs,
+                        cpu_usec, mem_peak_bytes, io_read_bytes, io_write_bytes,
+                        io_rchar_bytes, io_wchar_bytes
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                            $14, $15)
+                            $14, $15, $16, $17, $18, $19, $20, $21)
                     """,
                     [
                         (
@@ -3874,6 +3885,12 @@ class AgentJobStore:
                             bool(process.get("observed_exec")),
                             bool(process.get("observed_exit")),
                             [int(seq) for seq in process.get("tool_call_seqs") or []],
+                            process.get("cpu_usec"),
+                            process.get("mem_peak_bytes"),
+                            process.get("io_read_bytes"),
+                            process.get("io_write_bytes"),
+                            process.get("io_rchar_bytes"),
+                            process.get("io_wchar_bytes"),
                         )
                         for process in processes
                     ],
@@ -3922,7 +3939,10 @@ class AgentJobStore:
                 SELECT call_seq, tool_use_id, tool_name, timing_source, duration_ms,
                        sample_count, overlap_n, measured_span_ms,
                        cpu_usec_exclusive, cpu_usec_shared,
-                       mem_peak_exclusive_bytes, mem_peak_shared_bytes, process_count
+                       mem_peak_exclusive_bytes, mem_peak_shared_bytes, process_count,
+                       process_cpu_usec, process_mem_peak_bytes,
+                       process_io_read_bytes, process_io_write_bytes,
+                       process_resources_partial
                 FROM agent_tool_call_resources
                 WHERE attempt_id = $1
                 ORDER BY call_seq
@@ -3934,7 +3954,9 @@ class AgentJobStore:
                 """
                 SELECT process_seq, uid, pid, tgid, ppid, comm, executable,
                        started_offset_ms, duration_ms, exit_code,
-                       observed_fork, observed_exec, observed_exit, tool_call_seqs
+                       observed_fork, observed_exec, observed_exit, tool_call_seqs,
+                       cpu_usec, mem_peak_bytes, io_read_bytes, io_write_bytes,
+                       io_rchar_bytes, io_wchar_bytes
                 FROM agent_process_observations
                 WHERE attempt_id = $1
                 ORDER BY process_seq

@@ -9,10 +9,25 @@
 #include "guest-observer.h"
 
 /* Minimal CO-RE shapes.  Field offsets are relocated from the guest's BTF. */
+struct signal_struct {
+    unsigned long maxrss;
+} __attribute__((preserve_access_index));
+
+struct task_io_accounting {
+    __u64 rchar;
+    __u64 wchar;
+    __u64 read_bytes;
+    __u64 write_bytes;
+} __attribute__((preserve_access_index));
+
 struct task_struct {
     int pid;
     int tgid;
     struct task_struct *real_parent;
+    struct signal_struct *signal;
+    __u64 utime;
+    __u64 stime;
+    struct task_io_accounting ioac;
     int exit_code;
     char comm[FI_TASK_COMM_LEN];
 } __attribute__((preserve_access_index));
@@ -102,6 +117,44 @@ int observe_exec(struct bpf_raw_tracepoint_args *ctx)
     return 0;
 }
 
+/* What this task consumed, read at the one moment the kernel has settled it.
+ *
+ * Every field is guarded by its presence in the guest's BTF: a kernel built
+ * without task I/O accounting still loads this program and the loader reports
+ * that counter as unavailable, never as zero. utime/stime are this task's own
+ * share and exclude children; the host sums a group's threads and never adds
+ * signal->utime on top, which would count the dead threads twice. maxrss is
+ * settled by whichever thread empties the group, so the host keeps the
+ * maximum seen across the group's exits. */
+static __always_inline void fill_exit_counters(
+    struct fi_process_event *event,
+    struct task_struct *task)
+{
+    if (bpf_core_field_exists(task->utime) && bpf_core_field_exists(task->stime)) {
+        event->cpu_ns = BPF_CORE_READ(task, utime) + BPF_CORE_READ(task, stime);
+        event->counters |= FI_COUNTER_CPU;
+    }
+    if (bpf_core_field_exists(task->signal)) {
+        struct signal_struct *signal = BPF_CORE_READ(task, signal);
+
+        if (signal && bpf_core_field_exists(signal->maxrss)) {
+            event->maxrss_pages = BPF_CORE_READ(signal, maxrss);
+            event->counters |= FI_COUNTER_MAXRSS;
+        }
+    }
+    if (bpf_core_field_exists(task->ioac.read_bytes) &&
+        bpf_core_field_exists(task->ioac.write_bytes)) {
+        event->read_bytes = BPF_CORE_READ(task, ioac.read_bytes);
+        event->write_bytes = BPF_CORE_READ(task, ioac.write_bytes);
+        event->counters |= FI_COUNTER_IO;
+    }
+    if (bpf_core_field_exists(task->ioac.rchar) && bpf_core_field_exists(task->ioac.wchar)) {
+        event->rchar = BPF_CORE_READ(task, ioac.rchar);
+        event->wchar = BPF_CORE_READ(task, ioac.wchar);
+        event->counters |= FI_COUNTER_XACCT;
+    }
+}
+
 SEC("raw_tracepoint/sched_process_exit")
 int observe_exit(struct bpf_raw_tracepoint_args *ctx)
 {
@@ -112,6 +165,7 @@ int observe_exit(struct bpf_raw_tracepoint_args *ctx)
         return 0;
     fill_task(event, task);
     event->exit_code = BPF_CORE_READ(task, exit_code);
+    fill_exit_counters(event, task);
     bpf_ringbuf_submit(event, 0);
     return 0;
 }

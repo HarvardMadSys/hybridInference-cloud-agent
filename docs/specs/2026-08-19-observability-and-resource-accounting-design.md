@@ -362,6 +362,27 @@ calls (the model streaming, the CLI's own work) accrues to the attempt, not
 to any tool — visible as `attempt − Σ exclusive`, which is itself a useful
 series (harness overhead).
 
+**Exit-time accounting (Kata).** The sampler's grid is coarser than 97 % of
+calls, so under Kata the per-call numbers come from the guest kernel instead:
+the observer's `sched_process_exit` record carries the exiting task's own
+`utime + stime`, the group's settled `maxrss`, and its `task_io_accounting`
+bytes — the same counters `/proc/<pid>/{stat,status,io}` expose, read at the
+one moment the kernel has settled them and after the process is gone. Each
+task reports only its own share; the host sums a group's threads and never
+adds `signal->utime` on top, which would count dead threads twice. Every
+counter is guarded by its presence in the guest's BTF and arrives as absent,
+never as zero, on a kernel built without that accounting. A process is
+charged to a call only when its start fell inside that call's window alone;
+one that overlapping windows make plausible for several calls, or that was
+still running at turn end, is charged to none of them and marks every call it
+may belong to as `process_resources_partial`, so a per-call sum presented as
+exact never contains another call's work. CPU and I/O are sums over a call's
+processes, the peak is the largest single process (their peaks need not have
+coincided), and work the agent did inside its own resident process belongs to
+no call. This answers the "fine-grained tool call resource usage" question
+for a call of any length, including the 35 ms median, at the cost of one more
+read in a tracepoint that already fires.
+
 **Network per tool** is windowed the same way from parsed egress flows
 (connection window = [log time − duration, log time]), and only for the
 egress class; gateway/MCP bytes are exactly attributed already (O5) and join
