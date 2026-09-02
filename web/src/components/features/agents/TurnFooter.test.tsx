@@ -897,6 +897,37 @@ describe('per-call resources, through both real adapters', () => {
     expect(screen.getByText(/leave out a process it may own/)).toBeInTheDocument();
   });
 
+  it('treats every charged call as a floor when the census lost events', () => {
+    // The host marks this too; the adapter repeats it so an older or wrong
+    // row can never present an exit-accounted total beside a lossy census.
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 1,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: 2_228_224,
+            process_resources_partial: false,
+          },
+        ],
+        false,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 2,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).getByText('≥15ms')).toBeInTheDocument();
+    expect(within(shortRow).getByText('≥2.1MB')).toBeInTheDocument();
+  });
+
   it('never lets a truncated call list keep exit-accounted numbers', () => {
     openTable(
       withCalls(

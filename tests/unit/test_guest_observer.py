@@ -339,7 +339,8 @@ def test_a_sub_millisecond_process_survives_without_any_sampler_reading():
         [
             _event(1, "fork", 1_001_000_000, filename=""),
             _event(2, "exec", 1_001_100_000),
-            _event(3, "exit", 1_001_700_000),
+            # The kernel's live count reached zero: this exit ended the process.
+            _event(3, "exit", 1_001_700_000, counters=16, group_dead=True),
         ]
     )
 
@@ -547,27 +548,32 @@ def test_an_exit_only_baseline_process_is_not_manufactured_into_turn_usage():
     assert observation.processes == ()
 
 
-# Exit records as the loader actually writes them, captured from a run on a
-# Linux 6.8 kernel: ``dd`` wrote 8 MiB, ``cat`` read it back from the page
-# cache. The read shows up in ``rchar`` and not in ``read_bytes``; the write
-# shows up in both. That asymmetry is the kernel's accounting, not ours.
+# Records as the loader actually writes them, captured from a run on a Linux
+# 6.8 kernel: ``dd`` wrote 8 MiB, ``cat`` read it back from the page cache.
+# The read shows up in ``rchar`` and not in ``read_bytes``; the write shows up
+# in both. That asymmetry is the kernel's accounting, not ours. The exit
+# record carries the group's peak and the I/O plus whether the exit emptied
+# the group (bits 2|4|8|16); CPU arrives on the ``done`` record (bit 1), from
+# the scheduler's runtime, once the task has left the CPU for the last time.
 _DD_EXIT = {
-    "counters": 15,
-    "cpu_ns": 15_000_000,
+    "counters": 30,
+    "group_dead": True,
     "maxrss_bytes": 2_228_224,
     "read_bytes": 0,
     "write_bytes": 8_388_608,
     "rchar": 8_390_683,
     "wchar": 8_388_701,
 }
+_DD_DONE = {"counters": 1, "cpu_ns": 15_000_000}
 
 
-def test_an_exit_record_carries_what_the_process_consumed():
+def test_exit_and_done_records_carry_what_the_process_consumed():
     payload = b"".join(
         [
             _event(1, "fork", 1_001_000_000, filename=""),
             _event(2, "exec", 1_001_100_000, comm="dd", filename="/usr/bin/dd"),
             _event(3, "exit", 1_001_700_000, comm="dd", **_DD_EXIT),
+            _event(4, "done", 1_001_700_100, comm="dd", **_DD_DONE),
         ]
     )
 
@@ -580,6 +586,8 @@ def test_an_exit_record_carries_what_the_process_consumed():
 
     assert observation.complete is True
     (process,) = observation.processes
+    assert process.observed_exit is True
+    assert process.duration_ms == 1, "the process ended at its exit, not its final deschedule"
     assert process.cpu_usec == 15_000
     assert process.mem_peak_bytes == 2_228_224
     assert process.io_read_bytes == 0
@@ -588,30 +596,53 @@ def test_an_exit_record_carries_what_the_process_consumed():
     assert process.io_wchar_bytes == 8_388_701
 
 
+def test_tick_based_cpu_on_an_exit_record_is_never_used():
+    """Only the scheduler runtime on ``done`` counts; a stray exit CPU is dropped."""
+    payload = b"".join(
+        [
+            _event(1, "fork", 1_001_000_000),
+            _event(2, "exit", 1_001_700_000, **{**_DD_EXIT, "counters": 31, "cpu_ns": 0}),
+            _event(3, "done", 1_001_700_100, **_DD_DONE),
+        ]
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    (process,) = observation.processes
+    assert process.cpu_usec == 15_000
+
+
 def test_thread_exits_fold_into_their_leader_even_after_it_exited():
     """Each task reports its own share; the group's row is their sum.
 
     The kernel settles the peak on whichever thread empties the group, so
     the leader's own exit can carry a zero there while a later thread's
     carries the real value. The row must end up with the sum of the CPU and
-    the maximum of the peak, whatever order the exits arrived in.
+    the maximum of the peak, whatever order the records arrived in.
     """
     payload = b"".join(
         [
             _event(1, "fork", 1_001_000_000),
             # A thread being created is not a process start.
             _event(2, "fork", 1_001_050_000, pid=43, tgid=42),
-            _event(3, "exit", 1_001_500_000, counters=3, cpu_ns=4_000_000, maxrss_bytes=0),
+            _event(3, "exit", 1_001_500_000, counters=18, group_dead=False, maxrss_bytes=0),
+            _event(4, "done", 1_001_500_100, counters=1, cpu_ns=4_000_000),
             _event(
-                4,
+                5,
                 "exit",
                 1_001_600_000,
                 pid=43,
                 tgid=42,
-                counters=3,
-                cpu_ns=6_000_000,
+                counters=18,
+                group_dead=True,
                 maxrss_bytes=4_096_000,
             ),
+            _event(6, "done", 1_001_600_100, pid=43, tgid=42, counters=1, cpu_ns=6_000_000),
         ]
     )
 
@@ -625,6 +656,8 @@ def test_thread_exits_fold_into_their_leader_even_after_it_exited():
     assert observation.complete is True
     (process,) = observation.processes
     assert process.pid == 42
+    assert process.observed_exit is True
+    assert process.exited_guest_mono_ns == 1_001_600_000, "the process ended with its last thread"
     assert process.cpu_usec == 10_000
     assert process.mem_peak_bytes == 4_096_000
     # Bits 4 and 8 were clear: this kernel accounted no I/O, which is not
@@ -634,6 +667,61 @@ def test_thread_exits_fold_into_their_leader_even_after_it_exited():
     assert process.io_rchar_bytes is None
 
 
+def test_a_leader_that_exited_before_its_threads_is_still_running():
+    """Linux lets a leader exit while its threads live on; that is not the end."""
+    payload = b"".join(
+        [
+            _event(1, "fork", 1_001_000_000),
+            _event(2, "fork", 1_001_050_000, pid=43, tgid=42),
+            _event(3, "exit", 1_001_500_000, counters=18, group_dead=False, maxrss_bytes=1_024),
+            _event(4, "done", 1_001_500_100, counters=1, cpu_ns=4_000_000),
+        ]
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    assert observation.complete is True
+    (process,) = observation.processes
+    assert process.observed_exit is False
+    assert process.duration_ms is None
+    assert process.cpu_usec is None
+    assert process.mem_peak_bytes is None
+
+
+def test_counters_wait_for_every_task_s_final_deschedule():
+    """A dead group whose ``done`` never arrived reports no consumption."""
+    payload = b"".join(
+        [
+            _event(1, "fork", 1_001_000_000),
+            _event(2, "exit", 1_001_700_000, **_DD_EXIT),
+        ]
+    )
+
+    observation = finish_observation(
+        cursor=_cursor(),
+        snapshot=_snapshot(),
+        payload=payload,
+        truncated=False,
+    )
+
+    (process,) = observation.processes
+    assert process.observed_exit is True
+    assert process.cpu_usec is None
+    assert process.io_write_bytes is None
+    rows, _counts = attribute_processes(
+        observation,
+        [ToolWindow("one", "Bash", opened_mono=11.000, closed_mono=11.010)],
+    )
+    (call,) = add_process_resources([{"call_seq": 1, "process_count": 1}], rows)
+    assert call["process_cpu_usec"] is None
+    assert call["process_resources_partial"] is True
+
+
 def test_a_process_that_outlived_the_turn_reports_no_consumption():
     payload = _event(1, "fork", 1_001_000_000) + _event(
         2,
@@ -641,8 +729,9 @@ def test_a_process_that_outlived_the_turn_reports_no_consumption():
         1_001_200_000,
         pid=43,
         tgid=42,
-        counters=1,
-        cpu_ns=6_000_000,
+        counters=18,
+        group_dead=False,
+        maxrss_bytes=4_096_000,
     )
 
     observation = finish_observation(
@@ -665,8 +754,9 @@ def test_a_malformed_counter_leaves_the_row_open_and_the_slice_partial():
         2,
         "exit",
         1_001_700_000,
-        counters=1,
-        cpu_ns="fifteen",
+        counters=18,
+        group_dead=True,
+        maxrss_bytes="lots",
     )
 
     observation = finish_observation(
@@ -679,14 +769,20 @@ def test_a_malformed_counter_leaves_the_row_open_and_the_slice_partial():
     assert observation.complete is False
     (process,) = observation.processes
     assert process.observed_exit is False
-    assert process.cpu_usec is None
+    assert process.mem_peak_bytes is None
 
 
 def test_process_rows_carry_the_counters_onto_the_wire():
     observation = finish_observation(
         cursor=_cursor(),
         snapshot=_snapshot(),
-        payload=_event(1, "fork", 1_001_000_000) + _event(2, "exit", 1_002_000_000, **_DD_EXIT),
+        payload=b"".join(
+            [
+                _event(1, "fork", 1_001_000_000),
+                _event(2, "exit", 1_002_000_000, **_DD_EXIT),
+                _event(3, "done", 1_002_000_100, **_DD_DONE),
+            ]
+        ),
         truncated=False,
     )
 
@@ -765,3 +861,17 @@ def test_a_counter_this_kernel_lacks_makes_the_total_unavailable_not_smaller():
     assert call["process_io_read_bytes"] is None
     assert call["process_io_write_bytes"] is None
     assert call["process_resources_partial"] is False
+
+
+def test_a_lossy_census_makes_every_charged_call_a_floor():
+    """Lost events may hide a process the call started; no total is exact then."""
+    with_processes, without = add_process_resources(
+        [{"call_seq": 1, "process_count": 1}, {"call_seq": 2, "process_count": 0}],
+        [_process_row([1], cpu_usec=2_000)],
+        observation_complete=False,
+    )
+
+    assert with_processes["process_cpu_usec"] == 2_000
+    assert with_processes["process_resources_partial"] is True
+    assert without["process_cpu_usec"] is None
+    assert without["process_resources_partial"] is False

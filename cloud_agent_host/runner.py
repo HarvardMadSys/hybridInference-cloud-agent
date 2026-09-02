@@ -1499,10 +1499,6 @@ def run_agent(
                         processes.append(row)
                     for call_seq, count in counts.items():
                         process_counts[call_seq] += count
-                tool_calls = add_process_resources(
-                    add_process_counts(tool_calls, process_counts),
-                    processes,
-                )
                 sources = {
                     observation.source
                     for observation in observations
@@ -1515,12 +1511,22 @@ def run_agent(
                     if kata_tool_marks
                     else None
                 )
+                observation_complete = (
+                    not merged_processes_truncated
+                    and len(sources) == 1
+                    and all(observation.complete for observation in observations)
+                )
+                # A lossy census may have missed a process a call started, so
+                # its exit-accounted numbers are floors, whatever survived.
+                tool_calls = add_process_resources(
+                    add_process_counts(tool_calls, process_counts),
+                    processes,
+                    observation_complete=observation_complete,
+                )
                 rollup.update(
                     {
                         "process_observer": process_observer,
-                        "process_observation_complete": not merged_processes_truncated
-                        and len(sources) == 1
-                        and all(observation.complete for observation in observations),
+                        "process_observation_complete": observation_complete,
                         "process_events_lost": sum(
                             observation.lost_events for observation in observations
                         ),

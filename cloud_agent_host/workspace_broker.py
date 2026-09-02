@@ -1746,6 +1746,7 @@ def create_app(
                         "tool_calls": add_process_resources(
                             add_process_counts(tool_calls, process_counts),
                             processes,
+                            observation_complete=telemetry.observation.complete,
                         ),
                         "tool_calls_truncated": tool_windows.truncated,
                         "tool_time_ms": (None if tool_windows.truncated else tool_time_ms(windows)),

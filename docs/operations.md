@@ -491,15 +491,18 @@ processes still have empty permitted and effective capability sets, and
 CPU and memory remain conservative periodic container statistics. Process
 existence is separate, event-driven telemetry: fork/exec/exit survives even
 when a process begins and ends entirely between two statistics samples, and
-the exit record carries what that process consumed — its own CPU time, the
-group's peak RSS, and the bytes it read from and dirtied to storage — as the
-guest kernel settled them. Those are the per-call CPU, memory and I/O numbers
-under Kata: a process is charged to the tool call whose window alone contains
-its start, and a process that overlapping calls could both own, or that was
-still running at turn end, is charged to neither and marks those calls as
-partial. Work done inside the Agent CLI's own process belongs to no call.
-The self-test in preflight also requires the exit record's CPU and peak-RSS
-counters to be present, so a guest kernel whose BTF does not relocate them
+the kernel's records carry what that process consumed — the group's peak RSS
+and the bytes it read from and dirtied to storage at exit, and its scheduler
+runtime once it left the CPU for the last time (tick-based CPU time reads
+zero for most sub-millisecond processes, so it is not used). Those are the
+per-call CPU, memory and I/O numbers under Kata: a process is charged to the
+tool call whose window alone contains its start, and a process that
+overlapping calls could both own, one whose thread group has not fully
+settled, or any process in a census that lost events, is charged to no call
+and marks those calls as partial. Work done inside the Agent CLI's own
+process belongs to no call. The self-test in preflight also requires a
+sub-millisecond child's records to carry non-zero CPU, a non-zero peak RSS
+and a group-exit flag, so a guest kernel whose BTF does not relocate them
 fails deployment rather than reporting zeros; storage and read/write byte
 accounting are kernel configuration and arrive as unavailable when absent.
 The per-turn table is therefore a lifecycle census of process starts observed

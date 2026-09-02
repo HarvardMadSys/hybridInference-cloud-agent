@@ -445,6 +445,19 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
   const processObserver = api.process_observer ?? null;
   const processEventsLost = api.process_events_lost ?? 0;
   const processesTruncated = api.processes_truncated === true;
+  const processObservationComplete =
+    processObserver !== null &&
+    api.process_observation_complete === true &&
+    processEventsLost === 0 &&
+    !processesTruncated;
+  // An incomplete census may have lost a process a call started, so no
+  // call's exit-accounted numbers can be presented as its total. The host
+  // marks this too; the reader is kept conservative even against an older
+  // or wrong row.
+  const conservativeCalls = toolCalls.map((call) => {
+    if (processObservationComplete || (call.processCount ?? 0) === 0) return call;
+    return { ...call, processResourcesPartial: true };
+  });
   return {
     cpuUsec: api.cpu_usec,
     memPeakBytes: api.mem_peak_bytes,
@@ -456,14 +469,10 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
     sampleCount: api.sample_count,
     coverage: api.coverage,
     toolTimeMs: toolCallsTruncated ? null : (api.tool_time_ms ?? null),
-    toolCalls,
+    toolCalls: conservativeCalls,
     toolCallsTruncated,
     processObserver,
-    processObservationComplete:
-      processObserver !== null &&
-      api.process_observation_complete === true &&
-      processEventsLost === 0 &&
-      !processesTruncated,
+    processObservationComplete,
     processEventsLost,
     processesTruncated,
     processes: (api.processes ?? []).map(toProcessObservation),

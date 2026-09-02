@@ -8,8 +8,16 @@
 
 #include "guest-observer.h"
 
+/* include/linux/sched.h; unchanged since the value was introduced. */
+#define FI_TASK_DEAD 0x00000080U
+
 /* Minimal CO-RE shapes.  Field offsets are relocated from the guest's BTF. */
+typedef struct {
+    int counter;
+} __attribute__((preserve_access_index)) atomic_t;
+
 struct signal_struct {
+    atomic_t live;
     unsigned long maxrss;
 } __attribute__((preserve_access_index));
 
@@ -20,13 +28,20 @@ struct task_io_accounting {
     __u64 write_bytes;
 } __attribute__((preserve_access_index));
 
+struct sched_entity {
+    __u64 sum_exec_runtime;
+} __attribute__((preserve_access_index));
+
 struct task_struct {
+    /* 5.14 renamed the field; both shapes are declared so the guard below
+     * can pick whichever this kernel's BTF carries. */
+    unsigned int __state;
+    long state;
     int pid;
     int tgid;
     struct task_struct *real_parent;
     struct signal_struct *signal;
-    __u64 utime;
-    __u64 stime;
+    struct sched_entity se;
     struct task_io_accounting ioac;
     int exit_code;
     char comm[FI_TASK_COMM_LEN];
@@ -86,6 +101,57 @@ static __always_inline void fill_task(
     bpf_core_read_str(event->comm, sizeof(event->comm), &task->comm);
 }
 
+/* What this task consumed, read at the one moment the kernel has settled it.
+ *
+ * Every field is guarded by its presence in the guest's BTF: a kernel built
+ * without task I/O accounting still loads this program and the loader reports
+ * that counter as unavailable, never as zero. maxrss is settled by whichever
+ * thread empties the group, so the host keeps the maximum seen across the
+ * group's exits. CPU is deliberately not read here: utime/stime are tick
+ * accounted and read zero for most sub-millisecond processes; the scheduler
+ * runtime is read at TASK_DEAD below, once it is final. */
+static __always_inline void fill_exit_counters(
+    struct fi_process_event *event,
+    struct task_struct *task)
+{
+    if (bpf_core_field_exists(task->signal)) {
+        struct signal_struct *signal = BPF_CORE_READ(task, signal);
+
+        if (signal) {
+            if (bpf_core_field_exists(signal->maxrss)) {
+                event->maxrss_pages = BPF_CORE_READ(signal, maxrss);
+                event->counters |= FI_COUNTER_MAXRSS;
+            }
+            /* do_exit decrements live before the tracepoint, so zero here
+             * means this exit emptied the group. Two threads racing out can
+             * both read zero; the host treats the flag as "dead as of this
+             * event", which is true for both. */
+            if (bpf_core_field_exists(signal->live.counter)) {
+                event->group_dead = BPF_CORE_READ(signal, live.counter) == 0;
+                event->counters |= FI_COUNTER_GROUP;
+            }
+        }
+    }
+    if (bpf_core_field_exists(task->ioac.read_bytes) &&
+        bpf_core_field_exists(task->ioac.write_bytes)) {
+        event->read_bytes = BPF_CORE_READ(task, ioac.read_bytes);
+        event->write_bytes = BPF_CORE_READ(task, ioac.write_bytes);
+        event->counters |= FI_COUNTER_IO;
+    }
+    if (bpf_core_field_exists(task->ioac.rchar) && bpf_core_field_exists(task->ioac.wchar)) {
+        event->rchar = BPF_CORE_READ(task, ioac.rchar);
+        event->wchar = BPF_CORE_READ(task, ioac.wchar);
+        event->counters |= FI_COUNTER_XACCT;
+    }
+}
+
+static __always_inline int task_is_dead(struct task_struct *task)
+{
+    if (bpf_core_field_exists(task->__state))
+        return (BPF_CORE_READ(task, __state) & FI_TASK_DEAD) != 0;
+    return ((unsigned long)BPF_CORE_READ(task, state) & FI_TASK_DEAD) != 0;
+}
+
 SEC("raw_tracepoint/sched_process_fork")
 int observe_fork(struct bpf_raw_tracepoint_args *ctx)
 {
@@ -117,44 +183,6 @@ int observe_exec(struct bpf_raw_tracepoint_args *ctx)
     return 0;
 }
 
-/* What this task consumed, read at the one moment the kernel has settled it.
- *
- * Every field is guarded by its presence in the guest's BTF: a kernel built
- * without task I/O accounting still loads this program and the loader reports
- * that counter as unavailable, never as zero. utime/stime are this task's own
- * share and exclude children; the host sums a group's threads and never adds
- * signal->utime on top, which would count the dead threads twice. maxrss is
- * settled by whichever thread empties the group, so the host keeps the
- * maximum seen across the group's exits. */
-static __always_inline void fill_exit_counters(
-    struct fi_process_event *event,
-    struct task_struct *task)
-{
-    if (bpf_core_field_exists(task->utime) && bpf_core_field_exists(task->stime)) {
-        event->cpu_ns = BPF_CORE_READ(task, utime) + BPF_CORE_READ(task, stime);
-        event->counters |= FI_COUNTER_CPU;
-    }
-    if (bpf_core_field_exists(task->signal)) {
-        struct signal_struct *signal = BPF_CORE_READ(task, signal);
-
-        if (signal && bpf_core_field_exists(signal->maxrss)) {
-            event->maxrss_pages = BPF_CORE_READ(signal, maxrss);
-            event->counters |= FI_COUNTER_MAXRSS;
-        }
-    }
-    if (bpf_core_field_exists(task->ioac.read_bytes) &&
-        bpf_core_field_exists(task->ioac.write_bytes)) {
-        event->read_bytes = BPF_CORE_READ(task, ioac.read_bytes);
-        event->write_bytes = BPF_CORE_READ(task, ioac.write_bytes);
-        event->counters |= FI_COUNTER_IO;
-    }
-    if (bpf_core_field_exists(task->ioac.rchar) && bpf_core_field_exists(task->ioac.wchar)) {
-        event->rchar = BPF_CORE_READ(task, ioac.rchar);
-        event->wchar = BPF_CORE_READ(task, ioac.wchar);
-        event->counters |= FI_COUNTER_XACCT;
-    }
-}
-
 SEC("raw_tracepoint/sched_process_exit")
 int observe_exit(struct bpf_raw_tracepoint_args *ctx)
 {
@@ -166,6 +194,33 @@ int observe_exit(struct bpf_raw_tracepoint_args *ctx)
     fill_task(event, task);
     event->exit_code = BPF_CORE_READ(task, exit_code);
     fill_exit_counters(event, task);
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+/* The scheduler's runtime for a task is final only once the task has been
+ * dequeued for the last time — dequeue_entity runs update_curr — which is
+ * where sched_switch sees it in TASK_DEAD. This is the same number the
+ * kernel's own cputime_adjust scales utime/stime to, so it matches what
+ * /proc and wait4() report in total, including for a 400 µs process that
+ * never received a tick. The predicate is the only work done on the hot
+ * path for every other context switch. */
+SEC("raw_tracepoint/sched_switch")
+int observe_switch(struct bpf_raw_tracepoint_args *ctx)
+{
+    struct task_struct *prev = (struct task_struct *)ctx->args[1];
+    struct fi_process_event *event;
+
+    if (!task_is_dead(prev))
+        return 0;
+    event = reserve_event(FI_PROCESS_DONE);
+    if (!event)
+        return 0;
+    fill_task(event, prev);
+    if (bpf_core_field_exists(prev->se.sum_exec_runtime)) {
+        event->cpu_ns = BPF_CORE_READ(prev, se.sum_exec_runtime);
+        event->counters |= FI_COUNTER_CPU;
+    }
     bpf_ringbuf_submit(event, 0);
     return 0;
 }
