@@ -77,6 +77,8 @@ need a gateway secret here, the design is wrong — stop and escalate.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
+| `COMPOSE_PROFILES` (`edge`) | **NEW** | Compose-level, read by `docker compose` not by this service. `edge` starts the nginx edge for a deployment that owns its own hostname: `/api/*` to the control plane with the prefix stripped, everything else to the web app, on one loopback port for the tunnel to point at. Unset under the gateway's hostname, where the console does that job. |
+| `AGENT_EDGE_BIND` / `AGENT_EDGE_PORT` | **NEW** | Where the edge listens; defaults `127.0.0.1` / `3003`. Only meaningful with the `edge` profile. |
 | `AGENT_SESSION_COOKIE_SECURE` | **NEW** | Defaults to on. Set to `false` **only** for a developer running the whole stack on plain `http://localhost`; a session cookie without `Secure` is one anyone on the path can take. |
 | `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls overwrites `X-Forwarded-For`; otherwise the admin audit trail records whatever address the caller typed. |
 

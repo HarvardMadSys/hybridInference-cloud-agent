@@ -102,6 +102,36 @@ def test_complete_local_edge_reresolves_recreated_services():
         assert f"server {upstream} resolve;" in config
 
 
+def test_the_standalone_edge_is_opt_in_and_loopback(compose: dict):
+    """The edge exists only for a deployment that owns its hostname.
+
+    Under the gateway's hostname the console already splits `/agents/*`
+    between the two services, so an edge that started unconditionally would
+    be a second, unused listener on every deployment — and one that dropped
+    its profile by accident would appear on the next deploy of all of them.
+    Loopback by default for the same reason every other published port is:
+    the tunnel is on the host, and nothing else should reach it.
+    """
+    edge = compose["services"]["edge"]
+    assert edge["profiles"] == ["edge"]
+    assert edge["ports"] == ["${AGENT_EDGE_BIND:-127.0.0.1}:${AGENT_EDGE_PORT:-3003}:80"]
+    assert edge["networks"] == ["control-plane"]
+
+
+def test_the_standalone_edge_strips_the_api_prefix():
+    """`/api/` must reach the control plane as `/`.
+
+    The control plane serves `/v1/...` at its root, exactly as it does behind
+    the console (whose rewrite strips `/agents/api`). A `proxy_pass` without
+    the trailing slash forwards the prefix, and every API call 404s while the
+    HTML still loads — a failure that reads as a client bug.
+    """
+    text = (REPO / "deploy/control-plane/edge.nginx.conf").read_text()
+    api = text[text.index("location /api/") : text.index("location / ")]
+    assert "proxy_pass http://cloud_agent_api/;" in api
+    assert "proxy_buffering off;" in api, "the control plane streams events over SSE"
+
+
 def test_root_mounted_web_build_accepts_an_explicit_empty_base_path():
     """Compose must distinguish unset from explicitly empty for root hosting."""
     text = _CONTROL_PLANE_COMPOSE.read_text()

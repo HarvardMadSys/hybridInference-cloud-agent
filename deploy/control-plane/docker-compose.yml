@@ -265,6 +265,31 @@ services:
         condition: service_started
     networks: [control-plane]
 
+  # --- Optional: the edge for a deployment that owns its own hostname -------
+  # Under the gateway's hostname the console proxies `/agents/*` to these two
+  # services and this one has no job, which is why it sits behind a profile:
+  # those deployments never run it. On a standalone hostname
+  # (agents.example.org) the tunnel or load balancer in front points at this
+  # one port and nginx splits the origin — `/api/*` to the control plane with
+  # the prefix stripped, everything else to the web app. One origin for both
+  # is what lets the session cookie travel; two hostnames would not.
+  #
+  # Enable with `COMPOSE_PROFILES=edge` in .env, and build the web app for the
+  # root: AGENT_WEB_BASE_PATH= (empty) and AGENT_WEB_API_URL=/api. Loopback by
+  # default, like every other published port here: the tunnel is on this host.
+  edge:
+    profiles: [edge]
+    image: nginx:1.27.5-alpine
+    volumes:
+      - ./edge.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${AGENT_EDGE_BIND:-127.0.0.1}:${AGENT_EDGE_PORT:-3003}:80"
+    depends_on:
+      - control-plane
+      - web
+    networks: [control-plane]
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
