@@ -14,9 +14,6 @@
 
 import { agentApiBase, basePath } from '@/config/env';
 
-/** Thrown when this deployment has no control plane to sign in against. */
-export class SignInNotConfigured extends Error {}
-
 /**
  * Only same-site paths, expressed the way the router speaks them.
  *
