@@ -37,12 +37,11 @@ permissions:
 jobs:
   deploy:
     name: Deploy control plane + web
-    # The host publishes an exact target-SHA capability only after every
-    # runner, broker, tunnel and retained Docker root passes its local checks.
-    # The control-plane deploy then performs a fresh-heartbeat and reverse
-    # broker probe before replacing the API. This is the rolling-deploy fence
-    # for the only supported topology, not a legacy/new-mode switch.
-    needs: deploy-host
+    # Both halves start together. The host publishes an exact target-SHA
+    # capability only after every runner, broker, tunnel and retained Docker
+    # root passes its local checks. deploy.sh waits for a fresh heartbeat and
+    # reverse broker probe before replacing the API, so the readiness fence —
+    # not serial Actions scheduling — establishes the safe rollout order.
     # `CI` is one workflow with a `CI Gate` job precisely so this condition can
     # be a single conclusion. It was four workflows until #31; gating on one of
     # four would have meant treating "that workflow was filtered out" and "that
@@ -58,8 +57,8 @@ jobs:
     # `workflow_run` job is filed under the default branch, so filtering the
     # run list by `dev` shows nothing and reads as "it never deployed".
     #
-    # Both jobs write to this one environment, matching production. This job
-    # depends on the host, so its successful record represents both halves.
+    # Both jobs write to this one environment, matching production. The
+    # workflow as a whole succeeds only when both parallel halves succeed.
     environment: staging
     timeout-minutes: 30
 
@@ -110,10 +109,9 @@ jobs:
 
   deploy-host:
     name: Deploy runner host
-    # Host first: new host code remains compatible with the currently running
-    # control plane, while the new control plane intentionally has no legacy
-    # executor endpoints. Its ready marker lets the dependent job prove this
-    # exact generation before making the irreversible half of the rollout.
+    # This job may run alongside the control build/migration work. Its exact-SHA
+    # ready marker is what lets deploy.sh prove this generation before it
+    # replaces the old API.
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&

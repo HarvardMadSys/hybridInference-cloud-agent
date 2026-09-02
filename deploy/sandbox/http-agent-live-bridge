@@ -51,6 +51,33 @@ class BridgeError(RuntimeError):
     """A local protocol or server error that must fail closed."""
 
 
+def fork_payload(messages: Any, source_native_turn_no: int) -> dict[str, str]:
+    """Resolve one settled ordinal to the servers' exclusive fork boundary."""
+    if source_native_turn_no < 1:
+        raise BridgeError("fork source_native_turn_no must be positive")
+    if not isinstance(messages, list):
+        raise BridgeError("native message history has an invalid shape")
+    user_messages = []
+    for message in messages:
+        info = message.get("info") if isinstance(message, dict) else None
+        if isinstance(info, dict) and info.get("role") == "user":
+            user_messages.append(info)
+    if source_native_turn_no > len(user_messages):
+        raise BridgeError(
+            "native history does not contain the requested fork turn "
+            f"({source_native_turn_no} of {len(user_messages)})"
+        )
+    if source_native_turn_no == len(user_messages):
+        return {}
+    # Both pinned servers define messageID as an exclusive upper bound. The
+    # next user message includes the selected completed exchange without
+    # copying the prompt Edit & rewind replaces.
+    next_message_id = user_messages[source_native_turn_no].get("id")
+    if not isinstance(next_message_id, str) or not next_message_id:
+        raise BridgeError("next native user message has no id")
+    return {"messageID": next_message_id}
+
+
 class Bridge:
     def __init__(self, runtime: str) -> None:
         if runtime not in _RUNTIMES:
@@ -363,11 +390,23 @@ class Bridge:
             with self._turn_lock:
                 if self._turn_id is not None:
                     raise BridgeError("cannot fork an active session")
+            source_native_turn_no = command.get("source_native_turn_no")
+            if (
+                not isinstance(source_native_turn_no, int)
+                or isinstance(source_native_turn_no, bool)
+                or source_native_turn_no < 1
+            ):
+                raise BridgeError("fork source_native_turn_no must be a positive integer")
+            messages = self.request(
+                "GET",
+                f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/message",
+            )
+            payload = fork_payload(messages, source_native_turn_no)
             child = self.request(
                 "POST",
                 f"/session/{urllib.parse.quote(str(self.session_id), safe='')}/fork?"
                 + urllib.parse.urlencode({"directory": self.workdir}),
-                {},
+                payload,
             )
             if not isinstance(child, dict) or not child.get("id"):
                 raise BridgeError("fork did not return a child session id")

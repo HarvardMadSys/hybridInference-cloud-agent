@@ -253,6 +253,7 @@ class SharedForkRequest(SharedSandboxIdentityRequest):
 
     operation_id: str = Field(..., min_length=1, max_length=256)
     source_native_session_id: str = Field(..., min_length=1, max_length=512)
+    source_native_turn_no: int = Field(..., ge=1, le=100_000)
     target_thread_id: str = Field(..., min_length=1, max_length=256)
     target_slot_id: int = Field(..., ge=0, le=127)
     source_launch: SharedResidentLaunchConfig
@@ -1512,6 +1513,7 @@ def create_app(
                 thread_id,
                 operation_id=body.operation_id,
                 source_native_session_id=body.source_native_session_id,
+                source_native_turn_no=body.source_native_turn_no,
                 target_thread_id=body.target_thread_id,
                 target_slot_id=body.target_slot_id,
                 source_launch=resident_launch(thread_id, body.source_launch),

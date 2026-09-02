@@ -17,11 +17,20 @@ import pytest
 import pytest_asyncio
 
 from cloud_agent.storage.store import AgentJobStore
+from cloud_agent_host.shared_protocol import (
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    SHARED_SANDBOX_CAPABILITY,
+    SHARED_SANDBOX_PROTOCOL,
+)
 from tests.support.migrations import apply_migrations, run_baseline_statements
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _ALLOWED_TEST_DB_PATTERN = "_test_"
+_SHARED_HOST_CAPABILITIES = [
+    SHARED_SANDBOX_CAPABILITY,
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+]
 _TABLES_IN_FK_ORDER = (
     "agent_native_session_edges",
     "agent_thread_sandbox_memberships",
@@ -125,8 +134,8 @@ def _shared_claim_attestation() -> dict[str, object]:
     """Return the exact process-local fence required for shared work."""
     return {
         "sandbox_image_digest": "sha256:shared-image",
-        "shared_sandbox_protocol": "v1",
-        "runner_capabilities": ["shared-sandbox-v1"],
+        "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
+        "runner_capabilities": _SHARED_HOST_CAPABILITIES,
         "runtime_versions": {
             "claude-code": "2.1.220",
             "codex": "0.145.0",
@@ -167,12 +176,13 @@ async def _claim(
         await store.register_host(
             host=host,
             credential_hash=credential,
-            capabilities=["shared-sandbox-v1"],
+            capabilities=_SHARED_HOST_CAPABILITIES,
             slots_total=128,
         )
         await store.record_host_heartbeat(
             host=host,
-            capabilities=["shared-sandbox-v1"],
+            capabilities=_SHARED_HOST_CAPABILITIES,
+            sandbox_image_digest="sha256:shared-image",
         )
     return await store.claim_job(
         worker_id=worker_id,
@@ -191,12 +201,13 @@ async def _reserve_retained_chat(
     await store.register_host(
         host="runner-a",
         credential_hash=credential_hash,
-        capabilities=["shared-sandbox-v1"],
+        capabilities=_SHARED_HOST_CAPABILITIES,
         slots_total=4,
     )
     online = await store.record_host_heartbeat(
         host="runner-a",
-        capabilities=["shared-sandbox-v1"],
+        capabilities=_SHARED_HOST_CAPABILITIES,
+        sandbox_image_digest="sha256:shared-image",
     )
     assert online is not None and online["status"] == "online"
     job = await _create_job(store)
@@ -234,12 +245,13 @@ async def _reserve_shared_chat(
     await store.register_host(
         host="shared-runner",
         credential_hash="test-credential-hash",
-        capabilities=["shared-sandbox-v1"],
+        capabilities=_SHARED_HOST_CAPABILITIES,
         slots_total=4,
     )
     online = await store.record_host_heartbeat(
         host="shared-runner",
-        capabilities=["shared-sandbox-v1"],
+        capabilities=_SHARED_HOST_CAPABILITIES,
+        sandbox_image_digest="sha256:shared-image",
     )
     assert online is not None and online["status"] == "online"
     job = await _create_job(store, base_sha="a" * 40, metadata=metadata)
@@ -666,12 +678,37 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         to_state="succeeded",
     )
 
+    # A newly deployed host may still retain a container created from the v1
+    # image. Ordinary follow-ups remain valid, but its old helper must never
+    # receive an at-anchor request it would silently interpret as "latest".
+    before_upgrade = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert before_upgrade is not None and before_upgrade["native_fork_capable"] is True
+    await store.record_host_heartbeat(
+        host="shared-runner",
+        capabilities=_SHARED_HOST_CAPABILITIES,
+        sandbox_image_digest="sha256:new-host-image",
+    )
+    after_upgrade = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert after_upgrade is not None and after_upgrade["native_fork_capable"] is False
+    refused = await store.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="native-fork-old-container",
+    )
+    assert refused == {"error": "native_fork_unavailable"}
+    await store.record_host_heartbeat(
+        host="shared-runner",
+        capabilities=_SHARED_HOST_CAPABILITIES,
+        sandbox_image_digest="sha256:shared-image",
+    )
+
     operation = await store.prepare_session_fork(
         source_job_id=job["id"],
         user_id=job["user_id"],
         idempotency_key="native-fork-one",
     )
     assert operation is not None and operation.get("error") is None
+    assert operation["source_native_turn_no"] == 1
     assert operation["state"] == "preparing"
     assert operation["sandbox_id"] == sandbox["sandbox_id"]
     assert operation["container_id"] == "container-shared-one"
@@ -817,6 +854,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child_sandbox["container_id"] == source_sandbox["container_id"]
     assert child_sandbox["native_session_id"] == "native-child"
     assert source_sandbox["native_session_id"] == "native-source"
+    assert child["native_turn_no"] == 1
     assert len(child_sandbox["group_members"]) == 2
     assert await store.finalize_session_fork(operation_id=operation["id"]) == child
 
@@ -910,6 +948,171 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         source_follow_up["id"],
         child_follow_up["id"],
     }
+
+
+async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_failed(
+    store: AgentJobStore,
+):
+    """Provider history and platform terminal state cannot drift by one turn."""
+    first, first_claim, sandbox = await _reserve_shared_chat(store)
+    first_fence = {
+        "thread_id": first["thread_id"],
+        "attempt_id": first_claim["attempt_id"],
+        "lease_generation": first_claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **first_fence,
+        container_id="container-native-ordinal",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**first_fence, job_id=first["id"])
+    assert await store.settle_thread_sandbox(
+        **first_fence,
+        job_id=first["id"],
+        context_status="live",
+        native_session_id="native-ordinal-source",
+        idle_timeout_seconds=1800,
+        base_sha=first["base_sha"],
+    )
+    second = await store.create_follow_up(
+        parent_job_id=first["id"],
+        user_id=first["user_id"],
+        prompt="continue after a lost final response",
+    )
+    assert second is not None and second["state"] == "waiting"
+    # This is the finalization-only failure case: the native exchange is
+    # already durable, even though the platform outcome is failed.
+    assert await store.transition(
+        job_id=first["id"],
+        attempt_id=first_claim["attempt_id"],
+        lease_generation=first_claim["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+        detail="job finalization failed after native settlement",
+    )
+    assert (await store.get_job(first["id"]))["native_turn_no"] == 1
+    assert (await store.get_job(second["id"]))["state"] == "queued"
+
+    second_claim = await _claim(
+        store,
+        worker_id="shared-worker-second",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+        claim_attestation=_shared_claim_attestation(),
+    )
+    assert second_claim is not None and second_claim["id"] == second["id"]
+    activated = await store.reserve_thread_sandbox(
+        thread_id=first["thread_id"],
+        attempt_id=second_claim["attempt_id"],
+        lease_generation=second_claim["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_name=sandbox["container_name"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        sandbox_image_digest=sandbox["sandbox_image_digest"],
+        execution_profile=sandbox["execution_profile"],
+    )
+    assert activated is not None
+    second_fence = {
+        "thread_id": first["thread_id"],
+        "attempt_id": second_claim["attempt_id"],
+        "lease_generation": second_claim["lease_generation"],
+        "sandbox_generation": activated["generation"],
+        "activation_generation": activated["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **second_fence,
+        container_id="container-native-ordinal",
+        context_status="restored",
+    )
+    assert await store.admit_thread_sandbox_turn(**second_fence, job_id=second["id"])
+    assert await store.settle_thread_sandbox(
+        **second_fence,
+        job_id=second["id"],
+        context_status="restored",
+        native_session_id="native-ordinal-source",
+        idle_timeout_seconds=1800,
+        base_sha=first["base_sha"],
+    )
+    assert await store.transition(
+        job_id=second["id"],
+        attempt_id=second_claim["attempt_id"],
+        lease_generation=second_claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    assert (await store.get_job(second["id"]))["native_turn_no"] == 2
+
+    operation = await store.prepare_session_fork(
+        source_job_id=second["id"],
+        user_id=second["user_id"],
+        idempotency_key="native-fork-after-finalization-failure",
+    )
+    assert operation is not None and operation.get("error") is None
+    assert operation["source_native_turn_no"] == 2
+
+
+async def test_native_turn_migration_backfills_existing_fork_prefixes(
+    store: AgentJobStore,
+):
+    """An upgrade preserves the native ordinal of already-copied history."""
+    from tests.support.migrations import apply_migrations, downgrade_to
+
+    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    db_config = {
+        "host": os.getenv("TEST_DB_HOST", "localhost"),
+        "port": int(os.getenv("TEST_DB_PORT", "5432")),
+        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
+        "user": os.getenv("TEST_DB_USER", "postgres"),
+        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
+    }
+    try:
+        downgrade_to(db_config, "0020_session_fork_coordinator")
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_threads (id, user_id, repo, title)
+                VALUES ('athr_migration_source', 'user-1', 'owner/repo', 'source'),
+                       ('athr_migration_child', 'user-1', 'owner/repo', 'child')
+                """
+            )
+            await conn.execute(
+                """
+                INSERT INTO agent_jobs (
+                    id, thread_id, turn_no, user_id, repo, task_prompt,
+                    runtime, model, state, fork_source_job_id
+                ) VALUES
+                    ('ajob_migration_source', 'athr_migration_source', 1,
+                     'user-1', 'owner/repo', 'settled source',
+                     'claude-code', 'model', 'succeeded', NULL),
+                    ('ajob_migration_unsettled', 'athr_migration_source', 2,
+                     'user-1', 'owner/repo', 'never settled',
+                     'claude-code', 'model', 'failed', NULL),
+                    ('ajob_migration_copy', 'athr_migration_child', 1,
+                     'user-1', 'owner/repo', 'copied source',
+                     'claude-code', 'model', 'failed', 'ajob_migration_source')
+                """
+            )
+        apply_migrations(db_config)
+        async with store._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, native_turn_no FROM agent_jobs
+                WHERE id LIKE 'ajob_migration_%' ORDER BY id
+                """
+            )
+        assert {row["id"]: row["native_turn_no"] for row in rows} == {
+            "ajob_migration_copy": 1,
+            "ajob_migration_source": 1,
+            "ajob_migration_unsettled": None,
+        }
+    finally:
+        apply_migrations(db_config)
 
 
 async def test_create_get_list_round_trip(store: AgentJobStore):

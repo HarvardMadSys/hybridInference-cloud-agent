@@ -162,7 +162,13 @@ def _gates(route: Any) -> set[str]:
 #: how the dashboard authenticates. Exempting it left every admin write —
 #: draining a host, pinning a runtime version — trusting a role that was true
 #: only whenever the session happened to be minted.
-MACHINE_GATES = frozenset({"_worker_claims", "verify_dispatcher_access"})
+MACHINE_GATES = frozenset(
+    {
+        "_worker_claims",
+        "verify_claiming_host",
+        "verify_dispatcher_access",
+    }
+)
 
 #: Both routers a browser reaches with a session. The admin router is a second
 #: mount point, not a second kind of caller.

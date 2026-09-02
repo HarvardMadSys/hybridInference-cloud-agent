@@ -15,11 +15,26 @@ else
 fi
 
 compose() {
+  configure_browser_urls
   # Intentional word splitting: COMPOSE is either one command or `docker compose`.
   # shellcheck disable=SC2086
   $COMPOSE --env-file "$ENV_FILE" --project-name "$(local_project_name)" \
     -f "$REPO_ROOT/deploy/control-plane/docker-compose.yml" \
     -f "$SCRIPT_DIR/docker-compose.yml" "$@"
+}
+
+configure_browser_urls() {
+  # These three URLs and the URL printed by this script must use one canonical
+  # hostname. A host-only login-flow cookie set on 127.0.0.1 is not sent to a
+  # callback on localhost (or vice versa), even though both reach the same
+  # socket. Derive from the effective port on every invocation; explicit shell
+  # values still win, while stale values in an older .env.local cannot split
+  # the OAuth round trip or point a second stack back at the first one's port.
+  edge_port=$(local_edge_port)
+  GATEWAY_AUTHORIZE_URL=${GATEWAY_AUTHORIZE_URL:-http://127.0.0.1:${edge_port}/authorize}
+  AGENT_SESSION_REDIRECT_URI=${AGENT_SESSION_REDIRECT_URI:-http://127.0.0.1:${edge_port}/api/v1/session/callback}
+  AGENT_WEB_BASE_URL=${AGENT_WEB_BASE_URL:-http://127.0.0.1:${edge_port}}
+  export GATEWAY_AUTHORIZE_URL AGENT_SESSION_REDIRECT_URI AGENT_WEB_BASE_URL
 }
 
 local_project_name() {
@@ -34,8 +49,35 @@ random_hex() {
   openssl rand -hex 32
 }
 
+append_env_if_missing() {
+  name=$1
+  value=$2
+  if ! grep -q "^${name}=" "$ENV_FILE"; then
+    printf '%s=%s\n' "$name" "$value" >>"$ENV_FILE"
+  fi
+}
+
+upgrade_existing_env() {
+  # Keep every existing credential and operator-selected port.  Local env
+  # files predate both retained-only deployment and the server-side OAuth
+  # round trip; simply returning when one exists makes an otherwise valid
+  # checkout fail Compose interpolation after an update.
+  edge_port=$(sed -n 's/^LOCAL_EDGE_PORT=//p' "$ENV_FILE" | tail -n 1)
+  edge_port=${edge_port:-13002}
+  append_env_if_missing AGENT_WORKSPACE_BROKER_TOKEN "$(random_hex)"
+  append_env_if_missing LOCAL_PROJECT_NAME freeinference-local
+  append_env_if_missing LOCAL_AGENT_EGRESS_NETWORK freeinference-local-agent-egress
+  append_env_if_missing GATEWAY_AUTHORIZE_URL "http://127.0.0.1:${edge_port}/authorize"
+  append_env_if_missing AGENT_SESSION_REDIRECT_URI \
+    "http://127.0.0.1:${edge_port}/api/v1/session/callback"
+  append_env_if_missing AGENT_WEB_BASE_URL "http://127.0.0.1:${edge_port}"
+  append_env_if_missing AGENT_WEB_GATEWAY_URL ""
+}
+
 ensure_env() {
   if [ -f "$ENV_FILE" ]; then
+    umask 077
+    upgrade_existing_env
     return
   fi
   umask 077
@@ -78,9 +120,9 @@ ensure_env() {
       'LOCAL_EDGE_PORT=13002' \
       'LOCAL_PROJECT_NAME=freeinference-local' \
       'LOCAL_AGENT_EGRESS_NETWORK=freeinference-local-agent-egress' \
-      'GATEWAY_AUTHORIZE_URL=http://localhost:13002/authorize' \
-      'AGENT_SESSION_REDIRECT_URI=http://localhost:13002/api/v1/session/callback' \
-      'AGENT_WEB_BASE_URL=http://localhost:13002' \
+      'GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize' \
+      'AGENT_SESSION_REDIRECT_URI=http://127.0.0.1:13002/api/v1/session/callback' \
+      'AGENT_WEB_BASE_URL=http://127.0.0.1:13002' \
       'AGENT_WEB_BASE_PATH=' \
       'AGENT_WEB_API_URL=/api' \
       'AGENT_WEB_GATEWAY_URL=' \

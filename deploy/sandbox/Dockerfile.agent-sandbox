@@ -160,7 +160,7 @@ LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.runtime.pi.versions="${PI_VERSIONS}" \
       org.freeinference.runtime.opencode.versions="${OPENCODE_VERSIONS}" \
       org.freeinference.runtime.kilo.versions="${KILO_VERSIONS}" \
-      org.freeinference.shared-sandbox.protocol="v1"
+      org.freeinference.shared-sandbox.protocol="v2"
 
 # pi, OpenCode, and Kilo all ignore OPENAI_BASE_URL; each one's supported
 # route to a custom gateway is a provider config file whose content (gateway

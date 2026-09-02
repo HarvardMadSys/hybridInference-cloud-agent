@@ -490,6 +490,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     historyTurns = historicalJobs.map((threadJob) => ({
       jobId: threadJob.id,
       turnNo: threadJob.turn_no ?? 1,
+      forkable: threadJob.state === 'succeeded',
       messages: (options.thread?.messages ?? [])
         .filter((message) => message.job_id === threadJob.id)
         .map(mapMessage),

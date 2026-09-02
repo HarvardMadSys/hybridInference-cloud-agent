@@ -203,6 +203,7 @@ describe('JobDetail', () => {
             {
               jobId: 'ajob_0',
               turnNo: 1,
+              forkable: true,
               messages: HISTORY,
               events: [
                 { kind: 'message', text: 'I will inspect the repository.', attemptNo: 1 },
@@ -925,6 +926,108 @@ describe('JobDetail', () => {
 
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_1'));
     expect(navigation.push).toHaveBeenCalledWith('/ajob_fork');
+  });
+
+  it('offers current-session Fork when a successful run produced no pull request', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'needs_review',
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+        })}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Fork from here' })).toBeInTheDocument();
+  });
+
+  it('forks a historical successful assistant boundary in the shared workspace', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_historical_fork' } as never);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          turnNo: 2,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          threadMessages: HISTORY,
+          historyTurns: [
+            {
+              jobId: 'ajob_0',
+              turnNo: 1,
+              forkable: true,
+              messages: HISTORY,
+              events: [{ kind: 'message', text: 'Earlier answer', attemptNo: 1 }],
+            },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(
+      within(screen.getByLabelText('Turn 1')).getByRole('button', {
+        name: 'Fork from here',
+      }),
+    );
+
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_historical_fork');
+  });
+
+  it('forks before a user prompt and carries it to the child as a one-shot edit draft', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_rewind' } as never);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const historicalTurn = {
+      jobId: 'ajob_0',
+      turnNo: 1,
+      forkable: true,
+      messages: HISTORY,
+      events: [{ kind: 'message' as const, text: 'Earlier answer', attemptNo: 1 }],
+    };
+    const { rerender } = render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          turnNo: 2,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          threadMessages: HISTORY,
+          historyTurns: [historicalTurn],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit & rewind' }));
+
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind')).toBe(
+      'Current task\nwith all of its detail.',
+    );
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_rewind');
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          id: 'ajob_rewind',
+          state: 'done',
+          turnNo: 1,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+        })}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toHaveValue(
+        'Current task\nwith all of its detail.',
+      ),
+    );
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind')).toBeNull();
   });
 
   it('does not offer a synthetic fork when no retained sandbox exists', () => {

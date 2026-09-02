@@ -46,10 +46,11 @@ permissions:
 jobs:
   deploy:
     name: Deploy control plane + web
-    # The retained executor is the only topology. Host deployment publishes
-    # the exact target-SHA readiness capability first; deploy.sh then performs
-    # a fresh heartbeat and reverse-broker probe before replacing this stack.
-    needs: deploy-host
+    # Both halves start together. The retained executor is the only topology;
+    # host deployment publishes exact target-SHA readiness, and deploy.sh waits
+    # for a fresh heartbeat plus reverse-broker probe before replacing this
+    # stack. The protocol fence preserves host-before-API compatibility without
+    # serializing image builds and migrations in Actions.
     runs-on: [self-hosted, Linux, deploy-cloud-agent-control-prod]
     # Records the deployment and gives protection rules somewhere to live.
     # Required-reviewer rules need a public repository or a paid plan, so on
@@ -119,9 +120,8 @@ jobs:
 
   deploy-host:
     name: Deploy sandbox host
-    # Host first. New host code remains compatible with the currently running
-    # control plane; the inverse is not safe now that the control plane has no
-    # legacy executor endpoints.
+    # Runs in parallel with the control build. The control deployment cannot
+    # replace its old API until this exact SHA has passed host readiness.
     runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-prod]
     environment: production
     timeout-minutes: 45

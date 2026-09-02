@@ -282,6 +282,7 @@ def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(mon
         "runtime_id": "codex",
         "runtime_version": "0.145.0",
         "source_session_id": "native-source",
+        "source_native_turn_no": 2,
         "target_thread_id": "athr_child",
         "target_slot_id": 2,
     }
@@ -317,6 +318,7 @@ def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(mon
         source,  # type: ignore[arg-type]
         "fork-recover",
         target_launch,
+        2,
     )
 
     assert child_id == "native-recovered-child"
@@ -375,6 +377,7 @@ def test_codex_lost_fork_response_recovers_from_the_rollout_inventory(monkeypatc
         source,  # type: ignore[arg-type]
         "fork-lost-response",
         target_launch,
+        2,
     )
 
     assert child_id == "native-recovered-child"
@@ -434,6 +437,7 @@ def test_http_native_fork_flushes_and_clones_private_provider_state(monkeypatch,
         source,  # type: ignore[arg-type]
         "fork-http",
         target_launch,
+        2,
     )
 
     assert child_id == "native-child"
@@ -446,6 +450,49 @@ def test_http_native_fork_flushes_and_clones_private_provider_state(monkeypatch,
     assert manager.events == [("normalize", 0), ("normalize", 2)]
     assert writes[0]["state"] == "preparing"
     assert writes[1]["state"] == "ready"
+
+
+def test_pi_fork_exposes_the_source_owned_child_session_to_its_target(monkeypatch):
+    manager = _Manager()
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    spec = replace(_spec(), runtime_id="pi", runtime_version="0.73.1")
+    source_launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        runtime_id="pi",
+        runtime_version="0.73.1",
+    )
+    target_launch = replace(
+        _launch("athr_child", native_session_id=None, slot=2),
+        runtime_id="pi",
+        runtime_version="0.73.1",
+    )
+    fork_calls: list[dict] = []
+    closed: list[bool] = []
+    source = SimpleNamespace(
+        native_session_id="native-source",
+        launch=source_launch,
+        session=SimpleNamespace(
+            fork_native=lambda **kwargs: fork_calls.append(kwargs) or "native-child"
+        ),
+        close=lambda: closed.append(True),
+    )
+    monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
+    monkeypatch.setattr(factory, "_write_fork_journal", lambda *_args: None)
+
+    child_id = factory.fork_native(
+        spec,
+        source,  # type: ignore[arg-type]
+        "fork-pi",
+        target_launch,
+        2,
+    )
+
+    assert child_id == "native-child"
+    assert fork_calls[0]["source_native_turn_no"] == 2
+    assert closed == [True]
+    # Pi mutates from the live source process, so the new child file is owned
+    # by slot 0 even though slot 2 will subsequently resume it.
+    assert manager.events == [("normalize", 0)]
 
 
 @pytest.mark.parametrize("runtime_id", ["opencode", "kilo"])
@@ -557,9 +604,10 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():
     factory = _TransportFactory()
     supervisor: SharedChatSessionSupervisor
 
-    def native_forker(spec, source_transport, operation_id, target_launch):
+    def native_forker(spec, source_transport, operation_id, target_launch, source_native_turn_no):
         assert source_transport.native_session_id == "native-source"
         assert operation_id == "fork-one"
+        assert source_native_turn_no == 1
         token, peer = supervisor.operation_opened("athr_peer")
         assert peer.operation_count == 1
         assert supervisor.status("athr_source").operation_count == 1
@@ -594,6 +642,7 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():
         "athr_source",
         operation_id="fork-one",
         source_native_session_id="native-source",
+        source_native_turn_no=1,
         target_thread_id="athr_child",
         target_slot_id=2,
         source_launch=source_launch,
@@ -611,7 +660,9 @@ def test_native_fork_retry_rotates_only_source_and_hidden_child_processes():
     factory = _TransportFactory()
     fork_calls: list[str] = []
 
-    def native_forker(_spec, _source_transport, operation_id, _target_launch):
+    def native_forker(
+        _spec, _source_transport, operation_id, _target_launch, _source_native_turn_no
+    ):
         fork_calls.append(operation_id)
         return "native-child"
 
@@ -643,6 +694,7 @@ def test_native_fork_retry_rotates_only_source_and_hidden_child_processes():
         "athr_source",
         operation_id="fork-retry",
         source_native_session_id="native-source",
+        source_native_turn_no=1,
         target_thread_id="athr_child",
         target_slot_id=2,
         source_launch=source_launch,
@@ -653,6 +705,7 @@ def test_native_fork_retry_rotates_only_source_and_hidden_child_processes():
         "athr_source",
         operation_id="fork-retry",
         source_native_session_id="native-source",
+        source_native_turn_no=1,
         target_thread_id="athr_child",
         target_slot_id=2,
         source_launch=replace(source_launch, credential="grant-rotated", residency_generation=10),
@@ -671,7 +724,9 @@ def test_native_fork_resumes_a_source_transport_closed_by_the_cli():
     manager = _Manager()
     factory = _TransportFactory()
 
-    def native_forker(_spec, source_transport, _operation_id, _target_launch):
+    def native_forker(
+        _spec, source_transport, _operation_id, _target_launch, _source_native_turn_no
+    ):
         source_transport.alive = False
         return "native-child"
 
@@ -703,6 +758,7 @@ def test_native_fork_resumes_a_source_transport_closed_by_the_cli():
         "athr_source",
         operation_id="fork-closes-source",
         source_native_session_id="native-source",
+        source_native_turn_no=1,
         target_thread_id="athr_child",
         target_slot_id=2,
         source_launch=source_launch,

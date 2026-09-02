@@ -105,7 +105,7 @@ The five supported adapters are pinned and attested as a unit:
 |---|---|
 | Claude Code | stream-json live process, native session id, reviewed `claude-session-fork` helper |
 | Codex | app-server live thread, resume by rollout id, native app-server fork |
-| Pi | RPC process, `--session` resume, prompt-free `--fork` |
+| Pi | RPC process, `--session` resume, RPC `fork`/`clone` |
 | OpenCode | authenticated serve bridge and native session fork |
 | Kilo | authenticated serve bridge and native session fork |
 
@@ -125,9 +125,19 @@ Fork is immediate. Clicking Fork invokes the selected Agent CLI's native fork
 operation before the API returns a usable child chat. It is not deferred until
 the child's first message.
 
-The source member must be at its latest settled native turn. A sibling may
-continue running because the workspace is intentionally shared; only the
-source session is quiesced for its fork boundary.
+The selected anchor may be any successfully settled native turn in the source
+chat, including a historical one. A sibling may continue running because the
+workspace is intentionally shared; only the source session is quiesced while
+its immutable prefix is forked.
+
+The platform assigns `native_turn_no` when a CLI turn settles, before final job
+state is written. It passes that stable ordinal to the host, which resolves the
+current provider-specific identifier at mutation time. Provider ids are not
+stored as platform history: Claude Code and OpenCode/Kilo can rewrite message
+ids in a fork, whereas the ordinal remains stable within each copied prefix.
+Codex maps it to inclusive `lastTurnId`; Claude maps it to the inclusive
+top-level assistant UUID; Pi forks before the next user entry (or clones the
+leaf); OpenCode/Kilo pass the next user `messageID` as an exclusive boundary.
 
 The durable sequence is:
 
@@ -135,8 +145,9 @@ The durable sequence is:
    membership `fork_preparing`.
 2. Ensure the exact retained container is running and reserve a child member
    slot.
-3. Flush the source runtime state as required and invoke its reviewed,
-   prompt-free native fork surface with source session id `S`.
+3. Resolve the selected settled native-turn ordinal inside source session `S`,
+   flush runtime state as required, and invoke the reviewed prompt-free fork
+   surface at that boundary.
 4. Receive and validate a distinct native session id `T`.
 5. Materialize member-private provider state when that runtime needs it, while
    keeping `/workspace` shared.
@@ -158,6 +169,12 @@ Fork never:
 - sends a synthetic prompt to a model;
 - copies an event transcript into model context;
 - waits for the child's first user message to materialize the native fork.
+
+“Edit & rewind” is this same operation from the user-message side: Fork is
+executed immediately at the nearest preceding settled assistant boundary, the
+child opens with only that prefix, and the selected user prompt is placed in
+the child composer as a one-shot draft. Submitting the edit is a new native
+turn; the original prompt is never replayed automatically.
 
 ## 5. Shared workspace consequences
 
@@ -312,24 +329,44 @@ host must provide:
 - an authenticated workspace broker URL reachable by the control plane;
 - the expected Docker data root and sandbox image digest;
 - exact runtime/helper versions and shared protocol attestation;
+- `native-fork-at-anchor-v1` from the current host image, with that image
+  digest equal to the immutable digest of the retained group;
 - at least two host slots and enough runner replicas to execute fork siblings
   concurrently (staging currently defaults both to three);
 - an immutable resident-slot capacity for each group;
 - the required isolation and egress configuration.
 
-The host deploys before the control plane during a rolling deployment. After
-its runners, broker, tunnel, isolation configuration, and Docker data root pass
-local checks, it publishes a capability containing the exact target commit.
-Before replacing any running API container, the control-plane deploy requires
-a fresh heartbeat carrying that commit and successfully reverse-probes every
-eligible host broker. Failure stops the rollout. It never falls back to an
-older sandbox path.
+The host and control-plane GitHub Actions jobs start in parallel during a
+rolling deployment. The control job may build images, start/health-check its
+database, and run a backwards-compatible migration while the old API remains
+live. After the host's runners, broker, tunnel, isolation configuration, and
+Docker data root pass local checks, it publishes a capability containing the
+exact target commit. Before replacing any running API container, the
+control-plane deploy requires a fresh heartbeat carrying that commit and
+successfully reverse-probes every eligible host broker. This runtime fence,
+not a serial Actions dependency, establishes host-before-new-API compatibility.
+Failure stops the rollout; it never falls back to an older sandbox path.
+
+A true cold start is the only exception to “old API remains live”: there is no
+old API. The control script starts Postgres, migrates, then starts only the
+target control-plane service so a simultaneously starting host can enroll and
+send the required fresh heartbeat. Web and MCP remain stopped until the same
+exact-SHA gate succeeds. If the gate fails, the bootstrap API is stopped again.
+Without this bounded bootstrap, both a fresh install and recovery after
+`compose down` deadlock: readiness waits for an HTTP heartbeat while the only
+process that accepts that heartbeat is deliberately kept stopped.
 
 There are no `AGENT_RESTARTABLE_*`, `AGENT_SHARED_LIVE_*`, or dispatcher-token
 feature switches. Names such as `shared-sandbox-v1` are protocol/capability
 identifiers used for exact claim attestation, not behavior toggles. The
 deployment-SHA marker is likewise a rolling-compatibility fence and cannot
-select another executor.
+select another executor. Historical fork has its own
+`native-fork-at-anchor-v1` attestation. The shared protocol is v2 for new
+images; a v1 retained container may keep serving ordinary follow-ups, but its
+older helpers cannot receive an at-anchor request. The control plane exposes
+Fork only when the host advertises that capability and its current sandbox
+image digest matches the group's pinned digest, so an upgrade fails closed
+instead of silently forking the latest provider message.
 
 ## 13. Acceptance contract
 
@@ -343,6 +380,8 @@ The implementation is ready only when these properties hold:
    restore, and prompt-free native Fork tests at its exact pin.
 4. Fork returns only after a distinct child native id and live child transport
    exist; it creates no Docker clone, mount, host directory, or model request.
+   Forking a historical successful turn copies exactly that native/display
+   prefix, and Edit & rewind opens the replacement prompt as an unsent draft.
 5. Parent and child can run simultaneously and edit the same workspace without
    a group busy error or cross-routed events/cancellation.
 6. Repeated forks support multiple members within configured slot/resource
@@ -363,7 +402,7 @@ The implementation is ready only when these properties hold:
     is presented as recovery.
 
 The repository suite and Docker-only local smoke cover the deterministic
-control-plane, host, broker, all-five-runtime, stop/restore, immediate Fork,
+control-plane, host, broker, all-five-runtime, stop/restore, historical immediate Fork,
 and concurrent-turn paths. Real-provider traffic, production isolation under
 Kata/gVisor, adversarial multi-process tests, OOM/container-exit stress, and
 disk-pressure operations remain deployment gates where applicable.

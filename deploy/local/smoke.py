@@ -298,7 +298,7 @@ def main() -> int:
     print("[4/7] One inactivity clock docker-stopped every mount-free container", flush=True)
 
     print("[5/7] Every CLI starts the same container and reports RESTORED", flush=True)
-    restored_sessions: dict[str, tuple[dict[str, Any], str, str]] = {}
+    restored_sessions: dict[str, tuple[dict[str, Any], dict[str, Any], str, str]] = {}
     for runtime, (live, sandbox_id, original_id) in sessions.items():
         print(f"  {runtime}: stopped-container follow-up", flush=True)
         restored_turn = client.request(
@@ -321,19 +321,28 @@ def main() -> int:
         stopped_id = wait_stopped(sandbox_id)
         if stopped_id != original_id:
             raise RuntimeError(f"{runtime} restored container changed before its next idle stop")
-        restored_sessions[runtime] = (restored, sandbox_id, original_id)
+        # Keep turn two as a historical native anchor. At fork time the source
+        # session already has turn three, so this exercises real prefix rewind
+        # rather than the old latest-only path.
+        restored_sessions[runtime] = (restored, live, sandbox_id, original_id)
 
     print(
         "[6/7] Every CLI forks immediately into a second session in the same workspace", flush=True
     )
     forked_sessions: dict[str, tuple[dict[str, Any], str, str]] = {}
-    for runtime, (source, sandbox_id, source_container_id) in restored_sessions.items():
+    for runtime, (
+        source,
+        historical_anchor,
+        sandbox_id,
+        source_container_id,
+    ) in restored_sessions.items():
         print(
-            f"  {runtime}: prompt-free native fork + two independently admitted turns", flush=True
+            f"  {runtime}: historical native fork + two independently admitted turns",
+            flush=True,
         )
         source_thread_id = str(source["thread_id"])
         forked = client.request(
-            f"/api/v1/agent/jobs/{urllib.parse.quote(str(source['id']))}/fork",
+            f"/api/v1/agent/jobs/{urllib.parse.quote(str(historical_anchor['id']))}/fork",
             method="POST",
             headers={"Idempotency-Key": f"local-smoke-{runtime}-{secrets.token_hex(8)}"},
         )
@@ -357,12 +366,24 @@ def main() -> int:
         target_thread = client.request(
             f"/api/v1/agent/jobs/{urllib.parse.quote(str(forked['id']))}/thread"
         )
-        source_words = [(item["role"], item["content"]) for item in source_thread["messages"]]
+        anchor_turn_no = int(historical_anchor.get("turn_no") or 0)
+        source_prefix_ids = {
+            str(item["id"])
+            for item in source_thread.get("jobs") or []
+            if int(item.get("turn_no") or 0) <= anchor_turn_no
+        }
+        source_words = [
+            (item["role"], item["content"])
+            for item in source_thread["messages"]
+            if str(item["job_id"]) in source_prefix_ids
+        ]
         target_words = [(item["role"], item["content"]) for item in target_thread["messages"]]
-        if len(target_thread.get("jobs") or []) != len(source_thread.get("jobs") or []):
-            raise RuntimeError(f"{runtime} native fork did not copy the settled job prefix")
+        if len(target_thread.get("jobs") or []) != len(source_prefix_ids):
+            raise RuntimeError(f"{runtime} historical fork copied the wrong job prefix")
+        if len(source_prefix_ids) >= len(source_thread.get("jobs") or []):
+            raise RuntimeError(f"{runtime} smoke did not select a genuinely historical anchor")
         if target_words != source_words:
-            raise RuntimeError(f"{runtime} native fork did not copy the conversation prefix")
+            raise RuntimeError(f"{runtime} historical fork copied the wrong conversation prefix")
 
         # Queue both before awaiting either. With two host slots this crosses
         # the real no-group-turn-lock path: source and child own distinct

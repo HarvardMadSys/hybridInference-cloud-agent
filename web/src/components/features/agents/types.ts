@@ -62,6 +62,8 @@ export interface AgentThreadMessage {
 export interface AgentHistoryTurn {
   jobId: string;
   turnNo: number;
+  /** Only a completed native assistant boundary is a valid fork anchor. */
+  forkable: boolean;
   messages: AgentThreadMessage[];
   events: AgentEvent[];
 }

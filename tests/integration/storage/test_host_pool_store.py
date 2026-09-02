@@ -28,6 +28,7 @@ from cloud_agent.host_pool import (
     hash_secret,
 )
 from cloud_agent.storage.store import AgentJobStore
+from cloud_agent_host.shared_protocol import SHARED_SANDBOX_PROTOCOL
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -123,7 +124,7 @@ def _kata_attestation(**overrides) -> dict:
     stamp = {
         "sandbox_runtime": "io.containerd.kata.v2",
         "sandbox_image_digest": "sandbox@sha256:claim",
-        "shared_sandbox_protocol": "v1",
+        "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
         "runner_capabilities": ["shared-sandbox-v1"],
         "runtime_versions": {
             "claude-code": "2.1.220",
@@ -145,7 +146,7 @@ def _shared_attestation(**overrides) -> dict:
     stamp = {
         "sandbox_runtime": "",
         "sandbox_image_digest": "sandbox@sha256:shared",
-        "shared_sandbox_protocol": "v1",
+        "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
         "runner_capabilities": ["shared-sandbox-v1"],
         "runtime_versions": {
             "claude-code": "2.1.220",

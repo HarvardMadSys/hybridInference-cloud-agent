@@ -78,6 +78,7 @@ from cloud_agent_host.session_supervisor_client import (
 )
 from cloud_agent_host.setup import run_setup
 from cloud_agent_host.shared_protocol import (
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_PROTOCOL,
@@ -915,11 +916,11 @@ def _shared_live_host_capabilities(
             return []
         if (
             capabilities.resident_transport != "supervisor_live"
-            or capabilities.fork != "latest_immediate"
+            or capabilities.fork != "at_anchor"
             or not capabilities.concurrent_shared_workspace
         ):
             return []
-    capabilities = [SHARED_SANDBOX_CAPABILITY]
+    capabilities = [SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
     if deployment_sha and ready_file:

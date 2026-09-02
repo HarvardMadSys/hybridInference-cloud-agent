@@ -13,16 +13,32 @@ Two branches, two environments, and they federate with the matching gateway:
 ## Staging
 
 Merging to `dev` deploys. `.github/workflows/deploy-staging.yml` waits for
-`CI` to conclude green on `dev`, then runs a deploy script on each target.
+`CI` to conclude green on `dev`, then starts a deploy script on each target in
+parallel.
 
-**Two machines, two jobs, host first.** The control plane and web app
+**Two machines, two parallel jobs, one runtime compatibility fence.** The control plane and web app
 run on spark2 (ARM64); runners, the workspace broker, egress proxy, and tunnels
 run on the sandbox host (x86_64). They are deployed by
-`deploy/control-plane/deploy.sh` and `deploy/host/deploy.sh`. The control-plane
-job has `needs: deploy-host`. The host marks the exact target SHA ready only
-after every runner, broker, tunnel, isolation check, and Docker data-root check
-passes. The control-plane job then waits for a fresh matching heartbeat and
-dials every eligible broker before it replaces any running API container.
+`deploy/control-plane/deploy.sh` and `deploy/host/deploy.sh`. Image builds and
+the control database migration overlap with host deployment. The host marks the
+exact target SHA ready only after every runner, broker, tunnel, isolation check,
+and Docker data-root check passes. The control-plane script waits for a fresh
+matching heartbeat and dials every eligible broker before it replaces any
+running API container. The protocol gate therefore preserves host-before-API
+compatibility without putting the whole Actions workflow on a serial critical
+path.
+
+On a cold machine, the control script first starts Postgres and runs Alembic.
+If no control-plane container is running, it then starts the target API by
+itself before entering the readiness wait. That cold-start exception is
+necessary because host enrollment and heartbeat are HTTP calls to the API, not
+direct database writes: after `compose down`, requiring a post-check heartbeat
+while keeping the API stopped is a deadlock. There is no old API to preserve in
+this branch; web and MCP remain stopped, work waits for an eligible host, and a
+failed gate stops the bootstrap API again. An ordinary rolling deployment does
+not take this branch and leaves the old API untouched until the exact-SHA host
+gate passes. As with every rolling migration, new migrations must remain
+compatible with the old API during this window.
 
 The retained topology is the only executor. Until an enrolled host reports
 `shared-sandbox-v1`, the exact deployment-SHA attestation, and a usable broker,
@@ -31,6 +47,13 @@ machine-level, while each claim repeats the protocol attestation from the exact
 runner replica so a mixed rolling deployment cannot borrow a newer sibling's
 capability. The SHA marker is deployment infrastructure metadata, not a
 behavior flag.
+
+Historical native Fork is fenced separately by
+`native-fork-at-anchor-v1`. During an image upgrade an existing retained
+container may continue ordinary follow-ups, but Fork is unavailable unless the
+host's current sandbox image digest equals that group's immutable digest. This
+prevents a v1 helper from accepting a v2 at-anchor request and accidentally
+forking the latest message.
 
 Host infrastructure metadata and the enrolled credential live under
 `AGENT_HOST_STATE_ROOT`. This is not a chat workspace or session mount. Chat
@@ -154,6 +177,13 @@ deploy; going back to a commit whose schema is older needs the downgrade run by
 hand first. Check whether `migrations/` changed between the two commits before
 assuming a rollback is just a redeploy.
 
+Control and host rollback jobs also start in parallel, but the control script
+will not replace the API until a host advertises the rollback SHA. A missing or
+offline sandbox runner therefore blocks a control-only rollback intentionally:
+restore/deploy the host half first rather than bypassing the compatibility fence.
+There is no implicit break-glass that can install a control protocol no runner
+has proved it speaks.
+
 ## What the script refuses to do
 
 - Deploy to a directory that is not a git checkout.
@@ -241,9 +271,9 @@ To finish it:
    service exists, it hands `/agents` to nothing.
 
 Order matters throughout. Configure the gateway first. Within this service,
-the production workflow then deploys the sandbox host first and replaces the
-control plane only after the target-SHA heartbeat and reverse-broker readiness
-fence passes.
+the production workflow starts host and control jobs together; the control job
+replaces the API only after the host publishes the target-SHA heartbeat and its
+reverse-broker readiness fence passes.
 
 Rollback is the same as staging's: dispatch **Deploy Prod** with `sha` set to
 the commit to go back to.

@@ -71,10 +71,6 @@ class SessionStateUnavailable(DriverError):
     """The retained native state or session locator is unavailable."""
 
 
-class ForkUnsupported(DriverError):
-    """The selected driver surface cannot fork a native session."""
-
-
 @dataclass(frozen=True)
 class HarnessCapabilities:
     """What this harness can do, in the design's semantic vocabulary.
@@ -85,7 +81,7 @@ class HarnessCapabilities:
 
     continuity: Literal["resume"] = "resume"
     steering: Literal["mid_turn", "queue_only", "none"] = "none"
-    fork: Literal["latest_immediate", "at_latest", "at_anchor", "none"] = "none"
+    fork: Literal["at_anchor", "none"] = "none"
     #: Whether the host supervisor, rather than an individual runner turn,
     #: can own one bidirectional CLI transport across several messages.
     resident_transport: Literal["supervisor_live", "none"] = "none"
@@ -333,7 +329,7 @@ class CodexDriver(HarnessDriver):
         return HarnessCapabilities(
             continuity="resume",
             steering="mid_turn",
-            fork="latest_immediate",
+            fork="at_anchor",
             model_switch="restart",
             resident_transport="supervisor_live",
             concurrent_shared_workspace=True,
@@ -360,7 +356,7 @@ class PiDriver(HarnessDriver):
         return HarnessCapabilities(
             continuity="resume",
             steering="mid_turn",
-            fork="latest_immediate",
+            fork="at_anchor",
             model_switch="restart",
             resident_transport="supervisor_live",
             concurrent_shared_workspace=True,
@@ -376,19 +372,6 @@ class PiDriver(HarnessDriver):
             raise SessionStateUnavailable("a resident pi session needs native state")
         return PiRpcSession(self, context, resume_session_id=session_id)
 
-    def launch_fork_live(
-        self,
-        context: LaunchContext,
-        *,
-        source_session_id: str,
-    ) -> PiRpcSession:
-        """Open pi's prompt-free ``--fork`` RPC process for one probe."""
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a pi native fork needs native state")
-        if not source_session_id:
-            raise ForkUnsupported("a pi native fork needs a source session id")
-        return PiRpcSession(self, context, fork_session_id=source_session_id)
-
 
 class OpenCodeDriver(HarnessDriver):
     """OpenCode serve over its XDG data store."""
@@ -398,7 +381,7 @@ class OpenCodeDriver(HarnessDriver):
         return HarnessCapabilities(
             continuity="resume",
             steering="mid_turn",
-            fork="latest_immediate",
+            fork="at_anchor",
             model_switch="restart",
             resident_transport="supervisor_live",
             concurrent_shared_workspace=True,
@@ -425,7 +408,7 @@ class KiloDriver(HarnessDriver):
         return HarnessCapabilities(
             continuity="resume",
             steering="mid_turn",
-            fork="latest_immediate",
+            fork="at_anchor",
             model_switch="restart",
             resident_transport="supervisor_live",
             concurrent_shared_workspace=True,
@@ -859,10 +842,42 @@ class CodexAppServerSession(_JsonResidentSession):
             }
         )
 
-    def fork_native(self, *, source_session_id: str, operation_id: str) -> str:
-        """Create and return one prompt-free native Codex child thread."""
+    def fork_native(
+        self,
+        *,
+        source_session_id: str,
+        operation_id: str,
+        source_native_turn_no: int,
+    ) -> str:
+        """Fork Codex through the requested settled native turn, inclusive."""
         if source_session_id != self.runtime.session_id:
             raise DriverError("Codex fork source no longer matches the live thread")
+        if source_native_turn_no < 1:
+            raise DriverError("Codex fork turn must be positive")
+
+        read_id = self._request_id(f"fork-read-{operation_id}")
+        self._write_json(
+            {
+                "id": read_id,
+                "method": "thread/read",
+                "params": {"threadId": source_session_id, "includeTurns": True},
+            }
+        )
+        read_response = self._read_until(lambda value: value.get("id") == read_id)
+        if read_response.get("error") is not None:
+            raise DriverError(f"Codex thread/read failed: {read_response['error']}")
+        read_result = read_response.get("result")
+        source_thread = read_result.get("thread") if isinstance(read_result, dict) else None
+        turns = source_thread.get("turns") if isinstance(source_thread, dict) else None
+        if not isinstance(turns, list) or source_native_turn_no > len(turns):
+            raise DriverError(
+                "Codex native history does not contain the requested fork turn "
+                f"({source_native_turn_no} of {len(turns) if isinstance(turns, list) else 0})"
+            )
+        anchor = turns[source_native_turn_no - 1]
+        anchor_id = anchor.get("id") if isinstance(anchor, dict) else None
+        if not isinstance(anchor_id, str) or not anchor_id:
+            raise DriverError("Codex fork turn has no native id")
         request_id = self._request_id(f"fork-{operation_id}")
         self._write_json(
             {
@@ -877,6 +892,11 @@ class CodexAppServerSession(_JsonResidentSession):
                     "sandbox": "danger-full-access"
                     if self._context.provides_isolation
                     else "workspace-write",
+                    # Pinned app-server 0.145.0 defines this as inclusive. The
+                    # platform resolves its stable native-turn ordinal against
+                    # the source thread at mutation time instead of persisting
+                    # provider ids that a later fork may rewrite.
+                    "lastTurnId": anchor_id,
                     # We need only the child locator.  Asking Codex to rebuild
                     # and serialize every historical turn after the native
                     # mutation makes the response slower and adds a second
@@ -907,12 +927,8 @@ class PiRpcSession(_JsonResidentSession):
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
-        fork_session_id: str | None = None,
     ) -> None:
-        if resume_session_id and fork_session_id:
-            raise DriverError("pi cannot resume and fork in one live process")
         super().__init__(driver, context, resume_session_id=resume_session_id)
-        self._fork_session_id = fork_session_id
 
     def _prepare_live(
         self, *, model: str, reasoning_effort: str | None
@@ -931,7 +947,6 @@ class PiRpcSession(_JsonResidentSession):
             session_state_dir=self._context.session_state_dir,
             resume_session_id=self._resume_session_id,
             activation_dir=self._context.activation_dir,
-            fork_session_id=self._fork_session_id,
         )
 
     def _initialize_protocol(self) -> None:
@@ -978,6 +993,74 @@ class PiRpcSession(_JsonResidentSession):
     def interrupt_turn(self, turn: _JsonResidentTurn) -> None:
         """Abort the active Pi RPC turn without closing its session process."""
         self._write_json({"id": self._request_id("abort"), "type": "abort"})
+
+    def fork_native(
+        self,
+        *,
+        source_session_id: str,
+        operation_id: str,
+        source_native_turn_no: int,
+    ) -> str:
+        """Fork Pi before the next prompt, or clone at the current leaf."""
+        if source_session_id != self.runtime.session_id:
+            raise DriverError("pi fork source no longer matches the live session")
+        if source_native_turn_no < 1:
+            raise DriverError("pi fork turn must be positive")
+
+        list_id = self._request_id(f"fork-list-{operation_id}")
+        self._write_json({"id": list_id, "type": "get_fork_messages"})
+        listed = self._read_until(
+            lambda value: value.get("type") == "response" and value.get("id") == list_id
+        )
+        data = listed.get("data") if listed.get("success") is True else None
+        messages = data.get("messages") if isinstance(data, dict) else None
+        if not isinstance(messages, list) or source_native_turn_no > len(messages):
+            detail = listed.get("error") if listed.get("success") is not True else None
+            raise DriverError(
+                str(detail)
+                if detail
+                else "pi native history does not contain the requested fork turn "
+                f"({source_native_turn_no} of "
+                f"{len(messages) if isinstance(messages, list) else 0})"
+            )
+
+        fork_id = self._request_id(f"fork-{operation_id}")
+        if source_native_turn_no < len(messages):
+            # Pi's RPC `fork` branches immediately *before* the selected user
+            # entry. Selecting turn N+1 therefore includes the complete Nth
+            # exchange and excludes the prompt the user is about to edit.
+            next_message = messages[source_native_turn_no]
+            entry_id = next_message.get("entryId") if isinstance(next_message, dict) else None
+            if not isinstance(entry_id, str) or not entry_id:
+                raise DriverError("pi next fork message has no native entry id")
+            command: dict[str, Any] = {"id": fork_id, "type": "fork", "entryId": entry_id}
+            expected_command = "fork"
+        else:
+            command = {"id": fork_id, "type": "clone"}
+            expected_command = "clone"
+        self._write_json(command)
+        forked = self._read_until(
+            lambda value: value.get("type") == "response" and value.get("id") == fork_id
+        )
+        fork_data = forked.get("data") if forked.get("success") is True else None
+        if (
+            forked.get("command") != expected_command
+            or not isinstance(fork_data, dict)
+            or fork_data.get("cancelled") is not False
+        ):
+            raise DriverError(f"pi native fork failed: {forked.get('error') or fork_data}")
+
+        state_id = self._request_id(f"fork-state-{operation_id}")
+        self._write_json({"id": state_id, "type": "get_state"})
+        state = self._read_until(
+            lambda value: value.get("type") == "response" and value.get("id") == state_id
+        )
+        state_data = state.get("data") if state.get("success") is True else None
+        child_id = state_data.get("sessionId") if isinstance(state_data, dict) else None
+        if not isinstance(child_id, str) or not child_id or child_id == source_session_id:
+            raise DriverError("pi native fork returned an invalid child session id")
+        self.runtime.session_id = child_id
+        return child_id
 
 
 class HttpAgentLiveTurn(_JsonResidentTurn):
@@ -1105,12 +1188,24 @@ class HttpAgentLiveSession(_JsonResidentSession):
             }
         )
 
-    def fork_native(self, *, source_session_id: str, operation_id: str) -> str:
-        """Create and return one prompt-free OpenCode/Kilo child session."""
+    def fork_native(
+        self,
+        *,
+        source_session_id: str,
+        operation_id: str,
+        source_native_turn_no: int,
+    ) -> str:
+        """Create an OpenCode/Kilo child at one settled native turn."""
         if source_session_id != self.runtime.session_id:
             raise DriverError(f"{self.runtime.name} fork source no longer matches")
         request_id = self._request_id(f"fork-{operation_id}")
-        self._write_json({"id": request_id, "type": "fork"})
+        self._write_json(
+            {
+                "id": request_id,
+                "type": "fork",
+                "source_native_turn_no": source_native_turn_no,
+            }
+        )
         response = self._read_until(
             lambda value: (
                 value.get("bridge") in {"fork_result", "command_error", "fatal"}
@@ -1153,7 +1248,7 @@ class ClaudeCodeDriver(HarnessDriver):
         return HarnessCapabilities(
             continuity="resume",
             steering="mid_turn",
-            fork="latest_immediate",
+            fork="at_anchor",
             model_switch="restart",
             resident_transport="supervisor_live",
             concurrent_shared_workspace=True,

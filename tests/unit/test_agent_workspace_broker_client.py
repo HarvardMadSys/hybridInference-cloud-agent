@@ -141,6 +141,7 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
         members=[],
         operation_id="asfo_test",
         source_native_session_id="native-source",
+        source_native_turn_no=2,
         target_thread_id="athr_target",
         target_slot_id=1,
         source_launch={},
@@ -151,6 +152,7 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
     call = calls[0]
     assert call[:3] == ("POST", "athr_source", "fork")
     assert call[3]["origin_thread_id"] == "athr_origin"
+    assert call[3]["source_native_turn_no"] == 2
     assert call[4] == 180
 
 

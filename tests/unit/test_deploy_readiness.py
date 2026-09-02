@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 
 from cloud_agent.deploy_readiness import shared_live_readiness
-from cloud_agent_host.shared_protocol import shared_deployment_capability
+from cloud_agent_host.shared_protocol import (
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    SHARED_SANDBOX_CAPABILITY,
+    shared_deployment_capability,
+)
 
 DEPLOYMENT_SHA = "abc123"
 
@@ -27,7 +31,11 @@ def _host(now: datetime, **overrides: Any) -> dict[str, Any]:
         "host": "runner-a",
         "status": "online",
         "enrolled": True,
-        "capabilities": ["shared-sandbox-v1", shared_deployment_capability(DEPLOYMENT_SHA)],
+        "capabilities": [
+            SHARED_SANDBOX_CAPABILITY,
+            NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+            shared_deployment_capability(DEPLOYMENT_SHA),
+        ],
         "slots_total": 3,
         "last_heartbeat_at": now,
         "broker_url": "http://broker-a:8092",
@@ -136,13 +144,13 @@ async def test_every_unpinned_schedulable_host_must_finish_the_target_deploy() -
         _host(
             started + timedelta(seconds=1),
             host="old-shared-host",
-            capabilities=["shared-sandbox-v1"],
+            capabilities=[SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY],
         ),
         _host(
             started - timedelta(days=1),
             host="offline-old-host",
             status="offline",
-            capabilities=["shared-sandbox-v1"],
+            capabilities=[SHARED_SANDBOX_CAPABILITY],
         ),
         _host(
             started + timedelta(seconds=1),
@@ -225,6 +233,15 @@ async def test_missing_target_commit_fails_closed() -> None:
     [
         ({"status": "offline"}, "status is offline"),
         ({"enrolled": False}, "not enrolled"),
+        (
+            {
+                "capabilities": [
+                    SHARED_SANDBOX_CAPABILITY,
+                    shared_deployment_capability(DEPLOYMENT_SHA),
+                ]
+            },
+            NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+        ),
         ({"slots_total": 1}, "fewer than two"),
         ({"broker_url": ""}, "no control-plane-reachable broker URL"),
     ],
@@ -253,7 +270,10 @@ async def test_a_runner_that_started_but_did_not_finish_target_deploy_stays_clos
             [
                 _host(
                     started + timedelta(seconds=1),
-                    capabilities=["shared-sandbox-v1"],
+                    capabilities=[
+                        SHARED_SANDBOX_CAPABILITY,
+                        NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+                    ],
                 )
             ]
         ),

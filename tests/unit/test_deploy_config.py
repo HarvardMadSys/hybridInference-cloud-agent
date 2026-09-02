@@ -9,7 +9,10 @@ runner container crash-loops in production.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -26,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
 _CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
 _LOCAL_COMPOSE = REPO_ROOT / "deploy/local/docker-compose.yml"
+_LOCAL_DEV_SCRIPT = REPO_ROOT / "deploy/local/dev.sh"
 _LOCAL_EDGE_DOCKERFILE = REPO_ROOT / "deploy/local/Dockerfile.edge"
 _LOCAL_NGINX = REPO_ROOT / "deploy/local/nginx.conf"
 _DOCKERFILE = Path(__file__).resolve().parents[2] / "deploy/sandbox/Dockerfile.agent-sandbox"
@@ -42,6 +46,66 @@ def compose() -> dict:
 def local_compose() -> dict:
     """Parse the Docker-only complete local stack overlay."""
     return yaml.safe_load(_LOCAL_COMPOSE.read_text())
+
+
+def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path: Path) -> None:
+    """A checkout update must not require deleting local credentials first."""
+    script = tmp_path / "repo/deploy/local/dev.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(_LOCAL_DEV_SCRIPT, script)
+    dotenv = script.parent / ".env.local"
+    dotenv.write_text(
+        "AGENT_SESSION_SECRET=keep-this-secret\n"
+        "AGENT_WORKSPACE_BROKER_TOKEN=keep-this-broker-token\n"
+        "LOCAL_EDGE_PORT=23002\n"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_compose = fake_bin / "docker-compose"
+    compose_env = tmp_path / "compose-env"
+    fake_compose.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$GATEWAY_AUTHORIZE_URL" "$AGENT_SESSION_REDIRECT_URI" '
+        '"$AGENT_WEB_BASE_URL" >"$COMPOSE_ENV_LOG"\n'
+    )
+    fake_compose.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script), "config"],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "COMPOSE_ENV_LOG": str(compose_env),
+            # A second local stack should not inherit the URLs persisted for
+            # the first one's port.
+            "LOCAL_EDGE_PORT": "24002",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    values = dict(
+        line.split("=", 1)
+        for line in dotenv.read_text().splitlines()
+        if line and not line.startswith("#")
+    )
+    assert values["AGENT_SESSION_SECRET"] == "keep-this-secret"
+    assert values["AGENT_WORKSPACE_BROKER_TOKEN"] == "keep-this-broker-token"
+    assert values["LOCAL_PROJECT_NAME"] == "freeinference-local"
+    assert values["LOCAL_AGENT_EGRESS_NETWORK"] == "freeinference-local-agent-egress"
+    assert values["GATEWAY_AUTHORIZE_URL"] == "http://127.0.0.1:23002/authorize"
+    assert values["AGENT_SESSION_REDIRECT_URI"] == (
+        "http://127.0.0.1:23002/api/v1/session/callback"
+    )
+    assert values["AGENT_WEB_BASE_URL"] == "http://127.0.0.1:23002"
+    assert values["AGENT_WEB_GATEWAY_URL"] == ""
+    assert compose_env.read_text().splitlines() == [
+        "http://127.0.0.1:24002/authorize",
+        "http://127.0.0.1:24002/api/v1/session/callback",
+        "http://127.0.0.1:24002",
+    ]
 
 
 def test_complete_local_stack_exposes_only_its_loopback_edge(local_compose: dict):
@@ -414,11 +478,11 @@ def test_runner_receives_exact_sha_rollout_metadata(compose: dict) -> None:
     assert any("AGENT_HOST_STATE_ROOT" in str(mount) for mount in runner["volumes"])
 
 
-def test_staging_deploy_enables_one_consistent_shared_live_rollout() -> None:
-    """The exact target host is proved before the control plane rolls."""
+def test_staging_deploy_runs_both_halves_in_parallel_with_a_runtime_fence() -> None:
+    """Actions overlap, while deploy.sh still proves the target host before rollout."""
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-staging.yml").read_text())
     jobs = workflow["jobs"]
-    assert jobs["deploy"]["needs"] == "deploy-host"
+    assert "needs" not in jobs["deploy"]
     assert "needs" not in jobs["deploy-host"]
     control_deploy = next(step for step in jobs["deploy"]["steps"] if step.get("name") == "Deploy")
     host_deploy = next(
@@ -437,10 +501,10 @@ def test_staging_deploy_enables_one_consistent_shared_live_rollout() -> None:
     assert "STAGING_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
 
 
-def test_production_deploy_uses_the_same_host_first_topology() -> None:
+def test_production_deploy_uses_the_same_parallel_topology() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-prod.yml").read_text())
     jobs = workflow["jobs"]
-    assert jobs["deploy"]["needs"] == "deploy-host"
+    assert "needs" not in jobs["deploy"]
     assert "needs" not in jobs["deploy-host"]
     host_deploy = next(
         step for step in jobs["deploy-host"]["steps"] if step.get("name") == "Deploy"

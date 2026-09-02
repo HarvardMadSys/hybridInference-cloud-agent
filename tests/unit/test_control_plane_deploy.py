@@ -190,11 +190,15 @@ def test_shared_live_readiness_is_proved_before_any_running_service_is_replaced(
     """
     script = DEPLOY_SCRIPT_PATH.read_text()
     build = script.index("compose build")
+    database = script.index('compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres')
+    migration = script.index("compose run --rm --no-deps migrate")
+    running_probe = script.index("compose ps --status running -q control-plane")
     readiness = script.index("python -m cloud_agent.deploy_readiness")
     bring_up = script.index("compose up -d --remove-orphans")
 
-    assert build < readiness < bring_up
+    assert build < database < migration < running_probe < readiness < bring_up
     assert "compose run --rm --no-deps control-plane" in script
+    assert "compose up -d --no-deps control-plane" in script
     assert '--timeout-seconds "${SHARED_READY_TIMEOUT}"' in script
     assert '--expected-deployment-sha "${SHA}"' in script
     assert "AGENT_SHARED_LIVE_SANDBOX" not in script
@@ -204,6 +208,7 @@ def _run_control_deploy(
     tmp_path: Path,
     *,
     readiness_exit: int,
+    control_running: bool = True,
     shared_live: str = "1",
     deployment_environment: str = "production",
     dotenv: str = "",
@@ -242,6 +247,8 @@ def _run_control_deploy(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
         'case "$*" in\n'
+        "  *' ps --status running -q control-plane')\n"
+        '    [ "${CONTROL_RUNNING}" = "1" ] && printf "%s\\n" existing-control ; exit 0 ;;\n'
         "  *' run --rm --no-deps control-plane python -m cloud_agent.deploy_readiness '*)\n"
         '    exit "${READINESS_EXIT}" ;;\n'
         "esac\n"
@@ -265,6 +272,7 @@ def _run_control_deploy(
             "HEALTH_TIMEOUT": "1",
             "DOCKER_LOG": str(docker_log),
             "READINESS_EXIT": str(readiness_exit),
+            "CONTROL_RUNNING": "1" if control_running else "0",
         },
         capture_output=True,
         text=True,
@@ -280,6 +288,8 @@ def test_a_failed_readiness_probe_never_replaces_the_running_stack(
 
     assert result.returncode == 17
     assert " build" in docker_calls
+    assert " up -d --wait --wait-timeout 1 postgres" in docker_calls
+    assert " run --rm --no-deps migrate" in docker_calls
     assert "cloud_agent.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" not in docker_calls
 
@@ -291,6 +301,36 @@ def test_a_successful_readiness_probe_allows_the_shared_only_service(tmp_path: P
     assert "cloud_agent.deploy_readiness" in docker_calls
     assert re.search(r"--expected-deployment-sha [0-9a-f]{40}(?:\s|$)", docker_calls)
     assert " up -d --remove-orphans" in docker_calls
+
+
+def test_a_cold_start_bootstraps_the_api_needed_for_a_fresh_host_heartbeat(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    bootstrap = docker_calls.index(" up -d --no-deps control-plane")
+    readiness = docker_calls.index("cloud_agent.deploy_readiness")
+    full_up = docker_calls.index(" up -d --remove-orphans")
+    assert bootstrap < readiness < full_up
+    assert "cold-start host heartbeat" in result.stdout
+
+
+def test_a_failed_cold_start_gate_stops_the_bootstrap_api(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=17,
+        control_running=False,
+    )
+
+    assert result.returncode == 17
+    assert " up -d --no-deps control-plane" in docker_calls
+    assert " stop web mcp-relay control-plane" in docker_calls
+    assert " up -d --remove-orphans" not in docker_calls
 
 
 def test_removed_default_off_switch_is_inert(

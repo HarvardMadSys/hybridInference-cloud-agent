@@ -465,15 +465,13 @@ def _job_response(
         base_ref = None
     sandbox = job.get("thread_sandbox") or {}
     native_fork_available = bool(
-        (not sandbox and job.get("state") in TERMINAL_STATES)
-        or (
-            sandbox.get("shared_live") is True
-            and sandbox.get("native_fork_capable") is True
-            and sandbox.get("native_state") == "ready"
-            and sandbox.get("fork_operation_id") is None
-            and sandbox.get("last_settled_job_id") == job.get("id")
-            and job.get("state") in TERMINAL_STATES
-        )
+        sandbox.get("shared_live") is True
+        and sandbox.get("native_fork_capable") is True
+        and sandbox.get("native_state") == "ready"
+        and sandbox.get("fork_operation_id") is None
+        and sandbox.get("active_attempt_id") is None
+        and bool(sandbox.get("last_settled_job_id"))
+        and job.get("state") in TERMINAL_STATES
     )
     return AgentJobResponse(
         id=job["id"],
@@ -1875,13 +1873,17 @@ async def fork_agent_job(
                 "not_settled",
                 "This turn is still active; stop the run before forking it.",
             ),
-            "not_latest_settled": (
+            "anchor_not_settled": (
                 "historical_snapshot_unavailable",
-                "Native Fork is available only at this chat's latest settled turn.",
+                "Native Fork requires a successfully completed assistant turn.",
             ),
             "not_shared_live": (
                 "native_fork_unavailable",
                 "This chat does not use a shared-native sandbox.",
+            ),
+            "native_fork_unavailable": (
+                "native_fork_unavailable",
+                "This retained sandbox version cannot fork from a historical turn.",
             ),
             "sandbox_not_ready": (
                 "native_context_unavailable",
@@ -2097,6 +2099,7 @@ async def fork_agent_job(
                 members=members,
                 operation_id=operation_id,
                 source_native_session_id=str(operation["source_native_session_id"]),
+                source_native_turn_no=int(operation["source_native_turn_no"]),
                 target_thread_id=str(operation["target_thread_id"]),
                 target_slot_id=int(operation["target_resident_slot_id"]),
                 source_launch={

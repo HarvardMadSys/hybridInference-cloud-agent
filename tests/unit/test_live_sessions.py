@@ -331,8 +331,21 @@ def test_codex_app_server_two_turns_and_prompt_free_fork(tmp_path):
     )
     assert second.wait().final_output == "second"
 
-    process.feed = _turn_lines({"id": "fork-op-5", "result": {"thread": {"id": "thread-child"}}})
-    assert session.fork_native(source_session_id="thread-a", operation_id="op") == "thread-child"
+    process.feed = _turn_lines(
+        {
+            "id": "fork-read-op-5",
+            "result": {"thread": {"id": "thread-a", "turns": [{"id": "turn-a"}, {"id": "turn-b"}]}},
+        },
+        {"id": "fork-op-6", "result": {"thread": {"id": "thread-child"}}},
+    )
+    assert (
+        session.fork_native(
+            source_session_id="thread-a",
+            operation_id="op",
+            source_native_turn_no=1,
+        )
+        == "thread-child"
+    )
     assert len(spawned) == 1
     argv, env = spawned[0]
     assert argv[-1] == "app-server"
@@ -344,6 +357,7 @@ def test_codex_app_server_two_turns_and_prompt_free_fork(tmp_path):
     ]
     fork = next(line for line in sent if line.get("method") == "thread/fork")
     assert fork["params"]["threadId"] == "thread-a"
+    assert fork["params"]["lastTurnId"] == "turn-a"
     assert fork["params"]["excludeTurns"] is True
     assert all("one" not in json.dumps(line) for line in sent if line is fork)
 
@@ -422,6 +436,61 @@ def test_pi_rpc_two_turns_and_native_abort(tmp_path):
     assert "-p" not in argv
 
 
+def test_pi_rpc_forks_before_the_next_native_prompt(tmp_path):
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {
+            "id": "state-1",
+            "type": "response",
+            "command": "get_state",
+            "success": True,
+            "data": {"sessionId": "pi-a"},
+        }
+    )
+    session = PiDriver(PiRuntime()).launch_live(context)
+    session.ensure_started(model="m", reasoning_effort=None)
+    process.feed = _turn_lines(
+        {
+            "id": "fork-list-op-2",
+            "type": "response",
+            "command": "get_fork_messages",
+            "success": True,
+            "data": {
+                "messages": [
+                    {"entryId": "user-one", "text": "one"},
+                    {"entryId": "user-two", "text": "two"},
+                ]
+            },
+        },
+        {
+            "id": "fork-op-3",
+            "type": "response",
+            "command": "fork",
+            "success": True,
+            "data": {"text": "two", "cancelled": False},
+        },
+        {
+            "id": "fork-state-op-4",
+            "type": "response",
+            "command": "get_state",
+            "success": True,
+            "data": {"sessionId": "pi-child"},
+        },
+    )
+
+    assert (
+        session.fork_native(
+            source_session_id="pi-a",
+            operation_id="op",
+            source_native_turn_no=1,
+        )
+        == "pi-child"
+    )
+    sent = [json.loads(line) for line in process.sent]
+    assert sent[-2] == {"id": "fork-op-3", "type": "fork", "entryId": "user-two"}
+
+
 @pytest.mark.parametrize(
     ("driver", "runtime", "runtime_name"),
     [
@@ -467,11 +536,19 @@ def test_http_server_bridge_two_turns_and_native_fork(tmp_path, driver, runtime,
             "session_id": "ses-child",
         }
     )
-    assert session.fork_native(source_session_id="ses-a", operation_id="op") == "ses-child"
+    assert (
+        session.fork_native(
+            source_session_id="ses-a",
+            operation_id="op",
+            source_native_turn_no=1,
+        )
+        == "ses-child"
+    )
     assert len(spawned) == 1
     argv, env = spawned[0]
     assert argv == ["http-agent-live-bridge", runtime_name]
     assert env["AGENT_LIVE_WORKDIR"] == "/w"
+    assert json.loads(process.sent[-1])["source_native_turn_no"] == 1
 
 
 def test_every_bundled_driver_only_advertises_shared_live_after_wiring():
@@ -485,4 +562,4 @@ def test_every_bundled_driver_only_advertises_shared_live_after_wiring():
         capabilities = driver(runtime()).capabilities()
         assert capabilities.resident_transport == "supervisor_live"
         assert capabilities.concurrent_shared_workspace is True
-        assert capabilities.fork == "latest_immediate"
+        assert capabilities.fork == "at_anchor"

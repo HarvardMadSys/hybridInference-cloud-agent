@@ -56,7 +56,8 @@ def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch
     monkeypatch.setenv("AGENT_RESTARTABLE_RUNTIMES", "claude-code")
 
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
-        "shared-sandbox-v1"
+        "shared-sandbox-v1",
+        "native-fork-at-anchor-v1",
     ]
 
 
@@ -68,17 +69,20 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
 
     ready_file.write_text("pending:target-sha\n")
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
-        "shared-sandbox-v1"
+        "shared-sandbox-v1",
+        "native-fork-at-anchor-v1",
     ]
 
     ready_file.write_text("different-sha\n")
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
-        "shared-sandbox-v1"
+        "shared-sandbox-v1",
+        "native-fork-at-anchor-v1",
     ]
 
     ready_file.write_text("target-sha\n")
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
         "shared-sandbox-v1",
+        "native-fork-at-anchor-v1",
         "shared-sandbox-deployment:target-sha",
     ]
 
@@ -207,7 +211,10 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         )
         == 0
     )
-    assert claim_calls[0]["attestation"]["runner_capabilities"] == ["shared-sandbox-v1"]
+    assert claim_calls[0]["attestation"]["runner_capabilities"] == [
+        "shared-sandbox-v1",
+        "native-fork-at-anchor-v1",
+    ]
     assert dispatched[0]["job"] is _JOB
     assert dispatched[0]["gateway_base_url"] == "http://gateway"
 

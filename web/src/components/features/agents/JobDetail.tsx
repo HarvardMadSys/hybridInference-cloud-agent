@@ -239,6 +239,25 @@ function ForkIcon() {
   );
 }
 
+function RewindIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={2}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9 15 3 9l6-6M3 9h12a6 6 0 0 1 0 12h-3"
+      />
+    </svg>
+  );
+}
+
 async function copyMessage(content: string) {
   try {
     await navigator.clipboard.writeText(content);
@@ -311,10 +330,12 @@ function ThreadTurn({
   message,
   busy,
   onFork,
+  onRewind,
 }: {
   message: AgentThreadMessage;
   busy?: boolean;
   onFork?: () => void;
+  onRewind?: () => void;
 }) {
   if (message.role === 'assistant') {
     return (
@@ -341,6 +362,12 @@ function ThreadTurn({
           <CopyIcon />
           Copy
         </MessageActionButton>
+        {onRewind ? (
+          <MessageActionButton label="Edit & rewind" onClick={onRewind} disabled={busy}>
+            <RewindIcon />
+            Edit & rewind
+          </MessageActionButton>
+        ) : null}
       </MessageActions>
     </div>
   );
@@ -416,12 +443,16 @@ function EventRow({
 
 function HistoryTurn({
   turn,
+  rewindAnchorJobId,
   busy,
   onFork,
+  onRewind,
 }: {
   turn: AgentHistoryTurn;
+  rewindAnchorJobId?: string;
   busy: boolean;
   onFork?: (jobId: string) => void;
+  onRewind?: (jobId: string, prompt: string) => void;
 }) {
   const hasEventMessages = turn.events.some((event) => event.kind === 'message');
   const toolCalls = turn.events.filter((event) => event.kind === 'tool_use').length;
@@ -434,7 +465,16 @@ function HistoryTurn({
       {turn.messages
         .filter((message) => message.role === 'user')
         .map((message) => (
-          <ThreadTurn key={message.id} message={message} busy={busy} />
+          <ThreadTurn
+            key={message.id}
+            message={message}
+            busy={busy}
+            onRewind={
+              rewindAnchorJobId && onRewind
+                ? () => onRewind(rewindAnchorJobId, message.content)
+                : undefined
+            }
+          />
         ))}
       <div aria-label={`Turn ${turn.turnNo} agent activity`} className="mt-2">
         {turn.events.map((event, index) => (
@@ -1110,12 +1150,27 @@ export function JobDetail({
     if (!efforts.includes(effort)) setEffort(highestEffort(efforts));
   }, [config, efforts, effort]);
 
+  // Edit & rewind creates the native child immediately, then leaves the
+  // replacement prompt as a one-shot draft on that child's landing page.
+  useEffect(() => {
+    const key = `agent-rewind-draft-${job.id}`;
+    let draft: string | null = null;
+    try {
+      draft = sessionStorage.getItem(key);
+      if (draft) sessionStorage.removeItem(key);
+    } catch {
+      return;
+    }
+    if (draft) setFollowUp(draft);
+  }, [job.id]);
+
   const selectedAttempt = job.attempts.find((attempt) => attempt.no === attemptNo);
   const visibleEvents = job.events.filter(
     (event) => event.attemptNo === undefined || attemptNo === 0 || event.attemptNo === attemptNo,
   );
   const pill = STATE_PILL[job.state];
   const isActive = job.state === 'running' || job.state === 'queued';
+  const isSuccessful = job.state === 'done' || job.state === 'needs_review';
   const latestTerminalEvent = [...job.events]
     .reverse()
     .find(
@@ -1218,8 +1273,8 @@ export function JobDetail({
   }
 
   // Fork creates a second native session in this chat's shared workspace and
-  // navigates to its copied display history.
-  async function forkFrom(anchorJobId: string) {
+  // navigates to its copied display history; draft prefills Edit & rewind.
+  async function forkFrom(anchorJobId: string, draft?: string) {
     if (forking) return;
     if (
       job.workspaceShared &&
@@ -1234,6 +1289,13 @@ export function JobDetail({
     setActionError(null);
     try {
       const fork = await forkAgentJob(anchorJobId);
+      if (draft) {
+        try {
+          sessionStorage.setItem(`agent-rewind-draft-${fork.id}`, draft);
+        } catch {
+          // Blocked storage only loses the prefill, never the native fork.
+        }
+      }
       toast.success('Conversation forked');
       router.push(`/${fork.id}`);
     } catch (cause: unknown) {
@@ -1252,10 +1314,11 @@ export function JobDetail({
     : allThreadMessages;
   const canForkAnchor = (anchorJobId: string) => {
     if (!job.sandboxId) return false;
-    return Boolean(
-      job.workspaceShared && job.nativeForkAvailable && anchorJobId === job.id && !isActive,
-    );
+    return Boolean(job.workspaceShared && job.nativeForkAvailable && anchorJobId && !isActive);
   };
+  const currentRewindAnchor = historyTurns
+    ? [...historyTurns].reverse().find((turn) => turn.forkable)?.jobId
+    : undefined;
   return (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
       <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
@@ -1396,30 +1459,52 @@ export function JobDetail({
               </div>
             ) : (
               <div className="flex-1">
-                {historyTurns?.map((turn) => (
-                  <HistoryTurn
-                    key={turn.jobId}
-                    turn={turn}
-                    busy={forking}
-                    onFork={
-                      canForkAnchor(turn.jobId)
-                        ? (anchorJobId) => void forkFrom(anchorJobId)
-                        : undefined
-                    }
-                  />
-                ))}
-                {threadMessages.map((message) => (
-                  <ThreadTurn
-                    key={message.id}
-                    message={message}
-                    busy={forking}
-                    onFork={
-                      message.role === 'assistant' && canForkAnchor(message.jobId)
-                        ? () => void forkFrom(message.jobId)
-                        : undefined
-                    }
-                  />
-                ))}
+                {historyTurns?.map((turn, index) => {
+                  const rewindAnchorJobId = [...historyTurns.slice(0, index)]
+                    .reverse()
+                    .find((candidate) => candidate.forkable)?.jobId;
+                  return (
+                    <HistoryTurn
+                      key={turn.jobId}
+                      turn={turn}
+                      rewindAnchorJobId={rewindAnchorJobId}
+                      busy={forking}
+                      onFork={
+                        turn.forkable && canForkAnchor(turn.jobId)
+                          ? (anchorJobId) => void forkFrom(anchorJobId)
+                          : undefined
+                      }
+                      onRewind={
+                        rewindAnchorJobId && canForkAnchor(rewindAnchorJobId)
+                          ? (anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)
+                          : undefined
+                      }
+                    />
+                  );
+                })}
+                {threadMessages.map((message) => {
+                  const rewindAnchor =
+                    message.role === 'user' && currentRewindAnchor !== message.jobId
+                      ? currentRewindAnchor
+                      : undefined;
+                  return (
+                    <ThreadTurn
+                      key={message.id}
+                      message={message}
+                      busy={forking}
+                      onFork={
+                        message.role === 'assistant' && isSuccessful && canForkAnchor(message.jobId)
+                          ? () => void forkFrom(message.jobId)
+                          : undefined
+                      }
+                      onRewind={
+                        rewindAnchor && canForkAnchor(rewindAnchor)
+                          ? () => void forkFrom(rewindAnchor, message.content)
+                          : undefined
+                      }
+                    />
+                  );
+                })}
 
                 {job.historyIncludesPrompt ? null : (
                   <div className="group my-4 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-4 py-3 shadow-subtle">
@@ -1432,6 +1517,18 @@ export function JobDetail({
                         <CopyIcon />
                         Copy
                       </MessageActionButton>
+                      {currentRewindAnchor && canForkAnchor(currentRewindAnchor) ? (
+                        <MessageActionButton
+                          label="Edit & rewind"
+                          onClick={() =>
+                            void forkFrom(currentRewindAnchor, job.prompt || job.title)
+                          }
+                          disabled={forking}
+                        >
+                          <RewindIcon />
+                          Edit & rewind
+                        </MessageActionButton>
+                      ) : null}
                     </MessageActions>
                   </div>
                 )}
@@ -1473,7 +1570,10 @@ export function JobDetail({
                       event={event}
                       busy={forking}
                       onFork={
-                        event.kind === 'message' && canForkAnchor(job.id) && !isActive
+                        event.kind === 'message' &&
+                        isSuccessful &&
+                        canForkAnchor(job.id) &&
+                        !isActive
                           ? () => void forkFrom(job.id)
                           : undefined
                       }

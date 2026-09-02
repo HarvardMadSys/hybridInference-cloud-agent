@@ -27,7 +27,7 @@ def _host(
     credential: bool = True,
     configured_root: str = "/var/lib/docker",
     daemon_root: str = "/var/lib/docker",
-    capability: str = "shared-sandbox-v1",
+    capability: str = "shared-sandbox-v1,native-fork-at-anchor-v1",
     credential_rejected: bool = False,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
@@ -203,6 +203,7 @@ def test_shared_live_check_attests_every_runner_and_broker(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert "shared-live ready" in result.stdout
     assert "shared-sandbox-v1" in result.stdout
+    assert "native-fork-at-anchor-v1" in result.stdout
 
 
 def test_shared_live_check_fails_when_runner_does_not_advertise(tmp_path: Path) -> None:
@@ -210,6 +211,13 @@ def test_shared_live_check_fails_when_runner_does_not_advertise(tmp_path: Path) 
 
     assert result.returncode != 0
     assert "did not attest shared-sandbox-v1" in result.stderr
+
+
+def test_shared_live_check_requires_historical_fork_attestation(tmp_path: Path) -> None:
+    result = _run(_host(tmp_path, capability="shared-sandbox-v1"), "check")
+
+    assert result.returncode != 0
+    assert "did not attest native-fork-at-anchor-v1" in result.stderr
 
 
 def test_shared_live_check_fails_for_a_rejected_host_credential(tmp_path: Path) -> None:

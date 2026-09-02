@@ -9,8 +9,12 @@ validation and imports the same values so the two claim gates cannot drift.
 from __future__ import annotations
 
 SHARED_SANDBOX_CAPABILITY = "shared-sandbox-v1"
+NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
 SHARED_DEPLOYMENT_CAPABILITY_PREFIX = "shared-sandbox-deployment:"
-SHARED_SANDBOX_PROTOCOL = "v1"
+# v2 adds the provider-transcript anchor carried by native fork requests.  A
+# v1 retained container may still serve ordinary follow-up turns, but must not
+# be asked to interpret a historical anchor that its bundled helpers ignore.
+SHARED_SANDBOX_PROTOCOL = "v2"
 SHARED_SANDBOX_RUNTIME_PINS = {
     "claude-code": "2.1.220",
     "codex": "0.145.0",

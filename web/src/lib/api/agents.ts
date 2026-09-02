@@ -520,9 +520,10 @@ export async function followUpAgentJob(
 }
 
 /**
- * Capability-gated shared chats native-fork the latest settled conversation
- * into a second live CLI session in the same sandbox/workspace. Historical
- * chats without retained sandbox state keep the DB-only compatibility path.
+ * Capability-gated shared chats native-fork the selected settled assistant
+ * boundary into a second live CLI session in the same sandbox/workspace.
+ * Chats without retained native state fail closed; transcript copying never
+ * substitutes for provider context.
  *
  * The fork-only call starts/probes the child's resident CLI but sends no
  * prompt and performs no model call. Returns the copied anchor turn — the

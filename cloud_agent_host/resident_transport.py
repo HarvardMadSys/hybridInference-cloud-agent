@@ -507,6 +507,7 @@ class ResidentTransportFactory:
         source: ResidentTransport,
         operation_id: str,
         target_launch: ResidentLaunch,
+        source_native_turn_no: int,
     ) -> str:
         """Materialize or recover one prompt-free, journaled native fork."""
         source_id = source.native_session_id
@@ -514,6 +515,8 @@ class ResidentTransportFactory:
             raise DriverError("native fork source has no settled session id")
         if not operation_id:
             raise DriverError("native fork operation id is required")
+        if source_native_turn_no < 1:
+            raise DriverError("native fork turn must be positive")
         if source.launch.runtime_id != target_launch.runtime_id:
             raise DriverError("native fork cannot change runtime")
         if source.launch.runtime_version != target_launch.runtime_version:
@@ -528,6 +531,7 @@ class ResidentTransportFactory:
             "runtime_id": source.launch.runtime_id,
             "runtime_version": source.launch.runtime_version,
             "source_session_id": source_id,
+            "source_native_turn_no": source_native_turn_no,
             "target_thread_id": target_launch.thread_id,
             "target_slot_id": target_launch.slot_id,
         }
@@ -565,12 +569,19 @@ class ResidentTransportFactory:
             self._write_fork_journal(spec, operation_id, preparing)
             child_id = ""
 
-        if not child_id and runtime_id in {"codex", "opencode", "kilo"}:
+        if not child_id and runtime_id in {"codex", "pi", "opencode", "kilo"}:
             fork = getattr(source.session, "fork_native", None)
             if fork is None:
                 raise DriverError(f"runtime {runtime_id!r} has no live native fork")
             try:
-                child_id = str(fork(source_session_id=source_id, operation_id=operation_id) or "")
+                child_id = str(
+                    fork(
+                        source_session_id=source_id,
+                        operation_id=operation_id,
+                        source_native_turn_no=source_native_turn_no,
+                    )
+                    or ""
+                )
             except Exception:
                 if runtime_id != "codex" or codex_baseline is None:
                     raise
@@ -589,9 +600,12 @@ class ResidentTransportFactory:
                     raise
                 child_id = next(iter(recovered))
         elif not child_id and runtime_id == "claude-code":
-            child_id = self._fork_claude(spec, source_id, source.launch.slot_id)
-        elif not child_id and runtime_id == "pi":
-            child_id = self._fork_pi(spec, source_id, target_launch)
+            child_id = self._fork_claude(
+                spec,
+                source_id,
+                source.launch.slot_id,
+                source_native_turn_no,
+            )
         elif not child_id:
             raise DriverError(f"runtime {runtime_id!r} has no native fork path")
         if not child_id or child_id == source_id:
@@ -623,7 +637,13 @@ class ResidentTransportFactory:
             )
             normalization_slot = target_launch.slot_id
         elif runtime_id == "pi":
-            normalization_slot = target_launch.slot_id
+            # Pi's RPC fork/clone switches the process itself onto the child.
+            # Close that probe so the supervisor resumes the source locator;
+            # the child is opened independently in its reserved slot.  The
+            # child session file was written by the source UID, so expose that
+            # UID's new files to the shared member group before target resume.
+            source.close()
+            normalization_slot = source.launch.slot_id
         else:
             normalization_slot = source.launch.slot_id
 
@@ -755,11 +775,17 @@ print(json.dumps(sorted(children), separators=(",", ":")))
             raise DriverError("Codex native fork journal recovery baseline is not canonical")
         return set(value)
 
-    def _fork_claude(self, spec: ChatSandboxSpec, source_id: str, source_slot: int) -> str:
+    def _fork_claude(
+        self,
+        spec: ChatSandboxSpec,
+        source_id: str,
+        source_slot: int,
+        source_native_turn_no: int,
+    ) -> str:
         uid = MEMBER_UID_BASE + source_slot
         result = self._manager.exec_capture(
             spec,
-            ["claude-session-fork", source_id],
+            ["claude-session-fork", source_id, str(source_native_turn_no)],
             env={
                 "HOME": f"/home/agent-member-{source_slot}",
                 "CLAUDE_CONFIG_DIR": f"{CHAT_STATE_DIR}/claude",
@@ -781,33 +807,6 @@ print(json.dumps(sorted(children), separators=(",", ":")))
         if not isinstance(receipt, dict) or receipt.get("source_session_id") != source_id:
             raise DriverError("Claude native fork returned the wrong source session")
         return str(receipt.get("session_id") or "")
-
-    def _fork_pi(
-        self,
-        spec: ChatSandboxSpec,
-        source_id: str,
-        target_launch: ResidentLaunch,
-    ) -> str:
-        driver = get_driver("pi")
-        opener = getattr(driver, "launch_fork_live", None)
-        if opener is None:
-            raise DriverError("pi driver has no prompt-free fork transport")
-        probe = opener(self._launch_context(spec, target_launch), source_session_id=source_id)
-        try:
-            ensure_started = getattr(probe, "ensure_started", None)
-            if ensure_started is None:
-                raise DriverError("pi fork transport cannot prove readiness")
-            ensure_started(
-                model=target_launch.model,
-                reasoning_effort=target_launch.reasoning_effort,
-            )
-            child_id = str(getattr(probe.runtime, "session_id", None) or "")
-            if not child_id or child_id == source_id:
-                raise DriverError("pi --fork returned an invalid child session id")
-            return child_id
-        finally:
-            with contextlib.suppress(Exception):
-                probe.close()
 
     @staticmethod
     def _journal_key(operation_id: str) -> str:

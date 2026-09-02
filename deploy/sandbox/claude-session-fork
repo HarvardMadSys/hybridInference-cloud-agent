@@ -6,13 +6,70 @@ from __future__ import annotations
 import json
 import sys
 
-from claude_agent_sdk import fork_session
+from claude_agent_sdk import fork_session, get_session_messages
+
+
+def assistant_anchor(messages, source_native_turn_no: int) -> str:
+    """Return the inclusive top-level assistant UUID closing one native turn."""
+    if source_native_turn_no < 1:
+        raise ValueError("native turn number must be positive")
+    top_level_users = [
+        index
+        for index, message in enumerate(messages)
+        if message.type == "user"
+        and message.parent_tool_use_id is None
+        and message.parent_agent_id is None
+        and isinstance(message.message, dict)
+        and message.message.get("role") == "user"
+    ]
+    if source_native_turn_no > len(top_level_users):
+        raise ValueError(
+            "native history does not contain the requested fork turn "
+            f"({source_native_turn_no} of {len(top_level_users)})"
+        )
+    start = top_level_users[source_native_turn_no - 1] + 1
+    end = (
+        top_level_users[source_native_turn_no]
+        if source_native_turn_no < len(top_level_users)
+        else len(messages)
+    )
+    assistant = next(
+        (
+            message
+            for message in reversed(messages[start:end])
+            if message.type == "assistant"
+            and message.parent_tool_use_id is None
+            and message.parent_agent_id is None
+            and message.uuid
+        ),
+        None,
+    )
+    if assistant is None:
+        raise ValueError("requested native turn has no settled assistant boundary")
+    return str(assistant.uuid)
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: claude-session-fork <source-session-id>")
-    result = fork_session(sys.argv[1], directory="/workspace")
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: claude-session-fork <source-session-id> <native-turn-no>")
+    try:
+        source_native_turn_no = int(sys.argv[2])
+    except ValueError:
+        raise SystemExit("native turn number must be an integer") from None
+    if source_native_turn_no < 1:
+        raise SystemExit("native turn number must be positive")
+
+    messages = get_session_messages(sys.argv[1], directory="/workspace")
+    try:
+        anchor = assistant_anchor(messages, source_native_turn_no)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+
+    result = fork_session(
+        sys.argv[1],
+        directory="/workspace",
+        up_to_message_id=anchor,
+    )
     print(
         json.dumps(
             {

@@ -99,39 +99,12 @@ compose() {
   docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}" "$@"
 }
 
-log "building images"
-compose build
-
-# The retained/shared-live topology is the only executable path, so there is
-# no old control-plane/runner protocol to fall back to during a rolling
-# deployment. The host job deploys first and publishes the exact target SHA
-# only after its runners, broker, tunnel and Docker data root pass their local
-# checks. This reverse probe then proves a fresh heartbeat and that the control
-# plane can actually dial every eligible broker before replacing live API
-# containers. It is a compatibility fence, not a feature switch.
-log "waiting for target ${SHA} host readiness and reverse broker probes"
-compose run --rm --no-deps control-plane \
-  python -m cloud_agent.deploy_readiness \
-    --timeout-seconds "${SHARED_READY_TIMEOUT}" \
-    --expected-deployment-sha "${SHA}"
-
-# `up -d` with no service list brings the whole stack to the file's desired
-# state, which is what makes this idempotent. It also runs `migrate` — the
-# compose file has control-plane wait on `service_completed_successfully`, so
-# alembic finishes before anything reads the schema it just changed.
-log "starting"
-compose up -d --remove-orphans
-
-# Ports come from .env when set; these defaults match the compose file's.
+# Ports come from .env when set; these defaults match the compose file.  The
+# control-plane port is needed before the compatibility fence only on a true
+# cold start, where there is no old API through which the newly deployed host
+# can publish its post-deploy heartbeat.
 CP_PORT="$(from_env AGENT_CONTROL_PLANE_PORT)"; CP_PORT="${CP_PORT:-8000}"
 WEB_PORT="$(from_env AGENT_WEB_PORT)";          WEB_PORT="${WEB_PORT:-3002}"
-
-# The web app is mounted under a base path, so `/` is a 404 by design and a
-# health check pointed at it fails every deploy of a working app. Checked
-# against the running staging host: `/` → 404, `/agents` → 200, `/agents/` →
-# 308. The un-slashed form is the one to probe.
-WEB_BASE_PATH="$(from_env AGENT_WEB_BASE_PATH)"
-WEB_BASE_PATH="${WEB_BASE_PATH%/}"
 
 wait_for() {
   local name="$1" url="$2" deadline=$((SECONDS + HEALTH_TIMEOUT))
@@ -148,6 +121,80 @@ wait_for() {
   die "${name} health check timed out after ${HEALTH_TIMEOUT}s (deployed ${SHA}, previous ${PREVIOUS})"
 }
 
+# A normal rolling deployment keeps the old API alive until the target host is
+# proved.  After `compose down`, however, no API exists for that host to send
+# the fresh heartbeat the proof deliberately requires.  If this script starts
+# a bootstrap API and then fails, put the public services back in their prior
+# stopped state rather than leaving an unproved generation accepting traffic.
+COLD_BOOTSTRAP_STARTED=0
+cleanup_failed_cold_bootstrap() {
+  local status=$?
+  if [ "${status}" -ne 0 ] && [ "${COLD_BOOTSTRAP_STARTED}" = "1" ]; then
+    log "cold-start deployment failed; stopping bootstrap public services"
+    compose stop web mcp-relay control-plane >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_failed_cold_bootstrap EXIT
+
+log "building images"
+compose build
+
+# Readiness itself uses the agent-owned database. Bring up only that durable
+# dependency and migrate it before evaluating the host fence. This ordering is
+# required on a cold machine (and after `compose down`): `compose run --no-deps`
+# cannot discover a Postgres container that does not exist, while putting the
+# full `compose up` first would replace the API before compatibility was proved.
+# Migrations shipped here must therefore remain backwards-compatible with the
+# still-running API for the duration of this rolling-deploy window.
+log "starting deployment database"
+# `--wait` makes the healthcheck above an executable ordering guarantee. A
+# plain detached `up` returns as soon as the container has started, which can
+# still let Alembic race Postgres initialization on a fresh volume.
+compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres
+log "migrating deployment database"
+compose run --rm --no-deps migrate
+
+# Heartbeats are HTTP calls to the control plane, not direct database writes.
+# Preserve the old API on an ordinary rolling deploy.  Only when no API
+# container is running may this target generation be started early so a host
+# coming up in parallel can enroll/heartbeat and release the compatibility
+# fence.  There is no older service to replace in this branch; user work stays
+# queued until an eligible host appears.  The EXIT trap above restores the
+# public services to stopped if the fence or a later health check fails.
+RUNNING_CONTROL_ID="$(compose ps --status running -q control-plane 2>/dev/null || true)"
+if [ -z "${RUNNING_CONTROL_ID}" ]; then
+  COLD_BOOTSTRAP_STARTED=1
+  log "no running control plane; starting target API for cold-start host heartbeat"
+  compose up -d --no-deps control-plane
+  wait_for "bootstrap control plane" "http://127.0.0.1:${CP_PORT}/healthz"
+fi
+
+# The retained/shared-live topology is the only executable path, so there is
+# no old control-plane/runner protocol to fall back to during a rolling
+# deployment. The host and control jobs start in parallel. The host publishes
+# the exact target SHA only after its runners, broker, tunnel and Docker data
+# root pass their local checks; this reverse probe then waits for that fact and
+# proves the control plane can dial every eligible broker before replacing live
+# API containers. It is a compatibility fence, not a feature switch.
+log "waiting for target ${SHA} host readiness and reverse broker probes"
+compose run --rm --no-deps control-plane \
+  python -m cloud_agent.deploy_readiness \
+    --timeout-seconds "${SHARED_READY_TIMEOUT}" \
+    --expected-deployment-sha "${SHA}"
+
+# `up -d` with no service list brings the whole stack to the file's desired
+# state, which is what makes this idempotent. Compose may run the idempotent
+# migration service again; the API still waits on its successful completion.
+log "starting"
+compose up -d --remove-orphans
+
+# The web app is mounted under a base path, so `/` is a 404 by design and a
+# health check pointed at it fails every deploy of a working app. Checked
+# against the running staging host: `/` → 404, `/agents` → 200, `/agents/` →
+# 308. The un-slashed form is the one to probe.
+WEB_BASE_PATH="$(from_env AGENT_WEB_BASE_PATH)"
+WEB_BASE_PATH="${WEB_BASE_PATH%/}"
+
 wait_for "control plane" "http://127.0.0.1:${CP_PORT}/healthz"
 wait_for "web"           "http://127.0.0.1:${WEB_PORT}${WEB_BASE_PATH:-/}"
 
@@ -155,4 +202,5 @@ wait_for "web"           "http://127.0.0.1:${WEB_PORT}${WEB_BASE_PATH:-/}"
 # answer "what is actually running here", and a value written before the health
 # check would answer it wrongly for every failed deploy.
 printf '%s\n' "${SHA}" > .deployed-sha
+COLD_BOOTSTRAP_STARTED=0
 log "deployed ${SHA} (was ${PREVIOUS})"

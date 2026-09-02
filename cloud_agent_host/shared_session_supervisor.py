@@ -166,7 +166,7 @@ class _Group:
 
 
 NativeForker = Callable[
-    [ChatSandboxSpec, ResidentTransport, str, ResidentLaunch],
+    [ChatSandboxSpec, ResidentTransport, str, ResidentLaunch, int],
     str,
 ]
 
@@ -737,6 +737,7 @@ class SharedChatSessionSupervisor:
         *,
         operation_id: str,
         source_native_session_id: str,
+        source_native_turn_no: int,
         target_thread_id: str,
         target_slot_id: int,
         source_launch: ResidentLaunch,
@@ -765,6 +766,7 @@ class SharedChatSessionSupervisor:
                         operation_id=operation_id,
                         source_thread_id=source_thread_id,
                         source_native_session_id=source_native_session_id,
+                        source_native_turn_no=source_native_turn_no,
                         target_thread_id=target_thread_id,
                         target_slot_id=target_slot_id,
                         source_launch=source_launch,
@@ -785,6 +787,7 @@ class SharedChatSessionSupervisor:
         operation_id: str,
         source_thread_id: str,
         source_native_session_id: str,
+        source_native_turn_no: int,
         target_thread_id: str,
         target_slot_id: int,
         source_launch: ResidentLaunch,
@@ -887,6 +890,7 @@ class SharedChatSessionSupervisor:
                 native_session_id=None,
                 slot_id=target_slot_id,
             ),
+            source_native_turn_no,
         )
         # Some HTTP-backed CLIs persist the child successfully and then close
         # the server process that handled the fork request. A successful fork

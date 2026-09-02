@@ -7,8 +7,8 @@ the pool credential.  A runner checking either from its own network would be
 answering a different question.
 
 The deploy runs this command *before* replacing the live control-plane
-container. The host has already deployed first; this is the second half of the
-rolling compatibility fence. A control plane cannot replace the current API
+container. Host and control jobs start in parallel; this runtime check is the
+ordering edge between them. A control plane cannot replace the current API
 until a newly heartbeating host at the exact target commit has proved the
 complete path. There is no alternate executor to enable or fall back to.
 """
@@ -30,6 +30,7 @@ from cloud_agent.broker_routing import ENV_BROKER_TOKEN, probe_broker
 from cloud_agent.host_pool import HOST_ONLINE
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     shared_deployment_capability,
 )
@@ -72,6 +73,8 @@ def _host_rejection(
     capabilities = row.get("capabilities")
     if not isinstance(capabilities, list) or SHARED_SANDBOX_CAPABILITY not in capabilities:
         return f"host has not advertised {SHARED_SANDBOX_CAPABILITY}"
+    if NATIVE_FORK_AT_ANCHOR_CAPABILITY not in capabilities:
+        return f"host has not advertised {NATIVE_FORK_AT_ANCHOR_CAPABILITY}"
     deployment_capability = shared_deployment_capability(expected_deployment_sha)
     if deployment_capability not in capabilities:
         return f"host has not completed target deployment {expected_deployment_sha}"
@@ -177,7 +180,8 @@ async def shared_live_readiness(
     return SharedLiveReadiness(
         True,
         f"{hosts} completed target deployment {expected_deployment_sha}, sent fresh "
-        f"{SHARED_SANDBOX_CAPABILITY} heartbeats, and every broker answered",
+        f"{SHARED_SANDBOX_CAPABILITY} and {NATIVE_FORK_AT_ANCHOR_CAPABILITY} "
+        "heartbeats, and every broker answered",
         host=ready_hosts[0],
     )
 

@@ -1016,17 +1016,8 @@ class PiRuntime(GenericRuntime):
         session_state_dir: str | None = None,
         resume_session_id: str | None = None,
         activation_dir: str | None = None,
-        fork_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
-        """Build pi 0.73.1's bidirectional JSONL RPC process.
-
-        ``--fork`` is a prompt-free native mutation performed by a temporary
-        RPC process.  It cannot be combined with ``--session``; keeping that
-        rule here mirrors the exact CLI validation instead of relying on a
-        later opaque exit.
-        """
-        if resume_session_id and fork_session_id:
-            raise ValueError("pi cannot resume and fork in one invocation")
+        """Build pi 0.73.1's bidirectional JSONL RPC process."""
         argv, env = self.prepare(
             workdir=workdir,
             task_prompt="",
@@ -1044,8 +1035,6 @@ class PiRuntime(GenericRuntime):
         argv[mode_at] = "rpc"
         prompt_at = argv.index("-p")
         del argv[prompt_at : prompt_at + 2]
-        if fork_session_id:
-            argv += ["--fork", fork_session_id]
         return argv, env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:

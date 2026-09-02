@@ -55,6 +55,7 @@ from cloud_agent.host_pool import (
     transition_allowed,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
 
 logger = get_logger(__name__)
 
@@ -109,7 +110,10 @@ def _new_session_fork_id() -> str:
 # upgraded database is readable, but they are deliberately absent from this
 # executable read shape: old rows cannot be resumed, forked, or silently
 # upgraded into a different topology.
-_THREAD_SANDBOX_SOURCE = """
+_NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
+
+
+_THREAD_SANDBOX_SOURCE = f"""
 (
     SELECT
         m.thread_id, g.id AS sandbox_id, g.generation, g.host, g.container_id,
@@ -138,7 +142,8 @@ _THREAD_SANDBOX_SOURCE = """
             SELECT 1 FROM agent_runner_hosts h
             WHERE h.host = g.host
               AND h.status = 'online'
-              AND h.capabilities @> '["shared-sandbox-v1"]'::jsonb
+              AND h.capabilities @> '{_NATIVE_FORK_CAPABILITY_JSON}'::jsonb
+              AND h.sandbox_image_digest = g.sandbox_image_digest
         ) AS native_fork_capable,
         COALESCE((
             SELECT jsonb_agg(
@@ -241,6 +246,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "thread_id": row["thread_id"],
         "parent_job_id": row["parent_job_id"],
         "turn_no": row["turn_no"],
+        "native_turn_no": row["native_turn_no"],
         "user_id": row["user_id"],
         "repo": row["repo"],
         "base_sha": row["base_sha"],
@@ -272,7 +278,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
 
 
 _JOB_COLUMNS = (
-    "id, thread_id, parent_job_id, turn_no, user_id, repo, base_sha, task_prompt, "
+    "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, repo, base_sha, task_prompt, "
     "setup_script, runtime, model, execution_profile, reasoning_effort, state, "
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
@@ -860,6 +866,11 @@ class AgentJobStore:
                 result.setdefault(key, value)
         if source is not None:
             result["source_job"] = _job_row_to_dict(source)
+            # Assigned at the native settlement boundary, not inferred from
+            # the final job state. A lease may expire after context settlement
+            # but before job finalization; subsequent successful turns must
+            # still resolve to the provider's correct ordinal.
+            result["source_native_turn_no"] = int(source["native_turn_no"] or 0)
         return result
 
     async def prepare_session_fork(
@@ -869,7 +880,7 @@ class AgentJobStore:
         user_id: str,
         idempotency_key: str,
     ) -> dict[str, Any] | None:
-        """Fence a latest-settled shared member and reserve an invisible child."""
+        """Fence a settled native boundary and reserve an invisible child."""
         if not idempotency_key or len(idempotency_key) > 256 or "\x00" in idempotency_key:
             raise ValueError("session fork idempotency key is invalid")
         operation_id = _new_session_fork_id()
@@ -903,16 +914,29 @@ class AgentJobStore:
             )
             if source is None:
                 return None
-            if source["state"] not in TERMINAL_STATES:
-                return {"error": "not_settled"}
+            # A failed/cancelled platform job is not proof of a completed native
+            # exchange. Historical rewind is anchored only on successful turns;
+            # their ordinal is resolved against the provider transcript later.
+            if source["state"] != SUCCEEDED:
+                return {"error": "anchor_not_settled"}
+            if not source["native_turn_no"]:
+                return {"error": "native_context_unavailable"}
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT m.*, g.generation AS sandbox_generation, g.host,
                        g.container_id, g.container_name, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
                        g.execution_profile, g.state AS sandbox_state,
                        g.resident_slot_capacity, g.memory_limit, g.cpu_limit,
-                       g.stop_timeout_seconds
+                       g.stop_timeout_seconds,
+                       EXISTS (
+                           SELECT 1 FROM agent_runner_hosts h
+                           WHERE h.host = g.host
+                             AND h.status = 'online'
+                             AND h.capabilities @>
+                                 '{_NATIVE_FORK_CAPABILITY_JSON}'::jsonb
+                             AND h.sandbox_image_digest = g.sandbox_image_digest
+                       ) AS native_fork_capable
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 WHERE m.thread_id = $1 AND g.mode = 'shared_live'
@@ -922,11 +946,30 @@ class AgentJobStore:
             )
             if row is None:
                 return {"error": "not_shared_live"}
-            if row["last_settled_job_id"] != source_job_id:
-                return {"error": "not_latest_settled"}
+            if not row["native_fork_capable"]:
+                # Existing retained v1 containers remain valid for follow-up
+                # turns.  Their bundled helpers do not understand historical
+                # anchors, however, so never degrade an at-anchor fork into a
+                # latest-session fork during a rolling upgrade.
+                return {"error": "native_fork_unavailable"}
             if row["active_attempt_id"] is not None:
                 return {"error": "source_busy"}
             if row["native_state"] != "ready" or not row["native_session_id"]:
+                return {"error": "native_context_unavailable"}
+            latest_settled = await conn.fetchrow(
+                """
+                SELECT turn_no, native_turn_no FROM agent_jobs
+                WHERE id = $1 AND thread_id = $2
+                """,
+                row["last_settled_job_id"],
+                source["thread_id"],
+            )
+            if (
+                latest_settled is None
+                or latest_settled["native_turn_no"] is None
+                or int(latest_settled["turn_no"]) < int(source["turn_no"])
+                or int(latest_settled["native_turn_no"]) < int(source["native_turn_no"])
+            ):
                 return {"error": "native_context_unavailable"}
             if row["resident_slot_id"] is None:
                 return {"error": "sandbox_not_ready"}
@@ -1397,14 +1440,14 @@ class AgentJobStore:
                     await conn.execute(
                         """
                         INSERT INTO agent_jobs (
-                            id, thread_id, parent_job_id, turn_no, user_id, repo,
+                            id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, repo,
                             base_sha, task_prompt, setup_script, runtime, model,
                             execution_profile, reasoning_effort, state,
                             published_pr_url, published_commit_sha, detail, metadata,
                             fork_source_job_id, mcp_servers, created_at, updated_at
                         ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                            $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20,
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                            $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21,
                             clock_timestamp(), clock_timestamp()
                         )
                         """,
@@ -1412,6 +1455,7 @@ class AgentJobStore:
                         operation["target_thread_id"],
                         previous_copy,
                         turn["turn_no"],
+                        turn["native_turn_no"],
                         operation["user_id"],
                         turn["repo"],
                         turn["base_sha"],
@@ -4041,6 +4085,26 @@ class AgentJobStore:
             )
             if shared is None:
                 return None
+            native_turn_no = await conn.fetchval(
+                """
+                UPDATE agent_jobs current_job
+                SET native_turn_no = COALESCE(
+                    current_job.native_turn_no,
+                    (
+                        SELECT COALESCE(MAX(previous.native_turn_no), 0) + 1
+                        FROM agent_jobs previous
+                        WHERE previous.thread_id = $1
+                          AND previous.turn_no < current_job.turn_no
+                    )
+                )
+                WHERE current_job.id = $2 AND current_job.thread_id = $1
+                RETURNING native_turn_no
+                """,
+                thread_id,
+                job_id,
+            )
+            if native_turn_no is None:
+                raise ValueError("shared workspace settlement has no native turn ordinal")
             if base_sha is None:
                 base_sha = await conn.fetchval(
                     "SELECT base_sha FROM agent_jobs WHERE id = $1",

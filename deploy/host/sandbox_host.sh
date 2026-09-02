@@ -329,6 +329,10 @@ check_shared_live_stack() {
       *,shared-sandbox-v1,*) ;;
       *) die "runner $id did not attest shared-sandbox-v1 (reported '${capability:-no capability}'); check slots, runtime/helper pins, sandbox image labels and broker configuration" ;;
     esac
+    case ",${capability}," in
+      *,native-fork-at-anchor-v1,*) ;;
+      *) die "runner $id did not attest native-fork-at-anchor-v1 (reported '${capability:-no capability}'); historical Fork/Edit & rewind is not deployment-ready" ;;
+    esac
   done
 
   # Capability attestation proves the runner is configured to dial the broker;
@@ -362,7 +366,7 @@ check_shared_live_stack() {
     die "the control plane rejected this host's persisted credential; re-enrol the host before enabling retained chats"
   fi
 
-  log "host-local shared-live ready: every runner attests shared-sandbox-v1, control plane is reachable, and broker storage is ${broker_root}"
+  log "host-local shared-live ready: every runner attests shared-sandbox-v1 and native-fork-at-anchor-v1, control plane is reachable, and broker storage is ${broker_root}"
 }
 
 # ── Isolation ─────────────────────────────────────────────────────────

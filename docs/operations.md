@@ -510,6 +510,12 @@ least two host slots and runner replicas; staging defaults both to three. One
 runner executes one synchronous turn, so `AGENT_HOST_SLOTS` must not exceed
 `AGENT_RUNNER_REPLICAS`.
 
+Historical Fork additionally requires `native-fork-at-anchor-v1` and an exact
+match between the host's current sandbox image digest and the retained group's
+pinned digest. A container kept from the previous image remains usable for
+normal follow-ups after a rollout, but its older fork helper is never asked to
+interpret a historical anchor.
+
 The Docker socket (or reviewed mTLS Engine endpoint) is the only host
 control/data interface for chat state. No repository, workspace, Agent CLI
 home, or session file is mapped from the host. Historical rows without a
@@ -589,18 +595,23 @@ and operational gates have passed.
 
 ### Rolling deployment order
 
-Deploy the sandbox host before the control plane. The host invalidates its
-ready marker, replaces the runner/broker stack, runs the isolation, tunnel,
+The host and control-plane Actions jobs start in parallel. The host invalidates
+its ready marker, replaces the runner/broker stack, runs the isolation, tunnel,
 runtime and retained Docker-root checks, records `.deployed-sha`, and only then
-publishes an exact `shared-sandbox-deployment:<sha>` capability. The
-control-plane deploy waits for a heartbeat newer than the start of that check
-and reverse-probes every eligible broker before `compose up` can replace the
-API. `SHARED_READY_TIMEOUT` controls that wait and defaults to 900 seconds.
+publishes an exact `shared-sandbox-deployment:<sha>` capability. In parallel,
+the control job builds and migrates, then waits for a heartbeat newer than the
+start of that check and reverse-probes every eligible broker before `compose
+up` can replace a running API. `SHARED_READY_TIMEOUT` controls that wait and
+defaults to 900 seconds.
 
 This fence is unconditional because retained/shared-live is the only executor.
 It cannot enable a legacy path and it cannot be bypassed by stale
 `AGENT_RESTARTABLE_*` or `AGENT_SHARED_LIVE_*` values. On failure, the existing
-control plane remains running and the deploy stops for operator repair.
+control plane remains running and the deploy stops for operator repair. On a
+true cold start there is no existing API through which the host can heartbeat,
+so the control script starts the target API alone after migration; a failed
+gate stops that bootstrap API again. Web and MCP do not start until the same
+exact-SHA fence succeeds.
 
 ### Retained Docker storage on a host
 

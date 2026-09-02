@@ -18,7 +18,7 @@ def test_only_registered_live_drivers_resolve():
         capabilities = driver.capabilities()
         assert capabilities.continuity == "resume"
         assert capabilities.resident_transport == "supervisor_live"
-        assert capabilities.fork == "latest_immediate"
+        assert capabilities.fork == "at_anchor"
         assert capabilities.concurrent_shared_workspace is True
 
     with pytest.raises(KeyError):

@@ -293,8 +293,8 @@ class FakeAgentJobStore:
         source = self.jobs.get(source_job_id)
         if source is None or source["user_id"] != user_id:
             return None
-        if source["state"] not in {"succeeded", "failed", "cancelled"}:
-            return {"error": "not_settled"}
+        if source["state"] != "succeeded":
+            return {"error": "anchor_not_settled"}
         sandbox = source.get("thread_sandbox")
         if not isinstance(sandbox, dict) or sandbox.get("shared_live") is not True:
             return {"error": "not_shared_live"}
@@ -329,6 +329,13 @@ class FakeAgentJobStore:
             "origin_thread_id": sandbox.get("origin_thread_id", source["thread_id"]),
             "source_job_id": source_job_id,
             "source_native_session_id": sandbox["native_session_id"],
+            "source_native_turn_no": sum(
+                1
+                for turn in self.jobs.values()
+                if turn["thread_id"] == source["thread_id"]
+                and turn["turn_no"] <= source["turn_no"]
+                and turn["state"] == "succeeded"
+            ),
             "source_activation_generation": sandbox.get("activation_generation", 1),
             "resident_slot_id": sandbox.get("resident_slot_id", 0),
             "target_thread_id": f"athr_fork_{self._next_job:04d}",
@@ -1713,6 +1720,7 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             assert kwargs["expected_container_id"] == "container-shared"
             assert kwargs["origin_thread_id"] == source_thread_id
             assert kwargs["source_native_session_id"] == "native-session-source"
+            assert kwargs["source_native_turn_no"] == 1
             assert kwargs["target_thread_id"] != source_thread_id
             return {
                 "operation_id": kwargs["operation_id"],
@@ -1770,6 +1778,81 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
     assert forked["thread_sandbox"]["container_id"] == source["thread_sandbox"]["container_id"]
     assert forked["thread_sandbox"]["native_session_id"] == "native-session-child"
     assert len(broker.calls) == 1
+
+
+async def test_shared_chat_can_fork_from_a_specific_historical_turn(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """The host receives the selected prefix, not an implicit latest fork."""
+
+    class Broker:
+        def __init__(self) -> None:
+            self.native_turns: list[int] = []
+
+        async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
+            self.native_turns.append(kwargs["source_native_turn_no"])
+            return {
+                "operation_id": kwargs["operation_id"],
+                "sandbox_id": kwargs["sandbox_id"],
+                "sandbox_generation": kwargs["generation"],
+                "container_id": kwargs["expected_container_id"],
+                "runtime_id": kwargs["runtime_id"],
+                "runtime_version": kwargs["runtime_version"],
+                "source_thread_id": source_thread_id,
+                "source_native_session_id": kwargs["source_native_session_id"],
+                "target_thread_id": kwargs["target_thread_id"],
+                "target_native_session_id": "native-session-at-turn-one",
+                "target_resident_slot_id": kwargs["target_slot_id"],
+                "source_residency_generation": kwargs["source_launch"]["residency_generation"],
+                "target_residency_generation": kwargs["target_launch"]["residency_generation"],
+                "source_process_generation": 3,
+                "target_process_generation": 1,
+            }
+
+    broker = Broker()
+    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first_id = await _create_job(client)
+        first = store.jobs[first_id]
+        first["state"] = "succeeded"
+        first["thread_sandbox"] = {
+            "thread_id": first["thread_id"],
+            "sandbox_id": "asbx_shared_historical",
+            "generation": 2,
+            "activation_generation": 2,
+            "container_id": "container-shared-historical",
+            "container_name": "freeinference-chat-shared-historical",
+            "runtime_id": "claude-code",
+            "runtime_version": "2.1.220",
+            "sandbox_image_digest": "sha256:shared-image",
+            "native_session_id": "native-session-source",
+            "state": "running",
+            "context_status": "live",
+            "shared_live": True,
+            "resident_slot_id": 0,
+            "resident_slot_capacity": 8,
+            "group_members": [],
+        }
+        second_response = await client.post(
+            f"/v1/agent/jobs/{first_id}/follow-ups",
+            json={"prompt": "a second completed turn"},
+        )
+        assert second_response.status_code == 201
+        second = store.jobs[second_response.json()["id"]]
+        second["state"] = "succeeded"
+
+        response = await client.post(
+            f"/v1/agent/jobs/{first_id}/fork",
+            headers={"Idempotency-Key": "fork-historical-turn-one"},
+        )
+
+    assert response.status_code == 201
+    forked = store.jobs[response.json()["id"]]
+    assert forked["turn_no"] == 1
+    assert forked["fork_source_job_id"] == first_id
+    assert broker.native_turns == [1]
+    assert second["thread_id"] == first["thread_id"]
 
 
 async def test_same_native_fork_request_has_one_external_coordinator(
