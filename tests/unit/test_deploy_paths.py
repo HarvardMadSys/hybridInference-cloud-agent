@@ -199,7 +199,10 @@ def test_no_file_references_a_source_repo_only_directory(path: Path) -> None:
 def test_the_workflow_targets_this_repository() -> None:
     """A repository guard left pointing at the source repo never runs here."""
     text = (REPO / ".github/workflows/agent-job-runner.yml").read_text(encoding="utf-8")
-    assert "HarvardMadSys/freeinference-cloud-agent" in text
+    assert "HarvardMadSys/hybridInference-cloud-agent" in text
+    # The repository was renamed on 2026-09-02; a guard still naming the old slug
+    # is a workflow that silently never runs (github.repository never matches).
+    assert "HarvardMadSys/freeinference-cloud-agent" not in text
     assert "HarvardMadSys/hybridInference" not in text
     assert "PYTHONPATH=. python -m cloud_agent_host.runner" in text
 

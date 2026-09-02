@@ -865,8 +865,8 @@ class CodexAppServerSession(_JsonResidentSession):
                 "method": "initialize",
                 "params": {
                     "clientInfo": {
-                        "name": "freeinference-cloud-agent",
-                        "title": "FreeInference Cloud Agent",
+                        "name": "hybridinference-cloud-agent",
+                        "title": "Cloud Agent",
                         "version": "1",
                     },
                     "capabilities": {

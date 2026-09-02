@@ -86,7 +86,7 @@ the commit it claims to be:
 ```bash
 cd /srv/freeinference-cloud-agent
 git init -b dev
-git remote add origin https://github.com/HarvardMadSys/freeinference-cloud-agent.git
+git remote add origin https://github.com/HarvardMadSys/hybridInference-cloud-agent.git
 git fetch <a local clone, or origin with credentials>
 git reset --mixed "$(cat .deployed-sha)"   # HEAD + index only; files untouched
 
