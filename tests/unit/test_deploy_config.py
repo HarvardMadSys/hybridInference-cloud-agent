@@ -102,7 +102,7 @@ def test_complete_local_edge_reresolves_recreated_services():
         assert f"server {upstream} resolve;" in config
 
 
-def test_the_standalone_edge_is_opt_in_and_loopback(compose: dict):
+def test_the_standalone_edge_is_opt_in_and_loopback():
     """The edge exists only for a deployment that owns its hostname.
 
     Under the gateway's hostname the console already splits `/agents/*`
@@ -112,7 +112,9 @@ def test_the_standalone_edge_is_opt_in_and_loopback(compose: dict):
     Loopback by default for the same reason every other published port is:
     the tunnel is on the host, and nothing else should reach it.
     """
-    edge = compose["services"]["edge"]
+    # The `compose` fixture is the runner host's stack; the edge lives beside
+    # the control plane and the web app, in the other file.
+    edge = yaml.safe_load(_CONTROL_PLANE_COMPOSE.read_text())["services"]["edge"]
     assert edge["profiles"] == ["edge"]
     assert edge["ports"] == ["${AGENT_EDGE_BIND:-127.0.0.1}:${AGENT_EDGE_PORT:-3003}:80"]
     assert edge["networks"] == ["control-plane"]
@@ -126,7 +128,7 @@ def test_the_standalone_edge_strips_the_api_prefix():
     the trailing slash forwards the prefix, and every API call 404s while the
     HTML still loads — a failure that reads as a client bug.
     """
-    text = (REPO / "deploy/control-plane/edge.nginx.conf").read_text()
+    text = (REPO_ROOT / "deploy/control-plane/edge.nginx.conf").read_text()
     api = text[text.index("location /api/") : text.index("location / ")]
     assert "proxy_pass http://cloud_agent_api/;" in api
     assert "proxy_buffering off;" in api, "the control plane streams events over SSE"
