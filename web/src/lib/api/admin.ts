@@ -73,7 +73,7 @@ export interface AgentRunnerHost {
 
 export interface AgentRunnerHostPool {
   hosts: AgentRunnerHost[];
-  /** Pinned host, or null when any runner may claim. */
+  /** New-chat placement host, or null when any runner may materialize one. */
   active_host: string | null;
   /**
    * The deployment's chosen CLI version per runtime id. A runtime absent here
@@ -92,7 +92,7 @@ export async function getAgentRunnerHosts(): Promise<AgentRunnerHostPool> {
   return jsonOrThrow<AgentRunnerHostPool>(await fetchWithAuth(API_BASE, HOSTS));
 }
 
-/** Pin new claims to one host, or pass null so any runner may claim. */
+/** Pin new-chat placement; existing retained groups stay on their owning host. */
 export async function setActiveAgentRunnerHost(host: string | null): Promise<AgentRunnerHostPool> {
   const resp = await fetchWithAuth(API_BASE, `${HOSTS}/active`, {
     method: 'PUT',

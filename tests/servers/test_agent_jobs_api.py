@@ -1676,6 +1676,63 @@ async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: Fak
     assert running.status_code == 409
 
 
+async def test_failed_turn_is_neither_advertised_nor_accepted_as_a_fork_anchor(
+    client: AsyncClient,
+    store: FakeAgentJobStore,
+):
+    job_id = await _create_job(client)
+    job = store.jobs[job_id]
+    job.update(
+        state="failed",
+        native_turn_no=1,
+        thread_sandbox={
+            "sandbox_id": "asbx_shared",
+            "shared_live": True,
+            "native_fork_capable": True,
+            "native_state": "ready",
+            "fork_operation_id": None,
+            "active_attempt_id": None,
+            "last_settled_job_id": job_id,
+        },
+    )
+
+    detail = await client.get(f"/v1/agent/jobs/{job_id}")
+    fork = await client.post(f"/v1/agent/jobs/{job_id}/fork")
+
+    assert detail.status_code == 200
+    assert detail.json()["native_fork_available"] is False
+    assert fork.status_code == 409
+    assert fork.json()["detail"]["error"]["type"] == "anchor_not_settled"
+
+
+async def test_successful_turn_needs_a_persisted_native_ordinal_before_advertising_fork(
+    client: AsyncClient,
+    store: FakeAgentJobStore,
+):
+    job_id = await _create_job(client)
+    job = store.jobs[job_id]
+    job.update(
+        state="succeeded",
+        native_turn_no=None,
+        thread_sandbox={
+            "sandbox_id": "asbx_shared",
+            "shared_live": True,
+            "native_fork_capable": True,
+            "native_state": "ready",
+            "fork_operation_id": None,
+            "active_attempt_id": None,
+            "last_settled_job_id": job_id,
+        },
+    )
+
+    without_ordinal = await client.get(f"/v1/agent/jobs/{job_id}")
+    job["native_turn_no"] = 1
+    with_ordinal = await client.get(f"/v1/agent/jobs/{job_id}")
+
+    assert without_ordinal.json()["native_fork_available"] is False
+    assert with_ordinal.json()["native_fork_available"] is True
+
+
 async def test_legacy_retained_chat_cannot_fall_back_to_a_docker_clone(
     store: FakeAgentJobStore, monkeypatch
 ):

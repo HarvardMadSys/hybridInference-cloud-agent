@@ -104,6 +104,7 @@ compose() {
 # cold start, where there is no old API through which the newly deployed host
 # can publish its post-deploy heartbeat.
 CP_PORT="$(from_env AGENT_CONTROL_PLANE_PORT)"; CP_PORT="${CP_PORT:-8000}"
+MCP_PORT="$(from_env AGENT_MCP_RELAY_PORT)"; MCP_PORT="${MCP_PORT:-8001}"
 WEB_PORT="$(from_env AGENT_WEB_PORT)";          WEB_PORT="${WEB_PORT:-3002}"
 
 wait_for() {
@@ -121,20 +122,21 @@ wait_for() {
   die "${name} health check timed out after ${HEALTH_TIMEOUT}s (deployed ${SHA}, previous ${PREVIOUS})"
 }
 
-# A normal rolling deployment keeps the old API alive until the target host is
-# proved.  After `compose down`, however, no API exists for that host to send
-# the fresh heartbeat the proof deliberately requires.  If this script starts
-# a bootstrap API and then fails, put the public services back in their prior
-# stopped state rather than leaving an unproved generation accepting traffic.
-COLD_BOOTSTRAP_STARTED=0
-cleanup_failed_cold_bootstrap() {
+# A normal rolling deployment keeps the old API and MCP relay alive until the
+# target host is proved. After `compose down` either service may independently
+# be absent: the host needs the API for its fresh heartbeat and both sandbox
+# relays for its exact-SHA probe. Track the services this invocation starts so
+# a failed deploy restores the *actual* prior state instead of stopping a
+# healthy service that happened to survive.
+BOOTSTRAP_SERVICES=()
+cleanup_failed_bootstrap() {
   local status=$?
-  if [ "${status}" -ne 0 ] && [ "${COLD_BOOTSTRAP_STARTED}" = "1" ]; then
-    log "cold-start deployment failed; stopping bootstrap public services"
-    compose stop web mcp-relay control-plane >/dev/null 2>&1 || true
+  if [ "${status}" -ne 0 ] && [ "${#BOOTSTRAP_SERVICES[@]}" -gt 0 ]; then
+    log "deployment failed; restoring previously stopped bootstrap services"
+    compose stop "${BOOTSTRAP_SERVICES[@]}" >/dev/null 2>&1 || true
   fi
 }
-trap cleanup_failed_cold_bootstrap EXIT
+trap cleanup_failed_bootstrap EXIT
 
 log "building images"
 compose build
@@ -162,11 +164,28 @@ compose run --rm --no-deps migrate
 # queued until an eligible host appears.  The EXIT trap above restores the
 # public services to stopped if the fence or a later health check fails.
 RUNNING_CONTROL_ID="$(compose ps --status running -q control-plane 2>/dev/null || true)"
+RUNNING_MCP_ID="$(compose ps --status running -q mcp-relay 2>/dev/null || true)"
 if [ -z "${RUNNING_CONTROL_ID}" ]; then
-  COLD_BOOTSTRAP_STARTED=1
-  log "no running control plane; starting target API for cold-start host heartbeat"
-  compose up -d --no-deps control-plane
+  BOOTSTRAP_SERVICES+=(control-plane)
+fi
+if [ -z "${RUNNING_MCP_ID}" ]; then
+  BOOTSTRAP_SERVICES+=(mcp-relay)
+fi
+if [ "${#BOOTSTRAP_SERVICES[@]}" -gt 0 ]; then
+  log "starting missing target services for parallel host readiness: ${BOOTSTRAP_SERVICES[*]}"
+  # Host readiness probes both fixed sandbox relays. Starting only the API on
+  # a clean machine, or assuming MCP is running merely because the API is,
+  # deadlocks deployment: the host cannot publish its exact-SHA marker while
+  # the full compose up that would start the missing service is fenced on that
+  # marker. The MCP app exposes only the scoped relay surface and both services
+  # are loopback-bound; browser-facing web remains stopped until the gate.
+  compose up -d --no-deps "${BOOTSTRAP_SERVICES[@]}"
+fi
+if [ -z "${RUNNING_CONTROL_ID}" ]; then
   wait_for "bootstrap control plane" "http://127.0.0.1:${CP_PORT}/healthz"
+fi
+if [ -z "${RUNNING_MCP_ID}" ]; then
+  wait_for "bootstrap MCP relay" "http://127.0.0.1:${MCP_PORT}/healthz"
 fi
 
 # The retained/shared-live topology is the only executable path, so there is
@@ -202,5 +221,5 @@ wait_for "web"           "http://127.0.0.1:${WEB_PORT}${WEB_BASE_PATH:-/}"
 # answer "what is actually running here", and a value written before the health
 # check would answer it wrongly for every failed deploy.
 printf '%s\n' "${SHA}" > .deployed-sha
-COLD_BOOTSTRAP_STARTED=0
+BOOTSTRAP_SERVICES=()
 log "deployed ${SHA} (was ${PREVIOUS})"

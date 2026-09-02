@@ -8,10 +8,9 @@
 # on a box that was only ever meant to run jobs. This script uses a standalone
 # compose file with no backend in it at all.
 #
-# The piece that makes a remote host work is a tunnel container on both the
-# closed agent network and a routable one, forwarding a single port to the
-# gateway host over ssh. The sandbox's world stays what it always was: one
-# endpoint, ours. Nothing here is reachable from the sandbox except that.
+# Three narrow tunnel containers carry model, MCP, and control-plane traffic.
+# Setup dependency traffic has a separate route-less network whose only uplink
+# is the allowlist proxy. Agent turns remain on the closed relay network.
 #
 # Usage, from the repository root on the runner host:
 #
@@ -20,13 +19,15 @@
 #   deploy/host/sandbox_host.sh check    # prove the tunnel reaches the gateway
 #   deploy/host/sandbox_host.sh down     # stop everything this file started
 #
-# Required in .env on this host:
+# Required in the environment or in .env on this host:
 #
 #   COMPOSE_PROJECT                this stack's compose project, unique on this machine
 #   AGENT_SANDBOX_IMAGE            image the sandboxes run
-#   AGENT_TUNNEL_SSH_DESTINATION   user@gateway-host
-#   AGENT_TUNNEL_SSH_KEY           path to this host's tunnel key (mounted ro)
-#   AGENT_TUNNEL_SSH_KNOWN_HOSTS   path to a known_hosts holding the gateway's key
+#   AGENT_TUNNEL_*                 inference tunnel destination/key/known_hosts
+#   AGENT_MCP_TUNNEL_*             MCP-only tunnel destination/key/known_hosts
+#   AGENT_CONTROL_PLANE_TUNNEL_*   control API tunnel destination/key/known_hosts
+#   AGENT_BROKER_REVERSE_*         the control plane's route back to this broker
+#   AGENT_WORKSPACE_BROKER_TOKEN   broker authentication secret
 #
 # Restrict the tunnel key on the gateway host — it needs one forwarded port and
 # no shell:
@@ -92,11 +93,21 @@ COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
 # to be labelled.
 compose() {
   [[ -n "$COMPOSE_PROJECT" ]] || die \
-    "COMPOSE_PROJECT is not set — put it in .env (e.g. freeinference-cloud-agent-sandbox-staging). It is what keeps this stack apart from the other environment on this machine."
-  docker compose \
-    -p "$COMPOSE_PROJECT" \
-    -f deploy/host/docker-compose.sandbox.yml \
-    --env-file .env "$@"
+    "COMPOSE_PROJECT is not set — export it or put it in .env (e.g. freeinference-cloud-agent-sandbox-staging). It is what keeps this stack apart from the other environment on this machine."
+  if [[ -f .env ]]; then
+    docker compose \
+      -p "$COMPOSE_PROJECT" \
+      -f deploy/host/docker-compose.sandbox.yml \
+      --env-file .env "$@"
+  else
+    # Compose already receives exported configuration from this process. Do not
+    # pass a path that does not exist: env-only hosts are an explicitly supported
+    # direct-operator path, even though the CD wrapper deliberately requires a
+    # deploy-root .env so credentials survive non-interactive service restarts.
+    docker compose \
+      -p "$COMPOSE_PROJECT" \
+      -f deploy/host/docker-compose.sandbox.yml "$@"
+  fi
 }
 
 SANDBOX_IMAGE="$(env_or_dotenv AGENT_SANDBOX_IMAGE)"
@@ -105,37 +116,35 @@ GATEWAY_HOSTNAME="$(env_or_dotenv AGENT_GATEWAY_HOSTNAME)"
 GATEWAY_HOSTNAME="${GATEWAY_HOSTNAME:-agent-gateway}"
 TUNNEL_PORT="$(env_or_dotenv AGENT_TUNNEL_LISTEN_PORT)"
 TUNNEL_PORT="${TUNNEL_PORT:-8080}"
+MCP_HOSTNAME="$(env_or_dotenv AGENT_MCP_HOSTNAME)"
+MCP_HOSTNAME="${MCP_HOSTNAME:-agent-mcp}"
+MCP_TUNNEL_PORT="$(env_or_dotenv AGENT_MCP_TUNNEL_LISTEN_PORT)"
+MCP_TUNNEL_PORT="${MCP_TUNNEL_PORT:-8000}"
+CONTROL_PLANE_HOSTNAME="$(env_or_dotenv AGENT_CONTROL_PLANE_HOSTNAME)"
+CONTROL_PLANE_HOSTNAME="${CONTROL_PLANE_HOSTNAME:-agent-control-plane}"
 EGRESS_NETWORK="$(env_or_dotenv AGENT_EGRESS_NETWORK_PLATFORM_ONLY)"
 EGRESS_NETWORK="${EGRESS_NETWORK:-agent-egress}"
 
-# Which agent CLI versions this deployment bakes into its sandbox image.
-#
-# All optional, and unset is the normal case: an empty value passes no build
-# argument at all, so the image is built from the reviewed default in
-# `deploy/sandbox/Dockerfile.agent-sandbox` — byte for byte the image this host
-# built before any of this existed. Setting one is how an environment runs a
-# version other than the default (staging soaking a new CLI, or a deployment
-# pinned back after a bad one) without editing the source both environments
-# build from.
-#
-# Named exactly as the Dockerfile's `ARG`s — one name for one thing, so there
-# is no mapping table between `.env` and `--build-arg` for a typo to hide in.
-#
-# The reads below are one spelled-out call each rather than a loop, because
-# `test_env_examples.py` recognises configuration by exactly this literal
-# `env_or_dotenv NAME` shape; a loop over a list of names would read to it as
-# no configuration at all. `test_runtime_version_pins.py` then holds this set
-# equal to the set of pins the Dockerfile declares, so a runtime added there
-# without a line here fails rather than being quietly unconfigurable.
-CLAUDE_CODE_VERSION="$(env_or_dotenv CLAUDE_CODE_VERSION)"
-CODEX_VERSION="$(env_or_dotenv CODEX_VERSION)"
-PI_VERSION="$(env_or_dotenv PI_VERSION)"
-OPENCODE_VERSION="$(env_or_dotenv OPENCODE_VERSION)"
-KILO_VERSION="$(env_or_dotenv KILO_VERSION)"
+# These two networks are new to the standalone stack, so unlike the historical
+# platform-only network they can safely derive collision-free names from the
+# Compose project. An explicit value still wins. The runner creates chat
+# containers through the Docker API, outside Compose, so it must receive the
+# exact daemon-side name Compose creates.
+TRUSTED_EGRESS_NETWORK="$(env_or_dotenv AGENT_EGRESS_NETWORK_TRUSTED)"
+TRUSTED_EGRESS_NETWORK="${TRUSTED_EGRESS_NETWORK:-${COMPOSE_PROJECT:+${COMPOSE_PROJECT}-}agent-egress-trusted}"
+AGENT_EGRESS_NETWORK_TRUSTED="$TRUSTED_EGRESS_NETWORK"
+export AGENT_EGRESS_NETWORK_TRUSTED
+UPLINK_EGRESS_NETWORK="$(env_or_dotenv AGENT_EGRESS_NETWORK_UPLINK)"
+UPLINK_EGRESS_NETWORK="${UPLINK_EGRESS_NETWORK:-${COMPOSE_PROJECT:+${COMPOSE_PROJECT}-}agent-egress-uplink}"
+AGENT_EGRESS_NETWORK_UPLINK="$UPLINK_EGRESS_NETWORK"
+export AGENT_EGRESS_NETWORK_UPLINK
 
 # Extra versions the image also carries, comma-separated, so an admin can switch
-# this deployment between them from the admin page without a rebuild. Empty is
-# the normal case and means the image holds exactly the pins above.
+# new chats between them from the admin page without a rebuild. The image's
+# default versions are protocol pins shared by the host and control plane, so
+# they change in source together with `SHARED_SANDBOX_RUNTIME_PINS`, not through
+# one host's environment. Empty is the normal case and means the image holds
+# exactly those reviewed defaults.
 #
 # Build time decides the menu; the admin page decides which item is active. The
 # control plane cannot offer a version this image does not contain, so what goes
@@ -152,12 +161,20 @@ require_env() {
   # that restarts forever, a missing known_hosts as a refusal nobody reads.
   local missing=() name
   for name in AGENT_SANDBOX_IMAGE \
+              AGENT_WORKSPACE_BROKER_TOKEN \
               AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_KEY \
-              AGENT_TUNNEL_SSH_KNOWN_HOSTS; do
+              AGENT_TUNNEL_SSH_KNOWN_HOSTS \
+              AGENT_MCP_TUNNEL_SSH_DESTINATION AGENT_MCP_TUNNEL_SSH_KEY \
+              AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS \
+              AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION \
+              AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY \
+              AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS \
+              AGENT_BROKER_REVERSE_BIND AGENT_BROKER_REVERSE_PORT \
+              AGENT_WORKSPACE_BROKER_ADVERTISE_URL; do
     [[ -n "$(env_or_dotenv "$name")" ]] || missing+=("$name")
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
-    die "missing in .env: ${missing[*]} (see ENVIRONMENT.md)"
+    die "missing from the environment or .env: ${missing[*]} (see ENVIRONMENT.md)"
   fi
 
   # On a machine running two environments, the enrollment-state root must be
@@ -181,15 +198,37 @@ require_env() {
     fi
   fi
 
-  local key known
-  key="$(env_or_dotenv AGENT_TUNNEL_SSH_KEY)"
-  known="$(env_or_dotenv AGENT_TUNNEL_SSH_KNOWN_HOSTS)"
-  [[ -r "$key" ]] || die "AGENT_TUNNEL_SSH_KEY=$key is not readable on this host"
-  [[ -s "$known" ]] || die \
-    "AGENT_TUNNEL_SSH_KNOWN_HOSTS=$known is missing or empty. Create it with
-     'ssh-keyscan <gateway-host> > $known' and check the fingerprint before
-     trusting it — this file is what stops the enrolled-host credential going to
-     whatever answers on that address."
+  local prefix key known
+  for prefix in AGENT_TUNNEL AGENT_MCP_TUNNEL AGENT_CONTROL_PLANE_TUNNEL; do
+    key="$(env_or_dotenv "${prefix}_SSH_KEY")"
+    known="$(env_or_dotenv "${prefix}_SSH_KNOWN_HOSTS")"
+    [[ -r "$key" ]] || die "${prefix}_SSH_KEY=$key is not readable on this host"
+    [[ -s "$known" ]] || die \
+      "${prefix}_SSH_KNOWN_HOSTS=$known is missing or empty. Generate it with
+       ssh-keyscan, verify the far host's fingerprint, and mount it read-only;
+       host verification is mandatory for every scoped relay."
+  done
+
+  # This compose file is the standalone/remote-host topology: its broker has no
+  # published host port and shares no Docker network with the control-plane
+  # stack. The reverse forward is therefore not an optional optimisation. A
+  # missing half would let the host attest locally, then make the control deploy
+  # wait the full readiness timeout on an address it can never reach.
+  local reverse_bind reverse_port advertise_url
+  reverse_bind="$(env_or_dotenv AGENT_BROKER_REVERSE_BIND)"
+  reverse_port="$(env_or_dotenv AGENT_BROKER_REVERSE_PORT)"
+  advertise_url="$(env_or_dotenv AGENT_WORKSPACE_BROKER_ADVERTISE_URL)"
+  case "$reverse_bind" in
+    0.0.0.0|127.0.0.1|localhost|::|::1)
+      die "AGENT_BROKER_REVERSE_BIND=$reverse_bind is not the control-plane Docker bridge gateway: loopback is invisible to its containers and a wildcard exposes the broker to the host network"
+      ;;
+  esac
+  [[ "$reverse_port" =~ ^[0-9]+$ \
+     && "$reverse_port" -ge 1 \
+     && "$reverse_port" -le 65535 ]] \
+    || die "AGENT_BROKER_REVERSE_PORT must be an integer from 1 through 65535 (got '$reverse_port')"
+  [[ "$advertise_url" =~ ^https?://[^/]+(:[0-9]+)?(/.*)?$ ]] \
+    || die "AGENT_WORKSPACE_BROKER_ADVERTISE_URL must be an http(s) URL reachable by the control plane (got '$advertise_url')"
 }
 
 normalise_host_path() {
@@ -212,7 +251,20 @@ validate_retained_config() {
     die "retained sandbox mode requires AGENT_ENROLL_TOKEN or the persisted host credential at ${state_root%/}/credential"
   fi
 
-  local slots runner_replicas resident_capacity
+  # The image defaults and SHARED_SANDBOX_RUNTIME_PINS are one reviewed
+  # protocol unit. A per-host default override used to build successfully and
+  # then make every runner omit shared-sandbox-v1, because the control plane
+  # quite correctly rejected the mismatched attestation. Fail at configuration
+  # time instead. A staging/rollback version is added to *_EXTRA_VERSIONS and
+  # selected in Admin; a new default changes both source pin locations.
+  local default_pin configured_pin
+  for default_pin in CLAUDE_CODE_VERSION CODEX_VERSION PI_VERSION OPENCODE_VERSION KILO_VERSION; do
+    configured_pin="$(env_or_dotenv "$default_pin")"
+    [[ -z "$configured_pin" ]] || die \
+      "$default_pin is a source-level shared protocol pin, not a host override. Remove it and put ${default_pin%_VERSION}_EXTRA_VERSIONS=$configured_pin in this host's configuration, then select that version in Admin; or update the Dockerfile and SHARED_SANDBOX_RUNTIME_PINS together in a reviewed change."
+  done
+
+  local slots runner_replicas resident_capacity chat_idle_timeout
   slots="$(env_or_dotenv AGENT_HOST_SLOTS)"
   slots="${slots:-3}"
   [[ "$slots" =~ ^[0-9]+$ && "$slots" -ge 2 ]] \
@@ -229,6 +281,39 @@ validate_retained_config() {
      && "$resident_capacity" -ge 2 \
      && "$resident_capacity" -le 128 ]] \
     || die "AGENT_SHARED_RESIDENT_CAPACITY must be an integer from 2 through 128 (got '$resident_capacity')"
+  chat_idle_timeout="$(env_or_dotenv AGENT_CHAT_IDLE_TIMEOUT_S)"
+  chat_idle_timeout="${chat_idle_timeout:-1800}"
+  [[ "$chat_idle_timeout" =~ ^[0-9]+([.][0-9]+)?$ \
+     ]] && awk -v value="$chat_idle_timeout" 'BEGIN { exit !(value > 0) }' \
+    || die "AGENT_CHAT_IDLE_TIMEOUT_S must be a positive number of seconds (got '$chat_idle_timeout')"
+
+  # The Trusted network is closed and the proxy alone straddles it and the
+  # routable uplink. Reusing a name here collapses that boundary and can put a
+  # chat directly on an internet-routable bridge while the config still says
+  # `trusted`.
+  if [[ "$EGRESS_NETWORK" == "$TRUSTED_EGRESS_NETWORK" \
+     || "$EGRESS_NETWORK" == "$UPLINK_EGRESS_NETWORK" \
+     || "$TRUSTED_EGRESS_NETWORK" == "$UPLINK_EGRESS_NETWORK" ]]; then
+    die "platform-only ('$EGRESS_NETWORK'), trusted ('$TRUSTED_EGRESS_NETWORK'), and proxy-uplink ('$UPLINK_EGRESS_NETWORK') networks must be three distinct names"
+  fi
+  # Docker DNS returns every container that claims an alias. If two relays use
+  # one name, requests are round-robined to services that listen on different
+  # ports: a readiness probe can win the lottery and a real job can lose it.
+  # All three aliases share the runner's internal network, and the first two
+  # also share the sandbox network, so pairwise uniqueness is mandatory.
+  if [[ "$GATEWAY_HOSTNAME" == "$MCP_HOSTNAME" \
+     || "$GATEWAY_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" \
+     || "$MCP_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]]; then
+    die "AGENT_GATEWAY_HOSTNAME ('$GATEWAY_HOSTNAME'), AGENT_MCP_HOSTNAME ('$MCP_HOSTNAME'), and AGENT_CONTROL_PLANE_HOSTNAME ('$CONTROL_PLANE_HOSTNAME') must be distinct Docker aliases"
+  fi
+  # The platform-only name predates project-derived defaults and is immutable
+  # for retained containers already attached to it. Inventing a new name on
+  # upgrade would leave stopped chats on the old network while moving their
+  # relays away, so preserve an explicitly provisioned per-stack name.
+  if [[ -n "$(env_or_dotenv SIBLING_COMPOSE_PROJECTS)" \
+     && -z "$(env_or_dotenv AGENT_EGRESS_NETWORK_PLATFORM_ONLY)" ]]; then
+    die "this host runs another environment, so AGENT_EGRESS_NETWORK_PLATFORM_ONLY must name this stack's own existing closed network. Reusing 'agent-egress' lets staging and production resolve each other's relays; changing it blindly strands retained containers on the old network."
+  fi
 
   # Chat files live in Docker's writable layer. Verify the daemon whose socket
   # the broker receives is the daemon backed by the configured storage root;
@@ -306,11 +391,48 @@ complete_shared_live_marker() {
   log "shared-live host deployment ${deployment_sha} is ready for control-plane activation"
 }
 
+probe_sandbox_relay() {
+  local network="$1" url="$2" label="$3" deadline="$4" diagnostic="$5"
+  local backend code="" first_failure=1
+  local runtime_args=()
+  backend="$(env_or_dotenv AGENT_SANDBOX_BACKEND)"
+  backend="${backend:-kata}"
+  if [[ "$backend" == "kata" ]]; then
+    runtime_args=(--runtime "$KATA_RUNTIME")
+  fi
+
+  while true; do
+    # Pass the URL as an argv value rather than interpolating operator config
+    # into shell source. `-f` matters: a tunnel that reaches a 503 is reachable
+    # but not ready, and must not publish the exact-SHA capability.
+    if code="$(docker run --rm --network "$network" \
+         ${runtime_args[@]+"${runtime_args[@]}"} \
+         --entrypoint /bin/sh "$SANDBOX_IMAGE" \
+         -c 'curl -fsS -o /dev/null -w "%{http_code}" --max-time 15 "$1"' \
+         sh "$url" 2>/dev/null)" && [[ "$code" == "200" ]]; then
+      log "the sandbox network can reach the healthy ${label} through its tunnel"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      die "a sandbox on ${network} cannot reach a healthy ${url} (last HTTP status: ${code:-none}). ${diagnostic}"
+    fi
+    if [[ "$first_failure" == "1" ]]; then
+      log "${label} is not ready from ${network} yet; waiting for the parallel control deployment"
+      first_failure=0
+    fi
+    sleep 3
+  done
+}
+
 check_shared_live_stack() {
-  # Ask every running replica to attest the exact image labels, helper pins,
-  # runtime drivers, broker settings and slot count used by the claim path.
-  # Inspecting only its environment would call a half-configured host ready —
-  # the exact failure mode the shared-sandbox-v1 capability is meant to avoid.
+  local deadline="${1:-$SECONDS}"
+  # Ask every running replica to complete the same executable preflight as its
+  # claim loop, then attest the exact image labels, helper pins, runtime
+  # drivers, broker settings and slot count used by the claim path.  Calling
+  # preflight here is intentional: a freshly started runner may still be
+  # blocked inside its own proxy/kernel/network probe while `docker exec`
+  # already works.  Static capability inspection during that window would
+  # publish the ready marker immediately before the runner crash-looped.
   local runner_ids running_replicas expected_replicas id capability first_id=""
   runner_ids="$(compose ps -q runner)" \
     || die "could not list runner replicas for shared-live verification"
@@ -323,8 +445,8 @@ check_shared_live_stack() {
   for id in $runner_ids; do
     [[ -n "$first_id" ]] || first_id="$id"
     capability="$(docker exec "$id" python -c \
-      'from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities; from cloud_agent_host.sandbox import build_backend_from_env; backend = build_backend_from_env(); print(",".join(capabilities(backend, backend.version_stamp())))')" \
-      || die "runner $id could not perform shared-live capability attestation"
+      'from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities; from cloud_agent_host.sandbox import build_backend_from_env; backend = build_backend_from_env(); backend.preflight(); print(",".join(capabilities(backend, backend.version_stamp())))')" \
+      || die "runner $id could not complete sandbox preflight and shared-live capability attestation"
     case ",${capability}," in
       *,shared-sandbox-v1,*) ;;
       *) die "runner $id did not attest shared-sandbox-v1 (reported '${capability:-no capability}'); check slots, runtime/helper pins, sandbox image labels and broker configuration" ;;
@@ -339,9 +461,13 @@ check_shared_live_stack() {
   # make the dial as well. This catches a broker crash-loop (including a
   # DockerRootDir mismatch) before the control plane begins assigning chats.
   local broker_root expected_root control_status recent_runner_logs
-  broker_root="$(docker exec "$first_id" python -c \
-    'import json, os, urllib.request; url = os.environ["AGENT_WORKSPACE_BROKER_URL"].rstrip("/") + "/health"; request = urllib.request.Request(url, headers={"X-Agent-Workspace-Token": os.environ["AGENT_WORKSPACE_BROKER_TOKEN"]}); print(json.load(urllib.request.urlopen(request, timeout=10)).get("retained_docker_data_root") or "")')" \
-    || die "runner $first_id cannot authenticate to the workspace broker health endpoint"
+  while ! broker_root="$(docker exec "$first_id" python -c \
+    'import json, os, urllib.request; url = os.environ["AGENT_WORKSPACE_BROKER_URL"].rstrip("/") + "/health"; request = urllib.request.Request(url, headers={"X-Agent-Workspace-Token": os.environ["AGENT_WORKSPACE_BROKER_TOKEN"]}); print(json.load(urllib.request.urlopen(request, timeout=10)).get("retained_docker_data_root") or "")')"; do
+    (( SECONDS < deadline )) \
+      || die "runner $first_id cannot authenticate to the workspace broker health endpoint"
+    log "workspace broker is not ready yet; retrying"
+    sleep 3
+  done
   expected_root="$(env_or_dotenv AGENT_RETAINED_DOCKER_DATA_ROOT)"
   expected_root="$(normalise_host_path "${expected_root:-/var/lib/docker}")"
   broker_root="$(normalise_host_path "$broker_root")"
@@ -352,9 +478,13 @@ check_shared_live_stack() {
   # can also reach the control plane that receives its capability heartbeat.
   # The control-plane deployment performs the authoritative second half: it
   # waits for a fresh database heartbeat and dials this broker in reverse.
-  control_status="$(docker exec "$first_id" python -c \
-    'import os, urllib.request; url = os.environ["AGENT_CONTROL_PLANE_URL"].rstrip("/") + "/healthz"; print(urllib.request.urlopen(url, timeout=10).status)')" \
-    || die "runner $first_id cannot reach the control-plane health endpoint"
+  while ! control_status="$(docker exec "$first_id" python -c \
+    'import os, urllib.request; url = os.environ["AGENT_CONTROL_PLANE_URL"].rstrip("/") + "/healthz"; print(urllib.request.urlopen(url, timeout=10).status)')"; do
+    (( SECONDS < deadline )) \
+      || die "runner $first_id cannot reach the control-plane health endpoint"
+    log "control plane is not ready through its tunnel yet; waiting for the parallel deployment"
+    sleep 3
+  done
   [[ "$control_status" == "200" ]] \
     || die "control-plane health endpoint returned '${control_status:-no status}'"
 
@@ -465,10 +595,10 @@ cmd_up() {
   require_env
   validate_retained_config
   prepare_shared_live_marker
-  # Before the build, not after: a host that cannot isolate should not spend
-  # ten minutes building an image it must not run.
+  # The cheap host check stays before the build. The authoritative guest-kernel
+  # probe needs the just-built image and therefore runs immediately after it;
+  # this also makes the first deployment work when no old image exists.
   require_kata_host
-  kata_smoke_test
 
   # This machine's name in the admin host switch. Resolved here because the
   # script runs on the host: inside a container the hostname is a container id,
@@ -480,17 +610,14 @@ cmd_up() {
         "(set AGENT_RUNNER_HOST in .env to rename it)"
   fi
 
-  # Only the pins this deployment actually sets are passed; the rest fall
-  # through to the Dockerfile's reviewed defaults. Logged one per line, because
-  # "which CLI version did this host build" is the first question asked when a
-  # job behaves differently here than elsewhere, and the build log is where
-  # somebody looks before the database.
+  # Only extra, operator-approved menu entries are passed. The defaults fall
+  # through to the Dockerfile's reviewed pins and are attested as one protocol
+  # unit by both the runner and control plane.
   local build_args=() name
-  for name in CLAUDE_CODE_VERSION CODEX_VERSION PI_VERSION OPENCODE_VERSION KILO_VERSION \
-              CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
+  for name in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
               OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
     [[ -n "${!name}" ]] || continue
-    log "runtime pin: ${name}=${!name} (overrides the Dockerfile default)"
+    log "runtime menu: ${name}=${!name} (adds to the reviewed Dockerfile default)"
     build_args+=(--build-arg "${name}=${!name}")
   done
 
@@ -501,7 +628,9 @@ cmd_up() {
   docker build ${build_args[@]+"${build_args[@]}"} \
     -f deploy/sandbox/Dockerfile.agent-sandbox -t "$SANDBOX_IMAGE" .
 
-  log "starting the gateway tunnel and ${replicas} runner(s)"
+  kata_smoke_test
+
+  log "starting the three purpose-scoped tunnels, egress proxy, broker, and ${replicas} runner(s)"
   # `--remove-orphans` because a renamed service leaves its old container
   # running otherwise: compose only replaces containers for services the file
   # still declares, so `agent-runner` outliving `runner` would mean two sets of
@@ -517,8 +646,12 @@ cmd_up() {
   # whole script — the logs below are exactly what explains a failed probe, so
   # they must still print. But the verdict is kept: swallowing it printed the
   # tunnel diagnosis, then "done", and an operator reads the last line.
-  local probe_ok=0
-  ( cmd_check ) || probe_ok=$?
+  local readiness_wait probe_ok=0
+  readiness_wait="$(env_or_dotenv SHARED_READY_TIMEOUT)"
+  readiness_wait="${readiness_wait:-900}"
+  [[ "$readiness_wait" =~ ^[1-9][0-9]*$ ]] \
+    || die "SHARED_READY_TIMEOUT must be a positive integer (got '$readiness_wait')"
+  ( cmd_check "$readiness_wait" ) || probe_ok=$?
   compose logs --tail 20 runner
   if [[ "$probe_ok" -ne 0 ]]; then
     die "the containers started but the deployment readiness check failed (see
@@ -534,6 +667,10 @@ cmd_up() {
 }
 
 cmd_check() {
+  local wait_seconds="${1:-0}"
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] \
+    || die "host readiness wait must be a non-negative integer (got '$wait_seconds')"
+  local deadline=$((SECONDS + wait_seconds))
   validate_retained_config
   # Ask from inside the closed network, which is the only vantage point whose
   # answer means anything: reaching the gateway from this host's shell proves
@@ -541,24 +678,27 @@ cmd_check() {
   local network="$EGRESS_NETWORK"
   local url="http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}/health"
   log "probing ${url} from the ${network} network"
-  if docker run --rm --network "$network" --entrypoint /bin/sh "$SANDBOX_IMAGE" \
-       -c "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 '$url'" 2>/dev/null; then
-    printf '\n'
-    log "the sandbox network can reach the gateway through the tunnel"
-    check_shared_live_stack
-    return 0
-  fi
-  printf '\n'
-  die "a sandbox on ${network} cannot reach ${url}.
-     Check 'docker logs' for the gateway-tunnel container: an ssh that
-     cannot authenticate or cannot bind its forward exits, and the container
-     restarts. Resolving the name is not enough — the forward has to be up."
+  probe_sandbox_relay "$network" "$url" "inference gateway" "$deadline" \
+    "Check 'docker logs' for the gateway-tunnel container: an SSH connection that cannot authenticate or bind its forward restarts."
+
+  # MCP is a second deliberately narrow destination on the same closed
+  # network. A healthy model tunnel does not prove this separate SSH key,
+  # listener, alias, or forward. Probe it from the sandbox's actual network
+  # before publishing the exact-SHA readiness marker.
+  url="http://${MCP_HOSTNAME}:${MCP_TUNNEL_PORT}/healthz"
+  log "probing ${url} from the ${network} network"
+  probe_sandbox_relay "$network" "$url" "MCP-only relay" "$deadline" \
+    "Check the mcp-tunnel SSH key, forward, and the control plane's MCP-only listener on port 8001."
+
+  check_shared_live_stack "$deadline"
 }
 
 cmd_status() {
   compose ps
   printf '\n'
-  compose logs --tail 20 gateway-tunnel runner
+  compose logs --tail 20 \
+    gateway-tunnel mcp-tunnel control-plane-tunnel \
+    agent-egress-proxy workspace-broker runner
 }
 
 cmd_down() {
@@ -574,7 +714,7 @@ cmd_mark_ready() {
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
   preflight) cmd_preflight ;;
-  check) cmd_check ;;
+  check) cmd_check 0 ;;
   status) cmd_status ;;
   down) cmd_down ;;
   mark-ready) shift; cmd_mark_ready "$@" ;;

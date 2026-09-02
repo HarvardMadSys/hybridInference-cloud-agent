@@ -512,7 +512,7 @@ def test_the_heartbeat_thread_survives_an_unexpected_exception(monkeypatch) -> N
 
 
 def test_establish_residency_hands_back_the_generation_and_the_grant(monkeypatch) -> None:
-    """The wire boundary of design §14: the fence and the thread-attributed
+    """The retained design's §6 wire boundary: fence plus thread-attributed
     credential arrive together, and a workspace-only answer (no credential)
     collapses to ``credential=None`` rather than an empty string."""
     identity = enrollment.HostIdentity(host="h1", credential="aht.h1.secret")

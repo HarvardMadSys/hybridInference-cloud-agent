@@ -71,8 +71,9 @@ Chat data lives only in the retained container's Docker writable layer:
 
 - `/workspace`, including Git metadata, dirty files, dependencies, and build
   outputs;
-- `/agent-state`, including runtime-native sessions and platform fork
-  receipts;
+- `/agent-state`, including runtime-native sessions;
+- `/home/agent/.freeinference-platform`, containing platform-owned native-fork
+  receipts outside provider state roots that some CLIs enumerate;
 - member-private provider homes where a CLI cannot safely share one home
   between concurrent processes.
 
@@ -126,9 +127,13 @@ operation before the API returns a usable child chat. It is not deferred until
 the child's first message.
 
 The selected anchor may be any successfully settled native turn in the source
-chat, including a historical one. A sibling may continue running because the
-workspace is intentionally shared; only the source session is quiesced while
-its immutable prefix is forked.
+chat, including a historical one, once it has a positive persisted
+`native_turn_no`, the owner host advertises at-anchor support, and the host's
+current image digest matches the group's pin. Failed/cancelled turns and
+successful rows whose ordinal has not settled are neither advertised nor
+accepted as anchors. A sibling may continue running because the workspace is
+intentionally shared; only the source session is quiesced while its immutable
+prefix is forked.
 
 The platform assigns `native_turn_no` when a CLI turn settles, before final job
 state is written. It passes that stable ordinal to the host, which resolves the
@@ -170,11 +175,13 @@ Fork never:
 - copies an event transcript into model context;
 - waits for the child's first user message to materialize the native fork.
 
-“Edit & rewind” is this same operation from the user-message side: Fork is
-executed immediately at the nearest preceding settled assistant boundary, the
-child opens with only that prefix, and the selected user prompt is placed in
-the child composer as a one-shot draft. Submitting the edit is a new native
-turn; the original prompt is never replayed automatically.
+The UI exposes Fork once per turn, on its final settled assistant/tool event,
+never on an intermediate streaming or tool boundary. “Edit & rewind” is this
+same operation from the user-message side: Fork is executed immediately at the
+nearest preceding forkable assistant boundary, skipping failed or unsettled
+turns; the child opens with only that prefix, and the selected user prompt is
+placed in the child composer as a one-shot draft. Submitting the edit is a new
+native turn; the original prompt is never replayed automatically.
 
 ## 5. Shared workspace consequences
 
@@ -185,7 +192,10 @@ workspace effects immediately. Consequently:
 - a member may observe a sibling's partial edit;
 - Git operations may contend on `.git/index.lock` or change shared HEAD/index;
 - cancellation stops only the selected Agent CLI turn and does not roll back
-  filesystem changes already made;
+  filesystem changes already made. After prompt admission the selected
+  member's native context fails closed as `LOST`, because the five CLIs do not
+  expose one portable, provable cancelled-turn boundary; sibling members remain
+  usable;
 - a publication snapshot can contain changes produced by multiple members.
 
 These are product semantics, not a race the platform hides with a lock. A
@@ -211,10 +221,24 @@ cancellation authority. A member may see the shared workspace and eligible
 runtime-native project data by design, but it must not read another process's
 credential from argv, disk, `/proc`, or reusable environment files.
 
+Turn cleanup uses the root-owned, mode-0555 `member-process-reaper` embedded in
+the sandbox image. It captures a member UID's `(pid, /proc starttime)` baseline
+in helper memory and accepts the baseline for cleanup over stdin, rather than
+trusting a member-writable pidfile. Before each TERM/KILL it rechecks UID and
+starttime to fence PID reuse; after escalation it rescans and fails closed if
+any non-baseline process survives.
+
 Public multi-tenant deployments still require the documented Kata/gVisor,
 non-root, capability, seccomp, and resource boundaries. The shared workspace
 does not relax egress: setup reaches only the allowlisted setup proxy, and the
-agent phase reaches only the fixed gateway relay.
+agent phase reaches only the fixed inference-gateway and MCP-only relays. Each
+sandbox group gets its own internal Docker bridge populated with only that
+group container and the phase's trusted relay/proxy endpoints. The compose
+networks are service-discovery backplanes; Docker's `internal: true` alone does
+not isolate two containers that share one bridge. Docker atomically allocates
+each phase bridge as a `/29` from configurable
+`AGENT_EGRESS_CHAT_NETWORK_POOL`; setup→agent and stop remove the old bridge,
+wake recreates the required phase, and broker startup prunes labelled orphans.
 
 ## 7. Lifecycle and inactivity
 
@@ -228,16 +252,24 @@ does not keep a group alive forever.
 
 At the inactivity deadline (1800 seconds by default):
 
-1. the control plane verifies that no member turn or broker operation is
-   active;
-2. the supervisor flushes native state, closes all resident processes, and
-   suspends protected terminal activity;
-3. the host performs `docker stop` on the exact fenced container;
-4. the database records the group as stopped without deleting it.
+1. the host supervisor verifies under the group admission fence that no member
+   turn, terminal, or broker operation is active;
+2. it flushes native state, closes all resident processes, suspends protected
+   terminal activity, and performs `docker stop` on the exact fenced container;
+3. it disconnects the stopped container from its private phase bridge and
+   removes that bridge, while retaining the same container writable layer;
+4. the next authenticated host heartbeat records the group as stopped without
+   deleting it;
+5. after a broker restart, when the in-memory deadline is unavailable, the
+   control plane applies the same durable activity/admission fences and a
+   bounded recovery window before issuing the exact-generation stop command.
 
-Any later interaction with any member starts the same container, restores only
-the member transport(s) needed for that interaction, and refreshes the common
-group deadline. A stopped sibling need not be eagerly restored.
+Any later interaction with any member recreates the correct agent bridge for a
+settled native context (or setup bridge for a never-settled member), starts the
+same container, restores only the member transport(s) needed for that
+interaction, and refreshes the common group deadline. A stopped sibling need
+not be eagerly restored. Broker startup stops running containers whose resident
+process ownership cannot be reconstructed before allowing a fenced wake.
 
 Container lifecycle is group-scoped: activity from either parent or child
 keeps their shared container running. A fatal container loss is group-scoped;
@@ -306,9 +338,10 @@ The executable records are:
 
 - `agent_sandboxes`: group/container identity, owning host, generation,
   runtime/image/profile pins, state, activity, and idle deadline;
-- `agent_sandbox_memberships`: chat-to-group identity, native session id,
+- `agent_thread_sandbox_memberships`: chat-to-group identity, native session id,
   member slot, admission/process/residency generations, and context state;
-- native fork operations/edges: idempotency and source/target session lineage;
+- `agent_session_forks` and `agent_native_session_edges`: idempotency and
+  source/target session lineage;
 - existing jobs, attempts, leases, events, and publication records.
 
 All mutations are fenced by attempt, sandbox, activation, process, or
@@ -319,6 +352,11 @@ Rows from the removed execution topology may remain in historical migration
 tables for audit and schema compatibility. They are not joined into runnable
 sandbox lookups. Follow-up, Fork, terminal, file, and claim operations on such
 a chat return a context/workspace-unavailable error.
+
+The admin active-host selection chooses where a chat without a sandbox may be
+materialized. It does not move an existing group: follow-up turns remain
+hard-pinned to the host that owns that group's Docker writable layer. Moving a
+group requires the deferred portable-storage protocol, not a scheduler pin.
 
 ## 12. Deployment contract
 
@@ -342,19 +380,40 @@ database, and run a backwards-compatible migration while the old API remains
 live. After the host's runners, broker, tunnel, isolation configuration, and
 Docker data root pass local checks, it publishes a capability containing the
 exact target commit. Before replacing any running API container, the
-control-plane deploy requires a fresh heartbeat carrying that commit and
-successfully reverse-probes every eligible host broker. This runtime fence,
-not a serial Actions dependency, establishes host-before-new-API compatibility.
-Failure stops the rollout; it never falls back to an older sandbox path.
+control-plane deploy requires a fresh heartbeat carrying that commit from every
+host currently eligible to materialize a new chat. It also reverse-probes every
+online host that still owns a non-lost retained group, even when new-chat
+placement has moved elsewhere. Such an owner may remain on an older compatible
+generation for ordinary follow-ups; it does not need to claim new chats or
+advertise historical Fork. The scheduler admits that reviewed v1 tuple only to
+an existing group owned by that host; creating a new group still requires v2.
+This runtime fence, not a serial Actions dependency, establishes
+host-before-new-API compatibility. Failure stops the rollout; it never falls
+back to an older sandbox path.
 
-A true cold start is the only exception to “old API remains live”: there is no
-old API. The control script starts Postgres, migrates, then starts only the
-target control-plane service so a simultaneously starting host can enroll and
-send the required fresh heartbeat. Web and MCP remain stopped until the same
-exact-SHA gate succeeds. If the gate fails, the bootstrap API is stopped again.
-Without this bounded bootstrap, both a fresh install and recovery after
-`compose down` deadlock: readiness waits for an HTTP heartbeat while the only
-process that accepts that heartbeat is deliberately kept stopped.
+Migration `0022_native_turn_rollout_guard` closes the interval in which 0021
+has added `native_turn_no` but the previous API is still settling turns. Its
+database triggers assign ordinals to old-writer success/snapshot/fork writes
+and rerun the backfill after trigger installation, so the parallel host/control
+rollout cannot silently create a historical anchor with a null ordinal.
+
+When either the old API or the MCP relay is absent, readiness cannot complete
+(a true cold start has neither). The control script starts Postgres, migrates,
+then independently bootstraps only each missing target service so a
+simultaneously starting host can enroll, send the required fresh heartbeat, and
+prove both fixed sandbox relay paths. Web remains stopped until the exact-SHA
+gate succeeds. If the gate fails, cleanup stops only the bootstrap services
+started by that invocation; an already-running API or relay is not rolled back.
+Without this bounded bootstrap, a fresh install, recovery after `compose down`,
+and either partial-service state deadlock: readiness waits for an HTTP
+heartbeat and MCP probe while a process that must answer is kept stopped.
+
+The complete local stack follows a separate credential-safety preflight.
+`deploy/local/.env.local` and its generated Postgres password must be retained
+with the Compose project's database volume. If the file is lost while that
+volume exists, `dev.sh` refuses to generate an unusable replacement or reset
+the database. `up`/`start` bring up Postgres alone, authenticate through the
+configured DSN, and run Alembic before starting the complete stack.
 
 There are no `AGENT_RESTARTABLE_*`, `AGENT_SHARED_LIVE_*`, or dispatcher-token
 feature switches. Names such as `shared-sandbox-v1` are protocol/capability
@@ -380,8 +439,9 @@ The implementation is ready only when these properties hold:
    restore, and prompt-free native Fork tests at its exact pin.
 4. Fork returns only after a distinct child native id and live child transport
    exist; it creates no Docker clone, mount, host directory, or model request.
-   Forking a historical successful turn copies exactly that native/display
-   prefix, and Edit & rewind opens the replacement prompt as an unsent draft.
+   Forking a historical successful, ordinal-bearing turn copies exactly that
+   native/display prefix; only its final assistant/tool boundary is actionable,
+   and Edit & rewind opens the replacement prompt as an unsent draft.
 5. Parent and child can run simultaneously and edit the same workspace without
    a group busy error or cross-routed events/cancellation.
 6. Repeated forks support multiple members within configured slot/resource
@@ -395,7 +455,11 @@ The implementation is ready only when these properties hold:
    auth, egress, and frontend flows continue through the owning broker and
    shared group.
 10. Docker inspection shows no chat-state bind or volume mount and the
-    configured Docker data root is the one the broker actually controls.
+    configured Docker data root is the one the broker actually controls. Two
+    unrelated sandbox groups do not share a Docker network; a group's agent
+    network contains only its container and the fixed inference/MCP relays.
+    Stop and setup→agent release obsolete bridges, wake recreates one from the
+    configured pool, and startup removes abandoned labelled allocations.
 11. Staging deployment requires broker credentials, enrolled host identity,
     exact attestation, and matching executor/slot capacity before a claim.
 12. `NEW`, `LIVE`, `RESTORED`, and `LOST` match native context truth; no replay

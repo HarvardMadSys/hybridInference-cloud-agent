@@ -1,8 +1,8 @@
-"""API-surface tests for the MCP proxy endpoint.
+"""API-surface tests for this service's MCP relay endpoint.
 
 The upstream is a ``MockTransport``, so these pin what actually crosses each
 boundary: which credential reaches the MCP server, which never reaches the
-sandbox, and which requests are refused before they leave the gateway at all.
+sandbox, and which requests are refused before they leave the relay at all.
 """
 
 from __future__ import annotations

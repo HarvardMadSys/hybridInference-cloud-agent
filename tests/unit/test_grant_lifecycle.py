@@ -646,7 +646,7 @@ async def test_a_cancelled_renewal_does_not_forget_its_refusal_count(monkeypatch
     )
 
 
-# ── The residency's grant dies with its lease (design §14) ─────────────
+# ── The residency's grant dies with its lease (retained design §6) ─────
 
 
 class _ResidencyStore:

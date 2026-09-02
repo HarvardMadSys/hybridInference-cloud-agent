@@ -42,6 +42,7 @@ import asyncpg
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
     ExecutionProfile,
+    compatible_shared_sandbox_followup_attested,
     default_execution_profile,
     shared_sandbox_claim_attested,
 )
@@ -1938,7 +1939,7 @@ class AgentJobStore:
             "user_id": row["user_id"],
             "role": role,
             "job_id": row["job_id"],
-            # What this job may reach through the MCP proxy. Carried on the same
+            # What this job may reach through this service's MCP relay. Carried on the same
             # fenced lookup as the model credential so the two cannot disagree:
             # the instant the token stops buying inference it also stops
             # reaching tools.
@@ -2104,7 +2105,7 @@ class AgentJobStore:
     # heartbeats. Claims pull work, but never create or rename host rows.
 
     async def active_runner_host(self) -> str | None:
-        """The pinned host, or ``None`` when any runner may claim."""
+        """The new-chat placement host, or ``None`` when any may materialize."""
         async with self._pool.acquire() as conn:
             return await conn.fetchval("SELECT active_host FROM agent_runner_policy WHERE id")
 
@@ -2135,6 +2136,46 @@ class AgentJobStore:
             [{**self._host_row_to_dict(row), "is_active": row["host"] == active} for row in rows],
             active,
             selected,
+        )
+
+    async def deployment_runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], set[str]]:
+        """Read placement policy, hosts, and retained owners for rollout fencing.
+
+        The admin pin governs only chats with no sandbox. A control-plane
+        rollout must also know which other hosts still own shared-live Docker
+        layers so it can reverse-probe their brokers. Read the policy under a
+        shared lock and the owners in the same transaction: a concurrent host
+        switch cannot make the snapshot describe two different placement
+        policies, and any newly claimed group while this lock is held belongs
+        to one of the placement hosts this snapshot already includes.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            policy = await conn.fetchrow(
+                "SELECT active_host, runtime_versions FROM agent_runner_policy WHERE id FOR SHARE"
+            )
+            rows = await conn.fetch(
+                f"""
+                SELECT {_HOST_COLUMNS}
+                FROM agent_runner_hosts
+                ORDER BY last_seen_at DESC
+                """
+            )
+            owner_rows = await conn.fetch(
+                """
+                SELECT DISTINCT host
+                FROM agent_sandboxes
+                WHERE mode = 'shared_live' AND state <> 'lost'
+                """
+            )
+        active = None if policy is None else policy["active_host"]
+        selected = {} if policy is None else _load_json(policy["runtime_versions"]) or {}
+        return (
+            [{**self._host_row_to_dict(row), "is_active": row["host"] == active} for row in rows],
+            active,
+            selected,
+            {str(row["host"]) for row in owner_rows},
         )
 
     async def list_runner_hosts(self) -> list[dict[str, Any]]:
@@ -2188,11 +2229,11 @@ class AgentJobStore:
             return True
 
     async def set_active_runner_host(self, *, host: str | None) -> bool:
-        """Pin agent jobs to one host, or unpin with ``None``.
+        """Pin new-chat placement to one host, or unpin with ``None``.
 
         Returns ``False`` when ``host`` names a machine that has never polled —
-        pinning to one would park the queue on a host that may not exist, which
-        presents as "every job hangs" with nothing in the logs.
+        pinning to one would park every chat without a sandbox on a host that
+        may not exist. Existing groups remain on their owning hosts.
 
         Takes the policy row exclusively *first*, then the host row it is about
         to point at. Every writer here uses that order, and the claim takes the
@@ -2234,9 +2275,8 @@ class AgentJobStore:
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the
         host idle, an admin pins it, and the delete then removes the row the
-        gate is pointing at — silently unpinning the deployment and handing
-        every machine the queue back. Same policy row, same order as the
-        switch, so the two serialize.
+        new-chat placement gate is pointing at — silently unpinning that
+        policy. Same policy row, same order as the switch, so the two serialize.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             active = await conn.fetchval(
@@ -2257,10 +2297,9 @@ class AgentJobStore:
     # it can take and what it can run, and is drained or revoked by name.
     #
     # The two halves share one table and compose rather than compete: the pin
-    # still decides *which* host may claim, and the pool decides *whether* that
-    # host is in a state to. A deployment that never enrolls anything keeps
-    # behaving exactly as it did, because a poll-registered row defaults to
-    # ``online`` with no slot ceiling.
+    # decides which host may materialize a new chat, retained groups select
+    # their immutable owner, and the pool decides whether either host is in a
+    # claimable state.
     #
     # Lock order everywhere below: policy row, then job rows, then host rows —
     # the order #1167 established, extended by one table. Nothing here takes a
@@ -2680,15 +2719,17 @@ class AgentJobStore:
         workers are safe via ``FOR UPDATE SKIP LOCKED``.
 
         The caller is always an enrolled host whose exact credential hash is
-        re-checked while its capacity slot is taken. When an operator has
-        pinned a host, every other host claims nothing.
+        re-checked while its capacity slot is taken. An operator pin chooses
+        the host for chats that do not have a sandbox yet. A retained chat is
+        instead hard-pinned to the host that owns its Docker writable layer;
+        without portable storage, sending that follow-up to the newly selected
+        host would be data loss disguised as failover.
 
-        The host check is the first statement of the *claiming* transaction and
-        takes the policy row shared, so it cannot be overtaken by a switch
-        committing between the check and the dequeue. Read on its own
-        connection, as it was, that window was real: the old host reads "still
-        me", the admin switches, and the machine the operator just moved away
-        from takes one more job while the page says the switch succeeded.
+        The policy read is the first statement of the *claiming* transaction and
+        takes the row shared, so it cannot be overtaken by a switch committing
+        between the check and the dequeue. The same query uses that decision to
+        exclude new chats from the old host while still admitting only retained
+        groups whose immutable ``host`` is that old host.
 
         **The pool gate (G4) sits after the pin and answers the same way.**
         A reported host must be ``online`` and have a free slot, and the job it
@@ -2699,10 +2740,12 @@ class AgentJobStore:
         run". Capacity and capability are operator-visible on the admin
         surface, which is where the question is answerable.
 
-        Every profile requires the shared-live capability attestation from the
-        exact claiming replica. ``untrusted-kata-v1`` additionally requires
-        the Kata runtime plus unequal host/guest kernels. The mutable heartbeat
-        row is not evidence for a particular replica during a rolling deploy.
+        Every profile requires a shared-live capability attestation from the
+        exact claiming replica. New groups require the current protocol; the
+        explicitly compatible v1 protocol may claim only an existing group on
+        its owning host. ``untrusted-kata-v1`` additionally requires the Kata
+        runtime plus unequal host/guest kernels. The mutable heartbeat row is
+        not evidence for a particular replica during a rolling deploy.
         """
         attestation = claim_attestation or {}
         sandbox_runtime = attestation.get("sandbox_runtime")
@@ -2721,7 +2764,8 @@ class AgentJobStore:
         host_kernel = attestation.get("host_kernel")
         guest_kernel = attestation.get("guest_kernel")
         shared_attestation = shared_sandbox_claim_attested(attestation)
-        if not host or not host_credential_hash or not shared_attestation:
+        followup_attestation = compatible_shared_sandbox_followup_attested(attestation)
+        if not host or not host_credential_hash or not followup_attestation:
             return None
         async with self._pool.acquire() as conn, conn.transaction():
             policy = await conn.fetchrow(
@@ -2731,11 +2775,7 @@ class AgentJobStore:
             selected_versions = (
                 {} if policy is None else _load_json(policy["runtime_versions"]) or {}
             )
-            if active_host is not None and host != active_host:
-                # Fail closed, including for a runner that reports no host:
-                # leaving the machine an operator just switched away from able
-                # to claim is the one outcome that makes the switch a lie.
-                return None
+            pin_allows_new_sandbox = active_host is None or host == active_host
             host_row = await conn.fetchrow(
                 "SELECT status, capabilities, slots_total, slots_used, "
                 "(credential_hash IS NOT NULL AND credential_hash = $2) "
@@ -2786,7 +2826,6 @@ class AgentJobStore:
                 LEFT JOIN {_THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
-                  AND $4::boolean
                   AND (
                         j.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
                         OR (
@@ -2795,9 +2834,10 @@ class AgentJobStore:
                         )
                   )
                   AND (
-                        s.thread_id IS NULL
+                        (s.thread_id IS NULL AND $5::boolean AND $4::boolean)
                         OR (
                             s.host = $2
+                            AND $6::boolean
                             AND s.fork_operation_id IS NULL
                             AND s.state IN (
                                 'provisioning', 'starting', 'running', 'stopped'
@@ -2813,6 +2853,8 @@ class AgentJobStore:
                 host,
                 secure_attestation,
                 shared_attestation,
+                pin_allows_new_sandbox,
+                followup_attestation,
             )
             if job_row is None:
                 return None
@@ -4340,6 +4382,17 @@ class AgentJobStore:
                 elif activity_active is False and idle_remaining_seconds is not None:
                     deadline_sql = "NOW() + make_interval(secs => $2)"
                     deadline_arg = idle_remaining_seconds
+                elif activity_active is None:
+                    # A broker reconstructed this running container without
+                    # its old monotonic clock. Give a group whose durable
+                    # deadline was cleared one bounded recovery window, but do
+                    # not refresh that window on every host heartbeat. Once a
+                    # real terminal/operation closes, the broker reports its
+                    # concrete decreasing remainder through the branch above.
+                    deadline_sql = (
+                        "COALESCE(idle_deadline, "
+                        "NOW() + make_interval(secs => idle_timeout_seconds))"
+                    )
                 row = await conn.fetchrow(
                     f"""
                     UPDATE agent_sandboxes

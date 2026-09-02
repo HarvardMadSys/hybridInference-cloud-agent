@@ -87,7 +87,7 @@ class RuntimeCapabilities:
     #: vocabulary to keep in step with the CLIs' and the models'. The order is
     #: therefore part of the declaration, and ``test_agent_runtimes`` pins it.
     reasoning_efforts: tuple[str, ...] = ()
-    # Whether this adapter can point the CLI at the gateway's MCP proxy *and*
+    # Whether this adapter can point the CLI at the platform's MCP relay *and*
     # shut out every other MCP config source. Both halves or neither: a runtime
     # that could be given servers but not stopped from picking up the
     # repository's own would be worse than one with no MCP at all.
@@ -199,12 +199,12 @@ class AgentRuntime:
     def _mcp_endpoints(
         config: RuntimeMCPConfig, *, gateway_base_url: str
     ) -> dict[str, dict[str, Any]]:
-        """Resolve opaque server ids into gateway-local endpoints.
+        """Resolve opaque server ids into sandbox-local relay endpoints.
 
-        The agent is told a URL on our own gateway, and nothing else: not the
-        upstream address, not the credential that reaches it. Both stay on the
-        gateway, which is what lets a sandbox with no egress use these servers
-        at all.
+        The agent is told this service's fixed MCP-only relay URL, and nothing
+        else: not the upstream address, not the user's credential that reaches
+        it. Both stay in the control plane, which is what lets a sandbox with
+        no general egress use these servers at all.
 
         **The token is referenced, not embedded.** ``${AGENT_MCP_TOKEN}`` is
         expanded by the CLI from the environment, so the credential never
@@ -244,10 +244,10 @@ class AgentRuntime:
         return RuntimeCapabilities()
 
     def _require_empty_mcp_config(self, config: RuntimeMCPConfig) -> None:
-        """Fail closed until this adapter has a gateway-mediated MCP path."""
+        """Fail closed until this adapter has a platform-mediated MCP path."""
         if config.server_ids:
             raise RuntimeMCPUnavailableError(
-                f"runtime {self.name!r} cannot use MCP servers until the gateway broker is enabled"
+                f"runtime {self.name!r} cannot use MCP servers until its isolated relay path is enabled"
             )
 
     @staticmethod

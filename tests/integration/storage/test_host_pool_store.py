@@ -1240,7 +1240,7 @@ async def test_the_reaper_lapses_expired_residencies_without_resetting_generatio
 
 
 async def test_establish_returns_what_the_grant_mint_needs(store):
-    """Design §14: the endpoint mints a thread-attributed grant from exactly
+    """Retained-session design §6: mint a thread-attributed grant from exactly
     what the earn-gate already proved — the establishing claim's user, model
     and attempt — so the row must carry all three."""
     await _enrol(store, "runner-a")

@@ -126,7 +126,7 @@ describe('AdminHostsPage', () => {
     expect(screen.getByText('0')).toBeInTheDocument();
   });
 
-  it('pins a host and reports that running jobs stay where they are', async () => {
+  it('pins new chats and reports that retained chats stay on their owning hosts', async () => {
     mocked.pin.mockResolvedValue(pool([host({ active: true })], 'runner-a'));
     render(<AdminHostsPage />);
 
@@ -134,7 +134,7 @@ describe('AdminHostsPage', () => {
 
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('runner-a'));
     expect(await screen.findByRole('status')).toHaveTextContent(
-      /Jobs already running elsewhere keep running there/,
+      /Existing retained chats stay on their owning hosts/,
     );
   });
 
@@ -194,7 +194,9 @@ describe('AdminHostsPage', () => {
     );
     render(<AdminHostsPage />);
 
-    expect(await screen.findByText(/the queue is stopped/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/New chats are pinned to it, so they will wait/),
+    ).toBeInTheDocument();
   });
 
   it('does not warn when an unpinned host is quiet — nothing depends on it', async () => {

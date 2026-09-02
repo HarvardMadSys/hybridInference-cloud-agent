@@ -18,12 +18,21 @@ DEPLOYMENT_SHA = "abc123"
 
 
 class _Store:
-    def __init__(self, rows: list[dict[str, Any]], *, active_host: str | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        active_host: str | None = None,
+        retained_hosts: set[str] | None = None,
+    ) -> None:
         self.rows = rows
         self.active_host = active_host
+        self.retained_hosts = retained_hosts or set()
 
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
-        return self.rows, self.active_host, {}
+    async def deployment_runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], set[str]]:
+        return self.rows, self.active_host, {}, self.retained_hosts
 
 
 def _host(now: datetime, **overrides: Any) -> dict[str, Any]:
@@ -131,6 +140,77 @@ async def test_the_active_host_pin_cannot_be_bypassed_by_another_ready_host() ->
 
 
 @pytest.mark.asyncio
+async def test_an_online_retained_owner_is_probed_after_new_chat_placement_moves() -> None:
+    started = datetime.now(UTC)
+    calls: list[tuple[str, str, bool]] = []
+
+    async def probe(host: str, url: str, *, force: bool = False) -> None:
+        calls.append((host, url, force))
+
+    old_owner = _host(
+        started + timedelta(seconds=1),
+        host="old-owner",
+        broker_url="http://old-broker:8092",
+        # An older compatible generation may serve normal retained follow-ups
+        # without this target SHA or historical-fork capability.
+        capabilities=[SHARED_SANDBOX_CAPABILITY],
+    )
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(started + timedelta(seconds=1), host="new-placement"),
+                old_owner,
+            ],
+            active_host="new-placement",
+            retained_hosts={"old-owner"},
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        broker_probe=probe,
+    )
+
+    assert verdict.ready is True
+    assert "new-chat placement hosts new-placement completed target deployment" in verdict.detail
+    assert "compatible retained owners also answered: old-owner" in verdict.detail
+    assert calls == [
+        ("new-placement", "http://broker-a:8092", True),
+        ("old-owner", "http://old-broker:8092", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_online_retained_owner_with_an_unreachable_broker_blocks_rollout() -> None:
+    started = datetime.now(UTC)
+
+    async def probe(host: str, *_args: Any, **_kwargs: Any) -> str | None:
+        return "connection refused" if host == "old-owner" else None
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(started + timedelta(seconds=1), host="new-placement"),
+                _host(
+                    started + timedelta(seconds=1),
+                    host="old-owner",
+                    capabilities=[SHARED_SANDBOX_CAPABILITY],
+                ),
+            ],
+            active_host="new-placement",
+            retained_hosts={"old-owner"},
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        broker_probe=probe,
+    )
+
+    assert verdict.ready is False
+    assert "old-owner" in verdict.detail
+    assert "connection refused" in verdict.detail
+
+
+@pytest.mark.asyncio
 async def test_every_unpinned_schedulable_host_must_finish_the_target_deploy() -> None:
     started = datetime.now(UTC)
     probed = False
@@ -173,6 +253,70 @@ async def test_every_unpinned_schedulable_host_must_finish_the_target_deploy() -
     assert "offline-old-host" not in verdict.detail
     assert "online-legacy-host" not in verdict.detail
     assert probed is False
+
+
+@pytest.mark.asyncio
+async def test_unpinned_v1_host_is_only_a_compatible_retained_owner() -> None:
+    """A v1 heartbeat cannot materialize new state but may keep its own layer."""
+    started = datetime.now(UTC)
+    calls: list[tuple[str, str, bool]] = []
+
+    async def probe(host: str, url: str, *, force: bool = False) -> None:
+        calls.append((host, url, force))
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(started + timedelta(seconds=1), host="v2-placement"),
+                _host(
+                    started + timedelta(seconds=1),
+                    host="v1-owner",
+                    broker_url="http://v1-broker:8092",
+                    capabilities=[SHARED_SANDBOX_CAPABILITY],
+                ),
+            ],
+            retained_hosts={"v1-owner"},
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        broker_probe=probe,
+    )
+
+    assert verdict.ready is True
+    assert calls == [
+        ("v2-placement", "http://broker-a:8092", True),
+        ("v1-owner", "http://v1-broker:8092", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unpinned_v1_host_without_retained_state_is_not_a_rollout_target() -> None:
+    started = datetime.now(UTC)
+    calls: list[tuple[str, str, bool]] = []
+
+    async def probe(host: str, url: str, *, force: bool = False) -> None:
+        calls.append((host, url, force))
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(started + timedelta(seconds=1), host="v2-placement"),
+                _host(
+                    started + timedelta(seconds=1),
+                    host="v1-idle",
+                    capabilities=[SHARED_SANDBOX_CAPABILITY],
+                ),
+            ]
+        ),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        broker_probe=probe,
+    )
+
+    assert verdict.ready is True
+    assert calls == [("v2-placement", "http://broker-a:8092", True)]
 
 
 @pytest.mark.asyncio

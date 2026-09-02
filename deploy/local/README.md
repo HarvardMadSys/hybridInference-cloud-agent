@@ -43,7 +43,13 @@ identity setup.
 For an isolated second stack, also export a distinct `LOCAL_PROJECT_NAME`,
 `LOCAL_AGENT_EGRESS_NETWORK`, `AGENT_NETWORK_NAME`, and the four published
 ports. This keeps its Docker volumes, service discovery, and sandbox egress
-network separate from another checkout's local stack.
+backplane separate from another checkout's local stack. Each retained sandbox
+then gets its own labelled internal `freeinference-chat-net-*` bridge; the
+backplane is used only to discover the local inference and MCP relay endpoints.
+`up`, `start`, and `smoke` fail before changing containers when either named
+network already belongs to a different Compose project; Compose's warning is
+not safe here because duplicate service aliases can route bootstrap or agent
+traffic into the other stack.
 
 `up` may take a while the first time because the sandbox image installs exact
 versions of Claude Code, Codex, Pi, OpenCode, and Kilo. Later builds use Docker

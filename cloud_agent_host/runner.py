@@ -1,12 +1,12 @@
-"""The agent job runner (issue #1041, P0) — what actually executes a job.
+"""The trusted host runner that schedules turns into retained chat sandboxes.
 
-Runs inside the sandbox (GitHub Actions for the P0 dogfood, a VM later) and is
-the only component that ever touches agent output. Its shape follows from the
-adjudicated security model rather than convenience:
+It runs outside the chat container, claims one fenced attempt at a time, and
+streams the member Agent CLI's output through the workspace broker. Its shape
+follows from the adjudicated security model rather than convenience:
 
-- **Narrow credentials.** The enrolled host claims work with its own identity
-  and receives per-attempt credentials. Only the inference grant and MCP token
-  enter the sandbox; the worker-control token stays in this trusted process.
+- **Narrow credentials.** The enrolled host claims with its own identity. Only
+  a member-scoped inference grant and an attempt-fenced MCP token enter the
+  sandbox; worker-control and repository credentials stay in this process.
 - **Snapshot-out, not push.** The runner never pushes. The trusted publisher
   captures and validates a quiescent shared-workspace snapshot, then pushes it.
   That is why neither the runner nor the sandbox needs a git write credential.
@@ -222,7 +222,7 @@ class ClaimedJob:
     turn_no: int = 1
     # MCP servers this job was granted. Names only: the runner learns nothing
     # about where they actually are, because the sandbox reaches them through
-    # the gateway's proxy rather than directly.
+    # this service's MCP-only relay rather than directly.
     mcp_servers: list[str] = field(default_factory=list)
     # The CLI version the control plane stamped on this attempt, resolved from
     # the thread's pin, the deployment's selection, or this host's default.
@@ -969,7 +969,6 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
         rows = client.list()
         observations: list[dict[str, Any]] = []
         now = time.monotonic()
-        idle_timeout_s = _chat_idle_timeout_s()
         for row in rows[:4096]:
             if row.get("shared_live") is not True:
                 raise ValueError("workspace broker returned a non-shared sandbox")
@@ -980,25 +979,18 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
             active = active or int(row.get("operation_count") or 0) > 0
             active = active or bool(row.get("workspace_suspended"))
             deadline = row.get("idle_deadline_monotonic")
-            # A reconstructed generation-zero entry is unknown while merely
-            # RUNNING.  Its empty local token set nevertheless needs one
-            # durable recovery window: a broker may have restarted after a
-            # terminal cleared the database deadline, and reporting nothing
-            # forever would leak that container in RUNNING. The control plane
-            # accepts this generation-zero idle window only when no attempt
-            # owns the sandbox and its deadline is still NULL, so repeated
-            # heartbeats neither stop an active turn nor extend the window.
-            reconstructed_idle = (
-                activation_generation == 0 and running and not active and deadline is None
-            )
-            activity_known = (
-                activation_generation > 0 or active or deadline is not None or reconstructed_idle
-            )
+            # A generation-zero RUNNING entry with no local deadline was just
+            # reconstructed after a broker restart. Its empty in-memory token
+            # set is not proof that the group has been idle: the broker may
+            # have restarted while a terminal had cleared the durable
+            # deadline. Report activity as unknown. The control plane installs
+            # one recovery deadline only when its durable deadline is also
+            # NULL; unlike reporting a fresh full timeout on every heartbeat,
+            # that window cannot be extended forever by healthy heartbeats.
+            activity_known = activation_generation > 0 or active or deadline is not None
             idle_remaining = None
             if activity_known and deadline is not None:
                 idle_remaining = max(0.0, float(deadline) - now)
-            elif reconstructed_idle:
-                idle_remaining = idle_timeout_s
             observations.append(
                 {
                     "thread_id": str(row["thread_id"]),
@@ -1881,8 +1873,10 @@ def _broker_url_from_env() -> str | None:
     Defaults to the same variable `workspace_broker_client` uses, so the
     address a host *reports* cannot drift from the one it *serves* — a row
     pointing at a broker this machine is not running answers 409 for every file
-    and terminal request on its jobs. That is right whenever both readers sit
-    on the same network, which is every co-located deployment.
+    and terminal request on its jobs. That is right only when both readers
+    share a network, as in the integrated local Compose stack. Merely running
+    separate Compose projects on one physical machine does not make their DNS
+    or networks shared.
 
     It stops being right the moment the control plane is on another machine.
     `AGENT_WORKSPACE_BROKER_URL` is a compose service name; it resolves here and

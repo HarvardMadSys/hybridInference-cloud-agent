@@ -144,7 +144,7 @@ from cloud_agent.source_control import (
     github_authorization_url,
     issue_oauth_state,
 )
-from cloud_agent.storage.store import RUNNING, TERMINAL_STATES
+from cloud_agent.storage.store import RUNNING, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.terminal_coordination import resume_settled_terminal
 from cloud_agent.thread_stats import summarize_thread
 from cloud_agent.tokens import (
@@ -471,7 +471,10 @@ def _job_response(
         and sandbox.get("fork_operation_id") is None
         and sandbox.get("active_attempt_id") is None
         and bool(sandbox.get("last_settled_job_id"))
-        and job.get("state") in TERMINAL_STATES
+        and job.get("state") == SUCCEEDED
+        and isinstance(job.get("native_turn_no"), int)
+        and not isinstance(job.get("native_turn_no"), bool)
+        and int(job["native_turn_no"]) > 0
     )
     return AgentJobResponse(
         id=job["id"],
@@ -1826,6 +1829,16 @@ async def fork_agent_job(
     )
     if job["state"] not in TERMINAL_STATES:
         raise not_settled
+    if job["state"] != SUCCEEDED:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "anchor_not_settled",
+                    "message": "Only a successfully settled turn can be used as a Fork anchor.",
+                }
+            },
+        )
     if job.get("thread_sandbox") is None:
         raise HTTPException(
             status_code=409,
@@ -2433,7 +2446,7 @@ async def _terminal_owner_workspace(
         )
     if job.get("terminal_resume_pending"):
         # The broker resolved a few lines up is this job's own host's, so the
-        # resume goes to the machine holding the worktree rather than to
+        # resume goes to the machine holding the retained workspace rather than to
         # whatever the deployment's single-host variable names.
         if not await resume_settled_terminal(_workspace_id(job), broker=broker):
             raise HTTPException(
@@ -2770,7 +2783,7 @@ async def get_agent_job_git_workspace(
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentGitWorkspaceResponse:
-    """Read live worktree status, diff and recent commits."""
+    """Read live retained-workspace status, diff and recent commits."""
     job_store = _require_store(store)
     job = await _owned_job(job_store, job_id, user)
     await _require_workspace_entitlement(

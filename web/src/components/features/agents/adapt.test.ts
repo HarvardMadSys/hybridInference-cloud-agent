@@ -315,7 +315,16 @@ describe('toDisplayJob', () => {
     const job = toDisplayJob(current, {
       thread: {
         thread_id: 'thread_1',
-        jobs: [{ ...JOB, id: 'ajob_1', thread_id: 'thread_1', turn_no: 1 }, current],
+        jobs: [
+          {
+            ...JOB,
+            id: 'ajob_1',
+            thread_id: 'thread_1',
+            turn_no: 1,
+            native_fork_available: true,
+          },
+          current,
+        ],
         messages: [
           { id: 1, role: 'user', content: 'first question', job_id: 'ajob_1', created_at: null },
           { id: 2, role: 'assistant', content: 'first answer', job_id: 'ajob_1', created_at: null },
@@ -341,6 +350,7 @@ describe('toDisplayJob', () => {
     });
 
     expect(job.historyTurns).toHaveLength(1);
+    expect(job.historyTurns?.[0].forkable).toBe(true);
     expect(job.historyTurns?.[0].messages[0].content).toBe('first question');
     expect(job.historyTurns?.[0].events).toEqual([
       expect.objectContaining({ kind: 'tool_use', detail: 'pwd', output: ['/workspace'] }),
@@ -556,7 +566,7 @@ describe('ledger-sourced fields', () => {
     expect(job.usage.tokensIn).toBe('74.5k');
     expect(job.usage.turns).toBe(3);
     // The tier is rendered for a reader who does not know the tier names.
-    expect(job.networkAgent).toBe('gateway only');
+    expect(job.networkAgent).toBe('platform relays only');
   });
 
   it('distinguishes "no ledger" from "spent nothing"', () => {

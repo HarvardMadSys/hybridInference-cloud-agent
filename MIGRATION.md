@@ -516,9 +516,8 @@ Its guarantees are kept by porting the source test file **whole** rather than
 by picking out the properties that seemed important:
 
 - `tests/unit/test_deploy_config.py` — all 50 source assertions, re-pointed at
-  the standalone compose. 45 pass unchanged; 3 are skipped with the Trusted-tier
-  reason below; 2 were adapted where they keyed on the gateway's `backend`
-  service, keeping the half that still exists.
+  the standalone compose. 48 pass unchanged; 2 were adapted where they keyed
+  on the gateway's `backend` service, keeping the half that still exists.
 - `tests/unit/test_deploy_security.py` — only what the port could not carry.
 - `tests/unit/test_setup_kata_runtime.py` — the Kata preflight, driving the
   real script. D7 had missed this file entirely.
@@ -531,18 +530,28 @@ porting it, and the compiler does not check prose. When a task drops an
 artifact, its tests move first and get deleted individually with reasons, never
 summarised.
 
-**One functional gap that came with the decision.** The Trusted egress tier —
+**Functional gap found with the decision; resolved 2026-09-02.** The Trusted egress tier —
 the Squid allowlist proxy and the `agent-egress-trusted` / `agent-egress-uplink`
-networks — was declared **only** in the overlay. The standalone compose defaults
-`AGENT_EGRESS_NETWORK_TRUSTED/CUSTOM/FULL` to empty and both tiers to
-`platform_only`, so it never supported anything above `platform_only`; that was
-acceptable while the overlay existed for the co-located case, and is not now.
-`deploy/host/Dockerfile.agent-egress-proxy` therefore builds an image that no
-compose file in this repository starts. A deployment needing setup-phase
-registry access must add the proxy, its config-render service and the tiered
-networks to the standalone compose. Not scoped here — it is a feature, not a
-migration — but it is the reason the tier is currently unreachable rather than
-merely unused.
+networks — was declared **only** in the overlay. At the time of the move, the
+standalone compose left `AGENT_EGRESS_NETWORK_TRUSTED/CUSTOM/FULL` empty and
+selected `platform_only` for both phases, so it did not support dependency
+registry access. The retained-only deployment follow-up closes that gap:
+the offline validating renderer writes a Docker-owned config volume, the
+proxy alone straddles an internal Trusted network and a routable uplink, and
+setup defaults to that tier while agent turns stay `platform_only`. The three
+previously skipped source assertions now run normally. This is infrastructure
+state only; no chat workspace, provider state, or Agent CLI session is mounted.
+
+**Isolation gap found during the retained-deployment audit; resolved
+2026-09-02.** A Docker network marked `internal` has no off-host route, but its
+containers can still address one another. Putting every chat directly on the
+same `agent-egress` bridge therefore made the documentation's two-fixed-relay
+claim false and exposed unrelated sandboxes as network peers. The compose
+networks are now discovery backplanes only. Lifecycle code creates a labelled,
+deterministic internal bridge per sandbox group, attaches only that group's
+container and the phase's fixed relay/proxy endpoints, and migrates a stopped
+pre-upgrade container off the old shared bridge before restart. Fork siblings
+remain in one container/network by design; unrelated groups do not.
 
 ### Which machine runs the connection migration (found in H1)
 

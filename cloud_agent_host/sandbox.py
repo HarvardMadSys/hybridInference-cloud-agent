@@ -524,9 +524,9 @@ class ContainerBackend(SandboxBackend):
     means one kernel bug reaches every tenant.
 
     Networking is a policy input rather than a default: the sandbox must reach
-    the gateway (models + event reporting) and, during setup, package
-    registries — but nothing else. ``network`` names the docker network that
-    encodes that policy for this deployment.
+    the fixed inference and MCP relays and, during setup, package registries —
+    but nothing else. ``network`` names the docker network that encodes that
+    policy for this deployment; event reporting stays in the trusted runner.
     """
 
     name = "container"
@@ -541,6 +541,8 @@ class ContainerBackend(SandboxBackend):
         extra_args: list[str] | None = None,
         allow_open_network: bool = False,
         egress: EgressPolicy | None = None,
+        chat_network_pool: str = "10.240.0.0/16",
+        sandbox_namespace: str = "default",
         uid: int = SANDBOX_UID,
         gid: int = SANDBOX_GID,
         home: str = SANDBOX_HOME,
@@ -552,6 +554,16 @@ class ContainerBackend(SandboxBackend):
         self.extra_args = extra_args or []
         self.allow_open_network = allow_open_network
         self.egress = egress
+        # Per-chat internal bridges must not consume Docker's tiny default
+        # address pools (commonly only 31 networks). ChatSandboxManager splits
+        # this operator-overridable RFC1918 pool into /29 phase networks.
+        self.chat_network_pool = chat_network_pool
+        if not sandbox_namespace or "\x00" in sandbox_namespace or len(sandbox_namespace) > 128:
+            raise ValueError("sandbox_namespace must be a non-empty value of at most 128 bytes")
+        # A Docker daemon may host sibling staging/production or local checkout
+        # stacks. Their control-plane databases are independent, so lifecycle
+        # discovery must never adopt another stack's retained containers.
+        self.sandbox_namespace = sandbox_namespace
         self.uid = uid
         self.gid = gid
         self.home = home
@@ -952,12 +964,12 @@ class ContainerBackend(SandboxBackend):
     def check_gateway_reachable(self, base_url: str) -> None:
         """Fail startup if the sandbox cannot reach the gateway it will be given.
 
-        `platform_only` means "our gateway and nothing else", which quietly
-        assumes the gateway is *on that network* — true when it is the compose
-        `backend` service, false the moment an operator points
-        AGENT_GATEWAY_URL at a remote one. The sandbox then resolves nothing,
-        every job dies at its first model call, and the error reads like a
-        broken model rather than a network that was never going to work.
+        `platform_only` means only the platform's fixed inference and MCP
+        relays. This method proves the inference half and therefore assumes the
+        gateway relay is *on that network*. If an operator points
+        AGENT_GATEWAY_URL at an unreachable remote address, every job dies at
+        its first model call and the error reads like a broken model rather
+        than a network that was never going to work.
 
         Probed rather than inferred: one container on the phase's real network,
         making a real request. A heuristic on the URL would be wrong for every
@@ -1025,8 +1037,8 @@ class ContainerBackend(SandboxBackend):
         detail = {
             "unresolved": (
                 f"cannot resolve {host!r}. A closed `platform_only` network only works "
-                "when the gateway is on it (the compose `backend` service); for a "
-                "gateway on another machine, put a relay for it on this network or give "
+                "when the fixed inference relay is on it; for a gateway on another "
+                "machine, put its fixed relay on this network or give "
                 "the agent phase a network that routes there (AGENT_EGRESS_AGENT_TIER="
                 "custom with AGENT_EGRESS_NETWORK_CUSTOM)."
             ),
@@ -1104,6 +1116,8 @@ def build_backend_from_env(env: dict[str, str] | None = None) -> SandboxBackend:
             extra_args=shlex.split(source.get("AGENT_SANDBOX_EXTRA_ARGS") or ""),
             allow_open_network=source.get("AGENT_SANDBOX_ALLOW_OPEN_NETWORK", "") not in ("", "0"),
             egress=build_policy_from_env(source),
+            chat_network_pool=source.get("AGENT_EGRESS_CHAT_NETWORK_POOL") or "10.240.0.0/16",
+            sandbox_namespace=source.get("AGENT_SANDBOX_NAMESPACE") or "default",
             uid=int(source.get("AGENT_SANDBOX_UID") or SANDBOX_UID),
             gid=int(source.get("AGENT_SANDBOX_GID") or SANDBOX_GID),
             home=source.get("AGENT_SANDBOX_HOME") or SANDBOX_HOME,

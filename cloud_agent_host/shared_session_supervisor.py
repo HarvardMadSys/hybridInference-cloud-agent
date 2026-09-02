@@ -247,13 +247,21 @@ class SharedChatSessionSupervisor:
     def reconcile(self) -> list[SharedSessionDescriptor]:
         """Discover only containers labelled for the shared-live protocol."""
         found: list[SharedSessionDescriptor] = []
+        specs: list[ChatSandboxSpec] = []
         for inspection in self._manager.list():
             if inspection.labels.get(CHAT_SHARED_LABEL) != "true":
                 continue
             spec = self._spec_from_inspection(inspection)
+            specs.append(spec)
             with self._lock:
                 group = self._groups.get(spec.sandbox_id)
                 if group is None:
+                    # A replacement broker cannot reattach the old docker-exec
+                    # pipes. Stop only a newly discovered orphan before
+                    # adopting it; list() also calls reconcile(), so stopping a
+                    # group already managed by this process would race every
+                    # active turn with ordinary status polling.
+                    inspection = self._manager.stop(spec)
                     group = _Group(spec=spec, inspection=inspection)
                     origin = _Member(thread_id=spec.thread_id, resident_slot_id=0)
                     group.members[origin.thread_id] = origin
@@ -264,6 +272,7 @@ class SharedChatSessionSupervisor:
                         raise SandboxError("shared sandbox immutable labels changed")
                     group.inspection = inspection
                 found.extend(self._descriptors(group))
+        self._manager.prune_orphan_networks(specs)
         return found
 
     def register_manifest(
@@ -411,7 +420,10 @@ class SharedChatSessionSupervisor:
                 member.context_status = "lost"
                 member.resident_state = "lost"
                 raise RetainedChatLost("shared sandbox container identity changed")
-            group.inspection = self._manager.start(group.spec)
+            group.inspection = self._manager.start(
+                group.spec,
+                network_phase="agent" if has_settled_context else "setup",
+            )
             if activation_generation < member.activation_generation:
                 raise SessionLeaseLost("member activation generation is stale")
             member.activation_generation = activation_generation
@@ -942,7 +954,6 @@ class SharedChatSessionSupervisor:
                 raise SandboxError("fork target raced with another membership")
             group.members[target_thread_id] = child
             self._members[target_thread_id] = group
-            self._arm_idle_if_quiescent(group)
             return NativeSessionForkResult(
                 operation_id=operation_id,
                 sandbox_id=group.spec.sandbox_id,
@@ -1009,7 +1020,7 @@ class SharedChatSessionSupervisor:
         result: dict[str, Any] | None = None
         try:
             if not current.running:
-                started = self._manager.start(group.spec)
+                started = self._manager.start(group.spec, network_phase="agent")
                 with self._lock:
                     if group.stopping or group.lifecycle_generation != lifecycle_generation:
                         raise SessionLeaseLost(
@@ -1319,7 +1330,15 @@ class SharedChatSessionSupervisor:
         current = self._manager.inspect(group.spec.container_name)
         if current is None:
             raise RetainedChatLost("shared sandbox container is missing")
-        group.inspection = self._manager.start(group.spec) if not current.running else current
+        network_phase = (
+            "agent"
+            if any(member.native_session_id for member in group.members.values())
+            else "setup"
+        )
+        group.inspection = self._manager.start(
+            group.spec,
+            network_phase=network_phase,
+        )
 
     def _arm_idle_if_quiescent(self, group: _Group) -> None:
         if self._is_quiescent(group) and group.inspection.running:

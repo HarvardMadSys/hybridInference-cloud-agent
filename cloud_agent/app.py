@@ -416,7 +416,7 @@ async def _reap_offline_hosts(store: AgentJobStore) -> None:
 async def _reap_lapsed_residencies(store: AgentJobStore, grants: Any | None) -> None:
     """Lapse residencies whose lease ran out — and kill their credentials.
 
-    A lapsed residency's grant dies with it (design §14): the credential
+    A lapsed residency's grant dies with it (retained-session design §6): the credential
     lives exactly as long as the lease, so a host that stopped beating must
     starve promptly rather than keep spending until the grant's own TTL.
     ``revoke()`` never raises, and a deployment without a grant client simply
@@ -907,10 +907,11 @@ def create_app() -> FastAPI:
 def create_mcp_app() -> FastAPI:
     """Build a listener that serves the MCP relay and nothing else.
 
-    **A sandbox is the least trusted thing in this system, and the relay is the
-    one endpoint it is meant to reach.** Pointed at the main application, its
-    tunnel also reaches jobs, sessions, host registration and admin — every
-    route the control plane has. Those refuse an ``mcp``-scoped token, so
+    **A sandbox is the least trusted thing in this system, and this listener is
+    one of only two fixed agent-phase endpoints it may reach.** Pointed at the
+    main application, its tunnel also reaches jobs, sessions, host registration
+    and admin — every route the control plane has. Those refuse an
+    ``mcp``-scoped token, so
     nothing was exploitable through them today; but the entire trusted control
     plane sat one authorization bug away from code nobody in this repository
     wrote, and that is a reachability decision rather than an authorization

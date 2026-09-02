@@ -2,8 +2,9 @@
 
 Runners pull work, so there is no gateway-side dial that points jobs at a
 machine — the only moment the platform gets to decide "not you" is the claim.
-These endpoints therefore do not move anything: they name the host whose
-runners may claim, and the switch takes effect on the losing host's next poll.
+These endpoints therefore do not move anything: they name the host that may
+materialize new chat sandboxes. Existing retained groups remain claimable only
+on their immutable owning host.
 
 A host joins by redeeming a one-time enrollment token. Its resulting credential
 names exactly one machine and is required for registration, heartbeat, and
@@ -11,8 +12,9 @@ claim: a compromised host cannot claim as a neighbour, and revoking it removes
 exactly one machine's access. Request-body host labels and pool-wide claim
 credentials are not accepted.
 
-The pin decides *which* enrolled host may claim; the pool lifecycle (drain,
-undrain, remove) decides *whether* that host is allowed to claim.
+The pin decides *which* enrolled host may claim a chat with no sandbox; the pool
+lifecycle (drain, undrain, remove) decides whether a host is allowed to claim at
+all.
 """
 
 from __future__ import annotations
@@ -127,13 +129,15 @@ async def set_active_agent_runner_host(
     _admin_id: str = Depends(verify_admin_access),
     store: AgentJobStore | None = Depends(get_agent_job_store),
 ) -> ListAgentRunnerHostsResponse:
-    """Pin agent jobs to one host, or unpin so any runner may claim.
+    """Pin new chat placement to one host, or let any host materialize it.
 
     Non-preemptive, and worth being precise about: the new host starts claiming
-    at once, while jobs already running on the old one keep running to the end
-    — they hold a lease and their runner reports through without claiming
-    again. The two overlap. This is not a drain, which would mean waiting for
-    the old host to empty before the new one starts.
+    new chats at once, while jobs already running on the old one keep running to
+    the end. Existing retained chats also remain hard-pinned to their owning
+    host for later follow-ups because their Docker writable layer is not
+    portable in this phase. The two hosts can therefore overlap. This is not a
+    drain, which would mean waiting for the old host to empty before the new one
+    starts.
     """
     job_store = _require_store(store)
     previous = await job_store.active_runner_host()
@@ -146,7 +150,7 @@ async def set_active_agent_runner_host(
             status_code=404,
             detail=(
                 f"No runner on {payload.host!r} has ever polled. Start one there "
-                "(ops/deploy/agent_runner.sh up) and it will appear here."
+                "(deploy/host/sandbox_host.sh up) and it will appear here."
             ),
         )
 
@@ -216,10 +220,12 @@ async def forget_agent_runner_host(
 
     Housekeeping only: a runner still polling on that machine re-adds itself
     within seconds. The active host cannot be dropped, because doing so would
-    silently unpin — every other machine would start claiming, which is the
-    opposite of what removing a host from a list looks like it does. That
-    refusal is decided inside the store's transaction, not by a check here: a
-    check here is a read a concurrent switch can outrun.
+    silently unpin new-chat placement, which is the opposite of what removing a
+    host from a list looks like it does. Existing retained owners are not moved
+    by forgetting their pool row; their broker routing continues to fail closed
+    until the same named host is enrolled again. The active-host refusal is
+    decided inside the store's transaction, not by a check here: a check here
+    is a read a concurrent switch can outrun.
     """
     job_store = _require_store(store)
     outcome = await job_store.forget_runner_host(host=host)

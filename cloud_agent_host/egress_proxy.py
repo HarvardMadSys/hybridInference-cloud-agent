@@ -1,10 +1,10 @@
 """The allowlist proxy that makes the Trusted egress tier real (issue #1041).
 
-The tiers in :mod:`cloud_agent_host.egress` are networks. ``platform_only``
-needs nothing else — an internal network reaches the gateway and stops. Any
-tier above it needs something on that network with a second leg, and this is
-it: a Squid instance that accepts CONNECT for an allowlisted host and refuses
-everything else.
+The tiers in :mod:`cloud_agent_host.egress` are network templates.
+``platform_only`` needs nothing else — a per-chat internal network reaches the two fixed platform relays
+and stops. Any tier above it needs something on that network with a second leg,
+and this is it: a Squid instance that accepts CONNECT for an allowlisted host
+and refuses everything else.
 
 **Why a proxy rather than a firewall on the network.** The sandbox names its
 destination in the CONNECT request, so an allowlist is a string comparison
@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 
 from cloud_agent_host.egress import (
     EgressPolicyError,
@@ -170,9 +171,29 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     out = args.out
-    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    with open(out, "w", encoding="utf-8") as handle:
-        handle.write(config)
+    directory = os.path.dirname(out) or "."
+    os.makedirs(directory, exist_ok=True)
+    # The live proxy may still have the previous file open while Compose runs
+    # this one-shot renderer. Never expose it to a truncated/partially-written
+    # ACL: write and fsync beside the destination, then atomically replace.
+    temporary = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=directory,
+            prefix=".squid.",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            handle.write(config)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, out)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
     print(f"wrote {out}", file=sys.stderr)
     return 0
 

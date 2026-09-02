@@ -74,7 +74,7 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     hasLedger: true,
     timeoutLabel: '',
     networkSetup: 'allowlist',
-    networkAgent: 'gateway only',
+    networkAgent: 'platform relays only',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
     currentAttemptNo: 1,
@@ -728,7 +728,7 @@ describe('JobDetail', () => {
     expect(screen.getByLabelText('Workspace files')).not.toHaveTextContent('null B');
   });
 
-  it('reads a live worktree file without offering to edit it', async () => {
+  it('reads a live workspace file without offering to edit it', async () => {
     vi.mocked(getAgentJobFiles)
       .mockResolvedValueOnce({
         path: '',
@@ -756,7 +756,7 @@ describe('JobDetail', () => {
     await waitFor(() => expect(pane).toHaveTextContent('# Before'));
     // Writable is a fact about the workspace, not an invitation: the pane is a
     // reader, so nothing here can change the run's files.
-    expect(pane).toHaveTextContent('Live worktree');
+    expect(pane).toHaveTextContent('Live workspace');
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Edit README.md' })).not.toBeInTheDocument();
@@ -908,6 +908,25 @@ describe('JobDetail', () => {
     expect(screen.getByText(/restores any saved changes/i)).toBeInTheDocument();
   });
 
+  it('does not offer a follow-up after an admitted turn lost native context', () => {
+    render(<JobDetail job={makeJob({ state: 'cancelled', contextStatus: 'lost' })} />);
+
+    expect(screen.getByText(/context can no longer be resumed/i)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    expect(screen.queryByText(/restores any saved changes/i)).toBeNull();
+  });
+
+  it('does not offer a follow-up from an older turn after the membership is lost', () => {
+    render(
+      <JobDetail job={makeJob({ state: 'done', contextStatus: 'live', nativeState: 'lost' })} />,
+    );
+
+    expect(screen.getByLabelText('Add a follow-up')).toBeDisabled();
+    expect(screen.getByText(/Agent CLI context can no longer be resumed/)).toBeInTheDocument();
+    expect(screen.getByText(/Start a new chat/)).toBeInTheDocument();
+  });
+
   it('forks the settled current native session', async () => {
     vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_fork' } as never);
     vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
@@ -918,10 +937,15 @@ describe('JobDetail', () => {
           sandboxId: 'asbx_1',
           workspaceShared: true,
           nativeForkAvailable: true,
+          events: [
+            { kind: 'message', text: 'Intermediate update', attemptNo: 1 },
+            { kind: 'message', text: 'Final answer', attemptNo: 1 },
+          ],
         })}
       />,
     );
 
+    expect(screen.getAllByRole('button', { name: 'Fork from here' })).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }));
 
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_1'));
@@ -976,6 +1000,104 @@ describe('JobDetail', () => {
 
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
     expect(navigation.push).toHaveBeenCalledWith('/ajob_historical_fork');
+  });
+
+  it('offers exactly one Fork action at the final assistant boundary of a turn', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_boundary_fork' } as never);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          turnNo: 2,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          historyTurns: [
+            {
+              jobId: 'ajob_0',
+              turnNo: 1,
+              forkable: true,
+              messages: HISTORY,
+              events: [
+                { kind: 'message', text: 'Intermediate assistant update', attemptNo: 1 },
+                {
+                  kind: 'tool_use',
+                  tool: 'Read',
+                  detail: 'README.md',
+                  output: [],
+                  attemptNo: 1,
+                },
+                { kind: 'message', text: 'Final settled answer', attemptNo: 1 },
+              ],
+            },
+          ],
+        })}
+      />,
+    );
+
+    const historicalTurn = within(screen.getByLabelText('Turn 1'));
+    expect(historicalTurn.getAllByRole('button', { name: 'Fork from here' })).toHaveLength(1);
+    expect(historicalTurn.queryByRole('button', { name: 'Edit & rewind' })).not.toBeInTheDocument();
+    fireEvent.click(historicalTurn.getByRole('button', { name: 'Fork from here' }));
+
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
+  });
+
+  it('skips a failed turn and rewinds its prompt from the nearest successful boundary', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_rewind_failed' } as never);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          turnNo: 3,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          historyTurns: [
+            {
+              jobId: 'ajob_success',
+              turnNo: 1,
+              forkable: true,
+              messages: HISTORY,
+              events: [{ kind: 'message', text: 'Settled answer', attemptNo: 1 }],
+            },
+            {
+              jobId: 'ajob_failed',
+              turnNo: 2,
+              forkable: false,
+              messages: [
+                {
+                  id: 3,
+                  role: 'user',
+                  content: 'Retry this failed prompt',
+                  jobId: 'ajob_failed',
+                  createdAt: null,
+                },
+                {
+                  id: 4,
+                  role: 'assistant',
+                  content: 'Partial failed output',
+                  jobId: 'ajob_failed',
+                  createdAt: null,
+                },
+              ],
+              events: [{ kind: 'message', text: 'Partial failed output', attemptNo: 1 }],
+            },
+          ],
+        })}
+      />,
+    );
+
+    const failedTurn = within(screen.getByLabelText('Turn 2'));
+    expect(failedTurn.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
+    fireEvent.click(failedTurn.getByRole('button', { name: 'Edit & rewind' }));
+
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_success'));
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind_failed')).toBe(
+      'Retry this failed prompt',
+    );
   });
 
   it('forks before a user prompt and carries it to the child as a one-shot edit draft', async () => {

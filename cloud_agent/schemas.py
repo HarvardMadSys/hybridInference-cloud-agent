@@ -189,7 +189,7 @@ class AgentJobResponse(BaseModel):
     forked_from_job_id: str | None = None
     metadata: dict[str, Any] | None = None
     # Names only. The owner never sees a server's URL or credential — those are
-    # the two things proxying through the gateway exists to keep off the wire.
+    # the two things this service's MCP relay keeps off the sandbox-facing wire.
     mcp_servers: list[str] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
@@ -739,7 +739,7 @@ class WorkerClaimResponse(BaseModel):
     mcp_servers: list[str] = Field(
         default_factory=list,
         description=(
-            "MCP server names this job may reach through the gateway proxy. The runner "
+            "MCP server names this job may reach through the control-plane relay. The runner "
             "passes them to the runtime adapter; it never learns their addresses."
         ),
     )
@@ -1198,12 +1198,15 @@ class AgentRunnerHost(BaseModel):  # type: ignore[no-any-unimported]
 
 
 class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported]
-    """The runner pool, which member takes jobs, and which versions it runs."""
+    """Runner pool, new-chat placement, and selected CLI versions."""
 
     hosts: list[AgentRunnerHost]
     active_host: str | None = Field(
         None,
-        description="Pinned host, or null when any runner may claim.",
+        description=(
+            "Host that may materialize chats without a sandbox, or null when "
+            "any claimable host may. Retained groups stay on their owning host."
+        ),
     )
     runtime_versions: dict[str, str] = Field(
         default_factory=dict,
@@ -1215,7 +1218,7 @@ class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported
 
 
 class SetActiveAgentRunnerHostRequest(BaseModel):  # type: ignore[no-any-unimported]
-    """Pin agent jobs to one host, or unpin with ``null``."""
+    """Pin new-chat placement to one host, or unpin with ``null``."""
 
     host: str | None = Field(
         None,
@@ -1511,7 +1514,8 @@ class HostResidencyEstablishResponse(BaseModel):  # type: ignore[no-any-unimport
     credential: str | None = Field(
         None,
         description=(
-            "The residency's inference grant (design §14): thread-attributed, "
+            "The residency's inference grant (retained-session design §6): "
+            "thread-attributed, "
             "renewed by this host's beats, revoked when the residency ends. "
             "It is what a live resident process runs on. Null degrades the "
             "residency to workspace-only — turns then ride warm_native on "

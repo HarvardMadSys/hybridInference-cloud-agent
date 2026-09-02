@@ -652,7 +652,7 @@ export async function listAllAgentThreadEvents(jobId: string): Promise<AgentThre
   }
 }
 
-/** Browse the retained container's live worktree. */
+/** Browse the retained container's live workspace. */
 export async function getAgentJobFiles(jobId: string, path = ''): Promise<AgentJobFilesApi> {
   const query = path ? `?path=${encodeURIComponent(path)}` : '';
   const resp = await fetchWithAuth(
@@ -662,7 +662,7 @@ export async function getAgentJobFiles(jobId: string, path = ''): Promise<AgentJ
   return jsonOrThrow<AgentJobFilesApi>(resp);
 }
 
-/** Save one UTF-8 file in the live worktree. */
+/** Save one UTF-8 file in the live workspace. */
 export async function writeAgentJobFile(
   jobId: string,
   path: string,
@@ -700,7 +700,7 @@ export async function listAgentTerminals(jobId: string): Promise<AgentTerminalAp
   return Array.isArray(body) ? body : body.terminals;
 }
 
-/** Start an isolated shell that shares the job's worktree. */
+/** Start an isolated shell that shares the job's retained workspace. */
 export async function createAgentTerminal(
   jobId: string,
   size: { rows: number; cols: number } = { rows: 24, cols: 80 },
@@ -955,7 +955,7 @@ export interface AgentGitWorkspaceApi {
   }>;
 }
 
-/** Read Git status/diff/commits from the live worktree. */
+/** Read Git status/diff/commits from the live workspace. */
 export async function getAgentJobGit(jobId: string): Promise<AgentGitWorkspaceApi> {
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/git`);
   return jsonOrThrow<AgentGitWorkspaceApi>(resp);

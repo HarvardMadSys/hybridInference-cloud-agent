@@ -16,9 +16,10 @@ layer and can resume from an explicit session locator. A live process is kept
 while the group is active; after ``docker stop`` the replacement process must
 resume that exact locator from the same container layer.
 
-Synchronous by design: the runner is threaded, and the only transport v1
-drivers own is container stdio. The design doc's async signatures become
-meaningful with the live-input transport and arrive with it.
+Synchronous by design: the runner is threaded, while the resident transport
+keeps each CLI's live input channel open and multiplexes turn events back into
+this contract. The design document uses async-shaped pseudocode; these methods
+provide the same lifecycle guarantees to the threaded host runner.
 """
 
 from __future__ import annotations
@@ -1265,10 +1266,10 @@ class ClaudeCodeDriver(HarnessDriver):
 
         The process stays alive after the turn settles and takes the next turn
         on stdin. It is only correct with a residency-lifetime credential in
-        ``context.credential`` (design §14: the thread-attributed grant that
-        host beats renew), because the pinned CLI runs its whole life on its
-        launch key — the measured fact that forced warm_native before §14
-        relaxed attribution to the thread.
+        ``context.credential`` — the thread-attributed residency grant from the
+        retained-session design's §6, renewed by host beats — because the pinned
+        CLI runs its whole life on its launch key. That measured behavior is why
+        the grant's lifetime and attribution follow the member residency.
         """
         if context.state_dir is None:
             raise SessionStateUnavailable("a resident turn needs native session state")
@@ -1332,8 +1333,9 @@ class ClaudeCodeLiveSession(HarnessSession):
     TTL_MS`` of 0 and 1 change nothing, and a 401 on a revoked key produces an
     error result without a refetch or retry. A live process therefore runs its
     whole life on its launch credential — which is why it must be launched on
-    the *residency's* credential, the thread-attributed grant of design §14
-    that host beats renew and release/takeover revokes, never on one turn's
+    the *residency's* credential, the thread-attributed grant of the retained-
+    session design's §6 that host beats renew and release/takeover revokes,
+    never on one turn's
     per-attempt token. With attribution per thread, one long-lived key for
     the whole conversation is the ledger telling the truth, not a lie.
     """

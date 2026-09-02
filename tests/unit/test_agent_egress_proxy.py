@@ -184,6 +184,23 @@ def test_the_renderer_writes_the_file_the_proxy_starts_from(tmp_path):
     assert "http_access deny all" in out.read_text()
 
 
+def test_renderer_never_exposes_a_partially_rewritten_live_acl(tmp_path, monkeypatch):
+    from cloud_agent_host import egress_proxy
+
+    out = tmp_path / "squid.conf"
+    out.write_text("old complete policy\n")
+
+    def fail_replace(_source, _destination):
+        raise OSError("simulated interrupted replace")
+
+    monkeypatch.setattr(egress_proxy.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="interrupted"):
+        main(["--out", str(out)])
+    assert out.read_text() == "old complete policy\n"
+    assert list(tmp_path.glob(".squid.*")) == []
+
+
 def test_a_refused_allowlist_stops_the_deploy_instead_of_starting_a_proxy(
     tmp_path, monkeypatch, capsys
 ):

@@ -459,6 +459,11 @@ function HistoryTurn({
   const fallbackMessages = hasEventMessages
     ? []
     : turn.messages.filter((message) => message.role === 'assistant');
+  const lastEventMessageIndex = turn.events.reduce(
+    (last, event, index) => (event.kind === 'message' ? index : last),
+    -1,
+  );
+  const lastFallbackMessageId = fallbackMessages.at(-1)?.id;
 
   return (
     <section aria-label={`Turn ${turn.turnNo}`}>
@@ -482,7 +487,11 @@ function HistoryTurn({
             key={`${turn.jobId}-${index}`}
             event={event}
             busy={busy}
-            onFork={event.kind === 'message' && onFork ? () => onFork(turn.jobId) : undefined}
+            onFork={
+              event.kind === 'message' && index === lastEventMessageIndex && onFork
+                ? () => onFork(turn.jobId)
+                : undefined
+            }
           />
         ))}
         {fallbackMessages.map((message) => (
@@ -490,7 +499,9 @@ function HistoryTurn({
             key={message.id}
             message={message}
             busy={busy}
-            onFork={onFork ? () => onFork(turn.jobId) : undefined}
+            onFork={
+              message.id === lastFallbackMessageId && onFork ? () => onFork(turn.jobId) : undefined
+            }
           />
         ))}
       </div>
@@ -756,7 +767,12 @@ function OutcomeCard({ job, onOpenDiff }: { job: AgentJob; onOpenDiff: () => voi
               {job.stateNote}
             </p>
           ) : null}
-          {job.state === 'cancelled' ? (
+          {job.nativeState === 'lost' || job.contextStatus === 'lost' ? (
+            <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+              This Agent CLI context can no longer be resumed. Files already written remain in the
+              retained workspace, but continuing requires a new chat.
+            </p>
+          ) : job.state === 'cancelled' ? (
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Send a follow-up to continue from any saved intermediate changes.
             </p>
@@ -857,7 +873,7 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
           {error
             ? 'Unavailable'
             : live?.available
-              ? 'Live worktree'
+              ? 'Live workspace'
               : loading
                 ? 'Loading…'
                 : 'Unavailable'}
@@ -1171,6 +1187,10 @@ export function JobDetail({
   const pill = STATE_PILL[job.state];
   const isActive = job.state === 'running' || job.state === 'queued';
   const isSuccessful = job.state === 'done' || job.state === 'needs_review';
+  // `contextStatus` describes the selected attempt. `nativeState` is the
+  // current membership truth, so it also closes the composer when someone is
+  // viewing an older successful turn after a later admitted turn was lost.
+  const contextLost = job.nativeState === 'lost' || job.contextStatus === 'lost';
   const latestTerminalEvent = [...job.events]
     .reverse()
     .find(
@@ -1243,7 +1263,7 @@ export function JobDetail({
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = followUp.trim();
-    if (!prompt || submitting) return;
+    if (!prompt || submitting || contextLost) return;
     setSubmitting(true);
     setActionError(null);
     try {
@@ -1312,10 +1332,15 @@ export function JobDetail({
   const threadMessages = historyTurns
     ? allThreadMessages.filter((message) => message.jobId === job.id)
     : allThreadMessages;
-  const canForkAnchor = (anchorJobId: string) => {
-    if (!job.sandboxId) return false;
-    return Boolean(job.workspaceShared && job.nativeForkAvailable && anchorJobId && !isActive);
-  };
+  const canForkWorkspace = Boolean(job.sandboxId && job.workspaceShared && !isActive);
+  const canForkCurrent = Boolean(canForkWorkspace && job.nativeForkAvailable);
+  const lastThreadAssistantMessageId = [...threadMessages]
+    .reverse()
+    .find((message) => message.role === 'assistant')?.id;
+  const lastVisibleMessageIndex = visibleEvents.reduce(
+    (last, event, index) => (event.kind === 'message' ? index : last),
+    -1,
+  );
   const currentRewindAnchor = historyTurns
     ? [...historyTurns].reverse().find((turn) => turn.forkable)?.jobId
     : undefined;
@@ -1470,12 +1495,12 @@ export function JobDetail({
                       rewindAnchorJobId={rewindAnchorJobId}
                       busy={forking}
                       onFork={
-                        turn.forkable && canForkAnchor(turn.jobId)
+                        turn.forkable && canForkWorkspace
                           ? (anchorJobId) => void forkFrom(anchorJobId)
                           : undefined
                       }
                       onRewind={
-                        rewindAnchorJobId && canForkAnchor(rewindAnchorJobId)
+                        rewindAnchorJobId && canForkWorkspace
                           ? (anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)
                           : undefined
                       }
@@ -1493,12 +1518,15 @@ export function JobDetail({
                       message={message}
                       busy={forking}
                       onFork={
-                        message.role === 'assistant' && isSuccessful && canForkAnchor(message.jobId)
+                        message.role === 'assistant' &&
+                        message.id === lastThreadAssistantMessageId &&
+                        isSuccessful &&
+                        canForkCurrent
                           ? () => void forkFrom(message.jobId)
                           : undefined
                       }
                       onRewind={
-                        rewindAnchor && canForkAnchor(rewindAnchor)
+                        rewindAnchor && canForkWorkspace
                           ? () => void forkFrom(rewindAnchor, message.content)
                           : undefined
                       }
@@ -1517,7 +1545,7 @@ export function JobDetail({
                         <CopyIcon />
                         Copy
                       </MessageActionButton>
-                      {currentRewindAnchor && canForkAnchor(currentRewindAnchor) ? (
+                      {currentRewindAnchor && canForkWorkspace ? (
                         <MessageActionButton
                           label="Edit & rewind"
                           onClick={() =>
@@ -1571,9 +1599,9 @@ export function JobDetail({
                       busy={forking}
                       onFork={
                         event.kind === 'message' &&
+                        index === lastVisibleMessageIndex &&
                         isSuccessful &&
-                        canForkAnchor(job.id) &&
-                        !isActive
+                        canForkCurrent
                           ? () => void forkFrom(job.id)
                           : undefined
                       }
@@ -1608,6 +1636,7 @@ export function JobDetail({
                   rows={2}
                   value={followUp}
                   onChange={(event) => setFollowUp(event.target.value)}
+                  disabled={contextLost}
                   onKeyDown={(event) => {
                     if (!isComposerSubmit(event)) return;
                     event.preventDefault();
@@ -1615,7 +1644,7 @@ export function JobDetail({
                     // same path and cannot drift apart.
                     event.currentTarget.form?.requestSubmit();
                   }}
-                  placeholder="Add a follow-up"
+                  placeholder={contextLost ? 'Native context unavailable' : 'Add a follow-up'}
                   aria-label="Add a follow-up"
                   className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
                 />
@@ -1627,9 +1656,11 @@ export function JobDetail({
                           native-resumes it in the same retained workspace; it
                           does not replace or clone the sandbox. */}
                       <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
-                        {job.state === 'cancelled'
-                          ? `Restores any saved changes · ${job.runtime} ·`
-                          : `Inherits ${job.runtime} ·`}
+                        {contextLost
+                          ? 'Start a new chat ·'
+                          : job.state === 'cancelled'
+                            ? `Restores any saved changes · ${job.runtime} ·`
+                            : `Inherits ${job.runtime} ·`}
                       </span>
                       <Picker
                         label="Model for this turn"
@@ -1651,15 +1682,17 @@ export function JobDetail({
                     </>
                   ) : (
                     <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                      {job.state === 'cancelled'
-                        ? `Restores any saved changes · ${job.runtime} · ${job.model}`
-                        : `Inherits ${job.runtime} · ${job.model}`}
+                      {contextLost
+                        ? `Start a new chat · ${job.runtime} · ${job.model}`
+                        : job.state === 'cancelled'
+                          ? `Restores any saved changes · ${job.runtime} · ${job.model}`
+                          : `Inherits ${job.runtime} · ${job.model}`}
                       {isActive ? ' · queued after this run' : ''}
                     </span>
                   )}
                   <button
                     type="submit"
-                    disabled={!followUp.trim() || submitting}
+                    disabled={contextLost || !followUp.trim() || submitting}
                     className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
                     aria-label="Send follow-up"
                     title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"

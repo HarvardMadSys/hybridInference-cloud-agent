@@ -37,6 +37,9 @@ class _Manager:
         )
         self.items: dict[str, ChatSandboxInspection] = {}
         self.events: list[object] = []
+        self.start_phases: list[str | None] = []
+        self.stop_count = 0
+        self.pruned_specs: list[ChatSandboxSpec] = []
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
 
     @staticmethod
@@ -65,7 +68,16 @@ class _Manager:
     def inspect(self, container_name: str) -> ChatSandboxInspection | None:
         return self.items.get(container_name)
 
-    def start(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+    def list(self) -> list[ChatSandboxInspection]:
+        return list(self.items.values())
+
+    def start(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        network_phase: str | None = None,
+    ) -> ChatSandboxInspection:
+        self.start_phases.append(network_phase)
         current = self.items[spec.container_name]
         if not current.running:
             current = replace(
@@ -77,6 +89,7 @@ class _Manager:
         return current
 
     def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+        self.stop_count += 1
         current = replace(
             self.items[spec.container_name],
             running=False,
@@ -84,6 +97,9 @@ class _Manager:
         )
         self.items[spec.container_name] = current
         return current
+
+    def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
+        self.pruned_specs = specs
 
     def freeze_shared_writers(
         self, spec: ChatSandboxSpec, *, slot_ids: list[int], token: str
@@ -204,6 +220,65 @@ def _members() -> list[SharedMemberManifest]:
             last_settled_job_id="ajob_peer",
         ),
     ]
+
+
+def test_broker_reconcile_stops_orphan_processes_before_accepting_requests():
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    descriptors = supervisor.reconcile()
+
+    assert manager.stop_count == 1
+    assert manager.items[spec.container_name].running is False
+    assert manager.pruned_specs == [spec]
+    assert descriptors[0].running is False
+
+
+def test_status_listing_never_stops_a_managed_running_group():
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(
+        spec,
+        _members(),
+        expected_container_id="container-shared",
+    )
+    supervisor.acquire(
+        spec,
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+
+    descriptors = supervisor.list()
+
+    assert manager.stop_count == 0
+    assert manager.items[spec.container_name].running is True
+    assert next(item for item in descriptors if item.thread_id == "athr_source").group_busy is True
+
+
+def test_acquire_recreates_agent_network_for_settled_context():
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+
+    supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+
+    assert manager.start_phases[-1] == "agent"
 
 
 def test_native_fork_journal_uses_the_docker_layer_owner_not_capabilityless_root():
@@ -583,7 +658,7 @@ def test_snapshot_starts_the_exact_idle_stopped_container_and_rearms_idle():
 
 def test_snapshot_start_failure_releases_the_admission_barrier():
     class StartFailureManager(_Manager):
-        def start(self, spec):
+        def start(self, spec, **_kwargs):
             raise SandboxError("docker start failed")
 
     manager = StartFailureManager()
@@ -653,6 +728,7 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():
     assert result.target_native_session_id == "native-child"
     assert supervisor.status("athr_child").resident_state == "live"
     assert supervisor.status("athr_source").operation_count == 0
+    assert supervisor.status("athr_source").idle_deadline_monotonic is not None
 
 
 def test_native_fork_retry_rotates_only_source_and_hidden_child_processes():

@@ -67,8 +67,8 @@ _CONNECT_TIMEOUT_S = 10.0
 
 # Forwarded from the agent to the upstream. Everything else — Authorization
 # above all, but equally Cookie, X-Forwarded-*, and whatever else the CLI or an
-# intermediary attaches — is dropped: the upstream sees a request this gateway
-# made, carrying this deployment's credential and nothing of the sandbox's.
+# intermediary attaches — is dropped: the upstream sees a request this control
+# plane made, carrying the owner's credential and nothing of the sandbox's.
 _FORWARD_TO_UPSTREAM = (
     "accept",
     "content-type",
@@ -78,7 +78,7 @@ _FORWARD_TO_UPSTREAM = (
 )
 
 # Returned from the upstream to the agent. Session id must survive for
-# streamable HTTP to work at all; the rest is this gateway's to decide, and
+# streamable HTTP to work at all; the rest is this relay's to decide, and
 # Set-Cookie in particular must never reach a sandbox.
 _RETURN_TO_AGENT = ("content-type", "mcp-session-id", "mcp-protocol-version")
 

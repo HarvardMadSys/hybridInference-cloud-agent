@@ -198,7 +198,9 @@ def test_shared_live_readiness_is_proved_before_any_running_service_is_replaced(
 
     assert build < database < migration < running_probe < readiness < bring_up
     assert "compose run --rm --no-deps control-plane" in script
-    assert "compose up -d --no-deps control-plane" in script
+    assert "BOOTSTRAP_SERVICES+=(control-plane)" in script
+    assert "BOOTSTRAP_SERVICES+=(mcp-relay)" in script
+    assert 'compose up -d --no-deps "${BOOTSTRAP_SERVICES[@]}"' in script
     assert '--timeout-seconds "${SHARED_READY_TIMEOUT}"' in script
     assert '--expected-deployment-sha "${SHA}"' in script
     assert "AGENT_SHARED_LIVE_SANDBOX" not in script
@@ -209,6 +211,7 @@ def _run_control_deploy(
     *,
     readiness_exit: int,
     control_running: bool = True,
+    mcp_running: bool = True,
     shared_live: str = "1",
     deployment_environment: str = "production",
     dotenv: str = "",
@@ -249,6 +252,8 @@ def _run_control_deploy(
         'case "$*" in\n'
         "  *' ps --status running -q control-plane')\n"
         '    [ "${CONTROL_RUNNING}" = "1" ] && printf "%s\\n" existing-control ; exit 0 ;;\n'
+        "  *' ps --status running -q mcp-relay')\n"
+        '    [ "${MCP_RUNNING}" = "1" ] && printf "%s\\n" existing-mcp ; exit 0 ;;\n'
         "  *' run --rm --no-deps control-plane python -m cloud_agent.deploy_readiness '*)\n"
         '    exit "${READINESS_EXIT}" ;;\n'
         "esac\n"
@@ -273,6 +278,7 @@ def _run_control_deploy(
             "DOCKER_LOG": str(docker_log),
             "READINESS_EXIT": str(readiness_exit),
             "CONTROL_RUNNING": "1" if control_running else "0",
+            "MCP_RUNNING": "1" if mcp_running else "0",
         },
         capture_output=True,
         text=True,
@@ -303,21 +309,23 @@ def test_a_successful_readiness_probe_allows_the_shared_only_service(tmp_path: P
     assert " up -d --remove-orphans" in docker_calls
 
 
-def test_a_cold_start_bootstraps_the_api_needed_for_a_fresh_host_heartbeat(
+def test_a_cold_start_bootstraps_both_services_needed_for_host_readiness(
     tmp_path: Path,
 ) -> None:
     result, docker_calls = _run_control_deploy(
         tmp_path,
         readiness_exit=0,
         control_running=False,
+        mcp_running=False,
     )
 
     assert result.returncode == 0, result.stderr
-    bootstrap = docker_calls.index(" up -d --no-deps control-plane")
+    bootstrap = docker_calls.index(" up -d --no-deps control-plane mcp-relay")
     readiness = docker_calls.index("cloud_agent.deploy_readiness")
     full_up = docker_calls.index(" up -d --remove-orphans")
     assert bootstrap < readiness < full_up
-    assert "cold-start host heartbeat" in result.stdout
+    assert "parallel host readiness" in result.stdout
+    assert "bootstrap MCP relay" in result.stdout
 
 
 def test_a_failed_cold_start_gate_stops_the_bootstrap_api(tmp_path: Path) -> None:
@@ -325,12 +333,62 @@ def test_a_failed_cold_start_gate_stops_the_bootstrap_api(tmp_path: Path) -> Non
         tmp_path,
         readiness_exit=17,
         control_running=False,
+        mcp_running=False,
     )
 
     assert result.returncode == 17
-    assert " up -d --no-deps control-plane" in docker_calls
-    assert " stop web mcp-relay control-plane" in docker_calls
+    assert " up -d --no-deps control-plane mcp-relay" in docker_calls
+    assert " stop control-plane mcp-relay" in docker_calls
     assert " up -d --remove-orphans" not in docker_calls
+
+
+def test_a_missing_mcp_relay_is_bootstrapped_without_replacing_the_live_api(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=True,
+        mcp_running=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert " up -d --no-deps mcp-relay" in docker_calls
+    assert " up -d --no-deps control-plane" not in docker_calls
+    assert docker_calls.index(" up -d --no-deps mcp-relay") < docker_calls.index(
+        "cloud_agent.deploy_readiness"
+    )
+
+
+def test_a_failed_partial_bootstrap_only_restores_the_service_that_was_stopped(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=17,
+        control_running=True,
+        mcp_running=False,
+    )
+
+    assert result.returncode == 17
+    assert " stop mcp-relay" in docker_calls
+    assert " stop control-plane" not in docker_calls
+
+
+def test_a_missing_api_is_bootstrapped_without_restarting_a_live_mcp_relay(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=False,
+        mcp_running=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert " up -d --no-deps control-plane" in docker_calls
+    assert " up -d --no-deps control-plane mcp-relay" not in docker_calls
+    assert "bootstrap MCP relay" not in result.stdout
 
 
 def test_removed_default_off_switch_is_inert(

@@ -45,6 +45,52 @@ local_project_name() {
   printf '%s\n' "${project_name:-freeinference-local}"
 }
 
+local_control_network() {
+  network_name=${AGENT_NETWORK_NAME:-}
+  if [ -z "$network_name" ] && [ -f "$ENV_FILE" ]; then
+    network_name=$(sed -n 's/^AGENT_NETWORK_NAME=//p' "$ENV_FILE" | tail -n 1)
+  fi
+  printf '%s\n' "${network_name:-cloud-agent}"
+}
+
+local_agent_egress_network() {
+  network_name=${LOCAL_AGENT_EGRESS_NETWORK:-}
+  if [ -z "$network_name" ] && [ -f "$ENV_FILE" ]; then
+    network_name=$(sed -n 's/^LOCAL_AGENT_EGRESS_NETWORK=//p' "$ENV_FILE" | tail -n 1)
+  fi
+  printf '%s\n' "${network_name:-freeinference-local-agent-egress}"
+}
+
+validate_network_owner() {
+  network_name=$1
+  expected_project=$2
+  if ! docker network inspect "$network_name" >/dev/null 2>&1; then
+    return
+  fi
+  owner=$(docker network inspect "$network_name" \
+    --format '{{ index .Labels "com.docker.compose.project" }}' 2>/dev/null) || {
+    echo "Could not inspect existing Docker network '$network_name'." >&2
+    return 1
+  }
+  if [ "$owner" != "$expected_project" ]; then
+    echo "Docker network '$network_name' belongs to Compose project '${owner:-<unlabelled>}', not '$expected_project'." >&2
+    echo "Choose unique LOCAL_PROJECT_NAME, AGENT_NETWORK_NAME, LOCAL_AGENT_EGRESS_NETWORK, and published ports before starting this checkout." >&2
+    return 1
+  fi
+}
+
+validate_local_network_ownership() {
+  project_name=$(local_project_name)
+  control_network=$(local_control_network)
+  egress_network=$(local_agent_egress_network)
+  if [ "$control_network" = "$egress_network" ]; then
+    echo "AGENT_NETWORK_NAME and LOCAL_AGENT_EGRESS_NETWORK must be different." >&2
+    return 1
+  fi
+  validate_network_owner "$control_network" "$project_name"
+  validate_network_owner "$egress_network" "$project_name"
+}
+
 random_hex() {
   openssl rand -hex 32
 }
@@ -54,6 +100,28 @@ append_env_if_missing() {
   value=$2
   if ! grep -q "^${name}=" "$ENV_FILE"; then
     printf '%s=%s\n' "$name" "$value" >>"$ENV_FILE"
+  fi
+}
+
+local_postgres_volumes() {
+  project_name=$(local_project_name)
+  docker volume ls --quiet \
+    --filter "label=com.docker.compose.project=$project_name" \
+    --filter "label=com.docker.compose.volume=agent-postgres"
+}
+
+refuse_lost_database_credentials() {
+  volumes=$(local_postgres_volumes) || {
+    echo "Could not inspect Docker volumes before generating $ENV_FILE." >&2
+    echo "Start Docker, then retry; credentials are never regenerated while retained database state may exist." >&2
+    return 1
+  }
+  if [ -n "$volumes" ]; then
+    echo "$ENV_FILE is missing, but Compose project '$(local_project_name)' still owns its Postgres volume:" >&2
+    printf '%s\n' "$volumes" >&2
+    echo "Restore the original .env.local (especially AGENT_POSTGRES_PASSWORD and AGENT_DATABASE_URL) and retry." >&2
+    echo "This script will not delete the volume or invent a new password that cannot authenticate to it." >&2
+    return 1
   fi
 }
 
@@ -67,6 +135,7 @@ upgrade_existing_env() {
   append_env_if_missing AGENT_WORKSPACE_BROKER_TOKEN "$(random_hex)"
   append_env_if_missing LOCAL_PROJECT_NAME freeinference-local
   append_env_if_missing LOCAL_AGENT_EGRESS_NETWORK freeinference-local-agent-egress
+  append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
   append_env_if_missing GATEWAY_AUTHORIZE_URL "http://127.0.0.1:${edge_port}/authorize"
   append_env_if_missing AGENT_SESSION_REDIRECT_URI \
     "http://127.0.0.1:${edge_port}/api/v1/session/callback"
@@ -80,6 +149,7 @@ ensure_env() {
     upgrade_existing_env
     return
   fi
+  refuse_lost_database_credentials
   umask 077
   postgres_password=$(random_hex)
   dispatch_token=$(random_hex)
@@ -120,6 +190,7 @@ ensure_env() {
       'LOCAL_EDGE_PORT=13002' \
       'LOCAL_PROJECT_NAME=freeinference-local' \
       'LOCAL_AGENT_EGRESS_NETWORK=freeinference-local-agent-egress' \
+      'LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16' \
       'GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize' \
       'AGENT_SESSION_REDIRECT_URI=http://127.0.0.1:13002/api/v1/session/callback' \
       'AGENT_WEB_BASE_URL=http://127.0.0.1:13002' \
@@ -132,6 +203,61 @@ ensure_env() {
       'AGENT_RETAINED_DOCKER_DATA_ROOT=/var/lib/docker'
   } >"$ENV_FILE"
   echo "Generated $ENV_FILE with local-only random credentials."
+}
+
+env_file_value() {
+  name=$1
+  value=$(printenv "$name" 2>/dev/null || true)
+  if [ -z "$value" ] && [ -f "$ENV_FILE" ]; then
+    value=$(sed -n "s/^${name}=//p" "$ENV_FILE" | tail -n 1)
+  fi
+  printf '%s' "$value"
+}
+
+require_local_database_credentials() {
+  missing=
+  for name in AGENT_POSTGRES_PASSWORD AGENT_DATABASE_URL; do
+    if [ -z "$(env_file_value "$name")" ]; then
+      missing="$missing $name"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    echo "$ENV_FILE is missing required database credential(s):$missing" >&2
+    echo "Restore them from the original local environment; this script will not reset the retained Postgres volume." >&2
+    return 1
+  fi
+}
+
+start_database_and_probe() {
+  echo "Starting Postgres before the rest of the local stack."
+  compose up --detach postgres
+  attempts=0
+  until compose exec -T postgres pg_isready >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 60 ]; then
+      echo "Local Postgres did not become ready; inspect it with '$0 logs postgres'." >&2
+      return 1
+    fi
+    sleep 2
+  done
+
+  echo "Verifying the retained database password from $ENV_FILE."
+  if ! compose run --rm --no-deps migrate python -c \
+    'import asyncio, os, asyncpg
+async def probe():
+    connection = await asyncpg.connect(os.environ["AGENT_DATABASE_URL"], timeout=10)
+    try:
+        await connection.fetchval("SELECT 1")
+    finally:
+        await connection.close()
+asyncio.run(probe())'; then
+    echo "The configured AGENT_DATABASE_URL cannot authenticate to the existing Postgres volume." >&2
+    echo "Restore the original AGENT_POSTGRES_PASSWORD/AGENT_DATABASE_URL. No volume was deleted or password reset." >&2
+    return 1
+  fi
+
+  echo "Applying the agent-owned database migrations before full startup."
+  compose run --rm --no-deps migrate
 }
 
 local_edge_port() {
@@ -183,7 +309,10 @@ command=${1:-up}
 case "$command" in
   up)
     ensure_env
-    compose build sandbox-image
+    require_local_database_credentials
+    validate_local_network_ownership
+    compose build sandbox-image migrate
+    start_database_and_probe
     compose up --detach --build
     wait_ready
     echo "Local Cloud Agent is ready: $(local_base_url)"
@@ -191,6 +320,9 @@ case "$command" in
     ;;
   start)
     ensure_env
+    require_local_database_credentials
+    validate_local_network_ownership
+    start_database_and_probe
     compose start
     wait_ready
     echo "Local Cloud Agent is ready: $(local_base_url)"
@@ -210,6 +342,7 @@ case "$command" in
     ;;
   smoke)
     ensure_env
+    validate_local_network_ownership
     wait_ready
     exec python3 "$SCRIPT_DIR/smoke.py" "${2:-$(local_base_url)}"
     ;;

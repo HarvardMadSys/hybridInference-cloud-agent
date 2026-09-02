@@ -1,16 +1,17 @@
 """The JSON-RPC half of the MCP proxy: what may be called, and what is listed.
 
-The proxy exists so that a sandbox with no egress can still use the MCP
-ecosystem. It sits where the model gateway already sits — on the trusted side —
-and the shape mirrors the publisher exactly: the sandbox holds a capability
-token and nothing else, and the component outside the boundary holds the real
-credential and decides what the request is allowed to be.
+The proxy exists so that a sandbox with no general egress can still use the MCP
+ecosystem. It sits in this service's control plane on the trusted side, behind
+a structurally separate MCP-only listener. The shape mirrors the publisher:
+the sandbox holds an attempt-fenced ``mcp`` capability and nothing upstream,
+while the component outside the boundary holds the user's real credential and
+decides what the request is allowed to be.
 
 This module is the deciding part, kept free of HTTP so it can be tested by
 calling it. It answers two questions:
 
 - **May this request proceed?** A ``tools/call`` naming a tool outside the
-  server's allowlist is refused here, before anything leaves the gateway. That
+  server's allowlist is refused here, before anything leaves the relay. That
   is the enforcement point that matters: the agent is driving on untrusted
   repository content, so "the model was told not to" is not a control.
 - **What does the agent get to see?** A ``tools/list`` result is filtered on

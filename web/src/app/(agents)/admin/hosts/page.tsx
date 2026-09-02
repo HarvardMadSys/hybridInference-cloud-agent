@@ -2,10 +2,10 @@
 
 // The runner host pool — the whole of this service's operations surface.
 //
-// Runners pull work, so nothing here moves a job to a machine: every control on
-// this page changes who may *claim*, and takes effect on the losing host's next
-// poll. The wording follows that. "Pinned", not "assigned"; "last polled", not
-// "online".
+// Runners pull work, so nothing here moves a sandbox to a machine. The pin
+// chooses where chats without a sandbox may be materialized; an existing
+// retained chat remains claimable only by its Docker-owning host. "Pinned",
+// not "assigned"; "last polled", not "online".
 //
 // Enrolment is deliberately absent. Minting a host credential is a real
 // operation and its endpoint stays, but it exists to stop a machine claiming
@@ -138,8 +138,8 @@ export default function AdminHostsPage() {
     run(
       () => setActiveAgentRunnerHost(host),
       host
-        ? `New agent jobs now go to ${host}. Jobs already running elsewhere keep running there.`
-        : 'Agent jobs unpinned — any runner may claim.',
+        ? `New chats now go to ${host}. Existing retained chats stay on their owning hosts.`
+        : 'New chats are unpinned — any runner may materialize one.',
     );
 
   // Unioned across the pool, because the selection is deployment-wide while
@@ -183,8 +183,8 @@ export default function AdminHostsPage() {
     );
   }
 
-  // Only the pinned host's silence is an incident: nothing else can pick the
-  // queue up, because pinning is what turned the others off.
+  // Silence blocks new-chat placement on the selected host. Existing retained
+  // chats have the same host-local dependency on each of their own owners.
   const staleActive = hosts.find((h) => h.active && h.seconds_since_seen > RECENT_POLL_SECONDS);
 
   return (
@@ -231,9 +231,10 @@ export default function AdminHostsPage() {
 
         {staleActive && (
           <div className="mt-6 rounded-xl border border-amber-200 dark:border-amber-500/25 bg-amber-50 dark:bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
-            {staleActive.host} last polled {formatAge(staleActive.seconds_since_seen)}. Jobs are
-            pinned to it, so if its runner is down the queue is stopped — pin another host or choose
-            Any host. (A machine that is simply busy also stops polling, so check before switching.)
+            {staleActive.host} last polled {formatAge(staleActive.seconds_since_seen)}. New chats
+            are pinned to it, so they will wait while its runners are down — pin another host or
+            choose Any host. Existing retained chats do not move. (A machine that is simply busy
+            also stops polling, so check before switching.)
           </div>
         )}
 
@@ -335,7 +336,7 @@ export default function AdminHostsPage() {
               Worth saying out loud rather than leaving to the badge: an absent
               "pinned" chip is ambiguous (nothing pinned, or did I miss it?),
               and pinning is not a drain — the machine that lost the pin keeps
-              running what it already has. */}
+              running and resuming retained chats it already owns. */}
           {activeHost && (
             <div className="mt-2">
               <button

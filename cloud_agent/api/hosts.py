@@ -54,7 +54,7 @@ router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
 
 #: How long a residency's lease lives between beats (design §7) — and, since
 #: the lease and the thread-attributed grant are renewed by the same beat and
-#: revoked together (design §14), the cap on how long an idle resident
+#: revoked together (retained-session design §§3 and 6), the cap on how long an idle resident
 #: process keeps a live credential after its host goes quiet.
 RESIDENCY_TTL_S = float(os.environ.get("AGENT_RESIDENCY_TTL_S") or 1800.0)
 
@@ -162,6 +162,11 @@ async def register_host(
     re-issued.
     """
     job_store = _require_store(store)
+    # Validate every retryable, machine-supplied configuration field before
+    # spending the one-time token. A refused broker address is a 400 the
+    # operator can correct; consuming the token first turns that typo into a
+    # second privileged admin operation for no security benefit.
+    broker_url = _checked_broker_url(body.broker_url)
     if not await job_store.consume_enroll_token(
         token_hash=hash_secret(body.enroll_token), host=body.name
     ):
@@ -185,7 +190,7 @@ async def register_host(
         credential_hash=hash_secret(credential),
         capabilities=body.capabilities,
         slots_total=body.slots_total,
-        broker_url=_checked_broker_url(body.broker_url),
+        broker_url=broker_url,
         runner_version=body.runner_version,
         labels=dict(body.labels),
     )
@@ -380,7 +385,7 @@ async def establish_thread_residency(
                 }
             },
         )
-    # A takeover is a credential rotation (design §14): the predecessor's
+    # A takeover is a credential rotation (retained-session design §6): the predecessor's
     # grant dies now, not at its TTL, so a zombie host starves promptly.
     previous_grant = row.get("previous_grant_id")
     if previous_grant and grants is not None:
@@ -400,7 +405,7 @@ async def _mint_residency_grant(
 ) -> str | None:
     """The residency's inference credential, or ``None`` for workspace-only.
 
-    Attribution is the *thread* (design §14): the grant's external job id
+    Attribution is the *thread* (retained-session design §6): the grant's external job id
     names it, so the gateway's ledger bills every resident turn to the
     conversation rather than to whichever turn happened to establish. Every
     failure degrades rather than refuses — a residency without a credential

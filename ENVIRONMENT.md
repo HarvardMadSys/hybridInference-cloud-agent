@@ -142,11 +142,12 @@ compose, because they name the stack rather than configure it.
 |---|---|---|
 | `COMPOSE_PROJECT` | **NEW** | This stack's compose project — the prefix on every container, image and network it creates, and therefore what keeps two environments on one machine apart. **Required, no default.** Sharing it is silent: the second `up` does not refuse, it adopts the first stack's containers and recreates them with its own configuration. `freeinference-cloud-agent-sandbox-staging` / `-prod`. |
 | `SIBLING_COMPOSE_PROJECTS` | **NEW** | Comma-separated projects on this machine that are the *other* environment rather than a stray copy of this one. Setting it makes `AGENT_HOST_STATE_ROOT` required: sharing that host path means sharing an enrolment credential. Chat workspaces are Docker writable layers and have no host directory. The deploy's guard reports containers of this stack's shape under any project it does not know; a legitimate sibling must be named or it trips that guard forever. |
+| `SHARED_READY_TIMEOUT` | **NEW** | Deployment-script wait for the two parallel rollout halves, default 900 seconds. The host uses the same bound while waiting for cold-start inference/MCP/control endpoints; the control deploy uses it while waiting for a fresh exact-SHA heartbeat and reverse broker probes. This is a rollout watchdog, not a chat/session timeout. |
 
 | Variable | New? | Notes |
 |---|---|---|
-| `AGENT_WORKSPACE_BROKER_URL` | existing | How a runner dials its co-located broker — normally the Compose service URL. The runner advertises `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` (or this value when no separate route is needed) at enrollment. The control plane always resolves brokers through the attempt's enrolled host row and never treats this as a global fallback. |
-| `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` | NEW | What the runner *reports* at enrolment, when that differs from what it *dials*. Unset, the two are one address, which is correct for every co-located deployment. Required when the control plane is on another machine: the service name above means nothing there, so the stored `broker_url` is unreachable and every terminal, file listing and git status answers 503 — jobs die at the first one, every attempt. Set it to the far end of the reverse forward (`AGENT_BROKER_REVERSE_BIND`/`_PORT`) and never without it. |
+| `AGENT_WORKSPACE_BROKER_URL` | existing | How a runner dials its broker — normally the Compose service URL. The runner advertises `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` (or this value only when the control plane truly shares that network) at enrollment. The control plane always resolves brokers through the attempt's enrolled host row and never treats this as a global fallback. |
+| `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` | NEW | What the runner *reports* at enrolment when that differs from what it *dials*. It may be omitted in the integrated local stack, where the control plane and broker share a network. It is required by `deploy/host/docker-compose.sandbox.yml`, including when its project happens to be on the same physical machine as the control-plane project: separate Compose networks cannot resolve the broker service name. Set it to the far end of the reverse forward (`AGENT_BROKER_REVERSE_BIND`/`_PORT`) and never without that tunnel; otherwise every terminal, file listing and Git status answers 503. |
 | `AGENT_WORKSPACE_BROKER_TOKEN` | existing | **Still global after phase G, and that means the same literal value on the control plane and on every host.** Host rows carry a broker *URL*, not a credential, so every broker in the pool authenticates this one value — a compromised host's broker token opens every other host's broker. Making it per-host is secret distribution (issue at enrollment, rotate, deliver), not routing, and is deliberately not done here. **Nothing detects a mismatch.** Two hosts provisioned independently get two secrets, both valid-looking, and the pool then answers 401 to every file listing, terminal and git status for jobs on the odd one out — which reads as a broken tunnel, not as a credential. This has already happened once (staging, 2026-08-06). Compare `sha256` of the value on both machines when provisioning a host, and never the value itself. |
 | `AGENT_BROKER_URL_ALLOWED_HOSTS` | **NEW** | Comma-separated hostnames a registering machine may name as its broker. **Read by the control plane, not the host** — it is listed here because it is the other half of the token above: a host proposes its own broker address and is then sent the pool's shared credential, so an unfiltered address is that credential handed to anything a compromised or mistyped registration names. Names, not patterns; a pool's machines are few and known. Unset means any host, which is what this did before the check — opt-in so an upgrade does not break an existing pool. |
 | `AGENT_CONTROL_PLANE_URL` | **NEW** | Where this runner claims work, registers this host and heartbeats. Split from `AGENT_GATEWAY_URL` because the two are the same origin only when control plane and gateway are co-located; a remote runner reaches each through its own tunnel alias. On the standalone stack it defaults to the control-plane tunnel (`AGENT_CONTROL_PLANE_HOSTNAME`), **not** the MCP one — those were briefly the same relay, and pointing here at MCP sends every claim to a listener that serves only MCP, so jobs are never taken and the 404 names a path rather than a port. |
@@ -157,7 +158,7 @@ compose, because they name the stack rather than configure it.
 | `AGENT_TERMINAL_MAX_SESSIONS` | existing | |
 | `AGENT_RETAINED_DOCKER_DATA_ROOT` | **NEW** | Exact daemon-side `DockerRootDir` expected by a restartable host (default `/var/lib/docker`). At broker startup, `docker info` must report this value or retained mode fails closed. For same-host disk durability, configure the **Docker daemon** itself to put `data-root` on the host's mounted durable block volume (for example `/mnt/agent-docker`) and set this variable to that same path. The broker checks configuration only; host bootstrap must separately prove the path is a mounted durable device (`findmnt --target …`). The path is never mounted into the broker or a sandbox, and it is not a per-chat directory API. Docker remains the only reader/writer of container layers. This preserves stop/start across service and host reboots, but is not the deferred cross-host checkpoint/cold-storage protocol. |
 | `AGENT_SHARED_RESIDENT_CAPACITY` | **NEW** | Number of credential-isolated member UID/private-tmpfs slots built into each new shared container. Default 8; accepted range 2–128. Fork reserves a free slot before any native mutation. This bounds resident chats in one group, while `AGENT_HOST_SLOTS` separately bounds simultaneously claimed turns on the machine. |
-| `AGENT_CHAT_IDLE_TIMEOUT_S` | **NEW** | The single product-level inactivity clock for a retained chat group. Defaults to 1800 seconds (30 minutes). Turn/file/Git completion and terminal activity advance the same group deadline; activity tokens prevent a mid-operation stop without stacking another full timeout. When the settled clock expires, the host issues `docker stop` while retaining the same container/writable layer. It never authorizes `docker rm`. `AGENT_TIMEOUT_S` and terminal TTLs are resource watchdogs, not alternate chat lifecycle clocks. |
+| `AGENT_CHAT_IDLE_TIMEOUT_S` | **NEW** | The single product-level inactivity clock for a retained chat group. Defaults to 1800 seconds (30 minutes). Turn/file/Git completion and terminal activity advance the same group deadline; activity tokens prevent a mid-operation stop without stacking another full timeout. When the settled clock expires, the host issues `docker stop`, releases that group's phase bridge, and retains the same container/writable layer. It never authorizes `docker rm`. Wake recreates the correct phase bridge before `docker start`. `AGENT_TIMEOUT_S` and terminal TTLs are resource watchdogs, not alternate chat lifecycle clocks. |
 | `AGENT_ENROLL_TOKEN` | **NEW** | One-time host enrollment token (task G2). Minted at `POST /admin/agent/runner-hosts/enroll-token`, redeemed once at `POST /v1/agent/host/register`, then replaced by the returned host credential. 15-minute TTL, hashed at rest, and shown exactly once — losing it means issuing another, not looking it up. **The token names the host it may register**: the admin minting it supplies `host`, and registration under any other name is refused without spending the token, so a typo cannot revoke a live machine's credential. The runner-side enrollment client is implemented: it serializes first registration across replicas, writes the host credential mode 0600 at `AGENT_HOST_CREDENTIAL_FILE`, and uses authenticated heartbeats thereafter. |
 | `AGENT_HOST_CREDENTIAL_FILE` | **NEW** | Where the host credential is kept between restarts. Default `/var/lib/hybridinference/agent-host-credential`, written mode 0600 before any byte reaches it — this machine runs untrusted repository code next door. `AGENT_HOST_CREDENTIAL` in the environment wins over the file, for deployments that inject it another way. |
 | `AGENT_DEPLOYMENT_SHA` / `AGENT_SHARED_LIVE_READY_FILE` | **NEW** | Deployment-script-managed rolling fence, not operator-selected topology. `deploy/host/deploy.sh` supplies the exact target commit and `sandbox_host.sh` keeps the marker under `AGENT_HOST_STATE_ROOT`; runners advertise `shared-sandbox-deployment:<sha>` only after every host check succeeds. Do not set either to choose behavior: retained/shared-live is unconditional. |
@@ -173,6 +174,7 @@ compose, because they name the stack rather than configure it.
 | `AGENT_SANDBOX_BACKEND` | existing | Defaults to `kata`. `container` is the explicit trusted-repository downgrade. `process` is a non-claimable test seam and cannot serve retained chats. |
 | `AGENT_SANDBOX_RUNTIME` | existing | Unset or `runc` for trusted internal repos. The enforced public/untrusted profile currently requires exactly `io.containerd.kata.v2`; gVisor needs its own future execution profile and is not accepted as Kata evidence. |
 | `AGENT_SANDBOX_IMAGE` | existing | Tag it per environment (`freeinference-cloud-agent-job:staging` / `:prod`) on a machine that runs both, or a rebuild on one side replaces the image the other is running. `-job` and not `-sandbox`, so it cannot be read as `…-sandbox-<env>-runner`, the image the runner container itself is built from. |
+| `AGENT_SANDBOX_NAMESPACE` | **NEW** | Stable deployment namespace stamped onto retained containers and private bridges so sibling Compose stacks on one Docker daemon cannot discover, stop, or prune each other's chats. The host stack requires its unique Compose project; the complete local stack derives it from `LOCAL_PROJECT_NAME`. Direct embeddings default to `default` and must override it when sharing a daemon. |
 | `AGENT_SANDBOX_NETWORK` | existing | |
 | `AGENT_SANDBOX_DOCKER` | existing | |
 | `AGENT_SANDBOX_HOME` | existing | |
@@ -180,52 +182,54 @@ compose, because they name the stack rather than configure it.
 | `AGENT_SANDBOX_EXTRA_ARGS` | existing | |
 | `AGENT_SANDBOX_ALLOW_OPEN_NETWORK` | existing | ⚠️ Isolation escape hatch. Must be unset in any environment reachable by untrusted repositories. |
 | `AGENT_SANDBOX_ALLOW_UNISOLATED` | existing | ⚠️ Same. |
-| `AGENT_EGRESS_SETUP_TIER` | existing | Egress during dependency setup. |
+| `AGENT_EGRESS_SETUP_TIER` | existing | Egress during dependency setup. The standalone host defaults to `trusted`, backed by its checked-in Squid allowlist proxy. Set `platform_only` only when setup needs no registry access. |
 | `AGENT_EGRESS_AGENT_TIER` | existing | Egress during the agent run. `platform_only` is the safe default; `custom` grants untrusted code general internet access. |
-| `AGENT_EGRESS_ALLOWLIST` | existing | |
-| `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` | existing | |
-| `AGENT_EGRESS_NETWORK_TRUSTED` | existing | |
+| `AGENT_EGRESS_ALLOWLIST` | existing | Extra domains added to the built-in Trusted package-registry list. Malformed entries and agent-vendor telemetry domains fail closed before Squid starts. |
+| `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` | existing | Internal discovery backplane carrying the fixed inference/MCP relays. Each chat gets a derived private bridge populated from it; chats are not left together on this network. On a host running sibling staging/production stacks this must be each stack's explicit unique name. |
+| `AGENT_EGRESS_NETWORK_TRUSTED` | existing | Internal discovery backplane carrying the setup proxy. Each setup phase gets a derived chat-private bridge. The supported host script derives a Compose-project-specific name when unset. |
+| `AGENT_EGRESS_NETWORK_UPLINK` | **NEW** | Routable network joined only by the allowlist proxy. The supported host script derives a Compose-project-specific name when unset. It must differ from both discovery backplanes. |
+| `AGENT_EGRESS_CHAT_NETWORK_POOL` | **NEW** | Canonical RFC1918 IPv4 CIDR from which Docker atomically allocates one `/29` per active chat/phase bridge (default `10.240.0.0/16`, 8192 bridges). Choose a range that does not overlap Docker, VPN, or private-service routes on the host. Collision retries are daemon-arbitrated across broker/runner processes. Setup→agent, idle/lost stop, and broker-startup orphan reconciliation disconnect endpoints and remove these bridges, so stopped retained layers do not consume IPAM forever. |
 | `AGENT_EGRESS_NETWORK_CUSTOM` | existing | |
 | `AGENT_EGRESS_NETWORK_FULL` | existing | |
-| `AGENT_EGRESS_PROXY_URL_TRUSTED` | existing | The proxy a Trusted-tier sandbox is pointed at — the one enforcing the built-in registry list plus `AGENT_EGRESS_ALLOWLIST`. |
+| `AGENT_EGRESS_PROXY_URL_TRUSTED` | existing | The proxy a Trusted-tier sandbox is pointed at — the one enforcing the built-in registry list plus `AGENT_EGRESS_ALLOWLIST`. The standalone Compose supplies this from its private service name and `AGENT_EGRESS_PROXY_PORT`; operators do not need to set it there. |
 | `AGENT_EGRESS_PROXY_URL_CUSTOM` | existing | Same for the Custom tier, which supplies its own proxy by definition; nothing here renders a config for it. |
 | `AGENT_EGRESS_PROXY_PORT` | existing | Port the rendered Squid config listens on. A non-numeric value is refused at render rather than defaulted, since a proxy silently on the wrong port is a sandbox with no egress filtering at all. |
 | `AGENT_LIVE_SESSION_ID` / `AGENT_LIVE_WORKDIR` | **NEW (internal)** | Generated by the runtime adapter for the private OpenCode/Kilo stdio bridge. Operators must not set these. They select the already-authorized native session and fixed `/workspace` path inside one member process; neither is a credential or host path. |
 
-### Agent CLI version pins (build time, not run time)
+### Complete local stack database recovery
 
-Read by `deploy/host/sandbox_host.sh` and passed to `docker build` as build
-arguments. Unprefixed by deliberate exception to the `AGENT_*` convention: each
-one is named for the `ARG` it feeds in `deploy/sandbox/Dockerfile.agent-sandbox`,
-and one name for one thing beats a mapping table between the `.env` key and the
-build argument — a typo in that mapping would be invisible.
+`deploy/local/dev.sh` stores the local Postgres password and matching
+`AGENT_DATABASE_URL` in the gitignored `deploy/local/.env.local`. Back up that
+file with any retained local Docker volume. If the file is missing while the
+selected Compose project still owns `agent-postgres`, the script refuses to
+generate a replacement password: PostgreSQL applies `POSTGRES_PASSWORD` only
+when initializing an empty data directory, so a new value cannot unlock the
+old volume.
 
-Unset is the normal case and passes no build argument at all, so the image is
-built from the Dockerfile's reviewed default. Set one only when this environment
-is deliberately running something else.
+`up` and `start` bring up Postgres first, wait for readiness, authenticate from
+the control-plane image using the configured DSN, and run Alembic before
+starting the rest of the stack. On a mismatch, restore the original
+`AGENT_POSTGRES_PASSWORD` and `AGENT_DATABASE_URL`. The script never deletes the
+volume or resets its password automatically.
 
-**The value must be an exact version.** A dist-tag (`latest`) or a range
-(`^2.1`) fails the image build. The pin is not only what gets installed — it is
-derived into the image's version labels, which the heartbeat reports, the claim
-copies onto every attempt as the durable record of what ran, and native-session
-admission compares before letting a thread resume its session. A label that does not
-match the installed binary makes all three false at once.
+### Agent CLI version pins (image build)
 
-Bumping one is a real change, not a config tweak: an agent CLI that alters its
-event format alters what `cloud_agent_host/runtimes.py` can parse. Re-run
-the agent-loop conformance suite before shipping one.
+The five default versions live in both
+`deploy/sandbox/Dockerfile.agent-sandbox` and
+`cloud_agent_host/shared_protocol.py`. They are one reviewed protocol unit:
+the image installs and labels them, while every runner and the control plane
+use the matching constants to decide whether `shared-sandbox-v1` may be
+advertised or claimed. They are therefore source pins, not per-host `.env`
+settings. Change both locations together and re-run the agent-loop conformance
+suite when intentionally changing a default.
 
-| Variable | New? | Notes |
-|---|---|---|
-| `CLAUDE_CODE_VERSION` | **NEW** | `@anthropic-ai/claude-code`. |
-| `CODEX_VERSION` | **NEW** | `@openai/codex`. |
-| `PI_VERSION` | **NEW** | `@mariozechner/pi-coding-agent`. |
-| `OPENCODE_VERSION` | **NEW** | `opencode-ai`. |
-| `KILO_VERSION` | **NEW** | `@kilocode/cli`. |
+The Dockerfile still verifies every exact version against the installed binary
+at build time. A dist-tag (`latest`) or range (`^2.1`) fails the build, so its
+labels cannot claim a different binary than the image actually contains.
 
-Each runtime also takes a `*_EXTRA_VERSIONS` — comma-separated, blank by
-default — naming **additional** versions the same image carries beside the
-default above. That list is the *menu*: build time decides what the image
+Each runtime takes a `*_EXTRA_VERSIONS` deployment setting — comma-separated,
+blank by default — naming **additional** versions the same image carries beside
+the reviewed default. That list is the *menu*: build time decides what the image
 holds, and an admin picks which item new work runs from the runner-hosts page
 (`agent_runner_policy.runtime_versions`). Blank leaves an image holding exactly
 its defaults, which is where every deployment starts.

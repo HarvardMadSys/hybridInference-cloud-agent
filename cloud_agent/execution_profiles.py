@@ -46,19 +46,14 @@ RESERVED_EXECUTION_METADATA_KEYS = frozenset(
 )
 
 
-def shared_sandbox_claim_attested(attestation: Mapping[str, object]) -> bool:
-    """Whether this exact polling runner replica may claim shared-live work.
-
-    A host heartbeat is machine-level and is shared by every runner replica on
-    that machine. During a rolling deployment it can therefore describe a new
-    replica while an old replica is the one actually polling. The claim carries
-    this second, replica-local proof so an old or partially configured process
-    skips shared work instead of borrowing its sibling's advertised capability.
-    """
+def _shared_sandbox_claim_attested(
+    attestation: Mapping[str, object], *, protocols: frozenset[str]
+) -> bool:
+    """Validate the common image/runtime proof for one set of protocols."""
     digest = attestation.get("sandbox_image_digest")
     if not isinstance(digest, str) or not digest.strip():
         return False
-    if attestation.get("shared_sandbox_protocol") != SHARED_SANDBOX_PROTOCOL:
+    if attestation.get("shared_sandbox_protocol") not in protocols:
         return False
     capabilities = attestation.get("runner_capabilities")
     if not isinstance(capabilities, list) or SHARED_SANDBOX_CAPABILITY not in capabilities:
@@ -73,6 +68,36 @@ def shared_sandbox_claim_attested(attestation: Mapping[str, object]) -> bool:
     return isinstance(helpers, Mapping) and all(
         helpers.get(helper_id) == version
         for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
+    )
+
+
+def shared_sandbox_claim_attested(attestation: Mapping[str, object]) -> bool:
+    """Whether this exact replica may create or claim current-protocol work.
+
+    A host heartbeat is machine-level and is shared by every runner replica on
+    that machine. During a rolling deployment it can therefore describe a new
+    replica while an old replica is the one actually polling. The claim carries
+    this second, replica-local proof so an old or partially configured process
+    skips shared work instead of borrowing its sibling's advertised capability.
+    """
+    return _shared_sandbox_claim_attested(
+        attestation,
+        protocols=frozenset({SHARED_SANDBOX_PROTOCOL}),
+    )
+
+
+def compatible_shared_sandbox_followup_attested(attestation: Mapping[str, object]) -> bool:
+    """Whether a replica may continue a retained group it already owns.
+
+    Protocol v2 added only the historical native-fork anchor. The reviewed v1
+    runner/image tuple therefore remains compatible with ordinary turns in its
+    existing Docker layer, but it must never materialize a new group or receive
+    an at-anchor fork request. Keep the allowlist explicit so a future protocol
+    revision is fail-closed until its compatibility is reviewed here.
+    """
+    return _shared_sandbox_claim_attested(
+        attestation,
+        protocols=frozenset({"v1", SHARED_SANDBOX_PROTOCOL}),
     )
 
 

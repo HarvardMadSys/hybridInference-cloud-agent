@@ -416,6 +416,28 @@ async def test_a_replayed_enrollment_token_is_refused(client):
     )
 
 
+async def test_an_invalid_broker_url_does_not_spend_the_enrollment_token(client):
+    """A retryable host configuration typo must not require a new admin token."""
+    async_client, store = client
+    issued = await async_client.post(
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
+    )
+    token = issued.json()["enroll_token"]
+
+    refused = await async_client.post(
+        "/v1/agent/host/register",
+        json=_registration_body(token, "runner-a", broker_url="file:///etc/passwd"),
+    )
+    retry = await async_client.post(
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
+    )
+
+    assert refused.status_code == 400
+    assert refused.json()["detail"]["error"]["type"] == "invalid_broker_url"
+    assert retry.status_code == 200
+    assert store.rows["runner-a"]["broker_url"] == "http://broker.test:8092"
+
+
 async def test_a_typo_cannot_evict_a_live_host(client):
     """The eviction the name binding exists to prevent.
 
@@ -1113,7 +1135,7 @@ def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
     assert validate_broker_url("http://anything:8081") == "http://anything:8081"
 
 
-# ── residency grant choreography (design §14) ──────────────────────────
+# ── residency grant choreography (retained-session design §6) ──────────
 
 
 def _establish_row(**overrides: Any) -> dict[str, Any]:

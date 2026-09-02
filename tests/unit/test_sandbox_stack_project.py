@@ -139,6 +139,16 @@ _SHARED_HOST_ENV = "\n".join(
         "AGENT_TUNNEL_SSH_DESTINATION=user@gateway",
         "AGENT_TUNNEL_SSH_KEY=/dev/null",
         "AGENT_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
+        "AGENT_MCP_TUNNEL_SSH_DESTINATION=user@control",
+        "AGENT_MCP_TUNNEL_SSH_KEY=/dev/null",
+        "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
+        "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION=user@control",
+        "AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY=/dev/null",
+        "AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
+        "AGENT_BROKER_REVERSE_BIND=172.24.0.1",
+        "AGENT_BROKER_REVERSE_PORT=18092",
+        "AGENT_WORKSPACE_BROKER_ADVERTISE_URL=http://172.24.0.1:18092",
+        "AGENT_WORKSPACE_BROKER_TOKEN=test-broker-token",
         "",
     ]
 )

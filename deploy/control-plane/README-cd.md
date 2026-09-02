@@ -23,22 +23,23 @@ run on the sandbox host (x86_64). They are deployed by
 the control database migration overlap with host deployment. The host marks the
 exact target SHA ready only after every runner, broker, tunnel, isolation check,
 and Docker data-root check passes. The control-plane script waits for a fresh
-matching heartbeat and dials every eligible broker before it replaces any
-running API container. The protocol gate therefore preserves host-before-API
-compatibility without putting the whole Actions workflow on a serial critical
-path.
+matching heartbeat from every new-chat placement host. It also dials every
+online host that still owns a retained group, even after the admin placement
+pin moved elsewhere, before it replaces any running API container. The protocol
+gate therefore preserves host-before-API compatibility without putting the
+whole Actions workflow on a serial critical path.
 
 On a cold machine, the control script first starts Postgres and runs Alembic.
-If no control-plane container is running, it then starts the target API by
-itself before entering the readiness wait. That cold-start exception is
-necessary because host enrollment and heartbeat are HTTP calls to the API, not
-direct database writes: after `compose down`, requiring a post-check heartbeat
-while keeping the API stopped is a deadlock. There is no old API to preserve in
-this branch; web and MCP remain stopped, work waits for an eligible host, and a
-failed gate stops the bootstrap API again. An ordinary rolling deployment does
-not take this branch and leaves the old API untouched until the exact-SHA host
-gate passes. As with every rolling migration, new migrations must remain
-compatible with the old API during this window.
+If no control-plane container is running, it then starts the target API and the
+scoped, loopback-bound MCP relay before entering the readiness wait. That
+cold-start exception is necessary because host enrollment/heartbeat need the
+API and host readiness probes both fixed sandbox relays: after `compose down`,
+keeping either service stopped is a deadlock. There is no old API to preserve
+in this branch; web remains stopped, work waits for an eligible host, and a
+failed gate stops both bootstrap services again. An ordinary rolling deployment
+does not take this branch and leaves the old services untouched until the
+exact-SHA host gate passes. As with every rolling migration, new migrations
+must remain compatible with the old API during this window.
 
 The retained topology is the only executor. Until an enrolled host reports
 `shared-sandbox-v1`, the exact deployment-SHA attestation, and a usable broker,
@@ -210,7 +211,8 @@ each control plane is alone on its box, so nothing there does.
 | sandbox project | `freeinference-cloud-agent-sandbox-staging` | `freeinference-cloud-agent-sandbox-prod` |
 | sandbox deploy root | `…/freeinference-cloud-agent-staging` | `…/freeinference-cloud-agent-prod` |
 | sandbox image | `freeinference-cloud-agent-job:staging` | `freeinference-cloud-agent-job:prod` |
-| egress network | `freeinference-cloud-agent-egress-staging` | `freeinference-cloud-agent-egress-prod` |
+| Agent-turn egress network | `freeinference-cloud-agent-egress-staging` | `freeinference-cloud-agent-egress-prod` |
+| setup/proxy networks | Compose-project-derived `-egress-trusted` / `-egress-uplink` | Compose-project-derived `-egress-trusted` / `-egress-uplink` |
 | state roots | `/var/lib/freeinference-cloud-agent-staging/…` | `/var/lib/freeinference-cloud-agent-prod/…` |
 | runner labels | `deploy-cloud-agent-control-staging`<br>`deploy-cloud-agent-sandbox-staging` | `deploy-cloud-agent-control-prod`<br>`deploy-cloud-agent-sandbox-prod` |
 
@@ -226,8 +228,9 @@ credential the runner holds, so editing the variable renames nothing. Two stacks
 on one machine therefore stay apart by having **their own state roots** — the
 credential lives under `AGENT_HOST_STATE_ROOT`, and sharing that directory means
 the second stack claims as whichever host enrolled first. `sandbox_host.sh`
-requires all three roots once `SIBLING_COMPOSE_PROJECTS` is set, because that is
-the moment the defaults stop being safe.
+requires that root plus the stack's existing PlatformOnly network name once
+`SIBLING_COMPOSE_PROJECTS` is set, because that is the moment the defaults stop
+being safe. The new Trusted/uplink network names derive from the Compose project.
 
 `cloudagent` on spark2 is the one name left alone. It is alone on that machine,
 so it needs no suffix, and renaming a compose project renames its **named

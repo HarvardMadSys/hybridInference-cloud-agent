@@ -94,15 +94,21 @@ needs an unchanged baseline to be worth anything.
   - *Setup phase* — dependency installation may reach package registries, but
     only through the Squid allowlist proxy, which permits CONNECT to an
     allowlisted host by name and refuses everything else.
-  - *Agent phase* — untrusted repository code runs, and the sandbox reaches the
-    gateway only, via a fixed-address relay. The relay is not a proxy: the
-    caller cannot choose a destination.
+  - *Agent phase* — untrusted repository code runs, and the sandbox reaches
+    only two fixed-address relays: the gateway for inference and the MCP-only
+    listener for tools. Each chat gets its own internal Docker network; the
+    compose network is only the discovery backplane from which those two
+    trusted relay endpoints are attached. Neither relay is a caller-selected
+    forward proxy, and unrelated chat containers never share a bridge.
 
 ## 7. Security boundaries — do not relax without review
 
-- During the agent phase the sandbox reaches exactly one network destination:
-  the gateway relay. The setup-phase allowlist proxy is the only sanctioned
-  widening, and the escape hatches (`AGENT_SANDBOX_ALLOW_OPEN_NETWORK`,
+- During the agent phase the sandbox reaches exactly two network destinations:
+  the inference gateway relay and the structurally isolated MCP-only relay.
+  Per-chat internal networks enforce both the off-host boundary and cross-chat
+  isolation; `internal: true` on one shared bridge is not sufficient. The
+  setup-phase allowlist proxy is the only sanctioned widening, and the
+  escape hatches (`AGENT_SANDBOX_ALLOW_OPEN_NETWORK`,
   `AGENT_EGRESS_AGENT_TIER=custom`) must stay unset anywhere untrusted
   repositories run.
 - Long-lived or cross-task credentials never enter the sandbox. Only

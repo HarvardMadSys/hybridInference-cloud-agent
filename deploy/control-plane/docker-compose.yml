@@ -87,8 +87,10 @@ services:
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32+ random bytes, unique per environment}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
-      # How long a hot sandbox's residency lease lives between beats (design
-      # §7). Also the cap on how long an idle resident process is kept at all.
+      # How long a member-scoped resident credential lives between runner
+      # heartbeats. Chat inactivity is a separate group clock on the host
+      # (AGENT_CHAT_IDLE_TIMEOUT_S); refreshing this lease does not keep an
+      # otherwise idle container running.
       AGENT_RESIDENCY_TTL_S: ${AGENT_RESIDENCY_TTL_S:-1800}
       # What a runner presents to claim work. Without it every claim is 401 and
       # the queue simply never drains — with nothing in the control plane's own
@@ -201,6 +203,11 @@ services:
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
+      # The relay resolves each owner's stored MCP connection and therefore
+      # must decrypt it under the same key/domain as the main control-plane
+      # listener. Without this, health stays green but every connected server
+      # is reported as unavailable at the first tool call.
+      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32 random bytes, unique per environment}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
     depends_on:
       migrate:

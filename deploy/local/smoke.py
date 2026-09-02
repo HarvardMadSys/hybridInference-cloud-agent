@@ -191,6 +191,46 @@ def chat_container(sandbox_id: str) -> tuple[str, str, str]:
     return container_id, status, mounts
 
 
+def chat_private_network(container_id: str) -> str:
+    """Require one chat-private bridge containing only this chat and two relays."""
+    inspected = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Networks}}",
+            container_id,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    networks = json.loads(inspected)
+    if len(networks) != 1:
+        raise RuntimeError(f"chat {container_id[:12]} has non-exclusive networks: {networks}")
+    network_name = next(iter(networks))
+    if not network_name.startswith("freeinference-chat-net-"):
+        raise RuntimeError(f"chat {container_id[:12]} remained on shared network {network_name!r}")
+    raw = json.loads(
+        subprocess.run(
+            ["docker", "network", "inspect", network_name],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )[0]
+    labels = raw.get("Labels") or {}
+    members = raw.get("Containers") or {}
+    if labels.get("org.freeinference.chat-sandbox-network") != "true":
+        raise RuntimeError(f"chat network {network_name!r} has no ownership label")
+    if len(members) != 3 or not any(str(member).startswith(container_id) for member in members):
+        raise RuntimeError(
+            f"chat network {network_name!r} must contain one sandbox and two relays, "
+            f"found {[item.get('Name') for item in members.values()]}"
+        )
+    return network_name
+
+
 def wait_stopped(sandbox_id: str) -> str:
     deadline = time.monotonic() + IDLE_STOP_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -253,6 +293,7 @@ def main() -> int:
 
     print("[3/7] Every pinned CLI creates NEW then continues one live process", flush=True)
     sessions: dict[str, tuple[dict[str, Any], str, str]] = {}
+    private_networks: set[str] = set()
     for runtime in RUNTIMES:
         print(f"  {runtime}: first turn", flush=True)
         created = client.request(
@@ -274,6 +315,12 @@ def main() -> int:
         original_id, status, mounts = chat_container(sandbox_id)
         if status != "running" or mounts != "[]":
             raise RuntimeError(f"{runtime} new chat container is {status} with mounts {mounts}")
+        private_network = chat_private_network(original_id)
+        if private_network in private_networks:
+            raise RuntimeError(
+                f"{runtime} shares chat network {private_network!r} with another group"
+            )
+        private_networks.add(private_network)
 
         print(f"  {runtime}: follow-up", flush=True)
         follow_up = client.request(
@@ -465,7 +512,8 @@ def main() -> int:
     print(
         "PASS: OAuth + all five CLIs NEW → LIVE → docker stop → RESTORED; "
         "all five native-fork source/child sessions stay LIVE in one workspace; "
-        "group stop → child RESTORED; snapshots publish; all containers keep mounts=[]",
+        "group stop → child RESTORED; snapshots publish; all containers keep mounts=[] "
+        "and unrelated groups use distinct relay-only networks",
         flush=True,
     )
     return 0

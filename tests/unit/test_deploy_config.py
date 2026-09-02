@@ -95,6 +95,7 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
     assert values["AGENT_WORKSPACE_BROKER_TOKEN"] == "keep-this-broker-token"
     assert values["LOCAL_PROJECT_NAME"] == "freeinference-local"
     assert values["LOCAL_AGENT_EGRESS_NETWORK"] == "freeinference-local-agent-egress"
+    assert values["LOCAL_CHAT_NETWORK_POOL"] == "10.240.0.0/16"
     assert values["GATEWAY_AUTHORIZE_URL"] == "http://127.0.0.1:23002/authorize"
     assert values["AGENT_SESSION_REDIRECT_URI"] == (
         "http://127.0.0.1:23002/api/v1/session/callback"
@@ -106,6 +107,101 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
         "http://127.0.0.1:24002/api/v1/session/callback",
         "http://127.0.0.1:24002",
     ]
+
+
+def test_local_dev_refuses_to_replace_lost_credentials_for_an_existing_database(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "repo/deploy/local/dev.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(_LOCAL_DEV_SCRIPT, script)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_compose = fake_bin / "docker-compose"
+    fake_compose.write_text("#!/bin/sh\nexit 0\n")
+    fake_compose.chmod(0o755)
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  'volume ls --quiet --filter label=com.docker.compose.project=freeinference-local "
+        "--filter label=com.docker.compose.volume=agent-postgres')\n"
+        "    echo freeinference-local_agent-postgres ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+    )
+    fake_docker.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script), "config"],
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert not (script.parent / ".env.local").exists()
+    assert "still owns its Postgres volume" in result.stderr
+    assert "will not delete the volume or invent a new password" in result.stderr
+
+
+def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "repo/deploy/local/dev.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(_LOCAL_DEV_SCRIPT, script)
+    (script.parent / ".env.local").write_text(
+        "AGENT_POSTGRES_PASSWORD=wrong-retained-password\n"
+        "AGENT_DATABASE_URL=postgresql://cloudagent:wrong-retained-password@postgres/cloudagent\n"
+        "AGENT_WORKSPACE_BROKER_TOKEN=keep\n"
+        "LOCAL_PROJECT_NAME=freeinference-local\n"
+        "LOCAL_AGENT_EGRESS_NETWORK=freeinference-local-agent-egress\n"
+        "LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16\n"
+        "LOCAL_EDGE_PORT=13002\n"
+        "GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize\n"
+        "AGENT_SESSION_REDIRECT_URI=http://127.0.0.1:13002/api/v1/session/callback\n"
+        "AGENT_WEB_BASE_URL=http://127.0.0.1:13002\n"
+        "AGENT_WEB_GATEWAY_URL=\n"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    compose_log = tmp_path / "compose.log"
+    docker = fake_bin / "docker"
+    docker.write_text("#!/bin/sh\nexit 1\n")
+    docker.chmod(0o755)
+    compose = fake_bin / "docker-compose"
+    compose.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >>"$COMPOSE_LOG"\n'
+        'case "$*" in\n'
+        "  *' exec -T postgres pg_isready') exit 0 ;;\n"
+        "  *' run --rm --no-deps migrate python -c '*) exit 17 ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    compose.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script), "up"],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "COMPOSE_LOG": str(compose_log),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = compose_log.read_text()
+
+    assert result.returncode != 0
+    assert " build sandbox-image migrate" in calls
+    assert " up --detach postgres" in calls
+    assert " run --rm --no-deps migrate python -c" in calls
+    assert " up --detach --build" not in calls
+    assert "cannot authenticate to the existing Postgres volume" in result.stderr
 
 
 def test_complete_local_stack_exposes_only_its_loopback_edge(local_compose: dict):
@@ -131,6 +227,15 @@ def test_complete_local_sandbox_network_has_only_narrow_relays(local_compose: di
 
     assert local_compose["networks"]["agent-egress"]["internal"] is True
     assert on_egress == {"local-gateway", "mcp-relay"}
+
+
+def test_mcp_only_listener_receives_the_connection_decryption_key() -> None:
+    """A healthy relay must be able to resolve the owner's stored connection."""
+    control_compose = yaml.safe_load(_CONTROL_PLANE_COMPOSE.read_text())
+    relay_env = control_compose["services"]["mcp-relay"]["environment"]
+
+    assert "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY" in relay_env
+    assert "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY" in relay_env["AGENT_SOURCE_CONTROL_ENCRYPTION_KEY"]
 
 
 def test_complete_local_host_data_is_docker_owned(local_compose: dict):
@@ -662,12 +767,6 @@ def test_the_setup_tier_the_overlay_selects_is_one_it_actually_ships(compose: di
     assert url.startswith("http://"), "the trusted tier is selected with no proxy URL"
 
 
-@pytest.mark.skip(
-    reason="The Trusted egress tier — proxy, config renderer, tiered networks — was "
-    "declared only in the gateway repo's co-located overlay, which this repository "
-    "did not migrate. Un-skip when the standalone compose declares them; see "
-    "MIGRATION.md, Open decisions."
-)
 def test_the_proxy_url_names_the_port_the_generated_config_listens_on(compose: dict):
     """Two places hold one number, so they are checked against each other.
 
@@ -681,12 +780,6 @@ def test_the_proxy_url_names_the_port_the_generated_config_listens_on(compose: d
     assert _expand(env["AGENT_EGRESS_PROXY_URL_TRUSTED"]).endswith(f":{DEFAULT_PROXY_PORT}")
 
 
-@pytest.mark.skip(
-    reason="The Trusted egress tier — proxy, config renderer, tiered networks — was "
-    "declared only in the gateway repo's co-located overlay, which this repository "
-    "did not migrate. Un-skip when the standalone compose declares them; see "
-    "MIGRATION.md, Open decisions."
-)
 def test_the_proxy_cannot_reach_the_rest_of_the_stack(compose: dict):
     """A Squid reachable by an untrusted sandbox must not also see the database.
 
@@ -714,12 +807,6 @@ def test_the_proxy_cannot_reach_the_rest_of_the_stack(compose: dict):
     )
 
 
-@pytest.mark.skip(
-    reason="The Trusted egress tier — proxy, config renderer, tiered networks — was "
-    "declared only in the gateway repo's co-located overlay, which this repository "
-    "did not migrate. Un-skip when the standalone compose declares them; see "
-    "MIGRATION.md, Open decisions."
-)
 def test_the_proxy_config_is_generated_by_the_validating_renderer(compose: dict):
     """The allowlist reaches Squid's config only through code that checks it.
 
@@ -738,8 +825,39 @@ def test_the_proxy_config_is_generated_by_the_validating_renderer(compose: dict)
     assert proxy["depends_on"]["agent-egress-proxy-config"]["condition"] == (
         "service_completed_successfully"
     ), "the proxy may start before its config exists, i.e. with no config at all"
+    fingerprint = proxy["environment"]["AGENT_EGRESS_CONFIG_FINGERPRINT"]
+    assert "AGENT_EGRESS_ALLOWLIST" in fingerprint
+    assert "AGENT_EGRESS_PROXY_PORT" in fingerprint
     assert any(volume.endswith(":ro") for volume in proxy["volumes"]), (
         "the proxy can rewrite the allowlist it is enforcing"
+    )
+
+
+def test_runner_and_broker_share_the_private_network_pool(compose: dict):
+    runner_pool = compose["services"]["runner"]["environment"]["AGENT_EGRESS_CHAT_NETWORK_POOL"]
+    broker_pool = compose["services"]["workspace-broker"]["environment"][
+        "AGENT_EGRESS_CHAT_NETWORK_POOL"
+    ]
+
+    assert runner_pool == broker_pool
+    assert runner_pool.endswith("/16}")
+    runner_namespace = compose["services"]["runner"]["environment"]["AGENT_SANDBOX_NAMESPACE"]
+    broker_namespace = compose["services"]["workspace-broker"]["environment"][
+        "AGENT_SANDBOX_NAMESPACE"
+    ]
+    assert runner_namespace == broker_namespace
+    assert "COMPOSE_PROJECT" in runner_namespace
+
+
+def test_complete_local_stack_namespaces_daemon_wide_chat_discovery(local_compose: dict):
+    broker_namespace = local_compose["services"]["workspace-broker"]["environment"][
+        "AGENT_SANDBOX_NAMESPACE"
+    ]
+    assert "LOCAL_PROJECT_NAME" in broker_namespace
+    # Runner inherits the exact same anchored environment.
+    assert (
+        local_compose["services"]["runner"]["environment"]["AGENT_SANDBOX_NAMESPACE"]
+        == broker_namespace
     )
 
 
@@ -1225,6 +1343,10 @@ def test_remote_compose_starts_no_gateway(remote_compose: dict):
         "gateway-tunnel",
         "mcp-tunnel",
         "control-plane-tunnel",
+        # Setup dependency traffic has its own allowlist proxy and an offline
+        # renderer; neither is a gateway or control-plane service.
+        "agent-egress-proxy-config",
+        "agent-egress-proxy",
         "workspace-broker",
         "runner",
     }

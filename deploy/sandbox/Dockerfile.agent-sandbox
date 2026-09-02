@@ -175,9 +175,11 @@ COPY deploy/sandbox/opencode-freeinference /usr/local/bin/opencode-freeinference
 COPY deploy/sandbox/kilo-freeinference /usr/local/bin/kilo-freeinference
 COPY deploy/sandbox/http-agent-live-bridge /usr/local/bin/http-agent-live-bridge
 COPY deploy/sandbox/claude-session-fork /usr/local/bin/claude-session-fork
+COPY deploy/sandbox/member-process-reaper /usr/local/bin/member-process-reaper
 RUN chmod 0755 /usr/local/bin/pi-freeinference /usr/local/bin/opencode-freeinference \
         /usr/local/bin/kilo-freeinference /usr/local/bin/http-agent-live-bridge \
-        /usr/local/bin/claude-session-fork
+        /usr/local/bin/claude-session-fork \
+    && chmod 0555 /usr/local/bin/member-process-reaper
 
 # `--ignore-user-config` does not suppress a trusted repository's
 # .codex/config.toml. Codex 0.145 applies this requirements allowlist after all

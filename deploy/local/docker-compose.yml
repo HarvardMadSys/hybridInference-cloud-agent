@@ -111,7 +111,9 @@ services:
       AGENT_SANDBOX_MCP_URL: http://mcp-relay:8001
       AGENT_SANDBOX_BACKEND: container
       AGENT_SANDBOX_IMAGE: freeinference-cloud-agent-sandbox:local
+      AGENT_SANDBOX_NAMESPACE: ${LOCAL_PROJECT_NAME:-freeinference-local}
       AGENT_EGRESS_NETWORK_PLATFORM_ONLY: ${LOCAL_AGENT_EGRESS_NETWORK:-freeinference-local-agent-egress}
+      AGENT_EGRESS_CHAT_NETWORK_POOL: ${LOCAL_CHAT_NETWORK_POOL:-10.240.0.0/16}
       AGENT_EGRESS_SETUP_TIER: platform_only
       AGENT_EGRESS_AGENT_TIER: platform_only
     volumes:
@@ -171,7 +173,8 @@ services:
       context: ../..
       dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
 
-  # The relay is the sandbox's second and only other network destination.
+  # The second fixed relay on the discovery backplane. Chat lifecycle copies
+  # this endpoint and local-gateway onto each sandbox-private internal bridge.
   mcp-relay:
     networks:
       - control-plane
@@ -180,6 +183,8 @@ services:
 networks:
   agent-egress:
     name: ${LOCAL_AGENT_EGRESS_NETWORK:-freeinference-local-agent-egress}
+    # Discovery only. `internal` removes an internet route but does not isolate
+    # peers, so chat containers are never left together on this bridge.
     internal: true
 
 volumes:

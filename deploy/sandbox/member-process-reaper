@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Capture or reap one sandbox member UID's Linux processes.
+
+This file is copied into the sandbox image as a root-owned executable. Agent
+code runs as the member UID and may inspect this process, but cannot rewrite
+the implementation or the baseline held in this process's memory.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+
+MAX_PROCESSES = 4096
+MAX_BASELINE_BYTES = 1_000_000
+
+
+def _identity(pid: int, expected_uid: int) -> tuple[int, int] | None:
+    """Return (pid, starttime), or None after a race/non-member process."""
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != expected_uid:
+            return None
+        with open(f"/proc/{pid}/stat", encoding="ascii") as handle:
+            raw = handle.read()
+        # comm is parenthesized and may itself contain spaces or ')'. Splitting
+        # from the rightmost delimiter leaves field 3 first; starttime (22) is
+        # therefore index 19.
+        fields = raw.rsplit(") ", 1)[1].split()
+        started = int(fields[19])
+    except (FileNotFoundError, IndexError, OSError, UnicodeError, ValueError):
+        return None
+    if pid <= 1 or started <= 0:
+        return None
+    return pid, started
+
+
+def _scan(expected_uid: int) -> set[tuple[int, int]]:
+    self_pid = os.getpid()
+    found: set[tuple[int, int]] = set()
+    try:
+        names = os.listdir("/proc")
+    except OSError as exc:
+        raise RuntimeError(f"cannot enumerate /proc: {exc}") from exc
+    for name in names:
+        if not name.isascii() or not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == self_pid:
+            continue
+        identity = _identity(pid, expected_uid)
+        if identity is not None:
+            found.add(identity)
+            if len(found) > MAX_PROCESSES:
+                raise RuntimeError("member process census exceeds its identity fence")
+    return found
+
+
+def _parse_baseline(payload: bytes) -> set[tuple[int, int]]:
+    if len(payload) > MAX_BASELINE_BYTES:
+        raise ValueError("baseline is too large")
+    try:
+        text = payload.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("baseline is not ASCII") from exc
+    found: set[tuple[int, int]] = set()
+    pids: set[int] = set()
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or any(not field.isascii() or not field.isdigit() for field in fields):
+            raise ValueError("baseline is malformed")
+        pid, started = (int(field) for field in fields)
+        if pid <= 1 or started <= 0 or pid in pids or len(found) >= MAX_PROCESSES:
+            raise ValueError("baseline is outside its identity fence")
+        pids.add(pid)
+        found.add((pid, started))
+    return found
+
+
+def _extras(expected_uid: int, baseline: set[tuple[int, int]]) -> set[tuple[int, int]]:
+    return _scan(expected_uid) - baseline
+
+
+def _signal_extras(
+    expected_uid: int,
+    baseline: set[tuple[int, int]],
+    sig: signal.Signals,
+) -> bool:
+    extras = _extras(expected_uid, baseline)
+    for pid, started in extras:
+        # Fence the scan-to-signal race: never signal a reused numeric PID.
+        if _identity(pid, expected_uid) != (pid, started):
+            continue
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            continue
+        except (OSError, PermissionError) as exc:
+            raise RuntimeError(f"cannot signal member process {pid}: {exc}") from exc
+    return not extras
+
+
+def _reap(expected_uid: int, baseline: set[tuple[int, int]]) -> None:
+    for _ in range(20):
+        if _signal_extras(expected_uid, baseline, signal.SIGTERM):
+            break
+        time.sleep(0.05)
+    for _ in range(64):
+        if _signal_extras(expected_uid, baseline, signal.SIGKILL):
+            break
+        time.sleep(0.05)
+    remaining = _extras(expected_uid, baseline)
+    if remaining:
+        sample = ", ".join(f"{pid}:{started}" for pid, started in sorted(remaining)[:8])
+        raise RuntimeError(f"member processes survived cleanup: {sample}")
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3 or argv[1] not in {"capture", "reap"}:
+        print("usage: member-process-reaper {capture|reap} UID", file=sys.stderr)
+        return 64
+    try:
+        expected_uid = int(argv[2])
+    except ValueError:
+        print("member uid is not an integer", file=sys.stderr)
+        return 64
+    if expected_uid <= 0 or expected_uid != os.getuid():
+        print("member uid does not match the reaper process", file=sys.stderr)
+        return 64
+    try:
+        if argv[1] == "capture":
+            for pid, started in sorted(_scan(expected_uid)):
+                print(pid, started)
+        else:
+            payload = sys.stdin.buffer.read(MAX_BASELINE_BYTES + 1)
+            _reap(expected_uid, _parse_baseline(payload))
+    except (RuntimeError, ValueError) as exc:
+        print(f"member process reaper failed: {exc}", file=sys.stderr)
+        return 45
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

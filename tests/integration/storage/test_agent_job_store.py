@@ -280,6 +280,73 @@ async def _reserve_shared_chat(
     return job, claim, sandbox
 
 
+async def test_native_turn_migration_catches_previous_generation_writers(
+    store: AgentJobStore,
+) -> None:
+    """The parallel rollout window cannot leave historical Fork ordinals blank."""
+    # A previous control plane can still finish a turn after migration 0021's
+    # one-time backfill. Its UPDATE does not name the newly added column.
+    succeeded = await _create_job(store, task_prompt="old API success")
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'succeeded' WHERE id = $1",
+            succeeded["id"],
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT native_turn_no FROM agent_jobs WHERE id = $1",
+                succeeded["id"],
+            )
+            == 1
+        )
+
+    # The old immediate-latest Fork copied display jobs without naming the
+    # column either. A copied provider-native source retains the same ordinal
+    # semantics in its new thread even when the display shell is not SUCCEEDED.
+    copied = await _create_job(store, task_prompt="old API fork copy")
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE agent_jobs
+            SET state = 'failed', fork_source_job_id = $2
+            WHERE id = $1
+            """,
+            copied["id"],
+            succeeded["id"],
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT native_turn_no FROM agent_jobs WHERE id = $1",
+                copied["id"],
+            )
+            == 1
+        )
+
+    # Native context settlement precedes final job state. The previous API
+    # records that boundary by adding the job to a publication snapshot, so the
+    # snapshot trigger must cover a lease loss before SUCCEEDED is written.
+    job, _claim_row, sandbox = await _reserve_shared_chat(store)
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_sandbox_snapshots (
+                sandbox_id, workspace_epoch, anchor_job_id,
+                included_job_ids, base_sha
+            ) VALUES ($1, 1, $2, jsonb_build_array($2::text), $3)
+            """,
+            sandbox["sandbox_id"],
+            job["id"],
+            job["base_sha"],
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT native_turn_no FROM agent_jobs WHERE id = $1",
+                job["id"],
+            )
+            == 1
+        )
+
+
 async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     store: AgentJobStore,
 ):
@@ -1115,6 +1182,60 @@ async def test_native_turn_migration_backfills_existing_fork_prefixes(
         apply_migrations(db_config)
 
 
+async def test_native_turn_rollout_guard_backfills_the_post_0021_gap(
+    store: AgentJobStore,
+):
+    """An old API write between 0021 and 0022 is not permanently unanchored."""
+    from tests.support.migrations import apply_migrations, downgrade_to
+
+    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    db_config = {
+        "host": os.getenv("TEST_DB_HOST", "localhost"),
+        "port": int(os.getenv("TEST_DB_PORT", "5432")),
+        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
+        "user": os.getenv("TEST_DB_USER", "postgres"),
+        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
+    }
+    try:
+        downgrade_to(db_config, "0021_native_turn_anchors")
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_threads (id, user_id, repo, title)
+                VALUES ('athr_rollout_gap', 'user-1', 'owner/repo', 'rollout gap')
+                """
+            )
+            await conn.execute(
+                """
+                INSERT INTO agent_jobs (
+                    id, thread_id, turn_no, user_id, repo, task_prompt,
+                    runtime, model, state
+                ) VALUES (
+                    'ajob_rollout_gap', 'athr_rollout_gap', 1,
+                    'user-1', 'owner/repo', 'old writer after backfill',
+                    'claude-code', 'model', 'succeeded'
+                )
+                """
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT native_turn_no FROM agent_jobs WHERE id = 'ajob_rollout_gap'"
+                )
+                is None
+            )
+        apply_migrations(db_config)
+        async with store._pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT native_turn_no FROM agent_jobs WHERE id = 'ajob_rollout_gap'"
+                )
+                == 1
+            )
+    finally:
+        apply_migrations(db_config)
+
+
 async def test_create_get_list_round_trip(store: AgentJobStore):
     """create -> get -> list returns the queued job with its fields."""
     job = await _create_job(store, metadata={"origin": "test"})
@@ -1686,6 +1807,29 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
     assert rearmed_after_restart["state"] == "running"
     assert rearmed_after_restart["idle_deadline"] > datetime.now(timezone.utc)
 
+    # When a replacement broker has neither activity tokens nor a monotonic
+    # deadline, it reports activity as unknown. The control plane grants one
+    # recovery window only; repeated healthy heartbeats must not keep an idle
+    # container alive forever by moving that deadline forward.
+    await store.reconcile_thread_sandbox_observation(
+        **observation,
+        activity_active=True,
+    )
+    await store.reconcile_thread_sandbox_observation(
+        **observation,
+        activity_active=None,
+        idle_remaining_seconds=None,
+    )
+    first_recovery = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert first_recovery["idle_deadline"] is not None
+    await store.reconcile_thread_sandbox_observation(
+        **observation,
+        activity_active=None,
+        idle_remaining_seconds=None,
+    )
+    second_recovery = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert second_recovery["idle_deadline"] == first_recovery["idle_deadline"]
+
     assert await store.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
@@ -1745,7 +1889,7 @@ async def test_retained_container_identity_cannot_be_replaced_or_reimaged(
         )
 
 
-async def test_retained_follow_up_attempt_keeps_original_image_and_cli_pin(
+async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool_switch(
     store: AgentJobStore,
 ):
     job = await _create_job(store)
@@ -1802,12 +1946,39 @@ async def test_retained_follow_up_attempt_keeps_original_image_and_cli_pin(
         from_states=("running",),
         to_state="succeeded",
     )
+    # Enrol the destination while the queue is empty, then move new-chat
+    # placement there. The existing group cannot move with that policy bit: its
+    # only workspace and native state are still in runner-a's Docker layer.
+    assert (
+        await _claim(
+            store,
+            worker_id="enrol-runner-b",
+            lease_ttl_seconds=60,
+            host="runner-b",
+        )
+        is None
+    )
+    assert await store.set_active_runner_host(host="runner-b")
     child = await store.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue",
     )
     assert child is not None and child["state"] == "queued"
+
+    _, active_host, _, retained_hosts = await store.deployment_runner_pool()
+    assert active_host == "runner-b"
+    assert "runner-a" in retained_hosts
+
+    assert (
+        await _claim(
+            store,
+            worker_id="wrong-host",
+            lease_ttl_seconds=60,
+            host="runner-b",
+        )
+        is None
+    )
 
     follow_up = await _claim(
         store,
@@ -1816,6 +1987,9 @@ async def test_retained_follow_up_attempt_keeps_original_image_and_cli_pin(
         host="runner-a",
         claim_attestation={
             **_shared_claim_attestation(),
+            # v2 added historical Fork only. An old owner may continue the
+            # exact retained group it already holds after placement moves.
+            "shared_sandbox_protocol": "v1",
             "sandbox_runtime": "runc",
             "sandbox_image_digest": "sha256:new-runner-image",
             "runtime_versions_available": {"claude-code": ["2.1.220", "2.1.999"]},
@@ -1826,6 +2000,43 @@ async def test_retained_follow_up_attempt_keeps_original_image_and_cli_pin(
     assert follow_up["runtime_version"] == "2.1.220"
     assert follow_up["sandbox_image_digest"] == "sha256:original-image"
     assert follow_up["thread_sandbox"]["container_id"] == "container-pinned"
+
+    fresh = await _create_job(store, task_prompt="new chat after the host switch")
+    assert (
+        await _claim(
+            store,
+            worker_id="old-host-new-chat",
+            lease_ttl_seconds=60,
+            host="runner-a",
+        )
+        is None
+    )
+    new_claim = await _claim(
+        store,
+        worker_id="selected-host-new-chat",
+        lease_ttl_seconds=60,
+        host="runner-b",
+    )
+    assert new_claim is not None and new_claim["id"] == fresh["id"]
+
+
+async def test_compatible_v1_runner_cannot_materialize_a_new_group(store: AgentJobStore):
+    fresh = await _create_job(store)
+    v1_attestation = {
+        **_shared_claim_attestation(),
+        "shared_sandbox_protocol": "v1",
+    }
+
+    claim = await _claim(
+        store,
+        worker_id="v1-runner",
+        lease_ttl_seconds=60,
+        host="runner-a",
+        claim_attestation=v1_attestation,
+    )
+
+    assert claim is None
+    assert (await store.get_job(fresh["id"]))["state"] == "queued"
 
 
 async def test_failed_preadmission_activation_requests_an_immediate_stop(

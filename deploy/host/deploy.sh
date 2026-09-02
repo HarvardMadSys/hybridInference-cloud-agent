@@ -83,7 +83,16 @@ export AGENT_DEPLOYMENT_SHA
 # Which stack this deploy owns. Read the same way `sandbox_host.sh` reads it,
 # from the environment or from this deploy root's `.env`, so the guard below and
 # the bring-up can never disagree about which containers are ours.
-from_env() { grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true; }
+from_env() {
+  local value
+  value="$(grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  # Match Compose and sandbox_host.sh: one quoted pair is syntax, not part of
+  # a project name. Without this, COMPOSE_PROJECT="host-prod" makes this guard
+  # inspect a different stack from the one sandbox_host.sh subsequently owns.
+  value="${value%\"}"; value="${value#\"}"
+  value="${value%\'}"; value="${value#\'}"
+  printf '%s' "$value"
+}
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(from_env COMPOSE_PROJECT)}"
 [ -n "${COMPOSE_PROJECT}" ] \
   || die "COMPOSE_PROJECT is not set — put it in ${DEPLOY_ROOT}/.env (e.g. freeinference-cloud-agent-sandbox-staging) or pass it in the environment"
@@ -113,7 +122,7 @@ KNOWN="${EXPECTED_PROJECT},${SIBLING_COMPOSE_PROJECTS}"
 STRAY="$(docker ps --format '{{.Label "com.docker.compose.project"}} {{.Names}}' 2>/dev/null \
   | awk -v known="${KNOWN}" '
       BEGIN { n = split(known, k, ","); for (i = 1; i <= n; i++) if (k[i] != "") ok[k[i]] = 1 }
-      !($1 in ok) && $2 ~ /-(runner|workspace-broker|gateway-tunnel|mcp-tunnel|control-plane-tunnel)-[0-9]+$/ {
+      !($1 in ok) && $2 ~ /-(runner|workspace-broker|gateway-tunnel|mcp-tunnel|control-plane-tunnel|agent-egress-proxy)-[0-9]+$/ {
         print "  " $2 "  (project: " $1 ")"
       }')"
 if [ -n "${STRAY}" ]; then

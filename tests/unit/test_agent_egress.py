@@ -147,16 +147,19 @@ def test_both_spellings_of_the_proxy_variables_are_set():
     assert env["https_proxy"] == env["HTTPS_PROXY"]
 
 
-def test_the_gateway_is_reached_directly_rather_than_through_the_proxy():
-    """Our own service is on the sandbox's network already.
+def test_platform_relays_are_reached_directly_rather_than_through_the_proxy():
+    """Our two fixed services are on the sandbox's network already.
 
-    Routing it through the proxy would need an allowlist entry for ourselves,
-    and would put every model call through a hop that exists to police the
-    internet.
+    Routing either through the proxy would need an allowlist entry for
+    ourselves and would put model/tool calls through a hop that exists to
+    police the internet.
     """
-    env = _trusted_setup(AGENT_GATEWAY_URL="http://backend:8080").sandbox_env("setup")
+    env = _trusted_setup(
+        AGENT_GATEWAY_URL="http://agent-gateway:8080",
+        AGENT_SANDBOX_MCP_URL="http://agent-mcp:8000",
+    ).sandbox_env("setup")
 
-    assert env["NO_PROXY"].split(",")[0] == "backend"
+    assert env["NO_PROXY"].split(",")[:2] == ["agent-gateway", "agent-mcp"]
     assert env["no_proxy"] == env["NO_PROXY"]
     assert "localhost" in env["NO_PROXY"]
 

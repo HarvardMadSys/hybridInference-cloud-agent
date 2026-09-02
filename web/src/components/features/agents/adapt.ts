@@ -248,7 +248,7 @@ function diffStat(patch: string): { add: number; del: number } | undefined {
 }
 
 const TIER_LABELS: Record<string, string> = {
-  platform_only: 'gateway only',
+  platform_only: 'platform relays only',
   trusted: 'allowlist',
   custom: 'custom',
   full: 'open',
@@ -490,7 +490,11 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     historyTurns = historicalJobs.map((threadJob) => ({
       jobId: threadJob.id,
       turnNo: threadJob.turn_no ?? 1,
-      forkable: threadJob.state === 'succeeded',
+      // This is stronger than platform success: the API has also proved a
+      // settled native ordinal, compatible online host/image, and idle source
+      // membership. Showing a button from state alone creates a predictable
+      // 409 for failed rollout generations.
+      forkable: threadJob.native_fork_available === true,
       messages: (options.thread?.messages ?? [])
         .filter((message) => message.job_id === threadJob.id)
         .map(mapMessage),

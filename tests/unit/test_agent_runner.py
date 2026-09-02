@@ -135,6 +135,41 @@ def test_chat_idle_timeout_has_one_canonical_setting(monkeypatch):
     assert runner_mod._chat_idle_timeout_s() == 34
 
 
+def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
+    """A broker restart must not renew a full idle window on every beat."""
+
+    class Supervisor:
+        def list(self):
+            return [
+                {
+                    "thread_id": "athr_reconstructed",
+                    "sandbox_id": "asbx_reconstructed",
+                    "container_id": "container-reconstructed",
+                    "generation": 1,
+                    "activation_generation": 0,
+                    "running": True,
+                    "shared_live": True,
+                    "group_busy": False,
+                    "terminal_count": 0,
+                    "operation_count": 0,
+                    "workspace_suspended": False,
+                    "idle_deadline_monotonic": None,
+                    "members": [],
+                }
+            ]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", Supervisor)
+
+    rows = runner_mod._retained_sandbox_heartbeat_rows()
+
+    assert rows is not None
+    assert rows[0]["activity_active"] is None
+    assert rows[0]["idle_remaining_seconds"] is None
+
+
 def test_resume_requires_the_exact_native_session():
     assert (
         runner_mod._verified_native_session_id(

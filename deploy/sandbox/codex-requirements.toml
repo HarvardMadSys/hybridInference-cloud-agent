@@ -1,5 +1,5 @@
 # Codex merges project .codex/config.toml after user config. An explicitly
 # present, empty requirements allowlist disables every MCP server regardless
-# of which config layer declared it. Keep this empty until the gateway MCP
-# broker has a reviewed server allowlist to put here.
+# of which config layer declared it. Keep this empty until the Codex adapter has
+# a verified isolated-relay configuration that cannot merge repository config.
 [mcp_servers]

@@ -9,8 +9,9 @@ answering a different question.
 The deploy runs this command *before* replacing the live control-plane
 container. Host and control jobs start in parallel; this runtime check is the
 ordering edge between them. A control plane cannot replace the current API
-until a newly heartbeating host at the exact target commit has proved the
-complete path. There is no alternate executor to enable or fall back to.
+until every new-chat placement host has heartbeated at the exact target commit
+and every online retained owner has proved its compatible broker path. There
+is no alternate executor to enable or fall back to.
 """
 
 from __future__ import annotations
@@ -64,6 +65,9 @@ def _host_rejection(
     *,
     not_before: datetime,
     expected_deployment_sha: str,
+    require_target_deployment: bool = True,
+    require_native_fork: bool = True,
+    require_two_slots: bool = True,
 ) -> str | None:
     """Return why a host cannot be the deployment barrier, or ``None``."""
     if row.get("status") != HOST_ONLINE:
@@ -73,13 +77,13 @@ def _host_rejection(
     capabilities = row.get("capabilities")
     if not isinstance(capabilities, list) or SHARED_SANDBOX_CAPABILITY not in capabilities:
         return f"host has not advertised {SHARED_SANDBOX_CAPABILITY}"
-    if NATIVE_FORK_AT_ANCHOR_CAPABILITY not in capabilities:
+    if require_native_fork and NATIVE_FORK_AT_ANCHOR_CAPABILITY not in capabilities:
         return f"host has not advertised {NATIVE_FORK_AT_ANCHOR_CAPABILITY}"
     deployment_capability = shared_deployment_capability(expected_deployment_sha)
-    if deployment_capability not in capabilities:
+    if require_target_deployment and deployment_capability not in capabilities:
         return f"host has not completed target deployment {expected_deployment_sha}"
     slots = row.get("slots_total")
-    if not isinstance(slots, int) or isinstance(slots, bool) or slots < 2:
+    if require_two_slots and (not isinstance(slots, int) or isinstance(slots, bool) or slots < 2):
         return "host has fewer than two declared slots"
     heartbeat_at = _heartbeat_at(row)
     if heartbeat_at is None:
@@ -115,25 +119,29 @@ async def shared_live_readiness(
             f"control plane has no {ENV_BROKER_TOKEN}; broker operations cannot authenticate",
         )
 
-    rows, active_host, _ = await store.runner_pool()
+    rows, active_host, _, retained_hosts = await store.deployment_runner_pool()
+    rows_by_host = {str(row.get("host")): row for row in rows if row.get("host")}
     if active_host is not None:
-        rows = [row for row in rows if row.get("host") == active_host]
-        if not rows:
+        placement_rows = [row for row in rows if row.get("host") == active_host]
+        if not placement_rows:
             return SharedLiveReadiness(False, f"pinned host {active_host!r} is not registered")
     else:
-        # With no pin, every online host advertising the shared capability may
-        # claim one of the new jobs this rollout enables. Proving only one of
-        # them would leave an older eligible host in the scheduler pool. Legacy
-        # and offline rows cannot claim shared work, so they do not block.
+        # With no pin, every online host advertising the current historical-
+        # fork surface may claim one of the new jobs this rollout enables.
+        # Proving only one of them would leave an older eligible host in the
+        # scheduler pool. A v1-only host cannot materialize a new sandbox;
+        # replica-local claim attestation admits it only for an existing group
+        # it owns. The retained-owner probe below still covers that case.
         pool_rows = rows
-        rows = [
+        placement_rows = [
             row
             for row in pool_rows
             if row.get("status") == HOST_ONLINE
             and isinstance(row.get("capabilities"), list)
             and SHARED_SANDBOX_CAPABILITY in row["capabilities"]
+            and NATIVE_FORK_AT_ANCHOR_CAPABILITY in row["capabilities"]
         ]
-        if not rows:
+        if not placement_rows:
             reasons = [
                 f"{row.get('host') or 'unknown'!s}: "
                 f"{_host_rejection(row, not_before=not_before, expected_deployment_sha=expected_deployment_sha)}"
@@ -146,7 +154,7 @@ async def shared_live_readiness(
             )
 
     rejected: list[str] = []
-    for row in rows:
+    for row in placement_rows:
         host = str(row.get("host") or "unknown")
         reason = _host_rejection(
             row,
@@ -161,8 +169,40 @@ async def shared_live_readiness(
             False, f"{scope} is not shared-live ready: {'; '.join(rejected)}"
         )
 
+    # A host switch does not move retained Docker writable layers. An online
+    # previous owner may therefore keep serving follow-ups even though it is no
+    # longer eligible to materialize a new chat. It need not carry this target
+    # SHA or the v2 historical-fork capability (v1 retained containers may
+    # serve ordinary follow-ups), but the new control plane must prove a fresh
+    # compatible heartbeat and that it can still authenticate to that broker.
+    probe_rows = list(placement_rows)
+    probed_hosts = {str(row.get("host")) for row in probe_rows}
+    for owner in sorted(retained_hosts):
+        row = rows_by_host.get(owner)
+        if row is None or row.get("status") != HOST_ONLINE or owner in probed_hosts:
+            continue
+        reason = _host_rejection(
+            row,
+            not_before=not_before,
+            expected_deployment_sha=expected_deployment_sha,
+            require_target_deployment=False,
+            require_native_fork=False,
+            require_two_slots=False,
+        )
+        if reason is not None:
+            rejected.append(f"retained owner {owner}: {reason}")
+            continue
+        probe_rows.append(row)
+        probed_hosts.add(owner)
+    if rejected:
+        return SharedLiveReadiness(
+            False,
+            "new-chat placement or an online retained owner is not shared-live ready: "
+            + "; ".join(rejected),
+        )
+
     ready_hosts: list[str] = []
-    for row in rows:
+    for row in probe_rows:
         host = str(row.get("host") or "unknown")
         broker_url = str(row["broker_url"]).strip()
         broker_error = await broker_probe(host, broker_url, force=True)
@@ -171,17 +211,29 @@ async def shared_live_readiness(
             continue
         ready_hosts.append(host)
 
-    scope = f"pinned host {active_host!r}" if active_host is not None else "host pool"
+    scope = (
+        f"pinned host {active_host!r} and online retained owners"
+        if active_host is not None
+        else "host pool"
+    )
     if rejected:
         return SharedLiveReadiness(
             False, f"{scope} is not shared-live ready: {'; '.join(rejected)}"
         )
-    hosts = ", ".join(ready_hosts)
+    placement_host_names = [str(row["host"]) for row in placement_rows]
+    placement_hosts = ", ".join(placement_host_names)
+    retained_owner_hosts = sorted(set(ready_hosts) - set(placement_host_names))
+    retained_detail = (
+        "; compatible retained owners also answered: " + ", ".join(retained_owner_hosts)
+        if retained_owner_hosts
+        else ""
+    )
     return SharedLiveReadiness(
         True,
-        f"{hosts} completed target deployment {expected_deployment_sha}, sent fresh "
-        f"{SHARED_SANDBOX_CAPABILITY} and {NATIVE_FORK_AT_ANCHOR_CAPABILITY} "
-        "heartbeats, and every broker answered",
+        f"new-chat placement hosts {placement_hosts} completed target deployment "
+        f"{expected_deployment_sha}, sent fresh {SHARED_SANDBOX_CAPABILITY} and "
+        f"{NATIVE_FORK_AT_ANCHOR_CAPABILITY} heartbeats, and their brokers answered"
+        f"{retained_detail}",
         host=ready_hosts[0],
     )
 

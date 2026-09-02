@@ -498,7 +498,7 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
   const sourceLabel = root?.error
     ? 'Unavailable'
     : (file?.source ?? source) === 'workspace'
-      ? 'Live worktree'
+      ? 'Live workspace'
       : 'Loading…';
 
   return (

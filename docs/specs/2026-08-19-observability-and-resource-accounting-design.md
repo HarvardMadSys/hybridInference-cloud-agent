@@ -34,8 +34,8 @@ because one credential spans several turns. Until process-tree sampling lands,
 per-member CPU/memory/I/O reports explicit zero coverage and never duplicate
 one container total onto concurrent jobs.
 
-For a thread opted into the one-chat/one-restartable-sandbox lifecycle,
-the first turn records `new` because there is no prior session to continue.
+Under the implemented shared-live group lifecycle, the first turn records
+`new` because there is no prior session to continue.
 `continuity_mode = hot` may still record that the existing Agent CLI process
 handled a follow-up, and `warm_native` may record a replacement process, but
 these are transport diagnostics rather than product correctness. The required
@@ -43,8 +43,9 @@ facts are `context_status = new | live | restored | lost`, the sandbox-qualified
 session locator, and `restored_through_job_id`. A process replacement after
 model/effort change or `docker stop` / `docker start` is successful only after
 the driver proves it loaded the retained native context. RUNNING-idle and
-STOPPED are residency states. A blank process or lost container must be
-recorded as lost/replay, never as restored.
+STOPPED are residency states. A missing native locator or lost container must
+be recorded as `LOST`; replay remains historical telemetry and is never a
+recovery path.
 
 Checkpoint export metrics and alerts below belong to the explicitly deferred
 persistent-storage phase. They remain documented so that later work preserves
@@ -191,7 +192,7 @@ honest window model of §6.
   `unclassified`, and its growth alerts — a hole in the byte ledger is a
   hole in the egress story. Denied CONNECT verdicts become a counter and an
   alert today, not just a stdout line. Windowed inference display for
-  resident turns already works this way (§14 of the resident design brackets
+  resident turns already works this way (§6 of the retained-session design brackets
   `api_logs` by attempt window), so this adds no new attribution philosophy.
 - **O6 — Running-idle and stopped residency are separate first-class series.**
   Docker writable-layer bytes (sampled through Engine inspect with size at

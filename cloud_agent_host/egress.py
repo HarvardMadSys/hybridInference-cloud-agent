@@ -8,9 +8,12 @@ concedes. A boundary the agent participates in is not a boundary.
 Four tiers, from closed to open:
 
 ``platform_only``
-    Our own gateway — models and event reporting — and nothing else. This is
-    the tier the design calls our distinctive shape: an agent that can think
-    and report but cannot reach the internet at all.
+    Two fixed platform relays — the inference gateway and this service's
+    MCP-only listener — and nothing else. This is the tier the design calls
+    our distinctive shape: an agent that can think and use approved tools but
+    cannot choose an internet destination. The configured Docker network is a
+    discovery backplane; retained execution creates a separate internal bridge
+    per chat and copies only those relay endpoints onto it.
 ``trusted``
     Package registries and similar, through an allowlist. Enough to install
     dependencies, which is the one thing ``platform_only`` cannot do.
@@ -203,8 +206,8 @@ class EgressPolicy:
     # of a Custom tier's list.
     allowlist: tuple[str, ...] = ()
     # Hosts the sandbox must reach *directly* rather than through the proxy:
-    # our own gateway, which is on the sandbox's network already and would
-    # otherwise need a proxy rule to talk to itself.
+    # the fixed inference/MCP relays, which are on the sandbox's network
+    # already and would otherwise need proxy rules to talk to themselves.
     no_proxy: tuple[str, ...] = ()
 
     def tier_for(self, phase: str) -> EgressTier:
@@ -391,14 +394,20 @@ def _validated_proxy_url(value: str, *, var: str) -> str:
 def _no_proxy_hosts(source: dict[str, str]) -> tuple[str, ...]:
     """Hosts a proxied phase must still reach directly.
 
-    The gateway sits on the sandbox's own network. Routing it through the proxy
-    would demand an allowlist entry for our own service and put every model
-    call through a hop that exists to police the *internet*.
+    Both platform relays sit on the sandbox's own network. Routing either
+    through the proxy would demand an allowlist entry for our own service and
+    put model/tool calls through a hop that exists to police the *internet*.
+    This matters when an operator selects a proxied Custom tier for the agent
+    phase; the default PlatformOnly tier has no proxy environment at all.
     """
-    base_url = source.get("AGENT_GATEWAY_URL") or source.get("FREEINFERENCE_BASE_URL") or ""
     hosts = ["localhost", "127.0.0.1"]
-    if host := (urlparse(base_url).hostname or "").strip():
-        hosts.insert(0, host)
+    base_urls = (
+        source.get("AGENT_GATEWAY_URL") or source.get("FREEINFERENCE_BASE_URL") or "",
+        source.get("AGENT_SANDBOX_MCP_URL") or "",
+    )
+    for base_url in reversed(base_urls):
+        if host := (urlparse(base_url).hostname or "").strip():
+            hosts.insert(0, host)
     return tuple(dict.fromkeys(hosts))
 
 

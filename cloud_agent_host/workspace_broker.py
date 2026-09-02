@@ -107,7 +107,7 @@ class FileWriteRequest(BaseModel):
 
 
 class TerminalRequest(BaseModel):
-    """One interactive-shell command against the mounted workspace."""
+    """One interactive-shell command inside the retained workspace."""
 
     command: str = Field(..., min_length=1, max_length=8000)
     cwd: str = Field("/workspace", min_length=1, max_length=4096)
@@ -645,7 +645,7 @@ class _TerminalManager:
             self._reaper.start()
 
     def close(self) -> None:
-        """Stop cleanup and kill every live sandbox during broker shutdown."""
+        """Stop cleanup and close every live terminal transport."""
         self._stop.set()
         with self._lock:
             sessions = [session for group in self._sessions.values() for session in group.values()]
