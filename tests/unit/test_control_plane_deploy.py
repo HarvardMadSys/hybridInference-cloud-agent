@@ -215,6 +215,7 @@ def _run_control_deploy(
     shared_live: str = "1",
     deployment_environment: str = "production",
     dotenv: str = "",
+    failed_health_match: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real deploy script against a minimal local git source."""
     source = tmp_path / "source"
@@ -261,7 +262,17 @@ def _run_control_deploy(
     )
     docker.chmod(0o755)
     curl = fake_bin / "curl"
-    curl.write_text("#!/bin/sh\nexit 0\n")
+    curl.write_text(
+        "#!/bin/sh\n"
+        'if [ -n "${FAILED_HEALTH_MATCH:-}" ]; then\n'
+        '  for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        '      *"${FAILED_HEALTH_MATCH}"*) exit 1 ;;\n'
+        "    esac\n"
+        "  done\n"
+        "fi\n"
+        "exit 0\n"
+    )
     curl.chmod(0o755)
 
     result = subprocess.run(
@@ -279,6 +290,7 @@ def _run_control_deploy(
             "READINESS_EXIT": str(readiness_exit),
             "CONTROL_RUNNING": "1" if control_running else "0",
             "MCP_RUNNING": "1" if mcp_running else "0",
+            "FAILED_HEALTH_MATCH": failed_health_match,
         },
         capture_output=True,
         text=True,
@@ -340,6 +352,23 @@ def test_a_failed_cold_start_gate_stops_the_bootstrap_api(tmp_path: Path) -> Non
     assert " up -d --no-deps control-plane mcp-relay" in docker_calls
     assert " stop control-plane mcp-relay" in docker_calls
     assert " up -d --remove-orphans" not in docker_calls
+
+
+def test_post_gate_health_failure_does_not_stop_bootstrap_services(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=False,
+        mcp_running=False,
+        failed_health_match="127.0.0.1:3002",
+    )
+
+    assert result.returncode != 0
+    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert " up -d --remove-orphans" in docker_calls
+    assert " stop control-plane" not in docker_calls
+    assert " stop mcp-relay" not in docker_calls
+    assert not (tmp_path / "deployed" / ".deployed-sha").exists()
 
 
 def test_a_missing_mcp_relay_is_bootstrapped_without_replacing_the_live_api(

@@ -133,6 +133,7 @@ def test_closed_egress_uses_a_distinct_private_network_for_each_chat():
     assert first_setup != "setup-backplane"
     assert first_agent != first_setup
     assert first_agent != manager.network_for_phase(second, "agent")
+    assert first_agent != manager.network_for_phase(replace(first, generation=4), "agent")
     command = manager.build_create_command(first, network_phase="agent")
     assert command[command.index("--network") + 1] == CHAT_BOOTSTRAP_NETWORK
 
@@ -603,7 +604,9 @@ def test_broker_startup_prunes_a_phase_network_left_before_container_create(monk
         if not network_exists:
             return None
         return {
+            "Id": "network-id",
             "Name": orphan,
+            "Created": "1970-01-01T00:00:00Z",
             "Driver": "bridge",
             "Scope": "local",
             "Internal": True,
@@ -632,7 +635,454 @@ def test_broker_startup_prunes_a_phase_network_left_before_container_create(monk
     manager.prune_orphan_networks([])
 
     assert network_exists is False
-    assert ["docker", "network", "rm", orphan] in calls
+    assert ["docker", "network", "rm", "network-id"] in calls
+
+
+def test_ownerless_prune_pins_the_old_id_across_a_same_name_replacement(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    orphan = manager.network_for_phase(spec, "setup")
+    old = {
+        "Id": "old-network-id",
+        "Name": orphan,
+        "Created": "1970-01-01T00:00:00Z",
+        "Driver": "bridge",
+        "Internal": True,
+        "Labels": manager._network_labels(spec, "setup"),
+        "Containers": {"proxy-container": {}},
+    }
+    replacement = {
+        **old,
+        "Id": "replacement-network-id",
+        "Created": "2999-01-01T00:00:00Z",
+    }
+    replaced = False
+    calls: list[list[str]] = []
+
+    def inspect_network(name):
+        if name == "listed-network-id":
+            return old
+        if name == "old-network-id":
+            return None if replaced else old
+        if name == orphan:
+            return replacement if replaced else old
+        return None
+
+    def run(argv, **_kwargs):
+        nonlocal replaced
+        calls.append(list(argv))
+        if argv[1:3] == ["network", "ls"]:
+            return SimpleNamespace(returncode=0, stdout="listed-network-id\n", stderr="")
+        if argv[1:3] == ["network", "disconnect"]:
+            assert argv[-2:] == ["old-network-id", "proxy-container"]
+            replaced = True
+            return SimpleNamespace(returncode=1, stdout="", stderr="network not found")
+        if argv[1:3] == ["network", "rm"]:
+            assert argv[-1] == "old-network-id"
+            return SimpleNamespace(returncode=1, stdout="", stderr="network not found")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(manager, "_inspect_network", inspect_network)
+    monkeypatch.setattr(
+        manager,
+        "_container_network_aliases",
+        lambda _container, _network: {"package-proxy"},
+    )
+    monkeypatch.setattr(manager, "_run", run)
+
+    manager.prune_orphan_networks([])
+
+    assert replaced is True
+    assert all(orphan not in call[3:] for call in calls if call[1:2] == ["network"])
+
+
+def test_ownerless_prune_restores_relays_after_a_late_sandbox_attach(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    orphan = manager.network_for_phase(spec, "agent")
+    network_id = "agent-network-id"
+    relay_id = "relay-container"
+    sandbox_id = "sha256:container-one"
+    relay_attached = True
+    sandbox_attached = False
+
+    def network():
+        containers = {}
+        if relay_attached:
+            containers[relay_id] = {}
+        if sandbox_attached:
+            containers[sandbox_id] = {}
+        return {
+            "Id": network_id,
+            "Name": orphan,
+            "Created": "1970-01-01T00:00:00Z",
+            "Driver": "bridge",
+            "Internal": True,
+            "Labels": manager._network_labels(spec, "agent"),
+            "Containers": containers,
+        }
+
+    def aliases(container_id, _network):
+        if container_id == relay_id and relay_attached:
+            return {"agent-gateway", "agent-mcp"}
+        return None
+
+    def run(argv, **_kwargs):
+        nonlocal relay_attached, sandbox_attached
+        if argv[1:3] == ["network", "ls"]:
+            return SimpleNamespace(returncode=0, stdout=f"{network_id}\n", stderr="")
+        if argv[1:3] == ["network", "disconnect"]:
+            assert argv[-2:] == [network_id, relay_id]
+            relay_attached = False
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[1:3] == ["network", "rm"]:
+            sandbox_attached = True
+            return SimpleNamespace(returncode=1, stdout="", stderr="active endpoints")
+        if argv[1:3] == ["network", "connect"]:
+            assert argv[-2:] == [orphan, relay_id]
+            relay_attached = True
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(manager, "_inspect_network", lambda _name: network())
+    monkeypatch.setattr(manager, "_container_network_aliases", aliases)
+    monkeypatch.setattr(
+        manager,
+        "_service_owners",
+        lambda _base, _aliases: {relay_id: ["agent-gateway", "agent-mcp"]},
+    )
+    monkeypatch.setattr(manager, "_run", run)
+
+    manager.prune_orphan_networks([])
+
+    assert sandbox_attached is True
+    assert relay_attached is True
+
+
+def test_orphan_prune_preserves_a_young_bridge_before_its_container_appears(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    pending = manager.network_for_phase(spec, "setup")
+    network = {
+        "Name": pending,
+        "Created": "2999-01-01T00:00:00Z",
+        "Driver": "bridge",
+        "Internal": True,
+        "Labels": manager._network_labels(spec, "setup"),
+        "Containers": {},
+    }
+
+    monkeypatch.setattr(
+        manager,
+        "_inspect_network",
+        lambda name: network if name in {"network-id", pending} else None,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda argv, **_kwargs: (
+            SimpleNamespace(returncode=0, stdout="network-id\n", stderr="")
+            if argv[1:3] == ["network", "ls"]
+            else pytest.fail(f"young in-flight network must not be mutated: {argv}")
+        ),
+    )
+
+    manager.prune_orphan_networks([])
+
+
+def test_reconcile_preserves_a_young_unattached_phase_bridge(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    setup = manager.network_for_phase(spec, "setup")
+    pending = manager.network_for_phase(spec, "agent")
+    current = ChatSandboxInspection(
+        container_id="sha256:container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.RUNNING,
+        running=True,
+        image=spec.sandbox_image_digest,
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=(setup,),
+    )
+    network = {
+        "Name": pending,
+        "Created": "2999-01-01T00:00:00Z",
+        "Driver": "bridge",
+        "Internal": True,
+        "Labels": manager._network_labels(spec, "agent"),
+        "Containers": {},
+    }
+
+    monkeypatch.setattr(
+        manager,
+        "_inspect_network",
+        lambda name: network if name in {"network-id", pending} else None,
+    )
+    monkeypatch.setattr(manager, "inspect", lambda _name: current)
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda argv, **_kwargs: (
+            SimpleNamespace(returncode=0, stdout="network-id\n", stderr="")
+            if argv[1:3] == ["network", "ls"]
+            else pytest.fail(f"in-flight phase network must not be mutated: {argv}")
+        ),
+    )
+
+    manager.prune_orphan_networks([spec])
+
+
+def test_reconcile_reclaims_a_stale_unattached_phase_bridge(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    setup = manager.network_for_phase(spec, "setup")
+    abandoned = manager.network_for_phase(spec, "agent")
+    current = ChatSandboxInspection(
+        container_id="sha256:container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.RUNNING,
+        running=True,
+        image=spec.sandbox_image_digest,
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=(setup,),
+    )
+    network = {
+        "Name": abandoned,
+        "Created": "1970-01-01T00:00:00Z",
+        "Driver": "bridge",
+        "Internal": True,
+        "Labels": manager._network_labels(spec, "agent"),
+        "Containers": {},
+    }
+    released: list[tuple[str, ChatSandboxSpec, str]] = []
+
+    monkeypatch.setattr(
+        manager,
+        "_inspect_network",
+        lambda name: network if name in {"network-id", abandoned} else None,
+    )
+    monkeypatch.setattr(manager, "inspect", lambda _name: current)
+    monkeypatch.setattr(
+        manager,
+        "_release_owned_network",
+        lambda name, owned_spec, phase, **_kwargs: released.append((name, owned_spec, phase)),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda argv, **_kwargs: (
+            SimpleNamespace(returncode=0, stdout="network-id\n", stderr="")
+            if argv[1:3] == ["network", "ls"]
+            else pytest.fail(f"unexpected Docker mutation: {argv}")
+        ),
+    )
+
+    manager.prune_orphan_networks([spec])
+
+    assert released == [(abandoned, spec, "agent")]
+
+
+def test_stale_prune_never_disconnects_a_sandbox_that_attached_during_recheck(
+    monkeypatch,
+):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    setup = manager.network_for_phase(spec, "setup")
+    pending = manager.network_for_phase(spec, "agent")
+    before = ChatSandboxInspection(
+        container_id="sha256:container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.RUNNING,
+        running=True,
+        image=spec.sandbox_image_digest,
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=(setup,),
+    )
+    attached = replace(before, networks=(pending,))
+    network = {
+        "Name": pending,
+        "Created": "1970-01-01T00:00:00Z",
+        "Driver": "bridge",
+        "Internal": True,
+        "Labels": manager._network_labels(spec, "agent"),
+        "Containers": {before.container_id: {}},
+    }
+    inspections = iter((before, attached))
+
+    monkeypatch.setattr(
+        manager,
+        "_inspect_network",
+        lambda name: network if name in {"network-id", pending} else None,
+    )
+    monkeypatch.setattr(manager, "inspect", lambda _name: next(inspections))
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda argv, **_kwargs: (
+            SimpleNamespace(returncode=0, stdout="network-id\n", stderr="")
+            if argv[1:3] == ["network", "ls"]
+            else pytest.fail(f"newly attached sandbox must not be mutated: {argv}")
+        ),
+    )
+
+    manager.prune_orphan_networks([spec])
+
+
+def test_stale_prune_ignores_a_same_name_replacement_network(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    setup = manager.network_for_phase(spec, "setup")
+    pending = manager.network_for_phase(spec, "agent")
+    current = ChatSandboxInspection(
+        container_id="sha256:container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.RUNNING,
+        running=True,
+        image=spec.sandbox_image_digest,
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=(setup,),
+    )
+    old = {
+        "Id": "old-network-id",
+        "Name": pending,
+        "Created": "1970-01-01T00:00:00Z",
+        "Driver": "bridge",
+        "Internal": True,
+        "Labels": manager._network_labels(spec, "agent"),
+        "Containers": {},
+    }
+    replacement = {
+        **old,
+        "Id": "replacement-network-id",
+        "Created": "2999-01-01T00:00:00Z",
+    }
+
+    monkeypatch.setattr(
+        manager,
+        "_inspect_network",
+        lambda name: old if name == "listed-network-id" else replacement,
+    )
+    monkeypatch.setattr(manager, "inspect", lambda _name: current)
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda argv, **_kwargs: (
+            SimpleNamespace(returncode=0, stdout="listed-network-id\n", stderr="")
+            if argv[1:3] == ["network", "ls"]
+            else pytest.fail(f"replacement network must not be mutated: {argv}")
+        ),
+    )
+
+    manager.prune_orphan_networks([spec])
+
+
+def test_stale_prune_restores_relays_when_a_sandbox_attaches_before_remove(
+    monkeypatch,
+):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    setup = manager.network_for_phase(spec, "setup")
+    pending = manager.network_for_phase(spec, "agent")
+    sandbox_id = "sha256:container-one"
+    network_id = "agent-network-id"
+    relay_id = "relay-container"
+    sandbox_attached = False
+    relay_attached = True
+    before = ChatSandboxInspection(
+        container_id=sandbox_id,
+        name=spec.container_name,
+        status=ChatSandboxStatus.RUNNING,
+        running=True,
+        image=spec.sandbox_image_digest,
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=(setup,),
+    )
+
+    def network():
+        containers = {}
+        if relay_attached:
+            containers[relay_id] = {}
+        if sandbox_attached:
+            containers[sandbox_id] = {}
+        return {
+            "Id": network_id,
+            "Name": pending,
+            "Created": "1970-01-01T00:00:00Z",
+            "Driver": "bridge",
+            "Scope": "local",
+            "Internal": True,
+            "Labels": manager._network_labels(spec, "agent"),
+            "IPAM": {"Config": [{"Subnet": "10.240.0.0/29"}]},
+            "Containers": containers,
+        }
+
+    def inspect(_name):
+        if not sandbox_attached:
+            return before
+        return replace(
+            before,
+            networks=(pending,),
+            network_ids=((pending, network_id),),
+        )
+
+    def aliases(container_id, _network):
+        if container_id == relay_id and relay_attached:
+            return {"agent-gateway", "agent-mcp"}
+        return None
+
+    def run(argv, **_kwargs):
+        nonlocal relay_attached, sandbox_attached
+        if argv[1:3] == ["network", "ls"]:
+            return SimpleNamespace(returncode=0, stdout=f"{network_id}\n", stderr="")
+        if argv[1:3] == ["network", "disconnect"]:
+            assert argv[-2:] == [network_id, relay_id]
+            relay_attached = False
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[1:3] == ["network", "rm"]:
+            sandbox_attached = True
+            return SimpleNamespace(returncode=1, stdout="", stderr="active endpoints")
+        if argv[1:3] == ["network", "connect"]:
+            assert argv[-2:] == [pending, relay_id]
+            relay_attached = True
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(manager, "_inspect_network", lambda _name: network())
+    monkeypatch.setattr(manager, "inspect", inspect)
+    monkeypatch.setattr(manager, "_container_network_aliases", aliases)
+    monkeypatch.setattr(
+        manager,
+        "_service_owners",
+        lambda _base, _aliases: {relay_id: ["agent-gateway", "agent-mcp"]},
+    )
+    monkeypatch.setattr(manager, "_reconcile_phase_members", lambda **_kwargs: None)
+    monkeypatch.setattr(manager, "_run", run)
+
+    manager.prune_orphan_networks([spec])
+
+    assert sandbox_attached is True
+    assert relay_attached is True
 
 
 def test_reconcile_preserves_the_private_network_attached_to_an_active_chat(monkeypatch):
@@ -735,6 +1185,97 @@ def test_stopped_pre_upgrade_chat_moves_off_the_shared_backplane(monkeypatch):
         "agent-backplane",
         current.container_id,
     ] in calls
+
+
+def test_running_chat_never_hot_migrates_from_the_shared_backplane(monkeypatch):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    current = ChatSandboxInspection(
+        container_id="sha256:container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.RUNNING,
+        running=True,
+        image=spec.sandbox_image_digest or "img",
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=("agent-backplane",),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_ensure_phase_network",
+        lambda *_args: pytest.fail("shared backplane must fail before migration"),
+    )
+
+    with pytest.raises(SandboxError, match="shared/obsolete"):
+        manager._require_phase_network(spec, current, "agent")
+
+
+def test_running_pre_generation_private_bridge_migrates_without_shared_fallback(
+    monkeypatch,
+):
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    expected = manager.network_for_phase(spec, "agent")
+    legacy = "freeinference-chat-net-legacy-digest"
+    networks = {legacy}
+    current = ChatSandboxInspection(
+        container_id="sha256:container-one",
+        name=spec.container_name,
+        status=ChatSandboxStatus.RUNNING,
+        running=True,
+        image=spec.sandbox_image_digest or "img",
+        labels=spec.docker_labels(),
+        mounts=(),
+        networks=(legacy,),
+    )
+    released: list[str] = []
+
+    monkeypatch.setattr(
+        manager,
+        "_inspect_network",
+        lambda name: (
+            {
+                "Name": legacy,
+                "Driver": "bridge",
+                "Internal": True,
+                "Labels": manager._network_labels(spec, "agent"),
+            }
+            if name == legacy
+            else None
+        ),
+    )
+    monkeypatch.setattr(manager, "_ensure_phase_network", lambda *_args: expected)
+    monkeypatch.setattr(
+        manager,
+        "_require",
+        lambda _spec: replace(current, networks=tuple(sorted(networks))),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_release_owned_network",
+        lambda name, *_args, **_kwargs: released.append(name),
+    )
+
+    def run(argv, **_kwargs):
+        if argv[1:3] == ["network", "connect"]:
+            networks.add(expected)
+        elif argv[1:3] == ["network", "disconnect"]:
+            networks.remove(legacy)
+        else:
+            raise AssertionError(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(manager, "_run", run)
+
+    moved = manager._require_phase_network(spec, current, "agent")
+
+    assert moved.running is True
+    assert moved.networks == (expected,)
+    assert released == [legacy]
 
 
 def test_retained_storage_preflight_reads_daemon_root_without_mounting_it(monkeypatch):

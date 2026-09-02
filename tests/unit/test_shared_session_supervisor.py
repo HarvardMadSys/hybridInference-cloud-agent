@@ -94,6 +94,7 @@ class _Manager:
             self.items[spec.container_name],
             running=False,
             status=ChatSandboxStatus.STOPPED,
+            networks=(),
         )
         self.items[spec.container_name] = current
         return current
@@ -261,6 +262,25 @@ def test_status_listing_never_stops_a_managed_running_group():
     assert manager.stop_count == 0
     assert manager.items[spec.container_name].running is True
     assert next(item for item in descriptors if item.thread_id == "athr_source").group_busy is True
+
+
+def test_status_retries_network_cleanup_for_an_externally_stopped_group():
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(
+        spec,
+        _members(),
+        expected_container_id="container-shared",
+    )
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+
+    descriptors = supervisor.list()
+
+    assert manager.stop_count == 1
+    assert manager.items[spec.container_name].networks == ()
+    assert all(item.running is False for item in descriptors)
 
 
 def test_acquire_recreates_agent_network_for_settled_context():
@@ -845,6 +865,26 @@ def test_native_fork_resumes_a_source_transport_closed_by_the_cli():
     assert result.source_process_generation == 2
     assert supervisor.status("athr_source").resident_state == "live"
     assert factory.opened == [source_launch, source_launch, child_launch]
+
+
+def test_idle_stop_releases_networks_after_docker_already_stopped_the_container():
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(
+        spec,
+        _members(),
+        expected_container_id="container-shared",
+    )
+
+    stopped = supervisor.stop_if_idle("athr_source", generation=spec.generation)
+
+    # The real manager's idempotent stop path releases any phase bridge still
+    # attached after an external stop or a partially failed prior cleanup.
+    assert manager.stop_count == 1
+    assert stopped.running is False
+    assert manager.items[spec.container_name].networks == ()
 
 
 def test_new_activation_waits_for_an_inflight_idle_stop_then_restarts_exact_container():

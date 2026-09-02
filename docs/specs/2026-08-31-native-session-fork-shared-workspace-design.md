@@ -236,9 +236,11 @@ sandbox group gets its own internal Docker bridge populated with only that
 group container and the phase's trusted relay/proxy endpoints. The compose
 networks are service-discovery backplanes; Docker's `internal: true` alone does
 not isolate two containers that share one bridge. Docker atomically allocates
-each phase bridge as a `/29` from configurable
+each sandbox-generation/phase bridge as a `/29` from configurable
 `AGENT_EGRESS_CHAT_NETWORK_POOL`; setup→agent and stop remove the old bridge,
-wake recreates the required phase, and broker startup prunes labelled orphans.
+wake recreates the required phase, and broker reconciliation prunes labelled
+orphans after a five-minute grace period so it cannot race an in-flight bridge
+attachment.
 
 ## 7. Lifecycle and inactivity
 
@@ -413,7 +415,9 @@ The complete local stack follows a separate credential-safety preflight.
 with the Compose project's database volume. If the file is lost while that
 volume exists, `dev.sh` refuses to generate an unusable replacement or reset
 the database. `up`/`start` bring up Postgres alone, authenticate through the
-configured DSN, and run Alembic before starting the complete stack.
+configured DSN, and run Alembic before starting the complete stack. `up` builds
+the required images before that database-only preflight; `start` does not
+rebuild them.
 
 There are no `AGENT_RESTARTABLE_*`, `AGENT_SHARED_LIVE_*`, or dispatcher-token
 feature switches. Names such as `shared-sandbox-v1` are protocol/capability

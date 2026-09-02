@@ -188,7 +188,7 @@ compose, because they name the stack rather than configure it.
 | `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` | existing | Internal discovery backplane carrying the fixed inference/MCP relays. Each chat gets a derived private bridge populated from it; chats are not left together on this network. On a host running sibling staging/production stacks this must be each stack's explicit unique name. |
 | `AGENT_EGRESS_NETWORK_TRUSTED` | existing | Internal discovery backplane carrying the setup proxy. Each setup phase gets a derived chat-private bridge. The supported host script derives a Compose-project-specific name when unset. |
 | `AGENT_EGRESS_NETWORK_UPLINK` | **NEW** | Routable network joined only by the allowlist proxy. The supported host script derives a Compose-project-specific name when unset. It must differ from both discovery backplanes. |
-| `AGENT_EGRESS_CHAT_NETWORK_POOL` | **NEW** | Canonical RFC1918 IPv4 CIDR from which Docker atomically allocates one `/29` per active chat/phase bridge (default `10.240.0.0/16`, 8192 bridges). Choose a range that does not overlap Docker, VPN, or private-service routes on the host. Collision retries are daemon-arbitrated across broker/runner processes. Setup→agent, idle/lost stop, and broker-startup orphan reconciliation disconnect endpoints and remove these bridges, so stopped retained layers do not consume IPAM forever. |
+| `AGENT_EGRESS_CHAT_NETWORK_POOL` | **NEW** | Canonical RFC1918 IPv4 CIDR from which Docker atomically allocates one `/29` per active chat generation/phase bridge (default `10.240.0.0/16`, 8192 bridges). Choose a range that does not overlap Docker, VPN, or private-service routes on the host. Collision retries are daemon-arbitrated across broker/runner processes. Setup→agent and idle/lost stop remove bridges immediately; broker reconciliation removes stale interrupted-create/transition bridges after a five-minute grace period so it cannot delete one between creation and sandbox attachment. Stopped retained layers therefore do not consume IPAM forever. |
 | `AGENT_EGRESS_NETWORK_CUSTOM` | existing | |
 | `AGENT_EGRESS_NETWORK_FULL` | existing | |
 | `AGENT_EGRESS_PROXY_URL_TRUSTED` | existing | The proxy a Trusted-tier sandbox is pointed at — the one enforcing the built-in registry list plus `AGENT_EGRESS_ALLOWLIST`. The standalone Compose supplies this from its private service name and `AGENT_EGRESS_PROXY_PORT`; operators do not need to set it there. |
@@ -206,9 +206,10 @@ generate a replacement password: PostgreSQL applies `POSTGRES_PASSWORD` only
 when initializing an empty data directory, so a new value cannot unlock the
 old volume.
 
-`up` and `start` bring up Postgres first, wait for readiness, authenticate from
-the control-plane image using the configured DSN, and run Alembic before
-starting the rest of the stack. On a mismatch, restore the original
+`up` builds the required images first. It and `start` then bring up only
+Postgres, wait for readiness, authenticate from the control-plane image using
+the configured DSN, and run Alembic before starting the rest of the stack. On a
+mismatch, restore the original
 `AGENT_POSTGRES_PASSWORD` and `AGENT_DATABASE_URL`. The script never deletes the
 volume or resets its password automatically.
 

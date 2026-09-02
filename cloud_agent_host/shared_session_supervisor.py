@@ -270,6 +270,12 @@ class SharedChatSessionSupervisor:
                 else:
                     if group.spec != spec:
                         raise SandboxError("shared sandbox immutable labels changed")
+                    if not inspection.running and inspection.networks and self._is_quiescent(group):
+                        # Retry an idempotent release after an external stop or
+                        # a prior stop whose Docker network cleanup failed.
+                        # Active member/terminal operations fence this path
+                        # from a concurrent wake or phase transition.
+                        inspection = self._manager.stop(spec)
                     group.inspection = inspection
                 found.extend(self._descriptors(group))
         self._manager.prune_orphan_networks(specs)
@@ -1200,7 +1206,12 @@ class SharedChatSessionSupervisor:
             current = self._manager.inspect(group.spec.container_name)
             if current is None:
                 raise RetainedChatLost("shared sandbox container is missing")
-            inspection = self._manager.stop(group.spec) if current.running else current
+            # ``ChatSandboxManager.stop`` is deliberately idempotent: when
+            # Docker already stopped the container it still releases the
+            # retained phase network. Always delegate so an external stop, or
+            # a retry after network cleanup failed, cannot leak the chat's
+            # private subnet.
+            inspection = self._manager.stop(group.spec)
         except BaseException:
             failed_inspection: ChatSandboxInspection | None = None
             with contextlib.suppress(Exception):

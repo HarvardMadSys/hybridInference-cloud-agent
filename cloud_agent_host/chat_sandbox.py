@@ -32,6 +32,7 @@ import threading
 import time
 import tty
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
@@ -73,6 +74,7 @@ CHAT_NETWORK_POOL_LABEL = "org.freeinference.chat-network-pool"
 CHAT_CONTAINER_PREFIX = "freeinference-chat"
 CHAT_NETWORK_PREFIX = "freeinference-chat-net"
 CHAT_NETWORK_PREFIX_LENGTH = 29
+CHAT_NETWORK_PRUNE_GRACE_S = 300
 CHAT_BOOTSTRAP_NETWORK = "bridge"
 CHAT_WORKDIR = "/workspace"
 CHAT_STATE_DIR = "/agent-state"
@@ -261,6 +263,7 @@ class ChatSandboxManager:
         digest = hashlib.sha256(
             (
                 f"{self.backend.sandbox_namespace}\0{spec.thread_id}\0{spec.sandbox_id}\0"
+                f"{spec.generation}\0"
                 f"{base}\0{tier.value}\0" + "\0".join(aliases)
             ).encode()
         ).hexdigest()[:24]
@@ -625,6 +628,40 @@ class ChatSandboxManager:
             + (f": {last_conflict}" if last_conflict else "")
         )
 
+    def _ensure_phase_service_connections(
+        self,
+        network: str,
+        phase: str,
+        aliases: tuple[str, ...],
+    ) -> set[str]:
+        """Attach the exact currently discovered fixed endpoints for one phase."""
+        base = self.backend.network_for_phase(phase)
+        owners = self._service_owners(base, aliases)
+        for container_id, owned_aliases in owners.items():
+            self._ensure_service_connection(
+                network=network,
+                container_id=container_id,
+                aliases=owned_aliases,
+            )
+        return set(owners)
+
+    def _ensure_phase_services(
+        self,
+        network: str,
+        spec: ChatSandboxSpec,
+        phase: str,
+        aliases: tuple[str, ...],
+    ) -> None:
+        """Attach and verify the exact fixed service endpoints for one phase."""
+        service_ids = self._ensure_phase_service_connections(network, phase, aliases)
+        self._reconcile_phase_members(
+            network=network,
+            spec=spec,
+            phase=phase,
+            service_ids=service_ids,
+            service_aliases=aliases,
+        )
+
     def _ensure_phase_network(self, spec: ChatSandboxSpec, phase: str) -> str:
         """Create/reconcile the chat-private network and its trusted peers."""
         expected = self.network_for_phase(spec, phase)
@@ -633,25 +670,24 @@ class ChatSandboxManager:
         if expected == base:
             return expected
         network = self._inspect_network(expected)
+        if network is not None and self._network_is_stale_for_prune(network):
+            sandbox = self.inspect(spec.container_name)
+            if sandbox is None or not self._phase_endpoint_is_current(sandbox, expected):
+                network_id = str(network.get("Id") or "") or None
+                self._release_owned_network(
+                    expected,
+                    spec,
+                    phase,
+                    only_if_sandbox_unattached=True,
+                    expected_network_id=network_id,
+                )
+                network = self._inspect_network(expected)
         if network is None:
             network = self._create_phase_network(expected, spec, phase)
         if network is None:
             raise SandboxError("Docker created the chat network but it cannot be inspected")
         self._verify_phase_network(network, spec, phase)
-        owners = self._service_owners(base, aliases)
-        for container_id, owned_aliases in owners.items():
-            self._ensure_service_connection(
-                network=expected,
-                container_id=container_id,
-                aliases=owned_aliases,
-            )
-        self._reconcile_phase_members(
-            network=expected,
-            spec=spec,
-            phase=phase,
-            service_ids=set(owners),
-            service_aliases=aliases,
-        )
+        self._ensure_phase_services(expected, spec, phase, aliases)
         return expected
 
     def _owned_network_matches_phase(
@@ -675,7 +711,13 @@ class ChatSandboxManager:
             and labels.get(CHAT_NETWORK_TIER_LABEL) == policy.tier_for(phase).value
         )
 
-    def _disconnect_endpoint(self, network: str, container_id: str) -> None:
+    def _disconnect_endpoint(
+        self,
+        network: str,
+        container_id: str,
+        *,
+        network_name: str | None = None,
+    ) -> None:
         disconnected = self._run(
             [
                 self.backend.docker_binary,
@@ -689,11 +731,15 @@ class ChatSandboxManager:
         )
         if disconnected.returncode == 0:
             return
-        aliases = self._container_network_aliases(container_id, network)
+        if self._inspect_network(network) is None:
+            # An id-pinned cleanup can lose to another process that already
+            # removed the old bridge. A same-name replacement is unrelated.
+            return
+        aliases = self._container_network_aliases(container_id, network_name or network)
         if aliases is not None:
             raise SandboxError(
-                f"container {container_id[:12]} could not leave network {network!r}: "
-                + disconnected.stderr.strip()[:300]
+                f"container {container_id[:12]} could not leave network "
+                f"{(network_name or network)!r}: " + disconnected.stderr.strip()[:300]
             )
 
     def _release_owned_network(
@@ -701,11 +747,20 @@ class ChatSandboxManager:
         network_name: str,
         spec: ChatSandboxSpec,
         phase: str,
+        *,
+        only_if_sandbox_unattached: bool = False,
+        expected_network_id: str | None = None,
     ) -> None:
         """Disconnect exact owned endpoints and delete one inactive bridge."""
         network = self._inspect_network(network_name)
         if network is None:
             return
+        network_id = str(network.get("Id") or "")
+        if expected_network_id is not None and network_id != expected_network_id:
+            # The old bridge disappeared and Docker reused its deterministic
+            # name. Never let stale cleanup mutate the replacement.
+            return
+        network_ref = network_id or network_name
         labels = network.get("Labels") or {}
         if (
             network.get("Driver") != "bridge"
@@ -724,6 +779,10 @@ class ChatSandboxManager:
         if sandbox is not None:
             self._verify_identity(sandbox, spec)
         sandbox_id = sandbox.container_id if sandbox is not None else None
+        if only_if_sandbox_unattached and sandbox_id in containers:
+            # Opportunistic orphan pruning must never detach a sandbox that
+            # won the race and connected after the caller's first inspection.
+            return
         recorded_aliases = {
             value.strip().lower().rstrip(".")
             for value in str(labels.get(CHAT_NETWORK_SERVICES_LABEL) or "").split(",")
@@ -738,16 +797,90 @@ class ChatSandboxManager:
                     f"chat-private egress network {network_name!r} contains an unexpected peer"
                 )
         for container_id in sorted(map(str, containers)):
-            self._disconnect_endpoint(network_name, container_id)
+            self._disconnect_endpoint(
+                network_ref,
+                container_id,
+                network_name=network_name,
+            )
         removed = self._run(
-            [self.backend.docker_binary, "network", "rm", network_name],
+            [self.backend.docker_binary, "network", "rm", network_ref],
             timeout=30,
         )
-        if removed.returncode != 0 and self._inspect_network(network_name) is not None:
+        remaining = self._inspect_network(network_ref) if removed.returncode != 0 else None
+        if remaining is not None and only_if_sandbox_unattached:
+            # A runner may attach the sandbox after the endpoint snapshot above.
+            # Restore relays before deciding whether the failed opportunistic
+            # prune is now a live phase bridge.
+            self._verify_phase_network(remaining, spec, phase)
+            self._ensure_phase_services(
+                network_name,
+                spec,
+                phase,
+                self._service_aliases_for_phase(phase),
+            )
+            refreshed_sandbox = self.inspect(spec.container_name)
+            if refreshed_sandbox is not None and self._phase_endpoint_is_current(
+                refreshed_sandbox, network_name
+            ):
+                return
+        if remaining is not None:
             raise SandboxError(
                 "inactive chat-private network could not be removed: "
                 + removed.stderr.strip()[:300]
             )
+
+    def _release_orphan_network(self, network: dict[str, Any], phase: str) -> None:
+        """Delete one ownerless bridge by immutable ID and repair a lost attach race."""
+        network_name = str(network.get("Name") or "")
+        network_id = str(network.get("Id") or "")
+        labels = network.get("Labels") or {}
+        containers = network.get("Containers") or {}
+        recorded_aliases = tuple(
+            sorted(
+                value.strip().lower().rstrip(".")
+                for value in str(labels.get(CHAT_NETWORK_SERVICES_LABEL) or "").split(",")
+                if value.strip()
+            )
+        )
+        if not network_name or not network_id or not recorded_aliases:
+            raise SandboxError("orphan chat-private network has invalid ownership metadata")
+        if not isinstance(containers, dict):
+            raise SandboxError("orphan chat-private network has invalid ownership metadata")
+        for container_id in sorted(map(str, containers)):
+            endpoint_aliases = self._container_network_aliases(container_id, network_name)
+            if not endpoint_aliases or not endpoint_aliases.intersection(recorded_aliases):
+                raise SandboxError("orphan chat-private network contains an unexpected peer")
+        for container_id in sorted(map(str, containers)):
+            self._disconnect_endpoint(
+                network_id,
+                container_id,
+                network_name=network_name,
+            )
+        removed = self._run(
+            [self.backend.docker_binary, "network", "rm", network_id],
+            timeout=30,
+        )
+        remaining = self._inspect_network(network_id) if removed.returncode != 0 else None
+        if remaining is None:
+            return
+
+        # A new sandbox can attach to the old ID after the endpoint snapshot.
+        # Put the fixed services back before preserving that now-live bridge.
+        service_ids = self._ensure_phase_service_connections(
+            network_name,
+            phase,
+            recorded_aliases,
+        )
+        refreshed = self._inspect_network(network_id)
+        refreshed_containers = (refreshed or {}).get("Containers") or {}
+        if (
+            isinstance(refreshed_containers, dict)
+            and set(map(str, refreshed_containers)) - service_ids
+        ):
+            return
+        raise SandboxError(
+            "orphan chat-private network could not be removed: " + removed.stderr.strip()[:300]
+        )
 
     def _release_sandbox_networks(
         self,
@@ -796,8 +929,23 @@ class ChatSandboxManager:
             raise SandboxError("retained chat is attached to an unknown egress network")
         return self._require(spec)
 
+    @staticmethod
+    def _network_is_stale_for_prune(network: dict[str, Any]) -> bool:
+        """Return true only after Docker's creation timestamp clears the race window."""
+        raw_created = network.get("Created")
+        if not isinstance(raw_created, str) or not raw_created:
+            return False
+        try:
+            created = datetime.fromisoformat(raw_created.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if created.tzinfo is None:
+            return False
+        age = (datetime.now(UTC) - created.astimezone(UTC)).total_seconds()
+        return age >= CHAT_NETWORK_PRUNE_GRACE_S
+
     def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
-        """Remove owned phase bridges left by an interrupted create/transition."""
+        """Remove stale owned bridges without racing a create or phase transition."""
         result = self._run(
             [
                 self.backend.docker_binary,
@@ -849,38 +997,27 @@ class ChatSandboxManager:
                     # so pruning it here would silently disconnect an active
                     # turn from both fixed relays.
                     continue
-                self._release_owned_network(str(network["Name"]), spec, phase)
+                if not self._network_is_stale_for_prune(network):
+                    # Runner and broker use separate Docker clients. During
+                    # create, wake, or setup→agent transition the next bridge
+                    # exists briefly before the sandbox endpoint is attached.
+                    continue
+                self._release_owned_network(
+                    str(network["Name"]),
+                    spec,
+                    phase,
+                    only_if_sandbox_unattached=True,
+                    expected_network_id=str(network.get("Id") or "") or None,
+                )
                 continue
 
             # No retained container on this broker owns the labelled bridge.
-            # Only fixed service endpoints recorded by that network may remain;
-            # a peer without one of those aliases could be a racing sandbox and
-            # makes startup fail closed instead of deleting underneath it.
-            recorded_aliases = {
-                value.strip().lower().rstrip(".")
-                for value in str(labels.get(CHAT_NETWORK_SERVICES_LABEL) or "").split(",")
-                if value.strip()
-            }
-            containers = network.get("Containers") or {}
-            if not recorded_aliases or not isinstance(containers, dict):
-                raise SandboxError("orphan chat-private network has invalid ownership metadata")
-            for container_id in sorted(map(str, containers)):
-                endpoint_aliases = self._container_network_aliases(
-                    container_id, str(network["Name"])
-                )
-                if not endpoint_aliases or not endpoint_aliases.intersection(recorded_aliases):
-                    raise SandboxError("orphan chat-private network contains an unexpected peer")
-            for container_id in sorted(map(str, containers)):
-                self._disconnect_endpoint(str(network["Name"]), container_id)
-            removed = self._run(
-                [self.backend.docker_binary, "network", "rm", str(network["Name"])],
-                timeout=30,
-            )
-            if removed.returncode != 0 and self._inspect_network(str(network["Name"])) is not None:
-                raise SandboxError(
-                    "orphan chat-private network could not be removed: "
-                    + removed.stderr.strip()[:300]
-                )
+            # A runner can create the bridge just before its new container
+            # appears in the daemon-wide list, so absence alone is not enough
+            # proof that the bridge is orphaned.
+            if not self._network_is_stale_for_prune(network):
+                continue
+            self._release_orphan_network(network, phase)
 
     def _phase_endpoint_is_current(
         self,
@@ -915,11 +1052,6 @@ class ChatSandboxManager:
         current: ChatSandboxInspection,
         phase: str,
     ) -> ChatSandboxInspection:
-        if current.running:
-            raise SandboxError(
-                "a running retained chat still uses a shared/obsolete egress network; "
-                "stop it before this deployment can isolate and resume it"
-            )
         sources = tuple(current.networks)
         base = self.backend.network_for_phase(phase)
         expected = self.network_for_phase(spec, phase)
@@ -930,6 +1062,14 @@ class ChatSandboxManager:
                 continue
             if source != base and not self._owned_network_matches_phase(source, spec, phase):
                 raise SandboxError("retained chat is attached to a network outside this chat/phase")
+        if current.running and any(
+            source not in {expected} and source in {base, CHAT_BOOTSTRAP_NETWORK}
+            for source in sources
+        ):
+            raise SandboxError(
+                "a running retained chat still uses a shared/obsolete egress network; "
+                "stop it before this deployment can isolate and resume it"
+            )
         expected = self._ensure_phase_network(spec, phase)
         if not self._phase_endpoint_is_current(current, expected):
             connected = self._run(

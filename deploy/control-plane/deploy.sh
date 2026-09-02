@@ -162,7 +162,7 @@ compose run --rm --no-deps migrate
 # coming up in parallel can enroll/heartbeat and release the compatibility
 # fence.  There is no older service to replace in this branch; user work stays
 # queued until an eligible host appears.  The EXIT trap above restores the
-# public services to stopped if the fence or a later health check fails.
+# services this invocation bootstrapped if their health or the fence fails.
 RUNNING_CONTROL_ID="$(compose ps --status running -q control-plane 2>/dev/null || true)"
 RUNNING_MCP_ID="$(compose ps --status running -q mcp-relay 2>/dev/null || true)"
 if [ -z "${RUNNING_CONTROL_ID}" ]; then
@@ -201,6 +201,12 @@ compose run --rm --no-deps control-plane \
     --timeout-seconds "${SHARED_READY_TIMEOUT}" \
     --expected-deployment-sha "${SHA}"
 
+# The compatibility gate passed, so any bootstrap peers are now part of the
+# desired target stack rather than temporary readiness aids. A later full-stack
+# startup/health failure must not stop API/MCP selectively while leaving web or
+# another replacement service running.
+BOOTSTRAP_SERVICES=()
+
 # `up -d` with no service list brings the whole stack to the file's desired
 # state, which is what makes this idempotent. Compose may run the idempotent
 # migration service again; the API still waits on its successful completion.
@@ -221,5 +227,4 @@ wait_for "web"           "http://127.0.0.1:${WEB_PORT}${WEB_BASE_PATH:-/}"
 # answer "what is actually running here", and a value written before the health
 # check would answer it wrongly for every failed deploy.
 printf '%s\n' "${SHA}" > .deployed-sha
-BOOTSTRAP_SERVICES=()
 log "deployed ${SHA} (was ${PREVIOUS})"

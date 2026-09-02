@@ -39,7 +39,9 @@ in this branch; web remains stopped, work waits for an eligible host, and a
 failed gate stops both bootstrap services again. An ordinary rolling deployment
 does not take this branch and leaves the old services untouched until the
 exact-SHA host gate passes. As with every rolling migration, new migrations
-must remain compatible with the old API during this window.
+must remain compatible with the old API during this window. After the gate
+passes, bootstrap peers are part of the desired stack; a failed final API/web
+probe leaves them running for diagnosis and does not write `.deployed-sha`.
 
 The retained topology is the only executor. Until an enrolled host reports
 `shared-sandbox-v1`, the exact deployment-SHA attestation, and a usable broker,

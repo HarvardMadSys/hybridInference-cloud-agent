@@ -296,13 +296,15 @@ the relay-discovery backplane, so compose insists on creating it. A network of
 that name created by hand beforehand is refused with a label mismatch — let
 compose own it, or point the tier variables at names compose does not declare.
 The `freeinference-chat-net-*` networks are different: Docker lifecycle code
-owns and labels them by sandbox generation. It allocates one `/29` from
+derives their names and labels from the sandbox generation. It allocates one `/29` from
 `AGENT_EGRESS_CHAT_NETWORK_POOL` (default `10.240.0.0/16`) and lets Docker
 arbitrate concurrent claims. The setup bridge is deleted at setup→agent; the
 current bridge is disconnected and deleted on idle/lost stop while Docker keeps
 the container writable layer. Wake creates the correct setup or agent bridge
-again. Broker startup also removes labelled networks left by an interrupted
-create, preventing retained chats from exhausting bridge interfaces or IPAM.
+again. Broker reconciliation also removes labelled networks left by an
+interrupted create or transition after a five-minute grace period. The grace
+prevents status reconciliation from deleting a bridge between creation and
+sandbox attachment while still reclaiming bridge interfaces and IPAM.
 
 ### 1. Only enrolled sandbox hosts run jobs
 
@@ -632,10 +634,10 @@ initialized, so losing the file cannot be repaired by generating another
 password. The script detects this state and exits without deleting the volume
 or changing the database.
 
-For `up` and `start`, the script starts only Postgres first, waits for
-`pg_isready`, authenticates through `AGENT_DATABASE_URL` from the migration
-image, and runs Alembic. Only then can the complete stack start. If the probe
-fails, restore the original `AGENT_POSTGRES_PASSWORD` and
+`up` builds the required images first. It and `start` then start only Postgres,
+wait for `pg_isready`, authenticate through `AGENT_DATABASE_URL` from the
+migration image, and run Alembic. Only then can the complete stack start. If
+the probe fails, restore the original `AGENT_POSTGRES_PASSWORD` and
 `AGENT_DATABASE_URL`; do not remove the volume unless discarding all local
 agent state is intentional.
 
@@ -661,7 +663,9 @@ probes (a true cold start has neither). After migration, the control script
 independently bootstraps only the missing service or services. A failed gate
 stops only those started by that invocation, leaving a pre-existing peer
 running for diagnosis. Web does not start until the same exact-SHA fence
-succeeds.
+succeeds. Once it does, the bootstrap peers belong to the desired target stack:
+a later final API/web probe failure leaves that stack running for diagnosis but
+does not write `.deployed-sha`.
 
 ### Retained Docker storage on a host
 
