@@ -815,6 +815,7 @@ jobs:
           # Broker authorization is distinct from enrollment-issued host
           # credentials. The latter are persisted after one-time enrollment
           # and therefore are not a Compose secret.
+          COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-ci
           AGENT_WORKSPACE_BROKER_TOKEN=ci-placeholder-broker-token
           AGENT_SANDBOX_IMAGE=cloud-agent-sandbox:ci
           AGENT_GATEWAY_URL=http://agent-gateway:8080
