@@ -1,15 +1,17 @@
 # Reasoning effort as a first-class turn attribute
 
-- **Status:** historical per-turn behavior, amended for the next restartable
-  sandbox phase by `2026-08-28-one-chat-one-restartable-sandbox-design.md` §12
+- **Status:** implemented per-turn behavior; the shared-retained amendment in
+  §0 and `2026-08-31-native-session-fork-shared-workspace-design.md` are
+  authoritative for the current topology
 - **Date:** 2026-08-19
 - **Companion:** `2026-08-17-session-resident-harness-threads-design.md`
-  (the `model_switch` capability this design's effort switch rides on);
-  `2026-08-28-one-chat-one-restartable-sandbox-design.md` (the newer invariant
-  that preserves per-turn configuration through in-place control or a
-  context-preserving CLI process rotation);
+  (historical source of the `model_switch` capability this design's effort
+  switch rides on);
+  `2026-08-28-one-chat-one-restartable-sandbox-design.md` (historical
+  predecessor for context-preserving CLI process rotation);
   `2026-08-31-native-session-fork-shared-workspace-design.md` (supervisor-owned
-  member-concurrent live transports and member-only process rotation);
+  executable topology with member-concurrent live transports and member-only
+  process rotation);
   gateway repo `hybridInference` (§6 lands there — the two halves ship as
   one gateway PR and one agent PR)
 - **One sentence:** let the owner of a thread choose how hard the model
@@ -19,15 +21,15 @@
 
 ---
 
-## 0. Restartable-sandbox amendment (2026-08-28)
+## 0. Shared-retained amendment (updated 2026-08-31)
 
 The implemented 2026-08-31 shared-live path keeps a compatible member process
 alive across turns. If the pinned live protocol cannot safely apply a new
 model/effort setting, only that member is flushed and natively resumed; a forked
 sibling process is neither blocked nor restarted.
 
-The per-turn effort override below remains the target behavior for a
-restartable chat. PID continuity is not a product invariant: a driver that can
+The per-turn effort override below is the implemented behavior for a retained
+chat. PID continuity is not a product invariant: a driver that can
 change effort in-band does so, while a driver whose CLI reads it only at launch
 flushes the settled native state, closes the old process, and resumes exactly
 one replacement process with the requested value in the same sandbox. The
