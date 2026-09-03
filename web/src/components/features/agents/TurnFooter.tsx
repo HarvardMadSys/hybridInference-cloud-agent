@@ -640,9 +640,7 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // one attempt's transcript with another's numbers.
   const timings = useMemo(() => toolTimings(job.events, attemptNo), [job.events, attemptNo]);
   const telemetryMatchesAttempt =
-    job.telemetryAttemptNo === undefined ||
-    !attemptNo ||
-    job.telemetryAttemptNo === attemptNo;
+    job.telemetryAttemptNo === undefined || !attemptNo || job.telemetryAttemptNo === attemptNo;
   const contextBadge =
     telemetryMatchesAttempt && job.contextStatus ? CONTEXT_LABEL[job.contextStatus] : undefined;
   // NEW/LIVE/RESTORED/LOST is the user-facing correctness contract. The old
