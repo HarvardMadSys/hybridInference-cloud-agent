@@ -62,6 +62,13 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
     )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    # Force the script's documented standalone fallback even on CI hosts that
+    # have a real Compose plugin. Otherwise `docker compose version` escapes
+    # this hermetic fixture and the real plugin tries to render files that the
+    # deliberately minimal temporary checkout does not contain.
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text("#!/bin/sh\nexit 1\n")
+    fake_docker.chmod(0o755)
     fake_compose = fake_bin / "docker-compose"
     compose_env = tmp_path / "compose-env"
     fake_compose.write_text(
