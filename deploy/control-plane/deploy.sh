@@ -99,6 +99,8 @@ compose up -d --remove-orphans
 from_env() { grep -E "^$1=" .env | tail -1 | cut -d= -f2- || true; }
 CP_PORT="$(from_env AGENT_CONTROL_PLANE_PORT)"; CP_PORT="${CP_PORT:-8000}"
 WEB_PORT="$(from_env AGENT_WEB_PORT)";          WEB_PORT="${WEB_PORT:-3002}"
+EDGE_PORT="$(from_env AGENT_EDGE_PORT)";        EDGE_PORT="${EDGE_PORT:-3003}"
+ACTIVE_SERVICES="$(compose config --services)"
 
 # The web app is mounted under a base path, so `/` is a 404 by design and a
 # health check pointed at it fails every deploy of a working app. Checked
@@ -124,6 +126,10 @@ wait_for() {
 
 wait_for "control plane" "http://127.0.0.1:${CP_PORT}/healthz"
 wait_for "web"           "http://127.0.0.1:${WEB_PORT}${WEB_BASE_PATH:-/}"
+if grep -qx edge <<<"${ACTIVE_SERVICES}"; then
+  wait_for "edge web route" "http://127.0.0.1:${EDGE_PORT}/"
+  wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"
+fi
 
 # Written last and only on success: this file is what an operator reads to
 # answer "what is actually running here", and a value written before the health

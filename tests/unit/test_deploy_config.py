@@ -25,6 +25,7 @@ from cloud_agent_host.runner import build_parser
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
 _CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
+_CONTROL_PLANE_DEPLOY = REPO_ROOT / "deploy/control-plane/deploy.sh"
 _LOCAL_COMPOSE = REPO_ROOT / "deploy/local/docker-compose.yml"
 _LOCAL_EDGE_DOCKERFILE = REPO_ROOT / "deploy/local/Dockerfile.edge"
 _LOCAL_NGINX = REPO_ROOT / "deploy/local/nginx.conf"
@@ -132,6 +133,22 @@ def test_the_standalone_edge_strips_the_api_prefix():
     api = text[text.index("location /api/") : text.index("location / ")]
     assert "proxy_pass http://cloud_agent_api/;" in api
     assert "proxy_buffering off;" in api, "the control plane streams events over SSE"
+
+
+def test_the_standalone_edge_is_probed_before_a_deploy_succeeds():
+    """An enabled edge must prove both routes before recording the deploy.
+
+    Checking the services directly does not catch an nginx crash or a broken
+    path split: both upstreams can be healthy while the public hostname is
+    returning 502 or sending API requests to the web app.
+    """
+    text = _CONTROL_PLANE_DEPLOY.read_text()
+    before_success = text[: text.index("printf '%s\\n' \"${SHA}\" > .deployed-sha")]
+    edge_checks = before_success[before_success.index('if grep -qx edge <<<"${ACTIVE_SERVICES}"') :]
+
+    assert 'ACTIVE_SERVICES="$(compose config --services)"' in before_success
+    assert 'wait_for "edge web route" "http://127.0.0.1:${EDGE_PORT}/"' in edge_checks
+    assert 'wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"' in edge_checks
 
 
 def test_root_mounted_web_build_accepts_an_explicit_empty_base_path():
