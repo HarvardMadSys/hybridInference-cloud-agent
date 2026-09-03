@@ -41,7 +41,11 @@ services:
 
   # One same-origin browser entrypoint: web, API, OAuth, SSE, and terminal
   # WebSockets all cross this edge. Only loopback is published.
-  edge:
+  # Keep this name distinct from the optional profiled `edge` service in the
+  # production control-plane file. Compose merges same-named services before
+  # applying profiles; reusing `edge` here would inherit that profile, bind
+  # mount, image and extra port and leave the default local stack unreachable.
+  local-edge:
     build:
       context: ../..
       dockerfile: deploy/local/Dockerfile.edge

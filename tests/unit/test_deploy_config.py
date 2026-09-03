@@ -208,7 +208,8 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
 def test_complete_local_stack_exposes_only_its_loopback_edge(local_compose: dict):
     services = local_compose["services"]
 
-    assert services["edge"]["ports"] == ["127.0.0.1:${LOCAL_EDGE_PORT:-13002}:8088"]
+    assert services["local-edge"]["ports"] == ["127.0.0.1:${LOCAL_EDGE_PORT:-13002}:8088"]
+    assert "edge" not in services
     assert services["local-gateway"]["environment"]["LOCAL_EDGE_PORT"] == (
         "${LOCAL_EDGE_PORT:-13002}"
     )
