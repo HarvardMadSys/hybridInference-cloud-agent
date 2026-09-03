@@ -1639,6 +1639,12 @@ async def test_shared_turn_returns_uid_filtered_guest_processes_without_sampler_
             "observed_exec": True,
             "observed_exit": True,
             "tool_call_seqs": [1],
+            "cpu_usec": None,
+            "mem_peak_bytes": None,
+            "io_read_bytes": None,
+            "io_write_bytes": None,
+            "io_rchar_bytes": None,
+            "io_wchar_bytes": None,
         }
     ]
 

@@ -46,6 +46,7 @@ enum self_test_event_flag {
     SELF_TEST_FORK = 1U << 0,
     SELF_TEST_EXEC = 1U << 1,
     SELF_TEST_EXIT = 1U << 2,
+    SELF_TEST_DONE = 1U << 3,
 };
 
 struct self_test_state {
@@ -55,9 +56,19 @@ struct self_test_state {
     bool malformed;
     bool exec_mismatch;
     bool uid_mismatch;
+    /* The records must carry the counters every Linux kernel has, with
+     * values a child that exec'd and returned cannot have: a zero peak RSS
+     * or a zero scheduler runtime means a BTF relocation silently read the
+     * wrong thing, and a single-threaded child's exit must empty its group. */
+    bool counters_missing;
+    uint8_t counters;
 };
 
 static volatile sig_atomic_t exiting;
+
+/* Guest page size, so maxrss leaves this process in bytes rather than in a
+ * unit the host would have to guess. */
+static uint64_t page_bytes = 4096;
 
 struct observer {
     int events_fd;
@@ -172,6 +183,8 @@ static const char *event_kind(uint8_t kind)
         return "exec";
     case FI_PROCESS_EXIT:
         return "exit";
+    case FI_PROCESS_DONE:
+        return "done";
     default:
         return NULL;
     }
@@ -212,7 +225,19 @@ static int self_test_event(void *context, void *payload, size_t payload_size)
         flag = SELF_TEST_EXEC;
         break;
     case FI_PROCESS_EXIT:
+        state->counters |= event->counters;
+        if ((event->counters & FI_COUNTER_MAXRSS) == 0 || event->maxrss_pages == 0 ||
+            (event->counters & FI_COUNTER_GROUP) == 0 || !event->group_dead)
+            state->counters_missing = true;
         flag = SELF_TEST_EXIT;
+        break;
+    case FI_PROCESS_DONE:
+        /* The child runs for well under a millisecond. Tick-based CPU time
+         * would read zero here; the scheduler runtime must not. */
+        state->counters |= event->counters;
+        if ((event->counters & FI_COUNTER_CPU) == 0 || event->cpu_ns == 0)
+            state->counters_missing = true;
+        flag = SELF_TEST_DONE;
         break;
     default:
         state->malformed = true;
@@ -224,10 +249,11 @@ static int self_test_event(void *context, void *payload, size_t payload_size)
 
 static bool self_test_complete(const struct self_test_state *state)
 {
-    const uint8_t expected = SELF_TEST_FORK | SELF_TEST_EXEC | SELF_TEST_EXIT;
+    const uint8_t expected =
+        SELF_TEST_FORK | SELF_TEST_EXEC | SELF_TEST_EXIT | SELF_TEST_DONE;
 
     return state->target_pid != 0 && !state->malformed && !state->exec_mismatch &&
-           !state->uid_mismatch && state->events == expected;
+           !state->uid_mismatch && !state->counters_missing && state->events == expected;
 }
 
 static int monotonic_ms(uint64_t *value)
@@ -320,9 +346,23 @@ static int exercise_lifecycle_events(int ring_map_fd, struct ring_buffer **ring_
         return -1;
     }
     if (!self_test_complete(&state)) {
-        fprintf(stderr, "guest observer did not deliver fork/exec/exit through the ring buffer\n");
+        if (state.counters_missing)
+            fprintf(stderr,
+                    "guest observer records lack settled CPU, peak-RSS or group-exit "
+                    "accounting\n");
+        else
+            fprintf(stderr,
+                    "guest observer did not deliver fork/exec/exit/done through the ring "
+                    "buffer\n");
         return -1;
     }
+    /* Storage and syscall I/O accounting are kernel configuration, not a
+     * lifecycle guarantee; missing ones arrive as unavailable, so say so
+     * here where an operator reads the preflight output. */
+    if ((state.counters & FI_COUNTER_IO) == 0)
+        fprintf(stderr, "guest kernel exposes no per-task storage I/O accounting\n");
+    if ((state.counters & FI_COUNTER_XACCT) == 0)
+        fprintf(stderr, "guest kernel exposes no per-task read/write byte accounting\n");
     return 0;
 
 child_cleanup:
@@ -340,6 +380,7 @@ static int journal_event(void *context, void *payload, size_t payload_size)
     const struct fi_process_event *event = payload;
     char comm[FI_TASK_COMM_LEN * 6 + 1];
     char filename[FI_EXECUTABLE_LEN * 6 + 1];
+    char counters[256];
     char line[2048];
     const char *kind;
     int length;
@@ -355,6 +396,54 @@ static int journal_event(void *context, void *payload, size_t payload_size)
     }
     json_escape(comm, sizeof(comm), event->comm, sizeof(event->comm));
     json_escape(filename, sizeof(filename), event->filename, sizeof(event->filename));
+    /* Exit and done records carry what the task consumed. Each counter is
+     * written only when the kernel exposed it; the host treats an absent key
+     * as unavailable, which is the honest reading of a kernel built without
+     * that accounting, and different from a process that used nothing. */
+    if (event->kind == FI_PROCESS_EXIT || event->kind == FI_PROCESS_DONE) {
+        size_t used = 0;
+        int written;
+
+        written = snprintf(counters, sizeof(counters), ",\"counters\":%u", event->counters);
+        if (written > 0 && (size_t)written < sizeof(counters))
+            used = (size_t)written;
+        if (event->counters & FI_COUNTER_GROUP) {
+            written = snprintf(counters + used, sizeof(counters) - used,
+                               ",\"group_dead\":%s", event->group_dead ? "true" : "false");
+            if (written > 0 && (size_t)written < sizeof(counters) - used)
+                used += (size_t)written;
+        }
+        if (event->counters & FI_COUNTER_CPU) {
+            written = snprintf(counters + used, sizeof(counters) - used,
+                               ",\"cpu_ns\":%" PRIu64, (uint64_t)event->cpu_ns);
+            if (written > 0 && (size_t)written < sizeof(counters) - used)
+                used += (size_t)written;
+        }
+        if (event->counters & FI_COUNTER_MAXRSS) {
+            written = snprintf(counters + used, sizeof(counters) - used,
+                               ",\"maxrss_bytes\":%" PRIu64,
+                               (uint64_t)event->maxrss_pages * page_bytes);
+            if (written > 0 && (size_t)written < sizeof(counters) - used)
+                used += (size_t)written;
+        }
+        if (event->counters & FI_COUNTER_IO) {
+            written = snprintf(counters + used, sizeof(counters) - used,
+                               ",\"read_bytes\":%" PRIu64 ",\"write_bytes\":%" PRIu64,
+                               (uint64_t)event->read_bytes, (uint64_t)event->write_bytes);
+            if (written > 0 && (size_t)written < sizeof(counters) - used)
+                used += (size_t)written;
+        }
+        if (event->counters & FI_COUNTER_XACCT) {
+            written = snprintf(counters + used, sizeof(counters) - used,
+                               ",\"rchar\":%" PRIu64 ",\"wchar\":%" PRIu64,
+                               (uint64_t)event->rchar, (uint64_t)event->wchar);
+            if (written > 0 && (size_t)written < sizeof(counters) - used)
+                used += (size_t)written;
+        }
+        counters[used] = '\0';
+    } else {
+        counters[0] = '\0';
+    }
     observer->event_seq += 1;
     length = snprintf(
         line,
@@ -362,7 +451,7 @@ static int journal_event(void *context, void *payload, size_t payload_size)
         "{\"version\":%d,\"seq\":%" PRIu64 ",\"kind\":\"%s\","
         "\"mono_ns\":%" PRIu64 ",\"uid\":%u,\"pid\":%u,\"tgid\":%u,"
         "\"ppid\":%u,\"comm\":\"%s\",\"filename\":\"%s\","
-        "\"exit_code\":%d}\n",
+        "\"exit_code\":%d%s}\n",
         FI_OBSERVER_VERSION,
         observer->event_seq,
         kind,
@@ -373,7 +462,8 @@ static int journal_event(void *context, void *payload, size_t payload_size)
         event->ppid,
         comm,
         filename,
-        event->exit_code);
+        event->exit_code,
+        counters);
     if (length <= 0 || (size_t)length >= sizeof(line) ||
         observer->journal_bytes + (uint64_t)length > MAX_JOURNAL_BYTES) {
         observer->journal_dropped += 1;
@@ -629,6 +719,12 @@ int main(int argc, char **argv)
         return 2;
     }
     libbpf_set_print(quiet_libbpf);
+    {
+        long page = sysconf(_SC_PAGESIZE);
+
+        if (page > 0)
+            page_bytes = (uint64_t)page;
+    }
     if (raise_memlock() < 0)
         goto cleanup;
     object = bpf_object__open_file(BPF_OBJECT_PATH, NULL);
@@ -656,7 +752,7 @@ int main(int argc, char **argv)
         }
         links[link_count++] = link;
     }
-    if (link_count != 3) {
+    if (link_count != 4) {
         fprintf(stderr, "guest observer did not attach all lifecycle tracepoints\n");
         goto cleanup;
     }

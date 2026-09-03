@@ -362,6 +362,38 @@ calls (the model streaming, the CLI's own work) accrues to the attempt, not
 to any tool — visible as `attempt − Σ exclusive`, which is itself a useful
 series (harness overhead).
 
+**Exit-time accounting (Kata).** The sampler's grid is coarser than 97 % of
+calls, so under Kata the per-call numbers come from the guest kernel instead,
+from two records per task. `sched_process_exit` carries the group's settled
+`maxrss`, the task's `task_io_accounting` bytes, and whether this exit
+emptied the thread group (`signal->live` reached zero, which `do_exit`
+decrements before the tracepoint). CPU is deliberately *not* read there:
+`utime`/`stime` are tick accounted, and a 400 µs process that never received
+a tick reads zero — exactly the case this exists for. The scheduler's own
+runtime (`se.sum_exec_runtime`, the number `cputime_adjust` scales the tick
+split to, so the total `/proc` and `wait4()` report) is final only once the
+task has been dequeued for the last time, which is where `sched_switch` sees
+it in `TASK_DEAD`; a fourth probe emits a `done` record with it there, and the
+predicate is the only work on every other context switch. Each task reports
+only its own share; the host sums a group's threads into its leader and never
+adds `signal->utime` on top, which would count dead threads twice. A group's
+numbers are settled only when the group is dead *and* every task whose exit
+was seen has also reported `done` — Linux lets a leader exit while its
+threads live on, and a leader's exit must not be mistaken for the process's.
+Every counter is guarded by its presence in the guest's BTF and arrives as
+absent, never as zero, on a kernel built without that accounting; the
+preflight self-test requires a sub-millisecond child's `done` to carry
+non-zero CPU. A process is charged to a call only when its start fell inside
+that call's window alone; one that overlapping windows make plausible for
+several calls, one whose group is not settled, or any process at all in a
+census that lost events, is charged to none of them and marks every call it
+may belong to as `process_resources_partial`, so a per-call sum presented as
+exact never contains another call's work or hides a gap. CPU and I/O are sums
+over a call's processes, the peak is the largest single process (their peaks
+need not have coincided), and work the agent did inside its own resident
+process belongs to no call. This answers the "fine-grained tool call resource
+usage" question for a call of any length, including the 35 ms median.
+
 **Network per tool** is windowed the same way from parsed egress flows
 (connection window = [log time − duration, log time]), and only for the
 egress class; gateway/MCP bytes are exactly attributed already (O5) and join

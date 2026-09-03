@@ -425,6 +425,9 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
   const toolCalls = (api.tool_calls ?? []).map((call) => {
     const adapted = toToolCallResources(call);
     if (!toolCallsTruncated) return adapted;
+    // A dropped call may have started processes the retained rows now
+    // claim; nothing per-call survives a truncated list, exit-accounted or
+    // sampled alike.
     return {
       ...adapted,
       sampleCount: 0,
@@ -432,11 +435,29 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
       cpuUsec: null,
       memPeakBytes: null,
       exclusive: false,
+      processCpuUsec: null,
+      processMemPeakBytes: null,
+      processIoReadBytes: null,
+      processIoWriteBytes: null,
+      processResourcesPartial: false,
     };
   });
   const processObserver = api.process_observer ?? null;
   const processEventsLost = api.process_events_lost ?? 0;
   const processesTruncated = api.processes_truncated === true;
+  const processObservationComplete =
+    processObserver !== null &&
+    api.process_observation_complete === true &&
+    processEventsLost === 0 &&
+    !processesTruncated;
+  // An incomplete census may have lost a process a call started, so no
+  // call's exit-accounted numbers can be presented as its total. The host
+  // marks this too; the reader is kept conservative even against an older
+  // or wrong row.
+  const conservativeCalls = toolCalls.map((call) => {
+    if (processObservationComplete || (call.processCount ?? 0) === 0) return call;
+    return { ...call, processResourcesPartial: true };
+  });
   return {
     cpuUsec: api.cpu_usec,
     memPeakBytes: api.mem_peak_bytes,
@@ -448,14 +469,10 @@ export function toTurnResources(api: AttemptResourcesApi): TurnResources {
     sampleCount: api.sample_count,
     coverage: api.coverage,
     toolTimeMs: toolCallsTruncated ? null : (api.tool_time_ms ?? null),
-    toolCalls,
+    toolCalls: conservativeCalls,
     toolCallsTruncated,
     processObserver,
-    processObservationComplete:
-      processObserver !== null &&
-      api.process_observation_complete === true &&
-      processEventsLost === 0 &&
-      !processesTruncated,
+    processObservationComplete,
     processEventsLost,
     processesTruncated,
     processes: (api.processes ?? []).map(toProcessObservation),
@@ -485,6 +502,11 @@ function toToolCallResources(api: ToolCallResourcesApi): ToolCallResources {
     memPeakBytes: exclusive ? api.mem_peak_exclusive_bytes : api.mem_peak_shared_bytes,
     exclusive,
     processCount: api.process_count ?? 0,
+    processCpuUsec: api.process_cpu_usec ?? null,
+    processMemPeakBytes: api.process_mem_peak_bytes ?? null,
+    processIoReadBytes: api.process_io_read_bytes ?? null,
+    processIoWriteBytes: api.process_io_write_bytes ?? null,
+    processResourcesPartial: api.process_resources_partial === true,
   };
 }
 
@@ -504,6 +526,12 @@ function toProcessObservation(api: ProcessObservationApi): ProcessObservation {
     observedExec: api.observed_exec,
     observedExit: api.observed_exit,
     toolCallSeqs: api.tool_call_seqs,
+    cpuUsec: api.cpu_usec ?? null,
+    memPeakBytes: api.mem_peak_bytes ?? null,
+    ioReadBytes: api.io_read_bytes ?? null,
+    ioWriteBytes: api.io_write_bytes ?? null,
+    ioRcharBytes: api.io_rchar_bytes ?? null,
+    ioWcharBytes: api.io_wchar_bytes ?? null,
   };
 }
 

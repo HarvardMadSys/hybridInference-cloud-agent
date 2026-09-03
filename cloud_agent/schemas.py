@@ -177,6 +177,20 @@ class ToolCallResources(BaseModel):
     #: Kernel-observed processes whose starts plausibly belong to this call.
     #: Zero proves none only when the attempt's process observation is complete.
     process_count: int = 0
+    #: What the processes this call alone started consumed, from the guest
+    #: kernel's exit-time accounting. Independent of the sampler and of the
+    #: call's length: a 35 ms call whose child exited has exact numbers here.
+    #: CPU and I/O are sums over those processes; the peak is the largest
+    #: single process. Null where no exited process was attributed to the
+    #: call alone, or where the kernel does not account that counter.
+    process_cpu_usec: int | None = None
+    process_mem_peak_bytes: int | None = None
+    process_io_read_bytes: int | None = None
+    process_io_write_bytes: int | None = None
+    #: True when a process this call may own was left out of the numbers:
+    #: shared with an overlapping call, or still running at turn end. The
+    #: numbers above are then floors, and a reader must say so.
+    process_resources_partial: bool = False
 
 
 class ProcessObservation(BaseModel):
@@ -198,6 +212,16 @@ class ProcessObservation(BaseModel):
     observed_exit: bool = False
     #: Every plausible call when tool windows overlap; empty is unassigned.
     tool_call_seqs: list[int] = Field(default_factory=list)
+    #: Exit-time accounting for the whole thread group, excluding children.
+    #: Null until the leader exited, and null for any counter the guest
+    #: kernel does not expose; never zero for something unmeasured.
+    cpu_usec: int | None = None
+    mem_peak_bytes: int | None = None
+    io_read_bytes: int | None = None
+    io_write_bytes: int | None = None
+    #: Bytes passed through read/write, which count pipes and caches too.
+    io_rchar_bytes: int | None = None
+    io_wchar_bytes: int | None = None
 
 
 class AttemptResources(BaseModel):
@@ -1024,6 +1048,21 @@ class WorkerToolCallResources(BaseModel):
     mem_peak_exclusive_bytes: int | None = Field(None, ge=0)
     mem_peak_shared_bytes: int | None = Field(None, ge=0)
     process_count: int = Field(0, ge=0)
+    process_cpu_usec: int | None = Field(None, ge=0)
+    process_mem_peak_bytes: int | None = Field(None, ge=0)
+    process_io_read_bytes: int | None = Field(None, ge=0)
+    process_io_write_bytes: int | None = Field(None, ge=0)
+    process_resources_partial: bool = False
+
+    @property
+    def has_process_resources(self) -> bool:
+        """Whether any exit-accounted counter was charged to this call."""
+        return (
+            self.process_cpu_usec is not None
+            or self.process_mem_peak_bytes is not None
+            or self.process_io_read_bytes is not None
+            or self.process_io_write_bytes is not None
+        )
 
     @model_validator(mode="after")
     def counters_match_the_window_evidence(self) -> WorkerToolCallResources:
@@ -1038,6 +1077,10 @@ class WorkerToolCallResources(BaseModel):
             raise ValueError("an overlapping tool row cannot carry exclusive counters")
         if self.sample_count < 2 and (exclusive or shared or self.measured_span_ms is not None):
             raise ValueError("fewer than two samples cannot support a tool measurement")
+        if self.process_count == 0 and (
+            self.has_process_resources or self.process_resources_partial
+        ):
+            raise ValueError("a call with no attributed process cannot carry process resources")
         return self
 
 
@@ -1058,6 +1101,29 @@ class WorkerProcessObservation(BaseModel):
     observed_exec: bool = False
     observed_exit: bool = False
     tool_call_seqs: list[int] = Field(default_factory=list, max_length=500)
+    cpu_usec: int | None = Field(None, ge=0)
+    mem_peak_bytes: int | None = Field(None, ge=0)
+    io_read_bytes: int | None = Field(None, ge=0)
+    io_write_bytes: int | None = Field(None, ge=0)
+    io_rchar_bytes: int | None = Field(None, ge=0)
+    io_wchar_bytes: int | None = Field(None, ge=0)
+
+    @model_validator(mode="after")
+    def counters_need_an_observed_exit(self) -> WorkerProcessObservation:
+        """Exit-time accounting cannot describe a process that has not exited."""
+        if not self.observed_exit and any(
+            value is not None
+            for value in (
+                self.cpu_usec,
+                self.mem_peak_bytes,
+                self.io_read_bytes,
+                self.io_write_bytes,
+                self.io_rchar_bytes,
+                self.io_wchar_bytes,
+            )
+        ):
+            raise ValueError("a process that has not exited cannot carry exit counters")
+        return self
 
 
 class WorkerResourcesRequest(BaseModel):
@@ -1125,7 +1191,12 @@ class WorkerResourcesRequest(BaseModel):
             self.processes
             or self.process_events_lost > 0
             or self.processes_truncated
-            or any(call.process_count > 0 for call in self.tool_calls)
+            or any(
+                call.process_count > 0
+                or call.has_process_resources
+                or call.process_resources_partial
+                for call in self.tool_calls
+            )
         ):
             raise ValueError("process rows require a named guest observer")
         return self

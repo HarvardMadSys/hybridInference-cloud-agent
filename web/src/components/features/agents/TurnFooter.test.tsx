@@ -777,6 +777,185 @@ describe('per-call resources, through both real adapters', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/observed no child process/)).toBeNull();
   });
+
+  const accountedProcess = {
+    ...tinyProcess,
+    executable: '/usr/bin/dd',
+    cpu_usec: 15_000,
+    mem_peak_bytes: 2_228_224,
+    io_read_bytes: 0,
+    io_write_bytes: 8_388_608,
+    io_rchar_bytes: 8_390_683,
+    io_wchar_bytes: 8_388_701,
+  };
+
+  it('shows what each guest process consumed at exit', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({ processes: [accountedProcess] }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    const row = screen.getByText('/usr/bin/dd').closest('tr')!;
+    expect(within(row).getByText('15ms')).toBeInTheDocument();
+    expect(within(row).getByText('2.1MB')).toBeInTheDocument();
+    expect(within(row).getByText('r0B w8MB')).toBeInTheDocument();
+    expect(screen.getByText(/accounting of each process at exit/)).toBeInTheDocument();
+  });
+
+  it('leaves consumption blank for a process that had not exited', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({
+            processes: [
+              { ...tinyProcess, duration_ms: null, exit_code: null, observed_exit: false },
+            ],
+          }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    const row = screen.getByText('/bin/tiny').closest('tr')!;
+    expect(within(row).getByText('still running')).toBeInTheDocument();
+    // CPU, peak RSS, I/O and exit code: four dashes, no zeros.
+    expect(within(row).getAllByText('—')).toHaveLength(4);
+  });
+
+  it('charges a call too short for the sampler with what its own processes consumed', () => {
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 1,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: 2_228_224,
+            process_io_read_bytes: 0,
+            process_io_write_bytes: 8_388_608,
+            process_resources_partial: false,
+          },
+        ],
+        false,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 0,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).getByText('15ms')).toBeInTheDocument();
+    expect(within(shortRow).getByText('2.1MB')).toBeInTheDocument();
+    expect(within(shortRow).getAllByText('ᵖ')).toHaveLength(2);
+    // The sampled call keeps its sampled numbers, unmarked.
+    const longRow = screen.getByText('4.4s').closest('tr')!;
+    expect(within(longRow).getByText('270MB')).toBeInTheDocument();
+    expect(within(longRow).queryByText('ᵖ')).toBeNull();
+    expect(screen.getByText(/accounted by the guest kernel/)).toBeInTheDocument();
+    expect(screen.queryByText(/periodic sampler did not span/)).toBeNull();
+  });
+
+  it('marks a call whose processes were not all its own as a floor', () => {
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 2,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: null,
+            process_io_read_bytes: null,
+            process_io_write_bytes: null,
+            process_resources_partial: true,
+          },
+        ],
+        false,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 0,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).getByText('≥15ms')).toBeInTheDocument();
+    expect(screen.getByText(/leave out a process it may own/)).toBeInTheDocument();
+  });
+
+  it('treats every charged call as a floor when the census lost events', () => {
+    // The host marks this too; the adapter repeats it so an older or wrong
+    // row can never present an exit-accounted total beside a lossy census.
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 1,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: 2_228_224,
+            process_resources_partial: false,
+          },
+        ],
+        false,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 2,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).getByText('≥15ms')).toBeInTheDocument();
+    expect(within(shortRow).getByText('≥2.1MB')).toBeInTheDocument();
+  });
+
+  it('never lets a truncated call list keep exit-accounted numbers', () => {
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 1,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: 2_228_224,
+            process_resources_partial: false,
+          },
+        ],
+        true,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 0,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).queryByText('15ms')).toBeNull();
+    expect(within(shortRow).queryByText('ᵖ')).toBeNull();
+  });
 });
 
 describe('attempt scoping', () => {
