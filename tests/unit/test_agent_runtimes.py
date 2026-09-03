@@ -232,6 +232,29 @@ def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
 
+def test_claude_model_aliases_resolve_to_the_only_model_the_grant_admits():
+    """A subagent picks its own model, and the job never named it.
+
+    Left to the vendor defaults the CLI asked the gateway for
+    ``claude-opus-5[1m]`` for an Explore subagent and reported the refusal as
+    the *user's* model being unavailable. Verified against the pinned CLI:
+    with the override ``--model opus`` requests the named model, without it
+    ``claude-opus-5``.
+    """
+    _argv, env = ClaudeCodeRuntime().prepare(
+        workdir="/tmp/x",
+        task_prompt="do the thing",
+        model="glm-5.1",
+        gateway_base_url="https://gateway.example.com/v1",
+        credential="ajt.a.b",
+    )
+    assert env["ANTHROPIC_MODEL"] == "glm-5.1"
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "glm-5.1"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.1"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.1"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.1"
+
+
 def test_codex_prepare_and_config_target_the_gateway():
     """Codex is pointed at the gateway through a scratch provider config."""
     runtime = CodexRuntime()

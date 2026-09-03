@@ -286,6 +286,34 @@ class ClaudeCodeRuntime(AgentRuntime):
         #: resumes (design §6); ``None`` until the CLI has announced itself.
         self.session_id: str | None = None
 
+    @staticmethod
+    def model_env(model: str) -> dict[str, str]:
+        """Every environment name that must name this turn's model.
+
+        One place, because the resident transport sets these again at spawn:
+        ``prepare_live`` builds its template with no model (the first turn
+        picks it), so two call sites name the same thing and a name added to
+        only one of them would work COLD and not HOT.
+
+        The three alias families are here because the CLI resolves a *family*
+        for work the job never named — a subagent picks its own model — and
+        without an override that resolves to the vendor default. Measured on
+        staging: an Explore subagent asked the gateway for
+        ``claude-opus-5[1m]`` and the CLI reported the answer as the user's
+        own model being unavailable. A grant admits exactly one model, so
+        every family resolves to that one. Verified against the pinned CLI:
+        with the override, ``--model opus`` requests the named model; without
+        it, ``claude-opus-5``. An override the CLI refuses (a ``claude-``
+        model whose family disagrees) falls back to the default it uses now.
+        """
+        return {
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_SMALL_FAST_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+        }
+
     def prepare(
         self,
         *,
@@ -358,8 +386,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             # The MCP relay's token, which is *not* the inference credential
             # above. Two services, two scopes, two blast radii.
             MCP_TOKEN_ENV: mcp_config.credential,
-            "ANTHROPIC_MODEL": model,
-            "ANTHROPIC_SMALL_FAST_MODEL": model,
+            **self.model_env(model),
             # Telemetry and auto-update are refused explicitly rather than left
             # to the egress allowlist: defence in depth, and it keeps the
             # allowlist free of vendor endpoints.

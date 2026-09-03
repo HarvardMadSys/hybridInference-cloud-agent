@@ -130,6 +130,26 @@ def test_two_turns_ride_one_process(tmp_path):
     assert not process.killed  # settling a turn never costs the residency
 
 
+def test_the_resident_spawn_names_the_model_everywhere_the_one_shot_does(tmp_path):
+    """The template carries no model, so the spawn has to supply every name.
+
+    Two call sites naming the same thing is how a name added to one of them
+    ends up working COLD and not HOT — including the alias overrides that
+    keep a subagent off the vendor's default model.
+    """
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+
+    process.feed = _turn_lines(_RESULT)
+    session.start_turn(TurnInput(prompt="p", model="glm-5.1")).wait()
+
+    (_argv, env), *_rest = spawned
+    named = ClaudeCodeRuntime.model_env("glm-5.1")
+    assert named  # a set that emptied would make the assertion below vacuous
+    assert {name: env.get(name) for name in named} == named
+
+
 def test_a_model_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
     process = _LiveProcess()
     session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])

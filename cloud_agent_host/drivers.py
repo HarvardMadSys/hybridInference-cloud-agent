@@ -1671,8 +1671,10 @@ class ClaudeCodeLiveSession(ClaudeCodeSession):
             argv[model_at + 1 : model_at + 1] = self.runtime.effort_args(reasoning_effort)
             env = dict(self._context.base_env)
             env.update(self._extra_env)
-            env["ANTHROPIC_MODEL"] = model
-            env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+            # The template was built without a model, so every name that
+            # carries one is filled in here — from the dialect layer, so this
+            # cannot fall behind the one-shot invocation's set.
+            env.update(self.runtime.model_env(model))
             assert self._context.spawn_live is not None
             self._process = self._context.spawn_live(argv, env)
             self._lines = self._process.lines()
