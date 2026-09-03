@@ -112,11 +112,13 @@ from cloud_agent.schemas import (
     McpIntegrationResponse,
     McpServerSummary,
     OAuthConnectRequest,
+    ProcessObservation,
     RepoBranchesResponse,
     SourceControlAccount,
     SourceControlIntegrationsResponse,
     SourceControlProviderResponse,
     SourceControlRepository,
+    ToolCallResources,
     WorkerAckResponse,
     WorkerClaimRequest,
     WorkerClaimResponse,
@@ -429,7 +431,7 @@ def _attempt_duration_ms(telemetry: dict[str, Any] | None) -> int | None:
 
 
 def _attempt_resources(telemetry: dict[str, Any] | None) -> AttemptResources | None:
-    """Shape the resource rollup, or None when no sampler ever reported.
+    """Shape the resource rollup, or None when no accounting record was reported.
 
     A row whose counters are all null is still returned: it carries
     ``coverage`` and is how a reader learns the turn was not measured, which
@@ -448,6 +450,14 @@ def _attempt_resources(telemetry: dict[str, Any] | None) -> AttemptResources | N
         sample_count=telemetry.get("sample_count") or 0,
         coverage=float(telemetry.get("coverage") or 0.0),
         sampler_version=telemetry.get("sampler_version"),
+        tool_time_ms=telemetry.get("tool_time_ms"),
+        tool_calls=[ToolCallResources(**call) for call in telemetry.get("tool_calls") or []],
+        tool_calls_truncated=bool(telemetry.get("tool_calls_truncated")),
+        process_observer=telemetry.get("process_observer"),
+        process_observation_complete=bool(telemetry.get("process_observation_complete")),
+        process_events_lost=int(telemetry.get("process_events_lost") or 0),
+        processes_truncated=bool(telemetry.get("processes_truncated")),
+        processes=[ProcessObservation(**process) for process in telemetry.get("processes") or []],
     )
 
 
@@ -510,6 +520,7 @@ def _job_response(
         model_calls=usage.get("model_calls"),
         setup_egress_tier=setup_tier,
         agent_egress_tier=agent_tier,
+        telemetry_attempt_id=(telemetry or {}).get("attempt_id"),
         continuity_mode=(telemetry or {}).get("continuity_mode"),
         context_status=(telemetry or {}).get("context_status"),
         resident_state=sandbox.get("resident_state"),
@@ -1693,7 +1704,7 @@ async def create_agent_follow_up(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobResponse:
-    """Append a turn to a task thread and queue its next isolated run."""
+    """Append a turn and queue its member in the retained shared sandbox."""
     job_store = _require_store(store)
     parent = await _owned_job(job_store, job_id, user)
     retained = parent.get("thread_sandbox")
@@ -1717,7 +1728,7 @@ async def create_agent_follow_up(
                         "type": "invalid_request",
                         "message": (
                             f"this thread runs on {parent['runtime']!r} and a thread's "
-                            "harness is fixed; fork the thread to continue on "
+                            "harness is fixed; start a new chat to use "
                             f"{body.runtime!r}"
                         ),
                     }
@@ -1757,14 +1768,12 @@ async def create_agent_follow_up(
             detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
         ) from exc
     # A thread's MCP servers are inherited by every turn, so a turn can end up
-    # with tools it will not get two ways: switching harness mid-thread to a
-    # runtime that cannot load them, or having disconnected the server since the
-    # thread started. Refuse either, rather than run a turn whose tools silently
-    # vanish — the follow-up prompt was very likely written expecting them.
+    # with tools it will not get a turn after the user disconnected a server
+    # since the thread started. Refuse it rather than run a turn whose tools
+    # silently vanish — the follow-up prompt was very likely written expecting
+    # them. Runtime is fixed above; the optional field can only echo that value.
     #
-    # **Checked on every turn, not only when the runtime changes.** That
-    # narrower guard was right when the only question was runtime compatibility,
-    # which cannot change while the runtime does not. Resolution now also
+    # **Checked on every turn.** Resolution now also
     # answers "is this still connected", which changes on its own, from the
     # Integrations page, between turns — leaving a plain follow-up to return 201
     # and fail at its first tool call, which is exactly the fail-fast this
@@ -1772,8 +1781,8 @@ async def create_agent_follow_up(
     if parent.get("mcp_servers"):
         await _resolve_mcp_servers(
             list(parent["mcp_servers"]),
-            # The runtime this turn will actually run on: the switched-to one,
-            # or the parent's when the caller did not switch.
+            # The runtime this turn will actually run on: an explicit echo or
+            # the parent's value when omitted.
             runtime=body.runtime or parent["runtime"],
             store=job_store,
             user_id=user["user_id"],
@@ -3786,11 +3795,11 @@ async def worker_report_resources(
     authorization: str | None = Header(None),
     store: AgentJobStore | None = Depends(get_agent_job_store),
 ) -> WorkerAckResponse:
-    """Record one closed attempt window's resource rollup.
+    """Record one closed attempt's resource and timing telemetry.
 
     Fenced like every other worker write, and idempotent: the rollup
-    describes a window that is already closed, so a retried post is the same
-    window said twice rather than a second window to add.
+    describes an attempt that is already closed, so a retried post is the same
+    report said twice rather than a second report to add.
     """
     job_store = _require_store(store)
     claims = _worker_claims(authorization)

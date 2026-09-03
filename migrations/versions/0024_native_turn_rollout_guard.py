@@ -1,28 +1,28 @@
 """Keep native turn ordinals complete while the previous API is still live.
 
 The host and control-plane deployment jobs intentionally start in parallel.
-Migration 0021 therefore adds the column and old-writer triggers in one short
+Migration 0023 therefore adds the column and old-writer triggers in one short
 transaction. This following revision performs the historical backfill and
 concurrent unique index without retaining the schema lock while an
 already-running previous-version control plane continues to settle turns.
 
-Revision ID: 0022_native_turn_rollout_guard
-Revises: 0021_native_turn_anchors
+Revision ID: 0024_native_turn_rollout_guard
+Revises: 0023_native_turn_anchors
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0022_native_turn_rollout_guard"
-down_revision = "0021_native_turn_anchors"
+revision = "0024_native_turn_rollout_guard"
+down_revision = "0023_native_turn_anchors"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    """Backfill ordinals without retaining 0021's exclusive schema lock."""
-    # 0021 committed the column and old-writer triggers in its own short
+    """Backfill ordinals without retaining 0023's exclusive schema lock."""
+    # 0023 committed the column and old-writer triggers in its own short
     # transaction. Normal turns are succeeded. Snapshot membership additionally
     # identifies the rare turn whose native context settled before final job
     # state was lost. The recursive arm carries that fact into already-forked
@@ -82,6 +82,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove the backfill index; 0021 owns the column and writer guard."""
+    """Remove the backfill index; 0023 owns the column and writer guard."""
     with op.get_context().autocommit_block():
         op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_agent_jobs_native_turn")

@@ -133,6 +133,9 @@ jobs:
     environment: production
     timeout-minutes: 45
     concurrency:
+      # Serialize production host rollouts with production only. Staging uses
+      # its own namespaced stack and may deploy in parallel; exact-SHA
+      # readiness still fences each control-plane rollout against its host.
       group: cloud-agent-prod-host-deploy
       cancel-in-progress: false
 

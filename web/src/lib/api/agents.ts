@@ -26,6 +26,63 @@ export type AgentJobApiState =
   | 'failed'
   | 'cancelled';
 
+/** One tool call's timing and attributable resource evidence. */
+export interface ToolCallResourcesApi {
+  call_seq: number;
+  tool_use_id: string;
+  tool_name: string;
+  /** `exact` = the sandbox's own hooks; `message` = bracketed from outside. */
+  timing_source: string;
+  duration_ms: number | null;
+  /** Historical sampled readings; current shared-member rows always carry 0. */
+  sample_count: number;
+  /** Calls that shared these readings, including this one. */
+  overlap_n: number;
+  measured_span_ms: number | null;
+  cpu_usec_exclusive: number | null;
+  cpu_usec_shared: number | null;
+  mem_peak_exclusive_bytes: number | null;
+  mem_peak_shared_bytes: number | null;
+  /** Guest-kernel process starts plausibly belonging to this call. */
+  process_count?: number;
+  /**
+   * What the processes this call alone started consumed, from the guest
+   * kernel's exit-time accounting. Sums for CPU and I/O, the largest single
+   * process for the peak. Null where nothing exited that belonged to this
+   * call alone, or where the kernel does not account that counter.
+   */
+  process_cpu_usec?: number | null;
+  process_mem_peak_bytes?: number | null;
+  process_io_read_bytes?: number | null;
+  process_io_write_bytes?: number | null;
+  /** A process this call may own was left out, so the numbers are floors. */
+  process_resources_partial?: boolean;
+}
+
+export interface ProcessObservationApi {
+  process_seq: number;
+  uid: number;
+  pid: number;
+  tgid: number;
+  ppid: number | null;
+  comm: string;
+  executable: string | null;
+  started_offset_ms: number;
+  duration_ms: number | null;
+  exit_code: number | null;
+  observed_fork: boolean;
+  observed_exec: boolean;
+  observed_exit: boolean;
+  tool_call_seqs: number[];
+  /** Exit-time accounting for the Linux process group; null until it exited. */
+  cpu_usec?: number | null;
+  mem_peak_bytes?: number | null;
+  io_read_bytes?: number | null;
+  io_write_bytes?: number | null;
+  io_rchar_bytes?: number | null;
+  io_wchar_bytes?: number | null;
+}
+
 export interface AttemptResourcesApi {
   cpu_usec: number | null;
   mem_peak_bytes: number | null;
@@ -38,6 +95,15 @@ export interface AttemptResourcesApi {
   /** Fraction of the attempt window actually sampled, 0..1. */
   coverage: number;
   sampler_version: string | null;
+  /** Union of the turn's tool windows, never their sum. */
+  tool_time_ms?: number | null;
+  tool_calls?: ToolCallResourcesApi[];
+  tool_calls_truncated?: boolean;
+  process_observer?: string | null;
+  process_observation_complete?: boolean;
+  process_events_lost?: number;
+  processes_truncated?: boolean;
+  processes?: ProcessObservationApi[];
 }
 
 export interface AgentJobApi {
@@ -73,6 +139,8 @@ export interface AgentJobApi {
   model_calls: number | null;
   setup_egress_tier: string | null;
   agent_egress_tier: string | null;
+  /** Attempt whose continuity and resource telemetry is attached below. */
+  telemetry_attempt_id?: number | null;
   /** Which continuity rung this turn ran on. Null on turns that predate it. */
   continuity_mode?: 'hot' | 'warm_native' | 'cold_native' | 'replay' | null;
   /** Canonical user-facing context state for restartable chat sandboxes. */
@@ -95,9 +163,9 @@ export interface AgentJobApi {
   workspace_epoch?: number | null;
   duration_ms?: number | null;
   /**
-   * What the sandbox consumed, measured from the host. Null when no sampler
-   * reported; a present object with `coverage` below 1 is a partial
-   * measurement and must be rendered as incomplete, never as a total.
+   * Resource evidence for this attempt. Null when no accounting row exists.
+   * Current shared-member rows intentionally have no container totals;
+   * historical sampled rows with partial coverage remain lower bounds.
    */
   resources?: AttemptResourcesApi | null;
   /** Conversation fields are optional so pre-thread deployments remain readable. */

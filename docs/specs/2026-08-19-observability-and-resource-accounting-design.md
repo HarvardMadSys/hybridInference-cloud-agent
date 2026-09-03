@@ -1,11 +1,10 @@
 # Observability and per-tool resource accounting
 
-- **Status:** draft v1 — for review (Murphy, Juncheng)
-- **Scope cut (2026-08-19, Murphy):** per-chat surfaces ship first; the
-  entire admin layer — aggregate API, console admin pages, alert checker,
-  emit() seam — is **deferred**. §10 carries the re-cut phases; deferred
-  sections remain in this document as the agreed direction for when the
-  admin layer is picked up.
+- **Status:** implemented per-chat subset; the shared-retained amendment in
+  §0 is authoritative for the current topology
+- **Scope cut:** per-chat timing and Kata process observations ship first. The
+  admin layer, aggregate API, alert checker, export seam, egress byte ledger,
+  inference-cost join, and portable persistence telemetry are **deferred**.
 - **Date:** 2026-08-19
 - **Companion:** `2026-08-17-session-resident-harness-threads-design.md`
   (historical continuity ladder),
@@ -24,15 +23,47 @@
 
 ---
 
-## 0. Restartable-sandbox amendment (2026-08-28)
+## 0. Shared-retained implementation amendment (2026-09-03)
 
-The 2026-08-31 shared-live implementation keeps these product states but makes
-process residency member-scoped and Docker lifecycle/resource totals
-group-scoped. Attempt-fenced events retain runtime-reported turn usage; the
-long-lived inference grant is billed by the gateway to `thread:<thread_id>`
-because one credential spans several turns. Until process-tree sampling lands,
-per-member CPU/memory/I/O reports explicit zero coverage and never duplicate
-one container total onto concurrent jobs.
+The executable topology is defined by
+`2026-08-31-native-session-fork-shared-workspace-design.md`: one retained
+container per sandbox group, one live Agent CLI session per member, and
+concurrent fork siblings in the same workspace. That changes the accounting
+unit. Docker statistics describe the **whole group container** and cannot be
+assigned to either concurrent chat turn without double counting. Therefore the
+current turn path never binds the whole-container `ResourceSampler` to a member
+attempt, including while a group happens to have only one member.
+
+Every current attempt instead stores this honest shape:
+
+- aggregate CPU, memory, I/O, and network counters are null;
+- `sample_count = 0`, `coverage = 0`, and
+  `sampler_version = shared-member-v1` mean “group totals intentionally not
+  attributed”, not “the turn used zero resources”;
+- the broker records bounded message-level tool windows for all normalized
+  `tool_use` / `tool_result` pairs;
+- Claude Code can narrow those windows to `exact` with the passive, pinned
+  marker helper;
+- under Kata, a guest-root eBPF observer records fork/exec/exit for the addressed
+  member UID. Exit-time CPU/RSS/I/O may be charged to a tool only when one
+  complete, non-overlapping window owns that process;
+- under trusted non-Kata Docker, the exact marker file may improve timing but
+  process accounting remains unavailable. It is not fabricated from the group
+  container.
+
+The workspace broker owns the observation cursor and tool-window tracker. It
+closes observation before the member reaper and permission normalizer run, so
+platform cleanup is never billed to the user call. The broker includes resource
+telemetry in both result and boundary-error frames; after cancellation or turn
+timeout, the runner interrupts the member and drains the terminal frame before
+reporting the attempt. A disconnected or lease-lost runner still aborts and
+cleans the member, but may only persist the explicit zero-coverage fallback if
+the terminal frame could not cross the wire.
+
+`ResourceSampler` and its daemon-backed tests remain as a lower-level
+whole-container/group primitive and for reading historical rows. It is not a
+current per-member accounting source. Any later group/residency dashboard must
+keep those totals group-scoped.
 
 Under the implemented shared-live group lifecycle, the first turn records
 `new` because there is no prior session to continue.
@@ -40,17 +71,17 @@ Under the implemented shared-live group lifecycle, the first turn records
 handled a follow-up, and `warm_native` may record a replacement process, but
 these are transport diagnostics rather than product correctness. The required
 facts are `context_status = new | live | restored | lost`, the sandbox-qualified
-session locator, and `restored_through_job_id`. A process replacement after
-model/effort change or `docker stop` / `docker start` is successful only after
-the driver proves it loaded the retained native context. RUNNING-idle and
-STOPPED are residency states. A missing native locator or lost container must
-be recorded as `LOST`; replay remains historical telemetry and is never a
+session locator, and the member's `last_settled_job_id`. A process replacement
+after model/effort change or `docker stop` / `docker start` is successful only
+after the driver proves it loaded the retained native context. RUNNING-idle
+and STOPPED are residency states. A missing native locator or lost container
+must be recorded as `LOST`; replay remains historical telemetry and is never a
 recovery path.
 
 Checkpoint export metrics and alerts below belong to the explicitly deferred
-persistent-storage phase. They remain documented so that later work preserves
-the telemetry contract, but they are not a prerequisite or implied deliverable
-for the retained-container stop/start phase.
+persistent-storage phase. The remaining sections preserve the motivation and
+roadmap; where older sampler language conflicts with this amendment, this
+section and the 2026-08-31 topology are the implementation contract.
 
 ## 1. Problem
 
@@ -72,7 +103,7 @@ the agent side. Consequences, concretely:
   residency budget, and the #61 replica-dilution question are tuned by guess;
   the design's own open questions 4–5 ask for data nobody records.
 - Incidents are diagnosed by ssh archaeology. "Is the claim loop alive",
-  "why did this thread degrade to replay", "which turn OOM-killed the host"
+  "why is this member LOST", "which turn OOM-killed the host"
   all require shelling into two machines.
 - Resource abuse is invisible. A tool call that pins 32 cores for ten
   minutes, or exfiltrates via an allowlisted domain, costs and risks real
@@ -134,7 +165,7 @@ each cite where they are pinned.
 
 ## 3. Goal
 
-> Every attempt tells its whole story in queryable form: **what happened**
+> Long-term target: every attempt tells its whole story in queryable form: **what happened**
 > (ledger), **what it consumed** (CPU, memory, io, network — per attempt,
 > per residency, and per tool call), and **what the platform did around it**
 > (ops). Postgres keeps every fact; our own console renders the operational
@@ -150,7 +181,7 @@ honest window model of §6.
 
 ## 4. Decision record
 
-- **O1 — Postgres is the only deployed backend; export is a seam, not a
+- **O1 — Deferred admin/export direction: Postgres is the only deployed backend; export is a seam, not a
   stack.** We deploy no Grafana, Prometheus, or collector — the gateway
   already removed Prometheus once, and this deployment gets no second
   metrics estate to operate. Every fact lives in Postgres; the admin
@@ -160,72 +191,65 @@ honest window model of §6.
   no-op. Attaching an OTLP exporter later (if ad-hoc exploration ever
   justifies a standard stack) is configuration, not surgery (OBS-4).
 - **O2 — Three signal classes.** DS's `ledger` and `ops`, plus one they
-  don't have: **resources** — periodic samples rolled up into per-window
-  facts. Resources are measurements, not events: they become metrics and
-  rollup rows, never ledger entries.
-- **O3 — Resource accounting is sandbox-scoped at source.** *(Mechanism
-  amended 2026-08-19 — see the amendment at the end of this section.)* The
-  runner samples each live sandbox at 1 Hz from the host side: cgroup v2
-  (`cpu.stat` usage, `memory.current`/`memory.peak`, `pids.current`,
-  `io.stat`) resolved from the container's PID, plus the container's veth
-  byte counters. No agent-visible process is involved; the sandbox cannot
-  see, block, or forge the sampler. Samples are tagged
-  `(thread, residency_generation, attempt | idle)`.
+  don't have: **resources**. Resource facts can come from periodic
+  whole-container samples or event-driven guest process accounting. They are
+  measurements, not ledger events.
+- **O3 — The measurement unit must match the ownership unit.** Docker stats
+  are sandbox-group totals. The daemon-backed 1 Hz sampler is therefore never
+  attached to one current shared member attempt. Current member rows carry the
+  explicit `shared-member-v1` unavailable aggregate described in §0. Kata adds
+  an independent, UID-filtered guest-kernel lifecycle census; trusted non-Kata
+  mode degrades without process totals. A future residency view may sample the
+  whole container only if it stores and renders the result as group-scoped.
 - **O4 — Per-tool attribution is windowed, and honest about it.** Tool
-  windows come from the driver event stream; boundary quality is a
-  per-driver capability, `tool_boundaries: exact | message | none`
-  (claude-code upgrades to `exact` via passive PreToolUse/PostToolUse hook
-  markers, §6; codex and claude-without-hooks are `message`-level from
-  `tool_use`/`tool_result` arrival; pi is `message` today with native
-  `tool_execution_start/end` events available; kilo/opencode are `none`).
-  Overlapping windows (parallel tool use) share their delta: every
-  overlapped call records the shared delta plus `overlap_n`, and rollups
-  keep `exclusive` and `shared` fields apart. A shared number is never
-  presented as exact.
-- **O5 — Network is classified at the choke points we own.** Two of three
-  are *already exactly attributed*: inference (gateway `api_logs`, grant →
-  attempt/thread) and MCP (relay token is per-attempt). Only generic egress
-  needs windows: the Squid access log (extended with `%>st` upload bytes and
-  `%tr` duration so a connection's window is reconstructable) is collected
-  and attributed like any other windowed signal. The sandbox's veth totals
-  bound the sum: `veth − (gateway + mcp + egress)` is published as
-  `unclassified`, and its growth alerts — a hole in the byte ledger is a
-  hole in the egress story. Denied CONNECT verdicts become a counter and an
-  alert today, not just a stdout line. Windowed inference display for
-  resident turns already works this way (§6 of the retained-session design brackets
-  `api_logs` by attempt window), so this adds no new attribution philosophy.
-- **O6 — Running-idle and stopped residency are separate first-class series.**
+  windows come from the normalized driver event stream. Claude Code upgrades a
+  pair to `exact` only when its passive PreToolUse/PostToolUse marks are both
+  valid and fall inside the message bracket; otherwise it, Codex, Pi,
+  OpenCode, and Kilo remain `message`-level wherever they emit paired tool
+  events. A Kata process is charged only when its start belongs to one window
+  and its accounting is settled. Overlap, a still-running process, truncation,
+  or journal loss makes the affected result partial and never invents an
+  exclusive number.
+- **O5 — Deferred: network is classified at choke points we own.** Inference
+  billing remains in gateway `api_logs`, MCP uses an attempt-fenced relay
+  token, and Squid logs setup egress. The proposed read path would parse flows
+  and expose a residual without assigning a shared container's veth total to a
+  member. No joined byte ledger, denied counter, or network panel ships in the
+  current implementation.
+- **O6 — Deferred: running-idle and stopped residency are separate first-class series.**
   Docker writable-layer bytes (sampled through Engine inspect with size at
   establish, stop/start, and daily),
   running-idle sandbox memory, stopped duration, and each state's share of
   host disk/container budgets price the idle deadline and new-chat admission.
   STOPPED consumes no workload CPU, memory, or pids but retains disk and the
   only local copy of workspace/native state in this phase.
-- **O7 — Cardinality budget.** Metric labels are bounded enums only: host,
+- **O7 — Deferred metrics cardinality budget.** Metric labels would be bounded enums only: host,
   runtime, continuity mode, floor event kind, egress verdict, tool *name*
   (bounded per runtime registry). `thread_id`/`attempt_id`/domain names
   never label a metric; they live in Postgres rows (and later exemplars).
-  A lint-style test enforces the label allowlist.
-- **O8 — Failure honesty.** Sampler or exporter death never fails a turn.
-  Every attempt rollup carries `coverage` (fraction of the attempt window
-  actually sampled) and `sampler_version`; a gap is recorded as a gap. This
+  A future lint-style test must enforce the label allowlist.
+- **O8 — Failure honesty.** Measurement failure never fails a turn. Every
+  attempt telemetry row carries `coverage` and `sampler_version`; current
+  shared members use the explicit unavailable semantic in §0, while a
+  sampler-backed historical/group row uses coverage for its observed span. A gap is recorded as a gap. This
   is DS's "seq gaps are routine, never a loss signal" applied to
   measurement.
-- **O9 — Export redaction defaults to deny-body.** The ledger projection
+- **O9 — Deferred export redaction defaults to deny-body.** The ledger projection
   exports event type, severity, sizes, ids, and a bounded allowlist of
   scalar fields; tool arguments/results and prompt text never leave Postgres
   via telemetry. The redaction stage is the DS waterfall shape — orderable
   rules, fail-closed per record, exported copy only — with the default rule
   set present rather than empty.
-- **O10 — Retention.** Squid raw log 7 d after parsing; Postgres rollups
+- **O10 — Deferred retention target.** Squid raw log 7 d after parsing; Postgres rollups
   and parsed flow rows indefinite (paper dataset); raw 1 Hz samples are a
   runner-side ring buffer only — rollups are computed at window close and
   the samples discarded. One retention tier, no second estate (O1).
 
-### O3 amendment — measured through the daemon, not through cgroupfs (2026-08-19)
+### Historical O3 amendment — daemon, not cgroupfs (2026-08-19)
 
 Recorded per this project's rule that a divergence is a decision and a
-decision gets written down.
+decision gets written down. This still defines the retained
+`ResourceSampler` primitive, but §0 supersedes its former attempt binding.
 
 O3 as written above says the runner reads cgroup v2 and the container's
 namespace counters directly, resolved from a pid. That assumed the runner is
@@ -280,19 +304,40 @@ Consequences:
   to "not measured", never to a fabricated zero.
 - Memory subtracts `inactive_file` as the `docker stats` CLI does, so an
   operator comparing the two sees one answer rather than two.
-- The runner's preflight now checks that the daemon answers and warns
-  loudly, without failing, when it does not. The first version's whole
-  failure was a deployment assumption nothing verified; this is that check.
+- External tests exercise the sampler against the daemon directly. The current
+  runner does not emit a per-turn sampler warning because shared-member totals
+  are intentionally unavailable, while ordinary backend preflight already
+  requires the Docker authority used for lifecycle operations.
 
 ## 5. Architecture
+
+Current per-turn path:
+
+```text
+retained group container                 workspace broker                 control plane
+────────────────────────                 ────────────────                 ─────────────
+member A live CLI (UID A) ─┐
+                            ├─ shared /workspace
+member B live CLI (UID B) ─┘
+  │                                         per-turn ToolWindowTracker
+  ├─ Claude passive marks ──────────────► member terminal frame ──────► attempt/tool rows
+  └─ fork/exec/exit ─► guest-root eBPF ──► UID-filtered cursor + attribution
+
+runner: claim/lease/cancel + terminal-frame drain; never charges group Docker totals to a member
+```
+
+The following diagram is the original roadmap. Its sampler, egress, aggregate,
+and alert branches are retained as deferred direction, not the current member
+execution path:
 
 ```text
 sandbox (docker, per residency)      runner (a container beside it)     control plane host
 ─────────────────────────────       ───────────────────────────        ──────────────────
 harness + tool children              ResourceSampler (1 Hz, via the      worker API (exists):
-  [claude: hook markers ——►          daemon's /containers/{id}/stats)     events, continuity,
-   container-local journal]          │                                    + NEW resource rollups
-                                     ├─► window rollup at turn/idle close ─► Postgres rows
+  │                                  daemon's /containers/{id}/stats)     events, continuity,
+  ├─ claude marker ─┐                │                                    + NEW resource rollups
+  └─ fork/exec/exit ┴─► guest-root   ├─ process/mark journal reader
+                       eBPF observer ├─► window rollup at turn/idle close ─► Postgres rows
 squid egress                         │                                    agent_job_events (exists)
   access log (bytes/verdict) ──►     egress log parser ─────────────────► net flow rows
                                      │
@@ -301,44 +346,58 @@ squid egress                         │                                    agen
 gateway api_logs (exists, billing authority) ───────── joined by grant attribution / attempt window ──► #57 read path
 ```
 
-The runner→CP path for rollups is the existing worker-report pattern
+The current broker→runner→CP path uses the existing worker-report pattern
 (`worker_report_continuity` is the precedent): a small authenticated POST at
 window close, idempotent per `(attempt_id, kind)`. The emit() seam may be
 lossy by contract; Postgres rows are the facts (O1).
 
 ## 6. The resource model (the new part)
 
-**Sampling.** At sandbox launch the runner resolves the container's cgroup
-directory (via its PID) and its veth peer once, then reads counters at 1 Hz
-per live sandbox — file reads, microseconds each, zero sandbox involvement.
-Counters are monotonic; deltas survive in-sandbox process churn. Samples
-carry a monotonic timestamp and the host wall clock. Kata (if it returns) is
-a different backend: the sampler declares what it can read per sandbox
-runtime; an unreadable backend yields `coverage = 0`, honestly, not zeros.
+**Aggregate sampling.** Current shared-member attempts do not sample Docker
+totals. They store the explicit unavailable shape in §0. The daemon-backed
+sampler remains available only for a future group/residency window and for
+historical-row compatibility; such a caller must never label its output as one
+member's consumption.
 
 **Windows.**
 
 | Window | Boundaries | Rollup destination |
 |---|---|---|
-| Attempt | claim → terminal state (runner-local) | `attempt_resources` row + metrics |
-| Tool call | per O4: hook markers (`exact`) or event arrival (`message`) | `tool_call_resources` rows |
-| Running-idle residency | RUNNING residency minus attempt windows | residency series (O6) |
-| Stopped residency | successful stop → start/manual loss | stopped duration + Docker writable-layer storage series (O6) |
+| Attempt | broker turn admission → terminal boundary | `attempt_resources` metadata; aggregate counters unavailable |
+| Tool call | hook markers (`exact`) or broker event arrival (`message`) | `tool_call_resources` timing + optional process accounting |
+| Guest process | member cursor → terminal boundary, filtered by fixed UID | `agent_process_observations` |
+| Running-idle / stopped residency | group lifecycle boundaries | deferred group-scoped residency series |
 
 **Per-tool mechanics.** For `message`-level drivers, a call's window is
 [`tool_use` arrival, matching `tool_result` arrival] joined on
-`tool_use_id` — includes model "thinking" time before execution starts, which
-is why it is labelled `message`, not `exact`. For claude-code `exact`: the
-sandbox image's settings gain PreToolUse/PostToolUse hooks that append one
-JSON line `{tool, tool_use_id, phase, t_mono}` to an append-only file on the
-container writable layer; the supervisor tails it through Docker exec. Hooks
-are **passive by contract**: log-only command, short timeout, exit 0 always; a
-hook that cannot write must not block the tool (contract test 7). Hook config
-lives in the sandbox image / injected home — platform infrastructure, never
-the user's repository, and patch-gated out of any diff like the rest of the
-injected home.
+`tool_use_id`. The model has already produced the call by the opening event;
+the wider window is labelled `message`, not `exact`, because it also contains
+the harness/platform delay around the actual execution. For claude-code
+`exact`, each
+PreToolUse/PostToolUse hook `exec`s one immutable, image-bundled helper. The
+helper timestamps before reading stdin and sends one bounded mark to a Unix
+datagram socket owned by the Kata guest-root observer. The observer requires
+kernel-supplied peer credentials, verifies `/proc/<pid>/exe` names the fixed
+helper inode, and appends the mark to the same root-only, loss-accounted journal
+as eBPF fork/exec/exit events. Its lifecycle remains visible in the complete
+census, but that exact executable identity excludes it from per-tool workload
+counts. Trusted
+non-Kata development falls back to the old bounded state-file reader; Kata
+never treats that agent-writable file as an attribution authority.
 
-**Attribution.** A delta between two samples is assigned to the tool windows
+Hooks remain **passive by contract**: one bounded helper, a 25 ms non-blocking
+stdin deadline plus a one-second outer CLI timeout, and exit 0 for every
+invalid input or output failure. A hook that cannot record a mark leaves the
+window message-level and must not block the tool. The root-only
+journal prevents repository code from editing, truncating, or directly
+injecting records. Exact tool attribution is still diagnostic rather than a
+security or billing boundary: code running as the Agent CLI's UID can invoke
+the marker helper itself. That limitation cannot be removed while hooks and
+tools intentionally share one UID; the independent eBPF process census remains
+the authoritative record of which processes existed.
+
+**Historical sample attribution.** For stored sampler-backed rows and the
+lower-level primitive, a delta between two samples is assigned to the tool windows
 open during that interval. One open window: exclusive. `n` overlapping
 windows: each records the shared delta with `overlap_n = n`; sums over
 `overlap_n > 1` are upper bounds by construction and are stored under
@@ -347,40 +406,75 @@ calls (the model streaming, the CLI's own work) accrues to the attempt, not
 to any tool — visible as `attempt − Σ exclusive`, which is itself a useful
 series (harness overhead).
 
-**Network per tool** is windowed the same way from parsed egress flows
-(connection window = [log time − duration, log time]), and only for the
-egress class; gateway/MCP bytes are exactly attributed already (O5) and join
-by attempt, not window.
+**Exit-time accounting (Kata).** The sampler's grid is coarser than 97 % of
+calls, so under Kata the per-call numbers come from the guest kernel instead,
+from two records per task. `sched_process_exit` carries the group's settled
+`maxrss`, the task's `task_io_accounting` bytes, and whether this exit
+emptied the thread group (`signal->live` reached zero, which `do_exit`
+decrements before the tracepoint). CPU is deliberately *not* read there:
+`utime`/`stime` are tick accounted, and a 400 µs process that never received
+a tick reads zero — exactly the case this exists for. The scheduler's own
+runtime (`se.sum_exec_runtime`, the number `cputime_adjust` scales the tick
+split to, so the total `/proc` and `wait4()` report) is final only once the
+task has been dequeued for the last time, which is where `sched_switch` sees
+it in `TASK_DEAD`; a fourth probe emits a `done` record with it there, and the
+predicate is the only work on every other context switch. Each task reports
+only its own share; the host sums a group's threads into its leader and never
+adds `signal->utime` on top, which would count dead threads twice. A group's
+numbers are settled only when the group is dead *and* every task whose exit
+was seen has also reported `done` — Linux lets a leader exit while its
+threads live on, and a leader's exit must not be mistaken for the process's.
+Every counter is guarded by its presence in the guest's BTF and arrives as
+absent, never as zero, on a kernel built without that accounting; the
+preflight self-test requires a sub-millisecond child's `done` to carry
+non-zero CPU. A process is charged to a call only when its start fell inside
+that call's window alone; one that overlapping windows make plausible for
+several calls, one whose group is not settled, or any process at all in a
+census that lost events, is charged to none of them and marks every call it
+may belong to as `process_resources_partial`, so a per-call sum presented as
+exact never contains another call's work or hides a gap. CPU and I/O are sums
+over a call's processes, the peak is the largest single process (their peaks
+need not have coincided), and work the agent did inside its own resident
+process belongs to no call. This answers the "fine-grained tool call resource
+usage" question for a call of any length, including the 35 ms median.
 
-**Rollup rows** (Postgres, new; names final at review):
+**Network per tool is deferred.** The intended model remains windowed parsed
+egress flows (connection window = [log time − duration, log time]), while
+gateway/MCP usage joins by attempt. No current shared-member turn reports a
+container network total or renders the planned network panel.
+
+**Stored rows** (Postgres, implemented unless marked deferred):
 
 ```text
 attempt_resources: attempt_id PK, cpu_usec, mem_peak_bytes, mem_avg_bytes,
   io_read_bytes, io_write_bytes, net_rx_bytes, net_tx_bytes,
-  sample_count, coverage, sampler_version, created_at
-  — the four classification columns (net_gateway_bytes, net_mcp_bytes,
-  net_egress_bytes, net_unclassified_bytes) land with CHAT-3, which is what
-  parses the egress log; adding them earlier would ship four columns that
-  nothing can populate and that a reader could not distinguish from
-  measured zeroes
+  sample_count, coverage, sampler_version, tool_time_ms,
+  tool_calls_truncated, process_observer, process_observation_complete,
+  process_events_lost, processes_truncated, created_at
+  — current shared-member writers leave aggregate counters null and use the
+  shared-member-v1 shape from §0
 
-tool_call_resources: attempt_id, tool_use_id, tool_name, source(exact|message),
-  started_at, ended_at, overlap_n_max,
-  cpu_usec_shared, cpu_usec_exclusive, mem_peak_shared_bytes,
-  net_egress_bytes_windowed, truncated bool
-  — capped at 500 rows per attempt; the cap sets `truncated` and increments a
-  counter (no silent caps)
+tool_call_resources: attempt_id + call_seq PK, tool_use_id, tool_name,
+  timing_source(exact|message), duration_ms, sample_count, overlap_n,
+  measured_span_ms, historical sampled CPU/memory fields, process_count,
+  process CPU/memory/I/O floors, process_resources_partial
+  — capped at 500 rows per attempt; the parent row says when rows were dropped
 
-egress_flows: attempt_id nullable (idle flows keep residency ids), ts_start,
-  ts_end, target_host, verdict, bytes_in, bytes_out
+agent_process_observations: attempt_id + process_seq PK, member uid,
+  pid/tgid/ppid, comm/executable, relative start + duration, lifecycle flags,
+  exit status, plausible tool call ordinals, and available exit-time counters
+
+egress_flows: deferred; no current table or per-domain UI is implied
 ```
 
-**Costs, honestly.** 1 Hz × a handful of sandboxes is negligible CPU and no
-sandbox-visible overhead. Postgres grows by one row per attempt, ≤500 per
-attempt for tools, one per egress connection; all bounded, all indexed by
-attempt. The hook file grows within a turn and is truncated at turn close.
-The standing cost of having eyes is one checker loop, one aggregate API,
-and a few console pages — zero new services (O1).
+**Costs, honestly.** The current path writes one attempt row, at most 500 tool
+rows, and at most 4096 bounded process rows; it makes no 1 Hz Docker request
+per active member. The trusted non-Kata fallback mark read is bounded to 1 MiB
+per turn. Deferred egress rows, checker, aggregate API, and console pages add
+no standing cost today. The guest journal has a
+64 MiB hard cap. Any reusable guest rotates it at 48 MiB only when no turn
+cursor is active; a single process storm that exhausts the remaining reserve
+is reported incomplete rather than silently losing processes.
 
 ## 7. Signal catalog (initial; the allowlist test pins it)
 
@@ -419,64 +513,65 @@ or stopped-container disk/admission saturation.
 
 | Situation | Behavior |
 |---|---|
-| Sampler crashes mid-turn | Turn unaffected; rollup ships with `coverage < 1`; ops record |
+| Current shared member | Aggregate counters null, `coverage = 0`, `sampler_version = shared-member-v1`; timing/process evidence remains independent |
+| Historical/group sampler crashes | Work unaffected; rollup has partial coverage; never converted to a measured zero |
 | Attached export backend down (if any) | emit() drops per SDK policy; Postgres facts, console, and checker unaffected (O1) |
-| Hook file absent / harness without hooks | `source = message` windows; no error |
+| Marker unavailable / harness without hooks | `source = message` windows; no error |
 | Hook cannot execute | Tool proceeds (passive contract); coverage of `exact` windows only |
-| Parallel tool calls | `overlap_n > 1`, shared fields only |
-| Squid log rotation / parse gap | Flow gap; `unclassified` absorbs it; gap counter |
-| Attempt with zero samples (sub-second turn) | `coverage = 0`, `sample_count = 0` — never fabricated zeros |
-| RUNNING residency with no attempt | Samples tagged running-idle; egress flows keep residency ids (idle egress should be ~0 — its growth alerts) |
-| STOPPED residency | No live cgroup samples; stopped duration and retained Docker writable-layer bytes remain charged; workload CPU/memory/pids/egress are zero |
+| Parallel tool calls | timing remains valid; ambiguous guest processes are charged to no call and affected rows are partial |
+| Guest observer unavailable | Tool timing remains; process observer is null/incomplete and no process use is fabricated |
+| Guest journal loss/truncation | Observation and affected process-resource rows are explicitly partial |
+| Cancel/timeout after admission | Member is interrupted and terminal telemetry is drained; context becomes LOST per the session design |
+| Broker stream disappears | Member is aborted/reaped; runner persists the explicit unavailable aggregate if no terminal frame arrived |
+| RUNNING residency with no attempt | No member resource row is invented; future group accounting remains deferred |
+| STOPPED residency | Docker stop preserves the writable layer; no workload measurement is attributed to a member |
 | Clock skew runner↔CP | Windows are runner-local monotonic; only display joins use wall clock |
 
 ## 9. Contract tests
 
-1. Cgroup deltas are monotonic and survive in-sandbox process churn
-   (spawn/kill storm) without negative or lost usage.
-2. Serial attribution: a turn whose Bash tool burns CPU attributes ≥ 90 % of
-   the attempt's cpu delta to that tool's exclusive window.
-3. Parallel calls: overlapping windows all carry `overlap_n`, and no shared
-   delta appears in an `exclusive_*` field.
-4. Byte ledger: veth totals ≥ gateway + mcp + egress sums; `unclassified`
-   equals the residual and is exported.
-5. Sampler killed mid-turn: attempt succeeds; `coverage < 1` recorded; ops
-   record emitted.
-6. Hook contract: a hook that hangs or fails never delays or blocks the tool
-   call (pinned against the stamped CLI, like the capability matrix).
-7. Denied CONNECT increments the verdict counter with the attempt attributed
-   when one is live.
-8. Dimension allowlist: no aggregate-API dimension (nor any attached
-   exporter's label) is unbounded (lint-style walk).
-9. Ledger export: tool arguments/results and prompt text never appear in an
-   exported record (deny-body default), while types/sizes/ids do.
-10. Rollup idempotency: re-POSTing a window rollup upserts, never doubles.
-11. Residency series: RUNNING without an attempt produces running-idle
-    samples; STOPPED records duration and retained storage, with zero workload
-    CPU/memory/pids/egress and zero attempt attribution.
-12. `coverage = 0` (unreadable backend) is distinguishable from "measured
-    zero usage" in both row and metric form.
+1. Current shared-member output never contains a whole-container CPU, memory,
+   I/O, or network total; its semantic version and zero coverage are explicit.
+2. Tool rows preserve issuance order, cap at 500, include unfinished calls,
+   and never turn dropped/overlapping evidence into exclusive usage.
+3. Claude markers upgrade a window only with one valid pre/post pair inside
+   its message bracket; malformed, late, duplicate, or blocked hooks degrade.
+4. The hook helper is passive, bounded, and exits successfully on bad input or
+   output failure.
+5. Concurrent member cursors are UID-filtered and one cursor closing does not
+   rotate/restart the singleton observer underneath another.
+6. Short-lived Kata children retain fork/exec/exit and scheduler CPU evidence;
+   missing BTF/accounting fields remain null.
+7. Observation closes before reaper/normalizer work and is returned on both
+   success and activation-boundary failure.
+8. Cancel/timeout drains a broker terminal resource frame, while lease loss
+   interrupts and fences the member.
+9. Re-posting one attempt rollup replaces its bounded child rows atomically and
+   never doubles them.
+10. The API/UI distinguish unavailable turn totals, partial historical totals,
+    complete empty process observation, and a missing telemetry row.
+11. Daemon-sampler unit/external tests continue to validate the lower-level
+    group primitive without binding it to a shared member.
+12. Kata deployment preflight proves the pinned observer and marker binaries
+    against a real guest kernel before a runner advertises the capability.
 
-## 10. Implementation plan
+## 10. Implementation status and remaining plan
 
-Re-cut 2026-08-19 (Murphy): the per-chat surfaces (§11's end-user
-experience) ship first; everything admin-facing is deferred wholesale.
+The per-chat surface ships first; everything admin-facing remains deferred.
 
 | Phase | Content | Note |
 |---|---|---|
-| **CHAT-1** | The footer's free half + the resource spine: continuity badge + tooltip and turn duration (from `continuity_mode` and attempt timestamps — **already recorded**; API exposure + UI only) and the per-tool duration table derived from stored `tool_use`/`tool_result` events (`message` windows, labelled approximate); plus ResourceSampler + attempt windows + `attempt_resources` + veth totals → footer CPU / peak-mem / net numbers | One PR, one repo (host + backend + web). The DS-alignment payoff — the honest-degradation badge — costs zero new measurement |
-| **CHAT-2** | The Trajectory view — a second tab beside Chat on a thread: full event list (user / assistant / tool / context) with per-call drill-down (payload, result, duration, timing-source label), session minimap strip, bottom stats bar (turns, steps, model-time vs tool-time split, TTFT, tok/s where usage events carry counts), search, session-log export | Pure read of `agent_job_events` — no schema changes, frontend-heavy. The DS-parity surface (§11) |
-| **CHAT-3** | Squid logformat extension (`%>st`, `%tr`) + flow parser + `egress_flows` → network panel (per-domain bytes, denied highlighted) + blocked count in the footer | The security dividend, made user-visible |
-| **CHAT-4** | Per-tool resource correlation (windowed attribution, `tool_call_resources`, shared/overlap labelling) + claude-code hook `exact` upgrade — upgrades both the footer expand and the Trajectory timing tab | The precision rung; contract tests 2, 3, 6 |
-| **CHAT-5** | Per-turn $ in the footer via the #57 gateway read path (bracketed `api_logs` view) | Footer ships without $ until the gateway join exists |
+| **SHIPPED — chat context/timing** | `NEW/LIVE/RESTORED/LOST`, historical continuity fallback, turn duration, Trajectory, bounded per-tool durations and time split | Message-level is labelled as an outside bracket |
+| **SHIPPED — Kata process observation** | UID-filtered lifecycle census, exact Claude markers, exit CPU/RSS/I/O floors, API/storage/UI, honest loss/truncation | Aggregate member totals remain unavailable by design |
+| **RETAINED PRIMITIVE** | Daemon-backed `ResourceSampler` and attribution arithmetic | Tested for future group/residency use and historical rows; not bound to current members |
+| **DEFERRED — CHAT-3** | Squid flow parser + `egress_flows` + network panel / denied count | No table or UI is currently promised |
+| **DEFERRED — CHAT-5** | Per-turn inference cost through the gateway read path | Billing remains authoritative in the gateway |
 | **DEFERRED — admin layer** | emit() seam + severity mapping + ops projection; CP aggregate API + console admin pages; alert checker + §7 seed set | Direction agreed in this doc; picked up when admin observability is prioritized |
 | **Later candidates** | Standard metrics stack (OTLP → Prometheus/Grafana) behind the seam; claude-code native OTel passthrough (verify against pinned CLI); MCP relay byte counters; pi native `tool_execution_*` boundaries; spans; gateway-side paper events (other repo) | Not committed by this doc |
 
-Ordered so the user-visible chat experience lands first. CHAT-1's badge and
-duration columns and the whole of CHAT-2 are pure exposure of data the
-platform already records, so the only genuinely new machinery before CHAT-3
-is the sampler. CHAT-4 is where review skepticism belongs (window
-semantics, caps, hook contract).
+The next resource work must choose a truthful accounting unit first. A
+group-level sampler can support capacity/residency views; member-level totals
+need a separate kernel/cgroup design that isolates the member, not a division
+or copy of one shared container delta.
 
 ## 11. Product surfaces
 
@@ -487,19 +582,21 @@ local tool; its user owns the machine and can run `htop` themselves. We are
 hosted: the user cannot see the machine, so the surfaces below are new
 product, not ports.
 
-**End user (thread UI).** v1 settles per turn, at turn close:
+**End user (thread UI).** The implemented per-turn surface is:
 
-- **Turn footer, one line:** continuity badge + duration + inference cost +
-  CPU seconds + peak memory + network in/out + blocked-connection count.
-  Example: `hot · 42s · $0.031 · CPU 18.2s · peak 1.2GB · net ↓34MB ↑2MB ·
-  2 blocked`.
-- **Expanded:** a per-tool table (tool, duration, CPU, peak mem, windowed
-  net; parallel calls labelled *shared — upper bound*), and a network panel
-  (per-domain bytes, allowed/denied verdicts, denied highlighted).
-- **The "explain the weird" surfaces** — the highest-value part: a `replay`
-  badge with a tooltip saying this turn was rebuilt from transcript and why
-  (export failure / host move); the footer separating compute-slow from
-  network-slow; the denied list answering "is it phoning home".
+- **Turn footer:** the authoritative context badge (`new`, `context live`,
+  `restored`, or `context lost`) and duration. Historical rows without context
+  status may fall back to the old continuity badge. Current retained turns
+  never produce replay.
+- **Aggregate honesty:** current rows say `turn totals unavailable`; they do not
+  show CPU/memory/network zero or copy the shared container's totals. Historical
+  sampler-backed rows remain readable and label partial coverage as a floor.
+- **Expanded:** bounded per-tool timing and model+platform/tool time split. Under
+  Kata, process starts and exit-time CPU/RSS/I/O floors appear for calls with
+  unambiguous ownership, with partial/loss labels where appropriate.
+- **Not yet present:** inference cost, per-domain/network totals, denied counts,
+  egress panels, or an admin aggregate view. Those remain the deferred rows in
+  §10.
 - **The Trajectory view — the DS-parity surface.** A second tab beside the
   chat, mirroring the DS harness's own Trajectory page: the full event list
   (user / assistant / tool / context rows) with a per-call drill-down panel
@@ -507,15 +604,14 @@ product, not ports.
   its source too), a session minimap strip, a bottom stats bar (turns,
   steps, model-time vs tool-time, TTFT, tok/s where usage events carry
   counts), search, and session-log export. This is a pure read of the
-  stored event ledger. Two honest gaps against DS, both labelled in the UI:
-  call timing is message-level until the CHAT-4 hook upgrade, and a schema
+  stored event ledger. Honest gaps are labelled in the UI: non-Claude and
+  unmarked call timing is message-level, and a schema
   tab can only cover tools we recognize (runtime catalogs plus what the MCP
   relay saw) — unknown tools show name and payload only. Tier-2 threads
   degrade to the raw tail, floor events only.
-- **Honesty rules are product copy, not fine print:** shared numbers say
-  shared; a turn with `coverage < 1` shows "resource data incomplete", never
-  a fabricated small number; `message`-level windows are labelled
-  approximate until the hook upgrade.
+- **Honesty rules are product copy, not fine print:** unavailable totals stay
+  unavailable; a historical turn with partial coverage is a floor; process
+  loss/truncation stays partial; and `message` timing is an outside bracket.
 
 **Admin (DEFERRED — 08-19 scope cut).** Console admin pages — the same chart components as the
 user-facing turn views, pointed at the CP aggregate API; no third-party
@@ -527,34 +623,33 @@ slots plus STOPPED container/storage admission water-line), consumption
 leaderboard (outlier turns), security
 (denied-CONNECT bursts, unclassified-bytes growth). Slack alerts from the §7
 checker. Per-attempt detail exposes coverage, sampler version, and
-degradation reason — the support answer to "why did my thread replay".
+degradation reason — the support answer to why native context was lost.
 
 **Alignment with DS, stated as product:** we adopt its three philosophies —
 transcript fidelity (our floor contract guarantees a never-blank turn;
 Tier-2 remains a raw tail, honestly below their bar), honest degradation
 (they never degrade so never say; we degrade, so we badge it), and
 say-what-you-record (their consent disclosure becomes our transparency
-statement: events, resources, and egress are recorded; tool arguments and
-prompt text never leave the database via telemetry).
+statement: events and the implemented resource evidence are recorded; the
+deferred exporter and egress ledger do not exist yet).
 
-**Doors opened, not committed:** runaway protection (live samples make "this
-turn has burned 30 CPU-minutes" a promptable/limitable signal), org usage
-reports, compute-based pricing or quotas.
+**Doors opened, not committed:** group capacity accounting, member-isolated
+resource limits, org usage reports, compute-based pricing, or quotas.
 
-## 12. Open questions (resolve during review / OBS-0)
+## 12. Deferred questions
 
 1. (Deferred with the admin layer) Alert webhook destination and channel
    (its own webhook, `alert_slack` pattern; a third producer — never the
    status-monitor control plane).
-2. veth resolution mechanics (host-side peer lookup at launch) — pick at
-   implementation; pure detail.
+2. Whether group-level Docker sampling is useful enough for residency/capacity
+   views, and how those rows remain visibly separate from member attempts.
 3. (Deferred with the admin layer) Which runner-local signals the checker
    needs pushed to the CP (claim heartbeat exists; does sampler liveness
    ride the rollup POSTs or its own beat?).
 4. Tool-name label bound for Tier-2/raw runtimes (unknown tool vocabularies
    — likely `other` bucket to protect O7).
-5. Whether `message` windows for claude-code should subtract streaming time
-   using per-block timing available in stream-json, or wait for hooks.
+5. Whether non-Claude adapters expose a stable passive native boundary that can
+   improve on their current message brackets.
 6. Postgres partitioning for `egress_flows` if volume demands it (start
    unpartitioned, telemetry decides).
 

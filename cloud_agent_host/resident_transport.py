@@ -136,11 +136,6 @@ class ResidentTransport:
         """Whether the underlying resident process still exists."""
         return bool(getattr(self.session, "process_alive", lambda: False)())
 
-    @property
-    def container(self) -> str | None:
-        """Container name used by resource/process accounting."""
-        return self.session.container
-
     def stderr_text(self) -> str:
         """Return a bounded diagnostic tail without exposing launch secrets."""
         diagnostic = getattr(self.session, "stderr_text", lambda: "")()
@@ -499,6 +494,7 @@ class ResidentTransportFactory:
             state_dir=CHAT_STATE_DIR,
             session_state_dir=state_dir or CHAT_STATE_DIR,
             activation_dir=activation_dir,
+            install_tool_hooks=lambda update: self._manager.install_tool_hooks(spec, update),
         )
 
     def fork_native(

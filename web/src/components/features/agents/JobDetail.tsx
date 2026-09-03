@@ -1105,6 +1105,7 @@ export function JobDetail({
   const [forking, setForking] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const stopRequestedRef = useRef(false);
+  const forkRequestedRef = useRef(false);
   const workspacePane = useResizablePane({
     storageKey: WORKSPACE_WIDTH_STORAGE_KEY,
     defaultWidth: WORKSPACE_DEFAULT_WIDTH,
@@ -1212,6 +1213,8 @@ export function JobDetail({
   useEffect(() => {
     stopRequestedRef.current = false;
     setStopping(false);
+    forkRequestedRef.current = false;
+    setForking(false);
   }, [job.id]);
 
   useEffect(() => {
@@ -1295,7 +1298,7 @@ export function JobDetail({
   // Fork creates a second native session in this chat's shared workspace and
   // navigates to its copied display history; draft prefills Edit & rewind.
   async function forkFrom(anchorJobId: string, draft?: string) {
-    if (forking) return;
+    if (forkRequestedRef.current) return;
     if (
       job.workspaceShared &&
       typeof globalThis.confirm === 'function' &&
@@ -1305,6 +1308,7 @@ export function JobDetail({
     ) {
       return;
     }
+    forkRequestedRef.current = true;
     setForking(true);
     setActionError(null);
     try {
@@ -1318,7 +1322,12 @@ export function JobDetail({
       }
       toast.success('Conversation forked');
       router.push(`/${fork.id}`);
+      // Keep the source mutation guard closed until the child job actually
+      // replaces it. App Router intentionally leaves this component showing
+      // the source while the dynamic route loads; reopening here permits a
+      // second click with a newly cleared idempotency key.
     } catch (cause: unknown) {
+      forkRequestedRef.current = false;
       setActionError(cause instanceof Error ? cause.message : 'Could not fork the conversation');
       setForking(false);
     }
@@ -1334,6 +1343,7 @@ export function JobDetail({
     : allThreadMessages;
   const canForkWorkspace = Boolean(job.sandboxId && job.workspaceShared && !isActive);
   const canForkCurrent = Boolean(canForkWorkspace && job.nativeForkAvailable);
+  const selectedAttemptIsCurrent = attemptNo === 0 || attemptNo === liveAttempt;
   const lastThreadAssistantMessageId = [...threadMessages]
     .reverse()
     .find((message) => message.role === 'assistant')?.id;
@@ -1601,7 +1611,8 @@ export function JobDetail({
                         event.kind === 'message' &&
                         index === lastVisibleMessageIndex &&
                         isSuccessful &&
-                        canForkCurrent
+                        canForkCurrent &&
+                        selectedAttemptIsCurrent
                           ? () => void forkFrom(job.id)
                           : undefined
                       }

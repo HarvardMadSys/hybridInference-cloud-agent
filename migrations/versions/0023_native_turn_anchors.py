@@ -5,16 +5,16 @@ settle the CLI context and then lose its lease before finalizing the job.  The
 next successful turn must count that already-written native exchange when it
 resolves a provider-specific fork boundary.
 
-Revision ID: 0021_native_turn_anchors
-Revises: 0020_session_fork_coordinator
+Revision ID: 0023_native_turn_anchors
+Revises: 0022_process_exit_counters
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0021_native_turn_anchors"
-down_revision = "0020_session_fork_coordinator"
+revision = "0023_native_turn_anchors"
+down_revision = "0022_process_exit_counters"
 branch_labels = None
 depends_on = None
 

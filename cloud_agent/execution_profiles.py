@@ -18,6 +18,7 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
+    SHARED_SANDBOX_V1_HELPER_PINS,
     has_shared_deployment_capability,
 )
 
@@ -55,7 +56,8 @@ def _shared_sandbox_claim_attested(
     digest = attestation.get("sandbox_image_digest")
     if not isinstance(digest, str) or not digest.strip():
         return False
-    if attestation.get("shared_sandbox_protocol") not in protocols:
+    protocol = attestation.get("shared_sandbox_protocol")
+    if protocol not in protocols:
         return False
     capabilities = attestation.get("runner_capabilities")
     if not isinstance(capabilities, list) or SHARED_SANDBOX_CAPABILITY not in capabilities:
@@ -67,9 +69,13 @@ def _shared_sandbox_claim_attested(
     ):
         return False
     helpers = attestation.get("helper_versions")
+    helper_pins = (
+        SHARED_SANDBOX_HELPER_PINS
+        if protocol == SHARED_SANDBOX_PROTOCOL
+        else SHARED_SANDBOX_V1_HELPER_PINS
+    )
     return isinstance(helpers, Mapping) and all(
-        helpers.get(helper_id) == version
-        for helper_id, version in SHARED_SANDBOX_HELPER_PINS.items()
+        helpers.get(helper_id) == version for helper_id, version in helper_pins.items()
     )
 
 

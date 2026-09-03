@@ -930,7 +930,7 @@ describe('JobDetail', () => {
   it('forks the settled current native session', async () => {
     vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_fork' } as never);
     vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
-    render(
+    const { rerender } = render(
       <JobDetail
         job={makeJob({
           state: 'done',
@@ -950,6 +950,53 @@ describe('JobDetail', () => {
 
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_1'));
     expect(navigation.push).toHaveBeenCalledWith('/ajob_fork');
+    expect(screen.getByRole('button', { name: 'Fork from here' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }));
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          id: 'ajob_fork',
+          state: 'done',
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          events: [{ kind: 'message', text: 'Forked answer', attemptNo: 1 }],
+        })}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Fork from here' })).not.toBeDisabled(),
+    );
+  });
+
+  it('does not fork the latest native turn from a superseded attempt view', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          attempts: [
+            { no: 1, status: 'superseded', note: 'lease expired' },
+            { no: 2, status: 'finished' },
+          ],
+          currentAttemptNo: undefined,
+          events: [
+            { kind: 'message', text: 'Superseded answer', attemptNo: 1 },
+            { kind: 'message', text: 'Final answer', attemptNo: 2 },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '1 · superseded' }));
+    expect(screen.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '2 · finished' }));
+    expect(screen.getByRole('button', { name: 'Fork from here' })).toBeInTheDocument();
   });
 
   it('offers current-session Fork when a successful run produced no pull request', () => {

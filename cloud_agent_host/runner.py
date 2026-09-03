@@ -57,7 +57,7 @@ from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
 from cloud_agent_host.logging_utils import configure_process_logging
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.resident_transport import ResidentLaunch
-from cloud_agent_host.resources import ResourceSampler, daemon_reachable
+from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.runtimes import (
     AgentRuntime,
     NormalizedEvent,
@@ -92,6 +92,11 @@ HEARTBEAT_INTERVAL_S = 30.0
 DEFAULT_AGENT_TIMEOUT_S = 3600.0
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
+# The broker closes guest telemetry and enforces the member activation
+# boundary after an interrupt. Keep draining its terminal frame so a cancel or
+# timeout cannot strand the member lock or discard the already-closed resource
+# report. The broker client itself has the same 180 second request ceiling.
+_SHARED_TURN_INTERRUPT_DRAIN_S = 180.0
 _GIT_TIMEOUT_S = 300.0
 
 # Both are interpolated into a URL and handed to git, which reads a leading
@@ -343,10 +348,10 @@ class ControlPlane:
             pass
 
     def report_resources(self, rollup: dict[str, Any]) -> None:
-        """Report one closed window's resource rollup. Best-effort.
+        """Report one closed attempt's resource and timing telemetry. Best-effort.
 
         Swallowed like every other observability write: a turn that ran must
-        not fail because the platform could not record what it consumed.
+        not fail because the platform could not record its telemetry.
         """
         try:
             self._post(f"/v1/agent/worker/jobs/{self.job_id}/resources", rollup)
@@ -1249,24 +1254,31 @@ def _stream_shared_agent_turn(
     tool_errors: list[str] = []
     denied_hosts: set[str] = set()
     result_frame: dict[str, Any] | None = None
+    forced_exit_code: int | None = None
+    interrupt_deadline: float | None = None
     try:
         while True:
             if heart.lease_lost:
                 with contextlib.suppress(Exception):
                     supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 raise LeaseLost("lease lost while the shared Agent CLI was running")
-            if heart.cancel_requested:
+            now = time.monotonic()
+            if heart.cancel_requested and forced_exit_code is None:
                 with contextlib.suppress(Exception):
                     supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 control.append_event(NormalizedEvent("lifecycle", {"phase": "cancelled_by_owner"}))
-                return 130, "".join(tail), tool_errors, result_frame
-            if time.monotonic() > deadline:
+                forced_exit_code = 130
+                interrupt_deadline = now + _SHARED_TURN_INTERRUPT_DRAIN_S
+            if forced_exit_code is None and now > deadline:
                 with contextlib.suppress(Exception):
                     supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 control.append_event(
                     NormalizedEvent("error", {"text": f"agent exceeded {timeout_s:.0f}s"})
                 )
-                return 124, "".join(tail), tool_errors, result_frame
+                forced_exit_code = 124
+                interrupt_deadline = now + _SHARED_TURN_INTERRUPT_DRAIN_S
+            if interrupt_deadline is not None and now > interrupt_deadline:
+                return forced_exit_code or 1, "".join(tail), tool_errors, result_frame
             try:
                 frame = frames.get(timeout=_POLL_INTERVAL_S)
             except queue.Empty:
@@ -1299,11 +1311,23 @@ def _stream_shared_agent_turn(
                 if stderr.strip():
                     tail.append(stderr[-2000:])
                 continue
-            if kind in {"error", "client_error"}:
+            if kind == "error":
+                result_frame = frame
+                detail = str(frame.get("detail") or "shared turn failed")
+                tail.append(detail[-2000:])
+                return forced_exit_code or 1, "".join(tail), tool_errors, result_frame
+            if kind == "client_error":
+                # The result may already have crossed the wire before the
+                # transport failed. Preserve that terminal frame rather than
+                # converting a completed activation into an opaque 502.
+                if result_frame is not None:
+                    break
                 raise SessionSupervisorError(502, str(frame.get("detail") or "shared turn failed"))
             raise SessionSupervisorError(502, "shared turn returned an unknown frame")
         if result_frame is None:
             raise SessionSupervisorError(502, "shared turn ended without a result")
+        if forced_exit_code is not None:
+            return forced_exit_code, "".join(tail), tool_errors, result_frame
         status = str(result_frame.get("status") or "failed")
         exit_code = int(result_frame.get("exit_code") or 0)
         if status == "cancelled":
@@ -1670,9 +1694,9 @@ def _run_shared_live_attempt(
             activation_generation=activation_generation,
         )
         turn_admitted = True
-        sampler = ResourceSampler(None)
+        result_frame: dict[str, Any] | None = None
         try:
-            exit_code, tail, tool_errors, _ = _stream_shared_agent_turn(
+            exit_code, tail, tool_errors, result_frame = _stream_shared_agent_turn(
                 supervisor=supervisor,
                 job=job,
                 control=control,
@@ -1681,11 +1705,15 @@ def _run_shared_live_attempt(
                 timeout_s=agent_timeout_s,
             )
         finally:
-            # Container totals include concurrent siblings and must not be
-            # duplicated as this member's usage. Report explicit zero coverage
-            # until process-tree accounting lands.
+            # Container totals include concurrent siblings and cannot be
+            # attributed to this member. The broker instead returns UID-scoped
+            # guest process telemetry and per-turn tool windows; if the stream
+            # died before a terminal frame, retain an explicit zero-coverage
+            # row rather than inventing a share of the container total.
             with contextlib.suppress(Exception):
-                control.report_resources(sampler.stop())
+                fallback = shared_member_resource_rollup()
+                observed = result_frame.get("resources") if isinstance(result_frame, dict) else None
+                control.report_resources(observed if isinstance(observed, dict) else fallback)
         if exit_code == 130:
             failure_detail = "cancelled by owner after shared-session admission"
             abandon_before_finish(lost=True, detail=failure_detail)
@@ -1950,14 +1978,6 @@ def run_forever(
     backend = backend or build_backend_from_env()
     backend.preflight()
 
-    if getattr(backend, "measurable", True):
-        unmeasurable = daemon_reachable()
-        if unmeasurable:
-            print(
-                f"resource measurement is unavailable: {unmeasurable}. Turns will run "
-                "normally and report no resource usage.",
-                file=sys.stderr,
-            )
     checker = getattr(backend, "check_gateway_reachable", None)
     if checker is not None:
         checker(gateway_url or base_url)

@@ -5,9 +5,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 ENV = REPO / "migrations/env.py"
-SCHEMA = REPO / "migrations/versions/0021_native_turn_anchors.py"
-BACKFILL = REPO / "migrations/versions/0022_native_turn_rollout_guard.py"
-DISPOSITION = REPO / "migrations/versions/0023_retained_followup_gate.py"
+SCHEMA = REPO / "migrations/versions/0023_native_turn_anchors.py"
+BACKFILL = REPO / "migrations/versions/0024_native_turn_rollout_guard.py"
+DISPOSITION = REPO / "migrations/versions/0025_retained_followup_gate.py"
 
 
 def test_every_revision_identifier_fits_alembic_version_num() -> None:

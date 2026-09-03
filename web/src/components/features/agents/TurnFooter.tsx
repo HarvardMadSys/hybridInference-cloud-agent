@@ -6,17 +6,23 @@
 // Two rules run through every line of this file, both from the observability
 // design's §11, and both are the reason it is worth showing numbers at all:
 //
-//   1. A number we did not measure is never rendered as a number. The
-//      sampler reports `coverage`, and anything short of a full window is
-//      labelled a floor rather than quietly rounded into a total.
+//   1. A number we did not measure is never rendered as a number. Current
+//      shared turns do not assign whole-container totals to one member; older
+//      sampled rows use `coverage`, and incomplete values remain floors.
 //   2. Timings derived from message arrival are labelled approximate. A tool
-//      row's window starts when the model asked for the call, which includes
-//      the model's own thinking before the tool ever ran, until per-call
+//      row's window starts after the model has produced the call and brackets
+//      execution with platform event-processing delay until per-call
 //      boundaries land.
 
 import { useMemo, useState } from 'react';
 
-import type { AgentEvent, AgentJob, TurnResources } from './types';
+import type {
+  AgentEvent,
+  AgentJob,
+  ProcessObservation,
+  ToolCallResources,
+  TurnResources,
+} from './types';
 
 /** One tool call's derived window, paired from the event stream. */
 export interface ToolTiming {
@@ -24,6 +30,8 @@ export interface ToolTiming {
   detail: string;
   ms: number | null;
   isError: boolean;
+  /** Joins this row to the host's measurement of the same call, when there is one. */
+  toolUseId: string | null;
 }
 
 const CONTINUITY_LABEL: Record<string, { text: string; tone: string; title: string }> = {
@@ -139,11 +147,11 @@ export function formatCpu(usec: number | null | undefined): string | null {
  * pairing below is the fallback for rows that were never folded — a call
  * whose payload carried its own output, or a stream that ended mid-call.
  *
- * Message-level by construction: the window opens when the model asked for
- * the call, not when the sandbox began running it, so it carries whatever
- * thinking preceded execution. Unpaired calls keep their row with a null
- * duration rather than being dropped — a call that never returned is exactly
- * what a reader is looking for.
+ * Message-level by construction: the window opens when the platform parses
+ * the model's call, not when the sandbox begins running it, so it brackets
+ * execution with platform delay on either side. Unpaired calls keep their row
+ * with a null duration rather than being dropped — a call that never returned
+ * is exactly what a reader is looking for.
  */
 export function toolTimings(events: AgentEvent[], attemptNo?: number): ToolTiming[] {
   const scoped =
@@ -179,6 +187,7 @@ export function toolTimings(events: AgentEvent[], attemptNo?: number): ToolTimin
       tool: event.tool,
       detail: event.detail,
       ms,
+      toolUseId: event.id ?? null,
       // Both sources: folding moves the flag onto the call's own row, while
       // a row that was never folded still has its result standing beside it.
       isError: event.outputIsError === true || result?.isError === true,
@@ -193,50 +202,426 @@ function resourceStats(resources: TurnResources): { label: string; value: string
     formatBytes(resources.netRxBytes) || formatBytes(resources.netTxBytes)
       ? `↓${formatBytes(resources.netRxBytes) ?? '—'} ↑${formatBytes(resources.netTxBytes) ?? '—'}`
       : null;
-  const io =
-    formatBytes(resources.ioReadBytes) || formatBytes(resources.ioWriteBytes)
-      ? `r${formatBytes(resources.ioReadBytes) ?? '—'} w${formatBytes(resources.ioWriteBytes) ?? '—'}`
-      : null;
+  // Disk is deliberately absent. The counter behind it is block io, and a
+  // container that wrote a known 64MiB and called `sync` reported that
+  // exactly on one run and zero on the next — the write absorbed above the
+  // block layer, never reaching the counter (pinned in
+  // tests/external/test_resource_sampler_live.py). A reader shown `disk w0B`
+  // concludes the sandbox wrote nothing, which is the one thing this number
+  // cannot say, and there is no way to tell the two cases apart at read
+  // time. It is still recorded; it is no longer presented as a measurement.
   return [
     { label: 'CPU', value: formatCpu(resources.cpuUsec) },
     { label: 'peak mem', value: formatBytes(resources.memPeakBytes) },
     { label: 'net', value: net },
-    { label: 'disk', value: io },
   ].filter((stat): stat is { label: string; value: string } => Boolean(stat.value));
 }
 
-function ToolTimingTable({ timings }: { timings: ToolTiming[] }) {
+/** A measured cell, or the dash that says nothing was measured here. */
+function MeasuredCell({ value, shared }: { value: string | null; shared: boolean }) {
+  if (value === null) {
+    return <span className="text-gray-400 dark:text-gray-600">—</span>;
+  }
   return (
-    <table className="w-full text-[12px]">
-      <thead>
-        <tr className="text-left text-gray-500 dark:text-gray-400">
-          <th className="py-1 font-medium">Tool</th>
-          <th className="py-1 font-medium">Detail</th>
-          <th className="py-1 text-right font-medium">Duration</th>
-        </tr>
-      </thead>
-      <tbody>
-        {timings.map((timing, index) => (
-          <tr
-            key={`${timing.tool}-${index}`}
-            className="border-t border-gray-100 dark:border-white/5"
-          >
-            <td className="py-1 pr-3 align-top text-gray-800 dark:text-gray-200">
-              {timing.tool}
-              {timing.isError ? (
-                <span className="ml-1 text-rose-600 dark:text-rose-400">failed</span>
-              ) : null}
-            </td>
-            <td className="max-w-0 truncate py-1 pr-3 align-top font-mono text-gray-500 dark:text-gray-400">
-              {timing.detail}
-            </td>
-            <td className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
-              {formatDuration(timing.ms) ?? 'unfinished'}
-            </td>
+    <span className={shared ? 'text-gray-500 dark:text-gray-400' : undefined}>
+      {value}
+      {shared ? <span className="ml-0.5">*</span> : null}
+    </span>
+  );
+}
+
+/**
+ * One call's CPU or memory, from whichever source could actually say.
+ *
+ * A historical sampler reading is shown when it spanned the call. Otherwise
+ * the guest kernel's exit-time accounting of the call's own processes is shown,
+ * marked so the reader knows it counts child processes only — work the
+ * agent did inside its own resident process is in neither number. A floor,
+ * where a process the call may own was left out, is prefixed rather than
+ * silently rounded into a total.
+ */
+function ConsumptionCell({
+  sampled,
+  shared,
+  accounted,
+  partial,
+}: {
+  sampled: string | null;
+  shared: boolean;
+  accounted: string | null;
+  partial: boolean;
+}) {
+  if (sampled !== null) {
+    return <MeasuredCell value={sampled} shared={shared} />;
+  }
+  if (accounted === null) {
+    return <MeasuredCell value={null} shared={false} />;
+  }
+  return (
+    <span>
+      {partial ? '≥' : ''}
+      {accounted}
+      <span className="ml-0.5 text-gray-400 dark:text-gray-500">ᵖ</span>
+    </span>
+  );
+}
+
+/** Read and write bytes as one cell, or the dash when neither was accounted. */
+function formatIo(
+  read: number | null | undefined,
+  write: number | null | undefined,
+): string | null {
+  const shownRead = formatBytes(read);
+  const shownWrite = formatBytes(write);
+  if (shownRead === null && shownWrite === null) return null;
+  return `r${shownRead ?? '—'} w${shownWrite ?? '—'}`;
+}
+
+/**
+ * The longest call in the turn, which is as close to "the expensive one" as
+ * this measurement gets.
+ *
+ * Ranking by what a call consumed would be the question a reader actually
+ * has, and it is not answerable: almost no call is long enough for the
+ * sampler to have measured it, so a CPU ranking would quietly order the
+ * handful that were and ignore the rest. Duration is known for every call
+ * that returned, so that is what this ranks by — and the label says so
+ * rather than implying a cost ranking it did not perform.
+ */
+function longestCall(timings: ToolTiming[]): ToolTiming | null {
+  let longest: ToolTiming | null = null;
+  for (const timing of timings) {
+    if (timing.ms === null) continue;
+    if (longest === null || timing.ms > (longest.ms ?? -1)) longest = timing;
+  }
+  return longest;
+}
+
+/**
+ * Where the turn's wall clock went.
+ *
+ * The most explanatory number the footer can carry, and it costs no new
+ * measurement: both halves were already recorded. On the production turns
+ * this was built against, the sandbox was busy for around one percent of the
+ * turn. The remainder was dominated by model work, but this measurement also
+ * includes harness and platform overhead and does not pretend to separate it.
+ *
+ * Tool time is the union of the calls' windows, never their sum, so it can
+ * never exceed the turn it belongs to.
+ */
+function TimeSplit({
+  durationMs,
+  toolTimeMs,
+}: {
+  durationMs: number | null;
+  toolTimeMs: number | null;
+}) {
+  if (durationMs === null || toolTimeMs === null) return null;
+  const rest = Math.max(0, durationMs - toolTimeMs);
+  return (
+    <p className="mb-1.5 text-[12px] text-gray-600 dark:text-gray-400">
+      Of <span className="tabular-nums">{formatDuration(durationMs)}</span>:{' '}
+      <span className="tabular-nums text-gray-800 dark:text-gray-200">
+        {formatDuration(toolTimeMs)}
+      </span>{' '}
+      in tools, <span className="tabular-nums">{formatDuration(rest)}</span> outside tools (model +
+      platform overhead).
+    </p>
+  );
+}
+
+/**
+ * One sentence saying what the durations in the table actually measure.
+ *
+ * Two different things can be in one table: a call the sandbox's own hooks
+ * bracketed, and a call timed from when the platform parsed its events. The
+ * second is wider than the execution by however long parsing took, and its
+ * windows overlap far more readily — which is why a third of production's
+ * calls could only be reported as sharing a measurement.
+ */
+export function timingSourceNote(calls: ToolCallResources[], rows: number): string {
+  const exact = calls.filter((call) => call.timingSource === 'exact').length;
+  if (exact === 0) {
+    return (
+      'Durations are measured from when each call\u2019s events were parsed, which brackets the ' +
+      'execution from outside rather than timing it.'
+    );
+  }
+  if (exact >= rows) {
+    return 'Durations are the sandbox\u2019s own tool boundaries, recorded as each call ran.';
+  }
+  return (
+    `${exact} of ${rows} durations are the sandbox\u2019s own tool boundaries; the rest are ` +
+    'bracketed from outside, from when each call\u2019s events were parsed.'
+  );
+}
+
+function ToolTimingTable({
+  timings,
+  calls,
+  truncated,
+  processObservationComplete,
+  sharedMemberAccounting,
+}: {
+  timings: ToolTiming[];
+  calls: ToolCallResources[];
+  truncated: boolean;
+  processObservationComplete: boolean;
+  sharedMemberAccounting: boolean;
+}) {
+  const byId = useMemo(() => {
+    const index = new Map<string, ToolCallResources[]>();
+    for (const call of calls) {
+      const matches = index.get(call.toolUseId) ?? [];
+      matches.push(call);
+      index.set(call.toolUseId, matches);
+    }
+    return index;
+  }, [calls]);
+  const usedById = new Map<string, number>();
+  const rows = timings.map((timing) => {
+    const matches = timing.toolUseId ? byId.get(timing.toolUseId) : undefined;
+    const used = timing.toolUseId ? (usedById.get(timing.toolUseId) ?? 0) : 0;
+    const recorded = matches?.[used];
+    if (timing.toolUseId && recorded) usedById.set(timing.toolUseId, used + 1);
+    return {
+      timing: {
+        ...timing,
+        // A recorded null means the call never returned. Fall back only when
+        // this attempt has no resource row for the call at all.
+        ms: recorded ? recorded.durationMs : timing.ms,
+      },
+      measurement: recorded && recorded.sampleCount >= 2 ? recorded : null,
+      processCount: recorded?.processCount ?? 0,
+      timingSource: recorded?.timingSource ?? 'message',
+      // Exit-time accounting of the call's own processes: present whenever
+      // something that belonged to this call alone exited, however short.
+      accountedCpuUsec: recorded?.processCpuUsec ?? null,
+      accountedMemPeakBytes: recorded?.processMemPeakBytes ?? null,
+      accountedPartial: recorded?.processResourcesPartial === true,
+    };
+  });
+  const longest = longestCall(rows.map((row) => row.timing));
+  const anyAccounted = rows.some(
+    (row) =>
+      row.measurement === null &&
+      (row.accountedCpuUsec !== null || row.accountedMemPeakBytes !== null),
+  );
+  const anyAccountedPartial = rows.some((row) => row.measurement === null && row.accountedPartial);
+  const anyUnmeasured = rows.some(
+    (row) =>
+      row.measurement === null &&
+      row.accountedCpuUsec === null &&
+      row.accountedMemPeakBytes === null,
+  );
+  const anyShared = rows.some((row) => row.measurement !== null && !row.measurement.exclusive);
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {longest && timings.length > 1 ? (
+        <p className="text-[12px] text-gray-600 dark:text-gray-400">
+          Longest call: <span className="text-gray-800 dark:text-gray-200">{longest.tool}</span>
+          {' · '}
+          <span className="tabular-nums">{formatDuration(longest.ms)}</span>
+        </p>
+      ) : null}
+      <table className="w-full text-[12px]">
+        <thead>
+          <tr className="text-left text-gray-500 dark:text-gray-400">
+            <th className="py-1 font-medium">Tool</th>
+            <th className="py-1 font-medium">Detail</th>
+            <th className="py-1 text-right font-medium">Duration</th>
+            <th className="py-1 text-right font-medium">Process starts</th>
+            <th className="py-1 text-right font-medium">CPU</th>
+            <th className="py-1 text-right font-medium">Peak mem</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
+            const {
+              measurement: call,
+              processCount,
+              timing,
+              timingSource,
+              accountedCpuUsec,
+              accountedMemPeakBytes,
+              accountedPartial,
+            } = row;
+            return (
+              <tr
+                key={`${timing.tool}-${index}`}
+                className="border-t border-gray-100 dark:border-white/5"
+              >
+                <td className="py-1 pr-3 align-top text-gray-800 dark:text-gray-200">
+                  {timing.tool}
+                  {timing.isError ? (
+                    <span className="ml-1 text-rose-600 dark:text-rose-400">failed</span>
+                  ) : null}
+                </td>
+                <td className="max-w-0 truncate py-1 pr-3 align-top font-mono text-gray-500 dark:text-gray-400">
+                  {timing.detail}
+                </td>
+                <td className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                  {formatDuration(timing.ms) ?? 'unfinished'}
+                  <span className="block text-[10px] text-gray-400 dark:text-gray-500">
+                    {timingSource === 'exact' ? 'sandbox timing' : 'outside bracket'}
+                  </span>
+                </td>
+                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                  {processObservationComplete
+                    ? processCount
+                    : processCount > 0
+                      ? `≥${processCount}`
+                      : '—'}
+                </td>
+                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                  <ConsumptionCell
+                    sampled={call ? formatCpu(call.cpuUsec) : null}
+                    shared={call ? !call.exclusive : false}
+                    accounted={formatCpu(accountedCpuUsec)}
+                    partial={accountedPartial}
+                  />
+                </td>
+                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                  <ConsumptionCell
+                    sampled={call ? formatBytes(call.memPeakBytes) : null}
+                    shared={call ? !call.exclusive : false}
+                    accounted={formatBytes(accountedMemPeakBytes)}
+                    partial={accountedPartial}
+                  />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {anyAccounted ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          ᵖ CPU and peak memory accounted by the guest kernel as the call&apos;s own processes
+          exited, exact for a call of any length. They cover child processes only, not work done
+          inside the agent&apos;s own process; peak memory is the largest single process.
+        </p>
+      ) : null}
+      {anyAccountedPartial ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          ≥ marks a call whose numbers leave out a process it may own: one shared with an
+          overlapping call, or one still running when the turn ended.
+        </p>
+      ) : null}
+      {anyUnmeasured ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          {sharedMemberAccounting
+            ? '— in CPU or memory means no exited child process was accounted to this call alone. ' +
+              'Shared turns never assign a container total to one member. Process-start counts ' +
+              'come from guest-kernel lifecycle events.'
+            : '— in CPU or memory means the historical periodic sampler did not span the call ' +
+              'and no exited child process was accounted to it alone. Process-start counts come ' +
+              'from guest-kernel lifecycle events.'}
+        </p>
+      ) : null}
+      {anyShared ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          * ran alongside other calls, which share the same reading. Those numbers cover all of
+          them, so each is an upper bound.
+        </p>
+      ) : null}
+      {truncated ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          This turn made more calls than are listed here.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ProcessObservationTable({
+  processes,
+  complete,
+  truncated,
+  lost,
+}: {
+  processes: ProcessObservation[];
+  complete: boolean;
+  truncated: boolean;
+  lost: number;
+}) {
+  return (
+    <div className="mt-3">
+      <p className="mb-1 text-[11px] font-medium text-gray-600 dark:text-gray-300">
+        Guest process starts
+      </p>
+      {processes.length > 0 ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="text-left text-gray-500 dark:text-gray-400">
+                <th className="py-1 font-medium">Process</th>
+                <th className="py-1 text-right font-medium">PID</th>
+                <th className="py-1 text-right font-medium">Started</th>
+                <th className="py-1 text-right font-medium">Lifetime</th>
+                <th className="py-1 text-right font-medium">CPU</th>
+                <th className="py-1 text-right font-medium">Peak RSS</th>
+                <th className="py-1 text-right font-medium">I/O</th>
+                <th className="py-1 text-right font-medium">Exit</th>
+                <th className="py-1 text-right font-medium">Tool rows</th>
+              </tr>
+            </thead>
+            <tbody>
+              {processes.map((process) => (
+                <tr
+                  key={process.processSeq}
+                  className="border-t border-gray-100 dark:border-white/5"
+                >
+                  <td
+                    className="max-w-48 truncate py-1 pr-3 font-mono text-gray-700 dark:text-gray-300"
+                    title={process.executable ?? process.comm}
+                  >
+                    {process.executable ?? process.comm}
+                  </td>
+                  <td className="py-1 text-right tabular-nums">{process.pid}</td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    +{formatDuration(process.startedOffsetMs)}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {formatDuration(process.durationMs) ?? 'still running'}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {formatCpu(process.cpuUsec) ?? '—'}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {formatBytes(process.memPeakBytes) ?? '—'}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {formatIo(process.ioReadBytes, process.ioWriteBytes) ?? '—'}
+                  </td>
+                  <td className="py-1 pl-3 text-right tabular-nums">{process.exitCode ?? '—'}</td>
+                  <td className="py-1 pl-3 text-right tabular-nums">
+                    {process.toolCallSeqs.length ? process.toolCallSeqs.join(', ') : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+            CPU, peak RSS and I/O are the guest kernel&apos;s accounting of each process at exit, so
+            a process still running shows none. I/O is bytes the process itself read from and
+            dirtied to storage, so a write served from cache can still count and a read hit in cache
+            does not.
+          </p>
+        </div>
+      ) : complete ? (
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">
+          The guest kernel observed no child-process start during this turn.
+        </p>
+      ) : null}
+      {!complete ? (
+        <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+          Process observation is partial
+          {lost > 0 ? ` (${lost} process lifecycle event${lost === 1 ? '' : 's'} lost)` : ''}
+          {truncated ? '; bounded observer data was incomplete' : ''}.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -254,16 +639,27 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // switches with the attempt picker, and a footer that did not would label
   // one attempt's transcript with another's numbers.
   const timings = useMemo(() => toolTimings(job.events, attemptNo), [job.events, attemptNo]);
-  const contextBadge = job.contextStatus ? CONTEXT_LABEL[job.contextStatus] : undefined;
+  const telemetryMatchesAttempt =
+    job.telemetryAttemptNo === undefined ||
+    !attemptNo ||
+    job.telemetryAttemptNo === attemptNo;
+  const contextBadge =
+    telemetryMatchesAttempt && job.contextStatus ? CONTEXT_LABEL[job.contextStatus] : undefined;
   // NEW/LIVE/RESTORED/LOST is the user-facing correctness contract. The old
   // HOT/WARM/COLD/REPLAY remains useful attempt telemetry and for historical
   // rows, but showing both on one turn made one fact look like two independent
   // states. Fall back to it only for rows that predate context status.
   const badge =
-    !contextBadge && job.continuityMode ? CONTINUITY_LABEL[job.continuityMode] : undefined;
-  const duration = formatDuration(job.durationMs);
-  const resources = job.resources;
+    telemetryMatchesAttempt && !contextBadge && job.continuityMode
+      ? CONTINUITY_LABEL[job.continuityMode]
+      : undefined;
+  const duration = formatDuration(telemetryMatchesAttempt ? job.durationMs : null);
+  const resources = telemetryMatchesAttempt ? job.resources : undefined;
+  const sharedMemberAccounting = resources?.samplerVersion === 'shared-member-v1';
   const stats = resources ? resourceStats(resources) : [];
+  const processes = resources?.processes ?? [];
+  const hasProcessObservation = Boolean(resources?.processObserver);
+  const hasDetails = timings.length > 0 || hasProcessObservation;
   // A sampler that reported at all but covered only part of the window makes
   // every number below a floor. Saying so is the difference between a partial
   // measurement and a wrong one.
@@ -283,20 +679,30 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
             'numbers above are lower bounds rather than totals. This happens when the sandbox ' +
             'took a while to appear, or ended before the turn did.'
           : explained === 'unmeasured'
-            ? 'This turn ran where the platform could not read the sandbox\u2019s counters, so ' +
-              'nothing was measured. That is not the same as a turn that consumed nothing.'
+            ? sharedMemberAccounting
+              ? hasProcessObservation
+                ? 'Whole-container totals are not assigned to one chat in a shared workspace. ' +
+                  'The guest process lifecycle events below are separate, member-scoped measurements.'
+                : 'Whole-container totals are not assigned to one chat because fork siblings can ' +
+                  'run concurrently. Unavailable data is not the same as a turn that consumed nothing.'
+              : hasProcessObservation
+                ? 'The historical periodic sandbox counters were unavailable. The guest process ' +
+                  'events below are a separate measurement.'
+                : 'The historical sampler could not read this turn\u2019s sandbox counters. ' +
+                  'Unavailable data is not the same as a turn that consumed nothing.'
             : null;
   const unmeasured = Boolean(resources && stats.length === 0);
 
-  // `unmeasured` counts as something to say: a sampler that ran and could
-  // read nothing is a different fact from a turn nobody tried to measure, and
-  // only the first of the two has anything to tell the reader.
+  // `unmeasured` counts as something to say: current shared turns intentionally
+  // omit group-wide totals, while old rows with no resource object predate the
+  // reporting contract entirely.
   if (
     !badge &&
     !contextBadge &&
     !duration &&
     stats.length === 0 &&
     timings.length === 0 &&
+    !hasProcessObservation &&
     !unmeasured
   ) {
     return null;
@@ -351,16 +757,20 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
             aria-expanded={explained === 'unmeasured'}
             className="text-gray-400 dark:text-gray-500 underline-offset-2 hover:underline"
           >
-            resource data unavailable
+            {sharedMemberAccounting ? 'turn totals unavailable' : 'resource data unavailable'}
           </button>
         ) : null}
-        {timings.length > 0 ? (
+        {hasDetails ? (
           <button
             type="button"
             onClick={() => setOpen((value) => !value)}
             className="ml-auto text-gray-500 dark:text-gray-400 underline-offset-2 hover:text-gray-800 dark:hover:text-gray-200 hover:underline"
           >
-            {open ? 'Hide' : `${timings.length} tool ${timings.length === 1 ? 'call' : 'calls'}`}
+            {open
+              ? 'Hide'
+              : timings.length > 0
+                ? `${timings.length} tool ${timings.length === 1 ? 'call' : 'calls'}`
+                : 'Process details'}
           </button>
         ) : null}
       </div>
@@ -369,14 +779,36 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
           {explanation}
         </p>
       ) : null}
-      {open && timings.length > 0 ? (
+      {open && hasDetails ? (
         <div className="mt-2 border-t border-gray-200 dark:border-white/10 pt-2">
-          <ToolTimingTable timings={timings} />
-          <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-            Durations are measured from when the model requested each call to when its result
-            arrived, so they include the model’s own thinking time. Per-call execution timing
-            arrives with the next step of this work.
-          </p>
+          {timings.length > 0 ? (
+            <>
+              <TimeSplit
+                durationMs={telemetryMatchesAttempt ? (job.durationMs ?? null) : null}
+                toolTimeMs={resources?.toolTimeMs ?? null}
+              />
+              <ToolTimingTable
+                timings={timings}
+                calls={resources?.toolCalls ?? []}
+                truncated={resources?.toolCallsTruncated === true}
+                processObservationComplete={resources?.processObservationComplete === true}
+                sharedMemberAccounting={sharedMemberAccounting}
+              />
+            </>
+          ) : null}
+          {resources?.processObserver ? (
+            <ProcessObservationTable
+              processes={processes}
+              complete={resources.processObservationComplete === true}
+              truncated={resources.processesTruncated === true}
+              lost={resources.processEventsLost ?? 0}
+            />
+          ) : null}
+          {timings.length > 0 ? (
+            <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+              {timingSourceNote(resources?.toolCalls ?? [], timings.length)}
+            </p>
+          ) : null}
         </div>
       ) : null}
     </section>

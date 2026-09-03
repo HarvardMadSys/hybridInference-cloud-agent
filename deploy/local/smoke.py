@@ -221,8 +221,11 @@ def chat_private_network(container_id: str) -> str:
     )[0]
     labels = raw.get("Labels") or {}
     members = raw.get("Containers") or {}
+    options = raw.get("Options") or {}
     if labels.get("org.freeinference.chat-sandbox-network") != "true":
         raise RuntimeError(f"chat network {network_name!r} has no ownership label")
+    if str(options.get("com.docker.network.bridge.inhibit_ipv4", "")).lower() != "true":
+        raise RuntimeError(f"chat network {network_name!r} still exposes a host IPv4 gateway")
     if len(members) != 3 or not any(str(member).startswith(container_id) for member in members):
         raise RuntimeError(
             f"chat network {network_name!r} must contain one sandbox and two relays, "

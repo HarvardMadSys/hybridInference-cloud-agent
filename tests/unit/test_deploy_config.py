@@ -28,6 +28,7 @@ from cloud_agent_host.runner import build_parser
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
 _CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
+_CONTROL_PLANE_DEPLOY = REPO_ROOT / "deploy/control-plane/deploy.sh"
 _LOCAL_COMPOSE = REPO_ROOT / "deploy/local/docker-compose.yml"
 _LOCAL_DEV_SCRIPT = REPO_ROOT / "deploy/local/dev.sh"
 _LOCAL_EDGE_DOCKERFILE = REPO_ROOT / "deploy/local/Dockerfile.edge"
@@ -272,6 +273,54 @@ def test_complete_local_edge_reresolves_recreated_services():
     assert "resolver 127.0.0.11" in config
     for upstream in ("control-plane:8000", "web:3000", "local-gateway:8080"):
         assert f"server {upstream} resolve;" in config
+
+
+def test_the_standalone_edge_is_opt_in_and_loopback():
+    """The edge exists only for a deployment that owns its hostname.
+
+    Under the gateway's hostname the console already splits `/agents/*`
+    between the two services, so an edge that started unconditionally would
+    be a second, unused listener on every deployment — and one that dropped
+    its profile by accident would appear on the next deploy of all of them.
+    Loopback by default for the same reason every other published port is:
+    the tunnel is on the host, and nothing else should reach it.
+    """
+    # The `compose` fixture is the runner host's stack; the edge lives beside
+    # the control plane and the web app, in the other file.
+    edge = yaml.safe_load(_CONTROL_PLANE_COMPOSE.read_text())["services"]["edge"]
+    assert edge["profiles"] == ["edge"]
+    assert edge["ports"] == ["${AGENT_EDGE_BIND:-127.0.0.1}:${AGENT_EDGE_PORT:-3003}:80"]
+    assert edge["networks"] == ["control-plane"]
+
+
+def test_the_standalone_edge_strips_the_api_prefix():
+    """`/api/` must reach the control plane as `/`.
+
+    The control plane serves `/v1/...` at its root, exactly as it does behind
+    the console (whose rewrite strips `/agents/api`). A `proxy_pass` without
+    the trailing slash forwards the prefix, and every API call 404s while the
+    HTML still loads — a failure that reads as a client bug.
+    """
+    text = (REPO_ROOT / "deploy/control-plane/edge.nginx.conf").read_text()
+    api = text[text.index("location /api/") : text.index("location / ")]
+    assert "proxy_pass http://cloud_agent_api/;" in api
+    assert "proxy_buffering off;" in api, "the control plane streams events over SSE"
+
+
+def test_the_standalone_edge_is_probed_before_a_deploy_succeeds():
+    """An enabled edge must prove both routes before recording the deploy.
+
+    Checking the services directly does not catch an nginx crash or a broken
+    path split: both upstreams can be healthy while the public hostname is
+    returning 502 or sending API requests to the web app.
+    """
+    text = _CONTROL_PLANE_DEPLOY.read_text()
+    before_success = text[: text.index("printf '%s\\n' \"${SHA}\" > .deployed-sha")]
+    edge_checks = before_success[before_success.index('if grep -qx edge <<<"${ACTIVE_SERVICES}"') :]
+
+    assert 'ACTIVE_SERVICES="$(compose config --services)"' in before_success
+    assert 'wait_for "edge web route" "http://127.0.0.1:${EDGE_PORT}/"' in edge_checks
+    assert 'wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"' in edge_checks
 
 
 def test_root_mounted_web_build_accepts_an_explicit_empty_base_path():
@@ -639,6 +688,22 @@ def test_production_deploy_uses_the_same_parallel_topology() -> None:
     assert "PROD_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
     assert ".deploy-orchestrator/deploy/control-plane/deploy.sh" in control_deploy["run"]
     assert ".deploy-orchestrator/deploy/host/deploy.sh" in host_deploy["run"]
+
+
+def test_staging_and_production_host_rollouts_are_independently_serialized() -> None:
+    """Namespaced host stacks can roll out concurrently without cancelling peers."""
+    staging = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-staging.yml").read_text())
+    production = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-prod.yml").read_text())
+
+    staging_jobs = staging["jobs"]
+    production_jobs = production["jobs"]
+    staging_group = staging_jobs["deploy-host"]["concurrency"]["group"]
+    production_group = production_jobs["deploy-host"]["concurrency"]["group"]
+    assert staging_group == "cloud-agent-host-deploy"
+    assert production_group == "cloud-agent-prod-host-deploy"
+    assert staging_group != production_group
+    assert "concurrency" not in staging_jobs["deploy"]
+    assert "concurrency" not in production_jobs["deploy"]
 
 
 def test_target_commit_can_activate_staging_under_the_default_branch_workflow() -> None:

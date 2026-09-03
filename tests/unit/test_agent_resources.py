@@ -15,13 +15,23 @@ import httpx
 
 from cloud_agent_host.resources import (
     SAMPLER_VERSION,
+    SHARED_MEMBER_ACCOUNTING_VERSION,
     ContainerStats,
     ResourceSampler,
     Sample,
     daemon_reachable,
     rollup,
     sample_from_stats,
+    shared_member_resource_rollup,
 )
+
+
+def test_shared_member_rollup_never_claims_group_container_totals():
+    assert shared_member_resource_rollup() == {
+        "sample_count": 0,
+        "coverage": 0.0,
+        "sampler_version": SHARED_MEMBER_ACCOUNTING_VERSION,
+    }
 
 
 def test_rollup_reports_deltas_so_a_resident_sandbox_is_not_double_charged():

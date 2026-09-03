@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 // No user-event dependency in this repo; fireEvent is the house click.
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { toDisplayJob } from './adapt';
+import { toDisplayJob, toTurnResources } from './adapt';
 import { TurnFooter, formatBytes, formatCpu, formatDuration, toolTimings } from './TurnFooter';
 import type { AgentEvent, AgentJob, TurnResources } from './types';
 
@@ -20,7 +20,11 @@ const RESOURCES: TurnResources = {
   netRxBytes: 35_651_584,
   netTxBytes: 2_097_152,
   sampleCount: 42,
+  samplerVersion: '2',
   coverage: 1,
+  toolTimeMs: null,
+  toolCalls: [],
+  toolCallsTruncated: false,
 };
 
 function job(overrides: Partial<AgentJob> = {}): AgentJob {
@@ -224,14 +228,41 @@ describe('TurnFooter', () => {
       netRxBytes: null,
       netTxBytes: null,
       sampleCount: 0,
+      samplerVersion: 'shared-member-v1',
       coverage: 0,
+      toolTimeMs: null,
+      toolCalls: [],
+      toolCallsTruncated: false,
     };
     render(<TurnFooter job={job({ resources: unmeasured })} />);
-    expect(screen.getByText('resource data unavailable')).toBeInTheDocument();
+    expect(screen.getByText('turn totals unavailable')).toBeInTheDocument();
     expect(screen.queryByText(/^0/)).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'resource data unavailable' }));
+    fireEvent.click(screen.getByRole('button', { name: 'turn totals unavailable' }));
     expect(screen.getByText(/not the same as a turn that consumed nothing/)).toBeInTheDocument();
+  });
+
+  it('keeps a historical sampler failure distinct from shared-member accounting', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: {
+            ...RESOURCES,
+            cpuUsec: null,
+            memPeakBytes: null,
+            memAvgBytes: null,
+            netRxBytes: null,
+            netTxBytes: null,
+            sampleCount: 0,
+            coverage: 0,
+          },
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'resource data unavailable' }));
+    expect(screen.getByText(/historical sampler could not read/i)).toBeInTheDocument();
+    expect(screen.queryByText(/fork siblings/i)).toBeNull();
   });
 
   it('renders nothing at all when there is nothing honest to say', () => {
@@ -262,7 +293,12 @@ describe('TurnFooter', () => {
     fireEvent.click(screen.getByRole('button', { name: '1 tool call' }));
     expect(screen.getByText('cargo build')).toBeInTheDocument();
     expect(screen.getByText('15s')).toBeInTheDocument();
-    expect(screen.getByText(/include the model’s own thinking time/)).toBeInTheDocument();
+    // The note used to say these windows include the model's thinking time.
+    // They do not: the call's event is emitted once the model has finished
+    // producing it, which is why production's median call is 35 ms and not
+    // seconds. What they do include is the platform's own parse latency, so
+    // the note now says they bracket the execution rather than time it.
+    expect(screen.getByText(/brackets the execution from outside/)).toBeInTheDocument();
   });
 });
 
@@ -281,6 +317,7 @@ describe('the per-tool table on real data', () => {
     state: 'done',
     cancel_requested: false,
     current_attempt_id: 7,
+    telemetry_attempt_id: 7,
     published_pr_url: null,
     detail: null,
     spent_usd: null,
@@ -332,6 +369,623 @@ describe('the per-tool table on real data', () => {
   });
 });
 
+describe('per-call resources, through both real adapters', () => {
+  // Events go through `toDisplayJob` and resources through `toTurnResources`,
+  // because both are where a field is silently lost: a footer fed hand-built
+  // objects passes while the shipped one renders nothing.
+  const apiJob = {
+    id: 'ajob_1',
+    repo: 'o/r',
+    task_prompt: 'build it',
+    runtime: 'claude-code',
+    model: 'glm-4.6',
+    state: 'done',
+    cancel_requested: false,
+    current_attempt_id: 7,
+    published_pr_url: null,
+    detail: null,
+    spent_usd: null,
+    tokens_in: null,
+    tokens_out: null,
+    model_calls: null,
+    setup_egress_tier: null,
+    agent_egress_tier: null,
+    created_at: '2026-08-19T10:00:00.000Z',
+    updated_at: '2026-08-19T10:01:00.000Z',
+  } as never;
+
+  const apiEvents = [
+    {
+      id: 1,
+      attempt_id: 7,
+      seq: 1,
+      event_type: 'tool_use',
+      payload: { id: 'long', name: 'Bash', detail: 'cargo build' },
+      created_at: '2026-08-19T10:00:00.000Z',
+    },
+    {
+      id: 2,
+      attempt_id: 7,
+      seq: 2,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 'long', content: 'compiled' },
+      created_at: '2026-08-19T10:00:09.500Z',
+    },
+    {
+      id: 3,
+      attempt_id: 7,
+      seq: 3,
+      event_type: 'tool_use',
+      payload: { id: 'short', name: 'Read', detail: 'src/main.rs' },
+      created_at: '2026-08-19T10:00:10.000Z',
+    },
+    {
+      id: 4,
+      attempt_id: 7,
+      seq: 4,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 'short', content: 'fn main' },
+      created_at: '2026-08-19T10:00:10.035Z',
+    },
+  ] as never;
+
+  function withCalls(
+    calls: unknown[],
+    truncated = false,
+    resourceOverrides: Record<string, unknown> = {},
+  ) {
+    const adapted = toDisplayJob(apiJob, { events: apiEvents });
+    return {
+      ...adapted,
+      resources: toTurnResources({
+        cpu_usec: 5_000_000,
+        mem_peak_bytes: 40_000_000,
+        mem_avg_bytes: null,
+        io_read_bytes: null,
+        io_write_bytes: null,
+        net_rx_bytes: null,
+        net_tx_bytes: null,
+        sample_count: 12,
+        coverage: 1,
+        sampler_version: '2',
+        tool_calls: calls,
+        tool_calls_truncated: truncated,
+        ...resourceOverrides,
+      } as never),
+    };
+  }
+
+  const measuredLongCall = {
+    call_seq: 1,
+    tool_use_id: 'long',
+    tool_name: 'Bash',
+    timing_source: 'message',
+    duration_ms: 9_500,
+    sample_count: 9,
+    overlap_n: 1,
+    measured_span_ms: 8_000,
+    cpu_usec_exclusive: 4_400_000,
+    cpu_usec_shared: null,
+    mem_peak_exclusive_bytes: 283_115_520,
+    mem_peak_shared_bytes: null,
+  };
+
+  const unmeasuredShortCall = {
+    call_seq: 2,
+    tool_use_id: 'short',
+    tool_name: 'Read',
+    timing_source: 'message',
+    duration_ms: 35,
+    sample_count: 0,
+    overlap_n: 1,
+    measured_span_ms: null,
+    cpu_usec_exclusive: null,
+    cpu_usec_shared: null,
+    mem_peak_exclusive_bytes: null,
+    mem_peak_shared_bytes: null,
+  };
+
+  const tinyProcess = {
+    process_seq: 1,
+    uid: 11001,
+    pid: 412,
+    tgid: 412,
+    ppid: 41,
+    comm: 'tiny',
+    executable: '/bin/tiny',
+    started_offset_ms: 12,
+    duration_ms: 1,
+    exit_code: 0,
+    observed_fork: true,
+    observed_exec: true,
+    observed_exit: true,
+    tool_call_seqs: [1],
+  };
+
+  function processOnlyResources(resourceOverrides: Record<string, unknown> = {}) {
+    return toTurnResources({
+      cpu_usec: null,
+      mem_peak_bytes: null,
+      mem_avg_bytes: null,
+      io_read_bytes: null,
+      io_write_bytes: null,
+      net_rx_bytes: null,
+      net_tx_bytes: null,
+      sample_count: 0,
+      coverage: 0,
+      sampler_version: 'shared-member-v1',
+      tool_calls: [],
+      tool_calls_truncated: false,
+      process_observer: 'kata-guest-ebpf-v1',
+      process_observation_complete: true,
+      process_events_lost: 0,
+      processes_truncated: false,
+      processes: [],
+      ...resourceOverrides,
+    } as never);
+  }
+
+  function openTable(job: AgentJob) {
+    render(<TurnFooter job={job} />);
+    fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
+  }
+
+  it('shows what the measured call consumed', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.getByText('4.4s')).toBeInTheDocument();
+    expect(screen.getByText('270MB')).toBeInTheDocument();
+  });
+
+  it('shows a dash for the call too short to measure, never a zero', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    // CPU and memory are unmeasured; process counts are also unknown because
+    // this fixture predates the guest observer. None of those is a measured 0.
+    expect(screen.getAllByText('—')).toHaveLength(4);
+    expect(screen.getByText(/historical periodic sampler did not span/i)).toBeInTheDocument();
+    expect(screen.queryByText('0s')).toBeNull();
+    expect(screen.queryByText('0B')).toBeNull();
+  });
+
+  it('marks a call that shared its reading as an upper bound', () => {
+    const shared = {
+      ...measuredLongCall,
+      overlap_n: 2,
+      cpu_usec_exclusive: null,
+      cpu_usec_shared: 4_400_000,
+      mem_peak_exclusive_bytes: null,
+      mem_peak_shared_bytes: 283_115_520,
+    };
+    openTable(withCalls([shared, unmeasuredShortCall]));
+
+    expect(screen.getByText('4.4s')).toBeInTheDocument();
+    expect(screen.getByText(/upper bound/)).toBeInTheDocument();
+  });
+
+  it('does not claim an upper bound when nothing was shared', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.queryByText(/upper bound/)).toBeNull();
+  });
+
+  it('names the longest call so a 157-row table does not have to be read', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.getByText(/Longest call:/)).toBeInTheDocument();
+    expect(screen.getAllByText('Bash').length).toBeGreaterThan(1);
+  });
+
+  it('renders and ranks the recorded duration instead of the wider event window', () => {
+    const exactLong = { ...measuredLongCall, timing_source: 'exact', duration_ms: 10 };
+    openTable(withCalls([exactLong, unmeasuredShortCall]));
+
+    expect(screen.getByText('10ms')).toBeInTheDocument();
+    expect(screen.queryByText('9.5s')).toBeNull();
+    expect(screen.getByText(/Longest call:/)).toHaveTextContent('Read · 35ms');
+  });
+
+  it('says when the list is not every call the turn made', () => {
+    openTable(
+      withCalls([measuredLongCall, unmeasuredShortCall], true, {
+        tool_time_ms: 9_535,
+      }),
+    );
+
+    expect(screen.getByText(/more calls than are listed/)).toBeInTheDocument();
+    expect(screen.queryByText('4.4s')).toBeNull();
+    expect(screen.queryByText(/outside tools/)).toBeNull();
+  });
+
+  it('says where the turn\u2019s time actually went', () => {
+    const withSplit = withCalls([measuredLongCall, unmeasuredShortCall]);
+    render(
+      <TurnFooter
+        job={{
+          ...withSplit,
+          durationMs: 3_559_000,
+          resources: { ...withSplit.resources!, toolTimeMs: 49_600 },
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
+
+    // The most explanatory number on the footer: on the production turns this
+    // was built against, the sandbox was busy for about 1% of the wall clock.
+    expect(screen.getByText(/outside tools/)).toBeInTheDocument();
+    expect(screen.getByText('49.6s')).toBeInTheDocument();
+  });
+
+  it('does not invent a split when the tool time was never measured', () => {
+    const withSplit = withCalls([measuredLongCall]);
+    render(<TurnFooter job={{ ...withSplit, durationMs: 3_559_000 }} />);
+    fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
+
+    expect(screen.queryByText(/outside tools/)).toBeNull();
+  });
+
+  it('says a message-level duration brackets the call rather than timing it', () => {
+    openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
+
+    expect(screen.getByText(/brackets the execution from outside/)).toBeInTheDocument();
+  });
+
+  it('says so when the sandbox\u2019s own hooks timed the calls', () => {
+    const exact = { ...measuredLongCall, timing_source: 'exact' };
+    const exactShort = { ...unmeasuredShortCall, timing_source: 'exact' };
+    openTable(withCalls([exact, exactShort]));
+
+    expect(screen.getByText(/own tool boundaries/)).toBeInTheDocument();
+    expect(screen.queryByText(/brackets the execution/)).toBeNull();
+  });
+
+  it('counts them when only some calls carry the sandbox\u2019s boundaries', () => {
+    const exact = { ...measuredLongCall, timing_source: 'exact' };
+    openTable(withCalls([exact, unmeasuredShortCall]));
+
+    expect(screen.getByText(/1 of 2 durations/)).toBeInTheDocument();
+    expect(
+      within(screen.getByText('cargo build').closest('tr')!).getByText('sandbox timing'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByText('src/main.rs').closest('tr')!).getByText('outside bracket'),
+    ).toBeInTheDocument();
+  });
+
+  it('never reuses one recorded row for two malformed duplicate tool ids', () => {
+    const duplicateEvents: AgentEvent[] = [
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'first duplicate',
+        id: 'duplicate',
+        durationMs: 100,
+      },
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'second duplicate',
+        id: 'duplicate',
+        durationMs: 200,
+      },
+    ];
+    render(
+      <TurnFooter
+        job={job({
+          events: duplicateEvents,
+          resources: {
+            ...RESOURCES,
+            toolCallsTruncated: true,
+            toolCalls: [
+              {
+                toolUseId: 'duplicate',
+                toolName: 'Bash',
+                timingSource: 'exact',
+                durationMs: 10,
+                sampleCount: 0,
+                overlapN: 1,
+                measuredSpanMs: null,
+                cpuUsec: null,
+                memPeakBytes: null,
+                exclusive: false,
+                processCount: 0,
+              },
+            ],
+          },
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
+
+    expect(
+      within(screen.getByText('first duplicate').closest('tr')!).getByText('sandbox timing'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByText('second duplicate').closest('tr')!).getByText('outside bracket'),
+    ).toBeInTheDocument();
+  });
+
+  it('renders dashes rather than nothing when no measurement was reported', () => {
+    // Every turn recorded before this shipped, and every turn on a host whose
+    // daemon could not be read.
+    openTable(withCalls([]));
+
+    expect(screen.getAllByText('—')).toHaveLength(6);
+    expect(screen.getByText(/historical periodic sampler did not span/i)).toBeInTheDocument();
+  });
+
+  it('renders a sub-tick process delivered by the guest observer', () => {
+    openTable(
+      withCalls([{ ...measuredLongCall, process_count: 1 }, unmeasuredShortCall], false, {
+        process_observer: 'kata-guest-ebpf-v1',
+        process_observation_complete: true,
+        process_events_lost: 0,
+        processes_truncated: false,
+        processes: [tinyProcess],
+      }),
+    );
+
+    expect(screen.getByText('Guest process starts')).toBeInTheDocument();
+    expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
+    expect(screen.getByText('+12ms')).toBeInTheDocument();
+    expect(screen.queryByText(/Process observation is partial/)).toBeNull();
+  });
+
+  it('does not present a lossy guest observation as a complete process census', () => {
+    openTable(
+      withCalls([{ ...measuredLongCall, process_count: 1 }, unmeasuredShortCall], false, {
+        process_observer: 'kata-guest-ebpf-v1',
+        process_observation_complete: false,
+        process_events_lost: 2,
+        processes_truncated: false,
+        processes: [tinyProcess],
+      }),
+    );
+
+    expect(
+      screen.getByText(/Process observation is partial \(2 process lifecycle events lost\)/),
+    ).toBeInTheDocument();
+    expect(screen.getByText('≥1')).toBeInTheDocument();
+  });
+
+  it('describes non-loss observer incompleteness without blaming the kernel ring', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({
+            process_observation_complete: false,
+            processes_truncated: true,
+          }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    expect(
+      screen.getByText(/Process observation is partial; bounded observer data was incomplete/),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps guest process details accessible when a turn emitted no tool event', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({ processes: [tinyProcess] }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    expect(screen.getByText('Guest process starts')).toBeInTheDocument();
+    expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
+  });
+
+  it('shows loss explicitly even when no process row survived', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({
+            // Even if an older/bad row claims completeness, explicit loss is
+            // authoritative and the adapter must keep the UI conservative.
+            process_observation_complete: true,
+            process_events_lost: 1,
+          }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    expect(
+      screen.getByText(/Process observation is partial \(1 process lifecycle event lost\)/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/observed no child process/)).toBeNull();
+  });
+
+  const accountedProcess = {
+    ...tinyProcess,
+    executable: '/usr/bin/dd',
+    cpu_usec: 15_000,
+    mem_peak_bytes: 2_228_224,
+    io_read_bytes: 0,
+    io_write_bytes: 8_388_608,
+    io_rchar_bytes: 8_390_683,
+    io_wchar_bytes: 8_388_701,
+  };
+
+  it('shows what each guest process consumed at exit', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({ processes: [accountedProcess] }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    const row = screen.getByText('/usr/bin/dd').closest('tr')!;
+    expect(within(row).getByText('15ms')).toBeInTheDocument();
+    expect(within(row).getByText('2.1MB')).toBeInTheDocument();
+    expect(within(row).getByText('r0B w8MB')).toBeInTheDocument();
+    expect(screen.getByText(/accounting of each process at exit/)).toBeInTheDocument();
+  });
+
+  it('leaves consumption blank for a process that had not exited', () => {
+    render(
+      <TurnFooter
+        job={job({
+          resources: processOnlyResources({
+            processes: [
+              { ...tinyProcess, duration_ms: null, exit_code: null, observed_exit: false },
+            ],
+          }),
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
+
+    const row = screen.getByText('/bin/tiny').closest('tr')!;
+    expect(within(row).getByText('still running')).toBeInTheDocument();
+    // CPU, peak RSS, I/O and exit code: four dashes, no zeros.
+    expect(within(row).getAllByText('—')).toHaveLength(4);
+  });
+
+  it('charges a call too short for the sampler with what its own processes consumed', () => {
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 1,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: 2_228_224,
+            process_io_read_bytes: 0,
+            process_io_write_bytes: 8_388_608,
+            process_resources_partial: false,
+          },
+        ],
+        false,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 0,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).getByText('15ms')).toBeInTheDocument();
+    expect(within(shortRow).getByText('2.1MB')).toBeInTheDocument();
+    expect(within(shortRow).getAllByText('ᵖ')).toHaveLength(2);
+    // The sampled call keeps its sampled numbers, unmarked.
+    const longRow = screen.getByText('4.4s').closest('tr')!;
+    expect(within(longRow).getByText('270MB')).toBeInTheDocument();
+    expect(within(longRow).queryByText('ᵖ')).toBeNull();
+    expect(screen.getByText(/accounted by the guest kernel/)).toBeInTheDocument();
+    // This fixture is a historical sampled turn, so it retains the sampled
+    // aggregate instead of showing the current shared-member disclaimer.
+    expect(screen.queryByText(/current shared turns never assign/i)).toBeNull();
+  });
+
+  it('marks a call whose processes were not all its own as a floor', () => {
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 2,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: null,
+            process_io_read_bytes: null,
+            process_io_write_bytes: null,
+            process_resources_partial: true,
+          },
+        ],
+        false,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 0,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).getByText('≥15ms')).toBeInTheDocument();
+    expect(screen.getByText(/leave out a process it may own/)).toBeInTheDocument();
+  });
+
+  it('treats every charged call as a floor when the census lost events', () => {
+    // The host marks this too; the adapter repeats it so an older or wrong
+    // row can never present an exit-accounted total beside a lossy census.
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 1,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: 2_228_224,
+            process_resources_partial: false,
+          },
+        ],
+        false,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 2,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).getByText('≥15ms')).toBeInTheDocument();
+    expect(within(shortRow).getByText('≥2.1MB')).toBeInTheDocument();
+  });
+
+  it('never lets a truncated call list keep exit-accounted numbers', () => {
+    openTable(
+      withCalls(
+        [
+          measuredLongCall,
+          {
+            ...unmeasuredShortCall,
+            process_count: 1,
+            process_cpu_usec: 15_000,
+            process_mem_peak_bytes: 2_228_224,
+            process_resources_partial: false,
+          },
+        ],
+        true,
+        {
+          process_observer: 'kata-guest-ebpf-v1',
+          process_observation_complete: true,
+          process_events_lost: 0,
+          processes_truncated: false,
+          processes: [{ ...accountedProcess, tool_call_seqs: [2] }],
+        },
+      ),
+    );
+
+    const shortRow = screen.getByText('Read').closest('tr')!;
+    expect(within(shortRow).queryByText('15ms')).toBeNull();
+    expect(within(shortRow).queryByText('ᵖ')).toBeNull();
+  });
+});
+
 describe('attempt scoping', () => {
   it('times only the attempt the reader is looking at', () => {
     const events: AgentEvent[] = [
@@ -355,5 +1009,51 @@ describe('attempt scoping', () => {
 
     expect(toolTimings(events, 2).map((t) => t.detail)).toEqual(['second try']);
     expect(toolTimings(events, 1).map((t) => t.ms)).toEqual([1_000]);
+  });
+
+  it('does not attach the newest attempt telemetry to an older attempt', () => {
+    const events: AgentEvent[] = [
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'first try',
+        id: 'dup',
+        attemptNo: 1,
+        durationMs: 1_000,
+      },
+      {
+        kind: 'tool_use',
+        tool: 'Bash',
+        detail: 'second try',
+        id: 'dup',
+        attemptNo: 2,
+        durationMs: 9_000,
+      },
+    ];
+    render(
+      <TurnFooter
+        attemptNo={1}
+        job={job({
+          attempts: [
+            { no: 1, status: 'superseded' },
+            { no: 2, status: 'finished' },
+          ],
+          telemetryAttemptNo: 2,
+          continuityMode: 'hot',
+          contextStatus: 'live',
+          durationMs: 42_000,
+          resources: RESOURCES,
+          events,
+        })}
+      />,
+    );
+
+    expect(screen.queryByText('hot')).not.toBeInTheDocument();
+    expect(screen.queryByText('live')).not.toBeInTheDocument();
+    expect(screen.queryByText('42s')).not.toBeInTheDocument();
+    expect(screen.queryByText('18.2s')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '1 tool call' }));
+    expect(screen.getByText('1s')).toBeInTheDocument();
+    expect(screen.queryByText('9s')).not.toBeInTheDocument();
   });
 });

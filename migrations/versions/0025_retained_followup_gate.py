@@ -1,15 +1,15 @@
 """Fence historical disposable failures from retained follow-up execution.
 
-Revision ID: 0023_retained_followup_gate
-Revises: 0022_native_turn_rollout_guard
+Revision ID: 0025_retained_followup_gate
+Revises: 0024_native_turn_rollout_guard
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0023_retained_followup_gate"
-down_revision = "0022_native_turn_rollout_guard"
+revision = "0025_retained_followup_gate"
+down_revision = "0024_native_turn_rollout_guard"
 branch_labels = None
 depends_on = None
 

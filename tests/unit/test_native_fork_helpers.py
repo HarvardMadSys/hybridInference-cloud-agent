@@ -178,3 +178,64 @@ def test_claude_raw_chain_follows_logical_parent_across_compaction(
     ]
     assert anchor(loaded, 1) == "assistant-1"
     assert anchor(loaded, 2) == "assistant-2"
+
+
+def test_claude_fork_calls_sdk_with_the_inclusive_assistant_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    script = _claude_script(monkeypatch)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        "\n".join(
+            json.dumps(entry)
+            for entry in [
+                {
+                    "type": "user",
+                    "uuid": "11111111-1111-4111-8111-111111111111",
+                    "parentUuid": None,
+                    "message": {"role": "user", "content": "one"},
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "22222222-2222-4222-8222-222222222222",
+                    "parentUuid": "11111111-1111-4111-8111-111111111111",
+                    "message": {"role": "assistant", "content": "done"},
+                },
+            ]
+        )
+        + "\n"
+    )
+    script["_session_entries"].__globals__["_resolve_session_file_path"] = (
+        lambda *_args, **_kwargs: transcript
+    )
+    call: dict[str, object] = {}
+
+    def fork_session(source: str, **kwargs: object) -> object:
+        call["source"] = source
+        call.update(kwargs)
+        return type(
+            "ForkResult",
+            (),
+            {"session_id": "33333333-3333-4333-8333-333333333333"},
+        )()
+
+    script["main"].__globals__["fork_session"] = fork_session
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["claude-session-fork", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "1"],
+    )
+
+    script["main"]()
+
+    assert call == {
+        "source": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "directory": "/workspace",
+        "up_to_message_id": "22222222-2222-4222-8222-222222222222",
+    }
+    assert json.loads(capsys.readouterr().out) == {
+        "source_session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "session_id": "33333333-3333-4333-8333-333333333333",
+    }

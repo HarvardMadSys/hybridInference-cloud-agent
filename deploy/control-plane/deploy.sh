@@ -25,7 +25,7 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT:-cloudagent}"
 COMPOSE_FILE="deploy/control-plane/docker-compose.yml"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 SHARED_READY_TIMEOUT="${SHARED_READY_TIMEOUT:-900}"
-DEPLOY_PROTOCOL="shared-live-exact-sha-v1"
+DEPLOY_PROTOCOL="shared-live-exact-sha-v2"
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -89,7 +89,7 @@ SOURCE_HEAD="$(git -C "${SOURCE_REPO}" rev-parse HEAD)"
   || die "SOURCE_REPO is at ${SOURCE_HEAD}, not the requested ${SHA} — refusing to deploy something other than what was asked for"
 TARGET_DEPLOY_PROTOCOL="$(git -C "${SOURCE_REPO}" show "${SHA}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
 [ "${TARGET_DEPLOY_PROTOCOL}" = "${DEPLOY_PROTOCOL}" ] \
-  || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; an online rollback to a pre-fence commit is unsupported and was refused before changing the deployment"
+  || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; it is pre-fence or protocol-incompatible, so online deployment was refused before changing the deployment"
 
 log "fetching ${SHA} from ${SOURCE_REPO}"
 git fetch --quiet "${SOURCE_REPO}" HEAD
@@ -116,6 +116,8 @@ compose() {
 CP_PORT="$(from_env AGENT_CONTROL_PLANE_PORT)"; CP_PORT="${CP_PORT:-8000}"
 MCP_PORT="$(from_env AGENT_MCP_RELAY_PORT)"; MCP_PORT="${MCP_PORT:-8001}"
 WEB_PORT="$(from_env AGENT_WEB_PORT)";          WEB_PORT="${WEB_PORT:-3002}"
+EDGE_PORT="$(from_env AGENT_EDGE_PORT)";        EDGE_PORT="${EDGE_PORT:-3003}"
+ACTIVE_SERVICES="$(compose config --services)"
 
 wait_for() {
   local name="$1" url="$2" deadline=$((SECONDS + HEALTH_TIMEOUT))
@@ -231,7 +233,12 @@ WEB_BASE_PATH="$(from_env AGENT_WEB_BASE_PATH)"
 WEB_BASE_PATH="${WEB_BASE_PATH%/}"
 
 wait_for "control plane" "http://127.0.0.1:${CP_PORT}/healthz"
+wait_for "MCP relay"     "http://127.0.0.1:${MCP_PORT}/healthz"
 wait_for "web"           "http://127.0.0.1:${WEB_PORT}${WEB_BASE_PATH:-/}"
+if grep -qx edge <<<"${ACTIVE_SERVICES}"; then
+  wait_for "edge web route" "http://127.0.0.1:${EDGE_PORT}/"
+  wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"
+fi
 
 # Written last and only on success: this file is what an operator reads to
 # answer "what is actually running here", and a value written before the health

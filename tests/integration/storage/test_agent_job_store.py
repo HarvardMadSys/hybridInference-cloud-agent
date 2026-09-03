@@ -20,7 +20,9 @@ from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
+    SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_PROTOCOL,
+    SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
 from tests.support.migrations import apply_migrations, run_baseline_statements
@@ -138,14 +140,8 @@ def _shared_claim_attestation() -> dict[str, object]:
         "sandbox_image_digest": "sha256:shared-image",
         "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
         "runner_capabilities": _SHARED_HOST_CAPABILITIES,
-        "runtime_versions": {
-            "claude-code": "2.1.220",
-            "codex": "0.145.0",
-            "pi": "0.73.1",
-            "opencode": "1.18.9",
-            "kilo": "7.4.17",
-        },
-        "helper_versions": {"claude-agent-sdk": "0.2.148"},
+        "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+        "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
     }
 
 
@@ -286,7 +282,7 @@ async def test_native_turn_migration_catches_previous_generation_writers(
     store: AgentJobStore,
 ) -> None:
     """The parallel rollout window cannot leave historical Fork ordinals blank."""
-    # A previous control plane can still finish a turn after migration 0021's
+    # A previous control plane can still finish a turn after migration 0023's
     # one-time backfill. Its UPDATE does not name the newly added column.
     succeeded = await _create_job(store, task_prompt="old API success")
     async with store._pool.acquire() as conn:
@@ -1187,7 +1183,7 @@ async def test_native_turn_migration_backfills_existing_fork_prefixes(
 async def test_native_turn_schema_guards_previous_writer_before_backfill(
     store: AgentJobStore,
 ):
-    """An old API write is anchored as soon as 0021 exposes the column."""
+    """An old API write is anchored as soon as 0023 exposes the column."""
     from tests.support.migrations import apply_migrations, downgrade_to
 
     base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
@@ -1200,7 +1196,7 @@ async def test_native_turn_schema_guards_previous_writer_before_backfill(
         "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
     }
     try:
-        downgrade_to(db_config, "0021_native_turn_anchors")
+        downgrade_to(db_config, "0023_native_turn_anchors")
         async with store._pool.acquire() as conn:
             await conn.execute(
                 """
@@ -1304,6 +1300,52 @@ async def test_disposable_era_terminal_chat_cannot_be_silently_reactivated(store
         user_id=historical["user_id"],
         prompt="must not fabricate native continuity",
     ) == {"error": "sandbox_context_lost"}
+
+
+async def test_disposable_era_inflight_chat_cannot_queue_a_retained_follow_up(store):
+    historical = await _create_job(store, task_prompt="in-flight disposable turn")
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs "
+            "SET state = 'running', retained_followup_eligible = NULL "
+            "WHERE id = $1",
+            historical["id"],
+        )
+
+    assert await store.create_follow_up(
+        parent_job_id=historical["id"],
+        user_id=historical["user_id"],
+        prompt="must not wait and later fabricate continuity",
+    ) == {"error": "sandbox_context_lost"}
+
+
+async def test_cutover_waiting_tail_is_failed_instead_of_promoted(store):
+    parent = await _create_job(store, task_prompt="old API parent")
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"],
+        user_id=parent["user_id"],
+        prompt="old API waiting child",
+    )
+    assert child is not None and child["state"] == "waiting"
+    async with store._pool.acquire() as conn:
+        # Model a child inserted by the old API while its disposable parent
+        # was still running across migration 0025.
+        await conn.execute(
+            "UPDATE agent_jobs "
+            "SET state = 'failed', retained_followup_eligible = NULL "
+            "WHERE id = $1",
+            parent["id"],
+        )
+        await conn.execute(
+            "UPDATE agent_jobs SET retained_followup_eligible = NULL WHERE id = $1",
+            child["id"],
+        )
+
+    assert await _claim(store, worker_id="cutover-worker", lease_ttl_seconds=60) is None
+    failed = await store.get_job(child["id"])
+    assert failed is not None
+    assert failed["state"] == "failed"
+    assert "predates retained-session continuity" in failed["detail"]
 
 
 async def test_projects_summarize_a_user_s_repos_and_page_one_at_a_time(store: AgentJobStore):
@@ -1587,6 +1629,248 @@ async def test_shared_waiting_follow_up_releases_before_snapshot_publish(store: 
     released = await store.get_job(child["id"])
     assert released is not None
     assert released["state"] == "queued"
+
+
+async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: AgentJobStore):
+    parent, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": parent["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-lock-order",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "DROP TRIGGER IF EXISTS test_delay_membership_update "
+            "ON agent_thread_sandbox_memberships"
+        )
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION test_delay_membership_update()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(0.25);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER test_delay_membership_update
+            BEFORE UPDATE ON agent_thread_sandbox_memberships
+            FOR EACH ROW EXECUTE FUNCTION test_delay_membership_update()
+            """
+        )
+    try:
+        settlement = asyncio.create_task(
+            store.settle_thread_sandbox(
+                **fence,
+                job_id=parent["id"],
+                context_status="live",
+                native_session_id="native-lock-order",
+                idle_timeout_seconds=1800,
+                base_sha=parent["base_sha"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        follow_up = asyncio.create_task(
+            store.create_follow_up(
+                parent_job_id=parent["id"],
+                user_id=parent["user_id"],
+                prompt="send while settlement holds its locks",
+            )
+        )
+        settled, child = await asyncio.wait_for(
+            asyncio.gather(settlement, follow_up),
+            timeout=3,
+        )
+    finally:
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS test_delay_membership_update "
+                "ON agent_thread_sandbox_memberships"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS test_delay_membership_update()")
+
+    assert settled is not None
+    assert child is not None and child["state"] == "waiting"
+
+
+async def test_settlement_and_host_reconciliation_use_one_lock_order(store: AgentJobStore):
+    parent, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": parent["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-reconcile-lock-order",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "DROP TRIGGER IF EXISTS test_delay_membership_update "
+            "ON agent_thread_sandbox_memberships"
+        )
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION test_delay_membership_update()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(0.25);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER test_delay_membership_update
+            BEFORE UPDATE ON agent_thread_sandbox_memberships
+            FOR EACH ROW EXECUTE FUNCTION test_delay_membership_update()
+            """
+        )
+    try:
+        settlement = asyncio.create_task(
+            store.settle_thread_sandbox(
+                **fence,
+                job_id=parent["id"],
+                context_status="live",
+                native_session_id="native-reconcile-lock-order",
+                idle_timeout_seconds=1800,
+                base_sha=parent["base_sha"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        reconciliation = asyncio.create_task(
+            store.reconcile_thread_sandbox_observation(
+                thread_id=parent["thread_id"],
+                host="shared-runner",
+                sandbox_id=sandbox["sandbox_id"],
+                container_id="container-reconcile-lock-order",
+                sandbox_generation=sandbox["generation"],
+                running=True,
+                activity_active=True,
+                members=[
+                    {
+                        "thread_id": parent["thread_id"],
+                        "activation_generation": sandbox["activation_generation"],
+                        "process_generation": 1,
+                        "residency_generation": 0,
+                        "resident_state": "live",
+                    }
+                ],
+            )
+        )
+        settled, reconciled = await asyncio.wait_for(
+            asyncio.gather(settlement, reconciliation),
+            timeout=3,
+        )
+    finally:
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS test_delay_membership_update "
+                "ON agent_thread_sandbox_memberships"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS test_delay_membership_update()")
+
+    assert settled is not None
+    assert reconciled == "running"
+
+
+async def test_stopped_reconciliation_locks_even_unreported_members_first(
+    store: AgentJobStore,
+):
+    parent, _, sandbox = await _reserve_shared_chat(store)
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE agent_thread_sandbox_memberships
+            SET active_attempt_id = NULL, admitted_job_id = NULL, admitted_at = NULL
+            WHERE thread_id = $1
+            """,
+            parent["thread_id"],
+        )
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = 'stopping' WHERE id = $1",
+            sandbox["sandbox_id"],
+        )
+        await conn.execute(
+            "DROP TRIGGER IF EXISTS test_delay_membership_update "
+            "ON agent_thread_sandbox_memberships"
+        )
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION test_delay_membership_update()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(0.25);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER test_delay_membership_update
+            BEFORE UPDATE ON agent_thread_sandbox_memberships
+            FOR EACH ROW EXECUTE FUNCTION test_delay_membership_update()
+            """
+        )
+
+    async def membership_then_group() -> None:
+        async with store._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "UPDATE agent_thread_sandbox_memberships "
+                "SET updated_at = NOW() WHERE thread_id = $1",
+                parent["thread_id"],
+            )
+            await conn.execute(
+                "UPDATE agent_sandboxes SET updated_at = NOW() WHERE id = $1",
+                sandbox["sandbox_id"],
+            )
+
+    try:
+        lifecycle = asyncio.create_task(membership_then_group())
+        await asyncio.sleep(0.05)
+        reconciliation = asyncio.create_task(
+            store.reconcile_thread_sandbox_observation(
+                thread_id=parent["thread_id"],
+                host="shared-runner",
+                sandbox_id=sandbox["sandbox_id"],
+                container_id="container-stopped-lock-order",
+                sandbox_generation=sandbox["generation"],
+                running=False,
+                members=[],
+            )
+        )
+        _, reconciled = await asyncio.wait_for(
+            asyncio.gather(lifecycle, reconciliation),
+            timeout=3,
+        )
+    finally:
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS test_delay_membership_update "
+                "ON agent_thread_sandbox_memberships"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS test_delay_membership_update()")
+
+    assert reconciled == "stopped"
 
 
 async def test_claim_creates_fenced_attempt(store: AgentJobStore):
@@ -2946,6 +3230,7 @@ async def test_a_resource_rollup_upserts_rather_than_accumulating(store: AgentJo
 
     telemetry = await store.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
+    assert telemetry["attempt_id"] == claim["attempt_id"]
     assert telemetry["cpu_usec"] == 1_000, "a retried post accumulated instead of replacing"
     assert telemetry["net_rx_bytes"] == 4_096
 
@@ -2997,6 +3282,214 @@ async def test_an_unmeasured_window_is_stored_as_such_not_as_zero(store: AgentJo
     assert telemetry["cpu_usec"] is None
     assert telemetry["coverage"] == 0.0
     assert telemetry["sampler_version"] == "1"
+    assert telemetry["tool_calls"] == []
+    assert telemetry["tool_calls_truncated"] is False
+    assert telemetry["tool_time_ms"] is None
+
+
+def _tool_call(seq: int, name: str, **overrides: object) -> dict[str, object]:
+    """One per-call row in the shape the runner's attribution produces."""
+    return {
+        "call_seq": seq,
+        "tool_use_id": f"toolu_{seq}",
+        "tool_name": name,
+        "timing_source": "message",
+        "duration_ms": 20,
+        "sample_count": 0,
+        "overlap_n": 1,
+        "measured_span_ms": None,
+        "cpu_usec_exclusive": None,
+        "cpu_usec_shared": None,
+        "mem_peak_exclusive_bytes": None,
+        "mem_peak_shared_bytes": None,
+        "process_count": 0,
+        **overrides,
+    }
+
+
+async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobStore):
+    """The rows the footer's expanded table renders, over real SQL."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+
+    assert await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        rollup={
+            "sample_count": 12,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls_truncated": False,
+            "tool_time_ms": 9_543,
+            "process_observer": "kata-guest-ebpf-v1",
+            "process_observation_complete": True,
+            "process_events_lost": 0,
+            "processes_truncated": False,
+            "tool_calls": [
+                _tool_call(
+                    1,
+                    "Bash",
+                    timing_source="exact",
+                    duration_ms=9_523,
+                    sample_count=9,
+                    measured_span_ms=8_000,
+                    cpu_usec_exclusive=4_400_000,
+                    mem_peak_exclusive_bytes=270_000_000,
+                    process_count=1,
+                    process_cpu_usec=15_000,
+                    process_mem_peak_bytes=2_228_224,
+                    process_io_read_bytes=0,
+                    process_io_write_bytes=8_388_608,
+                    process_resources_partial=True,
+                ),
+                _tool_call(2, "Read"),
+            ],
+            "processes": [
+                {
+                    "process_seq": 1,
+                    "uid": 11001,
+                    "pid": 412,
+                    "tgid": 412,
+                    "ppid": 41,
+                    "comm": "tiny",
+                    "executable": "/bin/tiny",
+                    "started_offset_ms": 12,
+                    "duration_ms": 1,
+                    "exit_code": 0,
+                    "observed_fork": True,
+                    "observed_exec": True,
+                    "observed_exit": True,
+                    "tool_call_seqs": [1],
+                    "cpu_usec": 15_000,
+                    "mem_peak_bytes": 2_228_224,
+                    "io_read_bytes": 0,
+                    "io_write_bytes": 8_388_608,
+                    "io_rchar_bytes": 8_390_683,
+                    "io_wchar_bytes": 8_388_701,
+                }
+            ],
+        },
+    )
+
+    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    assert telemetry is not None
+    assert telemetry["tool_calls_truncated"] is False
+    assert telemetry["tool_time_ms"] == 9_543
+    first, second = telemetry["tool_calls"]
+    assert [first["tool_name"], second["tool_name"]] == ["Bash", "Read"]
+    assert [first["timing_source"], second["timing_source"]] == ["exact", "message"]
+    assert first["cpu_usec_exclusive"] == 4_400_000
+    assert first["process_count"] == 1
+    assert first["process_cpu_usec"] == 15_000
+    assert first["process_mem_peak_bytes"] == 2_228_224
+    assert first["process_io_read_bytes"] == 0
+    assert first["process_io_write_bytes"] == 8_388_608
+    assert first["process_resources_partial"] is True
+    assert second["process_cpu_usec"] is None
+    assert second["process_resources_partial"] is False
+    assert telemetry["process_observer"] == "kata-guest-ebpf-v1"
+    assert telemetry["process_observation_complete"] is True
+    assert telemetry["process_events_lost"] == 0
+    assert telemetry["processes_truncated"] is False
+    (process,) = telemetry["processes"]
+    assert process["uid"] == 11001
+    assert process["executable"] == "/bin/tiny"
+    assert process["duration_ms"] == 1
+    assert process["tool_call_seqs"] == [1]
+    assert process["cpu_usec"] == 15_000
+    assert process["mem_peak_bytes"] == 2_228_224
+    assert process["io_write_bytes"] == 8_388_608
+    assert process["io_rchar_bytes"] == 8_390_683
+    assert process["io_wchar_bytes"] == 8_388_701
+    # Null rather than zero, in the database itself: this is the row that says
+    # the call was too short for the sampler to have seen anything.
+    assert second["cpu_usec_exclusive"] is None
+    assert second["mem_peak_exclusive_bytes"] is None
+    assert second["sample_count"] == 0
+
+
+async def test_a_retried_post_replaces_the_call_list_rather_than_appending(
+    store: AgentJobStore,
+):
+    """The list is one statement about the attempt, not a set to union with."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    base = {"sample_count": 5, "coverage": 1.0, "sampler_version": "2"}
+
+    await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        rollup={**base, "tool_calls": [_tool_call(1, "Bash"), _tool_call(2, "Read")]},
+    )
+    await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        rollup={**base, "tool_calls": [_tool_call(1, "Bash")]},
+    )
+
+    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    assert telemetry is not None
+    assert len(telemetry["tool_calls"]) == 1, "a retried post left a row from the first"
+
+
+async def test_a_superseded_attempt_cannot_write_per_call_rows_either(store: AgentJobStore):
+    """The rows describe spans inside a window this attempt no longer owns."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        rollup={
+            "sample_count": 5,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [_tool_call(1, "Bash")],
+        },
+    )
+
+    stale = await store.record_attempt_resources(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"] + 1,
+        rollup={
+            "sample_count": 1,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [_tool_call(1, "Bash", cpu_usec_exclusive=999_999)],
+        },
+    )
+
+    assert stale is False
+    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    assert telemetry is not None
+    (row,) = telemetry["tool_calls"]
+    assert row["cpu_usec_exclusive"] is None, "a fenced write reached the per-call rows"
+
+
+async def test_a_row_cannot_claim_a_number_is_both_exclusive_and_shared(
+    store: AgentJobStore,
+):
+    """The whole point of two columns is that a reader can tell them apart."""
+    import asyncpg
+
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+
+    with pytest.raises(asyncpg.IntegrityConstraintViolationError):
+        await store.record_attempt_resources(
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            rollup={
+                "sample_count": 5,
+                "coverage": 1.0,
+                "sampler_version": "2",
+                "tool_calls": [_tool_call(1, "Bash", cpu_usec_exclusive=10, cpu_usec_shared=10)],
+            },
+        )
+    assert job["id"]
 
 
 async def test_thread_events_span_every_turn_and_page(store: AgentJobStore):

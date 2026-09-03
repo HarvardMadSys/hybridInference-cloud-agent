@@ -233,6 +233,16 @@ cancellation authority. A member may see the shared workspace and eligible
 runtime-native project data by design, but it must not read another process's
 credential from argv, disk, `/proc`, or reusable environment files.
 
+Resource attribution follows the same ownership boundary. Whole-container
+Docker CPU, memory, I/O, and network counters belong to the group and are never
+copied onto a member attempt. Every current turn records an explicit
+zero-coverage `shared-member-v1` aggregate plus tool timing; Kata additionally
+records fork/exec/exit and settled resource counters through a guest-root
+observer filtered by the member's fixed UID. Trusted non-Kata mode degrades to
+timing without process totals. Observation closes before member reaping and
+permission normalization, and cancellation/timeout drains the broker's terminal
+telemetry frame when the stream remains reachable.
+
 Turn cleanup uses the root-owned, mode-0555 `member-process-reaper` embedded in
 the sandbox image. It captures a member UID's `(pid, /proc starttime)` baseline
 in helper memory and accepts the baseline for cleanup over stdin, rather than
@@ -245,13 +255,21 @@ not strand ordinary follow-ups on the old writable layer.
 
 Public multi-tenant deployments still require the documented Kata/gVisor,
 non-root, capability, seccomp, and resource boundaries. The shared workspace
-does not relax egress: setup reaches only the allowlisted setup proxy, and the
-agent phase reaches only the fixed inference-gateway and MCP-only relays. Each
-sandbox group gets its own internal Docker bridge populated with only that
-group container and the phase's trusted relay/proxy endpoints. The compose
-networks are service-discovery backplanes; Docker's `internal: true` alone does
-not isolate two containers that share one bridge. Docker atomically allocates
-each sandbox-generation/phase bridge as a `/29` from configurable
+does not relax the reviewed production egress defaults: setup reaches only the
+allowlisted setup proxy, and the `platform_only` agent phase reaches only the
+fixed inference-gateway and MCP-only relays. Explicit `trusted`, `custom`, or
+`full` operator overrides have their separately documented wider semantics and
+are not part of this acceptance shape. Each sandbox group gets its own internal
+Docker bridge populated with only that group container and the phase's trusted
+relay/proxy endpoints. The compose networks are service-discovery backplanes;
+Docker's `internal: true` alone does not isolate two containers that share one
+bridge, and an ordinary internal bridge still gives the host a gateway address
+that a sandbox could call. Every chat bridge additionally sets
+`com.docker.network.bridge.inhibit_ipv4=true`; network inspection must prove it,
+so the host has no IPv4 address on that bridge. The sandbox's configured DNS
+upstream is its own `127.0.0.1`: Docker embedded DNS still answers the fixed
+container aliases, while unknown names cannot become an off-bridge DNS channel.
+Docker atomically allocates each sandbox-generation/phase bridge as a `/29` from configurable
 `AGENT_EGRESS_CHAT_NETWORK_POOL`; setup→agent and stop remove the old bridge,
 wake recreates the required phase, and broker reconciliation prunes labelled
 orphans after a five-minute grace period so it cannot race an in-flight bridge
@@ -415,19 +433,25 @@ parallel rollout does not understand the new exact-SHA claim field; relying
 only on the target API's gate would leave a window in which the old API could
 assign work to an as-yet-unverified replacement.
 
-Migration `0021_native_turn_anchors` adds `native_turn_no` and its old-writer
+Migration `0023_native_turn_anchors` adds `native_turn_no` and its old-writer
 triggers in one short transaction, so the previous API can keep settling
 success/snapshot/fork writes as soon as the column exists. Migration
-`0022_native_turn_rollout_guard` then performs the historical backfill,
+`0024_native_turn_rollout_guard` then performs the historical backfill,
 validates the positive-number constraint, and builds the unique partial index
 concurrently after the schema lock has committed. Migration
-`0023_retained_followup_gate` leaves every pre-cutover row `NULL` and
+`0025_retained_followup_gate` leaves every pre-cutover row `NULL` and
 leaves the database default `NULL`; only the new API explicitly marks its own
 inserts eligible. The previous API can therefore keep inserting during the
 parallel migration window without accidentally upgrading disposable work.
-A disposable-era job that was still queued when migration began and became
-failed/cancelled later cannot silently seed a new native session; an actual
-retained membership is the independent proof that its chat remains runnable.
+A disposable-era job without an actual retained membership cannot accept a new
+follow-up, even when that old job is still queued or running when the new API
+arrives. This prevents an old in-flight runner from leaving a waiting child
+that the new scheduler would later materialize as a fresh native session. If an
+old API already inserted such a waiting tail before cutover, the new scheduler
+fails that pending tail when its parent settles instead of promoting it. An
+actual retained membership is the independent proof that the chat remains
+runnable; an explicit `TRUE` written by the new API is sufficient only for a
+new failed/cancelled parent that never established a retained group.
 
 When either the old API or the MCP relay is absent, readiness cannot complete
 (a true cold start has neither). The control script starts Postgres, migrates,
@@ -490,20 +514,25 @@ The implementation is ready only when these properties hold:
    shared group.
 10. Docker inspection shows no chat-state bind or volume mount and the
     configured Docker data root is the one the broker actually controls. Two
-    unrelated sandbox groups do not share a Docker network; a group's agent
-    network contains only its container and the fixed inference/MCP relays.
-    Stop and setup→agent release obsolete bridges, wake recreates one from the
-    configured pool, and startup removes abandoned labelled allocations.
+    unrelated sandbox groups do not share a Docker network; under the required
+    `platform_only` production tier, a group's agent network contains only its
+    container and the fixed inference/MCP relays. Stop and setup→agent release
+    obsolete bridges, wake recreates one from the configured pool, and startup
+    removes abandoned labelled allocations.
 11. Staging deployment requires broker credentials, enrolled host identity,
     exact attestation, and matching executor/slot capacity before a claim.
 12. `NEW`, `LIVE`, `RESTORED`, and `LOST` match native context truth; no replay
     is presented as recovery.
+13. A member attempt never receives its shared container's aggregate resource
+    totals. Unavailable, partial, and complete process observations remain
+    distinguishable on success, cancellation, timeout, and boundary failure.
 
 The repository suite and Docker-only local smoke cover the deterministic
-control-plane, host, broker, all-five-runtime, stop/restore, historical immediate Fork,
-and concurrent-turn paths. Real-provider traffic, production isolation under
-Kata/gVisor, adversarial multi-process tests, OOM/container-exit stress, and
-disk-pressure operations remain deployment gates where applicable.
+control-plane, host, broker, all-five-runtime, stop/restore, historical
+immediate Fork, and concurrent-turn paths. Real-provider traffic, production
+isolation under Kata/gVisor, adversarial multi-process tests,
+OOM/container-exit stress, and disk-pressure operations remain deployment
+gates where applicable.
 
 ## 14. Deferred persistence
 

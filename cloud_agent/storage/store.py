@@ -260,6 +260,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "state": row["state"],
         "cancel_requested": row["cancel_requested"],
         "terminal_resume_pending": row["terminal_resume_pending"],
+        "retained_followup_eligible": row["retained_followup_eligible"],
         "current_attempt_id": row["current_attempt_id"],
         "published_pr_url": row["published_pr_url"],
         "published_commit_sha": row["published_commit_sha"],
@@ -349,6 +350,87 @@ class AgentJobStore:
             """,
             thread_id,
             detail[:2000],
+        )
+
+    @staticmethod
+    async def _advance_waiting_follow_ups(
+        conn: Any,
+        *,
+        parent_job_id: str | None = None,
+    ) -> None:
+        """Release only descendants whose retained continuity is provable.
+
+        During the cutover, an old API can leave a waiting child behind an
+        in-flight disposable parent. Once that parent becomes terminal, the
+        child must not be promoted into a fresh retained sandbox and presented
+        as continuous. Fail the whole pending tail first, then release only a
+        child backed by a usable shared membership or by an explicitly
+        post-cutover parent that failed before producing native context.
+        """
+        await conn.execute(
+            """
+            WITH invalid_threads AS (
+                SELECT DISTINCT child.thread_id
+                FROM agent_jobs child
+                JOIN agent_jobs parent ON parent.id = child.parent_job_id
+                WHERE child.state IN ('waiting', 'queued')
+                  AND parent.state = ANY($2::text[])
+                  AND ($1::text IS NULL OR parent.id = $1)
+                  AND NOT (
+                        (
+                            parent.state IN ('failed', 'cancelled')
+                            AND parent.retained_followup_eligible IS TRUE
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM agent_thread_sandbox_memberships m
+                            JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                            WHERE m.thread_id = child.thread_id
+                              AND g.mode = 'shared_live'
+                              AND m.context_status <> 'lost'
+                              AND m.native_state <> 'lost'
+                              AND g.state NOT IN ('stopped_dirty', 'lost')
+                        )
+                  )
+            )
+            UPDATE agent_jobs pending
+            SET state = 'failed',
+                detail = 'not run because its parent predates retained-session continuity',
+                updated_at = NOW()
+            WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
+              AND pending.state IN ('waiting', 'queued')
+            """,
+            parent_job_id,
+            list(TERMINAL_STATES),
+        )
+        await conn.execute(
+            """
+            UPDATE agent_jobs child
+            SET state = 'queued', updated_at = NOW()
+            FROM agent_jobs parent
+            WHERE child.state = 'waiting'
+              AND child.parent_job_id = parent.id
+              AND parent.state = ANY($2::text[])
+              AND ($1::text IS NULL OR parent.id = $1)
+              AND (
+                    (
+                        parent.state IN ('failed', 'cancelled')
+                        AND parent.retained_followup_eligible IS TRUE
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM agent_thread_sandbox_memberships m
+                        JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                        WHERE m.thread_id = child.thread_id
+                          AND g.mode = 'shared_live'
+                          AND m.context_status <> 'lost'
+                          AND m.native_state <> 'lost'
+                          AND g.state NOT IN ('stopped_dirty', 'lost')
+                    )
+              )
+            """,
+            parent_job_id,
+            list(TERMINAL_STATES),
         )
 
     async def initialize(self) -> None:
@@ -761,13 +843,25 @@ class AgentJobStore:
             # wins the row first, the concurrent LOST writer subsequently
             # fails the inserted turn in its own transaction; if LOST wins,
             # no turn is inserted at all.
+            # Every lifecycle writer takes membership before sandbox. Locking
+            # the two joined rows in planner order would make that order
+            # implicit and could invert against host reconciliation.
+            await conn.fetchval(
+                """
+                SELECT thread_id
+                FROM agent_thread_sandbox_memberships
+                WHERE thread_id = $1
+                FOR UPDATE
+                """,
+                thread_id,
+            )
             sandbox = await conn.fetchrow(
                 """
                 SELECT g.state, m.context_status, TRUE AS shared_live
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 WHERE m.thread_id = $1 AND g.mode = 'shared_live'
-                FOR UPDATE OF g, m
+                FOR UPDATE OF g
                 """,
                 thread_id,
             )
@@ -782,15 +876,13 @@ class AgentJobStore:
                 sandbox["context_status"] == "lost" or sandbox["state"] in {"stopped_dirty", "lost"}
             ):
                 return {"error": "sandbox_context_lost"}
-            if (
-                sandbox is None
-                and parent["state"] in (FAILED, CANCELLED)
-                and parent["retained_followup_eligible"] is not True
-            ):
-                # Migration 0023 leaves every pre-cutover row NULL. It may
-                # have been queued when the migration ran and become terminal
-                # later, so only an explicit post-cutover TRUE may seed a new
-                # group without an existing retained membership.
+            if sandbox is None and parent["retained_followup_eligible"] is not True:
+                # Migration 0025 leaves every pre-cutover row NULL. It may
+                # still be in flight on a disposable runner, so accepting a
+                # waiting child now could later promote that child into a new
+                # retained group and silently fabricate continuity. Only an
+                # explicit post-cutover TRUE may proceed without an existing
+                # retained membership.
                 return {"error": "sandbox_context_lost"}
             if sandbox is None and parent["state"] == SUCCEEDED:
                 # A successful native turn must have settled inside its group.
@@ -933,6 +1025,15 @@ class AgentJobStore:
                 return {"error": "anchor_not_settled"}
             if not source["native_turn_no"]:
                 return {"error": "native_context_unavailable"}
+            await conn.fetchval(
+                """
+                SELECT thread_id
+                FROM agent_thread_sandbox_memberships
+                WHERE thread_id = $1
+                FOR UPDATE
+                """,
+                source["thread_id"],
+            )
             row = await conn.fetchrow(
                 f"""
                 SELECT m.*, g.generation AS sandbox_generation, g.host,
@@ -952,7 +1053,7 @@ class AgentJobStore:
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 WHERE m.thread_id = $1 AND g.mode = 'shared_live'
-                FOR UPDATE OF g, m
+                FOR UPDATE OF g
                 """,
                 source["thread_id"],
             )
@@ -1391,6 +1492,16 @@ class AgentJobStore:
             if operation["state"] == "ready":
                 anchor_id = str(operation["target_anchor_job_id"] or "") or None
             elif operation["state"] == "materialized":
+                # Match create_follow_up's thread -> job -> membership lock
+                # order. Locking the source job first here while a concurrent
+                # follow-up held the thread row produced a real PostgreSQL
+                # deadlock cycle (each transaction then waited for the other).
+                thread = await conn.fetchrow(
+                    "SELECT repo, title FROM agent_threads WHERE id = $1 FOR UPDATE",
+                    operation["source_thread_id"],
+                )
+                if thread is None:
+                    return None
                 source = await conn.fetchrow(
                     f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE id = $1 FOR UPDATE",
                     operation["source_job_id"],
@@ -1409,12 +1520,6 @@ class AgentJobStore:
                     or membership["native_session_id"] != operation["source_native_session_id"]
                     or not operation["target_native_session_id"]
                 ):
-                    return None
-                thread = await conn.fetchrow(
-                    "SELECT repo, title FROM agent_threads WHERE id = $1 FOR UPDATE",
-                    operation["source_thread_id"],
-                )
-                if thread is None:
                     return None
                 turns = await conn.fetch(
                     f"SELECT {_JOB_COLUMNS} FROM agent_jobs "
@@ -2824,17 +2929,7 @@ class AgentJobStore:
             # Follow-ups may be submitted while a run is active. Promote only
             # those whose direct parent has settled; a chain therefore
             # advances one turn at a time even with multiple waiting messages.
-            await conn.execute(
-                """
-                UPDATE agent_jobs child
-                SET state = 'queued', updated_at = NOW()
-                FROM agent_jobs parent
-                WHERE child.state = 'waiting'
-                  AND child.parent_job_id = parent.id
-                  AND parent.state = ANY($1::text[])
-                """,
-                list(TERMINAL_STATES),
-            )
+            await self._advance_waiting_follow_ups(conn)
             job_row = await conn.fetchrow(
                 f"""
                 SELECT {_QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox
@@ -3319,11 +3414,7 @@ class AgentJobStore:
                     sandbox_transition is not None
                     and sandbox_transition["context_status"] == "lost"
                 ):
-                    await conn.execute(
-                        "UPDATE agent_jobs SET state = 'queued', updated_at = NOW() "
-                        "WHERE parent_job_id = $1 AND state = 'waiting'",
-                        job_id,
-                    )
+                    await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
         return True
 
     async def append_event(
@@ -3416,11 +3507,21 @@ class AgentJobStore:
         runner may retry the post — a rollup describes a closed window, so a
         repeat is the same window said twice, never a second window to add.
 
-        Absent counters stay NULL: a backend the sampler could not read is not
-        a machine that used nothing, and ``coverage`` says which happened.
+        Absent counters stay NULL. Current shared-member writers intentionally
+        cannot assign whole-container totals to one member; historical sampler
+        failures likewise must not be reported as a machine that used nothing.
+
+        The per-call rows ride the same fence and the same transaction: they
+        describe spans inside this window, so a caller that could not write
+        the window must not be able to write its parts. They are replaced
+        rather than merged, because the list is one statement about the whole
+        attempt — a retry reporting fewer calls than a previous post means
+        fewer calls, not a set to union with.
         """
-        async with self._pool.acquire() as conn:
-            return bool(
+        tool_calls = rollup.get("tool_calls") or []
+        processes = rollup.get("processes") or []
+        async with self._pool.acquire() as conn, conn.transaction():
+            recorded = bool(
                 await conn.fetchval(
                     """
                     WITH live AS (
@@ -3432,9 +3533,12 @@ class AgentJobStore:
                     INSERT INTO agent_attempt_resources (
                         attempt_id, job_id, cpu_usec, mem_peak_bytes, mem_avg_bytes,
                         io_read_bytes, io_write_bytes, net_rx_bytes, net_tx_bytes,
-                        sample_count, coverage, sampler_version
+                        sample_count, coverage, sampler_version, tool_calls_truncated,
+                        tool_time_ms, process_observer, process_observation_complete,
+                        process_events_lost, processes_truncated
                     )
-                    SELECT live.id, live.job_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+                    SELECT live.id, live.job_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                           $13, $14, $15, $16, $17, $18
                     FROM live
                     ON CONFLICT (attempt_id) DO UPDATE SET
                         cpu_usec = EXCLUDED.cpu_usec,
@@ -3446,7 +3550,13 @@ class AgentJobStore:
                         net_tx_bytes = EXCLUDED.net_tx_bytes,
                         sample_count = EXCLUDED.sample_count,
                         coverage = EXCLUDED.coverage,
-                        sampler_version = EXCLUDED.sampler_version
+                        sampler_version = EXCLUDED.sampler_version,
+                        tool_calls_truncated = EXCLUDED.tool_calls_truncated,
+                        tool_time_ms = EXCLUDED.tool_time_ms,
+                        process_observer = EXCLUDED.process_observer,
+                        process_observation_complete = EXCLUDED.process_observation_complete,
+                        process_events_lost = EXCLUDED.process_events_lost,
+                        processes_truncated = EXCLUDED.processes_truncated
                     RETURNING attempt_id
                     """,
                     attempt_id,
@@ -3461,26 +3571,138 @@ class AgentJobStore:
                     int(rollup.get("sample_count") or 0),
                     float(rollup.get("coverage") or 0.0),
                     str(rollup.get("sampler_version") or "unknown"),
+                    bool(rollup.get("tool_calls_truncated")),
+                    rollup.get("tool_time_ms"),
+                    rollup.get("process_observer"),
+                    bool(rollup.get("process_observation_complete")),
+                    int(rollup.get("process_events_lost") or 0),
+                    bool(rollup.get("processes_truncated")),
                 )
             )
+            if not recorded:
+                return False
+            await conn.execute(
+                "DELETE FROM agent_tool_call_resources WHERE attempt_id = $1",
+                attempt_id,
+            )
+            if tool_calls:
+                await conn.executemany(
+                    """
+                    INSERT INTO agent_tool_call_resources (
+                        attempt_id, call_seq, tool_use_id, tool_name, timing_source,
+                        duration_ms, sample_count, overlap_n, measured_span_ms,
+                        cpu_usec_exclusive, cpu_usec_shared,
+                        mem_peak_exclusive_bytes, mem_peak_shared_bytes, process_count,
+                        process_cpu_usec, process_mem_peak_bytes,
+                        process_io_read_bytes, process_io_write_bytes,
+                        process_resources_partial
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                            $15, $16, $17, $18, $19)
+                    """,
+                    [
+                        (
+                            attempt_id,
+                            int(call["call_seq"]),
+                            str(call["tool_use_id"]),
+                            str(call["tool_name"]),
+                            str(call.get("timing_source") or "message"),
+                            call.get("duration_ms"),
+                            int(call.get("sample_count") or 0),
+                            int(call.get("overlap_n") or 1),
+                            call.get("measured_span_ms"),
+                            call.get("cpu_usec_exclusive"),
+                            call.get("cpu_usec_shared"),
+                            call.get("mem_peak_exclusive_bytes"),
+                            call.get("mem_peak_shared_bytes"),
+                            int(call.get("process_count") or 0),
+                            call.get("process_cpu_usec"),
+                            call.get("process_mem_peak_bytes"),
+                            call.get("process_io_read_bytes"),
+                            call.get("process_io_write_bytes"),
+                            bool(call.get("process_resources_partial")),
+                        )
+                        for call in tool_calls
+                    ],
+                )
+            await conn.execute(
+                "DELETE FROM agent_process_observations WHERE attempt_id = $1",
+                attempt_id,
+            )
+            if processes:
+                await conn.executemany(
+                    """
+                    INSERT INTO agent_process_observations (
+                        attempt_id, process_seq, uid, pid, tgid, ppid, comm, executable,
+                        started_offset_ms, duration_ms, exit_code,
+                        observed_fork, observed_exec, observed_exit, tool_call_seqs,
+                        cpu_usec, mem_peak_bytes, io_read_bytes, io_write_bytes,
+                        io_rchar_bytes, io_wchar_bytes
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                            $14, $15, $16, $17, $18, $19, $20, $21)
+                    """,
+                    [
+                        (
+                            attempt_id,
+                            int(process["process_seq"]),
+                            int(process["uid"]),
+                            int(process["pid"]),
+                            int(process["tgid"]),
+                            process.get("ppid"),
+                            str(process["comm"]),
+                            process.get("executable"),
+                            int(process.get("started_offset_ms") or 0),
+                            process.get("duration_ms"),
+                            process.get("exit_code"),
+                            bool(process.get("observed_fork")),
+                            bool(process.get("observed_exec")),
+                            bool(process.get("observed_exit")),
+                            [int(seq) for seq in process.get("tool_call_seqs") or []],
+                            process.get("cpu_usec"),
+                            process.get("mem_peak_bytes"),
+                            process.get("io_read_bytes"),
+                            process.get("io_write_bytes"),
+                            process.get("io_rchar_bytes"),
+                            process.get("io_wchar_bytes"),
+                        )
+                        for process in processes
+                    ],
+                )
+            return True
 
     async def job_turn_telemetry(self, *, job_id: str) -> dict[str, Any] | None:
         """Read how a job's newest attempt ran: continuity, window, resources.
 
         Newest attempt rather than the current one: a retried turn's earlier
         attempts each have their own window, and the one a reader wants is the
-        one that produced the result in front of them. One round trip, because
-        this rides the job-detail read that the thread view already makes.
+        one that produced the result in front of them. One repeatable-read
+        snapshot keeps the aggregate, per-call rows, and process rows from
+        different rollup retries out of the same response. The child rows stay
+        separate statements so counters arrive as numbers rather than as JSON
+        this pool would hand back as text.
         """
-        async with self._pool.acquire() as conn:
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(
+                isolation="repeatable_read",
+                readonly=True,
+            ),
+        ):
             row = await conn.fetchrow(
                 """
-                SELECT a.continuity_mode, a.context_status,
+                SELECT a.id AS attempt_id, a.continuity_mode, a.context_status,
                        a.started_at, a.finished_at,
                        r.cpu_usec, r.mem_peak_bytes, r.mem_avg_bytes,
                        r.io_read_bytes, r.io_write_bytes,
                        r.net_rx_bytes, r.net_tx_bytes,
-                       r.sample_count, r.coverage, r.sampler_version
+                       r.sample_count, r.coverage, r.sampler_version, r.tool_time_ms,
+                       r.process_observer,
+                       COALESCE(r.process_observation_complete, FALSE)
+                           AS process_observation_complete,
+                       COALESCE(r.process_events_lost, 0) AS process_events_lost,
+                       COALESCE(r.processes_truncated, FALSE) AS processes_truncated,
+                       COALESCE(r.tool_calls_truncated, FALSE) AS tool_calls_truncated
                 FROM agent_attempts a
                 LEFT JOIN agent_attempt_resources r ON r.attempt_id = a.id
                 WHERE a.job_id = $1
@@ -3489,7 +3711,40 @@ class AgentJobStore:
                 """,
                 job_id,
             )
-            return dict(row) if row else None
+            if row is None:
+                return None
+            telemetry = dict(row)
+            calls = await conn.fetch(
+                """
+                SELECT call_seq, tool_use_id, tool_name, timing_source, duration_ms,
+                       sample_count, overlap_n, measured_span_ms,
+                       cpu_usec_exclusive, cpu_usec_shared,
+                       mem_peak_exclusive_bytes, mem_peak_shared_bytes, process_count,
+                       process_cpu_usec, process_mem_peak_bytes,
+                       process_io_read_bytes, process_io_write_bytes,
+                       process_resources_partial
+                FROM agent_tool_call_resources
+                WHERE attempt_id = $1
+                ORDER BY call_seq
+                """,
+                telemetry["attempt_id"],
+            )
+            telemetry["tool_calls"] = [dict(call) for call in calls]
+            processes = await conn.fetch(
+                """
+                SELECT process_seq, uid, pid, tgid, ppid, comm, executable,
+                       started_offset_ms, duration_ms, exit_code,
+                       observed_fork, observed_exec, observed_exit, tool_call_seqs,
+                       cpu_usec, mem_peak_bytes, io_read_bytes, io_write_bytes,
+                       io_rchar_bytes, io_wchar_bytes
+                FROM agent_process_observations
+                WHERE attempt_id = $1
+                ORDER BY process_seq
+                """,
+                telemetry["attempt_id"],
+            )
+            telemetry["processes"] = [dict(process) for process in processes]
+            return telemetry
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
@@ -3776,13 +4031,24 @@ class AgentJobStore:
             "SELECT 1 FROM agent_thread_sandboxes WHERE thread_id = $1",
             thread_id,
         )
+        # Lock membership first everywhere; Docker reconciliation uses the
+        # same order before it fences the shared group row.
+        await conn.fetchval(
+            """
+            SELECT thread_id
+            FROM agent_thread_sandbox_memberships
+            WHERE thread_id = $1
+            FOR UPDATE
+            """,
+            thread_id,
+        )
         membership = await conn.fetchrow(
             """
             SELECT m.*, g.origin_thread_id
             FROM agent_thread_sandbox_memberships m
             JOIN agent_sandboxes g ON g.id = m.sandbox_id
             WHERE m.thread_id = $1 AND g.mode = 'shared_live'
-            FOR UPDATE OF g, m
+            FOR UPDATE OF g
             """,
             thread_id,
         )
@@ -3838,7 +4104,7 @@ class AgentJobStore:
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 WHERE m.thread_id = $1
-                FOR UPDATE OF g, m
+                FOR UPDATE OF g
                 """,
                 thread_id,
             )
@@ -3927,7 +4193,18 @@ class AgentJobStore:
         context_status: str,
     ) -> dict[str, Any] | None:
         """Confirm Docker start under both attempt and sandbox generations."""
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            locked_membership = await conn.fetchval(
+                """
+                SELECT thread_id
+                FROM agent_thread_sandbox_memberships
+                WHERE thread_id = $1
+                FOR UPDATE
+                """,
+                thread_id,
+            )
+            if locked_membership is None:
+                return None
             shared = await conn.fetchrow(
                 """
                 WITH updated_group AS (
@@ -4113,6 +4390,22 @@ class AgentJobStore:
     ) -> dict[str, Any] | None:
         """Close one turn boundary and arm deactivation without deleting state."""
         async with self._pool.acquire() as conn, conn.transaction():
+            # Match create_follow_up and fork finalization: thread -> job ->
+            # membership. Taking the membership first while a concurrent send
+            # held the job produced a real PostgreSQL deadlock cycle.
+            locked_thread = await conn.fetchval(
+                "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE",
+                thread_id,
+            )
+            if locked_thread is None:
+                return None
+            locked_job = await conn.fetchval(
+                "SELECT id FROM agent_jobs WHERE id = $1 AND thread_id = $2 FOR UPDATE",
+                job_id,
+                thread_id,
+            )
+            if locked_job is None:
+                return None
             shared = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandbox_memberships m
@@ -4287,6 +4580,22 @@ class AgentJobStore:
     ) -> str | None:
         """Join one Docker group observation with independently fenced members."""
         async with self._pool.acquire() as conn, conn.transaction():
+            # The stopped path updates every durable member, including one a
+            # partial host census omitted. Lock the complete bounded group in
+            # deterministic order before its sandbox row. Settlement,
+            # admission, fork, and terminal writers use the same membership
+            # -> sandbox order; taking only reported members would recreate
+            # the inverse order when the bulk stopped-state update runs.
+            await conn.fetch(
+                """
+                SELECT thread_id
+                FROM agent_thread_sandbox_memberships
+                WHERE sandbox_id = $1
+                ORDER BY thread_id
+                FOR UPDATE
+                """,
+                sandbox_id,
+            )
             group = await conn.fetchrow(
                 """
                 SELECT * FROM agent_sandboxes
@@ -4890,11 +5199,7 @@ class AgentJobStore:
                     "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
                     job_id,
                 )
-                await conn.execute(
-                    "UPDATE agent_jobs SET state = 'queued', updated_at = NOW() "
-                    "WHERE parent_job_id = $1 AND state = 'waiting'",
-                    job_id,
-                )
+                await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
                 return CANCELLED
             if state in (RUNNING, PUBLISHING):
                 await conn.execute(
@@ -5927,11 +6232,7 @@ class AgentJobStore:
                     # boundary as ``transition``. Keep the linear chat moving
                     # when the context is usable; the LOST branch above has
                     # already failed every unrunnable descendant instead.
-                    await conn.execute(
-                        "UPDATE agent_jobs SET state = 'queued', updated_at = NOW() "
-                        "WHERE parent_job_id = $1 AND state = 'waiting'",
-                        job_id,
-                    )
+                    await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
                 action_result: dict[str, Any] = {
                     "job_id": job_id,
                     "attempt_id": attempt_id,

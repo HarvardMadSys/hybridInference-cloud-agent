@@ -351,22 +351,49 @@ class _Control:
         self.events.append((event.event_type, event.payload))
 
 
-def test_shared_turn_cancellation_interrupts_the_live_cli():
-    supervisor = _Supervisor()
+@pytest.mark.parametrize(
+    ("heart", "timeout_s", "expected_code"),
+    [
+        (SimpleNamespace(cancel_requested=True, lease_lost=False), 30.0, 130),
+        (SimpleNamespace(cancel_requested=False, lease_lost=False), -1.0, 124),
+    ],
+)
+def test_shared_interrupt_drains_the_brokers_terminal_resource_frame(
+    heart,
+    timeout_s,
+    expected_code,
+):
+    resources = {
+        "process_observer": "kata-guest-ebpf-v1",
+        "process_observation_complete": True,
+        "processes": [{"pid": 412}],
+    }
+    supervisor = _Supervisor(
+        [
+            {
+                "kind": "result",
+                "status": "cancelled",
+                "exit_code": 130,
+                "resources": resources,
+            }
+        ]
+    )
     control = _Control()
 
-    result = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, result = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
         job=_JOB,
         control=control,
-        heart=SimpleNamespace(cancel_requested=True, lease_lost=False),
+        heart=heart,
         lease_token="lease",
-        timeout_s=30,
+        timeout_s=timeout_s,
     )
 
-    assert result[:3] == (130, "", [])
+    assert code == expected_code
+    assert result is not None and result["resources"] is resources
     assert supervisor.interrupted is True
-    assert ("lifecycle", {"phase": "cancelled_by_owner"}) in control.events
+    if expected_code == 130:
+        assert ("lifecycle", {"phase": "cancelled_by_owner"}) in control.events
     assert supervisor.stream.closed is True
 
 
@@ -421,7 +448,6 @@ def test_shared_turn_streams_events_and_requires_a_result():
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
     backend = ProcessBackend(acknowledged_unsafe=True)
     monkeypatch.setattr(backend, "preflight", lambda **_kwargs: None)
-    monkeypatch.setattr(runner_mod, "daemon_reachable", lambda: None)
 
     with pytest.raises(RuntimeError, match="cannot attest shared-sandbox-v1"):
         runner_mod.run_forever(

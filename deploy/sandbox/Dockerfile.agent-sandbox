@@ -21,6 +21,35 @@
 # changes its own event format, and the normalized event mapping in
 # cloud_agent_host/runtimes.py is written against a specific shape.
 
+# Build the trusted Kata guest observer outside the final image.  The BPF
+# object is CO-RE: it is compiled once here and relocated against the guest
+# kernel's BTF when the host starts it.  clang/libbpf headers never enter the
+# untrusted runtime image.
+FROM debian:bookworm-slim AS guest-observer-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang \
+        gcc \
+        libc6-dev \
+        libbpf-dev \
+        libelf-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY deploy/sandbox/guest-observer.h \
+     deploy/sandbox/guest-observer.bpf.c \
+     deploy/sandbox/guest-observer.c \
+     deploy/sandbox/tool-mark.h \
+     deploy/sandbox/tool-mark.c ./
+RUN clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
+        -I"/usr/include/$(gcc -dumpmachine)" \
+        -c guest-observer.bpf.c -o freeinference-guest-observer.bpf.o \
+    && gcc -O2 -Wall -Wextra -Werror guest-observer.c \
+        -o freeinference-guest-observer -lbpf -lelf -lz \
+    && gcc -O2 -Wall -Wextra -Werror tool-mark.c \
+        -o freeinference-tool-mark
+
 FROM node:22-bookworm-slim
 
 # Pin every agent runtime. Bump deliberately, and re-run the agent-loop
@@ -41,14 +70,14 @@ FROM node:22-bookworm-slim
 # are the pair that has to agree, so the reviewed value belongs in the same
 # tree as the code it was reviewed against.
 #
-# Each is also a build argument a deployment may override
-# (`deploy/host/sandbox_host.sh` passes them from that host's `.env`), because
-# *which* reviewed version an environment runs is deployment configuration, not
-# source. Without that, "let staging soak the new CLI for a week while
-# production stays put" was a change to the code both environments build from,
-# and every version bump — including a revert at 3am — needed a pull request.
-# An override must still be an exact version; the check at the end of this file
-# is what makes that true rather than merely asked for.
+# They remain build arguments so the Dockerfile can derive labels and install
+# paths from one value, but the supported host deploy deliberately refuses a
+# per-machine override. These defaults are part of the shared protocol
+# attestation and must change in source together with
+# `SHARED_SANDBOX_RUNTIME_PINS`. To soak another reviewed CLI without changing
+# the default, add its exact version to the matching `*_EXTRA_VERSIONS` menu and
+# select it through runner policy. The check at the end still proves every
+# advertised default is exact and matches the binary on PATH.
 ARG CLAUDE_CODE_VERSION=2.1.220
 ARG CODEX_VERSION=0.145.0
 ARG PI_VERSION=0.73.1
@@ -100,6 +129,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-venv \
         build-essential \
+        libbpf1 \
+        libelf1 \
         tini \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
@@ -151,6 +182,8 @@ RUN python3 -m venv /opt/claude-agent-sdk \
 # comma-separated string it will happily stamp onto an attempt.
 LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.helper.claude-agent-sdk.version="0.2.148" \
+      org.freeinference.helper.guest-observer.version="1" \
+      org.freeinference.helper.tool-mark.version="1" \
       org.freeinference.runtime.codex.version="${CODEX_VERSION}" \
       org.freeinference.runtime.pi.version="${PI_VERSION}" \
       org.freeinference.runtime.opencode.version="${OPENCODE_VERSION}" \
@@ -176,10 +209,19 @@ COPY deploy/sandbox/kilo-freeinference /usr/local/bin/kilo-freeinference
 COPY deploy/sandbox/http-agent-live-bridge /usr/local/bin/http-agent-live-bridge
 COPY deploy/sandbox/claude-session-fork /usr/local/bin/claude-session-fork
 COPY deploy/sandbox/member-process-reaper /usr/local/bin/member-process-reaper
+COPY --from=guest-observer-build /src/freeinference-guest-observer \
+     /usr/local/libexec/freeinference-guest-observer
+COPY --from=guest-observer-build /src/freeinference-guest-observer.bpf.o \
+     /usr/local/libexec/freeinference-guest-observer.bpf.o
+COPY --from=guest-observer-build /src/freeinference-tool-mark \
+     /usr/local/libexec/freeinference-tool-mark
 RUN chmod 0755 /usr/local/bin/pi-freeinference /usr/local/bin/opencode-freeinference \
         /usr/local/bin/kilo-freeinference /usr/local/bin/http-agent-live-bridge \
         /usr/local/bin/claude-session-fork \
-    && chmod 0555 /usr/local/bin/member-process-reaper
+        /usr/local/libexec/freeinference-guest-observer \
+        /usr/local/libexec/freeinference-tool-mark \
+    && chmod 0555 /usr/local/bin/member-process-reaper \
+    && chmod 0644 /usr/local/libexec/freeinference-guest-observer.bpf.o
 
 # `--ignore-user-config` does not suppress a trusted repository's
 # .codex/config.toml. Codex 0.145 applies this requirements allowlist after all

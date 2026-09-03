@@ -130,6 +130,9 @@ jobs:
     environment: staging
     timeout-minutes: 45
     concurrency:
+      # Serialize staging host rollouts with staging only. Production owns a
+      # different Compose project/image/network/state root and may deploy in
+      # parallel; the host preflight only checks Kata and never mutates it.
       group: cloud-agent-host-deploy
       cancel-in-progress: false
 

@@ -12,6 +12,11 @@ SHARED_SANDBOX_CAPABILITY = "shared-sandbox-v1"
 NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
 SHARED_DEPLOYMENT_CAPABILITY_PREFIX = "shared-sandbox-deployment:"
 ENV_DEPLOYMENT_SHA = "AGENT_DEPLOYMENT_SHA"
+#: Stored in the legacy-named ``sampler_version`` field for a current retained
+#: member turn.  Sharing this value with the control-plane schema makes the
+#: no-container-attribution invariant a wire-level contract, not a convention
+#: that a buggy runner can accidentally violate.
+SHARED_MEMBER_ACCOUNTING_VERSION = "shared-member-v1"
 # v2 adds the provider-transcript anchor carried by native fork requests.  A
 # v1 retained container may still serve ordinary follow-up turns, but must not
 # be asked to interpret a historical anchor that its bundled helpers ignore.
@@ -23,7 +28,15 @@ SHARED_SANDBOX_RUNTIME_PINS = {
     "opencode": "1.18.9",
     "kilo": "7.4.17",
 }
-SHARED_SANDBOX_HELPER_PINS = {"claude-agent-sdk": "0.2.148"}
+SHARED_SANDBOX_HELPER_PINS = {
+    "claude-agent-sdk": "0.2.148",
+    "guest-observer": "1",
+    "tool-mark": "1",
+}
+# Protocol v1 predates guest-kernel accounting. Those helpers are not needed
+# to continue an ordinary turn in an already-owned retained container; the
+# SDK pin is the reviewed compatibility floor for that old replica.
+SHARED_SANDBOX_V1_HELPER_PINS = {"claude-agent-sdk": "0.2.148"}
 
 
 def shared_deployment_capability(deployment_sha: str) -> str:

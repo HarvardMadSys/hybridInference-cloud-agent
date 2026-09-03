@@ -263,8 +263,15 @@ put both fixed tunnel aliases on the configured discovery backplane. The host
 then creates one internal bridge per sandbox group and attaches only those two
 relay containers plus that group's chat container. Docker's `internal: true`
 blocks routing off a bridge but does **not** block containers on the same bridge
-from reaching each other; using the compose backplane directly for every chat
-would therefore violate cross-chat isolation. If either relay alias is missing,
+from reaching each other, and by itself still leaves the bridge gateway
+reachable as a host address. Each chat bridge therefore also sets
+`com.docker.network.bridge.inhibit_ipv4=true`, so Docker assigns no host-side
+IPv4 address to it. The sandbox also sets `--dns 127.0.0.1`: Docker's embedded
+DNS still resolves the relay aliases, while unknown queries are forwarded from
+the sandbox namespace to its own loopback and fail instead of becoming a DNS
+egress path (including on daemons affected by CVE-2024-29018). Using the compose
+backplane directly for every chat, or an internal bridge without these guards,
+would violate the isolation contract. If either relay alias is missing,
 private-network creation fails before the Agent CLI starts.
 
 The host deployment check probes both relays: it starts containers on the
@@ -472,6 +479,57 @@ containerd finds it without a unit-file edit. The version is pinned in the
 script; upgrading is a two-line change there, and `--check` then fails on every
 host still carrying the old one.
 
+The setup also selects the release's packaged `vmlinuz-debug.container` for
+the default Kata configuration. That kernel is built with Kata's reviewed
+eBPF/BTF debug fragment; the ordinary guest kernel is not sufficient for the
+process observer. `--check` verifies both the asset and the active config, and
+runner preflight goes further: it starts a disposable sandbox with the same
+non-root, capability-dropped and `no-new-privileges` shape as a real retained
+guest, then exercises the same fixed privileged exec used to start the bundled
+observer. Its self-test requires all three lifecycle probes to attach, executes
+one short-lived child, and requires that child's fork, exec, and exit records to
+arrive through the ring buffer. A missing BPF syscall, BTF image, tracepoint,
+event-delivery path, or exec-time permission is therefore a deployment failure
+before the runner can claim work, not an empty process list under a completed
+turn. The same probe also requires the fixed tool-marker helper used by Claude's
+exact boundaries. See Kata's
+[debug-kernel build contract](https://github.com/kata-containers/kata-containers/blob/main/tools/packaging/kernel/README.md#debug-kernel).
+
+Only that fixed, image-bundled observer runs as guest root. Agent CLIs and
+repository code still run under their per-member UIDs with all capabilities
+dropped and `no-new-privileges`; they cannot read, edit, or directly inject
+records into the root-only journal. Claude's fixed non-root marker helper talks
+to it over a credential-checked Unix socket. A same-UID tool can still execute
+that helper, so exact per-tool association is diagnostic, never a security or
+billing authority; the eBPF lifecycle census itself is independent of marks.
+Kata containers retain `CAP_BPF` in the bounding set only so Docker's
+creation-time seccomp profile admits the later helper syscall. Non-root agent
+processes still have empty permitted and effective capability sets, and
+`no-new-privileges` prevents them from promoting that bounding bit. A shared
+container's periodic Docker statistics are group totals, so current member
+turns deliberately report aggregate CPU/memory/I/O/network as unavailable
+(`coverage=0`, `sampler_version=shared-member-v1`) instead of duplicating a
+sibling's work. Process existence is separate, event-driven telemetry:
+fork/exec/exit survives even
+when a process begins and ends entirely between two statistics samples, and
+the kernel's records carry what that process consumed — the group's peak RSS
+and the bytes it read from and dirtied to storage at exit, and its scheduler
+runtime once it left the CPU for the last time (tick-based CPU time reads
+zero for most sub-millisecond processes, so it is not used). Those are the
+per-call CPU, memory and I/O numbers under Kata: a process is charged to the
+tool call whose window alone contains its start, and a process that
+overlapping calls could both own, one whose thread group has not fully
+settled, or any process in a census that lost events, is charged to no call
+and marks those calls as partial. Work done inside the Agent CLI's own
+process belongs to no call. The self-test in preflight also requires a
+sub-millisecond child's records to carry non-zero CPU, a non-zero peak RSS
+and a group-exit flag, so a guest kernel whose BTF does not relocate them
+fails deployment rather than reporting zeros; storage and read/write byte
+accounting are kernel configuration and arrive as unavailable when absent.
+The per-turn table is therefore a member-UID lifecycle census of process starts observed
+after that turn's cursor, not a point-in-time snapshot of resident processes
+that were already running before the turn and not a whole-container total.
+
 Requirements: an x86_64 Linux host, bare metal or with nested virtualization
 enabled. Kata cannot run without KVM.
 
@@ -543,15 +601,18 @@ interpret a historical anchor.
 The Docker socket (or reviewed mTLS Engine endpoint) is the only host
 control/data interface for chat state. No repository, workspace, Agent CLI
 home, or session file is mapped from the host. Historical rows without a
-shared retained sandbox are non-runnable and fail closed.
+shared retained sandbox are non-runnable and fail closed, including an old
+in-flight parent observed during rollout. A waiting tail inserted by the old
+API before cutover is failed when that parent settles; it is never promoted
+into a newly fabricated native session.
 
-### One chat inactivity clock (and separate safety watchdogs)
+### One sandbox-group inactivity clock (and separate safety watchdogs)
 
 `AGENT_CHAT_IDLE_TIMEOUT_S` is the sandbox group's sole lifecycle timeout and
 defaults to **1800 seconds (30 minutes)**. Once the latest activity across all
 members is durably settled and no member/broker operation is active, the host
-Session Supervisor
-issues `docker stop`, disconnects and deletes the phase bridge, but never issues
+Shared Session Supervisor issues `docker stop`, disconnects and deletes the phase
+bridge, but never issues
 `docker rm`. A later acquire rebuilds the correct bridge, starts, and re-inspects
 the same labelled container. Supervisor shutdown itself leaves all chat
 containers untouched. At broker startup, reconciliation stops a still-running
@@ -675,10 +736,18 @@ controls that wait and defaults to 900 seconds.
 Both Actions jobs use the workflow commit's deployment orchestrator against a
 separate target checkout. Online rollback therefore cannot execute a
 pre-fence target's old scripts; commits without the current
-`deploy/DEPLOY_PROTOCOL` are refused before changing Docker state. Database
-changes are expand-first. Never downgrade columns underneath a still-running
-new API; roll code back to a schema-compatible commit first and treat any later
-contract migration as a separate reviewed operation.
+`deploy/DEPLOY_PROTOCOL`, or with an incompatible protocol value, are refused
+before changing Docker state. Protocol `shared-live-exact-sha-v2` deliberately
+excludes ancestors whose Alembic revision identifiers predate the merged
+`0021`–`0025` chain; those commits are not schema-compatible rollback targets.
+Database changes are expand-first. Never downgrade columns underneath a
+still-running new API; roll code back to a schema-compatible commit first and
+treat any later contract migration as a separate reviewed operation.
+
+`workflow_run` loads its workflow definition from the repository's default
+branch. Synchronize this orchestrator change to `main` before relying on the
+rollback fence, and do not manually dispatch an older default-branch workflow
+against staging during that rollout window.
 
 This fence is unconditional because retained/shared-live is the only executor.
 It cannot enable a legacy path and it cannot be bypassed by stale
@@ -1067,8 +1136,11 @@ pointing at it. The environment variables are a convenience for package
 managers, not the boundary: a setup script that ignored them finds a network
 that cannot route anywhere.
 
-The agent turn — the part driven by untrusted model output — still reaches only
-the fixed inference and MCP relays. That does not change when setup is opened.
+With the supported `platform_only` agent tier, the agent turn — the part driven
+by untrusted model output — still reaches only the fixed inference and MCP
+relays. Opening the separate setup phase does not change that. Selecting an
+agent-phase `trusted`, `custom`, or `full` tier is an explicit wider operator
+policy, not a side effect of setup access.
 
 The renderer's named volume contains only generated Squid configuration. It is
 host infrastructure, not chat state: Docker inspection of every chat container

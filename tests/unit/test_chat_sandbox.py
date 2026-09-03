@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -11,9 +12,11 @@ import pytest
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     CHAT_BOOTSTRAP_NETWORK,
+    CHAT_DNS_UPSTREAM,
     CHAT_IMAGE_DIGEST_LABEL,
     CHAT_NAMESPACE_LABEL,
     CHAT_NETWORK_BASE_LABEL,
+    CHAT_NETWORK_INHIBIT_IPV4_OPTION,
     CHAT_NETWORK_LABEL,
     CHAT_SANDBOX_ID_LABEL,
     CHAT_SANDBOX_LABEL,
@@ -30,7 +33,17 @@ from cloud_agent_host.chat_sandbox import (
     _RetainedTerminalProcess,
 )
 from cloud_agent_host.egress import EgressPolicy, EgressTier
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_BINARY,
+    GUEST_OBSERVER_ROOT,
+    GUEST_OBSERVER_ROTATE_BYTES,
+    GuestObservation,
+    GuestObserverController,
+    GuestObserverCursor,
+    GuestObserverSnapshot,
+    GuestObserverStatus,
+)
+from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 
 
 def _spec() -> ChatSandboxSpec:
@@ -54,6 +67,29 @@ def _isolated_policy() -> EgressPolicy:
         proxies={EgressTier.TRUSTED: "http://package-proxy:3128"},
         no_proxy=("agent-gateway", "agent-mcp", "localhost", "127.0.0.1"),
     )
+
+
+def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
+    status = snapshot.status
+    return json.dumps(
+        {
+            "status": {
+                "version": 1,
+                "ready": True,
+                "pid": status.pid,
+                "poll_seq": status.poll_seq,
+                "event_seq": status.event_seq,
+                "lost": status.lost,
+                "journal_dropped": status.journal_dropped,
+                "journal_bytes": status.journal_bytes,
+                "journal_dev": status.journal_dev,
+                "journal_ino": status.journal_ino,
+            },
+            "journal_size": snapshot.journal_size,
+            "guest_mono_ns": snapshot.guest_mono_ns,
+        },
+        separators=(",", ":"),
+    ).encode()
 
 
 def _inspect_payload(
@@ -108,9 +144,320 @@ def test_create_command_has_stable_identity_and_no_chat_state_mount_or_secret():
     assert command[-3] == "sha256:image-pinned"
     assert f"{ACTIVATION_TMPFS}:rw,nosuid,nodev,noexec" in joined
     assert f"--network {CHAT_BOOTSTRAP_NETWORK}" in joined
+    assert f"--dns {CHAT_DNS_UPSTREAM}" in joined
     assert "--cap-drop ALL" in joined
     assert "--security-opt no-new-privileges" in joined
     assert "--pids-limit 512" in joined
+    assert "sleep 2147483647 & child=$!" in command[-1]
+
+
+def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(
+            image="registry/agent:1",
+            network="agent-net",
+            runtime=KATA_RUNTIME,
+        )
+    )
+
+    command = manager.build_create_command(spec)
+    joined = " ".join(command)
+
+    assert f"{GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0" in joined
+    assert "--cap-drop ALL" in joined
+    assert "--cap-add BPF" in joined
+    assert "--security-opt no-new-privileges" in joined
+    assert command[command.index("--runtime") + 1] == KATA_RUNTIME
+
+
+def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
+    closing = GuestObserverSnapshot(
+        status=GuestObserverStatus(91, 20, 8, 0, 0, 0, 7, 19),
+        journal_size=0,
+        guest_mono_ns=2_000_000_000,
+    )
+    flushed = GuestObserverSnapshot(
+        status=GuestObserverStatus(91, 22, 8, 0, 0, 0, 7, 19),
+        journal_size=0,
+        guest_mono_ns=2_050_000_000,
+    )
+    waits: list[int | None] = []
+
+    def capture(argv, _timeout_s):
+        if GUEST_OBSERVER_BINARY in argv:
+            wanted = int(argv[-2])
+            waits.append(None if wanted < 0 else wanted)
+            snapshot = closing if wanted < 0 else flushed
+            return SimpleNamespace(
+                returncode=0,
+                stdout=_observer_snapshot_payload(snapshot),
+                stderr=b"",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    controller = GuestObserverController(
+        capture=capture,
+        privileged=lambda *_args: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
+    )
+    cursor = GuestObserverCursor(
+        uid=MEMBER_UID_BASE,
+        offset=0,
+        poll_seq=3,
+        observer_pid=91,
+        event_seq=7,
+        journal_dev=7,
+        journal_ino=19,
+        guest_mono_ns=1_000_000_000,
+        available=True,
+    )
+
+    observation = controller.finish(cursor)
+
+    assert observation.complete is True
+    # The first post-turn publication can have completed its poll before the
+    # closing status was read.  Crossing the following publication proves a
+    # full drain happened after that read.
+    assert waits == [None, 21]
+
+
+def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
+    calls: list[tuple[list[str], bool]] = []
+
+    def privileged(argv, detach, _timeout_s):
+        calls.append((list(argv), detach))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    ready = GuestObserverSnapshot(
+        status=GuestObserverStatus(91, 1, 0, 0, 0, 0, 7, 19),
+        journal_size=0,
+        guest_mono_ns=1,
+    )
+    controller = GuestObserverController(
+        capture=lambda *_args: SimpleNamespace(
+            returncode=0,
+            stdout=_observer_snapshot_payload(ready),
+            stderr=b"",
+        ),
+        privileged=privileged,
+    )
+
+    controller.start()
+
+    cleanup_argv, cleanup_detached = calls[0]
+    assert cleanup_detached is False
+    assert cleanup_argv[-1] == GUEST_OBSERVER_BINARY
+    compile(cleanup_argv[2], "<guest-observer-cleanup>", "exec")
+    assert "os.path.samefile" in cleanup_argv[2]
+    assert "stale guest observer did not exit" in cleanup_argv[2]
+    assert calls[1] == ([GUEST_OBSERVER_BINARY], True)
+
+
+def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
+    )
+    calls: list[list[str]] = []
+    payload = json.dumps(
+        {
+            "status": {
+                "version": 1,
+                "ready": True,
+                "pid": 91,
+                "poll_seq": 22,
+                "event_seq": 8,
+                "lost": 0,
+                "journal_dropped": 0,
+                "journal_bytes": 0,
+                "journal_dev": 7,
+                "journal_ino": 19,
+            },
+            "journal_size": 0,
+            "guest_mono_ns": 2_050_000_000,
+        }
+    ).encode()
+
+    def capture(_spec, argv, **_kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout=payload, stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", capture)
+
+    snapshot = manager._guest_observer_snapshot(_spec(), after_poll_seq=21)
+
+    assert snapshot.status.poll_seq == 22
+    command = calls[0]
+    compile(command[2], "<guest-observer-snapshot>", "exec")
+    assert command[-3:] == [GUEST_OBSERVER_BINARY, "21", "3.0"]
+    assert "os.path.samefile" in command[2]
+
+
+def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
+    snapshot = GuestObserverSnapshot(
+        status=GuestObserverStatus(91, 21, 8, 0, 0, 10, 7, 19),
+        journal_size=10,
+        guest_mono_ns=2_050_000_000,
+    )
+
+    def capture(argv, _timeout_s):
+        stdout = _observer_snapshot_payload(snapshot) if GUEST_OBSERVER_BINARY in argv else b"short"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+
+    controller = GuestObserverController(
+        capture=capture,
+        privileged=lambda *_args: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
+    )
+    cursor = GuestObserverCursor(
+        uid=MEMBER_UID_BASE,
+        offset=0,
+        observer_pid=91,
+        event_seq=7,
+        journal_dev=7,
+        journal_ino=19,
+        guest_mono_ns=1_000_000_000,
+        available=True,
+    )
+
+    observation = controller.finish(cursor)
+
+    assert observation.source is None
+    assert observation.complete is False
+    assert "published fence" in (observation.detail or "")
+
+
+def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="registry/agent:1", network="agent-net", runtime=KATA_RUNTIME)
+    )
+
+    class Controller:
+        def __init__(self):
+            self.pid = 91
+            self.size = 0
+            self.starts = 0
+            self.restart_choices: list[bool] = []
+
+        def snapshot(self, **_kwargs):
+            return GuestObserverSnapshot(
+                status=GuestObserverStatus(self.pid, 1, 0, 0, 0, self.size),
+                journal_size=self.size,
+                guest_mono_ns=1,
+            )
+
+        def start(self):
+            self.starts += 1
+            self.pid += 1
+            self.size = 0
+
+        def rotate_if_needed(self, *, threshold):
+            if self.size < threshold:
+                return False
+            self.start()
+            return True
+
+        def begin(self, *, user_uid, restart_if_missing=True):
+            self.restart_choices.append(restart_if_missing)
+            return GuestObserverCursor(
+                uid=user_uid,
+                observer_pid=self.pid,
+                offset=self.size,
+                available=True,
+            )
+
+        def finish(self, _cursor):
+            return GuestObservation(
+                source="kata-guest-ebpf-v1",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+            )
+
+    controller = Controller()
+    monkeypatch.setattr(manager, "_guest_observer_controller", lambda _spec: controller)
+
+    first = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
+    controller.size = GUEST_OBSERVER_ROTATE_BYTES
+    second = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE + 1)
+    assert controller.starts == 0
+
+    manager.finish_guest_observation(_spec(), first)
+    manager.finish_guest_observation(_spec(), second)
+    third = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
+
+    assert controller.starts == 1
+    assert controller.restart_choices == [True, False, True]
+    assert third.observer_pid == 92
+
+
+def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):
+    """Capabilityless guest root cannot traverse the 2770 agent-state tree."""
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    calls: list[dict[str, object]] = []
+
+    def exec_capture(_spec, argv, **kwargs):
+        calls.append({"argv": list(argv), **kwargs})
+        stdout = b"0\n" if len(calls) == 1 else b"100.0 pre toolu_1\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", exec_capture)
+
+    reader = manager.tool_mark_reader(_spec())
+    assert [mark[2] for mark in reader.read()] == ["toolu_1"]
+    assert [(call["user_uid"], call["user_gid"]) for call in calls] == [
+        (manager.backend.uid, manager.backend.gid),
+        (manager.backend.uid, manager.backend.gid),
+    ]
+
+
+def test_kata_never_reads_the_agent_writable_tool_mark_file(monkeypatch):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="agent-net", runtime=KATA_RUNTIME)
+    )
+    monkeypatch.setattr(
+        manager,
+        "exec_capture",
+        lambda *_args, **_kwargs: pytest.fail("Kata mark file must not be read"),
+    )
+
+    assert manager.tool_mark_reader(_spec()).read() == []
+
+
+def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch, tmp_path):
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    captured: dict[str, object] = {}
+
+    def exec_capture(_spec, argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["input"] = kwargs["input_bytes"]
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", exec_capture)
+    update = {"hooks": {"PreToolUse": [{"hooks": []}]}}
+
+    manager.install_tool_hooks(_spec(), update)
+
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    compile(argv[2], "<retained-tool-hooks>", "exec")
+    assert argv[-2:] == ["/agent-state/claude", "/agent-state/tool-marks.log"]
+    assert json.loads(captured["input"]) == update
+    assert "fcntl.flock" in argv[2]
+    assert "os.O_APPEND" in argv[2]
+
+    config = tmp_path / "agent-state" / "claude"
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text(json.dumps({"model": "keep-me"}))
+    marks = tmp_path / "agent-state" / "tool-marks.log"
+    subprocess.run(
+        ["python3", "-c", argv[2], str(config), str(marks)],
+        input=captured["input"],
+        check=True,
+    )
+    installed = json.loads((config / "settings.json").read_text())
+    assert installed["model"] == "keep-me"
+    assert installed["hooks"] == update["hooks"]
+    assert marks.exists()
+    assert marks.stat().st_mode & 0o777 == 0o660
 
 
 def test_closed_egress_uses_a_distinct_private_network_for_each_chat():
@@ -288,6 +635,7 @@ def test_private_network_contains_only_the_discovered_fixed_services(monkeypatch
                 "Driver": "bridge",
                 "Scope": "local",
                 "Internal": True,
+                "Options": {CHAT_NETWORK_INHIBIT_IPV4_OPTION: "true"},
                 "Labels": manager._network_labels(spec, "agent"),
                 "IPAM": {"Config": [{"Subnet": "10.240.0.0/29"}]},
                 "Containers": {
@@ -303,6 +651,7 @@ def test_private_network_contains_only_the_discovered_fixed_services(monkeypatch
         nonlocal created
         if argv[1:3] == ["network", "create"]:
             assert "--internal" in argv
+            assert f"{CHAT_NETWORK_INHIBIT_IPV4_OPTION}=true" in argv
             assert f"{CHAT_NETWORK_LABEL}=true" in argv
             assert f"{CHAT_NETWORK_BASE_LABEL}=agent-backplane" in argv
             assert argv[argv.index("--subnet") + 1].endswith("/29")
@@ -337,6 +686,25 @@ def test_private_network_contains_only_the_discovered_fixed_services(monkeypatch
     ]
 
 
+def test_private_network_rejects_a_host_addressable_internal_bridge() -> None:
+    spec = _spec()
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="unused", egress=_isolated_policy())
+    )
+    network = {
+        "Name": manager.network_for_phase(spec, "agent"),
+        "Driver": "bridge",
+        "Scope": "local",
+        "Internal": True,
+        "Labels": manager._network_labels(spec, "agent"),
+        "IPAM": {"Config": [{"Subnet": "10.240.0.0/29"}]},
+        "Containers": {},
+    }
+
+    with pytest.raises(SandboxError, match="host-isolated"):
+        manager._verify_phase_network(network, spec, "agent")
+
+
 def test_private_network_allocator_retries_a_racing_subnet_claim(monkeypatch):
     spec = _spec()
     manager = ChatSandboxManager(
@@ -369,6 +737,7 @@ def test_private_network_allocator_retries_a_racing_subnet_claim(monkeypatch):
             "Driver": "bridge",
             "Scope": "local",
             "Internal": True,
+            "Options": {CHAT_NETWORK_INHIBIT_IPV4_OPTION: "true"},
             "Labels": manager._network_labels(spec, "agent"),
             "IPAM": {"Config": [{"Subnet": subnet}]},
             "Containers": {},
@@ -423,6 +792,7 @@ def test_idle_stop_releases_private_network_and_wake_recreates_agent_phase(monke
             "Driver": "bridge",
             "Scope": "local",
             "Internal": True,
+            "Options": {CHAT_NETWORK_INHIBIT_IPV4_OPTION: "true"},
             "Labels": manager._network_labels(spec, "agent"),
             "IPAM": {"Config": [{"Subnet": "10.240.0.0/29"}]},
             "Containers": {container_id: {} for container_id in endpoints},
@@ -1051,6 +1421,7 @@ def test_stale_prune_restores_relays_when_a_sandbox_attaches_before_remove(
             "Driver": "bridge",
             "Scope": "local",
             "Internal": True,
+            "Options": {CHAT_NETWORK_INHIBIT_IPV4_OPTION: "true"},
             "Labels": manager._network_labels(spec, "agent"),
             "IPAM": {"Config": [{"Subnet": "10.240.0.0/29"}]},
             "Containers": containers,

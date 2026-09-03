@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import secrets
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_CPU_LIMIT_LABEL,
@@ -30,19 +31,27 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatBackend,
     RetainedChatLost,
 )
+from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_SOURCE,
+    GuestObservation,
+    GuestObserverCursor,
+)
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
     ResidentTransport,
     ResidentTransportFactory,
     ResidentTurn,
 )
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
     DEFAULT_SWEEP_INTERVAL_S,
     SessionBusy,
     SessionLeaseLost,
 )
+
+if TYPE_CHECKING:
+    from cloud_agent_host.tool_windows import ToolMarkReader
 
 ContextStatus = Literal["new", "live", "restored", "lost"]
 ResidentState = Literal["stopped", "starting", "live", "restarting", "lost"]
@@ -132,6 +141,47 @@ class NativeSessionForkResult:
     resident_state: Literal["live"] = "live"
 
 
+@dataclass(frozen=True)
+class SharedTurnTelemetry:
+    """Kernel process events and exact hook marks closed at one turn boundary."""
+
+    observation: GuestObservation
+    tool_marks: tuple[tuple[float, str, str], ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Compatibility view for callers that previously received only it."""
+        return self.observation.complete
+
+    @property
+    def source(self) -> str | None:
+        """Observer identifier from the process result."""
+        return self.observation.source
+
+    @property
+    def lost_events(self) -> int:
+        """Lost event count from the process result."""
+        return self.observation.lost_events
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the bounded process journal was truncated."""
+        return self.observation.truncated
+
+    @property
+    def processes(self) -> tuple[Any, ...]:
+        """Observed process rows before wire serialization."""
+        return self.observation.processes
+
+
+class SharedTurnBoundaryError(SandboxError):
+    """A failed activation boundary that still carries its closed telemetry."""
+
+    def __init__(self, detail: str, telemetry: SharedTurnTelemetry) -> None:
+        super().__init__(detail)
+        self.telemetry = telemetry
+
+
 @dataclass
 class _Member:
     thread_id: str
@@ -148,6 +198,8 @@ class _Member:
     transport: ResidentTransport | None = None
     current_turn: ResidentTurn | None = None
     activation_processes: tuple[tuple[int, int], ...] | None = None
+    observer_cursor: GuestObserverCursor | None = None
+    tool_mark_reader: ToolMarkReader | None = None
     turn_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -234,15 +286,48 @@ class SharedChatSessionSupervisor:
                 for member in group.members.values()
                 if member.transport is not None
             ]
+            observations = [
+                (group.spec, member.observer_cursor)
+                for group in self._groups.values()
+                for member in group.members.values()
+                if member.observer_cursor is not None
+            ]
+            turn_locks = [
+                member.turn_lock
+                for group in self._groups.values()
+                for member in group.members.values()
+                # An initialization may also hold this lock, but its context
+                # manager is still alive and owns the release. Only a detached
+                # admitted turn loses the normal ``complete_turn`` release
+                # path when ``close`` clears ``current_turn`` below.
+                if member.current_turn is not None and member.turn_lock.locked()
+            ]
             for group in self._groups.values():
                 for member in group.members.values():
                     member.transport = None
                     member.current_turn = None
+                    member.activation_processes = None
+                    member.observer_cursor = None
+                    member.tool_mark_reader = None
                     if member.resident_state == "live":
                         member.resident_state = "restarting"
         for transport in transports:
             with contextlib.suppress(Exception):
                 transport.close()
+        # Closing a transport ends the member workload. Drain afterwards so
+        # the manager also releases its per-container active-cursor fence;
+        # otherwise restarting this supervisor object can suppress safe
+        # journal rotation for the rest of the container lifetime.
+        for spec, cursor in observations:
+            with contextlib.suppress(Exception):
+                self._manager.finish_guest_observation(spec, cursor)
+        # ``close`` may be used by a supervisor restart in the same process,
+        # not only interpreter shutdown. Do not leave a detached active turn's
+        # member lock permanently acquired after its transport and observation
+        # have both been closed.
+        for turn_lock in turn_locks:
+            with contextlib.suppress(RuntimeError):
+                turn_lock.release()
 
     def reconcile(self) -> list[SharedSessionDescriptor]:
         """Discover only containers labelled for the shared-live protocol."""
@@ -417,6 +502,11 @@ class SharedChatSessionSupervisor:
                 raise SessionBusy(f"chat {thread_id!r} already has an active turn")
             if member.current_turn is not None:
                 raise SessionBusy(f"chat {thread_id!r} already has a running turn")
+            # Fence stale attempt owners before doing anything observable to
+            # the shared container. In particular, an old lease must not wake
+            # a stopped workspace only to be rejected after ``docker start``.
+            if activation_generation < member.activation_generation:
+                raise SessionLeaseLost("member activation generation is stale")
             current = self._manager.inspect(group.spec.container_name)
             if current is None:
                 member.context_status = "lost"
@@ -430,8 +520,6 @@ class SharedChatSessionSupervisor:
                 group.spec,
                 network_phase="agent" if has_settled_context else "setup",
             )
-            if activation_generation < member.activation_generation:
-                raise SessionLeaseLost("member activation generation is stale")
             member.activation_generation = activation_generation
             member.lease_token = secrets.token_urlsafe(32)
             member.lease_owner = owner
@@ -486,6 +574,7 @@ class SharedChatSessionSupervisor:
             group.idle_deadline = None
         if not member.turn_lock.acquire(blocking=False):
             raise SessionBusy(f"chat {thread_id!r} already has a running turn")
+        observer_cursor: GuestObserverCursor | None = None
         try:
             activation_processes = self._manager.capture_member_processes(
                 group.spec,
@@ -493,6 +582,28 @@ class SharedChatSessionSupervisor:
                 user_uid=MEMBER_UID_BASE + member.resident_slot_id,
                 user_gid=self._manager.backend.gid,
             )
+            mark_reader_factory = getattr(self._manager, "tool_mark_reader", None)
+            tool_mark_reader = (
+                mark_reader_factory(group.spec)
+                if (
+                    mark_reader_factory is not None
+                    and transport.launch.runtime_id == "claude-code"
+                    and self._manager.backend.runtime != KATA_RUNTIME
+                )
+                else None
+            )
+            if self._manager.backend.runtime == KATA_RUNTIME:
+                begin_observation = getattr(self._manager, "begin_guest_observation", None)
+                if begin_observation is None:
+                    observer_cursor = GuestObserverCursor.unavailable(
+                        MEMBER_UID_BASE + member.resident_slot_id,
+                        "workspace broker has no guest observer client",
+                    )
+                else:
+                    observer_cursor = begin_observation(
+                        group.spec,
+                        user_uid=MEMBER_UID_BASE + member.resident_slot_id,
+                    )
             with self._lock:
                 current_group = self._members.get(thread_id)
                 current_member = (
@@ -513,6 +624,9 @@ class SharedChatSessionSupervisor:
                 reasoning_effort=reasoning_effort,
             )
         except Exception:
+            if observer_cursor is not None:
+                with contextlib.suppress(Exception):
+                    self._manager.finish_guest_observation(group.spec, observer_cursor)
             member.turn_lock.release()
             raise
         admitted = False
@@ -532,9 +646,14 @@ class SharedChatSessionSupervisor:
             if admitted:
                 member.current_turn = turn
                 member.activation_processes = activation_processes
+                member.observer_cursor = observer_cursor
+                member.tool_mark_reader = tool_mark_reader
         if not admitted:
             with contextlib.suppress(Exception):
                 turn.interrupt()
+            if observer_cursor is not None:
+                with contextlib.suppress(Exception):
+                    self._manager.finish_guest_observation(group.spec, observer_cursor)
             with contextlib.suppress(Exception):
                 self._manager.reap_member_processes_except(
                     group.spec,
@@ -547,14 +666,58 @@ class SharedChatSessionSupervisor:
             raise SessionLeaseLost("shared sandbox lifecycle changed during turn admission")
         return turn
 
-    def complete_turn(self, thread_id: str, token: str, turn: ResidentTurn) -> None:
-        """Release the member's in-flight marker after its result was drained."""
+    def complete_turn(
+        self,
+        thread_id: str,
+        token: str,
+        turn: ResidentTurn,
+    ) -> SharedTurnTelemetry:
+        """Close observation, then enforce and release the activation boundary."""
         with self._lock:
             group, member = self._leased_member(thread_id, token)
             if member.current_turn is not turn:
                 raise SessionLeaseLost("member turn generation is stale")
             slot_id = member.resident_slot_id
             activation_processes = member.activation_processes
+            observer_cursor = member.observer_cursor
+            tool_mark_reader = member.tool_mark_reader
+        observation = GuestObservation.unavailable("sandbox is not a Kata guest")
+        if self._manager.backend.runtime == KATA_RUNTIME:
+            finish_observation = getattr(self._manager, "finish_guest_observation", None)
+            if finish_observation is None:
+                observation = GuestObservation.unavailable(
+                    "workspace broker has no guest observer client",
+                    source=GUEST_OBSERVER_SOURCE,
+                )
+            else:
+                # Close before the member reaper/permission normalizer below:
+                # those are platform processes and must not be billed to the
+                # tool call whose background children they clean up.
+                try:
+                    finished = finish_observation(group.spec, observer_cursor)
+                    if isinstance(finished, GuestObservation):
+                        observation = (
+                            finished
+                            if finished.source is not None
+                            else replace(finished, source=GUEST_OBSERVER_SOURCE)
+                        )
+                    else:
+                        observation = GuestObservation.unavailable(
+                            "workspace broker returned invalid process telemetry",
+                            source=GUEST_OBSERVER_SOURCE,
+                        )
+                except Exception as exc:
+                    observation = GuestObservation.unavailable(
+                        str(exc),
+                        source=GUEST_OBSERVER_SOURCE,
+                    )
+        telemetry = SharedTurnTelemetry(
+            observation=observation,
+            tool_marks=(
+                tuple(tool_mark_reader.read() if tool_mark_reader is not None else ())
+                + observation.tool_marks
+            ),
+        )
         boundary_error: Exception | None = None
         try:
             if activation_processes is None:
@@ -591,6 +754,8 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost("member turn generation is stale")
             member.current_turn = None
             member.activation_processes = None
+            member.observer_cursor = None
+            member.tool_mark_reader = None
             transport = member.transport
             if boundary_error is not None:
                 member.transport = None
@@ -613,9 +778,11 @@ class SharedChatSessionSupervisor:
             if transport is not None:
                 with contextlib.suppress(Exception):
                     transport.close()
-            raise SandboxError(
-                f"shared member activation boundary failed: {boundary_error}"
+            raise SharedTurnBoundaryError(
+                f"shared member activation boundary failed: {boundary_error}",
+                telemetry,
             ) from boundary_error
+        return telemetry
 
     def interrupt(self, thread_id: str, token: str) -> None:
         """Interrupt the exact member activation, leaving siblings untouched."""
@@ -625,7 +792,12 @@ class SharedChatSessionSupervisor:
         if turn is not None:
             turn.interrupt()
 
-    def abort_turn(self, thread_id: str, token: str, turn: ResidentTurn) -> None:
+    def abort_turn(
+        self,
+        thread_id: str,
+        token: str,
+        turn: ResidentTurn,
+    ) -> SharedTurnTelemetry:
         """Fence a turn whose broker stream disappeared before its result.
 
         An HTTP client can vanish while the CLI is quiet. Merely closing the
@@ -644,7 +816,7 @@ class SharedChatSessionSupervisor:
         if transport is not None:
             with contextlib.suppress(Exception):
                 transport.close()
-        self.complete_turn(thread_id, token, turn)
+        return self.complete_turn(thread_id, token, turn)
 
     def settle(
         self,
@@ -712,7 +884,17 @@ class SharedChatSessionSupervisor:
         with self._lock:
             group, member = self._leased_member(thread_id, token)
             transport = member.transport
+            observer_cursor = member.observer_cursor
+            # ``complete_turn`` may have cleared ``current_turn`` and then
+            # failed before releasing the lock. Abandon owns this member's
+            # teardown, so the lock state itself is the authoritative cleanup
+            # signal here.
+            release_turn_lock = member.turn_lock.locked()
             member.transport = None
+            member.current_turn = None
+            member.activation_processes = None
+            member.observer_cursor = None
+            member.tool_mark_reader = None
             member.lease_token = None
             member.lease_owner = None
             member.context_status = "lost" if lost else member.context_status
@@ -722,6 +904,12 @@ class SharedChatSessionSupervisor:
         if transport is not None:
             with contextlib.suppress(Exception):
                 transport.close()
+        if observer_cursor is not None:
+            with contextlib.suppress(Exception):
+                self._manager.finish_guest_observation(group.spec, observer_cursor)
+        if release_turn_lock:
+            with contextlib.suppress(RuntimeError):
+                member.turn_lock.release()
         return descriptor
 
     def residency_lost(
@@ -737,6 +925,16 @@ class SharedChatSessionSupervisor:
                 return self._descriptor(group, member)
             turn = member.current_turn
             transport = member.transport
+            # An active observation belongs to the turn, not to the resident
+            # transport.  Keep it until complete_turn/abort_turn closes the
+            # turn so the events already captured before residency loss are
+            # still returned to the caller.  Drain only an orphaned cursor
+            # when there is no turn left to own it.
+            orphaned_observer_cursor = None
+            if turn is None:
+                orphaned_observer_cursor = member.observer_cursor
+                member.observer_cursor = None
+                member.tool_mark_reader = None
             member.transport = None
             member.residency_generation = 0
             member.resident_state = "restarting" if member.native_session_id else "stopped"
@@ -746,6 +944,9 @@ class SharedChatSessionSupervisor:
         if transport is not None:
             with contextlib.suppress(Exception):
                 transport.close()
+        if orphaned_observer_cursor is not None:
+            with contextlib.suppress(Exception):
+                self._manager.finish_guest_observation(group.spec, orphaned_observer_cursor)
         with self._lock:
             return self._descriptor(group, member)
 
@@ -1086,14 +1287,16 @@ class SharedChatSessionSupervisor:
             group, member = self._member(thread_id)
             if group.terminal_tokens.get(token) != thread_id:
                 raise SessionLeaseLost("shared terminal lifecycle token is stale")
-            group.terminal_tokens.pop(token, None)
             now = self._clock()
             activity_at = now
             if last_activity_monotonic is not None:
                 activity_at = float(last_activity_monotonic)
-                if activity_at < 0 or activity_at != activity_at:
+                if activity_at < 0 or not math.isfinite(activity_at):
                     raise ValueError("terminal last activity timestamp is invalid")
                 activity_at = min(activity_at, now)
+            # Validation comes first: a malformed close request is retryable
+            # and must not consume the reference that keeps this group awake.
+            group.terminal_tokens.pop(token, None)
             if self._is_quiescent(group) and group.inspection.running:
                 group.idle_deadline = activity_at + self._idle_timeout_s
             return self._descriptor(group, member)
@@ -1184,6 +1387,11 @@ class SharedChatSessionSupervisor:
                 for member in group.members.values()
                 if member.transport is not None
             ]
+            observations = [
+                (group.spec, member.observer_cursor)
+                for member in group.members.values()
+                if member.observer_cursor is not None
+            ]
             interrupted_turn_locks: list[Any] = []
             for member in group.members.values():
                 if member.current_turn is not None and member.turn_lock.locked():
@@ -1191,6 +1399,8 @@ class SharedChatSessionSupervisor:
                 member.transport = None
                 member.current_turn = None
                 member.activation_processes = None
+                member.observer_cursor = None
+                member.tool_mark_reader = None
                 member.lease_token = None
                 member.lease_owner = None
                 member.resident_state = "lost" if reason == "lost" else "stopped"
@@ -1200,6 +1410,9 @@ class SharedChatSessionSupervisor:
             for transport in transports:
                 with contextlib.suppress(Exception):
                     transport.close()
+            for spec, cursor in observations:
+                with contextlib.suppress(Exception):
+                    self._manager.finish_guest_observation(spec, cursor)
             for turn_lock in interrupted_turn_locks:
                 with contextlib.suppress(RuntimeError):
                     turn_lock.release()
@@ -1485,4 +1698,6 @@ __all__ = [
     "SharedMemberManifest",
     "SharedSessionDescriptor",
     "SharedSessionLease",
+    "SharedTurnBoundaryError",
+    "SharedTurnTelemetry",
 ]

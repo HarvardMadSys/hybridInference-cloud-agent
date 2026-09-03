@@ -40,8 +40,15 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.drivers import DriverError
+from cloud_agent_host.guest_observer import (
+    GuestObservation,
+    add_process_counts,
+    add_process_resources,
+    attribute_processes,
+)
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.resident_transport import ResidentLaunch
+from cloud_agent_host.resources import shared_member_resource_rollup
 from cloud_agent_host.retained_workspace import (
     RetainedWorkspaceError,
     read_retained_file,
@@ -64,8 +71,12 @@ from cloud_agent_host.session_lifecycle import (
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
+    SharedSessionDescriptor,
+    SharedTurnBoundaryError,
+    SharedTurnTelemetry,
 )
 from cloud_agent_host.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
+from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
 from cloud_agent_host.workspace_browser import (
     MAX_FILE_PREVIEW_BYTES,
     WorkspacePathError,
@@ -424,7 +435,16 @@ class _TerminalSession:
         with self._condition:
             if self.state != "running" or self._closed or not self._suspended:
                 return
-            self._process.resume()
+            try:
+                self._process.resume()
+            except (SandboxError, OSError):
+                # A backend may report failure after a partially effective
+                # CONT. Best-effort STOP it again before preserving the
+                # logical suspension; callers must never treat an uncertain
+                # resume as an open publication/preparation barrier.
+                with contextlib.suppress(SandboxError, OSError):
+                    self._process.suspend()
+                raise
             self._suspended = False
 
     def resize(self, *, rows: int, cols: int, now: float) -> dict[str, Any]:
@@ -797,11 +817,20 @@ class _TerminalManager:
             if suspensions:
                 return {"ok": True, "resumed": 0}
             sessions = list(self._sessions.get(workspace_id, {}).values())
+            attempted: list[_TerminalSession] = []
             try:
                 for session in sessions:
+                    attempted.append(session)
                     session.resume()
             except (SandboxError, OSError) as exc:
-                # A retry must still see the workspace as suspended.
+                # Restore every PTY already resumed in this batch. A retry
+                # must see both the logical workspace fence and the actual
+                # processes suspended; otherwise one shell could mutate the
+                # shared tree inside a quiescent capture after a sibling's
+                # resume failed.
+                for session in attempted:
+                    with contextlib.suppress(SandboxError, OSError):
+                        session.suspend()
                 suspensions.add(key)
                 raise HTTPException(
                     status_code=503,
@@ -1256,12 +1285,25 @@ def create_app(
                 with contextlib.suppress(SandboxError):
                     owner.operation_closed(workspace_id, token)
 
-    def ensure_workspace(workspace_id: str) -> None:
+    def ensure_workspace(workspace_id: str) -> SharedSessionDescriptor:
+        """Validate a member alias and return its shared-group descriptor."""
         owner = retained_owner(workspace_id)
         try:
-            owner.status(workspace_id)
+            return owner.status(workspace_id)
         except SandboxError as exc:
             raise supervisor_error(exc) from exc
+
+    def terminal_scope(workspace_id: str) -> str:
+        """Map any member URL onto the one terminal namespace for its group.
+
+        The public/control-plane route stays chat-scoped so ownership is still
+        checked against the addressed member.  The shell processes themselves
+        operate on the group's single ``/workspace`` as the group UID, though,
+        so capacity and suspension must be group-scoped too.  Otherwise a fork
+        sibling could keep writing through a PTY while another member had
+        installed the documented workspace preparation/publication barrier.
+        """
+        return str(ensure_workspace(workspace_id).origin_thread_id)
 
     def shared_spec(body: SharedSandboxIdentityRequest) -> ChatSandboxSpec:
         return ChatSandboxSpec(
@@ -1391,9 +1433,65 @@ def create_app(
             raise supervisor_error(exc) from exc
 
         def frames():
-            turn_completed = False
+            turn_boundary_closed = False
+            tool_windows = ToolWindowTracker()
+            resources: dict[str, Any] | None = None
+
+            def close_resources(value: Any) -> dict[str, Any]:
+                nonlocal resources
+                if resources is not None:
+                    return resources
+                telemetry = (
+                    value
+                    if isinstance(value, SharedTurnTelemetry)
+                    else SharedTurnTelemetry(
+                        observation=(
+                            value
+                            if isinstance(value, GuestObservation)
+                            else GuestObservation.unavailable(
+                                "shared turn returned no process telemetry"
+                            )
+                        )
+                    )
+                )
+                tool_windows.apply_marks(list(telemetry.tool_marks))
+                windows = tool_windows.windows()
+                resources = shared_member_resource_rollup()
+                tool_calls = attribute(
+                    [],
+                    windows,
+                    windows_complete=not tool_windows.truncated,
+                )
+                processes, process_counts = attribute_processes(
+                    telemetry.observation,
+                    windows,
+                    windows_complete=not tool_windows.truncated,
+                )
+                resources.update(
+                    {
+                        "tool_calls": add_process_resources(
+                            add_process_counts(tool_calls, process_counts),
+                            processes,
+                            observation_complete=telemetry.observation.complete,
+                        ),
+                        "tool_calls_truncated": tool_windows.truncated,
+                        "tool_time_ms": (None if tool_windows.truncated else tool_time_ms(windows)),
+                        "process_observer": telemetry.observation.source,
+                        "process_observation_complete": telemetry.observation.complete,
+                        "process_events_lost": telemetry.observation.lost_events,
+                        "processes_truncated": telemetry.observation.truncated,
+                        "processes": processes,
+                    }
+                )
+                return resources
+
             try:
                 for event in turn.lines():
+                    tool_windows.observe(
+                        event.event_type,
+                        event.payload,
+                        mono=time.monotonic(),
+                    )
                     yield (
                         json.dumps(
                             {
@@ -1412,8 +1510,9 @@ def create_app(
                 # normalizes shared writes; if either fails the runner must
                 # receive an error frame instead of a result followed by an
                 # opaque settle failure.
-                owner.complete_turn(thread_id, body.token, turn)
-                turn_completed = True
+                telemetry = owner.complete_turn(thread_id, body.token, turn)
+                turn_boundary_closed = True
+                resources = close_resources(telemetry)
                 yield (
                     json.dumps(
                         {
@@ -1424,22 +1523,39 @@ def create_app(
                             "usage": result.usage,
                             "raw": result.raw,
                             "stderr": turn.stderr_text()[-4000:],
+                            "resources": resources,
                         },
                         separators=(",", ":"),
                     )
                     + "\n"
                 )
             except Exception as exc:
+                telemetry = exc.telemetry if isinstance(exc, SharedTurnBoundaryError) else None
+                if telemetry is not None:
+                    turn_boundary_closed = True
+                if not turn_boundary_closed:
+                    try:
+                        telemetry = owner.abort_turn(thread_id, body.token, turn)
+                        turn_boundary_closed = True
+                    except SharedTurnBoundaryError as boundary_exc:
+                        telemetry = boundary_exc.telemetry
+                        turn_boundary_closed = True
+                    except Exception:
+                        telemetry = None
                 yield (
                     json.dumps(
-                        {"kind": "error", "detail": str(exc)[:1000]},
+                        {
+                            "kind": "error",
+                            "detail": str(exc)[:1000],
+                            "resources": close_resources(telemetry),
+                        },
                         separators=(",", ":"),
                     )
                     + "\n"
                 )
             finally:
                 with contextlib.suppress(Exception):
-                    if not turn_completed:
+                    if not turn_boundary_closed:
                         owner.abort_turn(thread_id, body.token, turn)
 
         return StreamingResponse(
@@ -1760,13 +1876,15 @@ def create_app(
         owner = retained_owner(workspace_id)
         terminal_token: str | None = None
         try:
-            terminal_token, _ = await asyncio.to_thread(owner.terminal_opened, workspace_id)
+            terminal_token, descriptor = await asyncio.to_thread(
+                owner.terminal_opened, workspace_id
+            )
             retained = owner.backend(workspace_id)
             retained.manager.require_network_phase(retained.spec, "agent")
             token = terminal_token
             return await asyncio.to_thread(
                 terminals.create,
-                workspace_id,
+                descriptor.origin_thread_id,
                 "/workspace",
                 rows=body.rows,
                 cols=body.cols,
@@ -1792,10 +1910,10 @@ def create_app(
         body: TerminalCoordinationRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        retained_owner(workspace_id)
+        scope = terminal_scope(workspace_id)
         return await asyncio.to_thread(
             terminals.suspend,
-            workspace_id,
+            scope,
             lease_generation=body.lease_generation,
             job_id=body.job_id,
         )
@@ -1806,10 +1924,10 @@ def create_app(
         body: TerminalCoordinationRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        retained_owner(workspace_id)
+        scope = terminal_scope(workspace_id)
         return await asyncio.to_thread(
             terminals.resume,
-            workspace_id,
+            scope,
             lease_generation=body.lease_generation,
             job_id=body.job_id,
         )
@@ -1820,10 +1938,10 @@ def create_app(
         body: TerminalSettledRequest | None = None,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        retained_owner(workspace_id)
+        scope = terminal_scope(workspace_id)
         return await asyncio.to_thread(
             terminals.resume_settled,
-            workspace_id,
+            scope,
             job_id=body.job_id if body is not None else None,
         )
 
@@ -1832,8 +1950,8 @@ def create_app(
         workspace_id: str,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        ensure_workspace(workspace_id)
-        return {"terminals": await asyncio.to_thread(terminals.list, workspace_id)}
+        scope = terminal_scope(workspace_id)
+        return {"terminals": await asyncio.to_thread(terminals.list, scope)}
 
     @app.get("/workspaces/{workspace_id}/terminals/{terminal_id}/stream")
     async def stream_terminal(
@@ -1842,8 +1960,8 @@ def create_app(
         after: int = Query(0, ge=0),
         _: None = Depends(authenticate),
     ) -> StreamingResponse:
-        ensure_workspace(workspace_id)
-        session = terminals.get(workspace_id, terminal_id)
+        scope = terminal_scope(workspace_id)
+        session = terminals.get(scope, terminal_id)
         session.open_stream()
 
         async def event_stream():
@@ -1880,7 +1998,7 @@ def create_app(
         body: TerminalInputRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        ensure_workspace(workspace_id)
+        scope = terminal_scope(workspace_id)
         try:
             data = base64.b64decode(body.data, validate=True)
         except (binascii.Error, ValueError) as exc:
@@ -1889,7 +2007,7 @@ def create_app(
             ) from exc
         if len(data) > MAX_TERMINAL_INPUT_BYTES:
             raise HTTPException(status_code=413, detail="terminal input is too large")
-        session = terminals.get_for_control(workspace_id, terminal_id)
+        session = terminals.get_for_control(scope, terminal_id)
         return await asyncio.to_thread(session.write, data, now=time.monotonic())
 
     @app.post("/workspaces/{workspace_id}/terminals/{terminal_id}/resize")
@@ -1899,8 +2017,8 @@ def create_app(
         body: TerminalResizeRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        ensure_workspace(workspace_id)
-        session = terminals.get_for_control(workspace_id, terminal_id)
+        scope = terminal_scope(workspace_id)
+        session = terminals.get_for_control(scope, terminal_id)
         return await asyncio.to_thread(
             session.resize,
             rows=body.rows,
@@ -1914,8 +2032,8 @@ def create_app(
         terminal_id: str,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        ensure_workspace(workspace_id)
-        return await asyncio.to_thread(terminals.delete, workspace_id, terminal_id)
+        scope = terminal_scope(workspace_id)
+        return await asyncio.to_thread(terminals.delete, scope, terminal_id)
 
     @app.get("/workspaces/{workspace_id}/git")
     async def git(

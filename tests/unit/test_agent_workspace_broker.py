@@ -5,14 +5,20 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError, TerminalProcess
-from cloud_agent_host.shared_session_supervisor import SharedSessionDescriptor
+from cloud_agent_host.shared_session_supervisor import (
+    SharedSessionDescriptor,
+    SharedTurnTelemetry,
+)
 from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
@@ -50,6 +56,23 @@ class _TerminalProcess(TerminalProcess):
 
     def wait(self) -> int:
         return 0
+
+
+class _SuspendableTerminalProcess(_TerminalProcess):
+    def __init__(self, *, fail_resume: bool = False) -> None:
+        super().__init__()
+        self.suspended = False
+        self.fail_resume = fail_resume
+        self.suspend_calls = 0
+
+    def suspend(self) -> None:
+        self.suspend_calls += 1
+        self.suspended = True
+
+    def resume(self) -> None:
+        self.suspended = False
+        if self.fail_resume:
+            raise SandboxError("resume failed after CONT")
 
 
 class _WorkspaceBackend(RetainedChatBackend):
@@ -391,6 +414,76 @@ async def test_interactive_terminal_runs_in_the_shared_container():
 
 
 @pytest.mark.asyncio
+async def test_fork_siblings_share_terminal_visibility_capacity_and_suspension():
+    """Member URLs authenticate separately but address one workspace PTY scope."""
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        created = await client.post(
+            "/workspaces/athr_source/terminals",
+            headers=headers,
+            json={"rows": 30, "cols": 100},
+        )
+        terminal_id = created.json()["id"]
+        child_list = await client.get("/workspaces/athr_child/terminals", headers=headers)
+        suspended = await client.post(
+            "/workspaces/athr_child/terminals/suspend",
+            headers=headers,
+            json={"lease_generation": 3, "job_id": "ajob_child"},
+        )
+        blocked = await client.post(
+            "/workspaces/athr_source/terminals",
+            headers=headers,
+            json={"rows": 30, "cols": 100},
+        )
+        resumed = await client.post(
+            "/workspaces/athr_source/terminals/resume",
+            headers=headers,
+            json={"lease_generation": 3, "job_id": "ajob_child"},
+        )
+        accepted = await client.post(
+            "/workspaces/athr_child/terminals",
+            headers=headers,
+            json={"rows": 30, "cols": 100},
+        )
+        accepted_terminal_id = accepted.json()["id"]
+        third = await client.post(
+            "/workspaces/athr_source/terminals",
+            headers=headers,
+            json={"rows": 30, "cols": 100},
+        )
+        fourth = await client.post(
+            "/workspaces/athr_child/terminals",
+            headers=headers,
+            json={"rows": 30, "cols": 100},
+        )
+        over_capacity = await client.post(
+            "/workspaces/athr_source/terminals",
+            headers=headers,
+            json={"rows": 30, "cols": 100},
+        )
+        terminal_ids = [
+            terminal_id,
+            accepted_terminal_id,
+            third.json()["id"],
+            fourth.json()["id"],
+        ]
+        deleted = [
+            await client.delete(f"/workspaces/athr_child/terminals/{current}", headers=headers)
+            for current in terminal_ids
+        ]
+
+    assert created.status_code == child_list.status_code == 200
+    assert child_list.json()["terminals"][0]["id"] == terminal_id
+    assert suspended.status_code == resumed.status_code == 200
+    assert blocked.status_code == 409
+    assert accepted.status_code == third.status_code == fourth.status_code == 200
+    assert over_capacity.status_code == 409
+    assert all(response.status_code == 200 for response in deleted)
+
+
+@pytest.mark.asyncio
 async def test_refused_terminal_creation_releases_its_activity_token():
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
@@ -460,6 +553,34 @@ def test_legacy_settled_resume_resets_its_per_job_generation():
     terminals.suspend("athr_source", lease_generation=1)
 
     assert terminals._workspace_generations["athr_source"] == 1
+    assert "athr_source" in terminals._suspended_workspaces
+
+
+def test_partial_terminal_resume_refreezes_every_process(tmp_path):
+    """One failed PTY cannot leave an earlier sibling running behind the barrier."""
+    terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
+    processes = [_SuspendableTerminalProcess(), _SuspendableTerminalProcess(fail_resume=True)]
+    sessions = [
+        _TerminalSession(
+            terminal_id=f"term_{index}",
+            process=process,
+            workdir=tmp_path,
+            rows=24,
+            cols=80,
+            now=0,
+        )
+        for index, process in enumerate(processes)
+    ]
+    terminals._sessions["athr_source"] = {session.id: session for session in sessions}
+    terminals.suspend("athr_source", lease_generation=1, job_id="job-parent")
+
+    with pytest.raises(HTTPException) as raised:
+        terminals.resume("athr_source", lease_generation=1, job_id="job-parent")
+
+    assert raised.value.status_code == 503
+    assert all(process.suspended for process in processes)
+    assert processes[0].suspend_calls == 2
+    assert processes[1].suspend_calls == 2
     assert "athr_source" in terminals._suspended_workspaces
 
 
@@ -546,4 +667,107 @@ async def test_activation_boundary_failure_is_not_reported_as_success():
         )
 
     frames = [json.loads(line) for line in response.text.splitlines() if line]
-    assert frames == [{"kind": "error", "detail": "member permission normalization failed"}]
+    assert len(frames) == 1
+    assert frames[0]["kind"] == "error"
+    assert frames[0]["detail"] == "member permission normalization failed"
+    assert frames[0]["resources"]["process_observation_complete"] is False
+    assert frames[0]["resources"]["tool_calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks():
+    marks: dict[str, float] = {}
+
+    class Turn:
+        @staticmethod
+        def lines():
+            yield SimpleNamespace(
+                event_type="tool_use",
+                payload={"id": "toolu_exact", "name": "Bash"},
+                raw_line='{"type":"tool_use"}',
+            )
+            marks["pre"] = time.monotonic()
+            time.sleep(0.001)
+            marks["post"] = time.monotonic()
+            yield SimpleNamespace(
+                event_type="tool_result",
+                payload={"tool_use_id": "toolu_exact"},
+                raw_line='{"type":"tool_result"}',
+            )
+
+        @staticmethod
+        def wait():
+            return SimpleNamespace(
+                status="completed",
+                final_output="done",
+                exit_code=0,
+                usage=None,
+                raw=None,
+            )
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    process = GuestProcess(
+        process_seq=1,
+        uid=11001,
+        pid=412,
+        tgid=412,
+        ppid=41,
+        comm="tiny",
+        executable="/bin/tiny",
+        started_guest_mono_ns=1_001_000_000,
+        exited_guest_mono_ns=1_001_600_000,
+        started_host_mono=1e20,
+        exited_host_mono=1e20,
+        exit_code=0,
+        observed_fork=True,
+        observed_exec=True,
+        observed_exit=True,
+    )
+
+    supervisor = _SharedSupervisor()
+    supervisor.start_turn = lambda *_args, **_kwargs: Turn()  # type: ignore[attr-defined]
+    supervisor.complete_turn = (  # type: ignore[attr-defined]
+        lambda *_args, **_kwargs: SharedTurnTelemetry(
+            observation=GuestObservation(
+                source="kata-guest-ebpf-v1",
+                complete=True,
+                lost_events=0,
+                truncated=False,
+                processes=(process,),
+                origin_guest_mono_ns=1_000_000_000,
+            ),
+            tool_marks=(
+                (marks["pre"], "pre", "toolu_exact"),
+                (marks["post"], "post", "toolu_exact"),
+            ),
+        )
+    )
+    supervisor.abort_turn = lambda *_args, **_kwargs: (_ for _ in ()).throw(  # type: ignore[attr-defined]
+        AssertionError("completed turn was aborted")
+    )
+    app = _app(supervisor)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        response = await client.post(
+            "/shared-sandboxes/athr_source/turn",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json={
+                "token": "lease",
+                "prompt": "test",
+                "model": "model",
+                "reasoning_effort": None,
+            },
+        )
+
+    frames = [json.loads(line) for line in response.text.splitlines() if line]
+    result = next(frame for frame in frames if frame["kind"] == "result")
+    resources = result["resources"]
+    assert resources["sampler_version"] == "shared-member-v1"
+    assert resources["coverage"] == 0.0
+    assert resources["process_observer"] == "kata-guest-ebpf-v1"
+    assert resources["process_observation_complete"] is True
+    assert resources["processes"][0]["pid"] == 412
+    assert resources["tool_calls"][0]["timing_source"] == "exact"

@@ -109,6 +109,14 @@ required, with no default, in each stack's own `.env`:
 | staging | `freeinference-cloud-agent-sandbox-staging` |
 | production | `freeinference-cloud-agent-sandbox-prod` |
 
+Staging and production use separate Actions concurrency groups, so their host
+rollouts may run at the same time. This is safe only because every mutable stack
+surface in the table below is environment-specific: Compose project, sandbox
+image, networks, deployment root and host-state root. The Kata preflight run by
+deployment is read-only (`--check`); installing or changing a host runtime is a
+separate operator action. Within each environment, the control-plane and host
+jobs also run in parallel behind the exact-SHA readiness fence.
+
 **Sharing it is silent, which is why there is no default.** Two deploys under
 one project name are not two stacks: the second `up` adopts the first's
 containers and recreates them with its own configuration, and the first
@@ -175,8 +183,11 @@ Dispatch **Deploy Staging** with `sha` set to a compatible commit to go back to.
 The workflow always runs the current deployment orchestrator against a separate
 checkout of that target, so choosing an old SHA cannot also remove the exact-SHA
 fence. A target predating `deploy/DEPLOY_PROTOCOL` is refused before Docker or
-the checkout in `DEPLOY_ROOT` is changed; recover forward to a compatible commit
-instead of bypassing the fence.
+the checkout in `DEPLOY_ROOT` is changed, as is a target carrying an older
+protocol value; recover forward to a compatible commit instead of bypassing the
+fence. Because `workflow_run` definitions come from the default branch, sync
+this orchestrator to `main` before relying on that guarantee and do not dispatch
+the older default-branch workflow during the transition.
 
 Alembic runs forward on every deploy. Do **not** downgrade a schema while the
 newer API is still serving: it may immediately read columns that the downgrade

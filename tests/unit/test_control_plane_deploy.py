@@ -216,14 +216,16 @@ def _run_control_deploy(
     deployment_environment: str = "production",
     dotenv: str = "",
     failed_health_match: str = "",
-    deploy_protocol: bool = True,
+    deploy_protocol: bool | str = True,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real deploy script against a minimal local git source."""
     source = tmp_path / "source"
     script_target = source / "deploy/control-plane/deploy.sh"
     script_target.parent.mkdir(parents=True)
     shutil.copy2(DEPLOY_SCRIPT_PATH, script_target)
-    if deploy_protocol:
+    if isinstance(deploy_protocol, str):
+        (source / "deploy/DEPLOY_PROTOCOL").write_text(deploy_protocol + "\n")
+    elif deploy_protocol:
         shutil.copy2(REPO_ROOT / "deploy/DEPLOY_PROTOCOL", source / "deploy/DEPLOY_PROTOCOL")
     git_env = {
         **os.environ,
@@ -323,7 +325,19 @@ def test_online_rollback_to_a_pre_fence_commit_is_refused_before_docker(tmp_path
     )
 
     assert result.returncode != 0
-    assert "pre-fence commit is unsupported" in result.stderr
+    assert "pre-fence or protocol-incompatible" in result.stderr
+    assert docker_calls == ""
+
+
+def test_online_rollback_to_an_old_protocol_is_refused_before_docker(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        deploy_protocol="shared-live-exact-sha-v1",
+    )
+
+    assert result.returncode != 0
+    assert "does not implement shared-live-exact-sha-v2" in result.stderr
     assert docker_calls == ""
 
 
@@ -383,6 +397,21 @@ def test_post_gate_health_failure_does_not_stop_bootstrap_services(tmp_path: Pat
     assert " up -d --remove-orphans" in docker_calls
     assert " stop control-plane" not in docker_calls
     assert " stop mcp-relay" not in docker_calls
+    assert not (tmp_path / "deployed" / ".deployed-sha").exists()
+
+
+def test_replaced_mcp_relay_must_pass_its_post_gate_health_check(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=True,
+        mcp_running=True,
+        failed_health_match="127.0.0.1:8001",
+    )
+
+    assert result.returncode != 0
+    assert " up -d --remove-orphans" in docker_calls
+    assert "MCP relay health check timed out" in result.stderr
     assert not (tmp_path / "deployed" / ".deployed-sha").exists()
 
 

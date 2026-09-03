@@ -573,7 +573,11 @@ class FakeAgentJobStore:
             return False
         # Upsert, never append: a rollup describes a closed window, so a
         # retried post is the same window said twice.
-        self.turn_telemetry[job_id] = {**self.turn_telemetry.get(job_id, {}), **rollup}
+        self.turn_telemetry[job_id] = {
+            **self.turn_telemetry.get(job_id, {}),
+            **rollup,
+            "attempt_id": attempt_id,
+        }
         return True
 
     async def admit_thread_sandbox_turn(self, **kwargs: Any) -> bool:
@@ -1539,7 +1543,8 @@ async def test_a_follow_up_cannot_switch_the_threads_harness(client: AsyncClient
     """The harness is fixed per thread (design D2); its session is the memory.
 
     Echoing the thread's own runtime stays a 201 — existing callers do that —
-    and a *different* registered runtime is the refusal, pointing at fork.
+    and a *different* registered runtime is refused. Native fork preserves the
+    runtime too, so the response points at a genuinely new chat.
     """
     parent_id = await _create_job(client)
 
@@ -1548,7 +1553,7 @@ async def test_a_follow_up_cannot_switch_the_threads_harness(client: AsyncClient
         json={"prompt": "continue on another harness", "runtime": "codex"},
     )
     assert switched.status_code == 400
-    assert "fork" in switched.json()["detail"]["error"]["message"]
+    assert "start a new chat" in switched.json()["detail"]["error"]["message"]
 
     echoed = await client.post(
         f"/v1/agent/jobs/{parent_id}/follow-ups",
@@ -4762,6 +4767,277 @@ async def test_the_owner_sees_what_their_turn_consumed(
     assert job["resources"]["coverage"] == 1.0
 
 
+async def test_shared_member_accounting_refuses_container_attribution(
+    client: AsyncClient,
+):
+    """The semantic version is a server-enforced promise, not runner trust.
+
+    Fork siblings can overlap in one container.  Accepting either an aggregate
+    delta or a periodic tool sample under ``shared-member-v1`` would silently
+    charge one chat for the other's work.
+    """
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+    endpoint = f"/v1/agent/worker/jobs/{job_id}/resources"
+    base = {
+        "sample_count": 0,
+        "coverage": 0.0,
+        "sampler_version": "shared-member-v1",
+    }
+
+    invalid = [
+        {**base, "cpu_usec": 1},
+        {**base, "sample_count": 1},
+        {
+            **base,
+            "tool_calls": [
+                {
+                    "call_seq": 1,
+                    "tool_use_id": "toolu_1",
+                    "tool_name": "Bash",
+                    "sample_count": 2,
+                    "measured_span_ms": 1,
+                    "cpu_usec_exclusive": 1,
+                }
+            ],
+        },
+    ]
+    for payload in invalid:
+        refused = await client.post(endpoint, json=payload, headers=auth)
+        assert refused.status_code == 422, refused.text
+
+    accepted = await client.post(
+        endpoint,
+        json={
+            **base,
+            "tool_time_ms": 25,
+            "tool_calls": [
+                {
+                    "call_seq": 1,
+                    "tool_use_id": "toolu_1",
+                    "tool_name": "Bash",
+                    "duration_ms": 25,
+                    "sample_count": 0,
+                    "overlap_n": 1,
+                }
+            ],
+        },
+        headers=auth,
+    )
+    assert accepted.status_code == 200, accepted.text
+
+
+async def test_resource_sequences_and_process_references_are_consistent(
+    client: AsyncClient,
+):
+    """Malformed worker evidence is a 422, never a database primary-key 500."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+    endpoint = f"/v1/agent/worker/jobs/{job_id}/resources"
+    call = {
+        "call_seq": 1,
+        "tool_use_id": "toolu_1",
+        "tool_name": "Bash",
+    }
+    process = {
+        "process_seq": 1,
+        "uid": 11003,
+        "pid": 42,
+        "tgid": 42,
+        "comm": "tiny",
+        "started_offset_ms": 1,
+        "tool_call_seqs": [1],
+    }
+    base = {
+        "sampler_version": "shared-member-v1",
+        "process_observer": "kata-guest-ebpf-v1",
+    }
+    invalid = [
+        {**base, "tool_calls": [call, {**call, "tool_use_id": "toolu_2"}]},
+        {
+            **base,
+            "tool_calls": [{**call, "process_count": 2}],
+            "processes": [process, {**process, "pid": 43, "tgid": 43}],
+        },
+        {
+            **base,
+            "tool_calls": [{**call, "process_count": 1}],
+            "processes": [{**process, "tool_call_seqs": [1, 1]}],
+        },
+        {**base, "tool_calls": [call], "processes": [{**process, "tool_call_seqs": [2]}]},
+        {**base, "tool_calls": [{**call, "process_count": 1}]},
+    ]
+
+    for payload in invalid:
+        refused = await client.post(endpoint, json=payload, headers=auth)
+        assert refused.status_code == 422, refused.text
+
+
+async def test_per_call_rows_survive_the_wire_in_both_directions(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Posted by the runner, read by the owner, over the real request models.
+
+    Written against the wire rather than the store because that is where this
+    kind of field is lost: a model missing the attribute accepts the post,
+    answers 200, and drops it silently — which no test that hands a dict to
+    the store can see.
+    """
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    ack = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/resources",
+        json={
+            "cpu_usec": 5_000_000,
+            "sample_count": 12,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_time_ms": 9_543,
+            "tool_calls": [
+                {
+                    "call_seq": 1,
+                    "tool_use_id": "toolu_long",
+                    "tool_name": "Bash",
+                    "timing_source": "exact",
+                    "duration_ms": 9_523,
+                    "sample_count": 9,
+                    "overlap_n": 1,
+                    "measured_span_ms": 8_000,
+                    "cpu_usec_exclusive": 4_400_000,
+                    "mem_peak_exclusive_bytes": 270_000_000,
+                    "process_count": 1,
+                    "process_cpu_usec": 15_000,
+                    "process_mem_peak_bytes": 2_228_224,
+                    "process_io_read_bytes": 0,
+                    "process_io_write_bytes": 8_388_608,
+                    "process_resources_partial": True,
+                },
+                {
+                    "call_seq": 2,
+                    "tool_use_id": "toolu_short",
+                    "tool_name": "Read",
+                    "duration_ms": 20,
+                    "sample_count": 0,
+                    "overlap_n": 1,
+                },
+            ],
+            "tool_calls_truncated": False,
+            "process_observer": "kata-guest-ebpf-v1",
+            "process_observation_complete": True,
+            "process_events_lost": 0,
+            "processes": [
+                {
+                    "process_seq": 1,
+                    "uid": 11003,
+                    "pid": 42,
+                    "tgid": 42,
+                    "ppid": 7,
+                    "comm": "tiny",
+                    "executable": "/bin/tiny",
+                    "started_offset_ms": 12,
+                    "duration_ms": 1,
+                    "exit_code": 0,
+                    "observed_fork": True,
+                    "observed_exec": True,
+                    "observed_exit": True,
+                    "tool_call_seqs": [1],
+                    "cpu_usec": 15_000,
+                    "mem_peak_bytes": 2_228_224,
+                    "io_read_bytes": 0,
+                    "io_write_bytes": 8_388_608,
+                    "io_rchar_bytes": 8_390_683,
+                    "io_wchar_bytes": 8_388_701,
+                }
+            ],
+        },
+        headers=auth,
+    )
+    assert ack.status_code == 200, ack.text
+
+    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
+    assert job["telemetry_attempt_id"] == claim["attempt_id"]
+    resources = job["resources"]
+    assert resources["tool_calls_truncated"] is False
+    assert resources["tool_time_ms"] == 9_543
+    long_call, short_call = resources["tool_calls"]
+    assert long_call["tool_name"] == "Bash"
+    assert long_call["timing_source"] == "exact"
+    assert short_call["timing_source"] == "message", "an unmarked call claimed precision"
+    assert long_call["cpu_usec_exclusive"] == 4_400_000
+    assert long_call["measured_span_ms"] == 8_000
+    assert long_call["process_count"] == 1
+    assert long_call["process_cpu_usec"] == 15_000
+    assert long_call["process_mem_peak_bytes"] == 2_228_224
+    assert long_call["process_io_write_bytes"] == 8_388_608
+    assert long_call["process_resources_partial"] is True
+    assert short_call["process_cpu_usec"] is None
+    assert short_call["process_resources_partial"] is False
+    assert resources["process_observer"] == "kata-guest-ebpf-v1"
+    assert resources["process_observation_complete"] is True
+    assert resources["process_events_lost"] == 0
+    (process,) = resources["processes"]
+    assert process["executable"] == "/bin/tiny"
+    assert process["duration_ms"] == 1
+    assert process["tool_call_seqs"] == [1]
+    assert process["cpu_usec"] == 15_000
+    assert process["mem_peak_bytes"] == 2_228_224
+    assert process["io_write_bytes"] == 8_388_608
+    assert process["io_rchar_bytes"] == 8_390_683
+    # The 97 % case, all the way to the reader: a row, a duration, and no
+    # counters at all. A zero here would be a number nobody measured.
+    assert short_call["sample_count"] == 0
+    assert short_call["cpu_usec_exclusive"] is None
+    assert short_call["cpu_usec_shared"] is None
+    assert short_call["mem_peak_exclusive_bytes"] is None
+
+
+async def test_a_turn_with_no_per_call_rows_reads_as_an_empty_list(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Every turn recorded before this shipped, and every unmeasured one."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+    await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/resources",
+        json={"sample_count": 0, "coverage": 0.0, "sampler_version": "2"},
+        headers=auth,
+    )
+
+    resources = (await client.get(f"/v1/agent/jobs/{job_id}")).json()["resources"]
+    assert resources["tool_calls"] == []
+    assert resources["tool_calls_truncated"] is False
+    # Null, not zero: a turn nobody measured did not spend no time in tools.
+    assert resources["tool_time_ms"] is None
+
+
+async def test_more_calls_than_the_cap_are_refused_rather_than_truncated_server_side(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """The runner caps and flags; the server must not quietly cap a second time."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/resources",
+        json={
+            "sample_count": 1,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [
+                {"call_seq": i + 1, "tool_use_id": f"t{i}", "tool_name": "Read"} for i in range(501)
+            ],
+        },
+        headers=auth,
+    )
+    assert response.status_code == 422
+
+
 async def test_a_rollup_is_the_same_window_said_twice_not_two_windows(
     client: AsyncClient, store: FakeAgentJobStore
 ):
@@ -4812,6 +5088,7 @@ async def test_an_unmeasured_turn_reports_nothing_rather_than_zero(
 
     job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
 
+    assert job["telemetry_attempt_id"] is None
     assert job["resources"] is None
     assert job["continuity_mode"] is None
     assert job["duration_ms"] is None

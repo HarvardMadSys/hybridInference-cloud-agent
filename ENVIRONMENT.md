@@ -76,6 +76,8 @@ need a gateway secret here, the design is wrong — stop and escalate.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
+| `COMPOSE_PROFILES` (`edge`) | **NEW** | Compose-level, read by `docker compose` not by this service. `edge` starts the nginx edge for a deployment that owns its own hostname: `/api/*` to the control plane with the prefix stripped, everything else to the web app, on one loopback port for the tunnel to point at. Unset under the gateway's hostname, where the console does that job. |
+| `AGENT_EDGE_BIND` / `AGENT_EDGE_PORT` | **NEW** | Where the edge listens; defaults `127.0.0.1` / `3003`. Only meaningful with the `edge` profile. |
 | `AGENT_SESSION_COOKIE_SECURE` | **NEW** | Defaults to on. Set to `false` **only** for a developer running the whole stack on plain `http://localhost`; a session cookie without `Secure` is one anyone on the path can take. |
 | `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls overwrites `X-Forwarded-For`; otherwise the admin audit trail records whatever address the caller typed. |
 | `AGENT_DEPLOYMENT_SHA` | **NEW** | Exact commit this API serves. Required by the production control-plane Compose stack and exported by `deploy/control-plane/deploy.sh`; do not hand-edit it during a rollout. New retained-group claims require the polling replica to advertise the matching completed host marker, so a pending or failed host deployment cannot claim through a cold-start API. The local stack generates its own stack-scoped marker. |
@@ -185,7 +187,7 @@ compose, because they name the stack rather than configure it.
 | `AGENT_SANDBOX_ALLOW_OPEN_NETWORK` | existing | ⚠️ Isolation escape hatch. Must be unset in any environment reachable by untrusted repositories. |
 | `AGENT_SANDBOX_ALLOW_UNISOLATED` | existing | ⚠️ Same. |
 | `AGENT_EGRESS_SETUP_TIER` | existing | Egress during dependency setup. The standalone host defaults to `trusted`, backed by its checked-in Squid allowlist proxy. Set `platform_only` only when setup needs no registry access. |
-| `AGENT_EGRESS_AGENT_TIER` | existing | Egress during the agent run. `platform_only` is the safe default; `custom` grants untrusted code general internet access. |
+| `AGENT_EGRESS_AGENT_TIER` | existing | Egress during the agent run. `platform_only` is the required safe production default. `trusted` adds the package allowlist proxy, `custom` delegates reachability to an operator network, and `full` is unrestricted; all three widen the reviewed agent-phase boundary. |
 | `AGENT_EGRESS_ALLOWLIST` | existing | Extra domains added to the built-in Trusted package-registry list. Malformed entries and agent-vendor telemetry domains fail closed before Squid starts. |
 | `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` | existing | Internal discovery backplane carrying the fixed inference/MCP relays. Each chat gets a derived private bridge populated from it; chats are not left together on this network. On a host running sibling staging/production stacks this must be each stack's explicit unique name. |
 | `AGENT_EGRESS_NETWORK_TRUSTED` | existing | Internal discovery backplane carrying the setup proxy. Each setup phase gets a derived chat-private bridge. The supported host script derives a Compose-project-specific name when unset. |

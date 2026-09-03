@@ -30,7 +30,9 @@ from cloud_agent.host_pool import (
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_PROTOCOL,
+    SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
 from tests.support.migrations import apply_migrations
@@ -134,14 +136,8 @@ def _kata_attestation(**overrides) -> dict:
             NATIVE_FORK_AT_ANCHOR_CAPABILITY,
             shared_deployment_capability("test-deployment"),
         ],
-        "runtime_versions": {
-            "claude-code": "2.1.220",
-            "codex": "0.145.0",
-            "pi": "0.73.1",
-            "opencode": "1.18.9",
-            "kilo": "7.4.17",
-        },
-        "helper_versions": {"claude-agent-sdk": "0.2.148"},
+        "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+        "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
         "host_kernel": "6.8.0-host",
         "guest_kernel": "6.1.0-kata",
     }
@@ -160,14 +156,8 @@ def _shared_attestation(**overrides) -> dict:
             NATIVE_FORK_AT_ANCHOR_CAPABILITY,
             shared_deployment_capability("test-deployment"),
         ],
-        "runtime_versions": {
-            "claude-code": "2.1.220",
-            "codex": "0.145.0",
-            "pi": "0.73.1",
-            "opencode": "1.18.9",
-            "kilo": "7.4.17",
-        },
-        "helper_versions": {"claude-agent-sdk": "0.2.148"},
+        "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+        "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
     }
     stamp.update(overrides)
     return stamp
@@ -564,7 +554,13 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
         ),
         _shared_attestation(sandbox_image_digest=""),
         _shared_attestation(shared_sandbox_protocol="v0"),
-        _shared_attestation(helper_versions={"claude-agent-sdk": "0.2.147"}),
+        _shared_attestation(
+            helper_versions={
+                "claude-agent-sdk": "0.2.147",
+                "guest-observer": "1",
+                "tool-mark": "1",
+            }
+        ),
         _shared_attestation(
             runtime_versions={
                 "claude-code": "2.1.219",

@@ -99,18 +99,29 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
     );
   }
 
-  // Handle backend error format: { error: { type: "...", message: "...", code: 500 } }
-  // or { detail: "..." } (FastAPI validation errors)
+  // Handle backend error format: { error: { type: "...", message: "...", code: 500 } },
+  // the same object wrapped by FastAPI as { detail: { error: {...} } }, or
+  // { detail: "..." } for plain HTTPException/validation errors.
   let errorCode = 'UNKNOWN_ERROR';
   let errorMessage = '';
   let errorDetails: Record<string, unknown> | undefined;
 
   if (errorData && typeof errorData === 'object') {
     const data = errorData as Record<string, unknown>;
+    const detail =
+      data.detail && typeof data.detail === 'object' && !Array.isArray(data.detail)
+        ? (data.detail as Record<string, unknown>)
+        : undefined;
+    const structuredError =
+      data.error && typeof data.error === 'object'
+        ? (data.error as Record<string, unknown>)
+        : detail?.error && typeof detail.error === 'object'
+          ? (detail.error as Record<string, unknown>)
+          : undefined;
 
-    if (data.error && typeof data.error === 'object') {
-      // Backend error format: { error: { message: "...", type: "...", code: 400 } }
-      const error = data.error as Record<string, unknown>;
+    if (structuredError) {
+      // Backend error format, either direct or under FastAPI's `detail`.
+      const error = structuredError;
       errorMessage = (error.message as string) || errorMessage;
       const lowerMessage = errorMessage.toLowerCase();
 
@@ -132,7 +143,11 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
         errorCode = 'INVALID_TOKEN';
       } else if (error.type === 'validation_error') {
         errorCode = 'VALIDATION_ERROR';
-      } else if (resp.status === 409) {
+      } else if (
+        resp.status === 409 &&
+        (lowerMessage.includes('already registered') ||
+          (lowerMessage.includes('user') && lowerMessage.includes('already exists')))
+      ) {
         errorCode = 'USER_ALREADY_EXISTS';
       } else if (resp.status === 401) {
         errorCode = 'INVALID_CREDENTIALS';
@@ -149,6 +164,12 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
         errorCode = 'EMAIL_NOT_VERIFIED';
       } else if (resp.status === 403 && lowerMessage.includes('suspend')) {
         errorCode = 'ACCOUNT_SUSPENDED';
+      } else if (typeof error.type === 'string' && error.type) {
+        // Preserve domain conflicts such as native_fork_failed. Treating every
+        // structured 409 as USER_ALREADY_EXISTS makes unrelated agent errors
+        // render as an email-registration failure wherever getErrorMessage is
+        // used.
+        errorCode = error.type;
       }
     } else if (data.detail) {
       // FastAPI validation error format: { detail: "..." }

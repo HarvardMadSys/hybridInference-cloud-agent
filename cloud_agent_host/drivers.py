@@ -25,6 +25,7 @@ provide the same lifecycle guarantees to the threaded host runner.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -44,6 +45,7 @@ from cloud_agent_host.runtimes import (
     get_runtime,
 )
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
+from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -176,6 +178,10 @@ class LaunchContext:
     #: Private per-membership tmpfs root for generated provider configuration.
     #: It is never the durable native session store.
     activation_dir: str | None = None
+    #: Retained containers own their state inside Docker rather than at a host
+    #: path. They provide this trusted writer so Claude's passive hooks are
+    #: installed in the filesystem the CLI will actually read.
+    install_tool_hooks: Callable[[dict[str, Any]], None] | None = None
 
 
 class HarnessTurn:
@@ -277,17 +283,6 @@ class HarnessSession:
     def closed(self) -> bool:
         """Whether :meth:`close` has ended this session."""
         return self._closed
-
-    @property
-    def container(self) -> str | None:
-        """The sandbox container this session's process runs in, if any.
-
-        The host-side resource sampler is the only consumer: a resident turn
-        reuses a process spawned by an earlier turn, so without this the one
-        rung that needs no spawn would be the one rung nobody could measure.
-        Sessions without a live process of their own answer None.
-        """
-        return None
 
     def turn_finished(self) -> None:
         """A settled turn leaves the live session ready for another turn."""
@@ -508,10 +503,6 @@ class _JsonResidentSession(HarnessSession):
         self._live_turn: _JsonResidentTurn | None = None
         self._request_sequence = 0
         self._prefetched: list[str] = []
-
-    @property
-    def container(self) -> str | None:
-        return getattr(self._process, "container", None)
 
     def _request_id(self, prefix: str = "req") -> str:
         self._request_sequence += 1
@@ -1240,6 +1231,11 @@ class HttpAgentLiveSession(_JsonResidentSession):
 #: ``/workspace`` workdir, which keeps the project-dir encoding stable).
 CLAUDE_STATE_CONFIG_DIR = f"{STATE_MOUNT_TARGET}/claude"
 
+#: The sandbox-side hooks append exact tool boundaries here. Keeping this on
+#: the state mount makes it platform data rather than part of the repository,
+#: and lets resident turns share one append-only stream safely.
+CLAUDE_TOOL_MARKS = f"{STATE_MOUNT_TARGET}/{TOOL_MARK_FILE}"
+
 
 class ClaudeCodeDriver(HarnessDriver):
     """Claude Code native live transport, resume, and immediate fork."""
@@ -1353,6 +1349,14 @@ class ClaudeCodeLiveSession(HarnessSession):
             raise DriverError("a live session needs a live-input spawn")
         if context.state_dir is None:
             raise DriverError("a resident session needs a state mount")
+        # Hook installation is an observability upgrade and must never cost a
+        # user their turn. The retained broker writes into the container's
+        # Docker-owned state; tests and non-observing embeddings omit the seam.
+        if context.install_tool_hooks is not None:
+            try:
+                context.install_tool_hooks(hook_settings(CLAUDE_TOOL_MARKS))
+            except Exception as exc:  # pragma: no cover - defensive degradation
+                print(f"tool hooks not installed: {exc}", file=sys.stderr)
         argv, extra_env = self.runtime.prepare_live(
             workdir=context.workdir,
             model="",  # pinned per session below, chosen by the first turn's model
@@ -1373,17 +1377,6 @@ class ClaudeCodeLiveSession(HarnessSession):
         #: only meaningful once ``_process`` exists.
         self._reasoning_effort: str | None = None
         self._live_turn: ClaudeCodeLiveTurn | None = None
-
-    @property
-    def container(self) -> str | None:
-        """The container the live process runs in, once it has been spawned.
-
-        Read defensively: the process is whatever the platform's spawn seam
-        returned, and a process that cannot say where it runs is one the
-        sampler simply does not measure. An observer must never be the reason
-        a turn fails.
-        """
-        return getattr(self._process, "container", None)
 
     def shared_lines(self) -> Iterator[str]:
         """The session's single stdout reader, borrowed by the current turn."""

@@ -1,10 +1,14 @@
-"""What a turn actually consumed, measured from outside the sandbox.
+"""Whole-container sampling primitives and honest shared-member fallbacks.
 
-The platform runs every turn on a machine its user cannot see, so "why was
-that slow" and "what did that cost in CPU" have had no answer but ssh. This
-module is the measurement half of the observability design's third signal
-class: a periodic sampler that reads one sandbox's counters and rolls a
-closed window up into one set of numbers.
+``ResourceSampler`` reads one Docker container's counters and rolls a closed
+window up into one set of numbers.  That primitive remains useful for
+group/residency diagnostics and for tests, but it is deliberately **not** bound
+to a chat-member attempt: fork siblings can execute concurrently in the same
+container, so assigning the container delta to either member would duplicate
+the other's work.  Current shared turns instead start from
+``shared_member_resource_rollup()`` and may add UID-filtered Kata guest process
+telemetry and per-tool timing.  The empty top-level counters are an explicit
+unavailable result, never a measured zero.
 
 **Why through the daemon, and not through cgroupfs.** The first version read
 ``/proc/<pid>/cgroup`` and ``/sys/fs/cgroup`` directly, having assumed the
@@ -18,18 +22,17 @@ socket the runner already holds has no such assumption: it is the same
 answer whether the runner runs on the host, in a container, or on a machine
 that joins the pool later.
 
-**Why still from outside.** The invariant is unchanged. Nothing is asked of
-the sandbox, nothing runs inside it, and no agent-visible process
-participates — so a turn cannot see that it is measured, cannot refuse, and
-cannot report numbers of its own choosing.
+**Why this sampler is still outside.** Nothing is asked of the sandbox and no
+agent-visible process participates in these Docker totals.  The separate Kata
+guest observer is a reviewed, root-only helper and filters records by member
+UID; it is not implemented in this module.
 
 **Why deltas, never absolutes.** These counters are cumulative from the
-container's creation, and a resident thread's sandbox can outlive the turn
-being measured. Every value reported is the difference between the window's
-last and first sample, so a second turn in the same sandbox is never charged
-for the first. Peak memory is the maximum of *our own* samples for the same
-reason: a high-water mark since creation would attribute an earlier turn's
-spike to this one.
+container's creation. Every value reported is the difference between the
+window's last and first sample. Peak memory is the maximum of *our own* samples
+for the same reason: a high-water mark since creation would attribute an
+earlier window's spike to this one. Callers must additionally prove that the
+whole container is the accounting unit; a shared member turn cannot do so.
 
 **Why a missing number is not a zero.** A daemon that cannot be reached, a
 container that has gone, a field this Docker version does not populate — all
@@ -54,6 +57,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.shared_protocol import SHARED_MEMBER_ACCOUNTING_VERSION
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,10 +69,25 @@ logger = get_logger(__name__)
 #: the move from host cgroupfs reads to the daemon's own accounting.
 SAMPLER_VERSION = "2"
 
-#: One sample per second. A turn is measured in tens of seconds, so this is
-#: fine-grained enough for per-tool windows (design §6) without being a load
+
+def shared_member_resource_rollup() -> dict[str, object]:
+    """Return the honest top-level base for one shared-member turn.
+
+    The broker may add tool windows and UID-scoped guest observations to this
+    object. Keeping all aggregate counters absent prevents an unforked turn and
+    a forked turn from silently acquiring different accounting semantics.
+    """
+    return {
+        "sample_count": 0,
+        "coverage": 0.0,
+        "sampler_version": SHARED_MEMBER_ACCOUNTING_VERSION,
+    }
+
+
+#: One sample per second. A container-owned accounting window is normally
+#: measured in tens of seconds, so this is fine-grained without being a load
 #: of its own — one small request per sandbox per second, on a connection
-#: that stays open.
+#: that stays open. Shared member turns deliberately do not use this sampler.
 SAMPLE_INTERVAL_S = 1.0
 
 #: How long to keep asking the daemon about a container before giving up.
@@ -80,10 +99,9 @@ BIND_TIMEOUT_S = 30.0
 
 #: How often to re-ask while waiting for the container to appear. Much
 #: shorter than the sampling interval on purpose: every millisecond between
-#: the sandbox starting and the sampler binding is consumption nobody
-#: measured, and at the sampling interval a container that was not ready on
-#: the first ask cost a full second of a turn that often lasts ten. The extra
-#: asks happen only during startup and stop the moment one succeeds.
+#: the container starting and the sampler binding is consumption nobody
+#: measured. The extra asks happen only during startup and stop the moment
+#: one succeeds.
 BIND_POLL_S = 0.1
 
 _DEFAULT_SOCKET = "/var/run/docker.sock"
@@ -336,14 +354,7 @@ def rollup(samples: list[Sample], *, window_s: float) -> dict[str, object]:
 
 
 def daemon_reachable(*, timeout_s: float = 5.0) -> str | None:
-    """Check that the daemon answers, returning a reason when it does not.
-
-    The runner's preflight calls this so a deployment where measurement
-    cannot work says so at startup, in the log, rather than by rendering
-    "resource data unavailable" under every turn until somebody notices. The
-    first version's whole failure was an assumption about the deployment that
-    nothing checked; this is that check.
-    """
+    """Check that the daemon answers for sampler tests/group-level callers."""
     try:
         with daemon_client(timeout_s=timeout_s) as client:
             response = client.get("/version")
@@ -357,7 +368,11 @@ def daemon_reachable(*, timeout_s: float = 5.0) -> str | None:
 
 
 class ResourceSampler:
-    """Samples one sandbox for the life of one attempt window.
+    """Sample one Docker container for one container-owned window.
+
+    Do not bind this to one member of a shared retained sandbox. Container
+    totals include every concurrent sibling; the live topology uses
+    :func:`shared_member_resource_rollup` plus UID-scoped guest observations.
 
     Binding is **lazy and retried**, because ``docker run`` returns a client
     process long before the daemon has created the container: asking who to
@@ -401,6 +416,16 @@ class ResourceSampler:
     def active(self) -> bool:
         """Whether this sampler has something to measure, or may yet bind."""
         return self._counters is not None or self._resolver is not None
+
+    def samples(self) -> list[Sample]:
+        """This window's readings, for attributing spans narrower than it.
+
+        A copy, and only meaningful once :meth:`stop` has taken the closing
+        reading. The list covers the current binding alone: ``rebind`` throws
+        the previous container's readings away with the container, so a call
+        issued before a re-spawn correctly finds nothing to measure it with.
+        """
+        return list(self._samples)
 
     def start(self) -> None:
         """Begin sampling. Safe to call on an inert sampler."""
