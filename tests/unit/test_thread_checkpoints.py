@@ -12,14 +12,11 @@ import base64
 import hashlib
 import io
 import json
+import pathlib
 import tarfile
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
 import pytest
-
-if TYPE_CHECKING:
-    import pathlib
 
 import cloud_agent.checkpoints as checkpoints
 from cloud_agent.checkpoints import gate_for_claim, open_checkpoint
@@ -292,6 +289,54 @@ def test_docker_owned_state_uses_the_retained_hook_writer(tmp_path):
     assert len(updates) == 1
     assert set(updates[0]["hooks"]) == {"PreToolUse", "PostToolUse"}
     assert not host_path.exists()
+
+
+def test_the_host_written_config_directory_is_handed_to_the_sandbox_user(tmp_path):
+    """The runner writes it; the CLI has to own it.
+
+    The runner hands the state mount over before the turn starts, and this
+    directory is created after that — as the runner, which in the Compose
+    deployment is root while the CLI is uid 10001. Left unadopted, the CLI
+    cannot create ``session-env`` and every Bash call fails with EACCES.
+    """
+    adopted: list[tuple[str, list[str]]] = []
+    context = replace(
+        _context(tmp_path),
+        adopt_state_path=lambda path: adopted.append(
+            (path, sorted(p.name for p in pathlib.Path(path).iterdir()))
+        ),
+    )
+
+    ClaudeCodeDriver(_ClaudeStub()).launch(context).start_turn(TurnInput(prompt="go", model="m"))
+
+    # Handed over after the write, not before: a hand-over that runs first
+    # leaves the settings file itself owned by the runner.
+    assert adopted == [(str(tmp_path / "claude"), ["settings.json"])]
+
+
+def test_an_already_present_config_directory_is_handed_over_again(tmp_path):
+    """A directory an earlier turn left behind proves nothing about this one."""
+    (tmp_path / "claude").mkdir(parents=True)
+    adopted: list[str] = []
+    context = replace(_context(tmp_path), adopt_state_path=adopted.append)
+
+    ClaudeCodeDriver(_ClaudeStub()).launch(context).start_turn(TurnInput(prompt="go", model="m"))
+
+    assert adopted == [str(tmp_path / "claude")]
+
+
+def test_the_retained_hook_writer_needs_no_host_hand_over(tmp_path):
+    """Docker-layer state is created for the sandbox uid in the image."""
+    adopted: list[str] = []
+    context = replace(
+        _context(tmp_path),
+        install_tool_hooks=lambda update: None,
+        adopt_state_path=adopted.append,
+    )
+
+    ClaudeCodeDriver(_ClaudeStub()).launch(context).start_turn(TurnInput(prompt="go", model="m"))
+
+    assert adopted == []
 
 
 def test_a_turn_without_a_state_mount_installs_nothing(tmp_path):

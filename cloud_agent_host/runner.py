@@ -1672,6 +1672,11 @@ def _run_agent(
         mcp_config=mcp_config,
         state_dir=state_dir,
         install_tool_hooks=getattr(backend, "install_tool_hooks", None),
+        # The hand-over below happens before the turn starts and therefore
+        # before the driver writes anything of its own into the mount. A
+        # driver that writes there gets the same primitive rather than a
+        # second copy of the ownership rules.
+        adopt_state_path=backend.adopt_workdir,
     )
     session = None
     turn = None

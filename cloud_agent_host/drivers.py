@@ -221,6 +221,12 @@ class LaunchContext:
     #: path. They provide this trusted writer so Claude's passive hooks are
     #: installed in the filesystem the CLI will actually read.
     install_tool_hooks: Callable[[dict[str, Any]], None] | None = None
+    #: Hands one host path under the state mount to the sandbox user, the way
+    #: the runner hands over the state directory itself. A driver that writes
+    #: into that mount does so as the *runner*, and the sandbox user is a
+    #: different one; without this the CLI cannot write inside its own config
+    #: directory. ``None`` where nothing writes there before the turn.
+    adopt_state_path: Callable[[str], None] | None = None
 
 
 class HarnessTurn:
@@ -1377,6 +1383,16 @@ class ClaudeCodeSession(HarnessSession):
                     settings = json.loads(settings_path.read_text()) or {}
             settings.update(settings_update)
             settings_path.write_text(json.dumps(settings, indent=2))
+            # This writer is the runner (root in the Compose deployment) and
+            # runs *after* the runner has already handed the state mount over,
+            # so everything it just created belongs to the wrong user. The CLI
+            # keeps session-env/, projects/ and its own settings in here: an
+            # unadopted config directory fails every Bash call with EACCES and
+            # writes no session file at all, which reads as a broken model
+            # rather than as a permission bug. Re-adopt unconditionally — a
+            # directory a previous turn created is no guarantee about this one.
+            if self._context.adopt_state_path is not None:
+                self._context.adopt_state_path(str(config))
         except Exception as exc:  # pragma: no cover - defence, not behaviour
             print(f"tool hooks not installed: {exc}", file=sys.stderr)
 

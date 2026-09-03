@@ -476,6 +476,73 @@ def test_retained_hooks_are_installed_before_the_guest_process_fence(tmp_path):
     assert control.resources[0]["process_observation_complete"] is True
 
 
+def test_host_written_hooks_leave_the_config_directory_owned_by_the_sandbox(tmp_path):
+    """A legacy backend has no in-container writer, so the runner writes it.
+
+    The runner adopts the state mount before the turn starts, and the CLI's
+    config directory is created after that — by the runner, which is root in
+    the Compose deployment while the CLI is uid 10001. Unadopted, the CLI
+    cannot create ``session-env`` and every Bash call fails with EACCES while
+    Read still works, which reads as a broken model rather than a permission
+    bug. The hand-over is what this asserts, at the seam that actually runs.
+    """
+    state_dir = tmp_path / "job.state"
+    state_dir.mkdir()
+    adopted: list[tuple[str, list[str]]] = []
+
+    class Process:
+        @staticmethod
+        def lines():
+            return iter([_result_line()])
+
+        @staticmethod
+        def kill():
+            return None
+
+        @staticmethod
+        def wait():
+            return 0
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    class Backend:
+        provides_isolation = True
+
+        @staticmethod
+        def base_env():
+            return {"PATH": "/usr/bin"}
+
+        @staticmethod
+        def adopt_workdir(path):
+            adopted.append((path, sorted(entry.name for entry in Path(path).iterdir())))
+
+        @staticmethod
+        def spawn(_spec):
+            return Process()
+
+    code, _tail, _errors = run_agent(
+        ClaudeCodeRuntime(),
+        job=ClaimedJob(**{**_JOB.__dict__, "runtime": "claude-code"}),
+        workdir=str(tmp_path),
+        gateway_base_url="http://gw",
+        control=FakeControl(),
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=Backend(),
+        state_dir=str(state_dir),
+        export_checkpoint=False,
+    )
+
+    assert code == 0
+    # The mount is adopted while still empty, so the directory written after
+    # it has to be handed over on its own — with its settings file already
+    # inside, or that file stays the runner's too.
+    assert (str(state_dir), []) in adopted
+    assert (str(state_dir / "claude"), ["settings.json"]) in adopted
+
+
 def test_merging_more_process_rows_than_the_wire_cap_is_never_complete(tmp_path):
     def observed_process(sequence: int) -> GuestProcess:
         return GuestProcess(
