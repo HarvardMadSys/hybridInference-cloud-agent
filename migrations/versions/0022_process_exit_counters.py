@@ -1,10 +1,10 @@
 """Store what each guest process consumed, and charge it to the call that ran it.
 
 The process census said which processes a tool call started. It could not
-say what they consumed: container totals cannot be assigned to a concurrent
-shared member, and the median call is shorter than a periodic sample. The guest
-kernel accounts every task at its exit, so the exit event now carries CPU time,
-peak RSS and I/O bytes, and this revision gives those numbers a home.
+say what they cost: the periodic sampler reads container totals once a
+second, and the median call is 35 ms. The guest kernel accounts every task at
+its exit, so the exit event now carries CPU time, peak RSS and I/O bytes, and
+this revision gives those numbers a home.
 
 Two tables change. Each process row gains the counters the kernel exposed
 for its thread group — null until the leader exited, and null for any

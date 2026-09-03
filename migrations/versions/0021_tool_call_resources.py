@@ -1,18 +1,22 @@
 """Record tool windows and Kata guest process lifecycle observations.
 
-Tool timing and process observations explain which calls ran and where time
-went. In the shared-retained topology they deliberately do not claim a complete
-member cost: whole-container counters also include concurrent siblings.
+The attempt rollup says what a turn cost. It cannot say which call cost it,
+and that is the question an owner actually asks when a turn is slow or
+expensive — measured on production, six calls out of 278 held two thirds of
+all tool time, and every one of them was Bash.
 
-Periodic fields remain for historical/group sampler rows. Kata guest eBPF is a
-separate event source: fork/exec/exit events preserve
+The periodic resource sampler remains a conservative source for CPU/memory.
+Kata guest eBPF is a separate event source: fork/exec/exit events preserve
 processes that begin and end between sampler readings. Lost-event and
 truncation fields are stored explicitly so an empty process list is evidence
 of no process only when ``process_observation_complete`` is true.
 
-The ``exclusive``/``shared`` fields preserve compatibility with sampled rows.
-Current shared-member writers leave them null and charge Kata process counters
-only when one call unambiguously owns a settled process.
+The ``exclusive``/``shared`` split is the other half of that honesty. Parallel
+tool calls share the sandbox's counters and cannot be told apart, so a call
+that shared its readings stores them in the shared columns with the number of
+calls it shared with. A reader that knows only about exclusive numbers then
+shows nothing for those calls, rather than showing one call's row containing
+several calls' work.
 
 Revision ID: 0021_tool_call_resources
 Revises: 0020_session_fork_coordinator
