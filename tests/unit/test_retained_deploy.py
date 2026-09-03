@@ -183,6 +183,17 @@ def test_target_sha_marker_is_a_rollout_fence_not_a_topology_switch() -> None:
     assert "AGENT_SHARED_LIVE_SANDBOX" not in host_script
 
 
+def test_host_builds_then_drains_runners_before_replacing_the_broker() -> None:
+    script = SANDBOX_HOST.read_text()
+
+    build = script.index("compose build")
+    marker = script.index("prepare_shared_live_marker", build)
+    drain = script.index("compose stop runner", marker)
+    replace = script.index("compose up -d --no-build --remove-orphans", drain)
+
+    assert build < marker < drain < replace
+
+
 def test_direct_host_commands_support_environment_only_configuration(tmp_path: Path) -> None:
     """The direct operator path must not require a nonexistent optional .env."""
     app_dir = tmp_path / "app"

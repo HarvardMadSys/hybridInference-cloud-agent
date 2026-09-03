@@ -16,9 +16,11 @@ from cloud_agent_host.shared_session_supervisor import SharedSessionDescriptor
 from cloud_agent_host.workspace_broker import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
+    MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
     TerminalRequest,
     _run_terminal,
     _terminal_sse_frame,
+    _TerminalManager,
     _TerminalSession,
     create_app,
 )
@@ -388,6 +390,35 @@ async def test_interactive_terminal_runs_in_the_shared_container():
     assert any(call[0] == "terminal_closed" for call in supervisor.calls)
 
 
+@pytest.mark.asyncio
+async def test_refused_terminal_creation_releases_its_activity_token():
+    supervisor = _SharedSupervisor()
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        for _ in range(MAX_TERMINAL_SESSIONS_PER_WORKSPACE):
+            created = await client.post(
+                "/workspaces/athr_source/terminals",
+                headers=headers,
+                json={"rows": 30, "cols": 100},
+            )
+            assert created.status_code == 200
+        refused = await client.post(
+            "/workspaces/athr_source/terminals",
+            headers=headers,
+            json={"rows": 30, "cols": 100},
+        )
+
+    assert refused.status_code == 409
+    assert len([call for call in supervisor.calls if call[0] == "terminal_opened"]) == (
+        MAX_TERMINAL_SESSIONS_PER_WORKSPACE + 1
+    )
+    failed_cleanup = [
+        call for call in supervisor.calls if call[0] == "terminal_closed" and call[3] == {}
+    ]
+    assert failed_cleanup == [("terminal_closed", "athr_source", "terminal-token", {})]
+
+
 def test_shared_one_shot_terminal_uses_group_writable_umask():
     backend = _WorkspaceBackend()
     result = _run_terminal(
@@ -397,6 +428,39 @@ def test_shared_one_shot_terminal_uses_group_writable_umask():
     )
     assert result["exit_code"] == 0
     assert backend.spawned[0].argv[-1].startswith("umask 0002; ")
+
+
+def test_terminal_suspensions_are_reference_counted_per_concurrent_turn():
+    terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
+
+    terminals.suspend("athr_source", lease_generation=2, job_id="job-parent")
+    terminals.suspend("athr_source", lease_generation=1, job_id="job-child")
+    assert terminals.resume("athr_source", lease_generation=2, job_id="job-parent") == {
+        "ok": True,
+        "resumed": 0,
+    }
+    assert "athr_source" in terminals._suspended_workspaces
+    assert terminals.resume_settled("athr_source", job_id="job-parent") == {
+        "ok": True,
+        "resumed": 0,
+    }
+    assert "athr_source" in terminals._suspended_workspaces
+    assert terminals.resume("athr_source", lease_generation=1, job_id="job-child") == {
+        "ok": True,
+        "resumed": 0,
+    }
+    assert "athr_source" not in terminals._suspended_workspaces
+
+
+def test_legacy_settled_resume_resets_its_per_job_generation():
+    terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
+
+    terminals.suspend("athr_source", lease_generation=2)
+    assert terminals.resume_settled("athr_source") == {"ok": True, "resumed": 0}
+    terminals.suspend("athr_source", lease_generation=1)
+
+    assert terminals._workspace_generations["athr_source"] == 1
+    assert "athr_source" in terminals._suspended_workspaces
 
 
 def test_terminal_ring_is_bounded_and_reports_cursor_reset(tmp_path):

@@ -171,14 +171,20 @@ Never run `git clean` in this tree.
 
 ## Rolling back
 
-Dispatch **Deploy Staging** with `sha` set to the commit to go back to.
-Rollback is a deploy of an older commit; there is deliberately no separate
-mechanism, so the emergency path is the one that runs on every merge.
+Dispatch **Deploy Staging** with `sha` set to a compatible commit to go back to.
+The workflow always runs the current deployment orchestrator against a separate
+checkout of that target, so choosing an old SHA cannot also remove the exact-SHA
+fence. A target predating `deploy/DEPLOY_PROTOCOL` is refused before Docker or
+the checkout in `DEPLOY_ROOT` is changed; recover forward to a compatible commit
+instead of bypassing the fence.
 
-A rollback across a migration is not automatic. Alembic runs forward on every
-deploy; going back to a commit whose schema is older needs the downgrade run by
-hand first. Check whether `migrations/` changed between the two commits before
-assuming a rollback is just a redeploy.
+Alembic runs forward on every deploy. Do **not** downgrade a schema while the
+newer API is still serving: it may immediately read columns that the downgrade
+removed. The supported emergency sequence is code rollback to a
+schema-compatible commit first, verify it is serving, and only then perform a
+separately reviewed contract migration if one is genuinely required. The
+native-turn migrations in this rollout are expand-first and may remain in place
+during code rollback.
 
 Control and host rollback jobs also start in parallel, but the control script
 will not replace the API until a host advertises the rollback SHA. A missing or

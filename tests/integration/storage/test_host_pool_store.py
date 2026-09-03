@@ -28,7 +28,11 @@ from cloud_agent.host_pool import (
     hash_secret,
 )
 from cloud_agent.storage.store import AgentJobStore
-from cloud_agent_host.shared_protocol import SHARED_SANDBOX_PROTOCOL
+from cloud_agent_host.shared_protocol import (
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    SHARED_SANDBOX_PROTOCOL,
+    shared_deployment_capability,
+)
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -125,7 +129,11 @@ def _kata_attestation(**overrides) -> dict:
         "sandbox_runtime": "io.containerd.kata.v2",
         "sandbox_image_digest": "sandbox@sha256:claim",
         "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
-        "runner_capabilities": ["shared-sandbox-v1"],
+        "runner_capabilities": [
+            "shared-sandbox-v1",
+            NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+            shared_deployment_capability("test-deployment"),
+        ],
         "runtime_versions": {
             "claude-code": "2.1.220",
             "codex": "0.145.0",
@@ -147,7 +155,11 @@ def _shared_attestation(**overrides) -> dict:
         "sandbox_runtime": "",
         "sandbox_image_digest": "sandbox@sha256:shared",
         "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
-        "runner_capabilities": ["shared-sandbox-v1"],
+        "runner_capabilities": [
+            "shared-sandbox-v1",
+            NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+            shared_deployment_capability("test-deployment"),
+        ],
         "runtime_versions": {
             "claude-code": "2.1.220",
             "codex": "0.145.0",
@@ -172,6 +184,7 @@ async def _claim(
     host: str = "",
     host_credential_hash: str | object = _DEFAULT_CLAIM_VALUE,
     claim_attestation: dict | object = _DEFAULT_CLAIM_VALUE,
+    expected_deployment_sha: str | None = None,
 ) -> dict | None:
     """Claim as an enrolled, exactly attested host unless a test overrides it."""
     credential = (
@@ -190,6 +203,7 @@ async def _claim(
         host=host,
         host_credential_hash=credential,
         claim_attestation=attestation,
+        expected_deployment_sha=expected_deployment_sha,
     )
 
 
@@ -542,6 +556,12 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
     [
         {},
         _shared_attestation(runner_capabilities=[]),
+        _shared_attestation(
+            runner_capabilities=[
+                "shared-sandbox-v1",
+                shared_deployment_capability("test-deployment"),
+            ]
+        ),
         _shared_attestation(sandbox_image_digest=""),
         _shared_attestation(shared_sandbox_protocol="v0"),
         _shared_attestation(helper_versions={"claude-agent-sdk": "0.2.147"}),
@@ -586,6 +606,44 @@ async def test_exact_polling_replica_can_claim_shared_work(store):
     )
 
     assert claim is not None and claim["id"] == job["id"]
+
+
+async def test_new_group_claim_requires_the_control_planes_exact_deployment(store):
+    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2)
+    job = await _create_job(store, metadata={"requires": ["shared-sandbox-v1"]})
+    stale = _shared_attestation(
+        runner_capabilities=[
+            "shared-sandbox-v1",
+            NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+            shared_deployment_capability("previous-deployment"),
+        ]
+    )
+
+    refused = await _claim(
+        store,
+        worker_id="pending-replica",
+        lease_ttl_seconds=60,
+        host="runner-a",
+        claim_attestation=stale,
+        expected_deployment_sha="target-deployment",
+    )
+    accepted = await _claim(
+        store,
+        worker_id="ready-replica",
+        lease_ttl_seconds=60,
+        host="runner-a",
+        claim_attestation=_shared_attestation(
+            runner_capabilities=[
+                "shared-sandbox-v1",
+                NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+                shared_deployment_capability("target-deployment"),
+            ]
+        ),
+        expected_deployment_sha="target-deployment",
+    )
+
+    assert refused is None
+    assert accepted is not None and accepted["id"] == job["id"]
 
 
 async def test_runc_replica_skips_secure_work_and_takes_the_next_trusted_job(store):

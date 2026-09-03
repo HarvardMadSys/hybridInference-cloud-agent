@@ -343,65 +343,6 @@ def heartbeat(
     return identity
 
 
-def establish_residency(
-    *,
-    base_url: str,
-    identity: HostIdentity,
-    thread_id: str,
-    runtime_id: str,
-    runtime_version: str | None = None,
-    sandbox_id: str | None = None,
-) -> dict[str, Any] | None:
-    """Take residency for a thread this host is running; ``None`` = refused.
-
-    Returns ``{generation, credential, model}`` — ``credential`` may be None.
-    Every failure is ``None`` rather than an exception: the supervisor fences
-    that member process, while the chat's native session files remain in the
-    retained container for a later activation.
-    """
-    try:
-        answer = _post(
-            f"{base_url.rstrip('/')}/v1/agent/host/residencies",
-            {
-                "thread_id": thread_id,
-                "runtime_id": runtime_id,
-                "runtime_version": runtime_version,
-                "sandbox_id": sandbox_id,
-            },
-            bearer=identity.credential,
-        )
-    except (HostRemoved, EnrollmentError):
-        return None
-    generation = answer.get("generation")
-    if not (isinstance(generation, int) and generation >= 1):
-        return None
-    return {
-        "generation": generation,
-        "credential": answer.get("credential") or None,
-        "model": answer.get("model") or None,
-    }
-
-
-def release_residency(
-    *, base_url: str, identity: HostIdentity, thread_id: str, generation: int
-) -> None:
-    """Tell the control plane this host is done with a residency.
-
-    Best-effort: the reaper lapses whatever a lost release leaves behind.
-    """
-    try:
-        _post(
-            f"{base_url.rstrip('/')}/v1/agent/host/residencies/release",
-            {"thread_id": thread_id, "generation": generation},
-            bearer=identity.credential,
-        )
-    except (HostRemoved, EnrollmentError):
-        logger.info(
-            "agent_residency_release_unacknowledged",
-            extra={"event": "agent_residency_release_unacknowledged", "thread_id": thread_id},
-        )
-
-
 def ensure_enrolled(
     *,
     base_url: str,

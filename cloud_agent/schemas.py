@@ -803,6 +803,10 @@ class WorkerContinuityRequest(BaseModel):
     is the product-facing context contract.
     """
 
+    # ``replay`` is accepted only for rolling compatibility with an already
+    # admitted previous-generation attempt. No current scheduler or runner
+    # selects it, but rejecting its final telemetry during a parallel deploy
+    # would turn a diagnostic field into an avoidable attempt failure.
     mode: Literal["hot", "warm_native", "cold_native", "replay"] | None = None
     context_status: Literal["new", "live", "restored", "lost"] | None = None
 
@@ -1496,43 +1500,14 @@ class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
     )
 
 
-class HostResidencyEstablishRequest(BaseModel):  # type: ignore[no-any-unimported]
-    """A host taking residency for a thread it is running (design §7)."""
-
-    thread_id: str = Field(..., min_length=1, max_length=128)
-    runtime_id: str = Field(..., min_length=1, max_length=64)
-    runtime_version: str | None = Field(None, max_length=128)
-    sandbox_id: str | None = Field(None, max_length=253)
-
-
 class HostResidencyEstablishResponse(BaseModel):  # type: ignore[no-any-unimported]
-    """The residency the host now holds — the generation is its fence."""
+    """Attempt-fenced residency granted to a supervisor-owned member process."""
 
     thread_id: str
     generation: int
     ttl_seconds: float
-    credential: str | None = Field(
-        None,
-        description=(
-            "The residency's inference grant (retained-session design §6): "
-            "thread-attributed, "
-            "renewed by this host's beats, revoked when the residency ends. "
-            "It is what a live resident process runs on. Null degrades the "
-            "residency to workspace-only — turns then ride warm_native on "
-            "their own per-attempt grants."
-        ),
-    )
-    model: str | None = Field(
-        None,
-        description="The model the grant is scoped to (the establishing turn's).",
-    )
-
-
-class HostResidencyReleaseRequest(BaseModel):  # type: ignore[no-any-unimported]
-    """A host ending a residency it holds (teardown, eviction, drain)."""
-
-    thread_id: str = Field(..., min_length=1, max_length=128)
-    generation: int = Field(..., ge=1)
+    credential: str | None = None
+    model: str | None = None
 
 
 class HostHeartbeatResponse(BaseModel):  # type: ignore[no-any-unimported]

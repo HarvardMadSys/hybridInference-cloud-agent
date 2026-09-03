@@ -138,6 +138,25 @@ def test_closed_egress_uses_a_distinct_private_network_for_each_chat():
     assert command[command.index("--network") + 1] == CHAT_BOOTSTRAP_NETWORK
 
 
+def test_trusted_agent_phase_copies_both_platform_relays_and_the_proxy():
+    policy = _isolated_policy()
+    policy.tiers["agent"] = EgressTier.TRUSTED
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="unused", egress=policy))
+
+    assert manager._service_aliases_for_phase("agent") == (
+        "agent-gateway",
+        "agent-mcp",
+        "package-proxy",
+    )
+
+
+def test_trusted_setup_phase_copies_only_the_registry_proxy():
+    policy = _isolated_policy()
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="unused", egress=policy))
+
+    assert manager._service_aliases_for_phase("setup") == ("package-proxy",)
+
+
 def test_first_activation_replaces_the_dormant_bootstrap_bridge_before_start(monkeypatch):
     spec = _spec()
     manager = ChatSandboxManager(
@@ -1577,15 +1596,16 @@ def test_member_replacement_reaps_pidfile_group_and_every_same_uid_leftover(monk
         user_gid=manager.backend.gid,
     )
 
-    assert len(calls) == 2
-    assert calls[0][0] == [
+    assert len(calls) == 3
+    assert "stat -c %u:%g:%a" in calls[0][0][2]
+    assert calls[1][0] == [
         "/usr/local/bin/member-process-reaper",
         "reap",
         str(MEMBER_UID_BASE),
     ]
-    assert calls[0][1]["input_bytes"] == b""
-    assert calls[0][1]["user_uid"] == MEMBER_UID_BASE
-    assert "resident-*.pid" in calls[1][0][2]
+    assert calls[1][1]["input_bytes"] == b""
+    assert calls[1][1]["user_uid"] == MEMBER_UID_BASE
+    assert "resident-*.pid" in calls[2][0][2]
 
 
 def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
@@ -1623,13 +1643,13 @@ def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
     )
 
     assert baseline == ((41, 400), (42, 500))
-    assert calls[1][1]["input_bytes"] == b"41 400\n42 500\n"
-    assert calls[0][0] == [
+    assert calls[3][1]["input_bytes"] == b"41 400\n42 500\n"
+    assert calls[1][0] == [
         "/usr/local/bin/member-process-reaper",
         "capture",
         str(MEMBER_UID_BASE),
     ]
-    assert calls[1][0] == [
+    assert calls[3][0] == [
         "/usr/local/bin/member-process-reaper",
         "reap",
         str(MEMBER_UID_BASE),
@@ -1637,6 +1657,56 @@ def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
 
     with pytest.raises(SandboxError, match="malformed"):
         manager._parse_member_processes(b"41 nope\n")
+
+
+def test_pre_upgrade_container_receives_the_root_owned_process_reaper(monkeypatch, tmp_path):
+    spec = _spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img", network="agent-net"))
+    source = tmp_path / "member-process-reaper"
+    source.write_text("#!/usr/bin/env python3\n")
+    monkeypatch.setenv("AGENT_MEMBER_PROCESS_REAPER_SOURCE", str(source))
+    monkeypatch.setattr(
+        manager,
+        "_require",
+        lambda _spec: ChatSandboxInspection(
+            container_id="old-container-id",
+            name=spec.container_name,
+            status=ChatSandboxStatus.RUNNING,
+            running=True,
+            image="old-image",
+            labels=spec.docker_labels(),
+            mounts=(),
+            networks=("agent-net",),
+        ),
+    )
+    exec_calls: list[tuple[list[str], dict]] = []
+    docker_calls: list[list[str]] = []
+
+    def fake_exec(_spec, argv, **kwargs):
+        exec_calls.append((list(argv), kwargs))
+        return SimpleNamespace(
+            returncode=1 if len(exec_calls) == 1 else 0,
+            stdout=b"",
+            stderr=b"",
+        )
+
+    def fake_run(argv, **_kwargs):
+        docker_calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(manager, "exec_capture", fake_exec)
+    monkeypatch.setattr(manager, "_run", fake_run)
+
+    manager.ensure_member_process_reaper(spec)
+
+    assert len(docker_calls) == 1
+    assert docker_calls[0][:3] == ["docker", "cp", str(source)]
+    assert docker_calls[0][3].startswith(
+        "old-container-id:/usr/local/bin/member-process-reaper.install-"
+    )
+    assert "chown 0:0" in exec_calls[1][0][2]
+    assert "chmod 0555" in exec_calls[1][0][2]
+    assert exec_calls[1][1]["user_uid"] == 0
 
 
 def test_shared_writer_freeze_runs_as_each_owner_without_cap_kill(monkeypatch):

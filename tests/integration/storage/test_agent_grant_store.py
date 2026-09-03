@@ -28,10 +28,12 @@ import pytest_asyncio
 
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
+    shared_deployment_capability,
 )
 from tests.support.migrations import apply_migrations
 
@@ -125,7 +127,11 @@ async def _claimed(store: AgentJobStore, *, prompt: str = "fix it") -> dict:
         claim_attestation={
             "sandbox_image_digest": "sha256:grant-test-image",
             "shared_sandbox_protocol": SHARED_SANDBOX_PROTOCOL,
-            "runner_capabilities": [SHARED_SANDBOX_CAPABILITY],
+            "runner_capabilities": [
+                SHARED_SANDBOX_CAPABILITY,
+                NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+                shared_deployment_capability("test-deployment"),
+            ],
             "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
             "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
         },

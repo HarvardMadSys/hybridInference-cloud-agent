@@ -144,6 +144,16 @@ Codex maps it to inclusive `lastTurnId`; Claude maps it to the inclusive
 top-level assistant UUID; Pi forks before the next user entry (or clones the
 leaf); OpenCode/Kilo pass the next user `messageID` as an exclusive boundary.
 
+Those adapters count **platform prompts**, not every provider record whose role
+is `user`. Claude tool results are user-role JSONL entries and the pinned SDK
+does not preserve their `parent_tool_use_id`; the adapter therefore reads the
+raw current chain, excludes `tool_result`, meta/sidechain, and compact-summary
+records, and follows a compact boundary's `logicalParentUuid` to retain
+pre-compaction ordinals. OpenCode/Kilo exclude user messages containing a
+`compaction` part and all-synthetic auto-continue parts. This keeps one
+platform turn mapped to one ordinal even when the provider performs tools or
+compaction internally; an unrecognized history shape fails closed.
+
 The durable sequence is:
 
 1. Create or recover an idempotent fork operation and mark only the source
@@ -211,6 +221,8 @@ Correctness fences are narrower:
 - one process generation and residency generation per member;
 - one activation/event/cancellation stream per attempt;
 - group operation references around Docker start/stop;
+- one terminal-suspension token per protected turn, so PTYs resume only after
+  every concurrent sibling has left its preparation/finalization phase;
 - a short source-member fork transition;
 - a bounded quiescent publication capture.
 
@@ -226,7 +238,10 @@ the sandbox image. It captures a member UID's `(pid, /proc starttime)` baseline
 in helper memory and accepts the baseline for cleanup over stdin, rather than
 trusting a member-writable pidfile. Before each TERM/KILL it rechecks UID and
 starttime to fence PID reuse; after escalation it rescans and fails closed if
-any non-baseline process survives.
+any non-baseline process survives. A new trusted runner also carries the same
+reviewed helper and installs it root-owned/mode-0555 before activating a
+retained pre-upgrade container that lacks it, so an in-place host rollout does
+not strand ordinary follow-ups on the old writable layer.
 
 Public multi-tenant deployments still require the documented Kata/gVisor,
 non-root, capability, seccomp, and resource boundaries. The shared workspace
@@ -393,11 +408,26 @@ This runtime fence, not a serial Actions dependency, establishes
 host-before-new-API compatibility. Failure stops the rollout; it never falls
 back to an older sandbox path.
 
-Migration `0022_native_turn_rollout_guard` closes the interval in which 0021
-has added `native_turn_no` but the previous API is still settling turns. Its
-database triggers assign ordinals to old-writer success/snapshot/fork writes
-and rerun the backfill after trigger installation, so the parallel host/control
-rollout cannot silently create a historical anchor with a null ordinal.
+While that marker is pending, replacement runners still enroll and heartbeat
+the base protocol capabilities needed by host-local checks, but do not poll for
+jobs. The pause is runner-side because the previous API serving during a
+parallel rollout does not understand the new exact-SHA claim field; relying
+only on the target API's gate would leave a window in which the old API could
+assign work to an as-yet-unverified replacement.
+
+Migration `0021_native_turn_anchors` adds `native_turn_no` and its old-writer
+triggers in one short transaction, so the previous API can keep settling
+success/snapshot/fork writes as soon as the column exists. Migration
+`0022_native_turn_rollout_guard` then performs the historical backfill,
+validates the positive-number constraint, and builds the unique partial index
+concurrently after the schema lock has committed. Migration
+`0023_retained_followup_gate` leaves every pre-cutover row `NULL` and
+leaves the database default `NULL`; only the new API explicitly marks its own
+inserts eligible. The previous API can therefore keep inserting during the
+parallel migration window without accidentally upgrading disposable work.
+A disposable-era job that was still queued when migration began and became
+failed/cancelled later cannot silently seed a new native session; an actual
+retained membership is the independent proof that its chat remains runnable.
 
 When either the old API or the MCP relay is absent, readiness cannot complete
 (a true cold start has neither). The control script starts Postgres, migrates,

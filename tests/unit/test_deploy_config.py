@@ -595,11 +595,22 @@ def test_staging_deploy_runs_both_halves_in_parallel_with_a_runtime_fence() -> N
     )
     control_env = control_deploy["env"]
     host_env = host_deploy["env"]
+    for job in (jobs["deploy"], jobs["deploy-host"]):
+        checkouts = [step for step in job["steps"] if step.get("uses") == "actions/checkout@v6"]
+        assert [step["with"]["ref"] for step in checkouts] == [
+            "${{ github.workflow_sha }}",
+            "${{ steps.target.outputs.sha }}",
+        ]
+        assert checkouts[0]["with"]["path"] == ".deploy-orchestrator"
+        assert checkouts[1]["with"]["path"] == ".deploy-target"
 
     for env in (control_env, host_env):
         assert "AGENT_SHARED_LIVE_SANDBOX" not in env
         assert "AGENT_RESTARTABLE_SANDBOX" not in env
         assert "STAGING_SHARED_LIVE_SANDBOX" not in env
+        assert env["SOURCE_REPO"].endswith("/.deploy-target")
+    assert ".deploy-orchestrator/deploy/control-plane/deploy.sh" in control_deploy["run"]
+    assert ".deploy-orchestrator/deploy/host/deploy.sh" in host_deploy["run"]
     assert control_env["COMPOSE_PROJECT"] == "${{ vars.STAGING_CONTROL_COMPOSE_PROJECT }}"
     assert "STAGING_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
     assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
@@ -614,6 +625,7 @@ def test_production_deploy_uses_the_same_parallel_topology() -> None:
     host_deploy = next(
         step for step in jobs["deploy-host"]["steps"] if step.get("name") == "Deploy"
     )
+    control_deploy = next(step for step in jobs["deploy"]["steps"] if step.get("name") == "Deploy")
     host_env = host_deploy["env"]
 
     for removed in (
@@ -625,6 +637,8 @@ def test_production_deploy_uses_the_same_parallel_topology() -> None:
     assert "PROD_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
     assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
     assert "PROD_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
+    assert ".deploy-orchestrator/deploy/control-plane/deploy.sh" in control_deploy["run"]
+    assert ".deploy-orchestrator/deploy/host/deploy.sh" in host_deploy["run"]
 
 
 def test_target_commit_can_activate_staging_under_the_default_branch_workflow() -> None:
@@ -762,6 +776,11 @@ def test_the_setup_tier_the_overlay_selects_is_one_it_actually_ships(compose: di
     assert trusted in [_expand(n) for n in proxy["networks"]], (
         "the proxy is not on the network whose traffic it is supposed to police"
     )
+    for relay in ("gateway-tunnel", "mcp-tunnel"):
+        assert "agent-egress-trusted" in compose["services"][relay]["networks"], (
+            f"{relay} is absent from trusted discovery, so NO_PROXY makes its "
+            "platform URL resolve to nowhere"
+        )
     # And the runner must actually tell the sandbox to use it.
     url = _expand(env["AGENT_EGRESS_PROXY_URL_TRUSTED"])
     assert url.startswith("http://"), "the trusted tier is selected with no proxy URL"

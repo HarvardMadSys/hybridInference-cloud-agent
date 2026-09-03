@@ -933,6 +933,26 @@ def _shared_live_host_capabilities(
     return capabilities
 
 
+def _shared_live_deployment_ready(
+    backend: SandboxBackend,
+    stamp: dict[str, Any],
+) -> bool:
+    """Whether this replica may poll, including against the previous API.
+
+    The target API enforces the exact-SHA capability at claim time, but the
+    previous API in a parallel rollout cannot know that new field yet. A
+    pending runner must therefore refrain from polling locally until the host
+    checks publish its exact marker. It still enrolls and heartbeats with the
+    base protocol capabilities so those checks can inspect the replacement.
+    """
+    deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
+    if not deployment_sha:
+        return False
+    return shared_deployment_capability(deployment_sha) in _shared_live_host_capabilities(
+        backend, stamp
+    )
+
+
 def _claim_attestation(backend: SandboxBackend) -> dict[str, Any]:
     """Build the exact-replica proof required for every claim."""
     stamper = getattr(backend, "version_stamp", None)
@@ -1951,6 +1971,11 @@ def run_forever(
             "backend, broker URL/token, host slots, runner replicas, image labels, "
             "runtime pins, and live-session driver capabilities"
         )
+    if not (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip():
+        raise RuntimeError(
+            "shared-live sandbox execution requires AGENT_DEPLOYMENT_SHA; "
+            "sandbox_host.sh manages it together with the ready marker"
+        )
     if not host:
         raise RuntimeError(
             "shared-live sandbox execution requires AGENT_RUNNER_HOST; every replica "
@@ -2010,6 +2035,13 @@ def run_forever(
                 )
                 pool.stop()
                 return 0
+            time.sleep(idle_sleep_s)
+            continue
+
+        # Keep the old control plane safe during a parallel rollout. It does
+        # not enforce this generation's exact-SHA attestation, so the polling
+        # replica itself must remain idle until host-local checks complete.
+        if not _shared_live_deployment_ready(backend, stamp):
             time.sleep(idle_sleep_s)
             continue
 
@@ -2152,7 +2184,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point used by the runner workflow and the self-hosted service."""
+    """CLI entry point used by the self-hosted runner service and local tools."""
     parser = build_parser()
     args = parser.parse_args(argv)
 

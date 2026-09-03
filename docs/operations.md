@@ -611,7 +611,10 @@ final assistant/tool boundary of that turn. Edit & rewind resolves the nearest
 earlier such boundary for the selected user prompt and puts the replacement
 text in the child composer without sending it. The frontend treats `NEW`,
 `LIVE`, `RESTORED`, and `LOST` as context truth; hot/warm/cold/replay remains
-diagnostic telemetry and never chooses another executor.
+diagnostic telemetry and never chooses another executor. Current retained
+runners never emit `replay`; the API accepts it only so an attempt admitted by
+the previous generation can finish during a parallel rollout, and historical
+rows remain readable in the UI.
 
 After a shared turn settles, its snapshot and draft-PR fields may still change
 asynchronously. The detail view and recent-task list poll only while that
@@ -641,18 +644,41 @@ the probe fails, restore the original `AGENT_POSTGRES_PASSWORD` and
 `AGENT_DATABASE_URL`; do not remove the volume unless discarding all local
 agent state is intentional.
 
+Terminal freezing is also member-concurrent: each protected job phase owns a
+separate broker suspension token for the shared workspace. Completing or
+recovering one sibling releases only that token; interactive PTYs are resumed
+only when no sibling remains in a protected phase. The broker still accepts
+the previous generation's token-less request shape during a rolling deploy,
+but current control-plane requests always identify the owning job.
+
 ### Rolling deployment order
 
-The host and control-plane Actions jobs start in parallel. The host invalidates
-its ready marker, replaces the runner/broker stack, runs the isolation, tunnel,
-runtime and retained Docker-root checks, records `.deployed-sha`, and only then
-publishes an exact `shared-sandbox-deployment:<sha>` capability. In parallel,
-the control job builds and migrates, then waits for a heartbeat newer than the
-start of that check and reverse-probes every new-chat placement broker before
-`compose up` can replace a running API. When placement was moved between hosts,
+The host and control-plane Actions jobs start in parallel. The host builds the
+replacement sandbox/runner stack and proves Kata before invalidating its ready
+marker. It then stops the old runner replicas and lets their five-minute grace
+drain admitted turns before replacing the broker; no new turn can be admitted
+in that interval. After the isolation, tunnel, runtime and retained Docker-root
+checks pass, it records `.deployed-sha` and only then publishes an exact
+`shared-sandbox-deployment:<sha>` capability. In parallel, the control job
+builds and migrates, then waits for a heartbeat newer than the start of that
+check and reverse-probes every new-chat placement broker before `compose up`
+can replace a running API. The claim route enforces that same exact deployment
+capability. Pending replicas register and heartbeat their base protocol so the
+host checks can inspect them, but do not poll; this also prevents the previous
+API from assigning work before it knows the new claim field. A runner with a
+pending/failed marker therefore cannot take work even during a cold-start API
+bootstrap. When placement was moved between hosts,
 it also probes every online host that still owns a retained group; changing the
 pin must not make old chats disappear from rollout safety. `SHARED_READY_TIMEOUT`
 controls that wait and defaults to 900 seconds.
+
+Both Actions jobs use the workflow commit's deployment orchestrator against a
+separate target checkout. Online rollback therefore cannot execute a
+pre-fence target's old scripts; commits without the current
+`deploy/DEPLOY_PROTOCOL` are refused before changing Docker state. Database
+changes are expand-first. Never downgrade columns underneath a still-running
+new API; roll code back to a schema-compatible commit first and treat any later
+contract migration as a separate reviewed operation.
 
 This fence is unconditional because retained/shared-live is the only executor.
 It cannot enable a legacy path and it cannot be bypassed by stale

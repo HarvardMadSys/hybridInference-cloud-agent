@@ -40,16 +40,19 @@ check is that they are live on the staging gateway you are pointing at**.
 ## 0. Preconditions
 
 - [ ] A machine with Docker, ≥8 GB RAM, and a checkout of this repository.
-- [ ] **The staging gateway serves the contracts.** All four must answer:
+- [ ] **The staging gateway serves the contracts it still owns.** JWKS must
+      answer:
       ```bash
       curl -sS -o /dev/null -w '%{http_code} %{url_effective}\n' \
         "$GATEWAY_BASE_URL/v1/identity/jwks"
       ```
-      then, with the dispatch token, `/internal/mcp-registry`,
+      Then, with the dispatch token, check
       `/internal/model-catalog?user_id=<a real user>` and
-      `/internal/users/<id>/status`. A 404 on any of them means the gateway
-      side has not landed; **stop here** — everything below will fail closed,
-      correctly, and you will spend an hour proving that.
+      `/internal/users/<id>/status`. The old `/internal/mcp-registry` endpoint
+      was removed: MCP configuration is owned by this service and requiring
+      that path would make the smoke fail before it began. A 404 on either
+      remaining gateway lookup means the gateway side has not landed; **stop
+      here** — everything below will fail closed correctly.
 - [ ] A scratch GitHub repository this run may open pull requests against, and
       a token that can. Not a repository anyone depends on: the point of this
       exercise is that a machine writes to it.

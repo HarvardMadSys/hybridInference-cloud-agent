@@ -87,6 +87,23 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
     ]
 
 
+def test_pending_deployment_heartbeats_but_does_not_poll(monkeypatch, tmp_path):
+    _configure_host(monkeypatch)
+    monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "target-sha")
+    ready_file = tmp_path / "shared-live-ready"
+    monkeypatch.setenv("AGENT_SHARED_LIVE_READY_FILE", str(ready_file))
+    backend = ContainerBackend(image="img")
+
+    ready_file.write_text("pending:target-sha\n")
+    assert runner_mod.SHARED_SANDBOX_CAPABILITY in runner_mod._shared_live_host_capabilities(
+        backend, _stamp()
+    )
+    assert runner_mod._shared_live_deployment_ready(backend, _stamp()) is False
+
+    ready_file.write_text("target-sha\n")
+    assert runner_mod._shared_live_deployment_ready(backend, _stamp()) is True
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

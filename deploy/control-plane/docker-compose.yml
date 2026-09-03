@@ -86,6 +86,10 @@ services:
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:?32+ random bytes, unique per environment}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32+ random bytes, unique per environment}
+      # The API enforces the same exact host-generation capability as the
+      # deploy gate. Without this, a pending runner could claim queued work
+      # while deploy.sh correctly refused to replace the old API.
+      AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       # How long a member-scoped resident credential lives between runner
       # heartbeats. Chat inactivity is a separate group clock on the host

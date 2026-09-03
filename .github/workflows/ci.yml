@@ -853,6 +853,7 @@ jobs:
           AGENT_SESSION_SECRET=ci-placeholder-value-not-a-real-secret
           AGENT_CONTROL_TOKEN_SECRET=ci-placeholder-value-not-a-real-secret
           AGENT_SOURCE_CONTROL_ENCRYPTION_KEY=ci-placeholder-value-not-real
+          AGENT_DEPLOYMENT_SHA=ci-deployment-sha
           AGENT_POSTGRES_PASSWORD=ci-placeholder
           AGENT_WORKSPACE_BROKER_TOKEN=ci-placeholder-broker-token
           # Sign-in is assembled server-side now, so the control plane needs
@@ -899,7 +900,7 @@ jobs:
 
           CP=deploy/control-plane/docker-compose.yml
           HOST=deploy/host/docker-compose.sandbox.yml
-          for required in AGENT_SESSION_SECRET AGENT_WORKSPACE_BROKER_TOKEN; do
+          for required in AGENT_SESSION_SECRET AGENT_WORKSPACE_BROKER_TOKEN AGENT_DEPLOYMENT_SHA; do
             check "$CP" .env.control-plane "$required"
           done
           for required in AGENT_WORKSPACE_BROKER_TOKEN; do

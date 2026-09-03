@@ -216,12 +216,15 @@ def _run_control_deploy(
     deployment_environment: str = "production",
     dotenv: str = "",
     failed_health_match: str = "",
+    deploy_protocol: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real deploy script against a minimal local git source."""
     source = tmp_path / "source"
     script_target = source / "deploy/control-plane/deploy.sh"
     script_target.parent.mkdir(parents=True)
     shutil.copy2(DEPLOY_SCRIPT_PATH, script_target)
+    if deploy_protocol:
+        shutil.copy2(REPO_ROOT / "deploy/DEPLOY_PROTOCOL", source / "deploy/DEPLOY_PROTOCOL")
     git_env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "Deploy Test",
@@ -296,7 +299,7 @@ def _run_control_deploy(
         text=True,
         check=False,
     )
-    return result, docker_log.read_text()
+    return result, docker_log.read_text() if docker_log.exists() else ""
 
 
 def test_a_failed_readiness_probe_never_replaces_the_running_stack(
@@ -310,6 +313,18 @@ def test_a_failed_readiness_probe_never_replaces_the_running_stack(
     assert " run --rm --no-deps migrate" in docker_calls
     assert "cloud_agent.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" not in docker_calls
+
+
+def test_online_rollback_to_a_pre_fence_commit_is_refused_before_docker(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        deploy_protocol=False,
+    )
+
+    assert result.returncode != 0
+    assert "pre-fence commit is unsupported" in result.stderr
+    assert docker_calls == ""
 
 
 def test_a_successful_readiness_probe_allows_the_shared_only_service(tmp_path: Path) -> None:

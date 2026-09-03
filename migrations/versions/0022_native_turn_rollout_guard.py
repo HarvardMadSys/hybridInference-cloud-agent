@@ -1,10 +1,10 @@
 """Keep native turn ordinals complete while the previous API is still live.
 
 The host and control-plane deployment jobs intentionally start in parallel.
-Migration 0021 can therefore finish while an already-running previous-version
-control plane is still settling turns. That writer cannot name the new
-``native_turn_no`` column, so the database must fill it until the target API is
-the only writer.
+Migration 0021 therefore adds the column and old-writer triggers in one short
+transaction. This following revision performs the historical backfill and
+concurrent unique index without retaining the schema lock while an
+already-running previous-version control plane continues to settle turns.
 
 Revision ID: 0022_native_turn_rollout_guard
 Revises: 0021_native_turn_anchors
@@ -21,111 +21,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Assign ordinals for old success, snapshot, and native-fork writes."""
-    op.execute(
-        """
-        CREATE OR REPLACE FUNCTION assign_agent_job_native_turn_no()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-            IF NEW.thread_id IS NULL OR NEW.native_turn_no IS NOT NULL THEN
-                RETURN NEW;
-            END IF;
-            IF NEW.state <> 'succeeded'
-               AND NOT EXISTS (
-                    SELECT 1
-                    FROM agent_sandbox_snapshots snapshot
-                    WHERE snapshot.included_job_ids ? NEW.id
-               )
-               AND NOT EXISTS (
-                    SELECT 1
-                    FROM agent_jobs source
-                    WHERE source.id = NEW.fork_source_job_id
-                      AND source.native_turn_no IS NOT NULL
-               ) THEN
-                RETURN NEW;
-            END IF;
-
-            PERFORM pg_advisory_xact_lock(
-                hashtextextended('agent-native-turn:' || NEW.thread_id, 0)
-            );
-            SELECT COUNT(*) + 1
-            INTO NEW.native_turn_no
-            FROM agent_jobs job
-            WHERE job.thread_id = NEW.thread_id
-              AND job.id <> NEW.id
-              AND (job.turn_no, job.created_at, job.id)
-                    < (NEW.turn_no, NEW.created_at, NEW.id)
-              AND (
-                    job.native_turn_no IS NOT NULL
-                    OR job.state = 'succeeded'
-                    OR EXISTS (
-                        SELECT 1
-                        FROM agent_sandbox_snapshots snapshot
-                        WHERE snapshot.included_job_ids ? job.id
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM agent_jobs source
-                        WHERE source.id = job.fork_source_job_id
-                          AND source.native_turn_no IS NOT NULL
-                    )
-              );
-            RETURN NEW;
-        END;
-        $$
-        """
-    )
-    op.execute(
-        """
-        DROP TRIGGER IF EXISTS trg_agent_job_native_turn_no ON agent_jobs
-        """
-    )
-    op.execute(
-        """
-        CREATE TRIGGER trg_agent_job_native_turn_no
-        BEFORE INSERT OR UPDATE OF state, fork_source_job_id, native_turn_no
-        ON agent_jobs
-        FOR EACH ROW
-        EXECUTE FUNCTION assign_agent_job_native_turn_no()
-        """
-    )
-    op.execute(
-        """
-        CREATE OR REPLACE FUNCTION assign_snapshot_anchor_native_turn_no()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-            UPDATE agent_jobs
-            SET native_turn_no = native_turn_no
-            WHERE id = NEW.anchor_job_id
-              AND native_turn_no IS NULL;
-            RETURN NEW;
-        END;
-        $$
-        """
-    )
-    op.execute(
-        """
-        DROP TRIGGER IF EXISTS trg_snapshot_anchor_native_turn_no
-        ON agent_sandbox_snapshots
-        """
-    )
-    op.execute(
-        """
-        CREATE TRIGGER trg_snapshot_anchor_native_turn_no
-        AFTER INSERT OR UPDATE OF anchor_job_id, included_job_ids
-        ON agent_sandbox_snapshots
-        FOR EACH ROW
-        EXECUTE FUNCTION assign_snapshot_anchor_native_turn_no()
-        """
-    )
-    # Re-run 0021's backfill after both triggers exist. This catches writes in
-    # the interval after that migration's one-time UPDATE and before the first
-    # trigger above was installed; later previous-generation writes are caught
-    # synchronously by the triggers.
+    """Backfill ordinals without retaining 0021's exclusive schema lock."""
+    # 0021 committed the column and old-writer triggers in its own short
+    # transaction. Normal turns are succeeded. Snapshot membership additionally
+    # identifies the rare turn whose native context settled before final job
+    # state was lost. The recursive arm carries that fact into already-forked
+    # display copies.
     op.execute(
         """
         WITH RECURSIVE native_jobs(id) AS (
@@ -159,14 +60,28 @@ def upgrade() -> None:
         WHERE job.id = ranked.id AND job.native_turn_no IS NULL
         """
     )
+    op.execute(
+        "ALTER TABLE agent_jobs "
+        "VALIDATE CONSTRAINT ck_agent_jobs_native_turn_no_positive"
+    )
+    # PostgreSQL forbids CONCURRENTLY inside a transaction. Alembic's
+    # autocommit block ends this revision's backfill transaction first, so the
+    # index never takes an ACCESS EXCLUSIVE lock over the live API.
+    with op.get_context().autocommit_block():
+        # A failed concurrent build leaves an INVALID index behind. PostgreSQL
+        # considers that name present, so CREATE ... IF NOT EXISTS would skip
+        # it on Alembic retry and could let the revision be stamped without an
+        # enforcing index. This revision is still unstamped on such a retry;
+        # replacing its own index is therefore safe and deterministic.
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_agent_jobs_native_turn")
+        op.execute(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_agent_jobs_native_turn "
+            "ON agent_jobs(thread_id, native_turn_no) "
+            "WHERE native_turn_no IS NOT NULL"
+        )
 
 
 def downgrade() -> None:
-    """Remove the previous-generation writer guard."""
-    op.execute(
-        "DROP TRIGGER IF EXISTS trg_snapshot_anchor_native_turn_no "
-        "ON agent_sandbox_snapshots"
-    )
-    op.execute("DROP FUNCTION IF EXISTS assign_snapshot_anchor_native_turn_no()")
-    op.execute("DROP TRIGGER IF EXISTS trg_agent_job_native_turn_no ON agent_jobs")
-    op.execute("DROP FUNCTION IF EXISTS assign_agent_job_native_turn_no()")
+    """Remove the backfill index; 0021 owns the column and writer guard."""
+    with op.get_context().autocommit_block():
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_agent_jobs_native_turn")

@@ -37,11 +37,7 @@ from cloud_agent.schemas import (
     HostHeartbeatResponse,
     HostRegisterRequest,
     HostRegisterResponse,
-    HostResidencyEstablishRequest,
-    HostResidencyEstablishResponse,
-    HostResidencyReleaseRequest,
     ResidencyBeat,
-    WorkerAckResponse,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 
@@ -349,74 +345,10 @@ async def heartbeat_host(
     )
 
 
-@router.post("/residencies", response_model=HostResidencyEstablishResponse)
-async def establish_thread_residency(
-    body: HostResidencyEstablishRequest,
-    host: dict[str, Any] = Depends(authenticate_host),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
-    grants: Any = Depends(get_grant_client),
-) -> HostResidencyEstablishResponse:
-    """Take (or take over) residency for a thread this host is running.
-
-    Residency is earned, not asserted: the host must hold the thread's
-    *running* attempt right now, which is why the runner establishes at turn
-    end, before finish. Without the gate, a compromised machine could pull
-    other machines' conversations toward itself through claim affinity.
-    """
-    job_store = _require_store(store)
-    row = await job_store.establish_residency(
-        thread_id=body.thread_id,
-        host=host["host"],
-        runtime_id=body.runtime_id,
-        runtime_version=body.runtime_version,
-        sandbox_id=body.sandbox_id,
-        ttl_seconds=RESIDENCY_TTL_S,
-    )
-    if row is None:
-        # The gate lives inside the write's own transaction (store): running
-        # attempt, this host, lease unexpired — checked under a shared lock,
-        # so this answer cannot be stale by the time the row would exist.
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "not_running_thread",
-                    "message": "residency belongs to the host running the thread's turn",
-                }
-            },
-        )
-    # A takeover is a credential rotation (retained-session design §6): the predecessor's
-    # grant dies now, not at its TTL, so a zombie host starves promptly.
-    previous_grant = row.get("previous_grant_id")
-    if previous_grant and grants is not None:
-        await grants.revoke(previous_grant)
-    credential = await _mint_residency_grant(job_store, grants, row=row)
-    return HostResidencyEstablishResponse(
-        thread_id=row["thread_id"],
-        generation=row["generation"],
-        ttl_seconds=RESIDENCY_TTL_S,
-        credential=credential,
-        model=row.get("model"),
-    )
-
-
 async def _mint_residency_grant(
     job_store: AgentJobStore, grants: Any, *, row: dict[str, Any]
 ) -> str | None:
-    """The residency's inference credential, or ``None`` for workspace-only.
-
-    Attribution is the *thread* (retained-session design §6): the grant's external job id
-    names it, so the gateway's ledger bills every resident turn to the
-    conversation rather than to whichever turn happened to establish. Every
-    failure degrades rather than refuses — a residency without a credential
-    still keeps the workspace, and turns ride warm_native on their own
-    per-attempt grants.
-
-    A grant that cannot be linked is revoked, not handed over: the link is
-    the only thing that will ever renew or revoke it, and the one way linking
-    fails is a takeover between mint and link — whose new owner must not be
-    starved by an orphan credential it cannot see.
-    """
+    """Mint the worker-fenced grant for one supervisor-owned member process."""
     if grants is None:
         return None
     try:
@@ -427,7 +359,7 @@ async def _mint_residency_grant(
             models=[row["model"]],
             ttl_seconds=int(RESIDENCY_TTL_S),
         )
-    except Exception:  # degrade to workspace-only residency
+    except Exception:
         logger.warning(
             "agent_residency_grant_unavailable",
             exc_info=True,
@@ -448,28 +380,6 @@ async def _mint_residency_grant(
         await grants.revoke(grant_id)
         return None
     return token
-
-
-@router.post("/residencies/release", response_model=WorkerAckResponse)
-async def release_thread_residency(
-    body: HostResidencyReleaseRequest,
-    host: dict[str, Any] = Depends(authenticate_host),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
-    grants: Any = Depends(get_grant_client),
-) -> WorkerAckResponse:
-    """End a residency this host holds (teardown, eviction, drain).
-
-    Generation-scoped like every other residency write: releasing with a
-    stale generation is a no-op ``ok=false``, never an error — the successor
-    it would otherwise end belongs to someone else now.
-    """
-    job_store = _require_store(store)
-    released = await job_store.release_residency(
-        thread_id=body.thread_id, generation=body.generation, host=host["host"]
-    )
-    if released and grants is not None:
-        await grants.revoke(released)
-    return WorkerAckResponse(ok=released is not None)
 
 
 async def _probed_broker_error(

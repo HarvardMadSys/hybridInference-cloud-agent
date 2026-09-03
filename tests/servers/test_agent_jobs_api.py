@@ -772,6 +772,7 @@ class FakeAgentJobStore:
         host: str,
         host_credential_hash: str,
         claim_attestation: dict[str, Any] | None = None,
+        expected_deployment_sha: str | None = None,
     ) -> dict[str, Any] | None:
         if self.active_host is not None and host != self.active_host:
             return None
@@ -2412,18 +2413,35 @@ class _TerminalSessionBroker:
         self.calls.append(("list", workspace_id))
         return {"terminals": [_terminal_session_descriptor()]}
 
-    async def suspend_terminals(self, workspace_id: str, *, lease_generation: int):
-        self.calls.append(("suspend_all", workspace_id, lease_generation))
+    async def suspend_terminals(
+        self,
+        workspace_id: str,
+        *,
+        lease_generation: int,
+        job_id: str | None = None,
+    ):
+        self.calls.append(("suspend_all", workspace_id, lease_generation, job_id))
         self.suspended.add(workspace_id)
         return {"ok": True}
 
-    async def resume_terminals(self, workspace_id: str, *, lease_generation: int):
-        self.calls.append(("resume_all", workspace_id, lease_generation))
+    async def resume_terminals(
+        self,
+        workspace_id: str,
+        *,
+        lease_generation: int,
+        job_id: str | None = None,
+    ):
+        self.calls.append(("resume_all", workspace_id, lease_generation, job_id))
         self.suspended.discard(workspace_id)
         return {"ok": True}
 
-    async def resume_settled_terminals(self, workspace_id: str):
-        self.calls.append(("resume_settled", workspace_id))
+    async def resume_settled_terminals(
+        self,
+        workspace_id: str,
+        *,
+        job_id: str | None = None,
+    ):
+        self.calls.append(("resume_settled", workspace_id, job_id))
         self.suspended.discard(workspace_id)
         return {"ok": True}
 
@@ -2755,12 +2773,12 @@ async def test_worker_suspends_terminals_around_protected_workspace_phases(
     assert finished.status_code == 200
     assert input_after_finish.status_code == 200
     assert broker.calls == [
-        ("suspend_all", workspace_id, 1),
-        ("resume_all", workspace_id, 1),
+        ("suspend_all", workspace_id, 1, job_id),
+        ("resume_all", workspace_id, 1, job_id),
         ("input", workspace_id, "term_1", "eA=="),
-        ("suspend_all", workspace_id, 1),
+        ("suspend_all", workspace_id, 1, job_id),
         ("input", workspace_id, "term_1", "eA=="),
-        ("resume_all", workspace_id, 1),
+        ("resume_all", workspace_id, 1, job_id),
         ("input", workspace_id, "term_1", "eA=="),
     ]
 
@@ -2783,7 +2801,7 @@ async def test_settled_terminal_access_replays_durable_resume_after_restart(
 
     assert response.status_code == 200
     assert broker.calls == [
-        ("resume_settled", workspace_id),
+        ("resume_settled", workspace_id, job_id),
         ("list", workspace_id),
     ]
     assert store.jobs[job_id]["terminal_resume_pending"] is False
@@ -2825,9 +2843,9 @@ async def test_worker_re_suspends_terminals_if_ready_event_loses_lease(
     assert response.status_code == 409
     assert response.json()["detail"]["error"]["type"] == "lease_lost"
     assert broker.calls == [
-        ("suspend_all", workspace_id, 1),
-        ("resume_all", workspace_id, 1),
-        ("suspend_all", workspace_id, 1),
+        ("suspend_all", workspace_id, 1, job_id),
+        ("resume_all", workspace_id, 1, job_id),
+        ("suspend_all", workspace_id, 1, job_id),
     ]
 
 
@@ -2868,9 +2886,9 @@ async def test_worker_re_suspends_terminals_if_finish_loses_lease(
     assert response.status_code == 409
     assert response.json()["detail"]["error"]["type"] == "lease_lost"
     assert broker.calls == [
-        ("suspend_all", workspace_id, 1),
-        ("resume_all", workspace_id, 1),
-        ("suspend_all", workspace_id, 1),
+        ("suspend_all", workspace_id, 1, job_id),
+        ("resume_all", workspace_id, 1, job_id),
+        ("suspend_all", workspace_id, 1, job_id),
     ]
 
 
@@ -3081,7 +3099,7 @@ async def test_cancel_requeued_job_authoritatively_resumes_terminals(
 
     assert response.status_code == 200
     assert response.json()["state"] == "cancelled"
-    assert broker.calls == [("resume_settled", thread_id)]
+    assert broker.calls == [("resume_settled", thread_id, job_id)]
     assert store.jobs[job_id]["terminal_resume_pending"] is False
 
 

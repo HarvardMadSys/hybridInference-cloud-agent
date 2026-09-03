@@ -5,10 +5,10 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 ENV_FILE="$SCRIPT_DIR/.env.local"
 
-if command -v docker-compose >/dev/null 2>&1; then
-  COMPOSE=docker-compose
-elif docker compose version >/dev/null 2>&1; then
+if docker compose version >/dev/null 2>&1; then
   COMPOSE='docker compose'
+elif command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE=docker-compose
 else
   echo "Docker Compose is required (docker-compose or docker compose)." >&2
   exit 1
@@ -16,6 +16,10 @@ fi
 
 compose() {
   configure_browser_urls
+  LOCAL_SANDBOX_IMAGE=$(local_sandbox_image)
+  LOCAL_RUNNER_REPLICAS=$(local_runner_replicas)
+  AGENT_DEPLOYMENT_SHA=$(local_deployment_sha)
+  export LOCAL_SANDBOX_IMAGE LOCAL_RUNNER_REPLICAS AGENT_DEPLOYMENT_SHA
   # Intentional word splitting: COMPOSE is either one command or `docker compose`.
   # shellcheck disable=SC2086
   $COMPOSE --env-file "$ENV_FILE" --project-name "$(local_project_name)" \
@@ -43,6 +47,37 @@ local_project_name() {
     project_name=$(sed -n 's/^LOCAL_PROJECT_NAME=//p' "$ENV_FILE" | tail -n 1)
   fi
   printf '%s\n' "${project_name:-freeinference-local}"
+}
+
+local_sandbox_image() {
+  image=$(env_file_value LOCAL_SANDBOX_IMAGE)
+  if [ -n "$image" ]; then
+    printf '%s\n' "$image"
+    return
+  fi
+  project_slug=$(local_project_name | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9_.-')
+  printf 'freeinference-cloud-agent-sandbox-%s:local\n' "${project_slug:-local}"
+}
+
+local_runner_replicas() {
+  replicas=$(env_file_value LOCAL_RUNNER_REPLICAS)
+  replicas=${replicas:-2}
+  case "$replicas" in
+    '' | *[!0-9]*)
+      echo "LOCAL_RUNNER_REPLICAS must be an integer of at least 2." >&2
+      return 1
+      ;;
+  esac
+  if [ "$replicas" -lt 2 ]; then
+    echo "LOCAL_RUNNER_REPLICAS must be at least 2 for concurrent native forks." >&2
+    return 1
+  fi
+  printf '%s\n' "$replicas"
+}
+
+local_deployment_sha() {
+  deployment_sha=$(env_file_value AGENT_DEPLOYMENT_SHA)
+  printf '%s\n' "${deployment_sha:-local-$(local_project_name)}"
 }
 
 local_control_network() {
@@ -134,6 +169,9 @@ upgrade_existing_env() {
   edge_port=${edge_port:-13002}
   append_env_if_missing AGENT_WORKSPACE_BROKER_TOKEN "$(random_hex)"
   append_env_if_missing LOCAL_PROJECT_NAME freeinference-local
+  append_env_if_missing LOCAL_SANDBOX_IMAGE "$(local_sandbox_image)"
+  append_env_if_missing LOCAL_RUNNER_REPLICAS 2
+  append_env_if_missing AGENT_DEPLOYMENT_SHA "local-$(local_project_name)"
   append_env_if_missing LOCAL_AGENT_EGRESS_NETWORK freeinference-local-agent-egress
   append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
   append_env_if_missing GATEWAY_AUTHORIZE_URL "http://127.0.0.1:${edge_port}/authorize"
@@ -189,6 +227,9 @@ ensure_env() {
       'AGENT_WEB_PORT=13003' \
       'LOCAL_EDGE_PORT=13002' \
       'LOCAL_PROJECT_NAME=freeinference-local' \
+      'LOCAL_SANDBOX_IMAGE=freeinference-cloud-agent-sandbox-freeinference-local:local' \
+      'LOCAL_RUNNER_REPLICAS=2' \
+      'AGENT_DEPLOYMENT_SHA=local-freeinference-local' \
       'LOCAL_AGENT_EGRESS_NETWORK=freeinference-local-agent-egress' \
       'LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16' \
       'GATEWAY_AUTHORIZE_URL=http://127.0.0.1:13002/authorize' \
@@ -313,7 +354,7 @@ case "$command" in
     validate_local_network_ownership
     compose build sandbox-image migrate
     start_database_and_probe
-    compose up --detach --build
+    compose up --detach --build --scale "runner=$(local_runner_replicas)"
     wait_ready
     echo "Local Cloud Agent is ready: $(local_base_url)"
     echo "Run '$0 smoke' for an automated login/config/agent lifecycle check."

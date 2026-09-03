@@ -397,60 +397,6 @@ class ResourceSampler:
         self._thread: threading.Thread | None = None
         self._started_mono: float | None = None
 
-    @classmethod
-    def for_container(
-        cls,
-        container: str | None,
-        *,
-        interval_s: float = SAMPLE_INTERVAL_S,
-    ) -> ResourceSampler:
-        """Build a sampler that binds to a named container when it appears.
-
-        Resolution is deferred to the sampling thread rather than performed
-        here: this is called from the path that launches the agent, where a
-        daemon round trip is both too early to succeed and too expensive to
-        spend. A deployment whose daemon cannot be reached simply never
-        binds, and reports coverage 0 — the true statement.
-        """
-        if not container:
-            return cls(None)
-        client = daemon_client()
-
-        def _resolve() -> ContainerStats | None:
-            stats = ContainerStats(container, client)
-            # A container the daemon has not created yet answers 404, which
-            # `read` reports as terminal. Here that means "not yet", so the
-            # absent case is retried rather than treated as the end.
-            sample = stats.read()
-            return stats if sample is not None and _readable(sample) else None
-
-        return cls(resolver=_resolve, interval_s=interval_s, closer=client.close)
-
-    def rebind(self, container: str | None) -> None:
-        """Re-target this sampler at a different container, in place.
-
-        Every spawn is a new container, so a sampler still holding the
-        previous one would report a process this turn does not own — and on
-        the hot fallback path, one that is already dead. Whatever was
-        measured is discarded with it, which is correct: those numbers
-        belong to a container this turn no longer runs in.
-
-        In place rather than by replacement so callers keep one object for
-        the whole turn. The frame that must stop this thread on every exit
-        path is above the frames that re-target it, and a rebindable object
-        is what lets it hold a reference that stays valid.
-        """
-        self.stop()
-        replacement = ResourceSampler.for_container(container, interval_s=self._interval)
-        self._counters = replacement._counters
-        self._resolver = replacement._resolver
-        self._closer = replacement._closer
-        self._samples = []
-        self._stop = threading.Event()
-        self._thread = None
-        self._started_mono = None
-        self.start()
-
     @property
     def active(self) -> bool:
         """Whether this sampler has something to measure, or may yet bind."""

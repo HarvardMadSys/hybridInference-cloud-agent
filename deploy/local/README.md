@@ -19,10 +19,13 @@ not alternate code paths in the application.
 
 ## Run
 
-Prerequisites: Docker with Compose, `openssl`, `curl`, and Python 3. Give Docker
-Desktop at least 4 GiB of memory; 8 GiB is recommended for the all-five-runtime
-and concurrent-fork smoke. A roughly 2 GiB VM can OOM Kilo before the session
-protocol is exercised.
+Prerequisites: Docker with Compose, `openssl`, `curl`, and Python 3. The script
+prefers the Compose v2 plugin and falls back to the standalone command. It
+always passes `--scale runner=$LOCAL_RUNNER_REPLICAS` (default 2), so a legacy
+Compose binary cannot silently ignore `deploy.replicas` and deadlock the
+concurrent-fork smoke. Give Docker Desktop at least 4 GiB of memory; 8 GiB is
+recommended for the all-five-runtime and concurrent-fork smoke. A roughly
+2 GiB VM can OOM Kilo before the session protocol is exercised.
 
 ```bash
 ./deploy/local/dev.sh up
@@ -41,11 +44,14 @@ callback allowlist from that value. An explicit
 identity setup.
 
 For an isolated second stack, also export a distinct `LOCAL_PROJECT_NAME`,
-`LOCAL_AGENT_EGRESS_NETWORK`, `AGENT_NETWORK_NAME`, and the four published
-ports. This keeps its Docker volumes, service discovery, and sandbox egress
-backplane separate from another checkout's local stack. Each retained sandbox
-then gets its own labelled internal `freeinference-chat-net-*` bridge; the
-backplane is used only to discover the local inference and MCP relay endpoints.
+`LOCAL_SANDBOX_IMAGE`, `LOCAL_AGENT_EGRESS_NETWORK`, `AGENT_NETWORK_NAME`, and
+the four published ports. New env files derive a project-scoped sandbox image
+tag automatically; an explicit value remains necessary when overriding an
+existing env file. This keeps its Docker images, volumes, service discovery,
+and sandbox egress backplane separate from another checkout's local stack.
+Each retained sandbox then gets its own labelled internal
+`freeinference-chat-net-*` bridge; the backplane is used only to discover the
+local inference and MCP relay endpoints.
 `up`, `start`, and `smoke` fail before changing containers when either named
 network already belongs to a different Compose project; Compose's warning is
 not safe here because duplicate service aliases can route bootstrap or agent
@@ -53,7 +59,10 @@ traffic into the other stack.
 
 `up` may take a while the first time because the sandbox image installs exact
 versions of Claude Code, Codex, Pi, OpenCode, and Kilo. Later builds use Docker
-layer cache.
+layer cache. The bootstrap also writes a stack-scoped completed-deployment
+marker into `local-host-state`; local runners and the control plane use that
+same marker, so local claims exercise the production exact-generation fence
+rather than bypassing it.
 
 `smoke` logs in through PKCE, runs a first turn and native-session follow-up
 through **each of those five real CLI binaries**, waits for every chat group to

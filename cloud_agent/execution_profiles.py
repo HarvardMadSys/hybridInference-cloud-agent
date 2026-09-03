@@ -13,10 +13,12 @@ from collections.abc import Mapping
 from enum import StrEnum
 
 from cloud_agent_host.shared_protocol import (
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_PROTOCOL,
     SHARED_SANDBOX_RUNTIME_PINS,
+    has_shared_deployment_capability,
 )
 
 
@@ -71,7 +73,11 @@ def _shared_sandbox_claim_attested(
     )
 
 
-def shared_sandbox_claim_attested(attestation: Mapping[str, object]) -> bool:
+def shared_sandbox_claim_attested(
+    attestation: Mapping[str, object],
+    *,
+    expected_deployment_sha: str | None = None,
+) -> bool:
     """Whether this exact replica may create or claim current-protocol work.
 
     A host heartbeat is machine-level and is shared by every runner replica on
@@ -79,10 +85,21 @@ def shared_sandbox_claim_attested(attestation: Mapping[str, object]) -> bool:
     replica while an old replica is the one actually polling. The claim carries
     this second, replica-local proof so an old or partially configured process
     skips shared work instead of borrowing its sibling's advertised capability.
+    Creating a group additionally requires the completed deployment marker;
+    readiness and scheduling therefore enforce the same exact-SHA fence.
     """
-    return _shared_sandbox_claim_attested(
-        attestation,
-        protocols=frozenset({SHARED_SANDBOX_PROTOCOL}),
+    capabilities = attestation.get("runner_capabilities")
+    return (
+        _shared_sandbox_claim_attested(
+            attestation,
+            protocols=frozenset({SHARED_SANDBOX_PROTOCOL}),
+        )
+        and isinstance(capabilities, list)
+        and NATIVE_FORK_AT_ANCHOR_CAPABILITY in capabilities
+        and has_shared_deployment_capability(
+            capabilities,
+            expected_deployment_sha=expected_deployment_sha,
+        )
     )
 
 

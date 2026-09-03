@@ -281,7 +281,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
 _JOB_COLUMNS = (
     "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, repo, base_sha, task_prompt, "
     "setup_script, runtime, model, execution_profile, reasoning_effort, state, "
-    "cancel_requested, terminal_resume_pending, current_attempt_id, "
+    "cancel_requested, terminal_resume_pending, retained_followup_eligible, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
     "metadata, fork_source_job_id, mcp_servers, "
     "created_at, updated_at"
@@ -676,9 +676,9 @@ class AgentJobStore:
                 INSERT INTO agent_jobs
                     (id, thread_id, turn_no, user_id, repo, base_sha, task_prompt,
                      setup_script, runtime, model, execution_profile, reasoning_effort,
-                     metadata, mcp_servers)
+                     metadata, mcp_servers, retained_followup_eligible)
                 VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                        $12::jsonb, $13)
+                        $12::jsonb, $13, TRUE)
                 RETURNING {_JOB_COLUMNS}
                 """,
                 job_id,
@@ -782,6 +782,16 @@ class AgentJobStore:
                 sandbox["context_status"] == "lost" or sandbox["state"] in {"stopped_dirty", "lost"}
             ):
                 return {"error": "sandbox_context_lost"}
+            if (
+                sandbox is None
+                and parent["state"] in (FAILED, CANCELLED)
+                and parent["retained_followup_eligible"] is not True
+            ):
+                # Migration 0023 leaves every pre-cutover row NULL. It may
+                # have been queued when the migration ran and become terminal
+                # later, so only an explicit post-cutover TRUE may seed a new
+                # group without an existing retained membership.
+                return {"error": "sandbox_context_lost"}
             if sandbox is None and parent["state"] == SUCCEEDED:
                 # A successful native turn must have settled inside its group.
                 # Rows that predate that invariant are audit history, not a
@@ -797,9 +807,10 @@ class AgentJobStore:
                 INSERT INTO agent_jobs
                     (id, thread_id, parent_job_id, turn_no, user_id, repo, base_sha,
                      task_prompt, setup_script, runtime, model, execution_profile,
-                     reasoning_effort, state, metadata, mcp_servers)
+                     reasoning_effort, state, metadata, mcp_servers,
+                     retained_followup_eligible)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                        $14, $15::jsonb, $16)
+                        $14, $15::jsonb, $16, TRUE)
                 RETURNING {_JOB_COLUMNS}
                 """,
                 job_id,
@@ -1445,11 +1456,12 @@ class AgentJobStore:
                             base_sha, task_prompt, setup_script, runtime, model,
                             execution_profile, reasoning_effort, state,
                             published_pr_url, published_commit_sha, detail, metadata,
-                            fork_source_job_id, mcp_servers, created_at, updated_at
+                            fork_source_job_id, mcp_servers, retained_followup_eligible,
+                            created_at, updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                             $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21,
-                            clock_timestamp(), clock_timestamp()
+                            TRUE, clock_timestamp(), clock_timestamp()
                         )
                         """,
                         copy_id,
@@ -2711,6 +2723,7 @@ class AgentJobStore:
         host: str,
         host_credential_hash: str,
         claim_attestation: dict[str, Any] | None = None,
+        expected_deployment_sha: str | None = None,
     ) -> dict[str, Any] | None:
         """Claim the oldest queued job, creating a new fenced attempt.
 
@@ -2763,7 +2776,10 @@ class AgentJobStore:
             runtime_versions_available = {}
         host_kernel = attestation.get("host_kernel")
         guest_kernel = attestation.get("guest_kernel")
-        shared_attestation = shared_sandbox_claim_attested(attestation)
+        shared_attestation = shared_sandbox_claim_attested(
+            attestation,
+            expected_deployment_sha=expected_deployment_sha,
+        )
         followup_attestation = compatible_shared_sandbox_followup_attested(attestation)
         if not host or not host_credential_hash or not followup_attestation:
             return None

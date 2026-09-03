@@ -82,11 +82,6 @@ def test_an_inert_sampler_starts_stops_and_reports_zero_coverage():
     assert result["sample_count"] == 0
 
 
-def test_a_sampler_without_a_container_is_inert_rather_than_failing():
-    """No container name (process backend, unresolvable daemon) measures nothing."""
-    assert not ResourceSampler.for_container(None).active
-
-
 def test_a_sampler_that_never_binds_reports_zero_coverage(tmp_path):
     """A host that can never be read says so, and stops asking."""
     sampler = ResourceSampler(resolver=lambda: None, interval_s=0.01, bind_timeout_s=0.05)
@@ -234,19 +229,3 @@ def test_a_daemon_that_cannot_be_reached_is_reported_by_preflight():
     # On a host with a live daemon this is None; without one it names the
     # reason. Either way it must answer rather than raise.
     assert reason is None or isinstance(reason, str)
-
-
-def test_rebinding_discards_the_previous_container_s_numbers():
-    """Every spawn is a new container; the old window is not this turn's."""
-    sampler = ResourceSampler(
-        ContainerStats("first", _client(lambda _r: httpx.Response(200, json=_stats())))
-    )
-    sampler.start()
-    time.sleep(0.02)
-
-    sampler.rebind(None)
-
-    result = sampler.stop()
-    assert result["sample_count"] == 0
-    assert result["coverage"] == 0.0
-    assert result["sampler_version"] == SAMPLER_VERSION

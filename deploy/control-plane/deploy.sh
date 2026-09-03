@@ -25,6 +25,7 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT:-cloudagent}"
 COMPOSE_FILE="deploy/control-plane/docker-compose.yml"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 SHARED_READY_TIMEOUT="${SHARED_READY_TIMEOUT:-900}"
+DEPLOY_PROTOCOL="shared-live-exact-sha-v1"
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -86,6 +87,9 @@ log "target:   ${SHA}"
 SOURCE_HEAD="$(git -C "${SOURCE_REPO}" rev-parse HEAD)"
 [ "${SOURCE_HEAD}" = "${SHA}" ] \
   || die "SOURCE_REPO is at ${SOURCE_HEAD}, not the requested ${SHA} — refusing to deploy something other than what was asked for"
+TARGET_DEPLOY_PROTOCOL="$(git -C "${SOURCE_REPO}" show "${SHA}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
+[ "${TARGET_DEPLOY_PROTOCOL}" = "${DEPLOY_PROTOCOL}" ] \
+  || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; an online rollback to a pre-fence commit is unsupported and was refused before changing the deployment"
 
 log "fetching ${SHA} from ${SOURCE_REPO}"
 git fetch --quiet "${SOURCE_REPO}" HEAD
@@ -94,6 +98,12 @@ git reset --hard --quiet FETCH_HEAD
 NOW="$(git rev-parse HEAD)"
 [ "${NOW}" = "${SHA}" ] || die "checkout landed on ${NOW}, expected ${SHA}"
 log "checkout now at ${NOW}"
+
+# The target API uses the same exact generation as the deployment waiter when
+# deciding whether a replica may materialize a new retained group. Export it
+# for every Compose invocation, including a bounded cold-start bootstrap.
+AGENT_DEPLOYMENT_SHA="${SHA}"
+export AGENT_DEPLOYMENT_SHA
 
 compose() {
   docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}" "$@"

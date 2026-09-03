@@ -87,12 +87,18 @@ jobs:
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "deploying ${sha}"
 
-      # Checked out at the target commit so the script that runs is the one
-      # being shipped: a change to deploy.sh takes effect in the deploy that
-      # carries it, rather than one deploy later.
-      - uses: actions/checkout@v6
+      - name: Check out deployment orchestrator
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .deploy-orchestrator
+          fetch-depth: 1
+
+      - name: Check out target
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.target.outputs.sha }}
+          path: .deploy-target
           fetch-depth: 0
 
       - name: Deploy
@@ -103,7 +109,8 @@ jobs:
           # service, in which case two deploys under one project name are one
           # deploy.
           COMPOSE_PROJECT: ${{ vars.PROD_CONTROL_COMPOSE_PROJECT }}
-        run: bash deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
+          SOURCE_REPO: ${{ github.workspace }}/.deploy-target
+        run: bash .deploy-orchestrator/deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
         if: always()
@@ -161,9 +168,18 @@ jobs:
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "deploying ${sha}"
 
-      - uses: actions/checkout@v6
+      - name: Check out deployment orchestrator
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .deploy-orchestrator
+          fetch-depth: 1
+
+      - name: Check out target
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.target.outputs.sha }}
+          path: .deploy-target
           fetch-depth: 0
 
       - name: Deploy
@@ -179,7 +195,8 @@ jobs:
           AGENT_CHAT_IDLE_TIMEOUT_S: "1800"
           # Daemon-owned retained state, never a per-chat bind mount.
           AGENT_RETAINED_DOCKER_DATA_ROOT: ${{ vars.PROD_RETAINED_DOCKER_DATA_ROOT || '/var/lib/docker' }}
-        run: bash deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
+          SOURCE_REPO: ${{ github.workspace }}/.deploy-target
+        run: bash .deploy-orchestrator/deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
         if: always()

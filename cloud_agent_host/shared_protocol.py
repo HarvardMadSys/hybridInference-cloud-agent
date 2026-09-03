@@ -11,6 +11,7 @@ from __future__ import annotations
 SHARED_SANDBOX_CAPABILITY = "shared-sandbox-v1"
 NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
 SHARED_DEPLOYMENT_CAPABILITY_PREFIX = "shared-sandbox-deployment:"
+ENV_DEPLOYMENT_SHA = "AGENT_DEPLOYMENT_SHA"
 # v2 adds the provider-transcript anchor carried by native fork requests.  A
 # v1 retained container may still serve ordinary follow-up turns, but must not
 # be asked to interpret a historical anchor that its bundled helpers ignore.
@@ -31,3 +32,28 @@ def shared_deployment_capability(deployment_sha: str) -> str:
     if not normalized:
         raise ValueError("deployment SHA must not be empty")
     return f"{SHARED_DEPLOYMENT_CAPABILITY_PREFIX}{normalized}"
+
+
+def has_shared_deployment_capability(
+    capabilities: object,
+    *,
+    expected_deployment_sha: str | None = None,
+) -> bool:
+    """Whether one replica proved a completed, optionally exact deployment.
+
+    Requiring at least one deployment capability even when the control plane
+    has no configured target keeps direct/partially configured deployments
+    fail-closed. Production additionally supplies its own exact target SHA, so
+    a marker from a previous rollout cannot authorize a new sandbox.
+    """
+    if not isinstance(capabilities, list):
+        return False
+    expected = (expected_deployment_sha or "").strip()
+    if expected:
+        return shared_deployment_capability(expected) in capabilities
+    return any(
+        isinstance(capability, str)
+        and capability.startswith(SHARED_DEPLOYMENT_CAPABILITY_PREFIX)
+        and len(capability) > len(SHARED_DEPLOYMENT_CAPABILITY_PREFIX)
+        for capability in capabilities
+    )

@@ -58,6 +58,11 @@ COPY --from=builder /app/.venv .venv
 ENV PATH="/app/.venv/bin:$PATH"
 
 COPY cloud_agent_host/ cloud_agent_host/
+# A new runner may adopt retained containers created from the previous image.
+# Keep the reviewed helper on the trusted side so it can atomically upgrade
+# those containers before their first post-deploy activation.
+COPY deploy/sandbox/member-process-reaper /usr/local/libexec/member-process-reaper
+RUN chmod 0555 /usr/local/libexec/member-process-reaper
 
 # Root on purpose, and only here. The runner and broker need the host Docker
 # socket to create/start/stop retained containers. Repository source is cloned

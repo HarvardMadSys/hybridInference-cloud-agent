@@ -1561,7 +1561,11 @@ async def cancel_agent_job(
         resumed = True
         if owned.get("thread_sandbox") is not None:
             settled_broker = await _workspace_broker_for_job(job_store, owned)
-            resumed = await resume_settled_terminal(_workspace_id(owned), broker=settled_broker)
+            resumed = await resume_settled_terminal(
+                _workspace_id(owned),
+                job_id=job_id,
+                broker=settled_broker,
+            )
         if resumed:
             await job_store.mark_terminal_resume_complete(job_id=job_id)
     job = await job_store.get_job(job_id)
@@ -2448,7 +2452,11 @@ async def _terminal_owner_workspace(
         # The broker resolved a few lines up is this job's own host's, so the
         # resume goes to the machine holding the retained workspace rather than to
         # whatever the deployment's single-host variable names.
-        if not await resume_settled_terminal(_workspace_id(job), broker=broker):
+        if not await resume_settled_terminal(
+            _workspace_id(job),
+            job_id=job_id,
+            broker=broker,
+        ):
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -3009,6 +3017,7 @@ async def _restore_terminal_suspension(
     broker: WorkspaceBrokerClient | None,
     *,
     workspace_id: str,
+    job_id: str,
     lease_generation: int,
 ) -> None:
     """Best-effort compensation after a worker fails to finalize a resume."""
@@ -3018,6 +3027,7 @@ async def _restore_terminal_suspension(
         await broker.suspend_terminals(
             workspace_id,
             lease_generation=lease_generation,
+            job_id=job_id,
         )
     except WorkspaceBrokerError:
         logger.warning(
@@ -3026,6 +3036,7 @@ async def _restore_terminal_suspension(
             extra={
                 "event": "agent_terminal_resume_compensation_failed",
                 "workspace_id": workspace_id,
+                "job_id": job_id,
                 "lease_generation": lease_generation,
             },
         )
@@ -3273,6 +3284,7 @@ async def worker_claim(
         host=claiming_host["host"],
         host_credential_hash=claiming_host["credential_hash"],
         claim_attestation=(body.attestation.model_dump() if body.attestation is not None else None),
+        expected_deployment_sha=(os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip() or None,
     )
     if claim is None:
         return None
@@ -3823,6 +3835,7 @@ async def worker_suspend_terminals(
         await broker.suspend_terminals(
             workspace_id,
             lease_generation=claims["lease_generation"],
+            job_id=job_id,
         )
     except WorkspaceBrokerError as exc:
         raise HTTPException(
@@ -3864,11 +3877,13 @@ async def worker_resume_terminals(
         await broker.resume_terminals(
             workspace_id,
             lease_generation=claims["lease_generation"],
+            job_id=job_id,
         )
     except WorkspaceBrokerError as exc:
         await _restore_terminal_suspension(
             broker,
             workspace_id=workspace_id,
+            job_id=job_id,
             lease_generation=claims["lease_generation"],
         )
         raise HTTPException(
@@ -3891,6 +3906,7 @@ async def worker_resume_terminals(
         await _restore_terminal_suspension(
             broker,
             workspace_id=workspace_id,
+            job_id=job_id,
             lease_generation=claims["lease_generation"],
         )
         raise
@@ -3898,6 +3914,7 @@ async def worker_resume_terminals(
         await _restore_terminal_suspension(
             broker,
             workspace_id=workspace_id,
+            job_id=job_id,
             lease_generation=claims["lease_generation"],
         )
         raise _lease_lost()
@@ -3943,11 +3960,13 @@ async def worker_finish(
             await broker.resume_terminals(
                 workspace_id,
                 lease_generation=claims["lease_generation"],
+                job_id=job_id,
             )
         except WorkspaceBrokerError as exc:
             await _restore_terminal_suspension(
                 broker,
                 workspace_id=workspace_id,
+                job_id=job_id,
                 lease_generation=claims["lease_generation"],
             )
             raise HTTPException(
@@ -3973,6 +3992,7 @@ async def worker_finish(
         await _restore_terminal_suspension(
             broker,
             workspace_id=workspace_id,
+            job_id=job_id,
             lease_generation=claims["lease_generation"],
         )
         raise
@@ -3980,6 +4000,7 @@ async def worker_finish(
         await _restore_terminal_suspension(
             broker,
             workspace_id=workspace_id,
+            job_id=job_id,
             lease_generation=claims["lease_generation"],
         )
         raise _lease_lost()

@@ -20,7 +20,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-async def resume_settled_terminal(job_id: str, *, broker: WorkspaceBrokerClient | None) -> bool:
+async def resume_settled_terminal(
+    workspace_id: str,
+    *,
+    job_id: str,
+    broker: WorkspaceBrokerClient | None,
+) -> bool:
     """Authoritatively resume one settled workspace, reporting confirmation.
 
     ``broker=None`` reports failure. Every runnable chat has a retained
@@ -31,7 +36,7 @@ async def resume_settled_terminal(job_id: str, *, broker: WorkspaceBrokerClient 
     if broker is None:
         return False
     try:
-        await broker.resume_settled_terminals(job_id)
+        await broker.resume_settled_terminals(workspace_id, job_id=job_id)
     except WorkspaceBrokerError:
         logger.warning(
             "agent_terminal_settled_resume_failed",
@@ -39,6 +44,7 @@ async def resume_settled_terminal(job_id: str, *, broker: WorkspaceBrokerClient 
             extra={
                 "event": "agent_terminal_settled_resume_failed",
                 "job_id": job_id,
+                "workspace_id": workspace_id,
             },
         )
         return False

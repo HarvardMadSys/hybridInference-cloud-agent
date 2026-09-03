@@ -21,6 +21,7 @@ from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_PROTOCOL,
+    shared_deployment_capability,
 )
 from tests.support.migrations import apply_migrations, run_baseline_statements
 
@@ -30,6 +31,7 @@ _ALLOWED_TEST_DB_PATTERN = "_test_"
 _SHARED_HOST_CAPABILITIES = [
     SHARED_SANDBOX_CAPABILITY,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    shared_deployment_capability("test-deployment"),
 ]
 _TABLES_IN_FK_ORDER = (
     "agent_native_session_edges",
@@ -1182,10 +1184,10 @@ async def test_native_turn_migration_backfills_existing_fork_prefixes(
         apply_migrations(db_config)
 
 
-async def test_native_turn_rollout_guard_backfills_the_post_0021_gap(
+async def test_native_turn_schema_guards_previous_writer_before_backfill(
     store: AgentJobStore,
 ):
-    """An old API write between 0021 and 0022 is not permanently unanchored."""
+    """An old API write is anchored as soon as 0021 exposes the column."""
     from tests.support.migrations import apply_migrations, downgrade_to
 
     base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
@@ -1222,7 +1224,7 @@ async def test_native_turn_rollout_guard_backfills_the_post_0021_gap(
                 await conn.fetchval(
                     "SELECT native_turn_no FROM agent_jobs WHERE id = 'ajob_rollout_gap'"
                 )
-                is None
+                == 1
             )
         apply_migrations(db_config)
         async with store._pool.acquire() as conn:
@@ -1276,6 +1278,32 @@ async def test_execution_profile_persists_and_is_inherited_by_follow_up(store, m
     assert follow_up is not None
     assert follow_up["execution_profile"] == "untrusted-kata-v1"
     assert (await store.get_job(source["id"]))["execution_profile"] == "untrusted-kata-v1"
+
+
+async def test_disposable_era_terminal_chat_cannot_be_silently_reactivated(store):
+    historical = await _create_job(store, task_prompt="historical disposable failure")
+    async with store._pool.acquire() as conn:
+        assert historical["retained_followup_eligible"] is True
+        assert (
+            await conn.fetchval(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'agent_jobs' "
+                "AND column_name = 'retained_followup_eligible'"
+            )
+            is None
+        )
+        await conn.execute(
+            "UPDATE agent_jobs "
+            "SET state = 'failed', retained_followup_eligible = NULL "
+            "WHERE id = $1",
+            historical["id"],
+        )
+
+    assert await store.create_follow_up(
+        parent_job_id=historical["id"],
+        user_id=historical["user_id"],
+        prompt="must not fabricate native continuity",
+    ) == {"error": "sandbox_context_lost"}
 
 
 async def test_projects_summarize_a_user_s_repos_and_page_one_at_a_time(store: AgentJobStore):

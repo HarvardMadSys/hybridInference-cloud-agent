@@ -162,7 +162,11 @@ async def _reconcile_settled_terminals(store: AgentJobStore) -> None:
                 await store.mark_terminal_resume_complete(job_id=job_id)
                 continue
             broker = await hydrate_shared_broker(job, await broker_for_job(store, job_id))
-            if await resume_settled_terminal(str(job["thread_id"]), broker=broker):
+            if await resume_settled_terminal(
+                str(job["thread_id"]),
+                job_id=job_id,
+                broker=broker,
+            ):
                 await store.mark_terminal_resume_complete(job_id=job_id)
         except Exception:
             # One unavailable host must not prevent reconciliation of markers

@@ -51,17 +51,39 @@ class BridgeError(RuntimeError):
     """A local protocol or server error that must fail closed."""
 
 
+def _is_platform_user(message: Any) -> bool:
+    """Distinguish one outer prompt from provider-internal continuations."""
+    if not isinstance(message, dict):
+        return False
+    info = message.get("info")
+    if not isinstance(info, dict) or info.get("role") != "user":
+        return False
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        raise BridgeError("native user message has no parts")
+    # A compaction request is represented as a user message with a dedicated
+    # part; auto-continue is a synthetic text part. Both belong to the already
+    # active platform turn. A genuine prompt has at least one non-synthetic,
+    # non-compaction part (text, file, image, etc.).
+    if any(isinstance(part, dict) and part.get("type") == "compaction" for part in parts):
+        return False
+    return any(
+        isinstance(part, dict)
+        and part.get("type") != "compaction"
+        and part.get("synthetic") is not True
+        for part in parts
+    )
+
+
 def fork_payload(messages: Any, source_native_turn_no: int) -> dict[str, str]:
     """Resolve one settled ordinal to the servers' exclusive fork boundary."""
     if source_native_turn_no < 1:
         raise BridgeError("fork source_native_turn_no must be positive")
     if not isinstance(messages, list):
         raise BridgeError("native message history has an invalid shape")
-    user_messages = []
-    for message in messages:
-        info = message.get("info") if isinstance(message, dict) else None
-        if isinstance(info, dict) and info.get("role") == "user":
-            user_messages.append(info)
+    user_messages = [
+        message["info"] for message in messages if _is_platform_user(message)
+    ]
     if source_native_turn_no > len(user_messages):
         raise BridgeError(
             "native history does not contain the requested fork turn "

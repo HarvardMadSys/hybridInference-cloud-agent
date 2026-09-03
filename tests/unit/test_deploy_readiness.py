@@ -75,6 +75,41 @@ async def test_ready_requires_a_post_start_heartbeat_and_authoritative_broker_pr
 
 
 @pytest.mark.asyncio
+async def test_marker_change_during_broker_probe_keeps_the_barrier_closed() -> None:
+    started = datetime.now(UTC)
+    ready = _host(started + timedelta(seconds=1))
+    pending = _host(
+        started + timedelta(seconds=2),
+        capabilities=[SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY],
+    )
+
+    class ChangingStore(_Store):
+        def __init__(self) -> None:
+            super().__init__([ready])
+            self.calls = 0
+
+        async def deployment_runner_pool(self):
+            self.calls += 1
+            rows = [ready] if self.calls == 1 else [pending]
+            return rows, None, {}, set()
+
+    verdict = await shared_live_readiness(
+        ChangingStore(),
+        not_before=started,
+        broker_token="broker-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        broker_probe=lambda *_args, **_kwargs: _async_none(),
+    )
+
+    assert verdict.ready is False
+    assert "changed while its broker was probed" in verdict.detail
+
+
+async def _async_none() -> None:
+    return None
+
+
+@pytest.mark.asyncio
 async def test_a_stale_capability_row_cannot_release_the_deploy_barrier() -> None:
     started = datetime.now(UTC)
     probed = False

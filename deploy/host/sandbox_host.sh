@@ -594,7 +594,6 @@ cmd_up() {
   docker info >/dev/null 2>&1 || die "the Docker daemon is not running (or not accessible)"
   require_env
   validate_retained_config
-  prepare_shared_live_marker
   # The cheap host check stays before the build. The authoritative guest-kernel
   # probe needs the just-built image and therefore runs immediately after it;
   # this also makes the first deployment work when no old image exists.
@@ -630,13 +629,26 @@ cmd_up() {
 
   kata_smoke_test
 
+  # Build every replacement while the old, proven generation is still serving.
+  # Only after all builds and the Kata probe succeed do we invalidate its
+  # marker and drain runners. That keeps a failed build from pausing the queue
+  # and prevents Compose from replacing the broker underneath an active turn.
+  log "building host services"
+  AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
+    compose build
+  prepare_shared_live_marker
+  if [[ -n "$(compose ps -q runner 2>/dev/null || true)" ]]; then
+    log "draining existing runners before replacing their workspace broker"
+    compose stop runner
+  fi
+
   log "starting the three purpose-scoped tunnels, egress proxy, broker, and ${replicas} runner(s)"
   # `--remove-orphans` because a renamed service leaves its old container
   # running otherwise: compose only replaces containers for services the file
   # still declares, so `agent-runner` outliving `runner` would mean two sets of
   # runners claiming from one host, which is the two-brokers incident again.
   AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
-    compose up -d --build --remove-orphans
+    compose up -d --no-build --remove-orphans
 
   # The runner's preflight now makes a real request to the gateway through the
   # tunnel, so a tunnel that came up without a working upstream fails here

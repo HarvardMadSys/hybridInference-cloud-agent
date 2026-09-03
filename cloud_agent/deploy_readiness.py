@@ -221,6 +221,69 @@ async def shared_live_readiness(
             False, f"{scope} is not shared-live ready: {'; '.join(rejected)}"
         )
     placement_host_names = [str(row["host"]) for row in placement_rows]
+
+    # Broker probes are network awaits outside the database read. Re-read the
+    # pool before declaring success so a runner that invalidated its marker,
+    # went offline, or changed placement while those probes ran cannot satisfy
+    # the deployment with a stale snapshot. Claim admission independently
+    # enforces the same exact SHA; this closes the deploy-time availability gap.
+    (
+        current_rows,
+        current_active_host,
+        _,
+        current_retained_hosts,
+    ) = await store.deployment_runner_pool()
+    current_by_host = {str(row.get("host")): row for row in current_rows if row.get("host")}
+    if current_active_host != active_host or set(current_retained_hosts) != set(retained_hosts):
+        return SharedLiveReadiness(
+            False,
+            "host placement or retained ownership changed while brokers were probed",
+        )
+    if active_host is not None:
+        current_placement_names = {
+            str(row["host"]) for row in current_rows if row.get("host") == active_host
+        }
+    else:
+        current_placement_names = {
+            str(row["host"])
+            for row in current_rows
+            if row.get("status") == HOST_ONLINE
+            and isinstance(row.get("capabilities"), list)
+            and SHARED_SANDBOX_CAPABILITY in row["capabilities"]
+            and NATIVE_FORK_AT_ANCHOR_CAPABILITY in row["capabilities"]
+        }
+    if current_placement_names != set(placement_host_names):
+        return SharedLiveReadiness(
+            False,
+            "new-chat placement changed while brokers were probed",
+        )
+    for row in probe_rows:
+        host = str(row["host"])
+        current = current_by_host.get(host)
+        if current is None:
+            return SharedLiveReadiness(
+                False, f"host {host} disappeared while its broker was probed"
+            )
+        placement = host in current_placement_names
+        reason = _host_rejection(
+            current,
+            not_before=not_before,
+            expected_deployment_sha=expected_deployment_sha,
+            require_target_deployment=placement,
+            require_native_fork=placement,
+            require_two_slots=placement,
+        )
+        if reason is not None:
+            return SharedLiveReadiness(
+                False,
+                f"host {host} changed while its broker was probed: {reason}",
+            )
+        if str(current.get("broker_url") or "").strip() != str(row.get("broker_url") or "").strip():
+            return SharedLiveReadiness(
+                False,
+                f"host {host} changed broker URL while its previous broker was probed",
+            )
+
     placement_hosts = ", ".join(placement_host_names)
     retained_owner_hosts = sorted(set(ready_hosts) - set(placement_host_names))
     retained_detail = (

@@ -180,33 +180,38 @@ class WorkspaceBrokerClient:
         return await self._request("GET", workspace_id, "terminals")
 
     async def suspend_terminals(
-        self, workspace_id: str, *, lease_generation: int
+        self, workspace_id: str, *, lease_generation: int, job_id: str | None = None
     ) -> dict[str, Any]:
         """Freeze every interactive terminal process tree in a workspace."""
         return await self._request(
             "POST",
             workspace_id,
             "terminals/suspend",
-            json={"lease_generation": lease_generation},
+            json={"lease_generation": lease_generation, "job_id": job_id},
             timeout=60,
         )
 
-    async def resume_terminals(self, workspace_id: str, *, lease_generation: int) -> dict[str, Any]:
+    async def resume_terminals(
+        self, workspace_id: str, *, lease_generation: int, job_id: str | None = None
+    ) -> dict[str, Any]:
         """Resume retained interactive terminals after a protected phase."""
         return await self._request(
             "POST",
             workspace_id,
             "terminals/resume",
-            json={"lease_generation": lease_generation},
+            json={"lease_generation": lease_generation, "job_id": job_id},
             timeout=60,
         )
 
-    async def resume_settled_terminals(self, workspace_id: str) -> dict[str, Any]:
+    async def resume_settled_terminals(
+        self, workspace_id: str, *, job_id: str | None = None
+    ) -> dict[str, Any]:
         """Authoritatively resume terminals after the job can no longer retry."""
         return await self._request(
             "POST",
             workspace_id,
             "terminals/resume-settled",
+            json={"job_id": job_id} if job_id is not None else None,
             timeout=60,
         )
 

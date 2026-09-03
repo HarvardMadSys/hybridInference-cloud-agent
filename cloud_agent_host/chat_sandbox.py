@@ -82,6 +82,8 @@ ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
 MEMBER_UID_BASE = 11001
 MEMBER_UID_LIMIT = 128
+MEMBER_REAPER_TARGET = "/usr/local/bin/member-process-reaper"
+MEMBER_REAPER_SOURCE = "/usr/local/libexec/member-process-reaper"
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 
 # PID 1 contains no chat credential and owns no chat state outside the
@@ -237,6 +239,7 @@ class ChatSandboxManager:
                 f"large enough to contain /{CHAT_NETWORK_PREFIX_LENGTH} chat networks"
             )
         self._chat_network_pool = network_pool
+        self._member_reaper_lock = threading.Lock()
 
     def network_for_phase(self, spec: ChatSandboxSpec, phase: str) -> str:
         """Return this chat's network for one lifecycle phase.
@@ -280,7 +283,13 @@ class ChatSandboxManager:
             candidates = policy.no_proxy
         elif tier is EgressTier.TRUSTED:
             proxy = policy.proxies.get(tier, "")
-            candidates = ((urlparse(proxy).hostname or ""),) if proxy else ()
+            candidates = (
+                # Setup may reach registries only through the allowlist proxy.
+                # The gateway/MCP relays belong exclusively to the agent
+                # phase, even when an operator opts that phase into Trusted.
+                *(policy.no_proxy if phase == "agent" else ()),
+                *((urlparse(proxy).hostname or "",) if proxy else ()),
+            )
         else:
             return ()
 
@@ -1648,6 +1657,79 @@ class ChatSandboxManager:
             raise ValueError("resident PID file does not match its member uid")
         return slot_id
 
+    def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
+        """Install the immutable helper into retained pre-upgrade containers."""
+        with self._member_reaper_lock:
+            probe = self.exec_capture(
+                spec,
+                [
+                    "/bin/sh",
+                    "-c",
+                    'test "$(stat -c %u:%g:%a "$1" 2>/dev/null)" = 0:0:555',
+                    "sh",
+                    MEMBER_REAPER_TARGET,
+                ],
+                workdir="/",
+                timeout_s=20,
+                user_uid=0,
+                user_gid=0,
+            )
+            if probe.returncode == 0:
+                return
+            current = self._require(spec)
+            if not current.running:
+                raise SandboxError("chat sandbox must be started before helper installation")
+            source = os.environ.get("AGENT_MEMBER_PROCESS_REAPER_SOURCE", MEMBER_REAPER_SOURCE)
+            if not os.path.isfile(source):
+                raise SandboxError(
+                    "retained sandbox lacks member-process-reaper and the trusted "
+                    f"runner source {source!r} is unavailable"
+                )
+            temporary = f"{MEMBER_REAPER_TARGET}.install-{secrets.token_hex(8)}"
+            copied = self._run(
+                [
+                    self.backend.docker_binary,
+                    "cp",
+                    source,
+                    f"{current.container_id}:{temporary}",
+                ],
+                timeout=30,
+            )
+            if copied.returncode != 0:
+                raise SandboxError(
+                    "member-process-reaper compatibility install failed: "
+                    + copied.stderr.strip()[:300]
+                )
+            installed = self.exec_capture(
+                spec,
+                [
+                    "/bin/sh",
+                    "-c",
+                    'chown 0:0 "$1" && chmod 0555 "$1" && mv -f "$1" "$2"',
+                    "sh",
+                    temporary,
+                    MEMBER_REAPER_TARGET,
+                ],
+                workdir="/",
+                timeout_s=20,
+                user_uid=0,
+                user_gid=0,
+            )
+            if installed.returncode != 0:
+                with contextlib.suppress(Exception):
+                    self.exec_capture(
+                        spec,
+                        ["/bin/rm", "-f", temporary],
+                        workdir="/",
+                        timeout_s=10,
+                        user_uid=0,
+                        user_gid=0,
+                    )
+                raise SandboxError(
+                    "member-process-reaper compatibility activation failed: "
+                    + installed.stderr.decode("utf-8", "replace")[:300]
+                )
+
     def reap_member_processes(
         self,
         spec: ChatSandboxSpec,
@@ -1693,9 +1775,10 @@ class ChatSandboxManager:
     ) -> tuple[tuple[int, int], ...]:
         """Capture the reviewed resident PID/start-time set before one turn."""
         self._validate_member_identity(spec, slot_id=slot_id, user_uid=user_uid)
+        self.ensure_member_process_reaper(spec)
         result = self.exec_capture(
             spec,
-            ["/usr/local/bin/member-process-reaper", "capture", str(user_uid)],
+            [MEMBER_REAPER_TARGET, "capture", str(user_uid)],
             workdir="/",
             timeout_s=20,
             user_uid=user_uid,
@@ -1724,10 +1807,11 @@ class ChatSandboxManager:
         escape merely by changing process groups or forking during cleanup.
         """
         self._validate_member_identity(spec, slot_id=slot_id, user_uid=user_uid)
+        self.ensure_member_process_reaper(spec)
         payload = self._encode_member_processes(baseline)
         result = self.exec_capture(
             spec,
-            ["/usr/local/bin/member-process-reaper", "reap", str(user_uid)],
+            [MEMBER_REAPER_TARGET, "reap", str(user_uid)],
             workdir="/",
             timeout_s=30,
             input_bytes=payload,

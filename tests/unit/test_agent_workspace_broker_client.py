@@ -185,3 +185,36 @@ async def test_shared_registration_projects_db_manifest_before_broker_recovery(m
     assert call[3]["expected_container_id"] == "container-shared"
     assert call[3]["members"] == snapshot["members"]
     assert call[4] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_coordination_identifies_the_turn_owning_each_suspension(monkeypatch):
+    broker = WorkspaceBrokerClient("http://broker", "secret")
+    calls: list[tuple] = []
+
+    async def request(method, workspace_id, action, *, params=None, json=None, timeout=30):
+        calls.append((method, workspace_id, action, params, json, timeout))
+        return {"ok": True}
+
+    monkeypatch.setattr(broker, "_request", request)
+
+    await broker.suspend_terminals(
+        "athr_shared",
+        lease_generation=2,
+        job_id="ajob_parent",
+    )
+    await broker.resume_terminals(
+        "athr_shared",
+        lease_generation=2,
+        job_id="ajob_parent",
+    )
+    await broker.resume_settled_terminals(
+        "athr_shared",
+        job_id="ajob_parent",
+    )
+
+    assert [call[4] for call in calls] == [
+        {"lease_generation": 2, "job_id": "ajob_parent"},
+        {"lease_generation": 2, "job_id": "ajob_parent"},
+        {"job_id": "ajob_parent"},
+    ]

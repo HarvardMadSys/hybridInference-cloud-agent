@@ -27,6 +27,7 @@ set -euo pipefail
 SHA="${1:-${DEPLOY_SHA:-}}"
 SOURCE_REPO="${SOURCE_REPO:-${GITHUB_WORKSPACE:-}}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-}"
+DEPLOY_PROTOCOL="shared-live-exact-sha-v1"
 
 log() { printf '[deploy-host] %s\n' "$*"; }
 die() { printf '[deploy-host] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -63,6 +64,9 @@ fi
 SOURCE_HEAD="$(git -C "${SOURCE_REPO}" rev-parse HEAD)"
 [ "${SOURCE_HEAD}" = "${SHA}" ] \
   || die "SOURCE_REPO is at ${SOURCE_HEAD}, not the requested ${SHA} — refusing to deploy something other than what was asked for"
+TARGET_DEPLOY_PROTOCOL="$(git -C "${SOURCE_REPO}" show "${SHA}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
+[ "${TARGET_DEPLOY_PROTOCOL}" = "${DEPLOY_PROTOCOL}" ] \
+  || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; an online rollback to a pre-fence commit is unsupported and was refused before changing the host"
 
 PREVIOUS="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 log "previous: ${PREVIOUS}"

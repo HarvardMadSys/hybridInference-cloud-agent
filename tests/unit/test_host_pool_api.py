@@ -816,6 +816,7 @@ class ClaimRecorder(FakeHostPoolStore):
         host: str,
         host_credential_hash: str,
         claim_attestation: dict[str, Any] | None = None,
+        expected_deployment_sha: str | None = None,
     ):
         self.claims.append(
             {
@@ -823,6 +824,7 @@ class ClaimRecorder(FakeHostPoolStore):
                 "host": host,
                 "host_credential_hash": host_credential_hash,
                 "claim_attestation": claim_attestation,
+                "expected_deployment_sha": expected_deployment_sha,
             }
         )
         return None
@@ -836,6 +838,7 @@ async def claim_client(monkeypatch):
 
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
     monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
+    monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "deployment-under-test")
 
     store = ClaimRecorder()
     app = FastAPI()
@@ -875,6 +878,7 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
             "worker_id": "w1",
             "host": "runner-a",
             "host_credential_hash": hash_secret(credential),
+            "expected_deployment_sha": "deployment-under-test",
             "claim_attestation": {
                 "sandbox_runtime": "io.containerd.kata.v2",
                 "sandbox_image_digest": None,
@@ -1135,118 +1139,30 @@ def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
     assert validate_broker_url("http://anything:8081") == "http://anything:8081"
 
 
-# ── residency grant choreography (retained-session design §6) ──────────
+# ── removed host-level residency control plane ─────────────────────────
 
 
-def _establish_row(**overrides: Any) -> dict[str, Any]:
-    row = {
-        "thread_id": "th-1",
-        "generation": 1,
-        "status": "hot",
-        "previous_grant_id": None,
-        "establishing_job_id": "job-1",
-        "establishing_attempt_id": "att-1",
-        "user_id": "u1",
-        "model": "glm-5.1",
-    }
-    row.update(overrides)
-    return row
-
-
-async def test_establish_mints_a_thread_attributed_grant(residency_client):
-    """The credential in the answer is the residency's own: minted against the
-    thread (not the establishing attempt's job), linked under the generation
-    the row was fenced with, and scoped to the establishing turn's model."""
+async def test_legacy_host_residency_mutations_are_not_executable(residency_client):
+    """Only attempt-fenced worker routes may create or release member grants."""
     client, store, grants = residency_client
     credential = await _enroll(client, store)
-    store.establish_answer = _establish_row()
+    headers = {"Authorization": f"Bearer {credential}"}
 
-    response = await client.post(
+    establish = await client.post(
         "/v1/agent/host/residencies",
         json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
+        headers=headers,
+    )
+    release = await client.post(
+        "/v1/agent/host/residencies/release",
+        json={"thread_id": "th-1", "generation": 1},
+        headers=headers,
     )
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["credential"] == "tok-1"
-    assert body["model"] == "glm-5.1"
-    assert store.linked == [("th-1", 1, "agr-1")]
-    (mint,) = grants.minted
-    assert mint["job_id"] == "thread:th-1"
-    assert mint["user_id"] == "u1"
-    assert mint["models"] == ["glm-5.1"]
-    assert mint["attempt_id"] == "att-1"
-    assert grants.revoked == []
-
-
-async def test_a_takeover_revokes_the_predecessors_grant(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.establish_answer = _establish_row(generation=2, previous_grant_id="agr-old")
-
-    response = await client.post(
-        "/v1/agent/host/residencies",
-        json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200
-    # The zombie's credential dies at takeover, not at its TTL.
-    assert "agr-old" in grants.revoked
-
-
-async def test_a_failed_mint_degrades_to_a_workspace_only_residency(residency_client):
-    """No grant is no outage: the residency stands, the credential is null,
-    and turns ride warm_native on their own per-attempt grants."""
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.establish_answer = _establish_row()
-    grants.fail_mint = True
-
-    response = await client.post(
-        "/v1/agent/host/residencies",
-        json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["credential"] is None
-    assert store.linked == []
-
-
-async def test_a_grant_that_cannot_be_linked_is_revoked_not_handed_over(residency_client):
-    """The link is the only thing that will ever renew or revoke the grant;
-    a takeover between mint and link must leave no orphan credential."""
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.establish_answer = _establish_row()
-    store.link_ok = False
-
-    response = await client.post(
-        "/v1/agent/host/residencies",
-        json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["credential"] is None
-    assert grants.revoked == ["agr-1"]
-
-
-async def test_the_earn_gate_refusal_is_a_409_and_mints_nothing(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.establish_answer = None
-
-    response = await client.post(
-        "/v1/agent/host/residencies",
-        json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 409
+    assert establish.status_code == 404
+    assert release.status_code == 404
     assert grants.minted == []
+    assert grants.revoked == []
 
 
 async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_client):
@@ -1458,35 +1374,3 @@ async def test_stopped_shared_group_releases_and_revokes_each_member_residency(r
     assert grants.renewed == []
     assert grants.revoked == ["agr-stopped", "agr-stopped"]
     assert response.json()["residencies_lost"] == []
-
-
-async def test_release_revokes_the_grant_it_returns(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.release_answer = "agr-1"
-
-    response = await client.post(
-        "/v1/agent/host/residencies/release",
-        json={"thread_id": "th-1", "generation": 1},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert grants.revoked == ["agr-1"]
-
-
-async def test_a_stale_release_is_ok_false_and_revokes_nothing(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.release_answer = None
-
-    response = await client.post(
-        "/v1/agent/host/residencies/release",
-        json={"thread_id": "th-1", "generation": 1},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["ok"] is False
-    assert grants.revoked == []

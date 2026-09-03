@@ -60,6 +60,9 @@ services:
       agent-egress:
         aliases:
           - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
+      agent-egress-trusted:
+        aliases:
+          - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
 
   # The second narrow destination. MCP moved to the cloud agent's own relay, so
   # a sandbox now needs two addresses and reaches nothing else: the gateway for
@@ -100,6 +103,9 @@ services:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
       agent-egress:
+        aliases:
+          - ${AGENT_MCP_HOSTNAME:-agent-mcp}
+      agent-egress-trusted:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
 
@@ -203,6 +209,11 @@ services:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-runner
     restart: unless-stopped
+    # sandbox_host.sh drains runner replicas before replacing this service, so
+    # no admitted agent stream should remain. Keep a bounded window for
+    # terminal/SSE cleanup and lifespan finalizers instead of Docker's short
+    # default, which can SIGKILL the supervisor mid-cleanup.
+    stop_grace_period: ${AGENT_BROKER_STOP_GRACE:-30s}
     environment:
       # A broker-only secret. Host enrollment/claim uses its persisted host
       # credential; neither credential is accepted at the other's surface.
@@ -389,8 +400,9 @@ networks:
     internal: true
   agent-egress-trusted:
     name: ${AGENT_EGRESS_NETWORK_TRUSTED:-agent-egress-trusted}
-    # Route-less discovery backplane for the proxy. Setup scripts run on a
-    # per-chat bridge carrying only their sandbox and this proxy endpoint.
+    # Route-less discovery backplane for the proxy and fixed relays. Setup
+    # bridges copy only the proxy endpoint; an explicitly Trusted agent phase
+    # copies the proxy plus both relays so model/MCP traffic remains usable.
     internal: true
   agent-egress-uplink:
     name: ${AGENT_EGRESS_NETWORK_UPLINK:-agent-egress-uplink}

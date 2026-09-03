@@ -68,6 +68,7 @@ class _ClaimStore:
         host: str,
         host_credential_hash: str,
         claim_attestation: dict[str, Any] | None = None,
+        expected_deployment_sha: str | None = None,
     ) -> dict[str, Any] | None:
         if not self.queued:
             return None
