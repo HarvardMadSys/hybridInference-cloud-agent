@@ -278,6 +278,51 @@ def test_the_hooks_do_not_replace_settings_the_directory_already_holds(tmp_path)
     assert "PreToolUse" in settings["hooks"]
 
 
+def test_the_host_hook_writer_refuses_a_symlinked_config_directory(tmp_path, capsys):
+    """Agent-owned state must not redirect the trusted runner's settings write."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (state_dir / "claude").symlink_to(outside, target_is_directory=True)
+
+    ClaudeCodeDriver(_ClaudeStub()).launch(_context(state_dir)).start_turn(
+        TurnInput(prompt="go", model="m")
+    )
+
+    assert not (outside / "settings.json").exists()
+    assert "tool hooks not installed" in capsys.readouterr().err
+
+
+def test_the_host_hook_writer_refuses_a_symlinked_settings_file(tmp_path, capsys):
+    """A safe config directory must not make its individual files trustworthy."""
+    config = tmp_path / "claude"
+    config.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"keep": true}')
+    (config / "settings.json").symlink_to(outside)
+
+    ClaudeCodeDriver(_ClaudeStub()).launch(_context(tmp_path)).start_turn(
+        TurnInput(prompt="go", model="m")
+    )
+
+    assert outside.read_text() == '{"keep": true}'
+    assert "tool hooks not installed" in capsys.readouterr().err
+
+
+def test_the_host_written_config_tree_is_re_adopted_after_the_write(tmp_path):
+    """The CLI user must own both the config directory and settings file."""
+    observed: list[list[str]] = []
+
+    def adopt_state() -> None:
+        observed.append(sorted(path.name for path in (tmp_path / "claude").iterdir()))
+
+    context = replace(_context(tmp_path), adopt_state=adopt_state)
+    ClaudeCodeDriver(_ClaudeStub()).launch(context).start_turn(TurnInput(prompt="go", model="m"))
+
+    assert observed == [["settings.json"]]
+
+
 def test_docker_owned_state_uses_the_retained_hook_writer(tmp_path):
     """A guest path must not be mistaken for a path on the broker host."""
     updates: list[dict] = []
@@ -292,6 +337,20 @@ def test_docker_owned_state_uses_the_retained_hook_writer(tmp_path):
     assert len(updates) == 1
     assert set(updates[0]["hooks"]) == {"PreToolUse", "PostToolUse"}
     assert not host_path.exists()
+
+
+def test_the_retained_hook_writer_does_not_re_adopt_host_state(tmp_path):
+    """Docker-owned state is already written as the sandbox uid."""
+    adopted: list[None] = []
+    context = replace(
+        _context(tmp_path / "not-the-retained-state"),
+        install_tool_hooks=lambda _update: None,
+        adopt_state=lambda: adopted.append(None),
+    )
+
+    ClaudeCodeDriver(_ClaudeStub()).launch(context).start_turn(TurnInput(prompt="go", model="m"))
+
+    assert adopted == []
 
 
 def test_a_turn_without_a_state_mount_installs_nothing(tmp_path):

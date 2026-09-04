@@ -1640,6 +1640,12 @@ def _run_agent(
     _select_runtime_version(base_env, job=job, backend=backend)
 
     driver = driver_for(runtime)
+
+    def adopt_state() -> None:
+        """Re-adopt only the runner-owned mount root, never a driver child."""
+        assert state_dir is not None
+        backend.adopt_workdir(state_dir)
+
     context = LaunchContext(
         workdir=workdir,
         gateway_base_url=gateway_base_url,
@@ -1672,6 +1678,7 @@ def _run_agent(
         mcp_config=mcp_config,
         state_dir=state_dir,
         install_tool_hooks=getattr(backend, "install_tool_hooks", None),
+        adopt_state=adopt_state if state_dir is not None else None,
     )
     session = None
     turn = None

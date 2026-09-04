@@ -476,6 +476,64 @@ def test_retained_hooks_are_installed_before_the_guest_process_fence(tmp_path):
     assert control.resources[0]["process_observation_complete"] is True
 
 
+def test_host_written_hooks_re_adopt_the_trusted_state_root(tmp_path):
+    """The post-write hand-over must never recurse from an agent-owned child."""
+    state_dir = tmp_path / "job.state"
+    state_dir.mkdir()
+    adopted: list[tuple[str, list[str]]] = []
+
+    class Process:
+        @staticmethod
+        def lines():
+            return iter([_result_line()])
+
+        @staticmethod
+        def kill():
+            return None
+
+        @staticmethod
+        def wait():
+            return 0
+
+        @staticmethod
+        def stderr_text():
+            return ""
+
+    class Backend:
+        provides_isolation = True
+
+        @staticmethod
+        def base_env():
+            return {"PATH": "/usr/bin"}
+
+        @staticmethod
+        def adopt_workdir(path):
+            adopted.append((path, sorted(entry.name for entry in Path(path).iterdir())))
+
+        @staticmethod
+        def spawn(_spec):
+            return Process()
+
+    code, _tail, _errors = run_agent(
+        ClaudeCodeRuntime(),
+        job=ClaimedJob(**{**_JOB.__dict__, "runtime": "claude-code"}),
+        workdir=str(tmp_path),
+        gateway_base_url="http://gw",
+        control=FakeControl(),
+        heart=FakeHeart(),
+        timeout_s=30,
+        backend=Backend(),
+        state_dir=str(state_dir),
+        export_checkpoint=False,
+    )
+
+    assert code == 0
+    assert adopted == [
+        (str(state_dir), []),
+        (str(state_dir), ["claude"]),
+    ]
+
+
 def test_merging_more_process_rows_than_the_wire_cap_is_never_complete(tmp_path):
     def observed_process(sequence: int) -> GuestProcess:
         return GuestProcess(

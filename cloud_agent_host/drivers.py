@@ -29,7 +29,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import pathlib
+import stat
 import sys
 import tarfile
 import time
@@ -221,6 +223,10 @@ class LaunchContext:
     #: path. They provide this trusted writer so Claude's passive hooks are
     #: installed in the filesystem the CLI will actually read.
     install_tool_hooks: Callable[[dict[str, Any]], None] | None = None
+    #: Re-hand the trusted state root to the sandbox user after a driver writes
+    #: into it as the runner. This deliberately carries no path argument: a
+    #: child below the mount is agent-controlled and may have become a symlink.
+    adopt_state: Callable[[], None] | None = None
 
 
 class HarnessTurn:
@@ -1339,6 +1345,48 @@ CLAUDE_STATE_CONFIG_DIR = f"{STATE_MOUNT_TARGET}/claude"
 CLAUDE_TOOL_MARKS = f"{STATE_MOUNT_TARGET}/{TOOL_MARK_FILE}"
 
 
+def _read_json_object_at(directory_fd: int, name: str) -> dict[str, Any]:
+    """Read one regular JSON file without following an agent-owned symlink."""
+    try:
+        file_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        return {}
+    with os.fdopen(file_fd, encoding="utf-8") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise DriverError(f"refusing non-regular Claude settings file: {name!r}")
+        with contextlib.suppress(Exception):
+            loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                return loaded
+    return {}
+
+
+def _replace_json_at(directory_fd: int, name: str, value: dict[str, Any]) -> None:
+    """Atomically replace one file below an already verified directory fd."""
+    temporary = f".{name}.runner-{os.getpid()}-{time.time_ns()}"
+    file_fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o660,
+        dir_fd=directory_fd,
+    )
+    try:
+        with os.fdopen(file_fd, "w", encoding="utf-8") as handle:
+            file_fd = -1
+            handle.write(json.dumps(value, indent=2))
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    except Exception:
+        if file_fd >= 0:
+            os.close(file_fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=directory_fd)
+        raise
+
+
 class ClaudeCodeSession(HarnessSession):
     """A claude-code session: persistable, restorable, still one turn (COLD)."""
 
@@ -1368,15 +1416,25 @@ class ClaudeCodeSession(HarnessSession):
             if self._context.install_tool_hooks is not None:
                 self._context.install_tool_hooks(settings_update)
                 return
-            config = pathlib.Path(self._context.state_dir) / "claude"
-            config.mkdir(parents=True, exist_ok=True)
-            settings_path = config / "settings.json"
-            settings: dict[str, Any] = {}
-            if settings_path.exists():
-                with contextlib.suppress(Exception):
-                    settings = json.loads(settings_path.read_text()) or {}
-            settings.update(settings_update)
-            settings_path.write_text(json.dumps(settings, indent=2))
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            state_fd = os.open(self._context.state_dir, directory_flags)
+            try:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir("claude", mode=0o770, dir_fd=state_fd)
+                config_fd = os.open("claude", directory_flags, dir_fd=state_fd)
+                try:
+                    settings = _read_json_object_at(config_fd, "settings.json")
+                    settings.update(settings_update)
+                    _replace_json_at(config_fd, "settings.json", settings)
+                finally:
+                    os.close(config_fd)
+            finally:
+                os.close(state_fd)
+            # The host fallback runs as root in Compose, after the initial state
+            # hand-over. Re-adopt from the trusted mount root rather than from
+            # the agent-controlled `claude` child that was just opened above.
+            if self._context.adopt_state is not None:
+                self._context.adopt_state()
         except Exception as exc:  # pragma: no cover - defence, not behaviour
             print(f"tool hooks not installed: {exc}", file=sys.stderr)
 
