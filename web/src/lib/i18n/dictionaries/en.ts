@@ -22,7 +22,8 @@ export const en = {
   'nav.collapseTaskList': 'Collapse task list',
 
   'shell.internalRequired.title': 'Administrator access required',
-  'shell.internalRequired.body': "The agent sandbox runs code under this deployment's own credentials, so it is limited to administrators.",
+  'shell.internalRequired.body':
+    "The agent sandbox runs code under this deployment's own credentials, so it is limited to administrators.",
   'shell.internalRequired.back': 'Back to Dashboard',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────

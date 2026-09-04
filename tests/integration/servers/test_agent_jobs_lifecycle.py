@@ -73,7 +73,7 @@ class _FakeGateway:
         # Read by `require_agent_owner` on every write. A fake missing it fails
         # the whole mutating surface with an AttributeError rather than a
         # refusal — which is how it was found.
-        return {"exists": True, "active": True, "role": "internal"}
+        return {"exists": True, "active": True, "role": "admin"}
 
     # No `mcp_registry` here any more. A fake that answers a question the real
     # client cannot ask is a test passing against an interface nothing has —
@@ -149,14 +149,14 @@ async def api(monkeypatch):
     # so FastAPI could not intercept it, and the real one answered with an
     # anonymous *admin* context because user auth was disabled in that test
     # environment. Overriding the credential resolver is the override the
-    # source meant; ``internal`` is the least privilege the router's own
-    # dogfood gate accepts, so the lifecycle stays the subject of the test.
+    # source meant; ``admin`` is the least privilege the router's own gate
+    # accepts, so the lifecycle stays the subject of the test.
     # (``verify_api_key`` no longer exists here — the API-key branch was deleted
     # on 2026-08-04 — so this paragraph is about the source, not about a
     # dependency a reader will find.)
     app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
-        "role": "internal",
+        "role": "admin",
         "authenticated": True,
     }
     # /worker/claim is machine-to-machine; stand in for the dispatcher credential.
