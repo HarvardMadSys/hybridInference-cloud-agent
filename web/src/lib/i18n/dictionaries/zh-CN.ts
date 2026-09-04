@@ -23,8 +23,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'nav.expandTaskList': '展开任务列表',
   'nav.collapseTaskList': '收起任务列表',
 
-  'shell.internalRequired.title': '需要内部权限',
-  'shell.internalRequired.body': 'Agent 沙箱目前仅限内部试用(issue #1041)。',
+  'shell.internalRequired.title': '需要管理员权限',
+  'shell.internalRequired.body': 'Agent 沙箱会用本部署自己的凭据运行代码,因此仅限管理员使用。',
   'shell.internalRequired.back': '返回控制台',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────

@@ -290,12 +290,23 @@ async def authenticate_agent_owner(
     return await get_current_user(request=request, authorization=authorization)
 
 
+#: The gateway role this surface demands. Named once because the check runs
+#: twice — on the presented session and again on the role the gateway returns
+#: when a write revalidates — and two literals drift. Raised from ``internal``
+#: to ``admin`` on 2026-09-04: ``internal`` is handed out to people who ask for
+#: model access, which is a different question from who may run code in this
+#: deployment's sandboxes against its GitHub App.
+AGENT_REQUIRED_ROLE = "admin"
+
+_AGENT_ROLE_DENIED = f"Agent access requires role {AGENT_REQUIRED_ROLE!r}."
+
+
 async def require_agent_owner(
     request: Request,
     user: dict[str, Any] = Depends(authenticate_agent_owner),
     gateway=Depends(get_gateway_client),
 ) -> dict[str, Any]:
-    """Keep the P0 Agent surface restricted to internal/admin dogfood users.
+    """Keep the Agent surface restricted to this deployment's administrators.
 
     **Writes revalidate against the gateway; reads do not.** The session is a
     cache of an authorization decision the gateway made at sign-in, and a cache
@@ -334,8 +345,8 @@ async def require_agent_owner(
     """
     from cloud_agent.api.deps import SAFE_METHODS, has_role, may_sign_in
 
-    if not has_role(user.get("role", "free"), "internal"):
-        raise HTTPException(status_code=403, detail="Agent access requires role 'internal'.")
+    if not has_role(user.get("role", "free"), AGENT_REQUIRED_ROLE):
+        raise HTTPException(status_code=403, detail=_AGENT_ROLE_DENIED)
 
     if request.method.upper() in SAFE_METHODS:
         return user
@@ -362,8 +373,8 @@ async def require_agent_owner(
         raise HTTPException(status_code=403, detail="This account cannot sign in.")
 
     role = str(status.get("role") or "free")
-    if not has_role(role, "internal"):
-        raise HTTPException(status_code=403, detail="Agent access requires role 'internal'.")
+    if not has_role(role, AGENT_REQUIRED_ROLE):
+        raise HTTPException(status_code=403, detail=_AGENT_ROLE_DENIED)
 
     return {**user, "role": role, "is_admin": role == "admin"}
 

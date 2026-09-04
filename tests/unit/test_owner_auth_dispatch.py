@@ -70,7 +70,7 @@ async def test_the_session_cookie_authenticates_the_owner(client: AsyncClient) -
     """The one owner credential this service has."""
     client.cookies.set(
         identity.SESSION_COOKIE,
-        identity.mint_session(user_id=_USER, email="owner@example.com", role="internal"),
+        identity.mint_session(user_id=_USER, email="owner@example.com", role="admin"),
     )
 
     response = await client.get("/owner")
@@ -81,7 +81,7 @@ async def test_the_session_cookie_authenticates_the_owner(client: AsyncClient) -
 
 async def test_a_session_bearer_authenticates_the_owner(client: AsyncClient) -> None:
     """Same credential, carried the way a programmatic caller carries it."""
-    token = identity.mint_session(user_id=_USER, email=None, role="internal")
+    token = identity.mint_session(user_id=_USER, email=None, role="admin")
 
     response = await client.get("/owner", headers={"Authorization": f"Bearer {token}"})
 
@@ -134,7 +134,7 @@ async def test_the_cookie_wins_when_a_worker_bearer_rides_along(client: AsyncCli
     """
     client.cookies.set(
         identity.SESSION_COOKIE,
-        identity.mint_session(user_id=_USER, email=None, role="internal"),
+        identity.mint_session(user_id=_USER, email=None, role="admin"),
     )
 
     response = await client.get("/owner", headers={"Authorization": f"Bearer {_worker_token()}"})

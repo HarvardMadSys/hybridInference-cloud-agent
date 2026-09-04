@@ -160,9 +160,10 @@ function AgentsShell({
   const { branding } = useSiteConfig();
   const t = useT();
 
-  // Internal-only while the sandbox is dogfood (P0) — same gate as the
-  // playground; opens up behind a site-config feature flag in P1.
-  if (!hasRole(state.user?.role, 'internal')) {
+  // Admin-only: the same bar `require_agent_owner` enforces server-side. The
+  // two must agree — a UI that lets someone in only to 403 every request they
+  // make is worse than a clear refusal. Raised from 'internal' on 2026-09-04.
+  if (!hasRole(state.user?.role, 'admin')) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">

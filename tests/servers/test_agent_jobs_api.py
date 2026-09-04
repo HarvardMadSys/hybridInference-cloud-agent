@@ -1064,7 +1064,7 @@ class _FakeGateway:
     #: on every write, so a fake without it sends every mutating route down an
     #: ``AttributeError`` — the same trap ``model_catalog_with_aliases``
     #: documents below. Overridden per-test to exercise a refusal.
-    status: ClassVar[dict[str, Any]] = {"exists": True, "active": True, "role": "internal"}
+    status: ClassVar[dict[str, Any]] = {"exists": True, "active": True, "role": "admin"}
 
     async def user_status(self, user_id: str) -> dict[str, Any]:
         return dict(self.status)
@@ -1120,7 +1120,7 @@ class _FakeGrants:
         return True
 
 
-def _build_app(store, *, role: str = "internal", dispatcher: bool = True):
+def _build_app(store, *, role: str = "admin", dispatcher: bool = True):
     """Build an app with the router mounted and auth stubbed to one identity.
 
     ``dispatcher`` controls whether the machine-to-machine gate on
@@ -1151,7 +1151,7 @@ def _build_app(store, *, role: str = "internal", dispatcher: bool = True):
     app.dependency_overrides[get_log_store] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
     # Override the credential resolver, not the role gate, so the normal test
-    # client still exercises the internal-only dogfood entitlement.
+    # client still exercises the admin-only entitlement.
     app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: identity
     if dispatcher:
         app.dependency_overrides[agent_jobs_router.verify_dispatcher_access] = lambda: (
@@ -1172,7 +1172,7 @@ def _browser_session(*, expires_delta=None) -> str:
 
     from cloud_agent.identity import mint_session
 
-    token = mint_session(user_id=_OWNER, email="owner@example.com", role="internal")
+    token = mint_session(user_id=_OWNER, email="owner@example.com", role="admin")
     if expires_delta is None:
         return token
     import os
@@ -2208,16 +2208,21 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeAgentJobStore)
     assert response.json()["detail"]["error"]["type"] == "insufficient_scope"
 
 
-@pytest.mark.parametrize("role", ["free", "pro"])
-async def test_non_internal_owner_is_denied_server_side(store: FakeAgentJobStore, role: str):
-    """The client-side dogfood gate must not be bypassable via the API."""
+@pytest.mark.parametrize("role", ["free", "pro", "internal"])
+async def test_a_non_admin_owner_is_denied_server_side(store: FakeAgentJobStore, role: str):
+    """The gate must not be bypassable via the API.
+
+    ``internal`` is in the list on purpose. It used to be the bar, and it is
+    handed out for model access — a different question from who may run code
+    in this deployment's sandboxes under its GitHub App.
+    """
     app = _build_app(store, role=role)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as denied_client:
         response = await denied_client.get("/v1/agent/jobs")
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Agent access requires role 'internal'."
+    assert response.json()["detail"] == "Agent access requires role 'admin'."
 
 
 async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: FakeAgentJobStore):
