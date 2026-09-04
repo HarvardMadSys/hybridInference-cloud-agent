@@ -3381,6 +3381,50 @@ async def test_a_resource_rollup_upserts_rather_than_accumulating(store: AgentJo
     assert telemetry["net_rx_bytes"] == 4_096
 
 
+async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
+    """The owner UI can pair each attempt's events with the same window."""
+    job = await _create_job(store)
+    first = await store.claim_job(worker_id="w1", lease_ttl_seconds=60)
+    assert first is not None
+    assert await store.record_attempt_resources(
+        attempt_id=first["attempt_id"],
+        lease_generation=first["lease_generation"],
+        rollup={
+            "cpu_usec": 1_000,
+            "sample_count": 2,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [_tool_call(1, "Read")],
+        },
+    )
+    await _expire_attempt(store, first["attempt_id"])
+    await store.reap_expired(max_attempts=3)
+
+    second = await store.claim_job(worker_id="w2", lease_ttl_seconds=60)
+    assert second is not None
+    assert await store.record_attempt_resources(
+        attempt_id=second["attempt_id"],
+        lease_generation=second["lease_generation"],
+        rollup={
+            "cpu_usec": 7_000,
+            "sample_count": 4,
+            "coverage": 1.0,
+            "sampler_version": "2",
+            "tool_calls": [_tool_call(1, "Bash")],
+        },
+    )
+
+    attempts = await store.job_attempts_telemetry(job_id=job["id"])
+
+    assert [attempt["attempt_id"] for attempt in attempts] == [
+        first["attempt_id"],
+        second["attempt_id"],
+    ]
+    assert [attempt["attempt_no"] for attempt in attempts] == [1, 2]
+    assert [attempt["cpu_usec"] for attempt in attempts] == [1_000, 7_000]
+    assert [attempt["tool_calls"][0]["tool_name"] for attempt in attempts] == ["Read", "Bash"]
+
+
 async def test_a_superseded_attempt_cannot_overwrite_the_live_one_s_numbers(
     store: AgentJobStore,
 ):

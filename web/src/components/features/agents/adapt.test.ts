@@ -221,6 +221,61 @@ describe('toDisplayJob', () => {
     expect(job.currentAttemptNo).toBe(2);
   });
 
+  it('pairs telemetry with attempts by server identity', () => {
+    const events = [
+      event(1, 'attempt_superseded', { reason: 'lease_expired' }, 10),
+      event(2, 'message', {}, 11),
+    ];
+    const resources = {
+      cpu_usec: 1_000_000,
+      mem_peak_bytes: null,
+      mem_avg_bytes: null,
+      io_read_bytes: null,
+      io_write_bytes: null,
+      net_rx_bytes: null,
+      net_tx_bytes: null,
+      sample_count: 2,
+      coverage: 1,
+      sampler_version: '2',
+    };
+    const job = toDisplayJob(
+      {
+        ...JOB,
+        current_attempt_id: 11,
+        attempt_telemetry: [
+          {
+            attempt_id: 10,
+            attempt_no: 1,
+            continuity_mode: 'replay',
+            context_status: 'lost',
+            duration_ms: 3_000,
+            resources,
+          },
+          {
+            attempt_id: 11,
+            attempt_no: 2,
+            continuity_mode: 'warm_native',
+            context_status: 'restored',
+            duration_ms: 9_000,
+            resources: { ...resources, cpu_usec: 7_000_000 },
+          },
+        ],
+      },
+      { events },
+    );
+
+    expect(job.attempts[0].telemetry).toMatchObject({
+      contextStatus: 'lost',
+      durationMs: 3_000,
+      resources: { cpuUsec: 1_000_000 },
+    });
+    expect(job.attempts[1].telemetry).toMatchObject({
+      contextStatus: 'restored',
+      durationMs: 9_000,
+      resources: { cpuUsec: 7_000_000 },
+    });
+  });
+
   it('counts every stored event and retains unmatched tool results', () => {
     const events = [event(1, 'message'), event(2, 'tool_result', { content: 'done' })];
     const job = toDisplayJob(JOB, { events });

@@ -83,6 +83,7 @@ from cloud_agent.schemas import (
     EVENT_TYPE_PATTERN,
     PLATFORM_REASONING_EFFORTS,
     RESET_REASONING_EFFORT,
+    AgentAttemptTelemetry,
     AgentConfigResponse,
     AgentFollowUpRequest,
     AgentGitWorkspaceResponse,
@@ -475,10 +476,23 @@ def _attempt_resources(telemetry: dict[str, Any] | None) -> AttemptResources | N
     )
 
 
+def _attempt_telemetry_response(telemetry: dict[str, Any]) -> AgentAttemptTelemetry:
+    """Shape one attempt without losing its identity at the API boundary."""
+    return AgentAttemptTelemetry(
+        attempt_id=telemetry["attempt_id"],
+        attempt_no=telemetry["attempt_no"],
+        continuity_mode=telemetry.get("continuity_mode"),
+        context_status=telemetry.get("context_status"),
+        duration_ms=_attempt_duration_ms(telemetry),
+        resources=_attempt_resources(telemetry),
+    )
+
+
 def _job_response(
     job: dict[str, Any],
     usage: dict[str, Any] | None = None,
     telemetry: dict[str, Any] | None = None,
+    attempt_telemetry: list[dict[str, Any]] | None = None,
 ) -> AgentJobResponse:
     """Shape a store job row for the owner-facing API."""
     usage = usage or {}
@@ -545,6 +559,9 @@ def _job_response(
         workspace_epoch=sandbox.get("workspace_epoch"),
         duration_ms=_attempt_duration_ms(telemetry),
         resources=_attempt_resources(telemetry),
+        attempt_telemetry=[
+            _attempt_telemetry_response(attempt) for attempt in (attempt_telemetry or [])
+        ],
     )
 
 
@@ -1567,10 +1584,12 @@ async def get_agent_job(
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
     job_store = _require_store(store)
     job = await _owned_job(job_store, job_id, user)
+    attempt_telemetry = await job_store.job_attempts_telemetry(job_id=job_id)
     return _job_response(
         job,
         await _job_usage(log_store, job_id),
-        await job_store.job_turn_telemetry(job_id=job_id),
+        attempt_telemetry[-1] if attempt_telemetry else None,
+        attempt_telemetry,
     )
 
 

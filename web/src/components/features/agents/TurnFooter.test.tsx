@@ -143,6 +143,49 @@ describe('toolTimings', () => {
 });
 
 describe('TurnFooter', () => {
+  it('uses the selected attempt telemetry instead of the newest retry', () => {
+    const first = { ...RESOURCES, cpuUsec: 1_000_000 };
+    const second = { ...RESOURCES, cpuUsec: 7_000_000 };
+    render(
+      <TurnFooter
+        attemptNo={1}
+        job={job({
+          continuityMode: 'warm_native',
+          durationMs: 9_000,
+          resources: second,
+          attempts: [
+            {
+              no: 1,
+              status: 'superseded',
+              telemetry: {
+                continuityMode: 'replay',
+                contextStatus: 'lost',
+                durationMs: 3_000,
+                resources: first,
+              },
+            },
+            {
+              no: 2,
+              status: 'finished',
+              telemetry: {
+                continuityMode: 'warm_native',
+                contextStatus: 'restored',
+                durationMs: 9_000,
+                resources: second,
+              },
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'context lost' })).toBeInTheDocument();
+    expect(screen.getByText('3s')).toBeInTheDocument();
+    expect(screen.getByText('1s')).toBeInTheDocument();
+    expect(screen.queryByText('9s')).toBeNull();
+    expect(screen.queryByText('7s')).toBeNull();
+  });
+
   it('shows the continuity rung and what the turn consumed', () => {
     render(
       <TurnFooter job={job({ continuityMode: 'hot', durationMs: 42_000, resources: RESOURCES })} />,

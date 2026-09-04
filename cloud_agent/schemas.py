@@ -261,6 +261,17 @@ class AttemptResources(BaseModel):
     processes: list[ProcessObservation] = Field(default_factory=list)
 
 
+class AgentAttemptTelemetry(BaseModel):
+    """Continuity and resource measurements for one execution attempt."""
+
+    attempt_id: int
+    attempt_no: int
+    continuity_mode: str | None = None
+    context_status: Literal["new", "live", "restored", "lost"] | None = None
+    duration_ms: int | None = None
+    resources: AttemptResources | None = None
+
+
 class AgentJobResponse(BaseModel):
     """One agent job as returned to its owner."""
 
@@ -334,6 +345,9 @@ class AgentJobResponse(BaseModel):
     workspace_epoch: int | None = None
     duration_ms: int | None = None
     resources: AttemptResources | None = None
+    # Complete per-attempt telemetry for the attempt picker. The two fields
+    # above remain the newest attempt for backward-compatible readers.
+    attempt_telemetry: list[AgentAttemptTelemetry] = Field(default_factory=list)
     # The deployment's egress posture for this job's two phases, so the owner
     # can see what the sandbox could reach rather than take it on trust.
     setup_egress_tier: str | None = None

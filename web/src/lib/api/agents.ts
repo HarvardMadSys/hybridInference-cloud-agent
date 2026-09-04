@@ -106,6 +106,15 @@ export interface AttemptResourcesApi {
   processes?: ProcessObservationApi[];
 }
 
+export interface AgentAttemptTelemetryApi {
+  attempt_id: number;
+  attempt_no: number;
+  continuity_mode: 'hot' | 'warm_native' | 'cold_native' | 'replay' | null;
+  context_status: 'new' | 'live' | 'restored' | 'lost' | null;
+  duration_ms: number | null;
+  resources: AttemptResourcesApi | null;
+}
+
 export interface AgentJobApi {
   id: string;
   repo: string;
@@ -166,6 +175,8 @@ export interface AgentJobApi {
    * measurement and must be rendered as incomplete, never as a total.
    */
   resources?: AttemptResourcesApi | null;
+  /** Attempt-scoped measurements used by the retry picker. */
+  attempt_telemetry?: AgentAttemptTelemetryApi[];
   /** Conversation fields are optional so pre-thread deployments remain readable. */
   thread_id?: string | null;
   parent_job_id?: string | null;

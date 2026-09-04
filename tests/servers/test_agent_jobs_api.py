@@ -66,6 +66,7 @@ class FakeAgentJobStore:
         self.archived_threads: dict[str, datetime] = {}
         self.pinned_threads: dict[str, datetime] = {}
         self.turn_telemetry: dict[str, dict[str, Any]] = {}
+        self.attempt_telemetry: dict[str, list[dict[str, Any]]] = {}
         self.attempt_jobs: dict[int, str] = {}
         self.live_fence: tuple[int, int] | None = None
         self.attempt_grants: dict[int, str] = {}
@@ -614,6 +615,17 @@ class FakeAgentJobStore:
     async def job_turn_telemetry(self, *, job_id: str) -> dict[str, Any] | None:
         """How the newest attempt ran. Absent until a runner reports one."""
         return self.turn_telemetry.get(job_id)
+
+    async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
+        """All attempt windows, retaining their identity for the owner UI."""
+        recorded = self.attempt_telemetry.get(job_id)
+        if recorded is not None:
+            return recorded
+        newest = self.turn_telemetry.get(job_id)
+        if newest is None:
+            return []
+        attempt_id = self.jobs[job_id].get("current_attempt_id") or 100
+        return [{"attempt_id": attempt_id, "attempt_no": 1, **newest}]
 
     async def record_attempt_resources(
         self, *, attempt_id: int, lease_generation: int, rollup: dict[str, Any]
@@ -5266,6 +5278,54 @@ async def test_an_unmeasured_turn_reports_nothing_rather_than_zero(
     assert job["resources"] is None
     assert job["continuity_mode"] is None
     assert job["duration_ms"] is None
+
+
+async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Selecting an old transcript must never show the retry's measurements."""
+    job_id = await _create_job(client)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    store.attempt_telemetry = {
+        job_id: [
+            {
+                "attempt_id": 100,
+                "attempt_no": 1,
+                "continuity_mode": "replay",
+                "context_status": "lost",
+                "started_at": started,
+                "finished_at": started + timedelta(seconds=3),
+                "sampler_version": "2",
+                "cpu_usec": 1_000_000,
+                "sample_count": 3,
+                "coverage": 1.0,
+            },
+            {
+                "attempt_id": 101,
+                "attempt_no": 2,
+                "continuity_mode": "warm_native",
+                "context_status": "restored",
+                "started_at": started,
+                "finished_at": started + timedelta(seconds=9),
+                "sampler_version": "2",
+                "cpu_usec": 7_000_000,
+                "sample_count": 9,
+                "coverage": 1.0,
+            },
+        ]
+    }
+
+    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
+
+    first, second = job["attempt_telemetry"]
+    assert (first["attempt_id"], first["attempt_no"]) == (100, 1)
+    assert first["duration_ms"] == 3_000
+    assert first["resources"]["cpu_usec"] == 1_000_000
+    assert second["duration_ms"] == 9_000
+    assert second["resources"]["cpu_usec"] == 7_000_000
+    # Existing clients still receive the newest attempt at the top level.
+    assert job["duration_ms"] == 9_000
+    assert job["resources"]["cpu_usec"] == 7_000_000
 
 
 # ── Reasoning effort ───────────────────────────────────────────────────

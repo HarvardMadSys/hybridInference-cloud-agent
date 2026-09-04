@@ -8,6 +8,7 @@
 import type {
   AgentJobApi,
   AgentJobEventApi,
+  AgentAttemptTelemetryApi,
   AttemptResourcesApi,
   AgentThreadApi,
   AgentThreadEventApi,
@@ -20,6 +21,7 @@ import type {
   AgentDiffFile,
   AgentEvent,
   AgentHistoryTurn,
+  AgentAttempt,
   AgentJob,
   AgentJobState,
   DiffLine,
@@ -535,6 +537,15 @@ function toProcessObservation(api: ProcessObservationApi): ProcessObservation {
   };
 }
 
+function toAttemptTelemetry(api: AgentAttemptTelemetryApi): NonNullable<AgentAttempt['telemetry']> {
+  return {
+    ...(api.continuity_mode ? { continuityMode: api.continuity_mode } : {}),
+    ...(api.context_status ? { contextStatus: api.context_status } : {}),
+    ...(typeof api.duration_ms === 'number' ? { durationMs: api.duration_ms } : {}),
+    ...(api.resources ? { resources: toTurnResources(api.resources) } : {}),
+  };
+}
+
 export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): AgentJob {
   const events = options.events ?? [];
   const patch = options.patch ?? '';
@@ -551,15 +562,35 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       .filter((event) => event.event_type === 'attempt_superseded')
       .map((event) => event.attempt_id),
   );
-  const attempts = attemptIds.map((id, index) => ({
-    no: index + 1,
-    status: supersededIds.has(id)
-      ? ('superseded' as const)
-      : job.state === 'running' || job.state === 'publishing'
-        ? ('live' as const)
-        : ('finished' as const),
-    note: supersededIds.has(id) ? 'lease expired; a new attempt took over' : undefined,
-  }));
+  const telemetryByAttemptId = new Map(
+    (job.attempt_telemetry ?? []).map((attempt) => [attempt.attempt_id, attempt]),
+  );
+  const attempts = attemptIds.map((id, index): AgentAttempt => {
+    const recorded = telemetryByAttemptId.get(id);
+    // A rolling deployment may still return only the legacy newest-attempt
+    // fields. Attach those to the newest chip, never to an older one.
+    let telemetry: AgentAttempt['telemetry'];
+    if (recorded) {
+      telemetry = toAttemptTelemetry(recorded);
+    } else if (index === attemptIds.length - 1) {
+      telemetry = {
+        ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
+        ...(job.context_status ? { contextStatus: job.context_status } : {}),
+        ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
+        ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),
+      };
+    }
+    return {
+      no: index + 1,
+      status: supersededIds.has(id)
+        ? 'superseded'
+        : job.state === 'running' || job.state === 'publishing'
+          ? 'live'
+          : 'finished',
+      note: supersededIds.has(id) ? 'lease expired; a new attempt took over' : undefined,
+      ...(telemetry ? { telemetry } : {}),
+    };
+  });
 
   const egressDenials = renderedEvents.filter((event) => event.kind === 'egress_denied').length;
   const currentTurn =

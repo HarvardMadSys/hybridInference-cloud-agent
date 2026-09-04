@@ -629,19 +629,27 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // sentences badly. The one thing this footer most needs to explain — why a
   // turn forgot — was the least likely to be seen.
   const [explained, setExplained] = useState<Explained>(null);
+  const selectedTelemetry =
+    attemptNo !== undefined && attemptNo > 0
+      ? job.attempts.find((attempt) => attempt.no === attemptNo)?.telemetry
+      : job;
   // Scoped to the attempt the reader is looking at: the body above already
   // switches with the attempt picker, and a footer that did not would label
   // one attempt's transcript with another's numbers.
   const timings = useMemo(() => toolTimings(job.events, attemptNo), [job.events, attemptNo]);
-  const contextBadge = job.contextStatus ? CONTEXT_LABEL[job.contextStatus] : undefined;
+  const contextBadge = selectedTelemetry?.contextStatus
+    ? CONTEXT_LABEL[selectedTelemetry.contextStatus]
+    : undefined;
   // NEW/LIVE/RESTORED/LOST is the user-facing correctness contract. The old
   // HOT/WARM/COLD/REPLAY ladder remains useful for legacy attempts and admin
   // diagnostics, but showing both on one turn made one fact look like two
   // independent states. Fall back to it only for rows that predate context.
   const badge =
-    !contextBadge && job.continuityMode ? CONTINUITY_LABEL[job.continuityMode] : undefined;
-  const duration = formatDuration(job.durationMs);
-  const resources = job.resources;
+    !contextBadge && selectedTelemetry?.continuityMode
+      ? CONTINUITY_LABEL[selectedTelemetry.continuityMode]
+      : undefined;
+  const duration = formatDuration(selectedTelemetry?.durationMs);
+  const resources = selectedTelemetry?.resources;
   const stats = resources ? resourceStats(resources) : [];
   const processes = resources?.processes ?? [];
   const hasProcessObservation = Boolean(resources?.processObserver);
@@ -764,7 +772,7 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
           {timings.length > 0 ? (
             <>
               <TimeSplit
-                durationMs={job.durationMs ?? null}
+                durationMs={selectedTelemetry?.durationMs ?? null}
                 toolTimeMs={resources?.toolTimeMs ?? null}
               />
               <ToolTimingTable

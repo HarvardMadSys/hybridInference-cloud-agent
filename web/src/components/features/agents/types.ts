@@ -12,6 +12,13 @@ export interface AgentAttempt {
   status: 'live' | 'superseded' | 'finished';
   /** Shown in the audit banner when a lease takeover superseded the attempt. */
   note?: string;
+  /** Metrics from this attempt only; absent on servers predating this contract. */
+  telemetry?: {
+    continuityMode?: 'hot' | 'warm_native' | 'cold_native' | 'replay';
+    contextStatus?: 'new' | 'live' | 'restored' | 'lost';
+    durationMs?: number;
+    resources?: TurnResources;
+  };
 }
 
 export type AgentEvent =
@@ -257,9 +264,9 @@ export interface AgentJob {
     | 'published'
     | 'failed';
   workspaceEpoch?: number;
-  /** Wall time of the turn's newest attempt. */
+  /** Wall time of the turn's newest attempt (legacy/default view). */
   durationMs?: number;
-  /** Host-measured consumption. Absent when nothing measured this turn. */
+  /** Host-measured consumption for the newest attempt (legacy/default view). */
   resources?: TurnResources;
   egressDenials: number;
   /** e.g. "draft PR #1044" once published. */
