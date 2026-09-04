@@ -131,6 +131,7 @@ class ClaudeCli:
         config_dir: pathlib.Path,
         gateway_port: int,
         credential: str | None,
+        model: str = "fake-model",
         resume_session_id: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> None:
@@ -151,7 +152,7 @@ class ClaudeCli:
             "stream-json",
             "--verbose",
             "--model",
-            "fake-model",
+            model,
             "--strict-mcp-config",
             "--permission-mode",
             "bypassPermissions",

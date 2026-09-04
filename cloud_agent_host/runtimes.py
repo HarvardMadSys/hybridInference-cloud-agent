@@ -360,6 +360,13 @@ class ClaudeCodeRuntime(AgentRuntime):
             MCP_TOKEN_ENV: mcp_config.credential,
             "ANTHROPIC_MODEL": model,
             "ANTHROPIC_SMALL_FAST_MODEL": model,
+            # Claude otherwise lets Explore/Task choose an opus/sonnet/haiku
+            # default of its own.  A one-model inference grant cannot serve
+            # that silent switch, and family aliases are not enough: the CLI
+            # rejects cross-family mappings before they reach the gateway.
+            # Its explicit `inherit` mode reuses the main conversation's
+            # already-resolved model string exactly.
+            "CLAUDE_CODE_SUBAGENT_MODEL": "inherit",
             # Telemetry and auto-update are refused explicitly rather than left
             # to the egress allowlist: defence in depth, and it keeps the
             # allowlist free of vendor endpoints.

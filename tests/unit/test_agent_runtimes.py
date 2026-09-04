@@ -798,6 +798,19 @@ def test_auto_adds_no_flag():
     assert "--effort" not in argv
 
 
+def test_claude_code_subagents_inherit_the_exact_granted_model():
+    """Explore/Task must not silently switch to an ungranted family default.
+
+    Claude Code's opus/sonnet/haiku aliases are not sufficient here: a
+    gateway model can be outside those families, and the CLI rejects a
+    cross-family alias before it reaches the wire.  ``inherit`` is the CLI's
+    explicit instruction to reuse the main conversation's resolved model.
+    """
+    _argv, env = _prepare(ClaudeCodeRuntime())
+
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "inherit"
+
+
 def test_claude_code_offers_xhigh():
     """Captured from 2.1.220. The first declaration read --help and missed it."""
     argv, _env = _prepare(ClaudeCodeRuntime(), reasoning_effort="xhigh")
