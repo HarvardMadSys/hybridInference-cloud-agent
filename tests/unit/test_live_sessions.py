@@ -130,6 +130,21 @@ def test_two_turns_ride_one_process(tmp_path):
     assert not process.killed  # settling a turn never costs the residency
 
 
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "claude-sonnet-private-deployment"])
+def test_live_spawn_binds_subagents_after_the_empty_model_template(tmp_path, model):
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+    assert spawned == []
+
+    session.ensure_started(model=model, reasoning_effort=None)
+
+    ((argv, env),) = spawned
+    assert argv[argv.index("--model") + 1] == model
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == model
+    session.close()
+
+
 def test_a_model_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
     process = _LiveProcess()
     session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])

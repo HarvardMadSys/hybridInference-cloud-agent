@@ -11,6 +11,7 @@ after a Claude Code version bump.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -26,7 +27,6 @@ from tests.support.claude_cli import ClaudeCli, sse
 pytestmark = pytest.mark.external
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_GRANTED_MODEL = "claude-sonnet-private-deployment"
 
 
 def _pinned_cli_version() -> str:
@@ -36,7 +36,7 @@ def _pinned_cli_version() -> str:
     return match.group(1)
 
 
-def _message_start(message_id: str) -> bytes:
+def _message_start(message_id: str, model: str) -> bytes:
     return sse(
         "message_start",
         {
@@ -46,7 +46,7 @@ def _message_start(message_id: str) -> bytes:
                 "type": "message",
                 "role": "assistant",
                 "content": [],
-                "model": _GRANTED_MODEL,
+                "model": model,
                 "stop_reason": None,
                 "stop_sequence": None,
                 "usage": {"input_tokens": 1, "output_tokens": 1},
@@ -55,10 +55,10 @@ def _message_start(message_id: str) -> bytes:
     )
 
 
-def _answer(message_id: str, text: str) -> bytes:
+def _answer(message_id: str, text: str, model: str) -> bytes:
     return b"".join(
         [
-            _message_start(message_id),
+            _message_start(message_id, model),
             sse(
                 "content_block_start",
                 {
@@ -89,10 +89,10 @@ def _answer(message_id: str, text: str) -> bytes:
     )
 
 
-def _delegate() -> bytes:
+def _delegate(model: str, tool_model: str | None) -> bytes:
     return b"".join(
         [
-            _message_start("msg_parent_delegate"),
+            _message_start("msg_parent_delegate", model),
             sse(
                 "content_block_start",
                 {
@@ -118,6 +118,8 @@ def _delegate() -> bytes:
                                 "description": "Inspect the workspace",
                                 "prompt": "Reply with the word inspected.",
                                 "subagent_type": "Explore",
+                                "run_in_background": False,
+                                **({"model": tool_model} if tool_model else {}),
                             }
                         ),
                     },
@@ -140,7 +142,7 @@ def _delegate() -> bytes:
 class _SubagentGateway:
     """Delegate once, settle the child, then settle the parent."""
 
-    def __init__(self) -> None:
+    def __init__(self, model: str, tool_model: str | None = None) -> None:
         self.requests: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         recorder = self
@@ -156,11 +158,25 @@ class _SubagentGateway:
                     recorder.requests.append(request)
                     request_no = len(recorder.requests)
                     if request_no == 1:
-                        response = _delegate()
+                        response = _delegate(model, tool_model)
                     elif request_no == 2:
-                        response = _answer("msg_child", "inspected")
+                        response = _answer("msg_child", "inspected", model)
                     else:
-                        response = _answer("msg_parent_done", "done")
+                        response = _answer("msg_parent_done", "done", model)
+                # Enforce the same one-model boundary as an inference grant.
+                if request.get("model") != model:
+                    response = json.dumps(
+                        {
+                            "type": "error",
+                            "error": {"type": "permission_error", "message": "model not granted"},
+                        }
+                    ).encode()
+                    self.send_response(403)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(response)))
@@ -181,8 +197,24 @@ def _needs_npx():
         pytest.skip("npx is required to run the pinned CLI")
 
 
-def test_subagent_inherits_the_exact_parent_model(tmp_path):
-    gateway = _SubagentGateway()
+@pytest.mark.parametrize(
+    "model", ["deepseek-v4-flash", "glm-5.1", "claude-sonnet-private-deployment"]
+)
+@pytest.mark.parametrize("setting", ["unset", "inherit", "runtime"])
+def test_subagent_model_against_a_one_model_grant(tmp_path, monkeypatch, model, setting):
+    """The non-Claude controls must reproduce a rejected delegated request."""
+    _run_delegation(tmp_path, monkeypatch, model, setting)
+
+
+def test_concrete_override_also_beats_the_agent_tool_model(tmp_path, monkeypatch):
+    _run_delegation(tmp_path, monkeypatch, "deepseek-v4-flash", "runtime", tool_model="opus")
+
+
+def _run_delegation(tmp_path, monkeypatch, model, setting, tool_model=None):
+    for key in tuple(os.environ):
+        if key.startswith("ANTHROPIC_DEFAULT_") or key == "CLAUDE_CODE_SUBAGENT_MODEL":
+            monkeypatch.delenv(key)
+    gateway = _SubagentGateway(model, tool_model)
     workdir = tmp_path / "work"
     config = tmp_path / "config"
     workdir.mkdir()
@@ -190,17 +222,21 @@ def test_subagent_inherits_the_exact_parent_model(tmp_path):
     _argv, runtime_env = ClaudeCodeRuntime().prepare(
         workdir=str(workdir),
         task_prompt="delegate once",
-        model=_GRANTED_MODEL,
+        model=model,
         gateway_base_url=f"http://127.0.0.1:{gateway.port}",
         credential="one-model-grant",
     )
+    if setting == "unset":
+        runtime_env.pop("CLAUDE_CODE_SUBAGENT_MODEL", None)
+    elif setting == "inherit":
+        runtime_env["CLAUDE_CODE_SUBAGENT_MODEL"] = "inherit"
     cli = ClaudeCli(
         version=_pinned_cli_version(),
         workdir=workdir,
         config_dir=config,
         gateway_port=gateway.port,
         credential="one-model-grant",
-        model=_GRANTED_MODEL,
+        model=model,
         extra_env=runtime_env,
     )
     try:
@@ -211,4 +247,21 @@ def test_subagent_inherits_the_exact_parent_model(tmp_path):
 
     assert result is not None
     assert len(gateway.requests) >= 3, "Claude Code did not launch and rejoin the subagent"
-    assert {request["model"] for request in gateway.requests} == {_GRANTED_MODEL}
+    request_models = {request["model"] for request in gateway.requests}
+    returned = [
+        block
+        for request in gateway.requests[2:]
+        for message in request.get("messages", [])
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if block.get("type") == "tool_result" and block.get("tool_use_id") == "toolu_delegate"
+    ]
+    assert returned, "the parent never received the delegated result"
+    if setting == "runtime" or model.startswith("claude-"):
+        assert request_models == {model}
+        assert "inspected" in json.dumps(returned)
+        assert not result.get("is_error")
+    else:
+        assert request_models - {model}, "the baseline did not reproduce an ungranted model"
+        assert "model not granted" in json.dumps(returned)
+        assert "inspected" not in json.dumps(returned)
