@@ -323,6 +323,27 @@ def test_the_host_written_config_tree_is_re_adopted_after_the_write(tmp_path):
     assert observed == [["settings.json"]]
 
 
+@pytest.mark.parametrize("writer_step", ["_read_json_object_at", "_replace_json_at"])
+def test_failed_hook_install_still_hands_back_the_created_directory(
+    tmp_path, monkeypatch, capsys, writer_step
+):
+    """A passive hook failure must not leave the CLI with an unwritable config."""
+    adopted = []
+
+    def fail(*_args):
+        raise OSError("settings I/O failed")
+
+    monkeypatch.setattr(f"cloud_agent_host.drivers.{writer_step}", fail)
+    context = replace(
+        _context(tmp_path),
+        adopt_state=lambda: adopted.append((tmp_path / "claude").is_dir()),
+    )
+    ClaudeCodeDriver(_ClaudeStub()).launch(context).start_turn(TurnInput(prompt="go", model="m"))
+
+    assert adopted == [True]
+    assert "settings I/O failed" in capsys.readouterr().err
+
+
 def test_docker_owned_state_uses_the_retained_hook_writer(tmp_path):
     """A guest path must not be mistaken for a path on the broker host."""
     updates: list[dict] = []

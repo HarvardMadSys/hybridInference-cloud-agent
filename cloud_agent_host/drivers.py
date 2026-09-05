@@ -1430,11 +1430,11 @@ class ClaudeCodeSession(HarnessSession):
                     os.close(config_fd)
             finally:
                 os.close(state_fd)
-            # The host fallback runs as root in Compose, after the initial state
-            # hand-over. Re-adopt from the trusted mount root rather than from
-            # the agent-controlled `claude` child that was just opened above.
-            if self._context.adopt_state is not None:
-                self._context.adopt_state()
+                # Even a failed settings read/write can leave a newly created
+                # root-owned directory behind. Hand it back on every exit from
+                # the host writer, using only the trusted state mount root.
+                if self._context.adopt_state is not None:
+                    self._context.adopt_state()
         except Exception as exc:  # pragma: no cover - defence, not behaviour
             print(f"tool hooks not installed: {exc}", file=sys.stderr)
 
