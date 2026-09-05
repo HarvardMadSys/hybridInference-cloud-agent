@@ -8,6 +8,7 @@
 export type AgentJobState = 'queued' | 'running' | 'needs_review' | 'done' | 'failed' | 'cancelled';
 
 export interface AgentAttempt {
+  id?: number;
   no: number;
   status: 'live' | 'superseded' | 'finished';
   /** Shown in the audit banner when a lease takeover superseded the attempt. */
@@ -229,6 +230,8 @@ export interface AgentJob {
   networkAgent: string;
   sandbox: string;
   attempts: AgentAttempt[];
+  /** Server supports fetching a single attempt's resource detail. */
+  attemptTelemetryAvailable?: boolean;
   /** Display number for the server-authoritative current attempt, when it has emitted an event. */
   currentAttemptNo?: number;
   events: AgentEvent[];

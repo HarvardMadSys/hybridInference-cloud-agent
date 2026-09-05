@@ -3898,14 +3898,31 @@ class AgentJobStore:
             return True
 
     async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
-        """Read continuity, windows and resources for every attempt of a job.
-
-        The detail page can select an earlier attempt, so its telemetry has to
-        cross the API with the same attempt identity as its events.  The child
-        rows are fetched in two batches rather than once per attempt.
-        """
+        """Read lightweight attempt summaries without tool or process rows."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
+                """
+                SELECT id AS attempt_id, attempt_no, continuity_mode, context_status,
+                       started_at, finished_at
+                FROM agent_attempts
+                WHERE job_id = $1
+                ORDER BY attempt_no
+                """,
+                job_id,
+            )
+            return [dict(row) for row in rows]
+
+    async def job_turn_telemetry(
+        self, *, job_id: str, attempt_id: int | None = None
+    ) -> dict[str, Any] | None:
+        """Read one attempt's measurements, defaulting to the newest attempt.
+
+        Job detail uses the newest window for its existing top-level fields;
+        the attempt detail endpoint selects a specific window. Both queries
+        are job-scoped, including when an attempt id is supplied.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
                 """
                 SELECT a.id AS attempt_id, a.attempt_no,
                        a.continuity_mode, a.context_status,
@@ -3923,21 +3940,19 @@ class AgentJobStore:
                 FROM agent_attempts a
                 LEFT JOIN agent_attempt_resources r ON r.attempt_id = a.id
                 WHERE a.job_id = $1
-                ORDER BY a.attempt_no
+                  AND ($2::bigint IS NULL OR a.id = $2)
+                ORDER BY a.attempt_no DESC
+                LIMIT 1
                 """,
                 job_id,
+                attempt_id,
             )
-            if not rows:
-                return []
-            telemetry = [dict(row) for row in rows]
-            by_attempt = {row["attempt_id"]: row for row in telemetry}
-            attempt_ids = list(by_attempt)
-            for row in telemetry:
-                row["tool_calls"] = []
-                row["processes"] = []
+            if row is None:
+                return None
+            telemetry = dict(row)
             calls = await conn.fetch(
                 """
-                SELECT attempt_id, call_seq, tool_use_id, tool_name,
+                SELECT call_seq, tool_use_id, tool_name,
                        timing_source, duration_ms,
                        sample_count, overlap_n, measured_span_ms,
                        cpu_usec_exclusive, cpu_usec_shared,
@@ -3946,43 +3961,27 @@ class AgentJobStore:
                        process_io_read_bytes, process_io_write_bytes,
                        process_resources_partial
                 FROM agent_tool_call_resources
-                WHERE attempt_id = ANY($1::bigint[])
-                ORDER BY attempt_id, call_seq
+                WHERE attempt_id = $1
+                ORDER BY call_seq
                 """,
-                attempt_ids,
+                telemetry["attempt_id"],
             )
-            for call in calls:
-                shaped = dict(call)
-                attempt_id = shaped.pop("attempt_id")
-                by_attempt[attempt_id]["tool_calls"].append(shaped)
+            telemetry["tool_calls"] = [dict(call) for call in calls]
             processes = await conn.fetch(
                 """
-                SELECT attempt_id, process_seq, uid, pid, tgid, ppid, comm, executable,
+                SELECT process_seq, uid, pid, tgid, ppid, comm, executable,
                        started_offset_ms, duration_ms, exit_code,
                        observed_fork, observed_exec, observed_exit, tool_call_seqs,
                        cpu_usec, mem_peak_bytes, io_read_bytes, io_write_bytes,
                        io_rchar_bytes, io_wchar_bytes
                 FROM agent_process_observations
-                WHERE attempt_id = ANY($1::bigint[])
-                ORDER BY attempt_id, process_seq
+                WHERE attempt_id = $1
+                ORDER BY process_seq
                 """,
-                attempt_ids,
+                telemetry["attempt_id"],
             )
-            for process in processes:
-                shaped = dict(process)
-                attempt_id = shaped.pop("attempt_id")
-                by_attempt[attempt_id]["processes"].append(shaped)
+            telemetry["processes"] = [dict(process) for process in processes]
             return telemetry
-
-    async def job_turn_telemetry(self, *, job_id: str) -> dict[str, Any] | None:
-        """Read the newest attempt for legacy callers of the singular API."""
-        attempts = await self.job_attempts_telemetry(job_id=job_id)
-        if not attempts:
-            return None
-        telemetry = dict(attempts[-1])
-        telemetry.pop("attempt_id", None)
-        telemetry.pop("attempt_no", None)
-        return telemetry
 
     async def terminal_workspace_ready(self, *, attempt_id: int) -> bool:
         """Return whether the live attempt currently permits terminal writes.

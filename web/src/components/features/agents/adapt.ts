@@ -9,6 +9,7 @@ import type {
   AgentJobApi,
   AgentJobEventApi,
   AgentAttemptTelemetryApi,
+  AgentAttemptSummaryApi,
   AttemptResourcesApi,
   AgentThreadApi,
   AgentThreadEventApi,
@@ -537,7 +538,9 @@ function toProcessObservation(api: ProcessObservationApi): ProcessObservation {
   };
 }
 
-function toAttemptTelemetry(api: AgentAttemptTelemetryApi): NonNullable<AgentAttempt['telemetry']> {
+export function toAttemptTelemetry(
+  api: AgentAttemptSummaryApi & Partial<Pick<AgentAttemptTelemetryApi, 'resources'>>,
+): NonNullable<AgentAttempt['telemetry']> {
   return {
     ...(api.continuity_mode ? { continuityMode: api.continuity_mode } : {}),
     ...(api.context_status ? { contextStatus: api.context_status } : {}),
@@ -567,12 +570,16 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
   );
   const attempts = attemptIds.map((id, index): AgentAttempt => {
     const recorded = telemetryByAttemptId.get(id);
-    // A rolling deployment may still return only the legacy newest-attempt
-    // fields. Attach those to the newest chip, never to an older one.
+    // Only legacy servers need the top-level fallback. Its identity belongs
+    // to the fetched snapshot, not whichever attempt SSE has since started.
     let telemetry: AgentAttempt['telemetry'];
     if (recorded) {
       telemetry = toAttemptTelemetry(recorded);
-    } else if (index === attemptIds.length - 1) {
+    } else if (
+      job.attempt_telemetry === undefined &&
+      id ===
+        (job.telemetry_attempt_id === undefined ? job.current_attempt_id : job.telemetry_attempt_id)
+    ) {
       telemetry = {
         ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
         ...(job.context_status ? { contextStatus: job.context_status } : {}),
@@ -581,6 +588,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       };
     }
     return {
+      id,
       no: index + 1,
       status: supersededIds.has(id)
         ? 'superseded'
@@ -687,6 +695,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     networkAgent: tierLabel(job.agent_egress_tier),
     sandbox: sandboxLabel(events, job.current_attempt_id),
     attempts,
+    attemptTelemetryAvailable: job.attempt_telemetry !== undefined,
     currentAttemptNo: currentAttemptIndex >= 0 ? currentAttemptIndex + 1 : undefined,
     events: renderedEvents,
     eventCount: events.length,

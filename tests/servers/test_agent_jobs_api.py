@@ -34,6 +34,7 @@ import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -612,9 +613,14 @@ class FakeAgentJobStore:
         ]
         return sorted(rows, key=lambda row: row["id"])[:limit]
 
-    async def job_turn_telemetry(self, *, job_id: str) -> dict[str, Any] | None:
-        """How the newest attempt ran. Absent until a runner reports one."""
-        return self.turn_telemetry.get(job_id)
+    async def job_turn_telemetry(
+        self, *, job_id: str, attempt_id: int | None = None
+    ) -> dict[str, Any] | None:
+        """Read only the selected job's requested attempt, or its newest one."""
+        rows = await self.job_attempts_telemetry(job_id=job_id)
+        if attempt_id is not None:
+            return next((row for row in rows if row["attempt_id"] == attempt_id), None)
+        return rows[-1] if rows else None
 
     async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
         """All attempt windows, retaining their identity for the owner UI."""
@@ -5320,12 +5326,77 @@ async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
     first, second = job["attempt_telemetry"]
     assert (first["attempt_id"], first["attempt_no"]) == (100, 1)
     assert first["duration_ms"] == 3_000
-    assert first["resources"]["cpu_usec"] == 1_000_000
     assert second["duration_ms"] == 9_000
-    assert second["resources"]["cpu_usec"] == 7_000_000
+    assert "resources" not in first and "resources" not in second
     # Existing clients still receive the newest attempt at the top level.
+    assert job["telemetry_attempt_id"] == 101
     assert job["duration_ms"] == 9_000
     assert job["resources"]["cpu_usec"] == 7_000_000
+
+    old = (await client.get(f"/v1/agent/jobs/{job_id}/attempts/100/telemetry")).json()
+    assert old["attempt_id"] == 100
+    assert old["duration_ms"] == 3_000
+    assert old["resources"]["cpu_usec"] == 1_000_000
+
+
+async def test_retry_picker_polls_only_summaries_and_fetches_one_detail(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """Adding retries must not multiply the polled tool/process payload."""
+    job_id = await _create_job(client)
+    store.attempt_telemetry[job_id] = [
+        {
+            "attempt_id": attempt_id,
+            "attempt_no": attempt_id,
+            "sampler_version": "2",
+            "sample_count": 1,
+            "coverage": 1.0,
+            "cpu_usec": attempt_id,
+            "tool_calls": [
+                {"call_seq": seq + 1, "tool_use_id": f"t{seq}", "tool_name": "Read"}
+                for seq in range(500)
+            ],
+        }
+        for attempt_id in range(1, 13)
+    ]
+    read_detail = AsyncMock(wraps=store.job_turn_telemetry)
+    monkeypatch.setattr(store, "job_turn_telemetry", read_detail)
+    # The real store already returns scalar summaries, independently of the
+    # detail reader. Keep the fake faithful to that separate query.
+    summaries = [
+        {key: row[key] for key in ("attempt_id", "attempt_no")}
+        for row in store.attempt_telemetry[job_id]
+    ]
+    monkeypatch.setattr(store, "job_attempts_telemetry", AsyncMock(return_value=summaries))
+    for _ in range(2):
+        response = await client.get(f"/v1/agent/jobs/{job_id}?include_resources=false")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["attempt_telemetry"]) == 12
+        assert data["resources"] is None
+        assert b'"tool_calls"' not in response.content
+        assert b'"processes"' not in response.content
+        assert len(response.content) < 5_000
+    read_detail.assert_not_awaited()
+    # Supply the full row only when the singular reader is called.
+    read_detail.side_effect = lambda **kwargs: store.attempt_telemetry[job_id][
+        kwargs["attempt_id"] - 1
+    ]
+    detail = await client.get(f"/v1/agent/jobs/{job_id}/attempts/3/telemetry")
+    assert detail.status_code == 200
+    assert len(detail.json()["resources"]["tool_calls"]) == 500
+    read_detail.assert_awaited_once_with(job_id=job_id, attempt_id=3)
+
+
+async def test_attempt_telemetry_is_fenced_to_the_owned_job(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    job_id = await _create_job(client)
+    another = await _create_job(client)
+    store.attempt_telemetry[another] = [{"attempt_id": 999, "attempt_no": 1}]
+    assert (await client.get(f"/v1/agent/jobs/{job_id}/attempts/999/telemetry")).status_code == 404
+    store.jobs[another]["user_id"] = "someone-else"
+    assert (await client.get(f"/v1/agent/jobs/{another}/attempts/999/telemetry")).status_code == 404
 
 
 # ── Reasoning effort ───────────────────────────────────────────────────

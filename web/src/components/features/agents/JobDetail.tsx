@@ -33,7 +33,7 @@ import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import type { AgentEvent, AgentHistoryTurn, AgentJob, AgentThreadMessage } from './types';
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
-import { TurnFooter } from './TurnFooter';
+import { AttemptTurnFooter } from './AttemptTurnFooter';
 import { TrajectoryView } from './TrajectoryView';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
@@ -1592,7 +1592,7 @@ export function JobDetail({
                   ) : null}
                 </div>
 
-                <TurnFooter job={job} attemptNo={attemptNo} />
+                <AttemptTurnFooter job={job} attemptNo={attemptNo} />
 
                 <OutcomeCard job={job} onOpenDiff={() => openWorkspace('git')} />
               </div>

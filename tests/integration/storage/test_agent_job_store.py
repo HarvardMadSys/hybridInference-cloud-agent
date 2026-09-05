@@ -3395,6 +3395,7 @@ async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
             "coverage": 1.0,
             "sampler_version": "2",
             "tool_calls": [_tool_call(1, "Read")],
+            "processes": [_retry_process("first")],
         },
     )
     await _expire_attempt(store, first["attempt_id"])
@@ -3411,6 +3412,7 @@ async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
             "coverage": 1.0,
             "sampler_version": "2",
             "tool_calls": [_tool_call(1, "Bash")],
+            "processes": [_retry_process("second")],
         },
     )
 
@@ -3421,8 +3423,38 @@ async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
         second["attempt_id"],
     ]
     assert [attempt["attempt_no"] for attempt in attempts] == [1, 2]
-    assert [attempt["cpu_usec"] for attempt in attempts] == [1_000, 7_000]
-    assert [attempt["tool_calls"][0]["tool_name"] for attempt in attempts] == ["Read", "Bash"]
+    assert all("tool_calls" not in attempt and "processes" not in attempt for attempt in attempts)
+    details = [
+        await store.job_turn_telemetry(job_id=job["id"], attempt_id=attempt["attempt_id"])
+        for attempt in attempts
+    ]
+    assert [attempt["cpu_usec"] for attempt in details] == [1_000, 7_000]
+    assert [attempt["tool_calls"][0]["tool_name"] for attempt in details] == ["Read", "Bash"]
+    assert [attempt["processes"][0]["comm"] for attempt in details] == ["first", "second"]
+    other_job = await _create_job(store)
+    assert (
+        await store.job_turn_telemetry(job_id=other_job["id"], attempt_id=first["attempt_id"])
+        is None
+    )
+
+
+def _retry_process(comm: str) -> dict[str, object]:
+    return {
+        "process_seq": 1,
+        "uid": 10001,
+        "pid": 42,
+        "tgid": 42,
+        "ppid": 1,
+        "comm": comm,
+        "executable": "/bin/test",
+        "started_offset_ms": 0,
+        "duration_ms": 1,
+        "exit_code": 0,
+        "observed_fork": True,
+        "observed_exec": True,
+        "observed_exit": True,
+        "tool_call_seqs": [1],
+    }
 
 
 async def test_a_superseded_attempt_cannot_overwrite_the_live_one_s_numbers(

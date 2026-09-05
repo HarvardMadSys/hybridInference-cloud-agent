@@ -59,18 +59,37 @@ export function applyAgentLifecycleEvent(
   current: AgentJobApi,
   event: AgentJobEventApi,
 ): AgentJobApi {
+  const telemetryAttemptId =
+    current.telemetry_attempt_id === undefined
+      ? current.current_attempt_id
+      : current.telemetry_attempt_id;
   if (event.event_type === 'attempt_superseded') {
     if (current.current_attempt_id !== event.attempt_id) return current;
-    return { ...current, state: 'queued', current_attempt_id: null };
+    return {
+      ...current,
+      telemetry_attempt_id: telemetryAttemptId,
+      state: 'queued',
+      current_attempt_id: null,
+    };
   }
   if (event.event_type !== 'lifecycle') return current;
   const phase = event.payload?.phase;
   if (typeof phase !== 'string') return current;
   if (ACTIVE_ATTEMPT_PHASES.has(phase)) {
-    return { ...current, state: 'running', current_attempt_id: event.attempt_id };
+    return {
+      ...current,
+      telemetry_attempt_id: telemetryAttemptId,
+      state: 'running',
+      current_attempt_id: event.attempt_id,
+    };
   }
   if (phase === 'publishing') {
-    return { ...current, state: 'publishing', current_attempt_id: event.attempt_id };
+    return {
+      ...current,
+      telemetry_attempt_id: telemetryAttemptId,
+      state: 'publishing',
+      current_attempt_id: event.attempt_id,
+    };
   }
   return current;
 }

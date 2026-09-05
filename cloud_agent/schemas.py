@@ -261,14 +261,19 @@ class AttemptResources(BaseModel):
     processes: list[ProcessObservation] = Field(default_factory=list)
 
 
-class AgentAttemptTelemetry(BaseModel):
-    """Continuity and resource measurements for one execution attempt."""
+class AgentAttemptSummary(BaseModel):
+    """Identity, continuity and duration without unselected resource details."""
 
     attempt_id: int
     attempt_no: int
     continuity_mode: str | None = None
     context_status: Literal["new", "live", "restored", "lost"] | None = None
     duration_ms: int | None = None
+
+
+class AgentAttemptTelemetry(AgentAttemptSummary):
+    """Measurements fetched for one selected execution attempt."""
+
     resources: AttemptResources | None = None
 
 
@@ -345,9 +350,11 @@ class AgentJobResponse(BaseModel):
     workspace_epoch: int | None = None
     duration_ms: int | None = None
     resources: AttemptResources | None = None
-    # Complete per-attempt telemetry for the attempt picker. The two fields
-    # above remain the newest attempt for backward-compatible readers.
-    attempt_telemetry: list[AgentAttemptTelemetry] = Field(default_factory=list)
+    # Identity of the top-level telemetry, independent of the live attempt id.
+    telemetry_attempt_id: int | None = None
+    # Only summaries are repeated in job reads; resource details are fetched
+    # for the selected attempt through its own endpoint.
+    attempt_telemetry: list[AgentAttemptSummary] = Field(default_factory=list)
     # The deployment's egress posture for this job's two phases, so the owner
     # can see what the sandbox could reach rather than take it on trust.
     setup_egress_tier: str | None = None

@@ -16,6 +16,8 @@ import {
   followUpAgentJob,
   forkAgentJob,
   getAgentIntegrations,
+  getAgentJob,
+  getAgentAttemptTelemetry,
   getAgentJobArtifact,
   getAgentJobFiles,
   getAgentJobGit,
@@ -82,6 +84,34 @@ describe('agents api', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('pins legacy telemetry identity when fetching a snapshot', async () => {
+    fetchWithAuth.mockResolvedValue(jsonResponse({ current_attempt_id: 10 }));
+    expect((await getAgentJob('ajob_1')).telemetry_attempt_id).toBe(10);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/jobs/ajob_1?include_resources=false',
+    );
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ current_attempt_id: 11, telemetry_attempt_id: 10 }),
+    );
+    expect((await getAgentJob('ajob_1')).telemetry_attempt_id).toBe(10);
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ current_attempt_id: 11, telemetry_attempt_id: null }),
+    );
+    expect((await getAgentJob('ajob_1')).telemetry_attempt_id).toBeNull();
+  });
+
+  it('fetches one selected attempt with an abortable owner-scoped request', async () => {
+    fetchWithAuth.mockResolvedValue(jsonResponse({ attempt_id: 10, resources: null }));
+    const { signal } = new AbortController();
+    expect((await getAgentAttemptTelemetry('job/one', 10, signal)).attempt_id).toBe(10);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/jobs/job%2Fone/attempts/10/telemetry',
+      { signal },
+    );
   });
 
   it('lists jobs', async () => {
