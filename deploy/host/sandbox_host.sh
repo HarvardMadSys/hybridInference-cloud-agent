@@ -46,7 +46,11 @@ env_or_dotenv() {
   # A value may come from the environment or from .env; compose reads both, so
   # the preflight has to look in both or it rejects working configurations.
   local name="$1"
-  if [[ -n "${!name:-}" ]]; then
+  if [[ "$_COMPOSE_ENVIRONMENT_LOADED" == "1" ]]; then
+    compose_env_value "$name"
+    return 0
+  fi
+  if [[ "${!name+x}" == "x" ]]; then
     printf '%s' "${!name}"
     return 0
   fi
@@ -66,6 +70,39 @@ env_or_dotenv() {
   value="${value%\'}"; value="${value#\'}"
   printf '%s' "$value"
 }
+
+# Ask Compose itself to parse the interpolation environment used by the stack.
+# Reimplementing dotenv here is unsafe-by-disagreement: Compose resolves
+# references, quotes and inline comments, and an exported empty value still
+# outranks the file. A tiny stdin model avoids evaluating this stack's required
+# substitutions before require_env can report them clearly.
+_COMPOSE_ENVIRONMENT=""
+_COMPOSE_ENVIRONMENT_LOADED=0
+load_compose_environment() {
+  [[ "$_COMPOSE_ENVIRONMENT_LOADED" == "0" ]] || return 0
+  local command=(docker compose)
+  [[ -f .env ]] && command+=(--env-file .env)
+  if ! _COMPOSE_ENVIRONMENT="$(
+    printf 'services: {}\n' | "${command[@]}" -f - config --environment
+  )"; then
+    die "docker compose could not resolve the environment used by this stack"
+  fi
+  _COMPOSE_ENVIRONMENT_LOADED=1
+}
+
+compose_env_value() {
+  local name="$1" line
+  while IFS= read -r line; do
+    if [[ "${line%%=*}" == "$name" ]]; then
+      printf '%s' "${line#*=}"
+      return 0
+    fi
+  done <<< "$_COMPOSE_ENVIRONMENT"
+}
+
+case "${1:-}" in
+  up|check|status|down|mark-ready) load_compose_environment ;;
+esac
 
 # Read through env_or_dotenv, and therefore only after it exists. Taking these
 # from the shell environment alone silently ignored `.env` — the file this
@@ -189,12 +226,24 @@ require_env() {
   # Required only when a sibling is named, because that is exactly when the
   # enrollment default stops being safe.
   if [[ -n "$(env_or_dotenv SIBLING_COMPOSE_PROJECTS)" ]]; then
-    local missing_roots=()
-    for name in AGENT_HOST_STATE_ROOT; do
-      [[ -n "$(env_or_dotenv "$name")" ]] || missing_roots+=("$name")
+    local shared=() path unsafe
+    for name in AGENT_HOST_STATE_ROOT AGENT_EGRESS_NETWORK_PLATFORM_ONLY; do
+      path="$(env_or_dotenv "$name")"
+      case "$name" in
+        AGENT_HOST_STATE_ROOT)
+          unsafe="$(python3 -c 'import os; print(os.path.realpath("/var/lib/hybridinference/agent-host"))')"
+          if [[ -n "$path" ]]; then
+            path="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$path")"
+          fi
+          ;;
+        AGENT_EGRESS_NETWORK_PLATFORM_ONLY) unsafe="agent-egress" ;;
+      esac
+      if [[ -z "$path" || "$path" == "$unsafe" ]]; then
+        shared+=("$name")
+      fi
     done
-    if [[ ${#missing_roots[@]} -gt 0 ]]; then
-      die "this host runs another environment (SIBLING_COMPOSE_PROJECTS is set), so ${missing_roots[*]} must name a path of this stack's own; otherwise both stacks claim as whichever host enrolled first."
+    if [[ ${#shared[@]} -gt 0 ]]; then
+      die "this host runs another environment (SIBLING_COMPOSE_PROJECTS is set), so ${shared[*]} must be unique to this stack; unset values and legacy shared defaults mix enrollment credentials or tunnel aliases across environments."
     fi
   fi
 

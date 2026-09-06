@@ -795,6 +795,13 @@ def test_auto_adds_no_flag():
     assert "--effort" not in argv
 
 
+def test_claude_code_subagents_use_the_concrete_granted_model():
+    """An `inherit` sentinel leaves the subagent's own model choice in force."""
+    _argv, env = _prepare(ClaudeCodeRuntime())
+
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3"
+
+
 def test_claude_code_offers_xhigh():
     """Captured from 2.1.220. The first declaration read --help and missed it."""
     argv, _env = _prepare(ClaudeCodeRuntime(), reasoning_effort="xhigh")

@@ -59,6 +59,7 @@ def _host(
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
+        'case " $* " in *" config --environment "*) cat >/dev/null; { if [ -f .env ]; then cat .env; fi; env; } | awk -F= \'{v[$1]=$0} END {for (k in v) print v[k]}\'; exit 0 ;; esac\n'
         'case "$*" in\n'
         f"  'info --format {{{{.DockerRootDir}}}}') echo '{daemon_root}' ;;\n"
         "  'info') exit 0 ;;\n"
@@ -113,7 +114,7 @@ def _host(
         "AGENT_BROKER_REVERSE_PORT",
         "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
     ):
-        env[name] = ""
+        env.pop(name, None)
     return env
 
 
@@ -202,7 +203,7 @@ def test_direct_host_commands_support_environment_only_configuration(tmp_path: P
     fake_bin.mkdir()
     _write_executable(
         fake_bin / "docker",
-        "#!/bin/sh\ncase \"$*\" in\n  *'--env-file .env'*) exit 42 ;;\n  *) exit 0 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$*\" in\n  *'--env-file .env'*) exit 42 ;;\n  *'config --environment'*) cat >/dev/null; env; exit 0 ;;\n  *) exit 0 ;;\nesac\n",
     )
     env = {
         **os.environ,

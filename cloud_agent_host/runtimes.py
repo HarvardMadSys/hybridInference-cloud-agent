@@ -360,6 +360,10 @@ class ClaudeCodeRuntime(AgentRuntime):
             MCP_TOKEN_ENV: mcp_config.credential,
             "ANTHROPIC_MODEL": model,
             "ANTHROPIC_SMALL_FAST_MODEL": model,
+            # A concrete env override outranks Agent's model argument and the
+            # subagent definition. `inherit` skips that override, allowing
+            # Explore to pick an ungranted default (e.g. opus for DeepSeek).
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
             # Telemetry and auto-update are refused explicitly rather than left
             # to the egress allowlist: defence in depth, and it keeps the
             # allowlist free of vendor endpoints.

@@ -877,7 +877,7 @@ def create_app() -> FastAPI:
     from cloud_agent.api import admin_hosts, hosts, mcp_relay, routes, service_jobs, session
 
     app = FastAPI(
-        title="FreeInference Cloud Agent",
+        title="Cloud Agent",
         description="Cloud coding agents on sandboxed hosts",
         version="0.1.0",
         lifespan=lifespan,
@@ -937,7 +937,7 @@ def create_mcp_app() -> FastAPI:
     from cloud_agent.api import mcp_relay
 
     app = FastAPI(
-        title="FreeInference Cloud Agent — MCP relay",
+        title="Cloud Agent — MCP relay",
         description="The only surface a sandbox may reach",
         version="0.1.0",
         # No reaper and no publisher: they belong to the control-plane process,

@@ -670,8 +670,8 @@ class CodexAppServerSession(_JsonResidentSession):
                 "method": "initialize",
                 "params": {
                     "clientInfo": {
-                        "name": "freeinference-cloud-agent",
-                        "title": "FreeInference Cloud Agent",
+                        "name": "hybridinference-cloud-agent",
+                        "title": "Cloud Agent",
                         "version": "1",
                     },
                     "capabilities": {
@@ -1441,6 +1441,9 @@ class ClaudeCodeLiveSession(HarnessSession):
             env.update(self._extra_env)
             env["ANTHROPIC_MODEL"] = model
             env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+            # The launch template was built with model=""; bind delegated
+            # requests to the actual model chosen for this residency too.
+            env["CLAUDE_CODE_SUBAGENT_MODEL"] = model
             assert self._context.spawn_live is not None
             self._process = self._context.spawn_live(argv, env)
             self._lines = self._process.lines()

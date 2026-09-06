@@ -3125,10 +3125,6 @@ class AgentJobStore:
             if released_row is None:
                 return False
             released = released_row["job_id"]
-            # Hung off the guarded UPDATE above, not off entering this method:
-            # the predicate is what makes an abort happen once, so the slot
-            # release inherits that and cannot double-count.
-            await self._release_host_slot(conn, released_row["host_id"])
             # The store's own answer, not the caller's. `agent_job_events.job_id`
             # has no foreign key, so a mismatched (job_id, attempt_id) pair would
             # write a control event into a different job's stream — potentially a
@@ -3160,6 +3156,13 @@ class AgentJobStore:
                 released,
                 attempt_id,
             )
+            # All close-attempt paths take locks in attempt -> job -> host
+            # order. Previously transition took job -> attempt while this path
+            # took attempt -> host -> job, so concurrent finishes and aborts
+            # could form a cycle across two jobs. Hung off the guarded attempt
+            # UPDATE above, this still runs once and cannot double-count even
+            # when the job UPDATE changed no row.
+            await self._release_host_slot(conn, released_row["host_id"])
         return True
 
     async def heartbeat(
@@ -3226,6 +3229,22 @@ class AgentJobStore:
         but never overwrite the base it was given.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # Lock the attempt before its job, matching release_claim and the
+            # reaper. Without an explicit first lock, the job UPDATE below and
+            # a concurrent abort can each hold the row the other needs.
+            live_attempt = await conn.fetchval(
+                """
+                SELECT id
+                FROM agent_attempts
+                WHERE id = $1 AND lease_generation = $2
+                  AND status = 'running' AND lease_expires_at > NOW()
+                FOR UPDATE
+                """,
+                attempt_id,
+                lease_generation,
+            )
+            if live_attempt is None:
+                return False
             updated = await conn.fetchrow(
                 """
                 UPDATE agent_jobs j
@@ -3671,8 +3690,25 @@ class AgentJobStore:
                 )
             return True
 
-    async def job_turn_telemetry(self, *, job_id: str) -> dict[str, Any] | None:
-        """Read how a job's newest attempt ran: continuity, window, resources.
+    async def job_attempts_telemetry(self, *, job_id: str) -> list[dict[str, Any]]:
+        """Read lightweight attempt summaries without tool or process rows."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id AS attempt_id, attempt_no, continuity_mode, context_status,
+                       started_at, finished_at
+                FROM agent_attempts
+                WHERE job_id = $1
+                ORDER BY attempt_no
+                """,
+                job_id,
+            )
+            return [dict(row) for row in rows]
+
+    async def job_turn_telemetry(
+        self, *, job_id: str, attempt_id: int | None = None
+    ) -> dict[str, Any] | None:
+        """Read one job-scoped attempt, defaulting to the newest attempt.
 
         Newest attempt rather than the current one: a retried turn's earlier
         attempts each have their own window, and the one a reader wants is the
@@ -3691,7 +3727,8 @@ class AgentJobStore:
         ):
             row = await conn.fetchrow(
                 """
-                SELECT a.id AS attempt_id, a.continuity_mode, a.context_status,
+                SELECT a.id AS attempt_id, a.attempt_no,
+                       a.continuity_mode, a.context_status,
                        a.started_at, a.finished_at,
                        r.cpu_usec, r.mem_peak_bytes, r.mem_avg_bytes,
                        r.io_read_bytes, r.io_write_bytes,
@@ -3706,17 +3743,20 @@ class AgentJobStore:
                 FROM agent_attempts a
                 LEFT JOIN agent_attempt_resources r ON r.attempt_id = a.id
                 WHERE a.job_id = $1
+                  AND ($2::bigint IS NULL OR a.id = $2)
                 ORDER BY a.attempt_no DESC
                 LIMIT 1
                 """,
                 job_id,
+                attempt_id,
             )
             if row is None:
                 return None
             telemetry = dict(row)
             calls = await conn.fetch(
                 """
-                SELECT call_seq, tool_use_id, tool_name, timing_source, duration_ms,
+                SELECT call_seq, tool_use_id, tool_name,
+                       timing_source, duration_ms,
                        sample_count, overlap_n, measured_span_ms,
                        cpu_usec_exclusive, cpu_usec_shared,
                        mem_peak_exclusive_bytes, mem_peak_shared_bytes, process_count,

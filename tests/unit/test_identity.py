@@ -15,6 +15,8 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt import PyJWKClient as RealPyJWKClient
+from jwt.algorithms import RSAAlgorithm
 
 from cloud_agent import identity
 from cloud_agent.identity import (
@@ -54,7 +56,15 @@ def _clean(monkeypatch):
     identity.reset_jwks_cache()
 
 
-def _token(key, *, aud: str = AUDIENCE, iss: str = ISSUER, exp_delta: int = 600, **extra) -> str:
+def _token(
+    key,
+    *,
+    aud: str = AUDIENCE,
+    iss: str = ISSUER,
+    exp_delta: int = 600,
+    kid: str | None = None,
+    **extra,
+) -> str:
     now = int(time.time())
     claims: dict[str, Any] = {
         "sub": "user_1",
@@ -65,7 +75,8 @@ def _token(key, *, aud: str = AUDIENCE, iss: str = ISSUER, exp_delta: int = 600,
         "role": "pro",
         **extra,
     }
-    return jwt.encode(claims, key, algorithm="RS256")
+    headers = {"kid": kid} if kid is not None else None
+    return jwt.encode(claims, key, algorithm="RS256", headers=headers)
 
 
 class _FakeSigningKey:
@@ -148,6 +159,39 @@ def test_an_unfetchable_key_refuses_rather_than_passing(monkeypatch, keypair) ->
     monkeypatch.setattr(identity, "PyJWKClient", _Broken)
     with pytest.raises(IdentityError):
         verify_identity_token(_token(key))
+
+
+def test_a_withdrawn_jwks_key_stops_verifying_after_the_set_refreshes(monkeypatch) -> None:
+    """The bounded JWKS-set cache must refresh without an immortal key cache."""
+    first = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    second = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+
+    def public_jwk(key, kid: str) -> dict[str, Any]:
+        value = RSAAlgorithm.to_jwk(key.public_key(), as_dict=True)
+        value.update({"kid": kid, "use": "sig"})
+        return value
+
+    served = {"keys": [public_jwk(first, "first")]}
+
+    class _RotatingClient(RealPyJWKClient):
+        def fetch_data(self) -> dict[str, Any]:
+            data = {"keys": list(served["keys"])}
+            if self.jwk_set_cache is not None:
+                self.jwk_set_cache.put(data)
+            return data
+
+    monkeypatch.setattr(identity, "PyJWKClient", _RotatingClient)
+    monkeypatch.setenv(ENV_JWKS_URL, "https://gateway.example/v1/identity/jwks")
+
+    assert verify_identity_token(_token(first, kid="first"))["sub"] == "user_1"
+    served["keys"] = [public_jwk(second, "second")]
+    clock["now"] += identity.JWKS_CACHE_LIFESPAN_S + 1
+
+    with pytest.raises(IdentityError):
+        verify_identity_token(_token(first, kid="first"))
+    assert verify_identity_token(_token(second, kid="second"))["sub"] == "user_1"
 
 
 def test_no_jwks_url_is_not_configured(keypair) -> None:

@@ -81,7 +81,7 @@ function ConnectedInner() {
           Install the GitHub App
         </h1>
         <p className="max-w-md text-center text-sm text-gray-500 dark:text-gray-400">
-          GitHub authorization succeeded, but this account has no FreeInference installation yet.
+          GitHub authorization succeeded, but this account has no GitHub App installation yet.
         </p>
         <a
           href={installUrl}

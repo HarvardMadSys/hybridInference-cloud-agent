@@ -26,6 +26,14 @@ on:
   pull_request:
     branches: [main, dev]
 
+# This workflow executes the checked-out commit through tests, package install
+# hooks and Docker builds. Pull requests are therefore untrusted code, even
+# when Actions secrets are withheld. Every CI job runs on a disposable
+# GitHub-hosted VM; persistent self-hosted machines are reserved for the
+# post-CI deployment workflows, which consume trusted push commits only.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -39,7 +47,7 @@ env:
 jobs:
   changes:
     name: Classify Changes
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ubuntu-24.04
     outputs:
       backend: ${{ steps.classify.outputs.backend }}
       web: ${{ steps.classify.outputs.web }}
@@ -97,7 +105,7 @@ jobs:
           printf '%s\n' "${files}"
           echo "---------------------"
 
-          matches() { printf '%s\n' "${files}" | grep -qE "$1"; }
+          matches() { printf '%s\n' "${files}" | grep -E "$1" >/dev/null; }
 
           # Backend: everything that is not purely docs or the web app. This is
           # the old `paths-ignore` inverted, so it stays true by default — a new
@@ -106,7 +114,7 @@ jobs:
           if printf '%s\n' "${files}" \
              | grep -vE '^(docs/|web/)' \
              | grep -vE '(\.md|LICENSE|\.gitignore)$' \
-             | grep -q .; then
+             | grep . >/dev/null; then
             backend=true
           else
             backend=false
@@ -140,8 +148,8 @@ jobs:
   # One job, three checks — not a three-cell matrix. Each cell paid for its own
   # checkout, uv install, Python install and `uv sync` in order to run a command
   # that takes about a second: measured over one run, 14s of environment for 1s
-  # of linting. The `ci-general` pool is two runners for fifteen jobs, so that
-  # setup is not free time in parallel — it is queue for everything behind it.
+  # of linting. Keeping the checks together also avoids spending several
+  # hosted runners on identical setup for one commit.
   #
   # `fail-fast: false` is what the matrix bought, and it is kept below: every
   # check runs even after one fails, and the job is red if any did. This also
@@ -150,7 +158,7 @@ jobs:
     name: Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -180,8 +188,8 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-          # Even with UV_CACHE_DIR off the shared default, prune --ci is
-          # unnecessary on self-hosted and has raced with concurrent installs.
+          # Cache pruning adds work after the checks and is unnecessary for
+          # this job-local environment.
           prune-cache: false
 
       - name: Set up Python
@@ -237,7 +245,7 @@ jobs:
     name: Tests
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -288,10 +296,8 @@ jobs:
     name: Tests (Postgres)
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    # ci-general is spark2 (aarch64), whose runner user is in the `docker`
-    # group — service containers need that socket, and this is the pool that
-    # has it. postgres:15 publishes an arm64 manifest.
-    runs-on: [self-hosted, Linux, ci-general]
+    # Service containers run inside this job's disposable hosted VM.
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -332,9 +338,8 @@ jobs:
       # fail at the step; the whole workflow is rejected before anything runs.
       #
       # The port is looked up rather than fixed at 5432: `ports: - 5432/tcp`
-      # asks for an ephemeral host port, which is what lets this job run on a
-      # runner that already has a Postgres of its own — spark2 is also the
-      # staging host.
+      # asks for an ephemeral host port and avoids coupling the test to runner
+      # image internals.
       - name: Point the fixtures at the service container
         run: |
           {
@@ -440,7 +445,7 @@ jobs:
     name: Web
     needs: changes
     if: needs.changes.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -553,7 +558,7 @@ jobs:
   # ------------------------------------------------------------------ secret
   gitleaks:
     name: Gitleaks
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -604,35 +609,34 @@ jobs:
     name: Build ${{ matrix.image.name }}
     needs: changes
     if: needs.changes.outputs.docker == 'true'
-    # **Each image builds on the architecture it is deployed to.** These five do
-    # not all run in the same place: `control-plane` runs on spark2 (ARM64) with
-    # the web app, and the other four run on the runner host (x86_64), which is
-    # a different machine. Building them all in one place verified four of them
-    # against an architecture they never see — the build resolving on aarch64
-    # says nothing about a base image without an amd64 layer, or the reverse.
+    # **Each image builds on the architecture it is deployed to.** The control
+    # plane targets ARM64; the host images target x86_64. GitHub-hosted runners
+    # provide both architectures without exposing either deployment machine.
+    # A build resolving on ARM64 says nothing about a base image without an
+    # amd64 layer, or the reverse.
     #
     # `push: false` still: nothing here publishes. The point is that the build
     # resolves *where it matters*.
-    runs-on: ${{ fromJSON(matrix.image.runner) }}
+    runs-on: ${{ matrix.image.runner }}
     strategy:
       fail-fast: false
       matrix:
         image:
           - name: runner
             dockerfile: deploy/host/Dockerfile.agent-runner
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            runner: ubuntu-24.04
           - name: sandbox
             dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            runner: ubuntu-24.04
           - name: egress-proxy
             dockerfile: deploy/host/Dockerfile.agent-egress-proxy
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            runner: ubuntu-24.04
           - name: gateway-tunnel
             dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            runner: ubuntu-24.04
           - name: control-plane
             dockerfile: deploy/control-plane/Dockerfile
-            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
         with:
@@ -680,7 +684,7 @@ jobs:
     # opening its logs is exactly the kind of failure that could differ by base
     # image layer, so proving it on the other architecture would prove the
     # wrong one.
-    runs-on: [self-hosted, Linux, X64, image-verify-x64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -702,10 +706,8 @@ jobs:
       # did a first attempted fix (`cache_effective_user root`, which squid
       # rejects outright). Only starting the thing does.
       #
-      # A self-hosted runner shares its machine, its /tmp and its image store
-      # with every other job on it, so the tag, the container and the rendered
-      # config are per-run. Two runs colliding on `egress-proxy:ci` would have
-      # one testing the other's image.
+      # Keep the tag, container and rendered config per-run so retries and
+      # concurrent workflow attempts remain independently diagnosable.
       - name: Name this run's artifacts
         run: |
           suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -720,11 +722,8 @@ jobs:
         run: |
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
-      # setup-uv rather than `pipx install uv || pip install uv`: on a
-      # self-hosted runner that second branch installs into the machine's
-      # system Python, where a modern Debian/Ubuntu refuses it outright
-      # (externally-managed-environment) and an older one silently mutates a
-      # shared interpreter every other job also uses.
+      # setup-uv rather than mutating the runner image's system Python; the
+      # action also gives this job the same pinned setup path as backend CI.
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
@@ -757,7 +756,7 @@ jobs:
           fi
           # Up is not the same as listening: a squid that started and then
           # failed to bind would still read as `running` for a moment.
-          docker logs "$cid" 2>&1 | grep -q "Accepting HTTP Socket connections" || {
+          docker logs "$cid" 2>&1 | grep -F "Accepting HTTP Socket connections" >/dev/null || {
             echo "::error::the proxy is up but never accepted connections"
             exit 1
           }
@@ -781,9 +780,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     # The one docker job with no architecture to match: `docker compose config`
-    # parses and interpolates, it does not build or start anything. Left on the
-    # larger pool so it does not queue behind the x86 image builds.
-    runs-on: [self-hosted, Linux, ARM64, image-verify-arm64]
+    # parses and interpolates, it does not build or start anything.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -910,10 +908,10 @@ jobs:
       - name: The rendered stack keeps its security properties
         run: |
           set -euo pipefail
-          # `uv run --with pyyaml`, not a bare python3: a self-hosted runner is
-          # whatever the machine has, and PyYAML is preinstalled on a hosted
-          # image rather than guaranteed. The heredoc is quoted, so the path
-          # comes through the environment rather than shell interpolation.
+          # `uv run --with pyyaml`, not a bare python3: incidental packages in
+          # a hosted image are not a dependency guarantee. The heredoc is
+          # quoted, so the path comes through the environment rather than shell
+          # interpolation.
           uv run --no-project --with pyyaml python - <<'PY'
           import os, sys, yaml
           stack = yaml.safe_load(open(os.environ["RUNNER_TEMP"] + "/rendered.yml"))
@@ -954,7 +952,7 @@ jobs:
     # keys on this workflow's conclusion, so this is what stands between a merge
     # to dev and a rebuild of the staging stack.
     if: always()
-    runs-on: [self-hosted, Linux, ci-general]
+    runs-on: ubuntu-24.04
     needs:
       - changes
       - lint

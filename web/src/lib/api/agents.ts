@@ -106,6 +106,18 @@ export interface AttemptResourcesApi {
   processes?: ProcessObservationApi[];
 }
 
+export interface AgentAttemptSummaryApi {
+  attempt_id: number;
+  attempt_no: number;
+  continuity_mode: 'hot' | 'warm_native' | 'cold_native' | 'replay' | null;
+  context_status: 'new' | 'live' | 'restored' | 'lost' | null;
+  duration_ms: number | null;
+}
+
+export interface AgentAttemptTelemetryApi extends AgentAttemptSummaryApi {
+  resources: AttemptResourcesApi | null;
+}
+
 export interface AgentJobApi {
   id: string;
   repo: string;
@@ -168,6 +180,8 @@ export interface AgentJobApi {
    * historical sampled rows with partial coverage remain lower bounds.
    */
   resources?: AttemptResourcesApi | null;
+  /** Lightweight retry summaries; resource detail is loaded only on selection. */
+  attempt_telemetry?: AgentAttemptSummaryApi[];
   /** Conversation fields are optional so pre-thread deployments remain readable. */
   thread_id?: string | null;
   parent_job_id?: string | null;
@@ -516,8 +530,28 @@ export async function unpinAgentJob(jobId: string): Promise<AgentThreadPinApi> {
 }
 
 export async function getAgentJob(jobId: string): Promise<AgentJobApi> {
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}`);
-  return jsonOrThrow<AgentJobApi>(resp);
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}?include_resources=false`,
+  );
+  const job = await jsonOrThrow<AgentJobApi>(resp);
+  // Pin legacy telemetry to the fetched attempt before SSE advances current_attempt_id.
+  return job.telemetry_attempt_id === undefined
+    ? { ...job, telemetry_attempt_id: job.current_attempt_id }
+    : job;
+}
+
+export async function getAgentAttemptTelemetry(
+  jobId: string,
+  attemptId: number,
+  signal?: AbortSignal,
+): Promise<AgentAttemptTelemetryApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/attempts/${attemptId}/telemetry`,
+    { signal },
+  );
+  return jsonOrThrow<AgentAttemptTelemetryApi>(resp);
 }
 
 /** Load the conversation containing a job. Old standalone jobs return null. */

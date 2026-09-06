@@ -39,7 +39,7 @@ class _StatusGateway:
 
     def __init__(self, record: dict[str, Any] | None = None, *, error: bool = False) -> None:
         self.record = record if record is not None else {"exists": True, "active": True}
-        self.record.setdefault("role", "internal")
+        self.record.setdefault("role", "admin")
         self.error = error
         self.asked: list[str] = []
 
@@ -62,7 +62,7 @@ def _app(gateway: _StatusGateway) -> FastAPI:
     async def write(user: dict[str, Any] = Depends(agent_jobs_router.require_agent_owner)):
         return {"role": user["role"]}
 
-    identity = {"user_id": _OWNER, "role": "internal", "authenticated": True}
+    identity = {"user_id": _OWNER, "role": "admin", "authenticated": True}
     # Override the credential resolver, not the role gate: the gate is what is
     # under test.
     app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: identity

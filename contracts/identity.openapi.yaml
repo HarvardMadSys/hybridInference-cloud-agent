@@ -1,7 +1,7 @@
 openapi: 3.1.0
 
 info:
-  title: FreeInference gateway — cross-service identity
+  title: HybridInference gateway — cross-service identity
   version: "1.0.0"
   x-source:
     repo: HarvardMadSys/hybridInference
@@ -39,9 +39,9 @@ info:
     not.
 
 servers:
-  - url: https://freeinference.org
+  - url: https://gateway.example.org
     description: Production
-  - url: https://staging.freeinference.org
+  - url: https://staging.gateway.example.org
     description: Staging
 
 tags:

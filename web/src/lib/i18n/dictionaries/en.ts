@@ -21,8 +21,9 @@ export const en = {
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
-  'shell.internalRequired.title': 'Internal access required',
-  'shell.internalRequired.body': 'The agent sandbox is dogfood-only for now (issue #1041).',
+  'shell.internalRequired.title': 'Administrator access required',
+  'shell.internalRequired.body':
+    "The agent sandbox runs code under this deployment's own credentials, so it is limited to administrators.",
   'shell.internalRequired.back': 'Back to Dashboard',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────

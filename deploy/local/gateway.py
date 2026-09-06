@@ -1,7 +1,7 @@
 """Loopback-only gateway used by the complete local development stack.
 
 This is intentionally a separate service, not an authentication bypass in the
-control plane.  It implements the same HTTP contracts the real FreeInference
+control plane.  It implements the same HTTP contracts a real HybridInference
 gateway owns: PKCE identity, JWKS, internal account/model lookups, short-lived
 inference grants, and deterministic Anthropic/OpenAI inference responses.
 
@@ -41,7 +41,7 @@ CONCURRENT_FORK_PROBE_WAIT_S = 15.0
 CONCURRENT_FORK_PROBE_HOLD_S = 1.0
 CONCURRENT_FORK_PROBE_PREFIX = "[local-concurrency-probe:"
 
-app = FastAPI(title="FreeInference local gateway", docs_url=None, redoc_url=None)
+app = FastAPI(title="Local development gateway", docs_url=None, redoc_url=None)
 
 _lock = threading.Lock()
 _codes: dict[str, dict[str, Any]] = {}
@@ -178,7 +178,7 @@ async def authorize(
         "color:#171717}a{display:inline-block;margin-top:16px;padding:10px 16px;"
         "border-radius:8px;background:#b4232d;color:white;text-decoration:none}"
         "code{background:#f4f4f5;padding:2px 5px;border-radius:4px}</style></head><body>"
-        "<h1>FreeInference local development</h1>"
+        "<h1>Local development gateway</h1>"
         "<p>This loopback-only gateway will sign you in as "
         f"<code>{html.escape(USER_ID)}</code>. No external account or provider key is used.</p>"
         f"<a href='/authorize/continue?{html.escape(query, quote=True)}'>Continue locally</a>"

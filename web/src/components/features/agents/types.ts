@@ -8,10 +8,18 @@
 export type AgentJobState = 'queued' | 'running' | 'needs_review' | 'done' | 'failed' | 'cancelled';
 
 export interface AgentAttempt {
+  id?: number;
   no: number;
   status: 'live' | 'superseded' | 'finished';
   /** Shown in the audit banner when a lease takeover superseded the attempt. */
   note?: string;
+  /** Metrics from this attempt only; absent on servers predating this contract. */
+  telemetry?: {
+    continuityMode?: 'hot' | 'warm_native' | 'cold_native' | 'replay';
+    contextStatus?: 'new' | 'live' | 'restored' | 'lost';
+    durationMs?: number;
+    resources?: TurnResources;
+  };
 }
 
 export type AgentEvent =
@@ -229,6 +237,8 @@ export interface AgentJob {
   networkAgent: string;
   sandbox: string;
   attempts: AgentAttempt[];
+  /** Server supports fetching a single attempt's resource detail. */
+  attemptTelemetryAvailable?: boolean;
   /** Display number for the server-authoritative current attempt, when it has emitted an event. */
   currentAttemptNo?: number;
   /** Display number whose continuity/resources came from the telemetry read. */
@@ -262,9 +272,9 @@ export interface AgentJob {
     | 'published'
     | 'failed';
   workspaceEpoch?: number;
-  /** Wall time of the turn's newest attempt. */
+  /** Wall time of the turn's newest attempt (legacy/default view). */
   durationMs?: number;
-  /** Host-measured consumption. Absent when nothing measured this turn. */
+  /** Host-measured consumption for the newest attempt (legacy/default view). */
   resources?: TurnResources;
   egressDenials: number;
   /** e.g. "draft PR #1044" once published. */

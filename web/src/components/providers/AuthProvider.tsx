@@ -8,7 +8,7 @@
 // this provider can answer is "does the cookie still work", which it asks by
 // calling `/v1/session/me`.
 //
-// `hasRole` is carried over unchanged — the layout's internal-only gate depends
+// `hasRole` is carried over unchanged — the layout's admin-only gate depends
 // on its exact ordering.
 
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';

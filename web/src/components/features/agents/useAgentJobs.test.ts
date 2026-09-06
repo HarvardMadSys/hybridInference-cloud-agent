@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
+import { toDisplayJob } from './adapt';
 
 import {
   applyAgentLifecycleEvent,
@@ -36,6 +37,23 @@ function superseded(attemptId: number): AgentJobEventApi {
 }
 
 describe('applyAgentLifecycleEvent', () => {
+  it('keeps legacy telemetry on the fetched attempt across supersede and replacement events', () => {
+    const snapshot = {
+      ...JOB,
+      task_prompt: 'test',
+      duration_ms: 3_000,
+      context_status: 'lost' as const,
+    };
+    const requeued = applyAgentLifecycleEvent(snapshot, superseded(10));
+    const replacement = applyAgentLifecycleEvent(requeued, lifecycle(11, 'started'));
+    expect(replacement.telemetry_attempt_id).toBe(10);
+    const display = toDisplayJob(replacement, {
+      events: [superseded(10), lifecycle(11, 'started')],
+    });
+    expect(display.attempts[0].telemetry?.durationMs).toBe(3_000);
+    expect(display.attempts[1].telemetry).toBeUndefined();
+  });
+
   it('moves the cached job to the replacement attempt before workspace readiness', () => {
     const started = applyAgentLifecycleEvent(JOB, lifecycle(11, 'started'));
 

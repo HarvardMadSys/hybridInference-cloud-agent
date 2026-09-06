@@ -184,6 +184,7 @@ def _up(tmp_path: Path, dotenv: str) -> str:
     docker.write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case " $* " in *" config --environment "*) cat >/dev/null; printf "%s\\n" "$COMPOSE_ENVIRONMENT"; exit 0 ;; esac\n'
         'if [ "$*" = "info --format {{.DockerRootDir}}" ]; then\n'
         '  printf "/var/lib/docker\\n"\n'
         "  exit 0\n"
@@ -198,24 +199,22 @@ def _up(tmp_path: Path, dotenv: str) -> str:
     docker.chmod(0o755)
 
     log = tmp_path / "docker.log"
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "APP_DIR": str(app_dir),
+        "DOCKER_LOG": str(log),
+        "COMPOSE_ENVIRONMENT": dotenv,
+        "AGENT_DEPLOYMENT_SHA": "test-deployment-sha",
+        "AGENT_HOST_STATE_ROOT": str(tmp_path / "host-state"),
+    }
+    # Absence, not exported emptiness: Compose correctly gives even an empty
+    # shell value precedence over the dotenv file.
+    for name in ("COMPOSE_PROJECT", *_pins(), *_extras()):
+        environment.pop(name, None)
     subprocess.run(
         ["bash", str(SANDBOX_HOST), "up"],
-        env={
-            **os.environ,
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "APP_DIR": str(app_dir),
-            "DOCKER_LOG": str(log),
-            # Production reaches `up` through deploy.sh, which supplies the
-            # exact target generation and a writable host-state root. These
-            # tests stop at build argument construction, but must still model
-            # that unconditional rolling-deploy contract.
-            "AGENT_DEPLOYMENT_SHA": "test-deployment-sha",
-            "AGENT_HOST_STATE_ROOT": str(tmp_path / "host-state"),
-            # The caller's own environment must not stand in for the .env
-            # under test — every pin is read through the same precedence.
-            "COMPOSE_PROJECT": "",
-            **dict.fromkeys(set(_pins()) | _extras(), ""),
-        },
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
@@ -271,6 +270,7 @@ def test_a_per_host_default_override_is_refused_before_build(tmp_path: Path) -> 
     docker.write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case " $* " in *" config --environment "*) cat >/dev/null; cat .env; exit 0 ;; esac\n'
         'if [ "$*" = "info --format {{.DockerRootDir}}" ]; then echo /var/lib/docker; fi\n'
         "exit 0\n"
     )

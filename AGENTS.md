@@ -5,7 +5,7 @@ agent. Read this first.
 
 ## 1. What this is
 
-FreeInference Cloud Agent runs coding agents (Claude Code, Codex, Kilo, …) in
+Cloud Agent runs coding agents (Claude Code, Codex, Kilo, …) in
 sandboxed containers against a user's repository and publishes results as pull
 requests. It is being **extracted from the HybridInference monorepo**
 (`HarvardMadSys/hybridInference`) into this repository as an independent service.
@@ -63,8 +63,8 @@ needs an unchanged baseline to be worth anything.
 3. **Never weaken a test to make it pass.** A ported test that fails is a parity
    break — report it. Adapting fixtures and imports is fine; changing an
    assertion is not.
-4. **No gateway secrets here.** This service never sees the FreeInference
-   gateway's `API_KEY_SECRET` or `JWT_SECRET_KEY`. Grant tokens are minted *and*
+4. **No gateway secrets here.** This service never sees the gateway's
+   `API_KEY_SECRET` or `JWT_SECRET_KEY`. Grant tokens are minted *and*
    verified by the gateway. Our own tokens use our own secrets
    (`AGENT_CONTROL_TOKEN_SECRET`, `AGENT_SESSION_SECRET`).
 5. **The gateway is reached over HTTP only.** No Python import of `serving.*`,

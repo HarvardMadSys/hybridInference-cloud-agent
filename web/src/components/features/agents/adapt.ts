@@ -8,6 +8,8 @@
 import type {
   AgentJobApi,
   AgentJobEventApi,
+  AgentAttemptTelemetryApi,
+  AgentAttemptSummaryApi,
   AttemptResourcesApi,
   AgentThreadApi,
   AgentThreadEventApi,
@@ -20,6 +22,7 @@ import type {
   AgentDiffFile,
   AgentEvent,
   AgentHistoryTurn,
+  AgentAttempt,
   AgentJob,
   AgentJobState,
   DiffLine,
@@ -535,6 +538,17 @@ function toProcessObservation(api: ProcessObservationApi): ProcessObservation {
   };
 }
 
+export function toAttemptTelemetry(
+  api: AgentAttemptSummaryApi & Partial<Pick<AgentAttemptTelemetryApi, 'resources'>>,
+): NonNullable<AgentAttempt['telemetry']> {
+  return {
+    ...(api.continuity_mode ? { continuityMode: api.continuity_mode } : {}),
+    ...(api.context_status ? { contextStatus: api.context_status } : {}),
+    ...(typeof api.duration_ms === 'number' ? { durationMs: api.duration_ms } : {}),
+    ...(api.resources ? { resources: toTurnResources(api.resources) } : {}),
+  };
+}
+
 export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): AgentJob {
   const events = options.events ?? [];
   const patch = options.patch ?? '';
@@ -553,15 +567,40 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       .filter((event) => event.event_type === 'attempt_superseded')
       .map((event) => event.attempt_id),
   );
-  const attempts = attemptIds.map((id, index) => ({
-    no: index + 1,
-    status: supersededIds.has(id)
-      ? ('superseded' as const)
-      : job.state === 'running' || job.state === 'publishing'
-        ? ('live' as const)
-        : ('finished' as const),
-    note: supersededIds.has(id) ? 'lease expired; a new attempt took over' : undefined,
-  }));
+  const telemetryByAttemptId = new Map(
+    (job.attempt_telemetry ?? []).map((attempt) => [attempt.attempt_id, attempt]),
+  );
+  const attempts = attemptIds.map((id, index): AgentAttempt => {
+    const recorded = telemetryByAttemptId.get(id);
+    // Only legacy servers need the top-level fallback. Its identity belongs
+    // to the fetched snapshot, not whichever attempt SSE has since started.
+    let telemetry: AgentAttempt['telemetry'];
+    if (recorded) {
+      telemetry = toAttemptTelemetry(recorded);
+    } else if (
+      job.attempt_telemetry === undefined &&
+      id ===
+        (job.telemetry_attempt_id === undefined ? job.current_attempt_id : job.telemetry_attempt_id)
+    ) {
+      telemetry = {
+        ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
+        ...(job.context_status ? { contextStatus: job.context_status } : {}),
+        ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
+        ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),
+      };
+    }
+    return {
+      id,
+      no: index + 1,
+      status: supersededIds.has(id)
+        ? 'superseded'
+        : job.state === 'running' || job.state === 'publishing'
+          ? 'live'
+          : 'finished',
+      note: supersededIds.has(id) ? 'lease expired; a new attempt took over' : undefined,
+      ...(telemetry ? { telemetry } : {}),
+    };
+  });
 
   const egressDenials = renderedEvents.filter((event) => event.kind === 'egress_denied').length;
   const currentTurn =
@@ -663,6 +702,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     networkAgent: tierLabel(job.agent_egress_tier),
     sandbox: sandboxLabel(events, job.current_attempt_id),
     attempts,
+    attemptTelemetryAvailable: job.attempt_telemetry !== undefined,
     currentAttemptNo: currentAttemptIndex >= 0 ? currentAttemptIndex + 1 : undefined,
     telemetryAttemptNo: telemetryAttemptIndex >= 0 ? telemetryAttemptIndex + 1 : undefined,
     events: renderedEvents,

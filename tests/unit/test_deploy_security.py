@@ -21,6 +21,7 @@ REPO = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO / "deploy/host/docker-compose.sandbox.yml"
 SANDBOX_DOCKERFILE = REPO / "deploy/sandbox/Dockerfile.agent-sandbox"
 CODEX_REQUIREMENTS = REPO / "deploy/sandbox/codex-requirements.toml"
+WORKFLOW_DIR = REPO / ".github/workflows"
 
 
 @pytest.fixture(scope="module")
@@ -38,6 +39,26 @@ def _mounts(service: dict) -> list[str]:
             ro = ":ro" if volume.get("read_only") else ""
             out.append(f"{volume.get('source', '')}:{volume.get('target', '')}{ro}")
     return out
+
+
+def test_pull_request_workflows_never_target_persistent_runners() -> None:
+    """Untrusted PR code must run on disposable GitHub-hosted machines."""
+    checked: list[str] = []
+    paths = sorted((*WORKFLOW_DIR.glob("*.yml"), *WORKFLOW_DIR.glob("*.yaml")))
+    for path in paths:
+        text = path.read_text()
+        workflow = yaml.load(text, Loader=yaml.BaseLoader) or {}
+        configured = workflow.get("on", {})
+        events = set(configured) if isinstance(configured, (dict, list)) else {str(configured)}
+        if events.isdisjoint({"pull_request", "pull_request_target"}):
+            continue
+        checked.append(path.name)
+        configuration = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+        for unsafe in ("self-hosted", "image-verify-", "deploy-cloud-agent-"):
+            assert unsafe not in configuration, (
+                f"{path.name} is triggered by pull requests but targets {unsafe!r}"
+            )
+    assert checked, "no pull-request workflow was inspected"
 
 
 # ---------------------------------------------------------------------------

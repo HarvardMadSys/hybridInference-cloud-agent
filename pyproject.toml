@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "freeinference-cloud-agent"
+name = "hybridinference-cloud-agent"
 version = "0.1.0"
-description = "Cloud coding agents on sandboxed hosts, powered by the FreeInference gateway"
+description = "Cloud coding agents on sandboxed hosts, powered by a HybridInference gateway"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = { file = "LICENSE" }

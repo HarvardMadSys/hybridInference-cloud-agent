@@ -44,6 +44,7 @@ class FakeAnthropicGateway:
     def __init__(self) -> None:
         """Bind a loopback port and start serving in a daemon thread."""
         self.keys: list[str] = []
+        self.requests: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         recorder = self
 
@@ -53,10 +54,11 @@ class FakeAnthropicGateway:
 
             # Name fixed by BaseHTTPRequestHandler, not by us.
             def do_POST(self) -> None:
-                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
                 key = self.headers.get("x-api-key") or self.headers.get("authorization") or ""
                 with recorder._lock:
                     recorder.keys.append(key.strip())
+                    recorder.requests.append(request)
                 body = b"".join(
                     [
                         sse(
@@ -131,6 +133,7 @@ class ClaudeCli:
         config_dir: pathlib.Path,
         gateway_port: int,
         credential: str | None,
+        model: str = "fake-model",
         resume_session_id: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> None:
@@ -151,7 +154,7 @@ class ClaudeCli:
             "stream-json",
             "--verbose",
             "--model",
-            "fake-model",
+            model,
             "--strict-mcp-config",
             "--permission-mode",
             "bypassPermissions",

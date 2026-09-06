@@ -8,7 +8,7 @@
 //
 //   * `agentApiBase` is *this* service's control plane. It is the only origin
 //     the session cookie is sent to.
-//   * `gatewayUrl` is the FreeInference gateway's origin, for the links this
+//   * `gatewayUrl` is the HybridInference gateway's origin, for the links this
 //     app does not host itself. It owns login; we never see a password, never
 //     hold its keys, and — since the sign-in round trip moved into the control
 //     plane — never build an authorize URL here either.
@@ -61,7 +61,7 @@ export const gatewayUrl = (process.env.NEXT_PUBLIC_GATEWAY_URL || '').trim();
 
 export const config = {
   apiBase: agentApiBase,
-  appName: process.env.NEXT_PUBLIC_APP_NAME || 'FreeInference Cloud Agent',
+  appName: process.env.NEXT_PUBLIC_APP_NAME || 'Cloud Agent',
   environment: process.env.NODE_ENV || 'development',
   buildSha: process.env.NEXT_PUBLIC_BUILD_SHA || '',
   buildTimestamp: process.env.NEXT_PUBLIC_BUILD_TIMESTAMP || '',

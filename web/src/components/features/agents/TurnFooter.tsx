@@ -635,24 +635,27 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // sentences badly. The one thing this footer most needs to explain — why a
   // turn forgot — was the least likely to be seen.
   const [explained, setExplained] = useState<Explained>(null);
+  const selectedTelemetry =
+    attemptNo !== undefined && attemptNo > 0
+      ? job.attempts.find((attempt) => attempt.no === attemptNo)?.telemetry
+      : job;
   // Scoped to the attempt the reader is looking at: the body above already
   // switches with the attempt picker, and a footer that did not would label
   // one attempt's transcript with another's numbers.
   const timings = useMemo(() => toolTimings(job.events, attemptNo), [job.events, attemptNo]);
-  const telemetryMatchesAttempt =
-    job.telemetryAttemptNo === undefined || !attemptNo || job.telemetryAttemptNo === attemptNo;
-  const contextBadge =
-    telemetryMatchesAttempt && job.contextStatus ? CONTEXT_LABEL[job.contextStatus] : undefined;
+  const contextBadge = selectedTelemetry?.contextStatus
+    ? CONTEXT_LABEL[selectedTelemetry.contextStatus]
+    : undefined;
   // NEW/LIVE/RESTORED/LOST is the user-facing correctness contract. The old
   // HOT/WARM/COLD/REPLAY remains useful attempt telemetry and for historical
   // rows, but showing both on one turn made one fact look like two independent
   // states. Fall back to it only for rows that predate context status.
   const badge =
-    telemetryMatchesAttempt && !contextBadge && job.continuityMode
-      ? CONTINUITY_LABEL[job.continuityMode]
+    !contextBadge && selectedTelemetry?.continuityMode
+      ? CONTINUITY_LABEL[selectedTelemetry.continuityMode]
       : undefined;
-  const duration = formatDuration(telemetryMatchesAttempt ? job.durationMs : null);
-  const resources = telemetryMatchesAttempt ? job.resources : undefined;
+  const duration = formatDuration(selectedTelemetry?.durationMs);
+  const resources = selectedTelemetry?.resources;
   const sharedMemberAccounting = resources?.samplerVersion === 'shared-member-v1';
   const stats = resources ? resourceStats(resources) : [];
   const processes = resources?.processes ?? [];
@@ -782,7 +785,7 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
           {timings.length > 0 ? (
             <>
               <TimeSplit
-                durationMs={telemetryMatchesAttempt ? (job.durationMs ?? null) : null}
+                durationMs={selectedTelemetry?.durationMs ?? null}
                 toolTimeMs={resources?.toolTimeMs ?? null}
               />
               <ToolTimingTable

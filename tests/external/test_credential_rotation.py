@@ -40,6 +40,7 @@ def _pinned_cli_version() -> str:
 
 def _cli(**kwargs: object) -> ClaudeCli:
     """The pinned version: this suite always measures the CLI the image ships."""
+    kwargs.setdefault("model", "deepseek-v4-flash")
     return ClaudeCli(version=_pinned_cli_version(), **kwargs)  # type: ignore[arg-type]
 
 
@@ -129,3 +130,79 @@ def test_replacement_process_resumes_with_a_replacement_grant(tmp_path, gateway)
 
     assert gateway.keys[boundary:], "the resumed turn made no model calls"
     assert set(gateway.keys[boundary:]) == {"grant-ATTEMPT-2"}
+
+
+@pytest.mark.parametrize("original", ["hi", "Remember the continuity token harbor-lantern-9631."])
+def test_native_context_reaches_the_model_live_and_after_restart(tmp_path, gateway, original):
+    """An unchanged session id alone does not prove the model received history.
+
+    Inspect real CLI requests at the local protocol fixture: both a live
+    follow-up and a resumed process must send the original user and assistant
+    messages. No external inference is performed by this test.
+    """
+    config = tmp_path / "claude"
+    config.mkdir()
+    workdir = tmp_path / "ws"
+    workdir.mkdir()
+    follow_up = "What exact token did I ask you to remember?"
+    restored_prompt = "Quote my complete first user message."
+
+    first = _cli(
+        workdir=workdir,
+        config_dir=config,
+        gateway_port=gateway.port,
+        credential="grant-CONTEXT-1",
+    )
+    try:
+        result = first.turn(original)
+        assert result and not result.get("is_error")
+        session_id = result["session_id"]
+        boundary = len(gateway.requests)
+        result = first.turn(follow_up)
+        assert result and not result.get("is_error")
+        assert result["session_id"] == session_id
+        _assert_native_history(gateway.requests[boundary:], original, follow_up)
+    finally:
+        first.close()
+
+    boundary = len(gateway.requests)
+    restored = _cli(
+        workdir=workdir,
+        config_dir=config,
+        gateway_port=gateway.port,
+        credential="grant-CONTEXT-2",
+        resume_session_id=session_id,
+    )
+    try:
+        result = restored.turn(restored_prompt)
+        assert result and not result.get("is_error")
+        assert result["session_id"] == session_id
+        _assert_native_history(gateway.requests[boundary:], original, restored_prompt)
+        assert follow_up in json.dumps(gateway.requests[boundary:])
+    finally:
+        restored.close()
+
+
+def _assert_native_history(requests, original, current):
+    matching = [
+        request for request in requests if current in json.dumps(request.get("messages", []))
+    ]
+    assert matching, "the CLI did not send the current prompt to the model"
+    for request in matching:
+        assert request["model"] == "deepseek-v4-flash"
+        messages = request["messages"]
+        assert any(
+            message["role"] == "user"
+            and (
+                message["content"] == original
+                or (
+                    isinstance(message["content"], list)
+                    and any(block.get("text") == original for block in message["content"])
+                )
+            )
+            for message in messages
+        ), "native history lost the first user prompt"
+        assert any(
+            message["role"] == "assistant" and "ok" in json.dumps(message["content"])
+            for message in messages
+        ), "native history lost the previous assistant response"

@@ -12,11 +12,12 @@ The **session cookie** is ours: HttpOnly, signed with our own secret, and the
 only credential the browser keeps. The identity token is exchanged for one and
 then discarded, so a token intercepted afterwards is already spent.
 
-**Keys are cached by ``kid`` and re-fetched on a miss.** That is what makes
+**The JWKS is cached briefly and re-fetched on a miss.** That is what makes
 rotation work without coordination: the gateway starts signing with a new key,
 the first token carrying an unknown ``kid`` triggers one fetch, and tokens
-already in flight keep verifying against the retiring key the gateway is still
-publishing.
+already in flight keep verifying while the retiring key remains published.
+Individual keys are not cached beyond the JWKS lifetime, so withdrawing one
+actually revokes it after the bounded cache expires.
 """
 
 from __future__ import annotations
@@ -52,7 +53,12 @@ AUDIENCE = "cloud-agent"
 #: differ: `httpx` announces itself in a shape CDNs accept, `urllib` announces
 #: `Python-urllib/3.x`, which they routinely refuse. Two clients in one service
 #: reaching one host and getting different answers is the bug this prevents.
-USER_AGENT = "freeinference-cloud-agent"
+USER_AGENT = "hybridinference-cloud-agent"
+
+#: Keep retired signing keys usable only for the gateway's published overlap.
+#: Passed explicitly to PyJWT so a dependency-default change cannot silently
+#: turn the intended bounded revocation window into an unbounded one.
+JWKS_CACHE_LIFESPAN_S = 5 * 60
 
 #: Our own session, and **hours rather than days on purpose**.
 #:
@@ -108,8 +114,10 @@ def _jwks_client() -> PyJWKClient:
     if not url:
         raise IdentityNotConfigured(f"{ENV_JWKS_URL} must be set to verify identity tokens")
     if _jwk_client is None or _jwk_client_url != url:
-        # PyJWKClient caches keys and re-fetches on an unknown kid, which is
-        # exactly the rotation behaviour wanted here.
+        # Cache the JWKS set for an explicit bounded lifetime, and re-fetch on
+        # an unknown kid. Do not enable PyJWT's separate per-key LRU: it has
+        # no expiry and would keep a withdrawn signing key trusted until this
+        # process restarted.
         #
         # **The User-Agent is not decoration.** PyJWKClient fetches with
         # `urllib`, which announces itself as `Python-urllib/3.x` — and a
@@ -123,7 +131,13 @@ def _jwks_client() -> PyJWKClient:
         # minted; the key to check it against could not be fetched. Nothing in
         # either service's logs named a CDN, because from here it was a 403 on
         # an internal call and from there it was a request that never arrived.
-        _jwk_client = PyJWKClient(url, cache_keys=True, headers={"User-Agent": USER_AGENT})
+        _jwk_client = PyJWKClient(
+            url,
+            cache_keys=False,
+            cache_jwk_set=True,
+            lifespan=JWKS_CACHE_LIFESPAN_S,
+            headers={"User-Agent": USER_AGENT},
+        )
         _jwk_client_url = url
     return _jwk_client
 

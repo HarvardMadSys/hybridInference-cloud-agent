@@ -1,11 +1,12 @@
-# FreeInference Cloud Agent
+# Cloud Agent
 
 Cloud coding agents that run in sandboxed containers on a pool of hosts, drive a
 user's repository, and publish the result as a pull request.
 
-## Powered by FreeInference
+## Powered by a HybridInference gateway
 
-Model calls go through the [FreeInference](https://freeinference.org) gateway,
+Model calls go through a [HybridInference](https://github.com/HarvardMadSys/hybridInference) gateway
+(FreeInference is the hosted deployment of one),
 and **HTTP is the only thing these two services share** — no database, no
 signing secret, no Python import. Three contracts, each written down in
 [`contracts/`](contracts/):
@@ -43,7 +44,7 @@ the service", not "fine".
                  └───────────┬─────────────┘                           │
                              │ claim / heartbeat / terminal            │
                  ┌───────────▼─────────────┐                  ┌────────┴────────┐
-                 │  cloud_agent_host       │                  │   FreeInference │
+                 │  cloud_agent_host       │                  │     Gateway     │
                  │  runner + broker        │                  │   gateway       │
                  └───────────┬─────────────┘                  └────────▲────────┘
                              │ spawns                                  │

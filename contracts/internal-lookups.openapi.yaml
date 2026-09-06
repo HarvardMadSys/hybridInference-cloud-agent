@@ -1,7 +1,7 @@
 openapi: 3.1.0
 
 info:
-  title: FreeInference gateway — internal lookups
+  title: HybridInference gateway — internal lookups
   version: "1.0.0"
   x-source:
     repo: HarvardMadSys/hybridInference
@@ -30,9 +30,9 @@ info:
     widens permission at exactly the moment nobody is watching.
 
 servers:
-  - url: https://freeinference.org
+  - url: https://gateway.example.org
     description: Production
-  - url: https://staging.freeinference.org
+  - url: https://staging.gateway.example.org
     description: Staging
 
 tags:
