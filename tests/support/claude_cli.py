@@ -45,6 +45,8 @@ class FakeAnthropicGateway:
         """Bind a loopback port and start serving in a daemon thread."""
         self.keys: list[str] = []
         self.requests: list[dict[str, Any]] = []
+        self.reply_text = "ok"
+        self.response_status = 200
         self._lock = threading.Lock()
         recorder = self
 
@@ -59,6 +61,25 @@ class FakeAnthropicGateway:
                 with recorder._lock:
                     recorder.keys.append(key.strip())
                     recorder.requests.append(request)
+                    message_id = f"msg_{len(recorder.requests)}"
+                    reply_text = recorder.reply_text
+                    status = recorder.response_status
+                if status != 200:
+                    failure = json.dumps(
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "authentication_error",
+                                "message": "local test injected inference failure",
+                            },
+                        }
+                    ).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(failure)))
+                    self.end_headers()
+                    self.wfile.write(failure)
+                    return
                 body = b"".join(
                     [
                         sse(
@@ -66,7 +87,7 @@ class FakeAnthropicGateway:
                             {
                                 "type": "message_start",
                                 "message": {
-                                    "id": "msg_1",
+                                    "id": message_id,
                                     "type": "message",
                                     "role": "assistant",
                                     "content": [],
@@ -90,7 +111,7 @@ class FakeAnthropicGateway:
                             {
                                 "type": "content_block_delta",
                                 "index": 0,
-                                "delta": {"type": "text_delta", "text": "ok"},
+                                "delta": {"type": "text_delta", "text": reply_text},
                             },
                         ),
                         sse("content_block_stop", {"type": "content_block_stop", "index": 0}),

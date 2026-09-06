@@ -167,17 +167,41 @@ def test_a_process_dying_mid_turn_settles_as_failed(tmp_path):
     assert turn.wait().status == "failed"
 
 
-def test_close_ends_the_residency(tmp_path):
+def test_close_ends_the_residency(tmp_path, monkeypatch):
     process = _LiveProcess()
     session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
     process.feed = _turn_lines(_RESULT)
     session.start_turn(TurnInput(prompt="p", model="m")).wait()
 
+    clock = iter([0.0, 3.0])
+    monkeypatch.setattr("cloud_agent_host.drivers.time.monotonic", lambda: next(clock))
     session.close()
 
     assert process.stdin_closed and process.killed
     with pytest.raises(DriverError, match="closed"):
         session.start_turn(TurnInput(prompt="again", model="m"))
+
+
+def test_settled_claude_close_allows_pending_native_history_to_flush(tmp_path, monkeypatch):
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    process.feed = _turn_lines(_ANSWER, _RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m")).wait()
+    flushed = False
+
+    def flush(_):
+        nonlocal flushed
+        assert process.stdin_closed
+        assert not process.killed
+        flushed = True
+
+    monkeypatch.setattr(process, "poll", lambda: 0 if flushed else None)
+    monkeypatch.setattr("cloud_agent_host.drivers.time.sleep", flush)
+    session.close()
+    session.close()
+
+    assert flushed
+    assert not process.killed
 
 
 def test_launch_live_without_the_live_spawn_refuses(tmp_path):

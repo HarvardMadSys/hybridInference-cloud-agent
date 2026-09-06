@@ -1501,10 +1501,21 @@ class ClaudeCodeLiveSession(HarnessSession):
         a zombie until the runner exits, and a long-lived runner accumulates
         one per closed session.
         """
+        if self._closed:
+            return
         self._closed = True
         if self._process is not None:
             self._process.close_stdin()
-            self._process.kill()
+            # A result event can precede Claude's asynchronous JSONL flush.
+            # Killing immediately after EOF loses the last assistant message;
+            # native resume then substitutes "No response requested.". Allow
+            # a settled process to flush and exit, with a bounded kill backstop.
+            if self._live_turn is not None and self._live_turn._result is not None:
+                deadline = time.monotonic() + 2.0
+                while self._process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            if self._process.poll() is None:
+                self._process.kill()
             self._process.wait()
 
 
