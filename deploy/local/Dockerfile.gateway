@@ -6,6 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+ARG PIP_DEFAULT_TIMEOUT=120
 RUN pip install --no-cache-dir \
       "cryptography>=48.0.1" \
       "fastapi>=0.110.0" \

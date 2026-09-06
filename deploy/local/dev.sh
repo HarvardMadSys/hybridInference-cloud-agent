@@ -348,13 +348,28 @@ wait_ready() {
 
 command=${1:-up}
 case "$command" in
+  build)
+    ensure_env
+    shift
+    compose build "$@"
+    ;;
   up)
     ensure_env
     require_local_database_credentials
     validate_local_network_ownership
-    compose build sandbox-image migrate
+    shift
+    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --no-build ]; }; then
+      echo "Usage: $0 up [--no-build]" >&2
+      exit 1
+    fi
+    build_flag=--build
+    if [ "${1:-}" = --no-build ]; then
+      build_flag=--no-build
+    else
+      compose build sandbox-image migrate
+    fi
     start_database_and_probe
-    compose up --detach --build --scale "runner=$(local_runner_replicas)"
+    compose up --detach "$build_flag" --scale "runner=$(local_runner_replicas)"
     wait_ready
     echo "Local Cloud Agent is ready: $(local_base_url)"
     echo "Run '$0 smoke' for an automated login/config/agent lifecycle check."
@@ -393,7 +408,7 @@ case "$command" in
     echo "Local Compose configuration is valid."
     ;;
   *)
-    echo "Usage: $0 {up|start|stop|status|logs [service]|smoke|config}" >&2
+    echo "Usage: $0 {build [compose build options/services]|up|start|stop|status|logs [service]|smoke|config}" >&2
     exit 2
     ;;
 esac

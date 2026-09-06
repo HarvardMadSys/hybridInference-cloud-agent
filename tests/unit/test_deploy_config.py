@@ -154,8 +154,10 @@ def test_local_dev_refuses_to_replace_lost_credentials_for_an_existing_database(
     assert "will not delete the volume or invent a new password" in result.stderr
 
 
+@pytest.mark.parametrize("prebuilt", [False, True])
 def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
     tmp_path: Path,
+    prebuilt: bool,
 ) -> None:
     script = tmp_path / "repo/deploy/local/dev.sh"
     script.parent.mkdir(parents=True)
@@ -192,7 +194,7 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
     compose.chmod(0o755)
 
     result = subprocess.run(
-        ["sh", str(script), "up"],
+        ["sh", str(script), "up", *(["--no-build"] if prebuilt else [])],
         env={
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -205,7 +207,7 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
     calls = compose_log.read_text()
 
     assert result.returncode != 0
-    assert " build sandbox-image migrate" in calls
+    assert (" build sandbox-image migrate" in calls) is not prebuilt
     assert " up --detach postgres" in calls
     assert " run --rm --no-deps migrate python -c" in calls
     assert " up --detach --build" not in calls

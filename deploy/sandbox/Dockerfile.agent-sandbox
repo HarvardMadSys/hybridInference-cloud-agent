@@ -27,7 +27,9 @@
 # untrusted runtime image.
 FROM debian:bookworm-slim AS guest-observer-build
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
         clang \
         gcc \
         libc6-dev \
@@ -119,7 +121,9 @@ ARG KILO_VERSIONS=${KILO_VERSION}${KILO_EXTRA_VERSIONS:+,${KILO_EXTRA_VERSIONS}}
 # Tools an agent legitimately needs to understand and change a repository.
 # Deliberately not installed: anything that would let it reach the host
 # (docker CLI) or persist beyond the job.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
         curl \
@@ -158,6 +162,7 @@ RUN chmod 0755 /tmp/install-runtimes.sh \
 # The exact-version Python SDK supplies that native transcript mutation. Keep
 # it in a dedicated immutable venv so the runtime helper never depends on a
 # package from the repository or the host.
+ARG PIP_DEFAULT_TIMEOUT=120
 RUN python3 -m venv /opt/claude-agent-sdk \
     && /opt/claude-agent-sdk/bin/pip install --no-cache-dir \
         "claude-agent-sdk==0.2.148"

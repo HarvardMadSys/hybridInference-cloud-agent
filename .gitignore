@@ -40,3 +40,5 @@ next-env.d.ts
 
 # Written by deploy.sh on the deployment host: which commit is actually running.
 .deployed-sha
+# Local inference test credential (never commit).
+/api_key

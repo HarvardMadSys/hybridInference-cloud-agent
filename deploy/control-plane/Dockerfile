@@ -16,7 +16,9 @@ FROM python:3.12-slim AS base
 
 # Build-time only for asyncpg/cryptography wheels that may need compiling on
 # architectures without one, plus git for the publish path's plumbing.
-RUN apt-get update \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
     && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
@@ -32,6 +34,7 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY cloud_agent/__init__.py cloud_agent/__init__.py
 COPY cloud_agent_host/__init__.py cloud_agent_host/__init__.py
+ARG PIP_DEFAULT_TIMEOUT=120
 RUN pip install --no-cache-dir .
 
 # Both packages. See the header: `patch_gate` crosses the boundary.

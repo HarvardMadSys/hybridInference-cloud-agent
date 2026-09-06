@@ -64,6 +64,40 @@ marker into `local-host-state`; local runners and the control plane use that
 same marker, so local claims exercise the production exact-generation fence
 rather than bypassing it.
 
+### Building through a local proxy
+
+On Docker Desktop, a proxy listening on the host (for example Clash on port
+7890) is reachable from builds through `host.docker.internal`. Prebuild with
+Docker's standard proxy arguments, then start the stack using those cached
+images:
+
+```bash
+./deploy/local/dev.sh build \
+  --build-arg HTTP_PROXY=http://host.docker.internal:7890 \
+  --build-arg HTTPS_PROXY=http://host.docker.internal:7890 \
+  --build-arg NO_PROXY=localhost,127.0.0.1
+./deploy/local/dev.sh up --no-build
+```
+
+Use the same project, image and port environment overrides for both commands
+when running an isolated second stack. `up --no-build` starts the exact images
+you prebuilt, without rebuilding with the default mirror arguments. Re-run
+`build` after code changes before using this option. The proxy must already accept the
+Docker Desktop connection. These arguments apply to build downloads; no proxy
+environment is added to the running agent containers. Python dependency
+downloads allow 120 seconds of inactivity by default; the corresponding
+`PIP_DEFAULT_TIMEOUT` and runner `UV_HTTP_TIMEOUT` build arguments can be
+overridden for slower links. Certificate and package-signature checks remain
+enabled.
+
+If Debian's default mirror returns intermittent errors, select another Debian
+mirror at build time, for example `--build-arg
+DEBIAN_MIRROR=http://mirrors.aliyun.com`. The default remains
+`http://deb.debian.org`; the override changes both the archive and security
+mirror while preserving the distribution, components and signed keyring.
+Index downloads retry transient failures and fail the build if an index is
+still unavailable, rather than proceeding with an incomplete package list.
+
 `smoke` logs in through PKCE, runs a first turn and native-session follow-up
 through **each of those five real CLI binaries**, waits for every chat group to
 stop at the idle deadline, and proves each third turn restores the same

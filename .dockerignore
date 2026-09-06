@@ -29,3 +29,4 @@ workspaces
 .idea
 .vscode
 *.swp
+api_key
