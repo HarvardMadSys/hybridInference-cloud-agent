@@ -28,8 +28,11 @@
 FROM debian:bookworm-slim AS guest-observer-build
 
 ARG DEBIAN_MIRROR=http://deb.debian.org
-RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
-    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         clang \
         gcc \
         libc6-dev \
@@ -122,8 +125,11 @@ ARG KILO_VERSIONS=${KILO_VERSION}${KILO_EXTRA_VERSIONS:+,${KILO_EXTRA_VERSIONS}}
 # Deliberately not installed: anything that would let it reach the host
 # (docker CLI) or persist beyond the job.
 ARG DEBIAN_MIRROR=http://deb.debian.org
-RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
-    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         git \
         ca-certificates \
         curl \
@@ -149,13 +155,13 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.
 # sandbox is an agent that can step outside the version its attempt is stamped
 # with.
 COPY deploy/sandbox/install-runtimes.sh /tmp/install-runtimes.sh
-RUN chmod 0755 /tmp/install-runtimes.sh \
+RUN --mount=type=cache,id=cloud-agent-sandbox-npm,target=/root/.npm,sharing=locked \
+    chmod 0755 /tmp/install-runtimes.sh \
     && /tmp/install-runtimes.sh claude-code @anthropic-ai/claude-code claude "${CLAUDE_CODE_VERSIONS}" \
     && /tmp/install-runtimes.sh codex @openai/codex codex "${CODEX_VERSIONS}" \
     && /tmp/install-runtimes.sh pi @mariozechner/pi-coding-agent pi "${PI_VERSIONS}" \
     && /tmp/install-runtimes.sh opencode opencode-ai opencode "${OPENCODE_VERSIONS}" \
     && /tmp/install-runtimes.sh kilo @kilocode/cli kilo "${KILO_VERSIONS}" \
-    && npm cache clean --force \
     && rm /tmp/install-runtimes.sh
 
 # Claude's CLI has a live stdin transport but no prompt-free public fork RPC.

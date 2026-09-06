@@ -97,6 +97,9 @@ DEBIAN_MIRROR=http://mirrors.aliyun.com`. The default remains
 mirror while preserving the distribution, components and signed keyring.
 Index downloads retry transient failures and fail the build if an index is
 still unavailable, rather than proceeding with an incomplete package list.
+The sandbox also retries package downloads and keeps Debian/npm downloads in
+BuildKit caches, so retrying a failed build can reuse completed downloads.
+These build caches are not mounted into running agent containers.
 
 `smoke` logs in through PKCE, runs a first turn and native-session follow-up
 through **each of those five real CLI binaries**, waits for every chat group to
