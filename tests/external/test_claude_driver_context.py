@@ -131,8 +131,10 @@ def test_driver_flushes_last_reply_before_immediate_resume_and_failed_turn_retry
     _assert_history(gateway.requests[-1], expected)
 
     gateway.response_status = 401
-    _, events = _turn(session, "Retry continuity probe.")
+    failed, events = _turn(session, "Retry continuity probe.")
     assert any(event.event_type == ERROR for event in events)
+    assert failed.status == "failed"
+    assert failed.native_turn_settled is True
     session.close()
     gateway.response_status = 200
     session = open_session(session_id)

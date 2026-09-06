@@ -1522,6 +1522,7 @@ def create_app(
                             "exit_code": result.exit_code,
                             "usage": result.usage,
                             "raw": result.raw,
+                            "native_turn_settled": result.native_turn_settled,
                             "stderr": turn.stderr_text()[-4000:],
                             "resources": resources,
                         },

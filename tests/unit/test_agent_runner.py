@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -317,6 +318,88 @@ def test_historical_one_to_one_sandbox_fails_closed():
 
     assert result == 2
     assert finished == [("failed", "the control plane returned a non-shared sandbox mapping")]
+
+
+@pytest.mark.parametrize(
+    ("code", "frame", "preserved"),
+    [
+        (1, {"kind": "result", "status": "failed", "native_turn_settled": True}, True),
+        (1, {"kind": "result", "status": "failed"}, False),
+        (1, {"kind": "result", "status": "failed", "native_turn_settled": False}, False),
+        (1, {"kind": "error", "status": "failed", "native_turn_settled": True}, False),
+        (124, {"kind": "result", "status": "failed", "native_turn_settled": True}, False),
+        (130, {"kind": "result", "status": "cancelled", "native_turn_settled": True}, False),
+    ],
+)
+def test_native_failure_preserves_only_a_verified_turn_boundary(
+    monkeypatch, code, frame, preserved
+):
+    backend = ContainerBackend(image="img")
+    monkeypatch.setattr(backend, "version_stamp", _stamp)
+    manager = Mock()
+    retained = Mock()
+    retained.sandbox_metadata.return_value = {}
+    retained.has_binary.return_value = True
+    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args: retained)
+    monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
+    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
+    control = Mock()
+    control.reserve_chat_sandbox.side_effect = lambda seed: {
+        **seed,
+        "thread_id": _JOB.thread_id,
+        "generation": 1,
+        "activation_generation": 3,
+        "last_settled_job_id": "ajob_previous",
+        "native_session_id": "native-existing",
+        "resident_slot_id": 0,
+    }
+    control.mark_chat_sandbox_running.return_value = {}
+    supervisor = Mock()
+    supervisor.acquire_shared.return_value = {
+        "token": "lease",
+        "container_id": "same-container",
+        "activation_generation": 3,
+        "context_status": "live",
+        "resident_state": "live",
+    }
+    supervisor.ensure_shared_resident.return_value = {
+        "context_status": "live",
+        "process_generation": 1,
+    }
+    supervisor.settle_shared.return_value = {"native_session_id": "native-existing"}
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(
+        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (code, "API error", [], frame)
+    )
+    finish = Mock()
+
+    result = runner_mod._run_shared_live_attempt(
+        runtime=ClaudeCodeRuntime(),
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(),
+        backend=backend,
+        host="host-a",
+        gateway_base_url="http://gateway",
+        agent_timeout_s=30,
+        finish_attempt=finish,
+    )
+
+    assert result == (0 if code == 130 else 1)
+    assert finish.call_args.args[0] == ("cancelled" if code == 130 else "failed")
+    if preserved:
+        supervisor.settle_shared.assert_called_once()
+        control.settle_chat_sandbox.assert_called_once()
+        assert (
+            control.settle_chat_sandbox.call_args.kwargs["native_session_id"] == "native-existing"
+        )
+        supervisor.abandon_shared.assert_not_called()
+        control.abandon_chat_sandbox.assert_not_called()
+    else:
+        supervisor.settle_shared.assert_not_called()
+        control.settle_chat_sandbox.assert_not_called()
+        assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is True
 
 
 class _Stream:

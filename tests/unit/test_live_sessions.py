@@ -15,6 +15,7 @@ import pytest
 
 from cloud_agent_host.drivers import (
     TURN_COMPLETED,
+    TURN_FAILED,
     TURN_STARTED,
     ClaudeCodeDriver,
     CodexDriver,
@@ -165,6 +166,33 @@ def test_a_process_dying_mid_turn_settles_as_failed(tmp_path):
     list(turn.iter_events())
 
     assert turn.wait().status == "failed"
+    assert turn.wait().native_turn_settled is False
+
+
+@pytest.mark.parametrize("consume_events", [False, True])
+def test_claude_error_result_fails_the_turn_without_poisoning_next_turn(tmp_path, consume_events):
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(context)
+    process.feed = _turn_lines(
+        _ANSWER,
+        {"type": "result", "subtype": "success", "is_error": True, "result": "API Error: 403"},
+    )
+    failed = session.start_turn(TurnInput(prompt="hi", model="deepseek-v4-flash"))
+    if consume_events:
+        kinds = [event.event_type for event in failed.iter_events()]
+        assert "error" in kinds
+        assert kinds[-1] == TURN_FAILED
+        assert TURN_COMPLETED not in kinds
+    assert failed.wait().status == "failed"
+    assert failed.wait().exit_code != 0
+    assert failed.wait().native_turn_settled is True
+    assert failed.wait().final_output == ""
+
+    process.feed = _turn_lines(_ANSWER, _RESULT)
+    retried = session.start_turn(TurnInput(prompt="hi", model="deepseek-v4-flash"))
+    assert retried.wait().status == "completed"
+    assert len(spawned) == 1 and not process.killed
 
 
 def test_close_ends_the_residency(tmp_path, monkeypatch):

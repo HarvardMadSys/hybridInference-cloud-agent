@@ -640,7 +640,12 @@ async def test_activation_boundary_failure_is_not_reported_as_success():
 
         def wait(self):
             return SimpleNamespace(
-                status="completed", final_output="done", exit_code=0, usage=None, raw=None
+                status="completed",
+                final_output="done",
+                exit_code=0,
+                usage=None,
+                raw=None,
+                native_turn_settled=False,
             )
 
         def stderr_text(self):
@@ -675,7 +680,8 @@ async def test_activation_boundary_failure_is_not_reported_as_success():
 
 
 @pytest.mark.asyncio
-async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks():
+@pytest.mark.parametrize("failed", [False, True])
+async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks(failed):
     marks: dict[str, float] = {}
 
     class Turn:
@@ -698,11 +704,12 @@ async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks(
         @staticmethod
         def wait():
             return SimpleNamespace(
-                status="completed",
-                final_output="done",
-                exit_code=0,
+                status="failed" if failed else "completed",
+                final_output="" if failed else "done",
+                exit_code=1 if failed else 0,
                 usage=None,
                 raw=None,
+                native_turn_settled=failed,
             )
 
         @staticmethod
@@ -764,6 +771,8 @@ async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks(
 
     frames = [json.loads(line) for line in response.text.splitlines() if line]
     result = next(frame for frame in frames if frame["kind"] == "result")
+    assert result["native_turn_settled"] is failed
+    assert result["status"] == ("failed" if failed else "completed")
     resources = result["resources"]
     assert resources["sampler_version"] == "shared-member-v1"
     assert resources["coverage"] == 0.0

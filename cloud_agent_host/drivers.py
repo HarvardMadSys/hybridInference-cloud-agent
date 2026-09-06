@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.runtimes import (
@@ -126,6 +126,9 @@ class TurnResult:
     exit_code: int
     usage: dict[str, Any] | None = None
     raw: dict[str, Any] | None = None
+    # The CLI returned a native turn boundary, even if the request failed.
+    # False for unproven process/transport failures and unsupported dialects.
+    native_turn_settled: bool = False
 
     def __post_init__(self) -> None:
         if self.status == "completed" and not self.final_output.strip():
@@ -1278,6 +1281,16 @@ class ClaudeCodeLiveTurn(HarnessTurn):
     def __init__(self, session: ClaudeCodeLiveSession, process: SandboxProcess) -> None:
         super().__init__(session, process)
         self._saw_result = False
+        self._error_result = False
+
+    def event_for_line(self, line: str) -> HarnessEvent:
+        """Preserve terminal failure independently of the resident process exit."""
+        event = super().event_for_line(line)
+        # A live process survives API/authentication failures too. Its result
+        # boundary is not proof of success; honor the dialect's terminal error.
+        if self._runtime.turn_settled(line) and event.event_type == ERROR:
+            self._error_result = True
+        return event
 
     def raw_lines(self) -> Iterator[str]:
         """This turn's slice of the shared stream, up to its result line."""
@@ -1307,8 +1320,10 @@ class ClaudeCodeLiveTurn(HarnessTurn):
                     self.event_for_line(line)
             # The process is deliberately still alive after a result. A stream
             # ending without one is a mid-turn death even if its code was zero.
-            exit_code = 0 if self._saw_result else self._process.wait() or 1
-            self._result = self._build_result(exit_code)
+            exit_code = int(self._error_result) if self._saw_result else self._process.wait() or 1
+            self._result = replace(
+                self._build_result(exit_code), native_turn_settled=self._saw_result
+            )
             self._session.turn_finished()
         return self._result
 
