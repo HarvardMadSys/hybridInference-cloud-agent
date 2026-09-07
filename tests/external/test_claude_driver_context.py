@@ -12,7 +12,7 @@ import subprocess
 import pytest
 
 import cloud_agent_host.drivers as drivers
-from cloud_agent_host.runtimes import CLAUDE_CONTINUATION_REMINDER, ERROR, ClaudeCodeRuntime
+from cloud_agent_host.runtimes import ERROR, ClaudeCodeRuntime
 from cloud_agent_host.sandbox import ProcessBackend, SandboxSpec
 from tests.external.test_credential_rotation import _pinned_cli_version
 from tests.support.claude_cli import FakeAnthropicGateway
@@ -84,8 +84,6 @@ def _turn(session, prompt):
 
 def _assert_history(request, expected):
     assert request["model"] == MODEL
-    # Inspect what the pinned CLI actually sent, including after --resume.
-    assert request["messages"][-1]["content"][-1]["text"] == CLAUDE_CONTINUATION_REMINDER
     messages = request["messages"]
     for role, text in expected:
         assert any(

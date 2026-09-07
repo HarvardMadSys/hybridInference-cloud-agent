@@ -20,7 +20,7 @@ def test_prompt_requires_recalling_earlier_content(case, expected):
         rf"(?<![a-zA-Z0-9_]){re.escape(expected)}(?![a-zA-Z0-9_])",
         json.dumps(body["messages"][-1], ensure_ascii=False),
     )
-    assert len(body["messages"][-1]["content"]) == 2
+    assert len(body["messages"][-1]["content"]) == 1
 
 
 @pytest.mark.parametrize(

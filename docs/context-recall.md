@@ -6,19 +6,22 @@ request, while the model claimed there had been no previous conversation.
 A small synthetic reproduction showed that file-memory instructions could
 trigger this confusion. Removing auto memory did not fix the full CLI case.
 
-Claude follow-ups now carry a separate `<cloud-agent-context>` text block that
-identifies a native continuation and asks the model to ground recall in the
-actual user messages. The user's original text remains its own unchanged block.
-Fresh sessions do not receive a continuation marker. Live follow-ups, retries,
-and the first turn after native restore or Fork do. This does not replay history,
-replace the CLI system prompt, disable auto memory, or recover a lost sandbox.
-Compacted or genuinely absent details are not reconstructed by this mechanism.
+Native CLIs own the conversation history. Cloud Agent passes each user message
+unchanged and resumes the same native session; it does not append a reminder to
+persuade the model that history exists. The earlier continuation-prompt experiment
+has been withdrawn. Its passing behavior samples are not acceptance evidence for
+the unmodified-input implementation.
+
+The persistence fixes remain: allow a settled CLI to flush its native history,
+report native API errors as failures, and retain a verifiably settled failed turn
+for retry. Those fixes do not establish that the downstream model will correctly
+answer a recall question. The unprompted Flash recall failure remains unresolved.
 
 ## Verification before accepting a deployment
 
 1. Require the existing CI Gate. Its pinned native CLI regression checks actual
-   outbound requests, not just launch flags: user/assistant history and the
-   continuation marker must survive live follow-ups, immediate close/restore,
+   outbound requests, not just launch flags: user/assistant history must survive
+   live follow-ups, immediate close/restore,
    and a failed API call followed by a retry. This uses a loopback model fixture
    without external credentials or inference charges.
 2. Keep the deployment's exact host/API SHA, reverse broker probe and fresh
@@ -55,3 +58,37 @@ It is not automatically run by the deploy workflows. Run it again after changes
 to the gateway's model routes, model deployment, or CLI pin. Finite samples do
 not guarantee that a model can never make another incorrect claim; they test
 this reported recall failure separately from native history persistence.
+
+## Current investigation evidence (2026-09-07)
+
+A fresh synthetic reproduction bypassed Cloud Agent and the native CLI entirely:
+
+- System: `You are a coding assistant. You can use persistent files for memories between conversations.`
+- User: `hi`
+- Assistant: `Hello! How can I help you today?`
+- User: `我刚才让你做什么了`
+
+Using only `deepseek-v4-flash`, twelve requests compared Anthropic default,
+adaptive and enabled thinking with OpenAI default, enabled and disabled thinking
+(two samples per configuration). Eleven replies claimed missing history; only
+one OpenAI enabled sample recalled `hi`. All twelve responses were HTTP 200 and
+completed normally. This shows that bypassing Anthropic translation or explicitly
+requesting thinking is not a reliable fix. It does not identify the selected
+upstream provider or prove what its model server received.
+
+Examples to correlate in the staging gateway logs:
+
+- Anthropic adaptive, failed recall: `d419d6b244519572c8481520`.
+- OpenAI enabled, successful recall: `3ddbd2035605b4fb3d3a3805`.
+- OpenAI enabled, failed recall: `56d2d878c25d78bdbaf52ffb`.
+
+A separate local check exercised the gateway source snapshot's normalizer,
+translator and adapter through an actual loopback HTTP receiver. All twelve
+combinations of DeepSeek/SGLang/Ollama profile, streaming mode and inline-system
+shape preserved the synthetic conversation. It did not exercise deployed dynamic
+routing, the full router or the upstream model server's chat template.
+
+The gateway snapshot also strips Anthropic `thinking`, and drops effort values
+when the model config does not declare their domain. These are compatibility
+leads, not established causes of the recall failure. No gateway workaround or
+model-route change has been shipped as part of this Cloud Agent branch.

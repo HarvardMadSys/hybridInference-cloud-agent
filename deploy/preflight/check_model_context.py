@@ -34,7 +34,7 @@ DENIAL = re.compile(
 
 
 def recall_payload(case: str) -> tuple[dict, str]:
-    """Use the same continuation wire builder as the production Claude driver."""
+    """Use the same unmodified user-message wire builder as the production Claude driver."""
     original = "hi" if case != "task" else "请把待实现的函数命名为 comet_731;现在只确认名字。"
     answer = "Hello! How can I help you today?" if case != "task" else "收到,函数名为 comet_731。"
     messages = [
@@ -43,16 +43,14 @@ def recall_payload(case: str) -> tuple[dict, str]:
     ]
     if case == "repeat":
         messages += [
-            json.loads(ClaudeCodeRuntime.user_message_line(QUESTION, continuing=True))["message"],
+            json.loads(ClaudeCodeRuntime.user_message_line(QUESTION))["message"],
             {"role": "assistant", "content": "你之前只说了 hi,还没有布置具体任务。"},
         ]
     # After a repeated question, recalling that question itself is a valid
     # answer to "what did I just ask?". Ask explicitly for the first message
     # when checking that the greeting survived additional conversation turns.
     question = "请原样引用我在这个对话中的第一条用户消息。" if case == "repeat" else QUESTION
-    messages.append(
-        json.loads(ClaudeCodeRuntime.user_message_line(question, continuing=True))["message"]
-    )
+    messages.append(json.loads(ClaudeCodeRuntime.user_message_line(question))["message"])
     return {
         "model": MODEL,
         "system": SYSTEM,
