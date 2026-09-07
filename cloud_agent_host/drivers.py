@@ -276,6 +276,7 @@ class HarnessSession:
         self._driver = driver
         self._context = context
         self._closed = False
+        self.retire_after_turn = False
 
     @property
     def runtime(self) -> AgentRuntime:
@@ -1282,10 +1283,21 @@ class ClaudeCodeLiveTurn(HarnessTurn):
         super().__init__(session, process)
         self._saw_result = False
         self._error_result = False
+        self._saw_api_retry = False
 
     def event_for_line(self, line: str) -> HarnessEvent:
         """Preserve terminal failure independently of the resident process exit."""
         event = super().event_for_line(line)
+        # Inspect the wire record: the runtime deduplicates unknown system
+        # subtypes, so normalized events can hide a later retry notification.
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            record = None
+        if isinstance(record, dict) and (
+            record.get("type") == "system" and record.get("subtype") == "api_retry"
+        ):
+            self._saw_api_retry = True
         # A live process survives API/authentication failures too. Its result
         # boundary is not proof of success; honor the dialect's terminal error.
         if self._runtime.turn_settled(line) and event.event_type == ERROR:
@@ -1412,6 +1424,8 @@ class ClaudeCodeLiveSession(HarnessSession):
             raise DriverError("session is closed")
         if self._live_turn is not None and self._live_turn._result is None:
             raise DriverError("a turn is already running on this session")
+        if self.retire_after_turn:
+            raise DriverError("API retry requires a native session restart before the next turn")
         if self._process is None:
             self.ensure_started(
                 model=turn_input.model,
@@ -1482,8 +1496,17 @@ class ClaudeCodeLiveSession(HarnessSession):
             )
 
     def turn_finished(self) -> None:
-        """A settled turn leaves a live session ready for the next one."""
-        return
+        """Flush retry-affected native history before another user arrives."""
+        turn = self._live_turn
+        if turn is not None and turn._saw_result and turn._saw_api_retry:
+            # Claude 2.1.220 can append delayed api_error records after its
+            # successful answer, then parent the next user to that error.
+            # Resume follows that branch and loses the successful answer.
+            # EOF at the result boundary prevents the stale parent update.
+            # Request EOF after broker settlement has recorded the native id.
+            # The supervisor then restores that id on the next turn; ordinary
+            # turns keep their resident process.
+            self.retire_after_turn = True
 
     def interrupt_turn(self) -> None:
         """Interrupt only the active query over the pinned control protocol."""

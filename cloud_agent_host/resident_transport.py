@@ -136,6 +136,11 @@ class ResidentTransport:
         """Whether the underlying resident process still exists."""
         return bool(getattr(self.session, "process_alive", lambda: False)())
 
+    @property
+    def retire_after_turn(self) -> bool:
+        """Whether native history requires EOF before accepting another user."""
+        return self.session.retire_after_turn
+
     def stderr_text(self) -> str:
         """Return a bounded diagnostic tail without exposing launch secrets."""
         diagnostic = getattr(self.session, "stderr_text", lambda: "")()

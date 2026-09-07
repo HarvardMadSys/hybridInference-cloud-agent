@@ -17,12 +17,27 @@ report native API errors as failures, and retain a verifiably settled failed tur
 for retry. Those fixes do not establish that the downstream model will correctly
 answer a recall question. The unprompted Flash recall failure remains unresolved.
 
+A second, independent bug was reproduced with the pinned Claude 2.1.220 CLI
+against a loopback fixture, without any model server. After a retryable API error
+and a successful internal retry, a delayed native `system/api_error` record can
+become the next user's parent, bypassing the successful assistant reply. Live
+requests still contain that reply, but later native resume drops it.
+
+The driver detects the CLI's wire `system/api_retry` event, completes the current
+turn, and requests graceful process retirement after broker settlement saves its
+native locator. The next turn resumes the same native session and container.
+Uninterrupted successful turns continue using the live process. No conversation
+replay, JSONL rewriting or continuity prompt is added. Previously damaged parent
+chains are not retroactively repaired by this change.
+
 ## Verification before accepting a deployment
 
 1. Require the existing CI Gate. Its pinned native CLI regression checks actual
    outbound requests, not just launch flags: user/assistant history must survive
    live follow-ups, immediate close/restore,
-   and a failed API call followed by a retry. This uses a loopback model fixture
+   a failed API call followed by a retry, and a successful internal retry on
+   either the first or a later turn followed by multiple native restores.
+   This uses a loopback model fixture
    without external credentials or inference charges.
 2. Keep the deployment's exact host/API SHA, reverse broker probe and fresh
    heartbeat checks. A successful model call is not evidence that the intended

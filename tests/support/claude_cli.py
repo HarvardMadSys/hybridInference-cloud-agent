@@ -22,6 +22,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,7 @@ class FakeAnthropicGateway:
         self.requests: list[dict[str, Any]] = []
         self.reply_text = "ok"
         self.response_status = 200
+        self.response_statuses: deque[int] = deque()
         self._lock = threading.Lock()
         recorder = self
 
@@ -63,7 +65,11 @@ class FakeAnthropicGateway:
                     recorder.requests.append(request)
                     message_id = f"msg_{len(recorder.requests)}"
                     reply_text = recorder.reply_text
-                    status = recorder.response_status
+                    status = (
+                        recorder.response_statuses.popleft()
+                        if recorder.response_statuses
+                        else recorder.response_status
+                    )
                 if status != 200:
                     failure = json.dumps(
                         {

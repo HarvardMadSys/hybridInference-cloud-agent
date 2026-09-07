@@ -155,6 +155,8 @@ class _Turn:
 
 
 class _Transport:
+    retire_after_turn = False
+
     def __init__(self, launch: ResidentLaunch) -> None:
         self.launch = launch
         self.native_session_id = launch.native_session_id or "native-child"
@@ -1129,6 +1131,60 @@ def test_process_fixed_config_restart_reports_restored_instead_of_hot():
 
     assert restarted.process_generation == 2
     assert restarted.context_status == "restored"
+
+
+def test_retry_retirement_settles_native_locator_then_restores_same_session():
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    first = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source", first.token, _launch("athr_source", native_session_id=None, slot=0)
+    )
+    transport = factory.transports[-1]
+    transport.retire_after_turn = True
+    settled = supervisor.settle(
+        "athr_source", first.token, job_id="ajob_first", context_status="new"
+    )
+    assert not transport.alive
+    assert settled.native_session_id == "native-child"
+    assert settled.resident_state == "restarting"
+    assert settled.last_settled_job_id == "ajob_first"
+    second = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=[
+            replace(
+                _members()[0],
+                native_session_id=settled.native_session_id,
+                last_settled_job_id=settled.last_settled_job_id,
+                context_status=settled.context_status,
+            ),
+            _members()[1],
+        ],
+    )
+    assert second.context_status == "restored"
+    restored = supervisor.ensure_resident(
+        "athr_source",
+        second.token,
+        replace(
+            _launch("athr_source", native_session_id=settled.native_session_id, slot=0),
+            residency_generation=2,
+        ),
+    )
+    assert restored.native_session_id == "native-child"
+    assert restored.process_generation == 2
+    assert restored.context_status == "restored"
 
 
 def test_unused_mcp_token_does_not_change_live_process_compatibility():

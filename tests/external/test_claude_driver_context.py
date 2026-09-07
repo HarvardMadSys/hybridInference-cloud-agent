@@ -100,6 +100,40 @@ def _assert_history(request, expected):
         ), f"native resume lost {role} message: {text!r}"
 
 
+@pytest.mark.parametrize("retry_turn", [0, 1])
+def test_successful_internal_api_retry_preserves_native_parent_chain(native_driver, retry_turn):
+    gateway, open_session, _ = native_driver
+    session = open_session()
+    session_id = None
+    expected = []
+    retirement_requested = False
+    for index, prompt in enumerate(["hi", "我刚才让你做什么了", "请原样引用第一条消息。"]):
+        if index == retry_turn:
+            gateway.response_statuses.extend([500, 200])
+        gateway.reply_text = f"Independent reply {index}, which must survive native resume."
+        result, _ = _turn(session, prompt)
+        assert result.status == "completed"
+        assert result.native_turn_settled
+        session_id = session_id or session.runtime.session_id
+        assert session.runtime.session_id == session_id
+        _assert_history(gateway.requests[-1], expected)
+        expected.extend([("user", prompt), ("assistant", result.final_output)])
+        if index == retry_turn:
+            retirement_requested = session.retire_after_turn
+        # Mirror broker settlement: save the locator, then EOF the flagged
+        # process and follow the normal native restoration path.
+        if session.retire_after_turn:
+            session.close()
+            session = open_session(session_id)
+    session.close()
+    session = open_session(session_id)
+    restored, _ = _turn(session, "Check the whole conversation after another restart.")
+    assert restored.status == "completed"
+    assert session.runtime.session_id == session_id
+    _assert_history(gateway.requests[-1], expected)
+    assert retirement_requested, "a recovered API retry must flush before accepting another user"
+
+
 @pytest.mark.parametrize("original", ["hi", "Remember harbor-lantern-9631."])
 def test_driver_flushes_last_reply_before_immediate_resume_and_failed_turn_retry(
     native_driver, original

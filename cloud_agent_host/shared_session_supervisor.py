@@ -865,7 +865,15 @@ class SharedChatSessionSupervisor:
             member.native_session_id = settled_session_id
             member.last_settled_job_id = job_id
             member.context_status = context_status
-            member.resident_state = "live"
+            # Preserve the observed native locator before gracefully retiring
+            # a retry-affected CLI. Unexpected process death still fails the
+            # live-transport check above, and no subsequent turn can enter
+            # until EOF has flushed the native history.
+            if member.transport.retire_after_turn:
+                member.transport.close()
+                member.resident_state = "restarting"
+            else:
+                member.resident_state = "live"
             member.lease_token = None
             member.lease_owner = None
             self._arm_idle_if_quiescent(group)
