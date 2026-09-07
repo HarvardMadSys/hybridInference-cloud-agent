@@ -1074,10 +1074,26 @@ class PiRuntime(GenericRuntime):
         if kind == "message_end":
             return self._from_message_end(event, line)
         if kind == "agent_end":
+            failure = self.agent_error(event)
+            if failure is not None:
+                return NormalizedEvent(ERROR, {"text": failure})
             return NormalizedEvent(LIFECYCLE, {"phase": "result"})
         if kind in self._SILENT_KINDS:
             return None
         return self._raw(line, f"unknown type {kind!r}")
+
+    @staticmethod
+    def agent_error(event: dict[str, Any]) -> str | None:
+        """Read the final assistant outcome from Pi's native agent-end event."""
+        messages = event.get("messages")
+        if not isinstance(messages, list):
+            return None
+        for message in reversed(messages):
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                if message.get("stopReason") in {"error", "aborted"}:
+                    return _truncate(message.get("errorMessage") or "Pi agent turn failed")
+                return None
+        return None
 
     def _from_message_update(self, event: dict[str, Any], line: str) -> NormalizedEvent | None:
         """Map a completed content block; drop the deltas that built it."""

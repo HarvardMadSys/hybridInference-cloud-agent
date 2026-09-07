@@ -30,6 +30,37 @@ Uninterrupted successful turns continue using the live process. No conversation
 replay, JSONL rewriting or continuity prompt is added. Previously damaged parent
 chains are not retroactively repaired by this change.
 
+## Other native CLIs
+
+The same failure-retention policy now applies to every bundled CLI. Previously
+the runner restricted it to Claude Code. A local Codex task remembered its
+function name before an injected API failure, but its next follow-up returned
+`sandbox_context_lost` despite the native session still existing. Pi also
+reported a terminal API error as a successful empty turn.
+
+| CLI | Evidence that the failed query ended normally |
+| --- | --- |
+| Claude Code | Native `result` boundary, including `is_error` |
+| Codex | `turn/completed` for the active native turn ID |
+| Pi | `agent_end`; the last assistant's `stopReason` determines failure |
+| OpenCode / Kilo | Bridge `settled` for the active turn, emitted at native idle |
+
+A command rejection, dead transport, timeout or cancellation cannot substitute
+for this evidence. The broker must also complete activation cleanup and verify
+that the resident transport and native locator remain usable before settlement.
+
+OpenCode and Kilo additionally emit text parts for user messages. Their bridge
+now forwards `message.updated` metadata whose session ID is nested in `info`.
+The driver joins only parts owned by assistant messages, resolves late metadata
+at settlement, and excludes events attributed to a previous bridge turn. This
+fixes user prompts being copied into the visible assistant reply; native model
+history was already separate from that incorrect display text.
+
+The sandbox advertises `http-agent-live-bridge=2`, required by host attestation.
+Deploy the broker/runner and sandbox image together. An image without this
+helper version must not advertise readiness for the new host. This is not an
+automatic migration or repair of legacy retained transcripts.
+
 ## Verification before accepting a deployment
 
 1. Require the existing CI Gate. Its pinned native CLI regression checks actual
@@ -91,7 +122,8 @@ completed normally. This shows that bypassing Anthropic translation or explicitl
 requesting thinking is not a reliable fix. It does not identify the selected
 upstream provider or prove what its model server received.
 
-Examples to correlate in the staging gateway logs:
+API request IDs retained for a future authorized investigation (no gateway logs
+or configuration were accessed for these tests):
 
 - Anthropic adaptive, failed recall: `d419d6b244519572c8481520`.
 - OpenAI enabled, successful recall: `3ddbd2035605b4fb3d3a3805`.
@@ -107,3 +139,34 @@ The gateway snapshot also strips Anthropic `thinking`, and drops effort values
 when the model config does not declare their domain. These are compatibility
 leads, not established causes of the recall failure. No gateway workaround or
 model-route change has been shipped as part of this Cloud Agent branch.
+
+Further synthetic tests used OpenAI chat completions with temperature zero and
+unchanged messages. A neutral coding-assistant system description recalled `hi`
+in 2/2 samples; adding a file-memory sentence produced false missing-history
+claims in 2/2. Explicit high effort produced reasoning output, but only 1/2
+replies recalled `hi`. A further three samples with maximum effort recalled
+`hi` in only 1/3 replies; all three completed normally with reasoning output.
+Thus enabling reasoning is not an established fix.
+OpenCode also produced a false missing-history answer with complete native
+history, so this behavior cannot be attributed solely to Claude's persistence
+or memory feature. These model-behavior failures remain distinct from the
+reproduced native failure/LOST and message-ownership bugs fixed above.
+
+The local Docker stack also passed a real-Flash task-history sequence for all
+five bundled CLIs: initial function-name agreement, two live follow-ups, idle
+stop and native restore, a terminal API rejection, a successful follow-up and
+a native fork. The first query also received a locally injected transient API
+error. Assertions checked every prior successful user/assistant message in the
+outbound model request, the agreed function name in the visible reply, and the
+same retained sandbox. The terminal rejection was marked failed for every CLI;
+the following query and fork retained history. This validates the repaired
+session lifecycle, but does not override the separate failing greeting-recall
+samples above or count as verification of a remote deployment.
+
+Fresh greeting checks on the final sandbox image again reproduced false
+missing-history claims in OpenCode and Kilo while their outbound requests had
+the complete user/assistant history in the correct roles. Their original user
+text was no longer copied into the displayed assistant reply. Claude recalled
+`hi` in both live follow-ups and the idle-restore query in this sample; earlier
+Codex and Pi greeting checks also recalled it. These finite successful samples
+do not eliminate the failing cases or establish an upstream root cause.

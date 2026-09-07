@@ -433,6 +433,7 @@ class _JsonResidentTurn(HarnessTurn):
     def __init__(self, session: _JsonResidentSession, process: SandboxProcess) -> None:
         super().__init__(session, process)
         self._saw_result = False
+        self._saw_native_result = False
         self._protocol_failed = False
         self.protocol_turn_id: str | None = None
         # Several native protocols publish mutable updates for one tool item.
@@ -442,9 +443,10 @@ class _JsonResidentTurn(HarnessTurn):
     def raw_lines(self) -> Iterator[str]:
         for line in self._session.turn_lines(self):
             yield line
-            settled, failed = self._session.line_settles_turn(line, self)
+            settled, failed, native = self._session.line_settles_turn(line, self)
             if settled:
                 self._saw_result = True
+                self._saw_native_result = native
                 self._protocol_failed = failed
                 self._process.poll()
                 return
@@ -479,7 +481,9 @@ class _JsonResidentTurn(HarnessTurn):
                 exit_code = 1 if self._protocol_failed else 0
             else:
                 exit_code = self._process.wait() or 1
-            self._result = self._build_result(exit_code)
+            self._result = replace(
+                self._build_result(exit_code), native_turn_settled=self._saw_native_result
+            )
             self._session.turn_finished()
         return self._result
 
@@ -627,7 +631,8 @@ class _JsonResidentSession(HarnessSession):
         while True:
             yield self._next_line()
 
-    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool]:
+    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool, bool]:
+        """Return terminal, failed, and proof of a native turn boundary."""
         raise NotImplementedError
 
     def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
@@ -740,17 +745,17 @@ class CodexAppServerSession(_JsonResidentSession):
             raise DriverError("Codex turn/start returned no turn id")
         turn.protocol_turn_id = str(turn_id)
 
-    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool]:
+    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool, bool]:
         """Recognize the completion notification for this exact Codex turn."""
         value = self._object(line)
         if value is None or value.get("method") != "turn/completed":
-            return False, False
+            return False, False, False
         params = value.get("params")
         completed = params.get("turn") if isinstance(params, dict) else None
         if not isinstance(completed, dict) or completed.get("id") != turn.protocol_turn_id:
-            return False, False
+            return False, False, False
         status = str(completed.get("status") or "").lower()
-        return True, status not in {"completed", "interrupted"}
+        return True, status not in {"completed", "interrupted"}, True
 
     def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
         """Normalize one Codex app-server notification for the active turn."""
@@ -966,18 +971,20 @@ class PiRpcSession(_JsonResidentSession):
         turn.protocol_turn_id = request_id
         self._write_json({"id": request_id, "type": "prompt", "message": turn_input.prompt})
 
-    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool]:
+    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool, bool]:
         """Recognize Pi's response failure or terminal agent-end event."""
         value = self._object(line)
         if value is None:
-            return False, False
+            return False, False, False
         if (
             value.get("type") == "response"
             and value.get("id") == turn.protocol_turn_id
             and value.get("success") is False
         ):
-            return True, True
-        return value.get("type") == "agent_end", False
+            return True, True, False
+        if value.get("type") == "agent_end":
+            return True, self.runtime.agent_error(value) is not None, True
+        return False, False, False
 
     def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
         """Normalize one Pi RPC protocol event for the active turn."""
@@ -1064,7 +1071,8 @@ class HttpAgentLiveTurn(_JsonResidentTurn):
 
     def __init__(self, session: HttpAgentLiveSession, process: SandboxProcess) -> None:
         super().__init__(session, process)
-        self.text_parts: dict[str, str] = {}
+        self.text_parts: dict[str, tuple[str, str]] = {}
+        self.message_roles: dict[str, str] = {}
 
 
 class HttpAgentLiveSession(_JsonResidentSession):
@@ -1090,19 +1098,19 @@ class HttpAgentLiveSession(_JsonResidentSession):
         turn.protocol_turn_id = request_id
         self._write_json({"id": request_id, "type": "turn", "prompt": turn_input.prompt})
 
-    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool]:
+    def line_settles_turn(self, line: str, turn: _JsonResidentTurn) -> tuple[bool, bool, bool]:
         """Recognize the bridge settlement or command failure for this turn."""
         value = self._object(line)
         if value is None:
-            return False, False
+            return False, False, False
         bridge = value.get("bridge")
         if bridge == "settled" and value.get("turn_id") == turn.protocol_turn_id:
-            return True, value.get("status") != "completed"
+            return True, value.get("status") != "completed", True
         if bridge in {"fatal", "command_error"}:
             command_id = value.get("id")
             if bridge == "fatal" or command_id in {"", turn.protocol_turn_id}:
-                return True, True
-        return False, False
+                return True, True, False
+        return False, False, False
 
     def event_for_protocol_line(self, line: str, turn: _JsonResidentTurn) -> HarnessEvent:
         """Normalize one OpenCode/Kilo bridge event for the active turn."""
@@ -1111,6 +1119,8 @@ class HttpAgentLiveSession(_JsonResidentSession):
         if value is None:
             return HarnessEvent(LINE, raw_line=line)
         bridge = value.get("bridge")
+        if bridge in {"event", "settled"} and value.get("turn_id") != turn.protocol_turn_id:
+            return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
         if bridge == "event":
             event = value.get("event")
             event = event if isinstance(event, dict) else {}
@@ -1121,9 +1131,19 @@ class HttpAgentLiveSession(_JsonResidentSession):
             part = part if isinstance(part, dict) else {}
             part_type = part.get("type")
             part_id = str(part.get("id") or "")
+            if event_type == "message.updated":
+                info = properties.get("info")
+                if isinstance(info, dict) and info.get("id"):
+                    turn.message_roles[str(info["id"])] = str(info.get("role") or "")
             if event_type == "message.part.updated" and part_type == "text":
                 if part_id:
-                    turn.text_parts[part_id] = str(part.get("text") or "")
+                    # User prompts also emit text parts. Resolve ownership at
+                    # settlement so even a part preceding its message metadata
+                    # cannot turn the user's input into an assistant reply.
+                    turn.text_parts[part_id] = (
+                        str(part.get("messageID") or ""),
+                        str(part.get("text") or ""),
+                    )
                 return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
             if event_type == "message.part.updated" and part_type == "reasoning":
                 text = str(part.get("text") or "")
@@ -1164,7 +1184,11 @@ class HttpAgentLiveSession(_JsonResidentSession):
                 )
             return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
         if bridge == "settled":
-            final = "\n\n".join(text for text in turn.text_parts.values() if text.strip())
+            final = "\n\n".join(
+                text
+                for message_id, text in turn.text_parts.values()
+                if text.strip() and turn.message_roles.get(message_id) == "assistant"
+            )
             if final:
                 return HarnessEvent(MESSAGE, {"text": final}, raw_line=line)
             return HarnessEvent(LIFECYCLE, {"phase": "result"}, raw_line=line)

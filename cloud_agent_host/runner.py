@@ -1724,12 +1724,11 @@ def _run_shared_live_attempt(
             abandon_before_finish(lost=True, detail=failure_detail)
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 1
-        # A terminal Claude API error can leave its native history and process
+        # A terminal native API error can leave its history and process
         # intact. Only a broker result emitted after activation cleanup proves
         # this boundary; process death, timeout and lost streams remain LOST.
         settled_failure = (
             exit_code != 0
-            and job.runtime == "claude-code"
             and isinstance(result_frame, dict)
             and result_frame.get("kind") == "result"
             and result_frame.get("status") == "failed"

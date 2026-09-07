@@ -193,6 +193,7 @@ RUN python3 -m venv /opt/claude-agent-sdk \
 # comma-separated string it will happily stamp onto an attempt.
 LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.helper.claude-agent-sdk.version="0.2.148" \
+      org.freeinference.helper.http-agent-live-bridge.version="2" \
       org.freeinference.helper.guest-observer.version="1" \
       org.freeinference.helper.tool-mark.version="1" \
       org.freeinference.runtime.codex.version="${CODEX_VERSION}" \

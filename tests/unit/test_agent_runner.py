@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,7 +10,7 @@ import pytest
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
-from cloud_agent_host.runtimes import ClaudeCodeRuntime
+from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
 
 _JOB = ClaimedJob(
@@ -123,14 +124,17 @@ def test_shared_live_attestation_rejects_an_incomplete_host(monkeypatch, name, v
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == []
 
 
-def test_shared_live_attestation_requires_every_pinned_runtime_and_helper(monkeypatch):
+@pytest.mark.parametrize("helper_id", runner_mod.SHARED_SANDBOX_HELPER_PINS)
+def test_shared_live_attestation_requires_every_pinned_runtime_and_helper(monkeypatch, helper_id):
     _configure_host(monkeypatch)
     stamp = _stamp()
     stamp["runtime_versions"]["codex"] = "wrong"
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
 
     stamp = _stamp()
-    stamp["helper_versions"]["claude-agent-sdk"] = "wrong"
+    stamp["helper_versions"][helper_id] = "wrong"
+    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
+    del stamp["helper_versions"][helper_id]
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
 
 
@@ -331,8 +335,9 @@ def test_historical_one_to_one_sandbox_fails_closed():
         (130, {"kind": "result", "status": "cancelled", "native_turn_settled": True}, False),
     ],
 )
+@pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
 def test_native_failure_preserves_only_a_verified_turn_boundary(
-    monkeypatch, code, frame, preserved
+    monkeypatch, code, frame, preserved, runtime_id
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -375,8 +380,12 @@ def test_native_failure_preserves_only_a_verified_turn_boundary(
     finish = Mock()
 
     result = runner_mod._run_shared_live_attempt(
-        runtime=ClaudeCodeRuntime(),
-        job=_JOB,
+        runtime=get_runtime(runtime_id),
+        job=replace(
+            _JOB,
+            runtime=runtime_id,
+            runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS[runtime_id],
+        ),
         control=control,
         heart=SimpleNamespace(),
         backend=backend,

@@ -607,10 +607,21 @@ def test_http_server_bridge_two_turns_and_native_fork(tmp_path, driver, runtime,
             "bridge": "event",
             "turn_id": turn_id,
             "event": {
+                "type": "message.updated",
+                "properties": {
+                    "info": {"id": "assistant-1", "sessionID": "ses-a", "role": "assistant"}
+                },
+            },
+        },
+        {
+            "bridge": "event",
+            "turn_id": turn_id,
+            "event": {
                 "type": "message.part.updated",
                 "properties": {
                     "part": {
                         "id": "part-1",
+                        "messageID": "assistant-1",
                         "sessionID": "ses-a",
                         "type": "text",
                         "text": "server answer",

@@ -319,6 +319,9 @@ class Bridge:
         part = properties.get("part")
         if not session_id and isinstance(part, dict):
             session_id = part.get("sessionID")
+        info = properties.get("info")
+        if not session_id and isinstance(info, dict):
+            session_id = info.get("sessionID")
         if session_id != self.session_id:
             return
 
