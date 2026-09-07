@@ -862,6 +862,8 @@ class SharedChatSessionSupervisor:
             settled_session_id = observed or native_session_id
             if not settled_session_id:
                 raise SandboxError("resident transport did not report a native session id")
+            if member.native_session_id and settled_session_id != member.native_session_id:
+                raise SandboxError("resident transport settled a different native session")
             member.native_session_id = settled_session_id
             member.last_settled_job_id = job_id
             member.context_status = context_status
@@ -1498,6 +1500,15 @@ class SharedChatSessionSupervisor:
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost("member identity changed before process launch")
             self._require_mutation_admission(group)
+            # The retained member owns the locator. An omitted field in a
+            # later activation must not turn a restart into a fresh chat.
+            if member.native_session_id:
+                if (
+                    launch.native_session_id
+                    and launch.native_session_id != member.native_session_id
+                ):
+                    raise SandboxError("activation requested a different native session")
+                launch = replace(launch, native_session_id=member.native_session_id)
             lifecycle_generation = group.lifecycle_generation
             current = member.transport
             same_residency = (
@@ -1526,6 +1537,11 @@ class SharedChatSessionSupervisor:
             with contextlib.suppress(Exception):
                 current.close()
         transport = self._transport_factory.open(group.spec, launch)
+        observed = transport.native_session_id
+        if launch.native_session_id and observed and observed != launch.native_session_id:
+            with contextlib.suppress(Exception):
+                transport.close()
+            raise SandboxError("resident transport resumed a different native session")
         if launch.residency_generation <= 0:
             with contextlib.suppress(Exception):
                 transport.close()

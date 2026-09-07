@@ -458,7 +458,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                     return None
                 self._reported_subtypes.add(subtype)
                 return self._raw(line, f"unclassified system subtype {subtype!r}")
-            if subtype == "init":
+            if subtype == "init" and not event.get("parent_tool_use_id"):
                 captured = str(event.get("session_id") or "").strip()
                 if captured:
                     self.session_id = captured

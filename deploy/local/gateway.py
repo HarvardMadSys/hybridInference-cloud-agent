@@ -639,8 +639,22 @@ async def openai_responses(request: Request, authorization: str | None = Header(
             "response": {**response, "status": "in_progress", "output": []},
         },
         {
-            "type": "response.output_text.delta",
+            "type": "response.output_item.added",
             "sequence_number": 1,
+            "output_index": 0,
+            "item": {**response["output"][0], "status": "in_progress", "content": []},
+        },
+        {
+            "type": "response.content_part.added",
+            "sequence_number": 2,
+            "item_id": response["output"][0]["id"],
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+        {
+            "type": "response.output_text.delta",
+            "sequence_number": 3,
             "item_id": response["output"][0]["id"],
             "output_index": 0,
             "content_index": 0,
@@ -648,13 +662,30 @@ async def openai_responses(request: Request, authorization: str | None = Header(
         },
         {
             "type": "response.output_text.done",
-            "sequence_number": 2,
+            "sequence_number": 4,
             "item_id": response["output"][0]["id"],
             "output_index": 0,
             "content_index": 0,
             "text": text,
         },
-        {"type": "response.completed", "sequence_number": 3, "response": response},
+        {
+            "type": "response.content_part.done",
+            "sequence_number": 5,
+            "item_id": response["output"][0]["id"],
+            "output_index": 0,
+            "content_index": 0,
+            "part": response["output"][0]["content"][0],
+        },
+        {
+            # Codex persists completed output items. Text deltas and a final
+            # response.completed alone can display a reply without retaining
+            # it in the next native request, giving the smoke a false pass.
+            "type": "response.output_item.done",
+            "sequence_number": 6,
+            "output_index": 0,
+            "item": response["output"][0],
+        },
+        {"type": "response.completed", "sequence_number": 7, "response": response},
     ]
     return StreamingResponse(
         iter(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode() for event in events),

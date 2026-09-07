@@ -1311,13 +1311,20 @@ class ClaudeCodeLiveTurn(HarnessTurn):
 
     def event_for_line(self, line: str) -> HarnessEvent:
         """Preserve terminal failure independently of the resident process exit."""
-        event = super().event_for_line(line)
         # Inspect the wire record: the runtime deduplicates unknown system
         # subtypes, so normalized events can hide a later retry notification.
         try:
             record = json.loads(line)
         except (ValueError, TypeError):
             record = None
+        if isinstance(record, dict) and not record.get("parent_tool_use_id"):
+            observed = str(record.get("session_id") or "").strip()
+            expected = self._runtime.session_id or self._session._resume_session_id
+            if observed and expected and observed != expected:
+                # Check before the normalizer can overwrite its saved id or
+                # expose another session's answer as a successful follow-up.
+                raise DriverError("Claude reported a different native session")
+        event = super().event_for_line(line)
         if isinstance(record, dict) and (
             record.get("type") == "system" and record.get("subtype") == "api_retry"
         ):

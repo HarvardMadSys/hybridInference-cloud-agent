@@ -131,9 +131,22 @@ def wait_job(client: Client, job_id: str) -> dict[str, Any]:
         if state in TERMINAL_STATES:
             if state != "succeeded":
                 raise RuntimeError(f"job {job_id} ended {state}: {job.get('detail')}")
+            require_assistant_reply(client, job_id)
             return job
         time.sleep(1)
     raise RuntimeError(f"job {job_id} did not settle within {JOB_TIMEOUT_S}s")
+
+
+def require_assistant_reply(client: Client, job_id: str) -> None:
+    """A successful confirmation task must have its own nonempty reply."""
+    thread = client.request(f"/api/v1/agent/jobs/{urllib.parse.quote(job_id)}/thread")
+    if not any(
+        item.get("job_id") == job_id
+        and item.get("role") == "assistant"
+        and str(item.get("content") or "").strip()
+        for item in thread.get("messages", [])
+    ):
+        raise RuntimeError(f"job {job_id} succeeded without an assistant reply")
 
 
 def wait_concurrently_running(client: Client, source_job_id: str, child_job_id: str) -> None:

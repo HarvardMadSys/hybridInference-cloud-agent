@@ -1143,7 +1143,15 @@ def test_retry_retirement_settles_native_locator_then_restores_same_session():
         owner="attempt:1",
         activation_generation=1,
         has_settled_context=False,
-        manifest=_members(),
+        manifest=[
+            replace(
+                _members()[0],
+                native_session_id=None,
+                last_settled_job_id=None,
+                context_status="new",
+            ),
+            _members()[1],
+        ],
     )
     supervisor.ensure_resident(
         "athr_source", first.token, _launch("athr_source", native_session_id=None, slot=0)
@@ -1194,6 +1202,87 @@ def test_unused_mcp_token_does_not_change_live_process_compatibility():
     assert transport.compatible_with(
         replace(launch, mcp_base_url="http://relay", mcp_credential="fresh-attempt-token")
     )
+
+
+def test_missing_launch_locator_restores_the_known_member_instead_of_starting_fresh():
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    restored = supervisor.ensure_resident(
+        "athr_source", lease.token, _launch("athr_source", native_session_id=None, slot=0)
+    )
+    assert factory.opened[-1].native_session_id == "native-source"
+    assert restored.native_session_id == "native-source"
+    assert restored.context_status == "restored"
+
+
+@pytest.mark.parametrize("runtime", ["claude-code", "codex", "pi", "opencode", "kilo"])
+def test_wrong_native_resume_is_rejected_without_replacing_the_saved_locator(runtime):
+    class WrongResumeFactory(_TransportFactory):
+        def open(self, spec, launch):
+            transport = super().open(spec, launch)
+            transport.native_session_id = "unexpected-new-session"
+            return transport
+
+    factory = WrongResumeFactory()
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    with pytest.raises(SandboxError, match="different native session"):
+        supervisor.ensure_resident(
+            "athr_source",
+            lease.token,
+            replace(
+                _launch("athr_source", native_session_id="native-source", slot=0),
+                runtime_id=runtime,
+            ),
+        )
+    assert not factory.transports[-1].alive
+    assert not factory.transports[-1].turns
+    assert supervisor.status("athr_source").native_session_id == "native-source"
+
+
+def test_settlement_cannot_overwrite_the_previously_retained_native_session():
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    factory.transports[-1].native_session_id = "unexpected-new-session"
+    with pytest.raises(SandboxError, match="different native session"):
+        supervisor.settle(
+            "athr_source",
+            lease.token,
+            job_id="ajob_bad",
+            context_status="restored",
+            native_session_id="unexpected-new-session",
+        )
+    descriptor = supervisor.status("athr_source")
+    assert descriptor.native_session_id == "native-source"
+    assert descriptor.last_settled_job_id == "ajob_source"
 
 
 def test_turn_boundary_preserves_reviewed_resident_tree_and_reaps_new_processes():

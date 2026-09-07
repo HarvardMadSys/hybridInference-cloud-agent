@@ -1757,9 +1757,11 @@ def _run_shared_live_attempt(
             job_id=job.job_id,
             context_status=context_status,
         )
-        settled_session_id = str(local_settle.get("native_session_id") or "").strip()
-        if not settled_session_id:
-            raise SandboxError("shared supervisor settled without a native session locator")
+        settled_session_id = _verified_native_session_id(
+            previous_session_id=native_session_id,
+            observed_session_id=local_settle.get("native_session_id"),
+            has_context=has_context,
+        )
         control.settle_chat_sandbox(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,

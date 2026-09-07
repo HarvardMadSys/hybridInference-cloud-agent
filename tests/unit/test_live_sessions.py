@@ -308,6 +308,47 @@ def test_launch_resident_live_needs_the_state_mount(tmp_path):
         ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(context, session_id="s")
 
 
+@pytest.mark.parametrize("kind", ["init", "assistant", "result"])
+def test_claude_rejects_a_different_root_session_before_accepting_its_output(tmp_path, kind):
+    process = _LiveProcess()
+    context, _ = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(
+        context, session_id="retained-session"
+    )
+    record = (
+        {"type": "system", "subtype": "init"}
+        if kind == "init"
+        else dict(_ANSWER if kind == "assistant" else _RESULT)
+    )
+    process.feed = _turn_lines(dict(record, session_id="unexpected-new-session"))
+    turn = session.start_turn(TurnInput(prompt="Continue our task", model="deepseek-v4-flash"))
+    with pytest.raises(DriverError, match="different native session"):
+        list(turn.iter_events())
+    assert session.runtime.session_id != "unexpected-new-session"
+
+
+def test_claude_does_not_treat_a_child_agent_session_as_a_root_reset(tmp_path):
+    process = _LiveProcess()
+    context, _ = _live(process, tmp_path)
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_resident_live(context, session_id="root")
+    process.feed = _turn_lines(
+        {"type": "system", "subtype": "init", "session_id": "root"},
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "child",
+            "parent_tool_use_id": "tool-child",
+        },
+        dict(_ANSWER, session_id="child", parent_tool_use_id="tool-child"),
+        dict(_RESULT, session_id="root"),
+    )
+    assert (
+        session.start_turn(TurnInput(prompt="p", model="deepseek-v4-flash")).wait().status
+        == "completed"
+    )
+    assert session.runtime.session_id == "root"
+
+
 def test_the_first_turn_fixes_the_sessions_effort(tmp_path):
     """Effort is a launch flag, so the resident process carries the first one."""
     process = _LiveProcess()

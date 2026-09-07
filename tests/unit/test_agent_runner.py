@@ -324,20 +324,8 @@ def test_historical_one_to_one_sandbox_fails_closed():
     assert finished == [("failed", "the control plane returned a non-shared sandbox mapping")]
 
 
-@pytest.mark.parametrize(
-    ("code", "frame", "preserved"),
-    [
-        (1, {"kind": "result", "status": "failed", "native_turn_settled": True}, True),
-        (1, {"kind": "result", "status": "failed"}, False),
-        (1, {"kind": "result", "status": "failed", "native_turn_settled": False}, False),
-        (1, {"kind": "error", "status": "failed", "native_turn_settled": True}, False),
-        (124, {"kind": "result", "status": "failed", "native_turn_settled": True}, False),
-        (130, {"kind": "result", "status": "cancelled", "native_turn_settled": True}, False),
-    ],
-)
-@pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
-def test_native_failure_preserves_only_a_verified_turn_boundary(
-    monkeypatch, code, frame, preserved, runtime_id
+def _run_shared_boundary_case(
+    monkeypatch, code, frame, runtime_id, observed_session_id="native-existing"
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -372,7 +360,7 @@ def test_native_failure_preserves_only_a_verified_turn_boundary(
         "context_status": "live",
         "process_generation": 1,
     }
-    supervisor.settle_shared.return_value = {"native_session_id": "native-existing"}
+    supervisor.settle_shared.return_value = {"native_session_id": observed_session_id}
     monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
     monkeypatch.setattr(
         runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (code, "API error", [], frame)
@@ -395,6 +383,27 @@ def test_native_failure_preserves_only_a_verified_turn_boundary(
         finish_attempt=finish,
     )
 
+    return result, control, supervisor, finish
+
+
+@pytest.mark.parametrize(
+    ("code", "frame", "preserved"),
+    [
+        (1, {"kind": "result", "status": "failed", "native_turn_settled": True}, True),
+        (1, {"kind": "result", "status": "failed"}, False),
+        (1, {"kind": "result", "status": "failed", "native_turn_settled": False}, False),
+        (1, {"kind": "error", "status": "failed", "native_turn_settled": True}, False),
+        (124, {"kind": "result", "status": "failed", "native_turn_settled": True}, False),
+        (130, {"kind": "result", "status": "cancelled", "native_turn_settled": True}, False),
+    ],
+)
+@pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
+def test_native_failure_preserves_only_a_verified_turn_boundary(
+    monkeypatch, code, frame, preserved, runtime_id
+):
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, code, frame, runtime_id
+    )
     assert result == (0 if code == 130 else 1)
     assert finish.call_args.args[0] == ("cancelled" if code == 130 else "failed")
     if preserved:
@@ -409,6 +418,27 @@ def test_native_failure_preserves_only_a_verified_turn_boundary(
         supervisor.settle_shared.assert_not_called()
         control.settle_chat_sandbox.assert_not_called()
         assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is True
+
+
+@pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
+@pytest.mark.parametrize("code", [0, 1])
+def test_shared_runner_never_persists_a_different_session_returned_by_the_broker(
+    monkeypatch, runtime_id, code
+):
+    frame = {
+        "kind": "result",
+        "status": "completed" if code == 0 else "failed",
+        "native_turn_settled": True,
+    }
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, code, frame, runtime_id, observed_session_id="unexpected-new-session"
+    )
+    assert result == 2
+    assert finish.call_args.args[0] == "failed"
+    assert "different native session" in finish.call_args.args[1]
+    supervisor.settle_shared.assert_called_once()
+    control.settle_chat_sandbox.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is True
 
 
 class _Stream:

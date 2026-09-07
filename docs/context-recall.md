@@ -30,6 +30,27 @@ Uninterrupted successful turns continue using the live process. No conversation
 replay, JSONL rewriting or continuity prompt is added. Previously damaged parent
 chains are not retroactively repaired by this change.
 
+## Native session identity at the shared boundary
+
+The shared runner introduced by PR96 did not call the existing
+`_verified_native_session_id` check before saving the broker's settled locator.
+It could therefore accept a different session ID as a successful continuation.
+That check is now applied to both successful and verifiably settled failed turns.
+An unexpected locator fails the attempt before it can replace the durable one.
+
+The broker also uses the retained member's locator when a launch omits it,
+rejects a conflicting requested or observed locator, and verifies identity again
+at settlement. The normal runner already rejects an absent resume locator for a
+retained chat; the broker check protects that boundary independently. These
+fault-injection cases prove a validation gap, not that a staging request actually
+sent a missing or wrong ID.
+
+Claude root stream events are checked before normalization can overwrite the
+saved session ID or expose another session's output. Events with
+`parent_tool_use_id` belong to a child agent and cannot replace the root locator.
+The other bundled adapters already validate their native resume handshake.
+This uses the CLI's own history; it does not reconstruct context from UI text.
+
 ## Other native CLIs
 
 The same failure-retention policy now applies to every bundled CLI. Previously
@@ -61,6 +82,26 @@ Deploy the broker/runner and sandbox image together. An image without this
 helper version must not advertise readiness for the new host. This is not an
 automatic migration or repair of legacy retained transcripts.
 
+## Release scope and remaining findings
+
+The Cloud Agent fixes cover the reproduced retry/flush history loss, retention
+of verifiably settled failures across all five CLIs, Pi API-error reporting,
+OpenCode/Kilo assistant-message ownership, and native session identity at the
+shared runner/broker boundary. The local Responses fixture and smoke acceptance
+checks are also corrected. No unresolved PR review comment was present when
+this update was prepared.
+
+Two investigation findings remain separate from those fixes:
+
+| Finding | Status and ownership |
+| --- | --- |
+| Flash sometimes gives an incorrect missing-history explanation despite complete outbound native history. | Unresolved response behavior. This also occurred in fresh synthetic API requests without Cloud Agent or a CLI. Explicit reasoning effort and a newer CLI did not reliably eliminate it. The available client evidence does not identify the remote engine/template/model cause. |
+| The gateway source snapshot drops Anthropic effort when the model configuration omits its allowed values, and loses historical thinking blocks during translation. | Reproduced locally; separate gateway/configuration patches exist outside this repository. They are not included in this PR and their deployment has not been verified. Fixing these compatibility defects is not proof that all Flash recall responses are fixed. |
+
+The behavior preflight reports recall and observed thinking independently so
+neither finding is concealed by a successful HTTP response. Existing damaged
+native transcripts and old disposable chats are not migrated by this release.
+
 ## Verification before accepting a deployment
 
 1. Require the existing CI Gate. Its pinned native CLI regression checks actual
@@ -68,6 +109,9 @@ automatic migration or repair of legacy retained transcripts.
    live follow-ups, immediate close/restore,
    a failed API call followed by a retry, and a successful internal retry on
    either the first or a later turn followed by multiple native restores.
+   Assertions match exact user/assistant text, roles, order and repeated-message
+   occurrences. Shared runner and broker tests also reject a changed native ID
+   before persistence, including normally settled API failures.
    This uses a loopback model fixture
    without external credentials or inference charges.
 2. Keep the deployment's exact host/API SHA, reverse broker probe and fresh
@@ -86,11 +130,20 @@ automatic migration or repair of legacy retained transcripts.
    stays in the trusted test process, never in an agent sandbox or process
    arguments. The script sends only new synthetic messages, uses
    `deepseek-v4-flash`, and prints replies and request IDs without auth headers.
-   Three repetitions make nine model calls and incur ordinary inference usage.
+   It checks the greeting, repeated questions, a task, randomly generated user
+   and assistant facts with a requirement update, and a no-history negative
+   control. Three repetitions make fifteen model calls and incur ordinary
+   inference usage.
 
    A missing key, non-200 response, stream error, truncation, failure to recall
-   the greeting/function name, or a recognized missing-history claim produces
-   a nonzero exit. Inspect failures; the conservative claim detector can also
+   the required facts, or a recognized missing-history claim produces a nonzero
+   exit. The script requests the observed native CLI `adaptive/high` settings
+   and also requires a thinking output. Each completed response independently
+   reports `recall_passed` and `thinking_observed`, keeping the answer even if
+   thinking is absent. Neither missing thinking output nor observed thinking
+   proves anything about history loss or recall accuracy; inspect both checks.
+   Thinking output also does not prove the exact effort reached the engine.
+   Inspect failures; the conservative claim detector can also
    reject an answer that quotes a previous bad claim to correct it. HTTP 200
    alone is not a pass.
 4. Check a new Cloud Agent chat and its follow-up/idle restore through the
@@ -170,3 +223,47 @@ text was no longer copied into the displayed assistant reply. Claude recalled
 `hi` in both live follow-ups and the idle-restore query in this sample; earlier
 Codex and Pi greeting checks also recalled it. These finite successful samples
 do not eliminate the failing cases or establish an upstream root cause.
+
+## Local verification update (2026-09-08)
+
+- The original retry behavior was restored only in a test plugin by disabling
+  process retirement. Pinned Claude 2.1.220 then failed the request-history
+  assertion after native restore: the initial `hi` was absent. With the driver
+  fix enabled, all four real native CLI regressions passed (367.95 seconds).
+  The protocol fixture made no remote inference requests.
+- New broker/driver identity tests failed before the changes (10 failures), as
+  did all ten shared runner cases for five runtime IDs and two settled outcomes.
+  The combined focused suites now pass 162 tests.
+- Local Docker smoke and an independent request audit verified all five CLIs
+  across live continuation, idle stop/restore, historical native fork and child
+  stop/restore. The audit compared exact conversational text, roles, order and
+  occurrence counts in 30 requests, including the correct shorter fork prefix.
+  CLI-generated environment annotations were excluded from user text, and two
+  OpenCode/Kilo title requests were identified separately.
+- That audit first caught a defect in the local Responses mock: it omitted
+  `response.output_item.added/done`, so Codex completed jobs without retaining
+  assistant messages. The mock now emits the item/content-part lifecycle, and
+  the smoke requires a nonempty assistant reply belonging to each current job.
+  Codex was rerun after the correction; all six requests had the expected
+  history. The earlier Codex lifecycle pass is not history evidence. This is a
+  local test-fixture fix, not a claim about the deployed inference API.
+- A fresh local Claude chat used the real `deepseek-v4-flash` API for four turns,
+  with one locally injected retryable failure and an idle restore. Every request
+  retained all earlier user/assistant text in order, including both occurrences
+  of a repeated question. The same container and native session were retained.
+  Flash recognized the initial greeting but also speculated about lost session
+  state; the last answer accurately quoted `hi`. Since `hi` assigns no task,
+  saying that no task was assigned is not itself evidence of memory loss. The
+  unsupported session diagnosis remains a response-quality issue and cannot be
+  treated as proof that Cloud Agent discarded context.
+- `make check` passed formatting, lint and 1,833 tests (194 external/database
+  tests deselected). The four native regressions above ran separately. Local
+  broker and both runners matched all four changed production source hashes.
+  Temporary gateway overlays were removed after testing. No remote deployment,
+  configuration, logs or web UI were accessed in this verification.
+
+These changes repair reproduced local persistence and identity defects. They
+do not establish that every missing-history statement has the same cause or
+that changing reasoning effort can eliminate it. The model-behavior preflight
+remains a separate acceptance check; production prompts and CLI pins are
+unchanged by these identity fixes.

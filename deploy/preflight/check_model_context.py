@@ -2,7 +2,9 @@
 
 Only synthetic messages are sent. This checks model behavior, complementing
 (but not replacing) the pinned native CLI and retained-container regressions.
-A nonzero exit means the deployment's model path has not passed recall checks.
+A nonzero exit means a response/recall/thinking-output check failed. Results
+report recall and thinking separately: neither missing thinking output nor a
+model's missing-history claim alone proves session data was lost.
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ import argparse
 import json
 import os
 import re
+import secrets
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -33,8 +37,45 @@ DENIAL = re.compile(
 )
 
 
-def recall_payload(case: str) -> tuple[dict, str]:
+def recall_payload(case: str) -> tuple[dict, str | dict[str, str]]:
     """Use the same unmodified user-message wire builder as the production Claude driver."""
+    if case in {"state_update", "no_history"}:
+        tag = secrets.token_hex(4)
+        expected = {
+            "project_code": f"quartz_{tag}",
+            "original_function_name": f"emit_{tag}",
+            "original_format": "CSV",
+            "current_format": "JSONL",
+        }
+        messages = [
+            {
+                "role": "user",
+                "content": f"我们在设计导出功能,项目代号 {expected['project_code']},最初用 CSV。请起一个函数名。",
+            },
+            {
+                "role": "assistant",
+                "content": f"函数名建议用 {expected['original_function_name']}。",
+            },
+            {"role": "user", "content": "改用 JSONL。17+26是多少?"},
+            {"role": "assistant", "content": "43。"},
+        ]
+        question = (
+            "请只返回 JSON:project_code 是项目代号,original_function_name 是你第一条回复起的函数名,"
+            "original_format 是最初导出格式,current_format 是最新格式。对未提供的信息填 UNKNOWN。"
+        )
+        if case == "no_history":
+            messages = []
+            expected = dict.fromkeys(expected, "UNKNOWN")
+        messages.append(json.loads(ClaudeCodeRuntime.user_message_line(question))["message"])
+        return {
+            "model": MODEL,
+            "system": SYSTEM,
+            "messages": messages,
+            "max_tokens": 2048,
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+            "stream": True,
+        }, expected
     original = "hi" if case != "task" else "请把待实现的函数命名为 comet_731;现在只确认名字。"
     answer = "Hello! How can I help you today?" if case != "task" else "收到,函数名为 comet_731。"
     messages = [
@@ -55,17 +96,33 @@ def recall_payload(case: str) -> tuple[dict, str]:
         "model": MODEL,
         "system": SYSTEM,
         "messages": messages,
-        "max_tokens": 768,
+        "max_tokens": 2048,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
         "stream": True,
     }, "comet_731" if case == "task" else "hi"
 
 
-def validate_answer(answer: str, expected: str) -> None:
+def validate_answer(answer: str, expected: str | dict[str, str]) -> None:
     """Conservative acceptance: recall the fixture and reject known reset claims.
 
     This is a regression check for the reported failure, not a general-purpose
     semantic judge. A quoted denial can also fail; inspect the printed answer.
     """
+    if isinstance(expected, dict):
+        # Accept a JSON code fence, but not keyword matches in an incorrect
+        # explanation. Each role's fact and both old/new values must be right.
+        text = answer.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+        if fenced:
+            text = fenced.group(1)
+        try:
+            actual = json.loads(text)
+        except ValueError as exc:
+            raise ValueError("reply did not return a factual JSON object") from exc
+        if actual != expected:
+            raise ValueError("reply did not recall the required facts and updates")
+        return
     if not re.search(
         rf"(?<![a-zA-Z0-9_]){re.escape(expected)}(?![a-zA-Z0-9_])", answer, re.IGNORECASE
     ):
@@ -74,11 +131,20 @@ def validate_answer(answer: str, expected: str) -> None:
         raise ValueError("reply contains a missing-history/reset claim")
 
 
-def read_answer(response: httpx.Response) -> str:
+@dataclass(frozen=True)
+class ModelReply:
+    """Keep observed thinking separate from the answer's recall accuracy."""
+
+    text: str
+    thinking_observed: bool
+
+
+def read_reply(response: httpx.Response) -> ModelReply:
     """Require a complete, successful stream rather than accepting partial text."""
     answer = ""
     stopped = False
     reason = None
+    saw_thinking = False
     for line in response.iter_lines():
         if not line.startswith("data: "):
             continue
@@ -87,13 +153,36 @@ def read_answer(response: httpx.Response) -> str:
             raise ValueError("gateway returned a streaming error")
         if event.get("type") == "content_block_delta":
             answer += event.get("delta", {}).get("text", "")
+            saw_thinking |= bool(event.get("delta", {}).get("thinking"))
         if event.get("type") == "message_delta":
             reason = event.get("delta", {}).get("stop_reason")
         if event.get("type") == "message_stop":
             stopped = True
     if not stopped or reason != "end_turn":
         raise ValueError("incomplete or truncated model response")
-    return answer
+    return ModelReply(answer, saw_thinking)
+
+
+def assess_reply(reply: ModelReply, expected: str | dict[str, str]) -> dict:
+    """Evaluate both checks even when one fails; never infer history loss."""
+    result = {
+        "answer": reply.text,
+        "thinking_observed": reply.thinking_observed,
+        "recall_passed": True,
+        "passed": False,
+    }
+    errors = []
+    try:
+        validate_answer(reply.text, expected)
+    except ValueError as exc:
+        result["recall_passed"] = False
+        errors.append(str(exc))
+    if not reply.thinking_observed:
+        errors.append("no thinking output observed for the requested adaptive/high mode")
+    result["passed"] = result["recall_passed"] and reply.thinking_observed
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 def main() -> int:
@@ -117,9 +206,16 @@ def main() -> int:
     failures = 0
     with httpx.Client(timeout=120, trust_env=False, proxy=args.proxy) as client:
         for repetition in range(args.repetitions):
-            for case in ("hi", "repeat", "task"):
+            for case in ("hi", "repeat", "task", "state_update", "no_history"):
                 body, expected = recall_payload(case)
-                result = {"case": case, "repetition": repetition + 1, "model": MODEL}
+                result = {
+                    "case": case,
+                    "check": "factual_context"
+                    if isinstance(expected, dict)
+                    else "reported_symptom",
+                    "repetition": repetition + 1,
+                    "model": MODEL,
+                }
                 try:
                     with client.stream(
                         "POST",
@@ -135,17 +231,14 @@ def main() -> int:
                         result["request_id"] = response.headers.get("x-request-id")
                         if response.status_code != 200:
                             raise ValueError("gateway returned a non-200 response")
-                        answer = read_answer(response)
-                        result["answer"] = answer
-                        validate_answer(answer, expected)
-                    result["passed"] = True
+                        result.update(assess_reply(read_reply(response), expected))
                 except (httpx.HTTPError, ValueError) as exc:
                     # Network exception text can contain URLs; log the type only.
                     result["error"] = (
                         str(exc) if isinstance(exc, ValueError) else type(exc).__name__
                     )
                     result["passed"] = False
-                    failures += 1
+                failures += int(not result["passed"])
                 print(json.dumps(result, ensure_ascii=False), flush=True)
     return int(failures > 0)
 

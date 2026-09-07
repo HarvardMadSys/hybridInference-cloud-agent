@@ -84,20 +84,24 @@ def _turn(session, prompt):
 
 def _assert_history(request, expected):
     assert request["model"] == MODEL
-    messages = request["messages"]
-    for role, text in expected:
-        assert any(
-            message["role"] == role
-            and (
-                message["content"] == text
-                or any(
-                    block.get("text") == text
-                    for block in message["content"]
-                    if isinstance(block, dict)
-                )
+    # Match exact text, role, order and occurrence count. Membership checks
+    # alone accept a reordered transcript or one copy of two repeated turns.
+    actual = []
+    for message in request["messages"]:
+        content = message["content"]
+        if isinstance(content, str):
+            actual.append((message["role"], content))
+        else:
+            actual.extend(
+                (message["role"], block["text"])
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
             )
-            for message in messages
-        ), f"native resume lost {role} message: {text!r}"
+    remaining = iter(actual)
+    for role, text in expected:
+        assert any(item == (role, text) for item in remaining), (
+            f"native history lost, reordered or changed {role} message: {text!r}"
+        )
 
 
 @pytest.mark.parametrize("retry_turn", [0, 1])

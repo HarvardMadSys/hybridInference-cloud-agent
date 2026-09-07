@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -99,6 +100,49 @@ async def test_pkce_identity_internal_contracts_and_inference_grant() -> None:
     assert catalog.json()["models"] == [gateway.MODEL_ID]
     assert minted.json()["allowed_models"] == [gateway.MODEL_ID]
     assert "event: message_stop" in inference.text
+
+
+async def test_responses_stream_completes_the_assistant_item_for_native_history() -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=gateway.app), base_url="http://local"
+    ) as client:
+        minted = await client.post(
+            "/internal/agent-grants",
+            headers={"Authorization": "Bearer local-dispatch"},
+            json={
+                "user_id": gateway.USER_ID,
+                "external_job_id": "native-history-fixture",
+                "external_attempt_id": "1",
+                "allowed_models": [gateway.MODEL_ID],
+            },
+        )
+        response = await client.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer " + minted.json()["token"]},
+            json={
+                "model": gateway.MODEL_ID,
+                "stream": True,
+                "input": [{"role": "user", "content": "hi"}],
+            },
+        )
+    assert response.status_code == 200
+    events = [
+        json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
+    ]
+    kinds = [event["type"] for event in events]
+    assert "response.output_item.added" in kinds
+    assert "response.output_item.done" in kinds
+    assert kinds.index("response.output_item.added") < kinds.index("response.output_text.delta")
+    assert kinds.index("response.output_text.done") < kinds.index("response.output_item.done")
+    assert kinds.index("response.output_item.done") < kinds.index("response.completed")
+    assert [event["sequence_number"] for event in events] == list(range(len(events)))
+    done = events[kinds.index("response.output_item.done")]["item"]
+    completed = events[kinds.index("response.completed")]["response"]
+    assert done == completed["output"][0]
+    assert done["role"] == "assistant" and done["status"] == "completed"
+    assert done["content"][0]["text"] == "".join(
+        event["delta"] for event in events if event["type"] == "response.output_text.delta"
+    )
 
 
 async def test_codes_are_one_time_and_dispatch_errors_keep_contract_shape() -> None:
