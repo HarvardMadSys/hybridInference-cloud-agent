@@ -328,3 +328,11 @@ after you are satisfied, not before.
 `AGENT_WEB_BASE_PATH`, not `/`. The app is mounted under a prefix, so `/` is a
 404 by design; a check pointed there fails every deploy of a perfectly healthy
 app. On staging: `/` → 404, `/agents` → 200, `/agents/` → 308.
+
+## Conversation recall verification
+
+Health and matching deployment SHAs do not prove model recall. Before accepting
+a rollout, follow [the native conversation recall checks](../../docs/context-recall.md),
+including the opt-in Flash model preflight and an app follow-up/idle restore.
+The model check requires a separately supplied test key and is not enabled by
+the deployment workflows automatically.

@@ -1431,7 +1431,12 @@ class ClaudeCodeLiveSession(HarnessSession):
             )
         assert self._process is not None
         try:
-            self._process.write_line(self.runtime.user_message_line(turn_input.prompt))
+            self._process.write_line(
+                self.runtime.user_message_line(
+                    turn_input.prompt,
+                    continuing=self._resume_session_id is not None or self._live_turn is not None,
+                )
+            )
         except OSError as exc:
             # A broken pipe is the resident process having died idle. One
             # typed refusal, so the caller's fallback ladder catches it the

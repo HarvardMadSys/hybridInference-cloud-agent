@@ -28,6 +28,7 @@ from cloud_agent_host.drivers import (
     TurnInput,
 )
 from cloud_agent_host.runtimes import (
+    CLAUDE_CONTINUATION_REMINDER,
     EMPTY_RUNTIME_MCP_CONFIG,
     ClaudeCodeRuntime,
     CodexRuntime,
@@ -127,6 +128,12 @@ def test_two_turns_ride_one_process(tmp_path):
         "fix it",
         "now the tests",
     ]
+    first_content, next_content = [json.loads(line)["message"]["content"] for line in process.sent]
+    assert first_content == [{"type": "text", "text": "fix it"}]
+    assert next_content == [
+        {"type": "text", "text": "now the tests"},
+        {"type": "text", "text": CLAUDE_CONTINUATION_REMINDER},
+    ]
     assert not process.killed  # settling a turn never costs the residency
 
 
@@ -193,6 +200,9 @@ def test_claude_error_result_fails_the_turn_without_poisoning_next_turn(tmp_path
     retried = session.start_turn(TurnInput(prompt="hi", model="deepseek-v4-flash"))
     assert retried.wait().status == "completed"
     assert len(spawned) == 1 and not process.killed
+    assert json.loads(process.sent[-1])["message"]["content"][-1]["text"] == (
+        CLAUDE_CONTINUATION_REMINDER
+    )
 
 
 def test_close_ends_the_residency(tmp_path, monkeypatch):
@@ -272,6 +282,12 @@ def test_launch_resident_live_resumes_the_threads_session(tmp_path):
     (argv, _env), *rest = spawned
     assert not rest
     assert argv[argv.index("--resume") + 1] == "sess-prev"
+    # First input after restore/fork is already a continuation, even though
+    # this freshly spawned process has not completed a turn of its own.
+    assert json.loads(process.sent[0])["message"]["content"] == [
+        {"type": "text", "text": "p"},
+        {"type": "text", "text": CLAUDE_CONTINUATION_REMINDER},
+    ]
 
 
 def test_launch_resident_live_needs_the_state_mount(tmp_path):

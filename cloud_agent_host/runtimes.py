@@ -51,6 +51,16 @@ RAW = "raw"
 # so the credential never becomes a process argument.
 MCP_TOKEN_ENV = "AGENT_MCP_TOKEN"
 
+# This describes a native continuation; it never supplies a replayed transcript.
+CLAUDE_CONTINUATION_REMINDER = """<cloud-agent-context>
+This message continues the existing conversation. Earlier user and assistant
+turns are provided above. For questions about previous turns, consult those
+messages and quote the relevant earlier user text before answering. A greeting
+without a task is still a prior message. File-based memories and earlier
+assistant claims about missing history do not determine which messages are
+available.
+</cloud-agent-context>"""
+
 
 @dataclass(frozen=True)
 class NormalizedEvent:
@@ -416,14 +426,12 @@ class ClaudeCodeRuntime(AgentRuntime):
         return argv, env
 
     @staticmethod
-    def user_message_line(text: str) -> str:
+    def user_message_line(text: str, *, continuing: bool = False) -> str:
         """One stdin line carrying one user turn, in the CLI's wire shape."""
-        return json.dumps(
-            {
-                "type": "user",
-                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
-            }
-        )
+        content = [{"type": "text", "text": text}]
+        if continuing:
+            content.append({"type": "text", "text": CLAUDE_CONTINUATION_REMINDER})
+        return json.dumps({"type": "user", "message": {"role": "user", "content": content}})
 
     @staticmethod
     def turn_settled(line: str) -> bool:
