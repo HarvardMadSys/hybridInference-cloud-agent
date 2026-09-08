@@ -273,6 +273,16 @@ jobs:
       - name: Pytest
         run: uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest"
 
+      # A single OS user cannot reproduce a sibling CLI's 0700 process registry.
+      # Check the real normalizer across Linux UIDs before allowing deployment.
+      - name: Shared member permissions survive a sibling CLI restart
+        timeout-minutes: 5
+        env:
+          AGENT_PERMISSION_TEST_IMAGE: python:3.12-slim
+        run: |
+          docker pull "${AGENT_PERMISSION_TEST_IMAGE}"
+          uv run pytest -q -m external tests/external/test_shared_member_permissions.py
+
       # Completion can precede the native CLI's history flush. Unit doubles
       # cannot catch that race; exercise the shipped pin before CI can deploy.
       # Inference is a loopback protocol fixture, with no API key or model cost.

@@ -1951,6 +1951,10 @@ class ChatSandboxManager:
         # Codex can make temp files owner-only, while the HTTP runtimes keep
         # SQLite databases and per-project process locks. A sibling UID must
         # never traverse those homes merely to normalize its own writes.
+        # Claude's sessions/ is a process registry, not its projects/ JSONL
+        # history. The CLI resets that registry to 0700 on every start/resume.
+        # Leave it private even for its owner: widening it here would race a
+        # sibling's startup and make settlement fail after a successful reply.
         # Normalize shared roots while pruning every private-home collection,
         # then enter only direct children owned by this member.
         script = (
@@ -1962,12 +1966,14 @@ class ChatSandboxManager:
             f"normalize_dirs {CHAT_WORKDIR}; normalize_files {CHAT_WORKDIR}; "
             f"find {CHAT_STATE_DIR} -xdev "
             f"\\( -path {CHAT_STATE_DIR}/.platform "
+            f"-o -path {CHAT_STATE_DIR}/claude/sessions "
             f"-o -path {CHAT_STATE_DIR}/codex-members "
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
             f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
             '-uid "$uid" -type d -exec chmod g+rwx,g+s -- {} +; '
             f"find {CHAT_STATE_DIR} -xdev "
             f"\\( -path {CHAT_STATE_DIR}/.platform "
+            f"-o -path {CHAT_STATE_DIR}/claude/sessions "
             f"-o -path {CHAT_STATE_DIR}/codex-members "
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
             f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "

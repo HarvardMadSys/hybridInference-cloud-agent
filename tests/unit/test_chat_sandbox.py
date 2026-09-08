@@ -1934,6 +1934,7 @@ def test_member_permission_normalization_prunes_platform_and_sibling_provider_ho
 
     script = calls[0][0][2]
     assert script.count("-path /agent-state/.platform") == 2
+    assert script.count("-path /agent-state/claude/sessions") == 2
     assert script.count("-path /agent-state/codex-members") == 2
     assert script.count("-path /agent-state/opencode-members") == 2
     assert script.count("-path /agent-state/kilo-members") == 2
