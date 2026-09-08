@@ -11,6 +11,7 @@ real script.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -41,24 +42,41 @@ def _mounts(service: dict) -> list[str]:
     return out
 
 
-def test_pull_request_workflows_never_target_persistent_runners() -> None:
-    """Untrusted PR code must run on disposable GitHub-hosted machines."""
-    checked: list[str] = []
-    paths = sorted((*WORKFLOW_DIR.glob("*.yml"), *WORKFLOW_DIR.glob("*.yaml")))
-    for path in paths:
-        text = path.read_text()
-        workflow = yaml.load(text, Loader=yaml.BaseLoader) or {}
-        configured = workflow.get("on", {})
-        events = set(configured) if isinstance(configured, (dict, list)) else {str(configured)}
-        if events.isdisjoint({"pull_request", "pull_request_target"}):
-            continue
-        checked.append(path.name)
-        configuration = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
-        for unsafe in ("self-hosted", "image-verify-", "deploy-cloud-agent-"):
-            assert unsafe not in configuration, (
-                f"{path.name} is triggered by pull requests but targets {unsafe!r}"
-            )
-    assert checked, "no pull-request workflow was inspected"
+def test_private_repository_ci_uses_existing_self_hosted_pools() -> None:
+    """Keep private CI on our pools until the public-PR split in #99 lands."""
+    workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read"}
+    jobs = workflow["jobs"]
+    special_runners = {
+        "build": "${{ fromJSON(matrix.image.runner) }}",
+        "egress-proxy-starts": ["self-hosted", "Linux", "X64", "image-verify-x64"],
+        "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
+    }
+    assert special_runners.keys() <= jobs.keys()
+    for name, job in jobs.items():
+        expected = special_runners.get(name, ["self-hosted", "Linux", "ci-general"])
+        assert job["runs-on"] == expected, f"{name} left its self-hosted CI pool"
+
+
+def test_ci_images_build_on_their_deployment_architecture() -> None:
+    """Matrix indirection must preserve both self-hosting and native builds."""
+    workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
+    matrix = workflow["jobs"]["build"]["strategy"]["matrix"]
+    assert set(matrix) == {"image"}
+    images = matrix["image"]
+    x64 = ["self-hosted", "Linux", "X64", "image-verify-x64"]
+    arm64 = ["self-hosted", "Linux", "ARM64", "image-verify-arm64"]
+    expected = {
+        "deploy/host/Dockerfile.agent-runner": x64,
+        "deploy/sandbox/Dockerfile.agent-sandbox": x64,
+        "deploy/host/Dockerfile.agent-egress-proxy": x64,
+        "deploy/host/Dockerfile.agent-gateway-tunnel": x64,
+        "deploy/control-plane/Dockerfile": arm64,
+    }
+    assert len(images) == len(expected)
+    assert {image["dockerfile"] for image in images} == expected.keys()
+    for image in images:
+        assert json.loads(image["runner"]) == expected[image["dockerfile"]], image["name"]
 
 
 # ---------------------------------------------------------------------------

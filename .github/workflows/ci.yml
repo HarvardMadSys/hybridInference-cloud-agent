@@ -26,11 +26,9 @@ on:
   pull_request:
     branches: [main, dev]
 
-# This workflow executes the checked-out commit through tests, package install
-# hooks and Docker builds. Pull requests are therefore untrusted code, even
-# when Actions secrets are withheld. Every CI job runs on a disposable
-# GitHub-hosted VM; persistent self-hosted machines are reserved for the
-# post-CI deployment workflows, which consume trusted push commits only.
+# While this repository is private, CI uses the existing self-hosted pools.
+# Before making it public, #99 must route pull requests to GitHub-hosted
+# runners; tests, package install hooks and Docker builds execute PR code.
 permissions:
   contents: read
 
@@ -47,7 +45,7 @@ env:
 jobs:
   changes:
     name: Classify Changes
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ci-general]
     outputs:
       backend: ${{ steps.classify.outputs.backend }}
       web: ${{ steps.classify.outputs.web }}
@@ -148,8 +146,8 @@ jobs:
   # One job, three checks — not a three-cell matrix. Each cell paid for its own
   # checkout, uv install, Python install and `uv sync` in order to run a command
   # that takes about a second: measured over one run, 14s of environment for 1s
-  # of linting. Keeping the checks together also avoids spending several
-  # hosted runners on identical setup for one commit.
+  # of linting. Keeping the checks together also avoids occupying several
+  # runners with identical setup for one commit.
   #
   # `fail-fast: false` is what the matrix bought, and it is kept below: every
   # check runs even after one fails, and the job is red if any did. This also
@@ -158,7 +156,7 @@ jobs:
     name: Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ci-general]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -245,15 +243,16 @@ jobs:
     name: Tests
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ci-general]
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Isolate uv cache dir
+      - name: Isolate uv and npm cache dirs
         run: |
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+          echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -317,8 +316,8 @@ jobs:
     name: Tests (Postgres)
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    # Service containers run inside this job's disposable hosted VM.
-    runs-on: ubuntu-24.04
+    # This pool can start service containers; postgres:15 supports ARM64.
+    runs-on: [self-hosted, Linux, ci-general]
 
     services:
       postgres:
@@ -466,7 +465,7 @@ jobs:
     name: Web
     needs: changes
     if: needs.changes.outputs.web == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ci-general]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -579,7 +578,7 @@ jobs:
   # ------------------------------------------------------------------ secret
   gitleaks:
     name: Gitleaks
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ci-general]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -631,33 +630,33 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     # **Each image builds on the architecture it is deployed to.** The control
-    # plane targets ARM64; the host images target x86_64. GitHub-hosted runners
-    # provide both architectures without exposing either deployment machine.
+    # plane targets ARM64; the host images target x86_64. Each image uses the
+    # matching self-hosted image verification pool.
     # A build resolving on ARM64 says nothing about a base image without an
     # amd64 layer, or the reverse.
     #
     # `push: false` still: nothing here publishes. The point is that the build
     # resolves *where it matters*.
-    runs-on: ${{ matrix.image.runner }}
+    runs-on: ${{ fromJSON(matrix.image.runner) }}
     strategy:
       fail-fast: false
       matrix:
         image:
           - name: runner
             dockerfile: deploy/host/Dockerfile.agent-runner
-            runner: ubuntu-24.04
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
           - name: sandbox
             dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
-            runner: ubuntu-24.04
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
           - name: egress-proxy
             dockerfile: deploy/host/Dockerfile.agent-egress-proxy
-            runner: ubuntu-24.04
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
           - name: gateway-tunnel
             dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
-            runner: ubuntu-24.04
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
           - name: control-plane
             dockerfile: deploy/control-plane/Dockerfile
-            runner: ubuntu-24.04-arm
+            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -705,7 +704,7 @@ jobs:
     # opening its logs is exactly the kind of failure that could differ by base
     # image layer, so proving it on the other architecture would prove the
     # wrong one.
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, image-verify-x64]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -801,8 +800,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     # The one docker job with no architecture to match: `docker compose config`
-    # parses and interpolates, it does not build or start anything.
-    runs-on: ubuntu-24.04
+    # parses and interpolates, it does not build or start anything. Use the
+    # ARM64 pool so this does not queue behind the x64 image builds.
+    runs-on: [self-hosted, Linux, ARM64, image-verify-arm64]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -930,7 +930,7 @@ jobs:
         run: |
           set -euo pipefail
           # `uv run --with pyyaml`, not a bare python3: incidental packages in
-          # a hosted image are not a dependency guarantee. The heredoc is
+          # the runner environment are not a dependency guarantee. The heredoc is
           # quoted, so the path comes through the environment rather than shell
           # interpolation.
           uv run --no-project --with pyyaml python - <<'PY'
@@ -973,7 +973,7 @@ jobs:
     # keys on this workflow's conclusion, so this is what stands between a merge
     # to dev and a rebuild of the staging stack.
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ci-general]
     needs:
       - changes
       - lint
