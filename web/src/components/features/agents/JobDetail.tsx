@@ -614,7 +614,7 @@ function DetailsDrawer({
                   />
                   <DetailStat label="Input tokens" value={job.usage.tokensIn} />
                   <DetailStat label="Output tokens" value={job.usage.tokensOut} />
-                  <DetailStat label="Model calls" value={String(job.usage.turns)} />
+                  <DetailStat label="Model calls" value={String(job.usage.turns ?? '—')} />
                 </dl>
               </section>
               <section>

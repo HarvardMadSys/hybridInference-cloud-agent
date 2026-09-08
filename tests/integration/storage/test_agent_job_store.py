@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 
 from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.thread_stats import summarize_thread
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
@@ -122,6 +123,36 @@ async def _create_job(store: AgentJobStore, **overrides) -> dict:
     }
     params.update(overrides)
     return await store.create_job(**params)
+
+
+async def test_thread_stats_keep_output_presence_when_omitting_long_transcripts(
+    store: AgentJobStore,
+):
+    """Exercise the SQL projection that previously bypassed false-zero detection."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    for text in [" \n\t", "long answer " * 1000]:
+        assert await store.append_event(
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            event_type="message",
+            payload={
+                "text": text,
+                "usage_id": "msg_answer",
+                "usage": {"input_tokens": 100, "output_tokens": 0},
+            },
+        )
+    inputs = await store.thread_stats_inputs(job_id=job["id"], user_id=job["user_id"])
+    assert inputs is not None
+    assert [event["payload"]["has_text"] for event in inputs["events"]] == [False, True]
+    assert all("text" not in event["payload"] for event in inputs["events"])
+    stats = summarize_thread(
+        job_ids=inputs["job_ids"], attempts=inputs["attempts"], events=inputs["events"]
+    )
+    assert stats.input_tokens == 100
+    assert stats.output_tokens is None
+    assert stats.output_tokens_per_second is None
 
 
 async def _expire_attempt(store: AgentJobStore, attempt_id: int) -> None:

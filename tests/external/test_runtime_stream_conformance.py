@@ -42,6 +42,7 @@ import shutil
 
 import pytest
 
+from cloud_agent.thread_stats import summarize_thread
 from cloud_agent_host.runtimes import ClaudeCodeRuntime
 from tests.support.claude_cli import ClaudeCli, FakeAnthropicGateway
 
@@ -145,3 +146,55 @@ def test_the_parser_understands_every_offered_claude_code_version(version, tmp_p
     )
 
     assert "lifecycle" in kinds[-1:], f"{version} did not close on a terminal lifecycle event"
+
+
+def test_resident_claude_result_usage_is_per_turn_and_long_answers_survive(tmp_path, gateway):
+    """Measure result scope on the pinned CLI, including a second resident turn."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
+    answer = "long answer detail\n" * 500 + "COMPLETE"
+    gateway.reply_text = answer
+    cli = ClaudeCli(
+        version=_menu()[0],
+        workdir=workdir,
+        config_dir=config,
+        gateway_port=gateway.port,
+        credential="conformance-key",
+    )
+    runtime = ClaudeCodeRuntime()
+    events = []
+    try:
+        for turn_no in [1, 2]:
+            start = len(cli.transcript)
+            result = cli.turn("say ok")
+            assert result is not None and result["is_error"] is False
+            # The fake gateway reports one token each way on each request.
+            # A session-cumulative result would incorrectly report two here.
+            assert result["usage"]["input_tokens"] == 1
+            assert result["usage"]["output_tokens"] == 1
+            normalized = [
+                event
+                for raw in cli.transcript[start:]
+                if (event := runtime.parse_event(json.dumps(raw))) is not None
+            ]
+            assert any(
+                event.event_type == "message" and event.payload["text"] == answer
+                for event in normalized
+            )
+            for seq, event in enumerate(normalized):
+                events.append(
+                    {
+                        "job_id": f"turn-{turn_no}",
+                        "attempt_id": turn_no,
+                        "seq": seq,
+                        "event_type": event.event_type,
+                        "payload": event.payload,
+                    }
+                )
+    finally:
+        cli.close()
+    stats = summarize_thread(job_ids=["turn-1", "turn-2"], attempts=[], events=events)
+    assert stats.input_tokens == 2
+    assert stats.output_tokens == 2

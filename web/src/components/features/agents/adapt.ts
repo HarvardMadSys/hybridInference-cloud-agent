@@ -717,7 +717,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       tokensIn: formatTokens(job.tokens_in),
       tokensOut: formatTokens(job.tokens_out),
       cachePct: 0,
-      turns: job.model_calls ?? 0,
+      turns: job.model_calls,
     },
     egressDenials,
     prLabel: publishedPrUrl ? `draft PR ${publishedPrUrl.split('/').pop()}` : undefined,

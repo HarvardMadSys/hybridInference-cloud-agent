@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from cloud_agent.thread_stats import summarize_thread
 
 _T0 = datetime(2026, 8, 19, 12, 0, 0, tzinfo=timezone.utc)
@@ -36,6 +38,89 @@ def _event(
 
 def _attempt(*, job_id: str = "job-1", offset: float = 0.0) -> dict:
     return {"job_id": job_id, "started_at": _T0 + timedelta(seconds=offset)}
+
+
+def test_repeated_response_usage_is_counted_once_with_later_output_updates() -> None:
+    """Content blocks share an id; different responses can have equal counts."""
+    events = [
+        _event(
+            seq=seq,
+            event_type=kind,
+            payload={"usage_id": response_id, "usage": {"input_tokens": 100, "output_tokens": out}},
+        )
+        for seq, kind, response_id, out in [
+            (1, "thinking", "a", 0),
+            (2, "message", "a", 5),
+            (3, "tool_use", "a", 10),
+            (4, "tool_use", "a", 5),
+            (5, "message", "b", 10),
+        ]
+    ]
+    stats = summarize_thread(job_ids=["job-1"], attempts=[], events=events)
+    assert stats.input_tokens == 200
+    assert stats.output_tokens == 20
+
+
+@pytest.mark.parametrize("kind", ["lifecycle", "error"])
+def test_completed_usage_replaces_only_its_own_attempt(kind) -> None:
+    """Final counts replace provisional data without erasing retry usage."""
+    events = [
+        _event(
+            seq=1,
+            attempt_id=attempt_id,
+            event_type="message",
+            payload={"usage_id": "same-id", "usage": {"input_tokens": 100, "output_tokens": 0}},
+        )
+        for attempt_id in [1, 2]
+    ]
+    events.append(
+        _event(
+            seq=2,
+            attempt_id=2,
+            event_type=kind,
+            payload={
+                "usage_scope": "attempt",
+                "usage": {"input_tokens": 40, "output_tokens": 7},
+            },
+        )
+    )
+    stats = summarize_thread(job_ids=["job-1"], attempts=[], events=events)
+    assert stats.input_tokens == 140
+    assert stats.output_tokens == 7
+
+
+def test_same_response_id_in_separate_turns_is_not_deduplicated() -> None:
+    stats = summarize_thread(
+        job_ids=["job-1", "job-2"],
+        attempts=[],
+        events=[
+            _event(
+                job_id=job_id,
+                seq=1,
+                event_type="message",
+                payload={"usage_id": "same-id", "usage": {"input_tokens": 100}},
+            )
+            for job_id in ["job-1", "job-2"]
+        ],
+    )
+    assert stats.input_tokens == 200
+
+
+def test_projected_text_presence_withholds_false_zero_output() -> None:
+    """SQL omits full text but retains the fact that an answer was produced."""
+    stats = summarize_thread(
+        job_ids=["job-1"],
+        attempts=[],
+        events=[
+            _event(
+                seq=1,
+                event_type="message",
+                payload={"has_text": True, "usage": {"output_tokens": 0}},
+            )
+        ],
+    )
+    assert stats.output_tokens is None
+    assert stats.output_tokens_per_second is None
 
 
 def test_serial_tool_calls_sum_their_windows() -> None:

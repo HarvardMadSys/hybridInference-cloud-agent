@@ -38,6 +38,7 @@ _MESSAGE = "message"
 _THINKING = "thinking"
 _USAGE = "usage"
 _LIFECYCLE = "lifecycle"
+_ERROR = "error"
 
 #: Events that prove the model has started producing this turn's answer.
 #: Used for time-to-first-token; a ``lifecycle`` event does not qualify,
@@ -53,6 +54,7 @@ _INPUT_KEYS = ("input_tokens", "input_token_count", "prompt_tokens")
 _OUTPUT_KEYS = ("output_tokens", "output_token_count", "completion_tokens")
 _CACHE_READ_KEYS = ("cache_read_input_tokens", "cache_read_tokens", "cached_tokens")
 _CACHE_WRITE_KEYS = ("cache_creation_input_tokens", "cache_write_tokens")
+_TOKEN_KEY_GROUPS = (_INPUT_KEYS, _OUTPUT_KEYS, _CACHE_READ_KEYS, _CACHE_WRITE_KEYS)
 
 
 @dataclass(frozen=True)
@@ -152,11 +154,12 @@ def summarize_thread(
         if ttft is not None:
             ttft_samples.append(ttft)
 
+        for usage in _distinct_usage(ordered):
+            totals.add(usage)
         for event in ordered:
-            totals.add(_usage_of(event))
-            if (
-                event.get("event_type") == _MESSAGE
-                and str(_payload(event).get("text") or "").strip()
+            if event.get("event_type") == _MESSAGE and (
+                _payload(event).get("has_text") is True
+                or str(_payload(event).get("text") or "").strip()
             ):
                 produced_text = True
 
@@ -226,6 +229,51 @@ class _TokenTotals:
         if total <= 0:
             return None
         return self.cache_read_tokens / total
+
+
+def _distinct_usage(events: Sequence[Mapping[str, Any]]) -> Iterable[Mapping[str, Any]]:
+    """Prefer completed attempt totals; otherwise count each response once.
+
+    Claude's block events repeat a response's usage and may update output
+    counters later. Its result carries the completed query total. Identity
+    is scoped to each job's attempt, so retries and follow-ups remain additive.
+    Older events without identity retain their original additive semantics.
+    """
+    by_attempt: dict[Any, list[tuple[Mapping[str, Any], dict[str, int]]]] = {}
+    for event in events:
+        usage = _usage_of(event)
+        if not usage:
+            continue
+        normalized = {
+            keys[0]: value
+            for keys in _TOKEN_KEY_GROUPS
+            if (value := _first_int(usage, keys)) is not None
+        }
+        if normalized:
+            by_attempt.setdefault(event.get("attempt_id"), []).append((_payload(event), normalized))
+
+    for records in by_attempt.values():
+        final = next(
+            (
+                usage
+                for payload, usage in reversed(records)
+                if payload.get("usage_scope") == "attempt"
+            ),
+            None,
+        )
+        if final is not None:
+            yield final
+            continue
+        by_response: dict[str, dict[str, int]] = {}
+        for payload, usage in records:
+            response_id = payload.get("usage_id")
+            if not isinstance(response_id, str) or not response_id:
+                yield usage
+                continue
+            current = by_response.setdefault(response_id, {})
+            for key, value in usage.items():
+                current[key] = max(current.get(key, 0), value)
+        yield from by_response.values()
 
 
 def _earliest_attempt_start_per_job(
@@ -329,7 +377,7 @@ def _usage_of(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
     if event_type == _USAGE:
         nested = payload.get("usage")
         return nested if isinstance(nested, Mapping) else payload
-    if event_type in (_MESSAGE, _TOOL_USE, _LIFECYCLE):
+    if event_type in (_MESSAGE, _THINKING, _TOOL_USE, _LIFECYCLE, _ERROR):
         nested = payload.get("usage")
         return nested if isinstance(nested, Mapping) else None
     return None

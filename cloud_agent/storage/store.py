@@ -1966,7 +1966,10 @@ class AgentJobStore:
                        e.seq,
                        e.event_type,
                        e.created_at,
-                       e.payload - ARRAY['text', 'input', 'content'] AS payload
+                       (e.payload - ARRAY['text', 'input', 'content'])
+                       || jsonb_build_object(
+                           'has_text', COALESCE(e.payload->>'text', '') ~ '[^[:space:]]'
+                       ) AS payload
                 FROM agent_job_events e
                 JOIN agent_jobs j ON j.id = e.job_id
                 WHERE j.thread_id = $1

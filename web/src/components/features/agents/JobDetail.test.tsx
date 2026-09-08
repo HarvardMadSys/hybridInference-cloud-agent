@@ -449,6 +449,14 @@ describe('JobDetail', () => {
     expect(screen.getByText('{"event_type":"message"}')).toBeInTheDocument();
   });
 
+  it.each([null, 0])('preserves an absent or zero model-call count (%s)', (turns) => {
+    const job = makeJob();
+    render(<JobDetail job={{ ...job, usage: { ...job.usage, turns } }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const row = screen.getByText('Model calls').parentElement!;
+    expect(within(row).getByText(turns === null ? '—' : '0')).toBeInTheDocument();
+  });
+
   it('wraps unbroken failure details inside the outcome card', () => {
     const stateNote = `agent exited 1: ${'x'.repeat(300)}`;
     render(<JobDetail job={makeJob({ state: 'failed', stateNote })} />);

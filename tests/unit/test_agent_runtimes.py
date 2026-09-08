@@ -99,6 +99,60 @@ def test_error_result_maps_to_error():
     assert event.payload["subtype"] == "error_max_turns"
 
 
+@pytest.mark.parametrize("kind", ["text", "thinking", "tool_result", "result"])
+def test_claude_transcript_preserves_content_past_4000_characters(kind):
+    """A long answer or tool result must survive normalization in full."""
+    content = "repository detail\n" * 500 + "END OF CONTENT"
+    if kind == "result":
+        raw = {"type": "result", "result": content}
+        key = "text"
+    elif kind == "tool_result":
+        raw = {
+            "type": "user",
+            "message": {"content": [{"type": kind, "content": content}]},
+        }
+        key = "content"
+    else:
+        raw = {
+            "type": "assistant",
+            "message": {"content": [{"type": kind, kind: content}]},
+        }
+        key = "text"
+    event = ClaudeCodeRuntime().parse_event(json.dumps(raw))
+    assert event.payload[key] == content
+
+
+@pytest.mark.parametrize("kind", ["text", "thinking", "tool_use"])
+def test_claude_assistant_blocks_keep_the_response_identity(kind):
+    """Parallel blocks repeat one model response's usage, not separate calls."""
+    usage = {"input_tokens": 100, "output_tokens": 0}
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_shared",
+                    "content": [{"type": kind, kind: "content"}],
+                    "usage": usage,
+                },
+            }
+        )
+    )
+    assert event.payload["usage_id"] == "msg_shared"
+    assert event.payload["usage"] == usage
+
+
+@pytest.mark.parametrize("is_error", [False, True])
+def test_claude_result_keeps_the_completed_turn_usage(is_error):
+    """Success and failure both carry usage that supersedes streamed estimates."""
+    usage = {"input_tokens": 42, "output_tokens": 7, "cache_read_input_tokens": 100}
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": "result", "is_error": is_error, "usage": usage})
+    )
+    assert event.payload["usage"] == usage
+    assert event.payload["usage_scope"] == "attempt"
+
+
 def _pi_contract_lines() -> list[str]:
     """Return the sanitized pi ``--mode json`` stream, line by line."""
     return (_FIXTURES / "pi_stream_contract.jsonl").read_text().splitlines()
