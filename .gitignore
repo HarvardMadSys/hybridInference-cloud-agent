@@ -40,5 +40,7 @@ next-env.d.ts
 
 # Written by deploy.sh on the deployment host: which commit is actually running.
 .deployed-sha
+# Host readiness is deployment metadata, written beside .deployed-sha.
+.shared-live-ready
 # Local inference test credential (never commit).
 /api_key

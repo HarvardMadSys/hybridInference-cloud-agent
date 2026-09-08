@@ -309,7 +309,7 @@ services:
       # broker, tunnel and Docker storage check succeeds. The control-plane
       # deploy waits for the matching heartbeat before replacing its service.
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:-}
-      AGENT_SHARED_LIVE_READY_FILE: ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/shared-live-ready
+      AGENT_SHARED_LIVE_READY_FILE: /run/cloud-agent/shared-live-ready
       # Shared native forks need at least two synchronous executors.
       AGENT_HOST_SLOTS: ${AGENT_HOST_SLOTS:-3}
       # One process executes one claimed turn at a time. Pass the configured
@@ -376,6 +376,15 @@ services:
       # restart. Shared by all three replicas, which is also what makes the
       # lock work — it is taken on this directory.
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}:${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}
+      # The deploy user owns the readiness file; runners only read it. Keep it
+      # separate from the container-owned enrollment directory. Refuse a missing
+      # file instead of letting Docker create a root-owned directory in its place.
+      - type: bind
+        source: ../../.shared-live-ready
+        target: /run/cloud-agent/shared-live-ready
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - internal
     depends_on:

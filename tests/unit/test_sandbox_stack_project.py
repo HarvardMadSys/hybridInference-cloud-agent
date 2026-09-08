@@ -297,23 +297,21 @@ def test_the_shared_guard_canonicalizes_state_roots(tmp_path: Path) -> None:
     assert "AGENT_HOST_STATE_ROOT" in result.stderr
 
 
-def test_ready_marker_uses_the_same_compose_resolved_root_as_up(tmp_path: Path) -> None:
-    """The post-deploy marker must reach the root mounted into the runners."""
+def test_ready_marker_is_owned_by_the_deployment_checkout(tmp_path: Path) -> None:
+    """Compose enrollment paths must not redirect deployment metadata writes."""
     state_root = tmp_path / "host-state"
     state_root.mkdir()
-    marker = state_root / "shared-live-ready"
-    marker.write_text("pending:target-sha\n")
     dotenv = "AGENT_HOST_STATE_ROOT=${STATE_BASE}/host-state\n"
     resolved = f"AGENT_HOST_STATE_ROOT={state_root}\n"
+    env = _host(tmp_path, dotenv=dotenv, compose_environment=resolved)
+    marker = Path(env["APP_DIR"]) / ".shared-live-ready"
+    marker.write_text("pending:target-sha\n")
 
-    result = _run(
-        _host(tmp_path, dotenv=dotenv, compose_environment=resolved),
-        "mark-ready",
-        "target-sha",
-    )
+    result = _run(env, "mark-ready", "target-sha")
 
     assert result.returncode == 0, result.stderr
     assert marker.read_text() == "target-sha\n"
+    assert not (state_root / "shared-live-ready").exists()
 
 
 def test_a_lone_stack_needs_no_such_thing(tmp_path: Path) -> None:

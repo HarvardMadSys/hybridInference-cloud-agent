@@ -733,6 +733,13 @@ it also probes every online host that still owns a retained group; changing the
 pin must not make old chats disappear from rollout safety. `SHARED_READY_TIMEOUT`
 controls that wait and defaults to 900 seconds.
 
+The deploy user writes `.shared-live-ready` in the deployment checkout, separate
+from the container-owned enrollment directory. Runners mount only that file
+read-only at `/run/cloud-agent/shared-live-ready`. The host script preserves its
+inode when changing `pending:<sha>` to `<sha>`, so existing file mounts see the
+transition; an empty or partial write cannot advertise an exact target SHA.
+No credential ownership or permission changes are needed for a rollout.
+
 Both Actions jobs use the workflow commit's deployment orchestrator against a
 separate target checkout. Online rollback therefore cannot execute a
 pre-fence target's old scripts; commits without the current

@@ -58,10 +58,13 @@ host's current sandbox image digest equals that group's immutable digest. This
 prevents a v1 helper from accepting a v2 at-anchor request and accidentally
 forking the latest message.
 
-Host infrastructure metadata and the enrolled credential live under
-`AGENT_HOST_STATE_ROOT`. This is not a chat workspace or session mount. Chat
-files and Agent CLI state stay in each retained container's Docker writable
-layer.
+The enrolled credential lives under `AGENT_HOST_STATE_ROOT`, which may be owned
+by the runner container's user. Deployment readiness lives in `.shared-live-ready`
+beside `.deployed-sha` in the deployment checkout, where the deployment user can
+write it. Runners bind only that marker file read-only; completing readiness
+overwrites the same inode so existing mounts see the new SHA. Neither location
+is a chat workspace or session mount. Chat files and Agent CLI state stay in
+each retained container's Docker writable layer.
 
 The host script is thin on purpose: `sandbox_host.sh up` already checks
 the daemon, requires the environment, runs the isolation preflight **fail

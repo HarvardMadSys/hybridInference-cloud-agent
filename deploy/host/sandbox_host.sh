@@ -387,10 +387,11 @@ validate_retained_config() {
 # This marker is runner infrastructure metadata, not chat state and not a
 # feature switch; chat workspaces remain exclusively in Docker writable layers.
 shared_live_ready_file() {
-  local state_root
-  state_root="$(env_or_dotenv AGENT_HOST_STATE_ROOT)"
-  state_root="${state_root:-/var/lib/hybridinference/agent-host}"
-  printf '%s' "${state_root%/}/shared-live-ready"
+  # The deployment user owns this checkout, but Docker may own the enrollment
+  # directory. Keeping this beside .deployed-sha avoids requiring write access
+  # to credentials just to publish deployment readiness. Compose resolves its
+  # ../../.shared-live-ready source to this same checkout root.
+  printf '%s/.shared-live-ready' "${PWD%/}"
 }
 
 write_shared_live_marker() {
@@ -401,14 +402,14 @@ write_shared_live_marker() {
     || die "shared-live ready marker must be an absolute file path (got '$ready_file')"
   mkdir -p "$ready_dir" \
     || die "could not create shared-live marker directory $ready_dir"
-  # While this plain overwrite is empty or partial, runners omit the exact-SHA
+  # Keep the inode: every runner has a read-only file bind of this marker, so
+  # replacing it by rename would leave running replicas reading the old inode.
+  # While this overwrite is empty or partial, runners omit the exact-SHA
   # capability. That makes an interrupted write fail closed.
   printf '%s\n' "$value" > "$ready_file" \
     || die "could not write shared-live marker $ready_file"
   chmod 0644 "$ready_file" \
     || die "could not make shared-live marker readable by runner replicas"
-  AGENT_SHARED_LIVE_READY_FILE="$ready_file"
-  export AGENT_SHARED_LIVE_READY_FILE
 }
 
 prepare_shared_live_marker() {

@@ -30,3 +30,4 @@ workspaces
 .vscode
 *.swp
 api_key
+.shared-live-ready

@@ -632,13 +632,22 @@ def test_shared_chat_timeout_matches_and_no_legacy_gate_remains(compose: dict):
 
 
 def test_runner_receives_exact_sha_rollout_metadata(compose: dict) -> None:
-    """Infrastructure metadata shares the host-state mount, never chat data."""
+    """Runners read deployment metadata without owning its host directory."""
     runner = compose["services"]["runner"]
     env = runner["environment"]
 
     assert env["AGENT_DEPLOYMENT_SHA"] == "${AGENT_DEPLOYMENT_SHA:-}"
-    assert "AGENT_HOST_STATE_ROOT" in env["AGENT_SHARED_LIVE_READY_FILE"]
-    assert env["AGENT_SHARED_LIVE_READY_FILE"].endswith("/shared-live-ready")
+    assert env["AGENT_SHARED_LIVE_READY_FILE"] == "/run/cloud-agent/shared-live-ready"
+    marker_mount = next(
+        mount
+        for mount in runner["volumes"]
+        if isinstance(mount, dict) and mount.get("target") == env["AGENT_SHARED_LIVE_READY_FILE"]
+    )
+    assert marker_mount["type"] == "bind"
+    assert marker_mount["read_only"] is True
+    assert marker_mount["bind"]["create_host_path"] is False
+    compose_dir = REPO_ROOT / "deploy/host"
+    assert (compose_dir / marker_mount["source"]).resolve() == REPO_ROOT / ".shared-live-ready"
     assert any("AGENT_HOST_STATE_ROOT" in str(mount) for mount in runner["volumes"])
 
 

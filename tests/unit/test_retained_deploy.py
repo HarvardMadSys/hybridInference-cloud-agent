@@ -219,7 +219,7 @@ def test_direct_host_commands_support_environment_only_configuration(tmp_path: P
 
 def test_only_the_pending_target_commit_can_be_marked_ready(tmp_path: Path) -> None:
     env = _host(tmp_path)
-    marker = tmp_path / "host-state/shared-live-ready"
+    marker = Path(env["APP_DIR"]) / ".shared-live-ready"
     marker.write_text("pending:target-sha\n")
 
     wrong = _run(env, "mark-ready", "other-sha")
@@ -229,6 +229,46 @@ def test_only_the_pending_target_commit_can_be_marked_ready(tmp_path: Path) -> N
     ready = _run(env, "mark-ready", "target-sha")
     assert ready.returncode == 0, ready.stderr
     assert marker.read_text().strip() == "target-sha"
+
+
+def test_deploy_marker_does_not_require_writable_enrollment_state(tmp_path: Path) -> None:
+    """Container-owned credentials must not block an unprivileged rollout."""
+    env = _host(tmp_path)
+    _add_required_host_paths(env, tmp_path)
+    _write_executable(tmp_path / "bin/sleep", "#!/bin/sh\nexit 0\n")
+    env.update(AGENT_DEPLOYMENT_SHA="target-sha", DEFER_SHARED_READY_MARKER="1")
+    state_root = tmp_path / "host-state"
+    legacy_marker = state_root / "shared-live-ready"
+    legacy_marker.write_text("previous-generation\n")
+    legacy_marker.chmod(0o444)
+    state_root.chmod(0o555)
+    credential = state_root / "credential"
+    credential_before = credential.stat()
+
+    try:
+        started = _run(env, "up")
+        assert started.returncode == 0, started.stderr
+        marker = Path(env["APP_DIR"]) / ".shared-live-ready"
+        assert marker.read_text() == "pending:target-sha\n"
+        pending_inode = marker.stat().st_ino
+        assert not (Path(env["APP_DIR"]) / ".deployed-sha").exists()
+
+        ready = _run(env, "mark-ready", "target-sha")
+        assert ready.returncode == 0, ready.stderr
+        assert marker.read_text() == "target-sha\n"
+        # A read-only file bind in each runner must see the updated inode.
+        assert marker.stat().st_ino == pending_inode
+        assert marker.stat().st_mode & 0o777 == 0o644
+        assert legacy_marker.read_text() == "previous-generation\n"
+        assert legacy_marker.stat().st_mode & 0o777 == 0o444
+        assert state_root.stat().st_mode & 0o777 == 0o555
+        assert credential.read_text() == "host credential"
+        assert credential.stat().st_mode == credential_before.st_mode
+        assert credential.stat().st_uid == credential_before.st_uid
+        assert credential.stat().st_gid == credential_before.st_gid
+    finally:
+        state_root.chmod(0o755)
+        legacy_marker.chmod(0o644)
 
 
 def test_host_deploy_publishes_readiness_only_after_recording_the_target() -> None:
