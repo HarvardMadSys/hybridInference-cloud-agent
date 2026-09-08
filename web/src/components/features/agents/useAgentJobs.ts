@@ -445,6 +445,7 @@ export function useWorkspaceFiles(
   // A refresh invalidates every in-flight request: results from an older
   // generation belong to a workspace state the user is no longer looking at.
   const generation = useRef(0);
+  const fileRequest = useRef(0);
   const alive = useRef(true);
   const expandedRef = useRef(expanded);
   const selectedRef = useRef(selected);
@@ -494,11 +495,14 @@ export function useWorkspaceFiles(
   const loadFile = useCallback(
     async (path: string) => {
       const mine = generation.current;
+      const request = ++fileRequest.current;
+      const isCurrent = () =>
+        alive.current && mine === generation.current && request === fileRequest.current;
       setFileLoading(true);
       setFileError(null);
       try {
         const node = await getAgentJobFiles(jobId, path);
-        if (!alive.current || mine !== generation.current) return;
+        if (!isCurrent()) return;
         if (node.kind === 'directory') {
           // The entry turned out to be a directory — show it in the tree.
           setDirectories((current) => ({
@@ -512,11 +516,11 @@ export function useWorkspaceFiles(
           setFile(node);
         }
       } catch (cause) {
-        if (!alive.current || mine !== generation.current) return;
+        if (!isCurrent()) return;
         setFile(null);
         setFileError(filesError(cause));
       } finally {
-        if (alive.current && mine === generation.current) setFileLoading(false);
+        if (isCurrent()) setFileLoading(false);
       }
     },
     [jobId],
@@ -552,8 +556,10 @@ export function useWorkspaceFiles(
   );
 
   const closeFile = useCallback(() => {
+    fileRequest.current += 1;
     setSelected(null);
     setFile(null);
+    setFileLoading(false);
     setFileError(null);
   }, []);
 
