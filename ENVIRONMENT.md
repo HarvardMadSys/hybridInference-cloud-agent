@@ -39,6 +39,16 @@ need a gateway secret here, the design is wrong — stop and escalate.
 
 ## Control plane (`cloud_agent`)
 
+### Local and CI permission regression
+
+`AGENT_PERMISSION_TEST_IMAGE` enables the opt-in Linux UID regression in
+`tests/external/test_shared_member_permissions.py`. It names an already-pulled
+Docker image with Python 3 and GNU `find`/`stat`, such as `python:3.12-slim`.
+Run `AGENT_PERMISSION_TEST_IMAGE=python:3.12-slim uv run pytest -q -m external tests/external/test_shared_member_permissions.py` after pulling the image.
+The test uses disposable containers without network access or mounts and runs
+the production normalizer as separate member UIDs without capabilities. CI runs
+it before deployment; it needs no model API key or deployed-service setting.
+
 ### Database
 
 | Variable | New? | Value / who provisions |
