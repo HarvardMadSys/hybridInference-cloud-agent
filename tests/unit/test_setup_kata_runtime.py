@@ -101,6 +101,7 @@ def _fake_release_tarball(tmp_path: Path, *, version: str = PINNED_VERSION) -> P
     config_dir.mkdir(parents=True)
     (config_dir / "configuration-qemu.toml").write_text(
         '[hypervisor.qemu]\nkernel = "/opt/kata/share/kata-containers/vmlinuz.container"\n'
+        "[runtime]\ndisable_guest_seccomp = true\n"
     )
     (config_dir / "configuration.toml").symlink_to("configuration-qemu.toml")
 
@@ -244,6 +245,7 @@ def test_installs_links_the_shim_and_passes_its_own_check(tmp_path: Path) -> Non
     config = prefix / "share" / "defaults" / "kata-containers" / "configuration-qemu.toml"
     assert config.read_text() == (
         f'[hypervisor.qemu]\nkernel = "{prefix}/share/kata-containers/vmlinuz-debug.container"\n'
+        "[runtime]\ndisable_guest_seccomp = false\n"
     )
 
     # And the deploy-time check now passes on this host.
@@ -282,6 +284,26 @@ def test_a_second_run_downloads_nothing(tmp_path: Path) -> None:
     assert second.returncode == 0
     assert "already installed" in second.stdout
     assert _download_count(tmp_path) == 1, "a repeat run re-downloaded the release"
+
+
+@pytest.mark.skipif(not _HAS_ZSTD, reason="zstd is needed to build a release-shaped fixture")
+def test_check_rejects_disabled_guest_seccomp_and_install_repairs_without_download(tmp_path):
+    """A BTF kernel with Kata ignoring the OCI filter must not pass readiness."""
+    tarball = _fake_release_tarball(tmp_path)
+    env = {"KATA_SHA256": _digest(tarball)}
+    assert _run(tmp_path, tarball=tarball, env_overrides=env).returncode == 0
+    config = tmp_path / "root/opt/kata/share/defaults/kata-containers/configuration-qemu.toml"
+    config.write_text(
+        config.read_text().replace("disable_guest_seccomp = false", "disable_guest_seccomp = true")
+    )
+    before = config.read_bytes()
+    checked = _run(tmp_path, "--check")
+    assert checked.returncode != 0
+    assert "does not enforce guest seccomp" in checked.stderr
+    assert config.read_bytes() == before
+    assert _run(tmp_path, env_overrides=env).returncode == 0
+    assert _run(tmp_path, "--check").returncode == 0
+    assert _download_count(tmp_path) == 1
 
 
 @pytest.mark.skipif(not _HAS_ZSTD, reason="zstd is needed to build a release-shaped fixture")

@@ -192,6 +192,16 @@ debug_kernel_is_configured() {
     "$KATA_CONFIG_PATH"
 }
 
+guest_seccomp_is_configured() {
+  [[ -r "$KATA_CONFIG_PATH" ]] || return 1
+  awk '
+    /^\[runtime\]$/ { runtime = 1; next }
+    /^\[/ { runtime = 0 }
+    runtime && /^disable_guest_seccomp = false$/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$KATA_CONFIG_PATH"
+}
+
 # ── Install ──────────────────────────────────────────────────────────────
 
 resolve_sha256() {
@@ -265,16 +275,24 @@ configure_ebpf_kernel() {
         changed = 1
         next
       }
+      /^\[runtime\]$/ { runtime = 1 }
+      /^\[/ && $0 != "[runtime]" { runtime = 0 }
+      runtime && $0 ~ /^[[:space:]]*disable_guest_seccomp[[:space:]]*=/ {
+        print "disable_guest_seccomp = false"
+        seccomp = 1
+        next
+      }
       { print }
-      END { if (!changed) exit 42 }
+      END { if (!changed || !seccomp) exit 42 }
     ' "$config_target" >"$temporary"; then
     rm -f "$temporary"
-    die "${KATA_CONFIG_PATH} has no active kernel setting to replace."
+    die "${KATA_CONFIG_PATH} needs active kernel and runtime.disable_guest_seccomp settings."
   fi
   chmod 0644 "$temporary"
   mv -f "$temporary" "$config_target"
   debug_kernel_is_configured || die \
     "failed to configure ${KATA_RUNTIME} to boot ${KATA_DEBUG_KERNEL_PATH}."
+  guest_seccomp_is_configured || die "failed to enable guest seccomp in ${KATA_CONFIG_PATH}."
   log "configured the Kata eBPF/BTF guest kernel: ${KATA_DEBUG_KERNEL_PATH}"
 }
 
@@ -297,7 +315,7 @@ cmd_install() {
   require_tools
 
   if runtime_is_installed; then
-    if ! debug_kernel_is_configured; then
+    if ! debug_kernel_is_configured || ! guest_seccomp_is_configured; then
       configure_ebpf_kernel
     fi
     log "Kata ${KATA_VERSION} is already installed, linked, and observer-ready; nothing to download."
@@ -352,6 +370,8 @@ cmd_check() {
     "the packaged eBPF/BTF guest kernel is missing at ${KATA_DEBUG_KERNEL_PATH}. Re-run: sudo ${0}"
   debug_kernel_is_configured || die \
     "${KATA_RUNTIME} is not configured to boot the packaged eBPF/BTF kernel. Re-run: sudo ${0}"
+  guest_seccomp_is_configured || die \
+    "${KATA_RUNTIME} does not enforce guest seccomp. Re-run: sudo ${0}"
   require_virtualization
 
   log "Kata ${current} is installed, observer-ready, and this host can start VMs."

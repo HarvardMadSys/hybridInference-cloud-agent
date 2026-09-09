@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAuth, useT } from '@/components/providers';
@@ -56,6 +56,7 @@ function AgentsHeader({
           aria-label={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
           aria-expanded={!sidebarCollapsed}
           aria-controls="agents-sidebar"
+          aria-keyshortcuts="Meta+B Control+B"
           title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
           className="-ml-1.5 self-center rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
         >
@@ -197,6 +198,18 @@ function AgentsShell({
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
+      } catch {
+        // Non-persisted collapse still works for this session.
+      }
+      return next;
+    });
+  }, []);
+
   // Read after mount so the server-rendered shell and the first client render
   // agree; the sidebar then folds away on the same frame as hydration.
   useEffect(() => {
@@ -207,17 +220,27 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
     }
   }, []);
 
-  function toggleSidebar() {
-    setSidebarCollapsed((current) => {
-      const next = !current;
-      try {
-        window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
-      } catch {
-        // Non-persisted collapse still works for this session.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const hasOnePrimaryModifier = event.metaKey !== event.ctrlKey;
+      if (
+        event.key.toLowerCase() !== 'b' ||
+        !hasOnePrimaryModifier ||
+        event.altKey ||
+        event.shiftKey
+      ) {
+        return;
       }
-      return next;
-    });
-  }
+
+      event.preventDefault();
+      if (!event.repeat) {
+        toggleSidebar();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleSidebar]);
 
   return (
     <ProtectedRoute>

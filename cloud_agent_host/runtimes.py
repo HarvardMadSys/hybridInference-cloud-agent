@@ -34,6 +34,8 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
+from cloud_agent_host.event_payloads import bound_event_payload
+
 # Normalized event kinds. Kept in lockstep with agent_job_events.event_type and
 # the frontend's types.ts; anything else must be reported as ``raw``.
 THINKING = "thinking"
@@ -58,6 +60,10 @@ class NormalizedEvent:
 
     event_type: str
     payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Bound the report before it crosses the broker or worker transport."""
+        object.__setattr__(self, "payload", bound_event_payload(self.payload))
 
 
 @dataclass(frozen=True)
@@ -488,6 +494,9 @@ class ClaudeCodeRuntime(AgentRuntime):
         message = event.get("message") or {}
         blocks = message.get("content") or []
         usage = message.get("usage") or {}
+        # The CLI emits text and parallel tools as separate blocks of one
+        # response, each repeating its usage. Keep the identity for counting.
+        usage_fields = {"usage": usage or None, "usage_id": message.get("id")}
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -498,17 +507,19 @@ class ClaudeCodeRuntime(AgentRuntime):
                         "name": block.get("name"),
                         "id": block.get("id"),
                         "input": block.get("input"),
-                        "usage": usage or None,
+                        **usage_fields,
                     },
                 )
             if block.get("type") == "thinking":
-                return NormalizedEvent(THINKING, {"text": (block.get("thinking") or "")[:4000]})
+                return NormalizedEvent(
+                    THINKING, {"text": block.get("thinking") or "", **usage_fields}
+                )
         text = "".join(
             block.get("text", "")
             for block in blocks
             if isinstance(block, dict) and block.get("type") == "text"
         )
-        return NormalizedEvent(MESSAGE, {"text": text[:4000], "usage": usage or None})
+        return NormalizedEvent(MESSAGE, {"text": text, **usage_fields})
 
     def _from_user(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map a tool result echoed back into the conversation."""
@@ -521,26 +532,31 @@ class ClaudeCodeRuntime(AgentRuntime):
                     {
                         "tool_use_id": block.get("tool_use_id"),
                         "is_error": bool(block.get("is_error")),
-                        "content": _truncate(content),
+                        "content": _payload_text(content),
                     },
                 )
         return NormalizedEvent(RAW, {"text": "user turn without a tool result"})
 
     def _from_result(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map the terminal result line."""
+        # Result usage is the total for this query (one platform attempt),
+        # including failed queries. It supersedes provisional block usage.
+        usage_fields = {"usage": event.get("usage") or None, "usage_scope": "attempt"}
         if event.get("is_error"):
             return NormalizedEvent(
                 ERROR,
                 {
                     "subtype": event.get("subtype"),
                     "text": str(event.get("result") or "")[:2000],
+                    **usage_fields,
                 },
             )
         return NormalizedEvent(
             LIFECYCLE,
             {
                 "phase": "result",
-                "text": str(event.get("result") or "")[:4000],
+                "text": str(event.get("result") or ""),
+                **usage_fields,
                 "num_turns": event.get("num_turns"),
                 # Reported for observability only. The billing authority is
                 # api_logs.agent_job_id — the platform never trusts a number
@@ -1550,8 +1566,13 @@ def get_runtime(name: str) -> AgentRuntime:
 
 def _truncate(value: Any, limit: int = 4000) -> str:
     """Render any payload fragment as bounded text."""
+    return _payload_text(value)[:limit]
+
+
+def _payload_text(value: Any) -> str:
+    """Render transcript content without silently losing its tail."""
     if value is None:
         return ""
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False, default=str)
-    return value[:limit]
+    return value

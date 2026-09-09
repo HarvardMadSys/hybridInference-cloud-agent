@@ -650,6 +650,7 @@ describe('ledger-sourced fields', () => {
     expect(job.spentUsd).toBe(0);
     expect(job.hasLedger).toBe(false);
     expect(job.usage.tokensIn).toBe('');
+    expect(job.usage.turns).toBeNull();
   });
 });
 

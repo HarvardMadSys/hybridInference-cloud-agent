@@ -193,6 +193,10 @@ def test_the_process_env_does_inherit_the_host(monkeypatch):
 
 
 def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_image(monkeypatch):
+    # Observer/isolation failures have their own behavioural tests.
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.ChatSandboxManager.probe_guest_observer", lambda self: None
+    )
     calls: list[list[str]] = []
     monkeypatch.setattr(sandbox_mod.os, "uname", lambda: SimpleNamespace(release="host-kernel"))
 
@@ -469,6 +473,10 @@ def test_every_probe_runs_under_the_runtime_jobs_will_use(monkeypatch):
     and a VM-isolated one — so they carry the flag too.
     """
     backend = build_backend_from_env(_egress_env(AGENT_SANDBOX_BACKEND="kata"))
+    monkeypatch.setattr(
+        "cloud_agent_host.chat_sandbox.ChatSandboxManager.fixed_service_addresses",
+        lambda self, phase, network: {"agent-gateway": "10.2.0.2"},
+    )
     calls = _fake_docker(monkeypatch, internal={})
 
     backend._check_networks_are_closed()

@@ -480,7 +480,9 @@ script; upgrading is a two-line change there, and `--check` then fails on every
 host still carrying the old one.
 
 The setup also selects the release's packaged `vmlinuz-debug.container` for
-the default Kata configuration. That kernel is built with Kata's reviewed
+the default Kata configuration and sets `runtime.disable_guest_seccomp=false`.
+Kata's packaged default otherwise ignores the OCI seccomp filter even when
+Docker accepted the container security options. That kernel is built with Kata's reviewed
 eBPF/BTF debug fragment; the ordinary guest kernel is not sufficient for the
 process observer. `--check` verifies both the asset and the active config, and
 runner preflight goes further: it starts a disposable sandbox with the same
@@ -495,17 +497,26 @@ turn. The same probe also requires the fixed tool-marker helper used by Claude's
 exact boundaries. See Kata's
 [debug-kernel build contract](https://github.com/kata-containers/kata-containers/blob/main/tools/packaging/kernel/README.md#debug-kernel).
 
-Only that fixed, image-bundled observer runs as guest root. Agent CLIs and
+The fixed observer and platform lifecycle helpers run as guest root. Agent CLIs and
 repository code still run under their per-member UIDs with all capabilities
 dropped and `no-new-privileges`; they cannot read, edit, or directly inject
 records into the root-only journal. Claude's fixed non-root marker helper talks
 to it over a credential-checked Unix socket. A same-UID tool can still execute
 that helper, so exact per-tool association is diagnostic, never a security or
 billing authority; the eBPF lifecycle census itself is independent of marks.
-Kata containers retain `CAP_BPF` in the bounding set only so Docker's
-creation-time seccomp profile admits the later helper syscall. Non-root agent
-processes still have empty permitted and effective capability sets, and
-`no-new-privileges` prevents them from promoting that bounding bit. A shared
+Kata containers retain `BPF`, `PERFMON`, `SETUID`, `SETGID`, `CHOWN`,
+`DAC_OVERRIDE`, `KILL` and `SYS_PTRACE` in the bounding set for the fixed guest-root helpers:
+tracing, the UID-filter self-test, socket ownership, member cleanup and verifying
+the marker sender's `/proc/<pid>/exe` across member UIDs.
+Kata privileged exec cannot acquire capabilities outside that original set.
+Ordinary exec explicitly enters through `setpriv --no-new-privs`, because
+Kata 3.32 does not inherit PID 1's setting for Docker exec. Preflight requires
+non-root execution, zero effective/permitted capabilities, `NoNewPrivs=1`
+and `Seccomp=2`, then runs the observer and marker self-tests and requires a
+real non-root pre/post pair to reach the trusted observer journal. Privileged
+helpers also verify the **inspected container's** Kata runtime and execute by
+that verified container ID; changing a runner setting cannot promote an old
+runc container into a guest-root target. A shared
 container's periodic Docker statistics are group totals, so current member
 turns deliberately report aggregate CPU/memory/I/O/network as unavailable
 (`coverage=0`, `sampler_version=shared-member-v1`) instead of duplicating a
@@ -529,6 +540,21 @@ accounting are kernel configuration and arrive as unavailable when absent.
 The per-turn table is therefore a member-UID lifecycle census of process starts observed
 after that turn's cursor, not a point-in-time snapshot of resident processes
 that were already running before the turn and not a whole-container total.
+
+Docker's embedded DNS resolver (`127.0.0.11`) is outside the guest. Kata
+activation and phase checks therefore refresh `/etc/hosts` with only the
+configured relays' addresses on that chat's current private bridge. Unknown
+names gain no resolver or additional egress path. The first setup-to-agent
+transition stops and restarts the Kata guest after changing networks, before
+launching a resident CLI: Docker's live network changes alone do not update
+Kata 3.32's guest interfaces. The writable layer and container identity remain.
+An already settled agent-phase activation does not restart a live guest.
+
+When switching a host from runc, keep its retained runc groups on a compatible
+broker or migrate them separately. A backend setting does not change the
+runtime of a stopped Docker container; the privileged helper fence rejects
+those old containers. Do not delete retained workspaces as part of enabling
+Kata for new jobs.
 
 Requirements: an x86_64 Linux host, bare metal or with nested virtualization
 enabled. Kata cannot run without KVM.

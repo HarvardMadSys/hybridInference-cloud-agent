@@ -101,6 +101,7 @@ def _inspect_payload(
     labels: dict[str, str] | None = None,
     mounts: list[dict] | None = None,
     networks: tuple[str, ...] = ("agent-net",),
+    sandbox_runtime: str = "",
 ) -> str:
     return json.dumps(
         [
@@ -113,6 +114,7 @@ def _inspect_payload(
                     "Labels": labels or spec.docker_labels(),
                 },
                 "State": {"Status": status, "Running": running, "Paused": paused},
+                "HostConfig": {"Runtime": sandbox_runtime},
                 "Mounts": mounts or [],
                 "NetworkSettings": {"Networks": {network: {} for network in networks}},
             }
@@ -2358,7 +2360,8 @@ def test_retained_backend_reports_the_cli_version_pinned_in_its_container(monkey
     assert stamp["sandbox_image_digest"] == "sha256:image-pinned"
 
 
-def test_setup_network_is_replaced_by_agent_network_before_agent_exec(monkeypatch):
+@pytest.mark.parametrize("sandbox_runtime", [None, KATA_RUNTIME])
+def test_setup_network_is_replaced_by_agent_network_before_agent_exec(monkeypatch, sandbox_runtime):
     spec = _spec()
     policy = EgressPolicy(
         tiers={"setup": EgressTier.TRUSTED, "agent": EgressTier.PLATFORM_ONLY},
@@ -2367,28 +2370,37 @@ def test_setup_network_is_replaced_by_agent_network_before_agent_exec(monkeypatc
             EgressTier.PLATFORM_ONLY: "agent-net",
         },
     )
-    manager = ChatSandboxManager(ContainerBackend(image="img", network="unused", egress=policy))
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", runtime=sandbox_runtime, network="unused", egress=policy)
+    )
     networks = {"setup-net"}
+    running = True
     calls: list[list[str]] = []
 
     def fake_run(argv, **_kwargs):
+        nonlocal running
         calls.append(list(argv))
         if argv[1:3] == ["container", "inspect"]:
             return SimpleNamespace(
                 returncode=0,
                 stdout=_inspect_payload(
                     spec,
-                    status="running",
-                    running=True,
+                    status="running" if running else "exited",
+                    running=running,
                     networks=tuple(networks),
+                    sandbox_runtime=sandbox_runtime or "runc",
                 ),
                 stderr="",
             )
         if argv[1:3] == ["network", "connect"]:
+            assert running is (sandbox_runtime != KATA_RUNTIME)
             networks.add("agent-net")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if argv[1:3] == ["network", "disconnect"]:
             networks.remove("setup-net")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[1] in {"stop", "start"}:
+            running = argv[1] == "start"
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(argv)
 
@@ -2399,6 +2411,9 @@ def test_setup_network_is_replaced_by_agent_network_before_agent_exec(monkeypatc
 
     assert create_command[create_command.index("--network") + 1] == CHAT_BOOTSTRAP_NETWORK
     assert transitioned.networks == ("agent-net",)
+    assert transitioned.running
+    assert sum(call[1] == "stop" for call in calls) == int(sandbox_runtime == KATA_RUNTIME)
+    assert sum(call[1] == "start" for call in calls) == int(sandbox_runtime == KATA_RUNTIME)
     assert ["docker", "network", "connect", "agent-net", "sha256:container-one"] in calls
     assert [
         "docker",

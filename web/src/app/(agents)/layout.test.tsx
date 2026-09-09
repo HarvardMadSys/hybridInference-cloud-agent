@@ -65,6 +65,7 @@ describe('AgentsLayout sidebar collapse', () => {
     expect(toggle()).toHaveAccessibleName('Collapse task list');
     expect(toggle()).toHaveAttribute('aria-expanded', 'true');
     expect(toggle()).toHaveAttribute('aria-controls', 'agents-sidebar');
+    expect(toggle()).toHaveAttribute('aria-keyshortcuts', 'Meta+B Control+B');
 
     fireEvent.click(toggle());
 
@@ -90,6 +91,38 @@ describe('AgentsLayout sidebar collapse', () => {
 
     expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
     expect(toggle()).toHaveAccessibleName('Expand task list');
+  });
+
+  it('toggles and persists the task list with Command+B or Control+B', () => {
+    render(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+
+    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true })).toBe(false);
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('1');
+
+    expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true })).toBe(false);
+    expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('0');
+  });
+
+  it('ignores repeated or additionally modified shortcut variants', () => {
+    render(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+
+    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true, repeat: true })).toBe(false);
+    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true, shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true, altKey: true })).toBe(true);
+    expect(fireEvent.keyDown(window, { key: 'b' })).toBe(true);
+
+    expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
   });
 });
 

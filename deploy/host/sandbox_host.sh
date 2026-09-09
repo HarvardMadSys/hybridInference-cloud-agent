@@ -443,6 +443,7 @@ complete_shared_live_marker() {
 
 probe_sandbox_relay() {
   local network="$1" url="$2" label="$3" deadline="$4" diagnostic="$5"
+  local relay_service="$6" relay_id relay_ip relay_host
   local backend code="" first_failure=1
   local runtime_args=()
   backend="$(env_or_dotenv AGENT_SANDBOX_BACKEND)"
@@ -452,6 +453,17 @@ probe_sandbox_relay() {
   fi
 
   while true; do
+    if [[ "$backend" == "kata" ]]; then
+      # Docker's embedded resolver is not inside the Kata VM. Resolve only
+      # this compose-owned relay's endpoint on the exact probe bridge.
+      relay_id="$(compose ps -q "$relay_service")"
+      relay_ip="$(docker inspect "$relay_id" | python3 -c \
+        'import json, sys; print(json.load(sys.stdin)[0]["NetworkSettings"]["Networks"][sys.argv[1]]["IPAddress"])' "$network")"
+      [[ -n "$relay_ip" ]] || die "${label} has no address on ${network}"
+      relay_host="${url#*://}"
+      relay_host="${relay_host%%:*}"
+      runtime_args=(--runtime "$KATA_RUNTIME" --add-host "${relay_host}=${relay_ip}")
+    fi
     # Pass the URL as an argv value rather than interpolating operator config
     # into shell source. `-f` matters: a tunnel that reaches a 503 is reachable
     # but not ready, and must not publish the exact-SHA capability.
@@ -741,7 +753,7 @@ cmd_check() {
   local url="http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}/health"
   log "probing ${url} from the ${network} network"
   probe_sandbox_relay "$network" "$url" "inference gateway" "$deadline" \
-    "Check 'docker logs' for the gateway-tunnel container: an SSH connection that cannot authenticate or bind its forward restarts."
+    "Check 'docker logs' for the gateway-tunnel container: an SSH connection that cannot authenticate or bind its forward restarts." "gateway-tunnel"
 
   # MCP is a second deliberately narrow destination on the same closed
   # network. A healthy model tunnel does not prove this separate SSH key,
@@ -750,7 +762,7 @@ cmd_check() {
   url="http://${MCP_HOSTNAME}:${MCP_TUNNEL_PORT}/healthz"
   log "probing ${url} from the ${network} network"
   probe_sandbox_relay "$network" "$url" "MCP-only relay" "$deadline" \
-    "Check the mcp-tunnel SSH key, forward, and the control plane's MCP-only listener on port 8001."
+    "Check the mcp-tunnel SSH key, forward, and the control plane's MCP-only listener on port 8001." "mcp-tunnel"
 
   check_shared_live_stack "$deadline"
 }

@@ -253,7 +253,7 @@ export interface AgentJob {
   diffLines: DiffLine[];
   rawLines: string[];
   gates: AgentGate[];
-  usage: { tokensIn: string; tokensOut: string; cachePct: number; turns: number };
+  usage: { tokensIn: string; tokensOut: string; cachePct: number; turns: number | null };
   /** Attempt continuity telemetry; `replay` can occur only on historical rows. */
   continuityMode?: 'hot' | 'warm_native' | 'cold_native' | 'replay';
   /** Canonical user-facing context state; independent of process-id reuse. */

@@ -3292,6 +3292,30 @@ async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: Fa
     assert len(store.events) == 1
 
 
+async def test_worker_api_bounds_oversized_events_without_failing_or_duplicating_the_turn(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Older runners can upload large events; the API stores a labelled preview."""
+    job_id = await _create_job(client)
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    body = {
+        "event_type": "tool_result",
+        "payload": {"tool_use_id": "tool-1", "content": "image data " * 100_000},
+        "event_seq": 1,
+    }
+    first = await client.post(f"/v1/agent/worker/jobs/{job_id}/events", json=body, headers=auth)
+    replay = await client.post(f"/v1/agent/worker/jobs/{job_id}/events", json=body, headers=auth)
+    assert first.status_code == replay.status_code == 201
+    assert first.json()["event_id"] == replay.json()["event_id"]
+    assert len(store.events) == 1
+    payload = store.events[0]["payload"]
+    assert len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= 256 * 1024
+    assert payload["truncated"] is True
+    assert payload["tool_use_id"] == "tool-1"
+    assert "truncated" in payload["content"]
+
+
 async def test_empty_queue_claim_returns_null(client: AsyncClient):
     """Claiming with nothing queued is a 200 with a null body, not an error."""
     response = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})

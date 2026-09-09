@@ -39,6 +39,7 @@ from urllib.parse import urlparse
 
 from cloud_agent_host.egress import EgressTier
 from cloud_agent_host.guest_observer import (
+    GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
     GUEST_OBSERVER_ROTATE_BYTES,
     GuestObservation,
@@ -96,6 +97,20 @@ MEMBER_UID_BASE = 11001
 MEMBER_UID_LIMIT = 128
 MEMBER_REAPER_TARGET = "/usr/local/bin/member-process-reaper"
 MEMBER_REAPER_SOURCE = "/usr/local/libexec/member-process-reaper"
+# Kata exec cannot acquire capabilities outside the container's bounding set.
+# Only the fixed guest-root helpers use these: tracing, self-test UID drops,
+# socket ownership, and reading/signalling member process receipts.
+KATA_HELPER_CAPABILITIES = (
+    "BPF",
+    "PERFMON",
+    "SETUID",
+    "SETGID",
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "KILL",
+    "SYS_PTRACE",
+)
+_UNPRIVILEGED_EXEC = ("/usr/bin/setpriv", "--no-new-privs", "--")
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 
 # PID 1 contains no chat credential and owns no chat state outside the
@@ -229,6 +244,7 @@ class ChatSandboxInspection:
     mounts: tuple[dict[str, Any], ...]
     networks: tuple[str, ...]
     network_ids: tuple[tuple[str, str], ...] = ()
+    sandbox_runtime: str = ""
 
 
 class ChatSandboxManager:
@@ -488,6 +504,75 @@ class ChatSandboxManager:
             }
         except (IndexError, TypeError, json.JSONDecodeError):
             return None
+
+    def fixed_service_addresses(self, phase: str, network: str) -> dict[str, str]:
+        """Resolve only configured relays to their addresses on the given bridge."""
+        aliases = self._service_aliases_for_phase(phase)
+        if not aliases:
+            return {}
+        owners = self._service_owners(self.backend.network_for_phase(phase), aliases)
+        raw = self._inspect_network(network)
+        endpoints = (raw or {}).get("Containers") or {}
+        addresses: dict[str, str] = {}
+        for container_id, names in owners.items():
+            endpoint = endpoints.get(container_id) or {}
+            try:
+                address = ipaddress.IPv4Interface(endpoint["IPv4Address"]).ip
+            except (KeyError, ValueError, TypeError) as exc:
+                raise SandboxError(
+                    "fixed relay has no IPv4 address on the sandbox network"
+                ) from exc
+            for alias in names:
+                if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", alias):
+                    raise SandboxError("fixed relay alias is not a hostname")
+                addresses[alias] = str(address)
+        return addresses
+
+    def _sync_kata_service_hosts(
+        self, spec: ChatSandboxSpec, current: ChatSandboxInspection
+    ) -> None:
+        """Replace guest aliases after activation, relay replacement or phase change.
+
+        Docker's 127.0.0.11 resolver lives in a host network namespace, not in
+        the Kata guest. Keep resolution limited to the existing fixed relays;
+        no DNS listener or extra network destination is introduced.
+        """
+        if self.backend.runtime != KATA_RUNTIME or not current.running:
+            return
+        for phase in ("agent", "setup"):
+            network = self.network_for_phase(spec, phase)
+            if current.networks != (network,):
+                continue
+            addresses = self.fixed_service_addresses(phase, network)
+            if not addresses:
+                return
+            script = (
+                "import fcntl, json, os, stat, sys\n"
+                "entries=json.loads(sys.argv[1])\n"
+                "begin='# BEGIN FREEINFERENCE RELAYS\\n'\n"
+                "end='# END FREEINFERENCE RELAYS\\n'\n"
+                "fd=os.open('/etc/hosts', os.O_RDWR | os.O_NOFOLLOW)\n"
+                "with os.fdopen(fd, 'r+') as f:\n"
+                " fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+                " s=os.fstat(f.fileno())\n"
+                " if not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022:\n"
+                "  raise RuntimeError('guest hosts file is not root-owned and protected')\n"
+                " text=f.read(65537)\n"
+                " if len(text)>65536: raise RuntimeError('guest hosts file is too large')\n"
+                " if begin in text:\n"
+                "  before, rest=text.split(begin,1)\n"
+                "  if end not in rest: raise RuntimeError('invalid managed relay block')\n"
+                "  text=before+rest.split(end,1)[1]\n"
+                " text=text.rstrip()+'\\n'+begin\n"
+                " text+=''.join(ip+' '+host+'\\n' for host,ip in sorted(entries.items()))\n"
+                " f.seek(0); f.write(text+end); f.truncate()\n"
+            )
+            result = self._kata_privileged_exec(
+                spec, ["python3", "-c", script, json.dumps(addresses)], timeout_s=30
+            )
+            if result.returncode != 0:
+                raise SandboxError("Kata fixed relay resolution failed: " + result.stderr[:300])
+            return
 
     def _ensure_service_connection(
         self,
@@ -1288,16 +1373,12 @@ class ChatSandboxManager:
             # Kata guest.  Its journal is root-only and ephemeral; agent UIDs
             # cannot read, forge, or retain it across a guest restart.
             #
-            # Docker builds its default seccomp filter from the container's
-            # bounding capabilities.  A later ``docker exec --privileged`` gets
-            # every effective capability but does not replace that filter. Keep
-            # BPF in the bounding set so the helper's syscall is admitted. The
-            # container and every ordinary exec run as non-root with an empty
-            # permitted/effective set, and no-new-privileges prevents turning
-            # this bounding bit into authority.
+            # Kata limits even privileged exec to this bounding set. The
+            # ordinary member exec path explicitly sets no-new-privileges;
+            # Kata does not inherit PID 1's setting for docker exec.
+            for capability in KATA_HELPER_CAPABILITIES:
+                argv += ["--cap-add", capability]
             argv += [
-                "--cap-add",
-                "BPF",
                 "--tmpfs",
                 f"{GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0",
             ]
@@ -1406,6 +1487,7 @@ class ChatSandboxManager:
                         for network, endpoint in network_settings.items()
                     )
                 ),
+                sandbox_runtime=str((raw.get("HostConfig") or {}).get("Runtime") or ""),
             )
         except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SandboxError("Docker returned an invalid chat sandbox inspection") from exc
@@ -1482,6 +1564,7 @@ class ChatSandboxManager:
             preferred_phase=network_phase,
         )
         if current.running:
+            self._sync_kata_service_hosts(spec, current)
             return current
         if current.status is ChatSandboxStatus.PAUSED:
             raise SandboxError("a paused chat sandbox is not a valid stopped activation")
@@ -1495,6 +1578,7 @@ class ChatSandboxManager:
             raise SandboxError(
                 f"chat sandbox started into unexpected state {started.status.value!r}"
             )
+        self._sync_kata_service_hosts(spec, started)
         return started
 
     def stop(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
@@ -1536,6 +1620,7 @@ class ChatSandboxManager:
                 f"retained chat network is {list(current.networks)!r}, not "
                 f"the required {phase} network {expected!r}"
             )
+        self._sync_kata_service_hosts(spec, current)
 
     def transition_to_agent_network(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
         """Irreversibly replace setup egress with the agent-only network."""
@@ -1549,15 +1634,40 @@ class ChatSandboxManager:
                 raise SandboxError(
                     "retained chat has an unexpected network set before agent transition"
                 )
+            self._sync_kata_service_hosts(spec, current)
             return current
         if set(current.networks) == {agent_network}:
             if setup_network != self.backend.network_for_phase("setup"):
                 self._release_owned_network(setup_network, spec, "setup")
+            self._sync_kata_service_hosts(spec, current)
             return current
         if set(current.networks) not in ({setup_network}, {setup_network, agent_network}):
             raise SandboxError(
                 "retained chat has an unexpected network set before agent transition"
             )
+        restart_guest = self.backend.runtime == KATA_RUNTIME and current.running
+        if restart_guest:
+            # Docker network connect/disconnect changes the host namespace,
+            # but Kata 3.32 does not hotplug that change into a running guest.
+            # This is the one-time bootstrap boundary, before any resident CLI
+            # is launched. Preserve the writable layer and boot on agent egress.
+            if current.sandbox_runtime != KATA_RUNTIME:
+                raise SandboxError("Kata bootstrap transition requires an inspected Kata container")
+            stopped = self._run(
+                [
+                    self.backend.docker_binary,
+                    "stop",
+                    "--time",
+                    str(spec.stop_timeout_s),
+                    current.container_id,
+                ],
+                timeout=spec.stop_timeout_s + 30,
+            )
+            current = self._require(spec)
+            if stopped.returncode != 0 or current.running:
+                raise SandboxError(
+                    "Kata guest could not stop before the bootstrap network transition"
+                )
         if agent_network not in current.networks:
             connected = self._run(
                 [
@@ -1582,6 +1692,9 @@ class ChatSandboxManager:
             raise SandboxError("retained chat agent egress transition was not exact")
         if setup_network != self.backend.network_for_phase("setup"):
             self._release_owned_network(setup_network, spec, "setup")
+        if restart_guest:
+            return self.start(spec, network_phase="agent")
+        self._sync_kata_service_hosts(spec, transitioned)
         return transitioned
 
     def build_exec_command(
@@ -1615,7 +1728,10 @@ class ChatSandboxManager:
             if not key or "=" in key or "\x00" in key or "\x00" in value:
                 raise ValueError(f"invalid environment entry {key!r}")
             command += ["--env", f"{key}={value}"]
-        command += [spec.container_name, *argv]
+        command.append(spec.container_name)
+        if self.backend.runtime == KATA_RUNTIME:
+            command += list(_UNPRIVILEGED_EXEC)
+        command += argv
         return command
 
     def spawn(
@@ -2488,6 +2604,8 @@ class ChatSandboxManager:
         if self.backend.runtime != KATA_RUNTIME:
             raise SandboxError("guest-root platform helpers require the Kata runtime")
         current = self._require(spec)
+        if current.sandbox_runtime != KATA_RUNTIME:
+            raise SandboxError("guest-root platform helpers require an inspected Kata container")
         if not current.running:
             raise SandboxError("chat sandbox must be started before guest observation")
         command = [self.backend.docker_binary, "exec"]
@@ -2499,10 +2617,112 @@ class ChatSandboxManager:
             "0:0",
             "--workdir",
             "/",
-            spec.container_name,
+            current.container_id,
             *argv,
         ]
         return self._run(command, timeout=timeout_s)
+
+    def probe_guest_observer(self) -> None:
+        """Exercise retained exec isolation and real eBPF delivery before claiming."""
+        if self.backend.runtime != KATA_RUNTIME:
+            return
+        token = secrets.token_hex(12)
+        spec = ChatSandboxSpec(
+            thread_id=f"athr_preflight_{token}",
+            sandbox_id=f"asbx_preflight_{token}",
+            generation=1,
+            runtime_id="preflight",
+            resident_slot_capacity=2,
+        )
+        command = self.build_create_command(spec)
+        # Use the production creation/exec flags, without attaching any relay
+        # or touching retained user state. No repository or credential enters.
+        command[command.index("--network") + 1] = "none"
+        created = self._run(command, timeout=120)
+        if created.returncode != 0:
+            raise SandboxError("Kata observer probe creation failed: " + created.stderr[:300])
+        try:
+            started = self._run(
+                [self.backend.docker_binary, "start", spec.container_name], timeout=120
+            )
+            if started.returncode != 0:
+                raise SandboxError("Kata observer probe start failed: " + started.stderr[:300])
+            isolation = self.exec_capture(
+                spec,
+                [
+                    "python3",
+                    "-c",
+                    "import json, os; "
+                    "s=dict(line.split(':',1) for line in open('/proc/self/status') "
+                    "if ':' in line); "
+                    "print(json.dumps(dict(uid=os.getuid(), "
+                    "nnp=int(s['NoNewPrivs']), seccomp=int(s['Seccomp']), "
+                    "effective=int(s['CapEff'],16), permitted=int(s['CapPrm'],16))))",
+                ],
+                workdir="/",
+                timeout_s=30,
+            )
+            try:
+                observed = json.loads(isolation.stdout)
+            except (ValueError, TypeError) as exc:
+                raise SandboxError(
+                    "Kata observer probe could not inspect member isolation"
+                ) from exc
+            if (
+                isolation.returncode != 0
+                or observed
+                != {
+                    "uid": self.backend.uid,
+                    "nnp": 1,
+                    "seccomp": 2,
+                    "effective": 0,
+                    "permitted": 0,
+                }
+                or self.backend.uid == 0
+            ):
+                raise SandboxError("Kata member exec lacks non-root, seccomp or no-new-privileges")
+            observer = self._kata_privileged_exec(
+                spec, [GUEST_OBSERVER_BINARY, "--self-test"], timeout_s=30
+            )
+            if (
+                observer.returncode != 0
+                or observer.stdout.strip() != "freeinference-guest-observer-v1"
+            ):
+                raise SandboxError("Kata guest observer self-test failed: " + observer.stderr[:500])
+            marker = self.exec_capture(
+                spec,
+                ["/usr/local/libexec/freeinference-tool-mark", "--self-test"],
+                workdir="/",
+                timeout_s=30,
+            )
+            if marker.returncode != 0 or marker.stdout.strip() != b"freeinference-tool-mark-v1":
+                raise SandboxError("Kata tool marker self-test failed")
+            cursor = self.begin_guest_observation(spec, user_uid=self.backend.uid)
+            if not cursor.available:
+                raise SandboxError("Kata tool marker transport observer is unavailable")
+            for phase in ("pre", "post"):
+                sent = self.exec_capture(
+                    spec,
+                    [
+                        "/usr/local/libexec/freeinference-tool-mark",
+                        phase,
+                        "/agent-state/tool-marks.log",
+                    ],
+                    input_bytes=b'{"tool_use_id":"preflight"}',
+                    workdir="/",
+                    timeout_s=30,
+                )
+                if sent.returncode != 0:
+                    raise SandboxError("Kata tool marker transport helper failed")
+            observation = self.finish_guest_observation(spec, cursor)
+            if not observation.complete or [
+                (phase, tool_id) for _, phase, tool_id in observation.tool_marks
+            ] != [("pre", "preflight"), ("post", "preflight")]:
+                raise SandboxError("Kata observer did not receive trusted tool boundaries")
+        finally:
+            self._run(
+                [self.backend.docker_binary, "rm", "--force", spec.container_name], timeout=30
+            )
 
     def _observer_privileged_exec(
         self,

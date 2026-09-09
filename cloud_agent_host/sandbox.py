@@ -712,6 +712,11 @@ class ContainerBackend(SandboxBackend):
         if result.returncode != 0:
             raise SandboxError(f"{self.docker_binary} is not usable: {result.stderr.strip()[:200]}")
         self._probe_kernel_boundary()
+        if self.runtime == KATA_RUNTIME:
+            # Import here: retained operations depend on these base primitives.
+            from cloud_agent_host.chat_sandbox import ChatSandboxManager
+
+            ChatSandboxManager(self).probe_guest_observer()
         self._check_networks_are_closed()
         if not self.is_vm_isolated:
             logger.warning(
@@ -740,6 +745,7 @@ class ContainerBackend(SandboxBackend):
             "none",
             "--runtime",
             self.runtime,
+            *self.extra_args,
             "--entrypoint",
             "/bin/sh",
             self.image,
@@ -776,6 +782,19 @@ class ContainerBackend(SandboxBackend):
                 )
             return
         self._kernel_probe["guest_kernel"] = guest_kernel
+
+    def _kata_service_host_args(self, phase: str, network: str) -> list[str]:
+        """Give disposable Kata probes the same fixed relay resolution as chats."""
+        if self.runtime != KATA_RUNTIME:
+            return []
+        from cloud_agent_host.chat_sandbox import ChatSandboxManager
+
+        addresses = ChatSandboxManager(self).fixed_service_addresses(phase, network)
+        return [
+            part
+            for alias, address in sorted(addresses.items())
+            for part in ("--add-host", f"{alias}={address}")
+        ]
 
     def _check_networks_are_closed(self) -> None:
         """Check every network a phase can run on, not just the default one.
@@ -857,6 +876,8 @@ class ContainerBackend(SandboxBackend):
         # backend is kata validates a configuration nobody runs.
         if self.runtime:
             argv += ["--runtime", self.runtime]
+        argv += self.extra_args
+        argv += self._kata_service_host_args(phase, network)
         for key, value in sorted(env.items()):
             argv += ["--env", f"{key}={value}"]
         argv += [
@@ -997,6 +1018,8 @@ class ContainerBackend(SandboxBackend):
         # still fails at spawn.
         if self.runtime:
             argv += ["--runtime", self.runtime]
+        argv += self.extra_args
+        argv += self._kata_service_host_args("agent", network)
         argv += [
             "--entrypoint",
             "/bin/sh",
