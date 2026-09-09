@@ -2,11 +2,15 @@
 
 import json
 import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from cloud_agent_host.chat_sandbox import (
+    MEMBER_REAPER_TARGET,
+    MEMBER_UID_BASE,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
@@ -71,6 +75,10 @@ def test_kata_normal_exec_explicitly_sets_no_new_privileges():
         "/usr/bin/setpriv",
         "--no-new-privs",
         "--",
+        "/bin/sh",
+        "-c",
+        'exec "$@" </dev/null',
+        "sh",
         "sh",
         "-c",
         "id",
@@ -90,19 +98,76 @@ def test_kata_normal_exec_explicitly_sets_no_new_privileges():
     }
 
 
+@pytest.mark.parametrize("payload", [None, b"", b"input\x00\n"])
+def test_kata_exec_delivers_eof_and_preserves_input_and_literal_arguments(monkeypatch, payload):
+    manager = _manager()
+    spec = ChatSandboxSpec(
+        thread_id="thread", sandbox_id="sandbox", generation=1, runtime_id="claude-code"
+    )
+    literal = "spaces ' \" $HOME $(false) `false`\nnext line"
+    real_run = subprocess.run
+    monkeypatch.setattr(manager, "_require", lambda spec: SimpleNamespace(running=True))
+
+    def docker_exec(argv, **kwargs):
+        assert ("--interactive" in argv) == bool(payload)
+        guest_argv = argv[argv.index(spec.container_name) + 1 :]
+        assert guest_argv[:3] == ["/usr/bin/setpriv", "--no-new-privs", "--"]
+        guest_argv = guest_argv[3:]
+        if payload:
+            return real_run(guest_argv, input=kwargs["input"], capture_output=True, timeout=2)
+        # Model Kata's pipe whose writer stays open even without attached
+        # input. Execute the actual wrapper: reading it must still reach EOF.
+        read_fd, write_fd = os.pipe()
+        try:
+            return real_run(guest_argv, stdin=read_fd, capture_output=True, timeout=2)
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", docker_exec)
+    result = manager.exec_capture(
+        spec,
+        [
+            sys.executable,
+            "-c",
+            "import json,sys; print(json.dumps([sys.stdin.buffer.read().hex(),sys.argv[1]]))",
+            literal,
+        ],
+        input_bytes=payload,
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == [(payload or b"").hex(), literal]
+
+
 @pytest.mark.parametrize(
-    "failure", [None, "observer", "seccomp", "nnp", "effective", "marker", "marker_transport"]
+    "failure",
+    [
+        None,
+        "observer",
+        "seccomp",
+        "nnp",
+        "effective",
+        "member_cleanup",
+        "marker",
+        "marker_transport",
+    ],
 )
 def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatch, failure):
     manager = _manager()
     calls = []
     privileged_calls = []
+    cleanup_calls = []
 
     def run(argv, **kwargs):
         calls.append(argv)
         return SimpleNamespace(returncode=0, stdout="probe-id", stderr="")
 
     def capture(spec, argv, **kwargs):
+        if argv[0] == MEMBER_REAPER_TARGET:
+            cleanup_calls.append((argv, kwargs))
+            return SimpleNamespace(
+                returncode=int(failure == "member_cleanup"), stdout=b"", stderr=b"cleanup failed"
+            )
         if argv[0] == "python3":
             status = {"uid": 10001, "nnp": 1, "seccomp": 2, "effective": 0, "permitted": 0}
             if failure in {"seccomp", "nnp", "effective"}:
@@ -144,7 +209,11 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
     assert calls[0][calls[0].index("--network") + 1] == "none"
     assert calls[-1][1:3] == ["rm", "--force"]
     assert calls[-1][-1] == calls[0][calls[0].index("--name") + 1]
-    if failure in {"seccomp", "nnp", "effective"}:
+    if failure not in {"seccomp", "nnp", "effective"}:
+        assert cleanup_calls[0][0] == [MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)]
+        assert cleanup_calls[0][1]["input_bytes"] == b""
+        assert cleanup_calls[0][1]["user_uid"] == MEMBER_UID_BASE
+    if failure in {"seccomp", "nnp", "effective", "member_cleanup"}:
         assert privileged_calls == []
     else:
         assert privileged_calls == [[GUEST_OBSERVER_BINARY, "--self-test"]]

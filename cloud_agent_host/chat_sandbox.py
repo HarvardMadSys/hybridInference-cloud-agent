@@ -1731,6 +1731,10 @@ class ChatSandboxManager:
         command.append(spec.container_name)
         if self.backend.runtime == KATA_RUNTIME:
             command += list(_UNPRIVILEGED_EXEC)
+            if not interactive:
+                # Kata leaves an unattached stdin pipe open. Give commands
+                # that have no input a real EOF, without interpolating argv.
+                command += ["/bin/sh", "-c", 'exec "$@" </dev/null', "sh"]
         command += argv
         return command
 
@@ -2559,12 +2563,17 @@ class ChatSandboxManager:
         current = self._require(spec)
         if not current.running:
             raise SandboxError("chat sandbox must be started before exec")
+        interactive = input_bytes is not None
+        if self.backend.runtime == KATA_RUNTIME and not input_bytes:
+            # Attaching and immediately closing an empty stdin can wedge the
+            # Kata shim. build_exec_command supplies /dev/null in this case.
+            interactive = False
         command = self.build_exec_command(
             spec,
             argv,
             env=env,
             workdir=workdir,
-            interactive=input_bytes is not None,
+            interactive=interactive,
             user_uid=user_uid,
             user_gid=user_gid,
         )
@@ -2675,6 +2684,20 @@ class ChatSandboxManager:
                 or self.backend.uid == 0
             ):
                 raise SandboxError("Kata member exec lacks non-root, seccomp or no-new-privileges")
+            cleanup = self.exec_capture(
+                spec,
+                [MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)],
+                workdir="/",
+                input_bytes=b"",
+                user_uid=MEMBER_UID_BASE,
+                user_gid=self.backend.gid,
+                timeout_s=30,
+            )
+            if cleanup.returncode != 0:
+                raise SandboxError(
+                    "Kata member process cleanup self-test failed: "
+                    + cleanup.stderr.decode("utf-8", "replace")[:300]
+                )
             observer = self._kata_privileged_exec(
                 spec, [GUEST_OBSERVER_BINARY, "--self-test"], timeout_s=30
             )
