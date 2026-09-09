@@ -897,14 +897,32 @@ def test_native_fork_retry_rotates_only_source_and_hidden_child_processes():
     assert [launch.residency_generation for launch in factory.opened] == [1, 3, 10, 11]
 
 
-def test_native_fork_resumes_a_source_transport_closed_by_the_cli():
+@pytest.mark.parametrize("observation", ["none", "status", "list", "residency_lost"])
+def test_native_fork_keeps_source_transport_ownership_during_cli_restart(observation):
     manager = _Manager()
     factory = _TransportFactory()
+    observations = []
 
     def native_forker(
         _spec, source_transport, _operation_id, _target_launch, _source_native_turn_no
     ):
         source_transport.alive = False
+
+        # HTTP-backed CLIs close the source while persisting/copying the
+        # native fork. Poll from another thread in that exact window, before
+        # the forker returns and the supervisor resumes the source.
+        def observe():
+            if observation == "status":
+                observations.append(supervisor.status("athr_source"))
+            elif observation == "list":
+                observations.extend(supervisor.list())
+            elif observation == "residency_lost":
+                observations.append(supervisor.residency_lost("athr_source", generation=1))
+
+        observer = threading.Thread(target=observe)
+        observer.start()
+        observer.join(timeout=2)
+        assert not observer.is_alive(), "status polling blocked on the native fork"
         return "native-child"
 
     supervisor = SharedChatSessionSupervisor(
@@ -931,21 +949,36 @@ def test_native_fork_resumes_a_source_transport_closed_by_the_cli():
         context_status="live",
     )
 
-    result = supervisor.fork_native(
-        "athr_source",
-        operation_id="fork-closes-source",
-        source_native_session_id="native-source",
-        source_native_turn_no=1,
-        target_thread_id="athr_child",
-        target_slot_id=2,
-        source_launch=source_launch,
-        target_launch=_launch("athr_child", native_session_id=None, slot=2),
-    )
+    fork_args = {
+        "operation_id": "fork-closes-source",
+        "source_native_session_id": "native-source",
+        "source_native_turn_no": 1,
+        "target_thread_id": "athr_child",
+        "target_slot_id": 2,
+        "source_launch": source_launch,
+        "target_launch": _launch("athr_child", native_session_id=None, slot=2),
+    }
+    if observation == "residency_lost":
+        # A real grant revocation must still detach the source and reject
+        # this fork; the observational race fix cannot bypass that fence.
+        with pytest.raises(SessionLeaseLost, match="source transport changed after native fork"):
+            supervisor.fork_native("athr_source", **fork_args)
+        assert factory.opened == [source_launch]
+        assert supervisor.status("athr_source").residency_generation == 0
+        assert all(item.thread_id != "athr_child" for item in supervisor.list())
+        return
+
+    result = supervisor.fork_native("athr_source", **fork_args)
 
     child_launch = _launch("athr_child", native_session_id="native-child", slot=2)
     assert result.source_process_generation == 2
     assert supervisor.status("athr_source").resident_state == "live"
     assert factory.opened == [source_launch, source_launch, child_launch]
+    if observation != "none":
+        source_observation = next(item for item in observations if item.thread_id == "athr_source")
+        assert source_observation.operation_count == 1
+        assert source_observation.resident_state == "live"
+        assert source_observation.residency_generation == 1
 
 
 def test_idle_stop_releases_networks_after_docker_already_stopped_the_container():

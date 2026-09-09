@@ -1596,6 +1596,14 @@ class SharedChatSessionSupervisor:
 
     @staticmethod
     def _detach_dead_transport(member: _Member) -> ResidentTransport | None:
+        # The turn-lock owner controls transport replacement. Native fork
+        # deliberately closes the source while copying its private state,
+        # then resumes it under the same residency fence. A concurrent
+        # heartbeat/status read must not detach that owned transport. Real
+        # residency loss and forced stop use their own explicit invalidation
+        # paths and still take effect while this lock is held.
+        if member.turn_lock.locked():
+            return None
         transport = member.transport
         if transport is None or transport.alive:
             return None
