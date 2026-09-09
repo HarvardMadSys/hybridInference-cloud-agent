@@ -28,8 +28,8 @@ const LANES: { key: TrajectoryLane; label: string; tone: string }[] = [
 ];
 
 const ACTOR_TONE: Record<TrajectoryRow['actor'], string> = {
-  user: 'bg-sky-50 text-sky-700',
-  assistant: 'bg-violet-50 text-violet-700',
+  user: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400',
+  assistant: 'bg-violet-50 dark:bg-violet-500/10 text-violet-700 dark:text-violet-400',
   tool: 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400',
   context: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400',
   system: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400',
@@ -45,32 +45,55 @@ function Minimap({
   selectedId: number | null;
   onSelect: (id: number) => void;
 }) {
+  const lanes = LANES.map((lane) => ({
+    ...lane,
+    count: rows.filter((row) => row.lane === lane.key).length,
+  })).filter((lane) => lane.count > 0);
+
   return (
-    <div className="space-y-1 overflow-x-auto pb-1">
-      {LANES.filter((lane) => rows.some((row) => row.lane === lane.key)).map((lane) => (
-        <div key={lane.key} className="flex items-center gap-2">
-          <span className="w-12 shrink-0 text-right text-[10px] uppercase tracking-wide text-gray-400 dark:text-gray-500">
-            {lane.label}
-          </span>
-          <div className="flex gap-px">
-            {rows.map((row) =>
-              row.lane === lane.key ? (
-                <button
-                  key={row.id}
-                  type="button"
-                  aria-label={`${row.label} (${row.eventType})`}
-                  onClick={() => onSelect(row.id)}
-                  className={`h-2.5 w-2 shrink-0 rounded-[1px] transition-opacity hover:opacity-100 ${
-                    row.isError ? 'bg-rose-400' : lane.tone
-                  } ${selectedId === row.id ? 'opacity-100 ring-1 ring-gray-800 dark:ring-gray-100' : 'opacity-70'}`}
-                />
-              ) : (
-                <span key={row.id} className="h-2.5 w-2 shrink-0" />
-              ),
-            )}
+    <div className="flex gap-4">
+      <div className="w-24 shrink-0 space-y-1.5">
+        {lanes.map((lane) => (
+          <div key={lane.key} className="flex h-5 items-center gap-2">
+            <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${lane.tone}`} />
+            <span className="text-[11px] font-medium text-gray-600 dark:text-gray-300">
+              {lane.label}
+            </span>
+            <span className="ml-auto text-[10px] tabular-nums text-gray-400 dark:text-gray-500">
+              {lane.count}
+            </span>
           </div>
+        ))}
+      </div>
+      <div className="min-w-0 flex-1 overflow-x-auto pb-1">
+        <div className="space-y-1.5" style={{ minWidth: rows.length * 12 + 8 }}>
+          {lanes.map((lane) => (
+            <div
+              key={lane.key}
+              className="grid h-5 items-center gap-0.5 rounded-md bg-gray-50 px-1 dark:bg-white/[0.03]"
+              style={{ gridTemplateColumns: `repeat(${rows.length}, minmax(0, 1fr))` }}
+            >
+              {rows.map((row) =>
+                row.lane === lane.key ? (
+                  <button
+                    key={row.id}
+                    type="button"
+                    aria-label={`${row.label} (${row.eventType})`}
+                    aria-pressed={selectedId === row.id}
+                    title={`${row.label} (${row.eventType})${row.durationMs !== undefined ? ` · ${formatDuration(row.durationMs)}` : ''}`}
+                    onClick={() => onSelect(row.id)}
+                    className={`mx-auto h-3.5 w-full max-w-4 rounded-[3px] transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-700 focus-visible:ring-offset-2 dark:focus-visible:ring-gray-200 dark:focus-visible:ring-offset-gray-900 ${
+                      row.isError ? 'bg-rose-400' : lane.tone
+                    } ${selectedId === row.id ? 'opacity-100 ring-1 ring-gray-700 ring-offset-1 dark:ring-gray-200 dark:ring-offset-gray-900' : selectedId === null ? 'opacity-80' : 'opacity-60'}`}
+                  />
+                ) : (
+                  <span key={row.id} aria-hidden="true" />
+                ),
+              )}
+            </div>
+          ))}
         </div>
-      ))}
+      </div>
     </div>
   );
 }
@@ -145,7 +168,30 @@ export function TrajectoryView({ events }: { events: (AgentJobEventApi | AgentTh
 
   return (
     <section aria-label="Trajectory" className="space-y-3">
-      <Minimap rows={rows} selectedId={selectedId} onSelect={setSelectedId} />
+      <div className="rounded-xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(17,24,39,0.025)] dark:border-white/10 dark:bg-gray-900">
+        <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-3 dark:border-white/5">
+          <h2 className="flex items-center gap-2 text-[12px] font-medium text-gray-700 dark:text-gray-200">
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.25"
+              strokeLinecap="round"
+              className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500"
+            >
+              <path d="M2.5 2.5v11h11M5.5 5h3M9.5 8h3M5.5 11h2" />
+            </svg>
+            Execution overview
+          </h2>
+          <span className="rounded-md bg-gray-50 px-2 py-0.5 text-[10px] tabular-nums text-gray-500 dark:bg-white/5 dark:text-gray-400">
+            {rows.length} {rows.length === 1 ? 'event' : 'events'}
+          </span>
+        </div>
+        <div className="px-4 pb-3 pt-3.5">
+          <Minimap rows={rows} selectedId={selectedId} onSelect={setSelectedId} />
+        </div>
+      </div>
 
       <div className="flex items-center gap-2">
         <input
@@ -156,11 +202,11 @@ export function TrajectoryView({ events }: { events: (AgentJobEventApi | AgentTh
           aria-label="Search events"
           className="min-w-0 flex-1 rounded-lg border border-gray-200 dark:border-white/10 px-2.5 py-1.5 text-[13px] outline-none focus:border-gray-300"
         />
-        <span className="shrink-0 text-[12px] tabular-nums text-gray-500 dark:text-gray-400">
-          {visible.length === rows.length
-            ? `${rows.length} events`
-            : `${visible.length} of ${rows.length}`}
-        </span>
+        {visible.length !== rows.length ? (
+          <span className="shrink-0 text-[12px] tabular-nums text-gray-500 dark:text-gray-400">
+            {visible.length} of {rows.length}
+          </span>
+        ) : null}
         <button
           type="button"
           onClick={download}
