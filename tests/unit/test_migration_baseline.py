@@ -20,7 +20,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 BASELINE = REPO / "migrations/versions/0001_baseline.py"
-STORE = REPO / "backend/cloud_agent/storage/store.py"
+STORE = REPO / "cloud_agent/storage/store.py"
 
 # The 11 tables the gateway's AgentJobStore created at the freeze commit.
 # Written out rather than derived, so a table silently vanishing from the
@@ -294,6 +294,6 @@ def test_no_public_schema_field_offers_a_per_task_budget() -> None:
     Named `budget_usd` rather than "budget" so the *retry* budget — attempts
     per job, alive and enforced — does not trip it.
     """
-    schemas = (REPO / "backend/cloud_agent/schemas.py").read_text(encoding="utf-8")
+    schemas = (REPO / "cloud_agent/schemas.py").read_text(encoding="utf-8")
     assert "budget_usd" not in schemas
     assert "BUDGET_USD" not in schemas

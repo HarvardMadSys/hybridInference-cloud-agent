@@ -27,6 +27,7 @@ set -euo pipefail
 SHA="${1:-${DEPLOY_SHA:-}}"
 SOURCE_REPO="${SOURCE_REPO:-${GITHUB_WORKSPACE:-}}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-}"
+DEPLOY_PROTOCOL="shared-live-exact-sha-v2"
 
 log() { printf '[deploy-host] %s\n' "$*"; }
 die() { printf '[deploy-host] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -63,6 +64,9 @@ fi
 SOURCE_HEAD="$(git -C "${SOURCE_REPO}" rev-parse HEAD)"
 [ "${SOURCE_HEAD}" = "${SHA}" ] \
   || die "SOURCE_REPO is at ${SOURCE_HEAD}, not the requested ${SHA} — refusing to deploy something other than what was asked for"
+TARGET_DEPLOY_PROTOCOL="$(git -C "${SOURCE_REPO}" show "${SHA}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
+[ "${TARGET_DEPLOY_PROTOCOL}" = "${DEPLOY_PROTOCOL}" ] \
+  || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; it is pre-fence or protocol-incompatible, so online deployment was refused before changing the host"
 
 PREVIOUS="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 log "previous: ${PREVIOUS}"
@@ -74,10 +78,25 @@ NOW="$(git rev-parse HEAD)"
 [ "${NOW}" = "${SHA}" ] || die "checkout landed on ${NOW}, expected ${SHA}"
 log "checkout now at ${NOW}"
 
+# Every heartbeat carries this exact commit only after sandbox_host.sh has
+# proved all runner replicas and the broker. The control-plane deployment uses
+# it as a rolling-compatibility fence; it is not a topology switch.
+AGENT_DEPLOYMENT_SHA="${SHA}"
+export AGENT_DEPLOYMENT_SHA
+
 # Which stack this deploy owns. Read the same way `sandbox_host.sh` reads it,
 # from the environment or from this deploy root's `.env`, so the guard below and
 # the bring-up can never disagree about which containers are ours.
-from_env() { grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true; }
+from_env() {
+  local value
+  value="$(grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  # Match Compose and sandbox_host.sh: one quoted pair is syntax, not part of
+  # a project name. Without this, COMPOSE_PROJECT="host-prod" makes this guard
+  # inspect a different stack from the one sandbox_host.sh subsequently owns.
+  value="${value%\"}"; value="${value#\"}"
+  value="${value%\'}"; value="${value#\'}"
+  printf '%s' "$value"
+}
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(from_env COMPOSE_PROJECT)}"
 [ -n "${COMPOSE_PROJECT}" ] \
   || die "COMPOSE_PROJECT is not set — put it in ${DEPLOY_ROOT}/.env (e.g. freeinference-cloud-agent-sandbox-staging) or pass it in the environment"
@@ -107,7 +126,7 @@ KNOWN="${EXPECTED_PROJECT},${SIBLING_COMPOSE_PROJECTS}"
 STRAY="$(docker ps --format '{{.Label "com.docker.compose.project"}} {{.Names}}' 2>/dev/null \
   | awk -v known="${KNOWN}" '
       BEGIN { n = split(known, k, ","); for (i = 1; i <= n; i++) if (k[i] != "") ok[k[i]] = 1 }
-      !($1 in ok) && $2 ~ /-(runner|workspace-broker|gateway-tunnel|mcp-tunnel|control-plane-tunnel)-[0-9]+$/ {
+      !($1 in ok) && $2 ~ /-(runner|workspace-broker|gateway-tunnel|mcp-tunnel|control-plane-tunnel|agent-egress-proxy)-[0-9]+$/ {
         print "  " $2 "  (project: " $1 ")"
       }')"
 if [ -n "${STRAY}" ]; then
@@ -126,10 +145,11 @@ fi
 # broken tunnel into a red deploy instead of jobs that claim and then fail.
 log "handing over to sandbox_host.sh up"
 if [ -n "${REPLICAS:-}" ]; then
-  bash deploy/host/sandbox_host.sh up "${REPLICAS}"
+  DEFER_SHARED_READY_MARKER=1 bash deploy/host/sandbox_host.sh up "${REPLICAS}"
 else
-  bash deploy/host/sandbox_host.sh up
+  DEFER_SHARED_READY_MARKER=1 bash deploy/host/sandbox_host.sh up
 fi
 
 printf '%s\n' "${SHA}" > .deployed-sha
+bash deploy/host/sandbox_host.sh mark-ready "${SHA}"
 log "deployed ${SHA} (was ${PREVIOUS})"

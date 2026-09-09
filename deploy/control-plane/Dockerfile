@@ -3,7 +3,7 @@
 # **It ships the host package too, and that is not an oversight.** `patch_gate`
 # is imported by the publisher and the publish worker on this side and by the
 # runner and the snapshotter on the host side; the migration manifest called it
-# host-only, which was wrong. Dropping `host/` here produces an image that
+# host-only, which was wrong. Dropping `cloud_agent_host/` here produces an image that
 # builds, starts, serves, and fails at the first publish — the furthest
 # possible point from the mistake. See MIGRATION.md, "Manifest corrections".
 #
@@ -16,7 +16,9 @@ FROM python:3.12-slim AS base
 
 # Build-time only for asyncpg/cryptography wheels that may need compiling on
 # architectures without one, plus git for the publish path's plumbing.
-RUN apt-get update \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
     && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
@@ -30,13 +32,14 @@ WORKDIR /app
 
 # Dependencies first, so a source edit does not re-resolve them.
 COPY pyproject.toml README.md LICENSE ./
-COPY backend/cloud_agent/__init__.py backend/cloud_agent/__init__.py
-COPY host/cloud_agent_host/__init__.py host/cloud_agent_host/__init__.py
+COPY cloud_agent/__init__.py cloud_agent/__init__.py
+COPY cloud_agent_host/__init__.py cloud_agent_host/__init__.py
+ARG PIP_DEFAULT_TIMEOUT=120
 RUN pip install --no-cache-dir .
 
 # Both packages. See the header: `patch_gate` crosses the boundary.
-COPY backend/ backend/
-COPY host/ host/
+COPY cloud_agent/ cloud_agent/
+COPY cloud_agent_host/ cloud_agent_host/
 
 # Alembic owns the schema. Nothing in this service creates a table at startup,
 # so these are not optional extras — an image without them can only run against

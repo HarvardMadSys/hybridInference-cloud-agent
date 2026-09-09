@@ -185,7 +185,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
       {error ? (
         <p
           role="alert"
-          className="mb-2 shrink-0 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600"
+          className="mb-2 shrink-0 rounded-lg bg-red-50 dark:bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400"
         >
           {error}
         </p>
@@ -217,8 +217,8 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
           ))}
         </div>
       ) : (
-        <div className="flex min-h-80 flex-1 flex-col items-center justify-center rounded-xl border border-gray-200 bg-white px-6 text-center shadow-sm">
-          <span className="mb-3 rounded-lg border border-gray-200 p-2 text-gray-500">
+        <div className="flex min-h-80 flex-1 flex-col items-center justify-center rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 text-center shadow-sm">
+          <span className="mb-3 rounded-lg border border-gray-200 dark:border-white/10 p-2 text-gray-500 dark:text-gray-400">
             <svg aria-hidden="true" className="h-5 w-5" fill="none" viewBox="0 0 24 24">
               <rect
                 x="3.5"
@@ -238,10 +238,10 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
               />
             </svg>
           </span>
-          <p className="text-sm font-medium text-gray-800">
+          <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
             {loading || awaitingInitialLoad ? 'Loading terminals…' : 'No open terminals'}
           </p>
-          <p className="mt-1 max-w-sm text-xs leading-5 text-gray-500">
+          <p className="mt-1 max-w-sm text-xs leading-5 text-gray-500 dark:text-gray-400">
             Terminal changes appear in this workspace&apos;s Git and Files views, but do not
             automatically update an existing pull request.
           </p>
@@ -249,7 +249,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
             <button
               type="button"
               onClick={retryLoad}
-              className="mt-4 inline-flex items-center rounded-md border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              className="mt-4 inline-flex items-center rounded-md border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
             >
               Retry
             </button>
@@ -259,7 +259,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
               aria-label="New terminal"
               onClick={() => void create('new')}
               disabled={!canCreate || busy}
-              className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-gray-900 px-3 py-2 text-xs font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+              className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-2 text-xs font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white disabled:opacity-50"
             >
               <span aria-hidden="true" className="text-base leading-none">
                 +
@@ -270,7 +270,7 @@ export function TerminalWorkspace({ jobId, active, ready = true }: TerminalWorks
         </div>
       )}
       {visible.length ? (
-        <p className="mt-2 shrink-0 px-1 text-[10px] leading-4 text-gray-400">
+        <p className="mt-2 shrink-0 px-1 text-[10px] leading-4 text-gray-400 dark:text-gray-500">
           Changes appear in Git and Files, but do not automatically update an existing pull request.
         </p>
       ) : null}

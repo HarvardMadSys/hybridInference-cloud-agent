@@ -1,7 +1,7 @@
 openapi: 3.1.0
 
 info:
-  title: FreeInference gateway — internal lookups
+  title: HybridInference gateway — internal lookups
   version: "1.0.0"
   x-source:
     repo: HarvardMadSys/hybridInference
@@ -19,10 +19,10 @@ info:
     that task either fails to import or silently degrades — and a silent
     degrade here looks like a feature that stopped working for no reason.
 
-    The MCP registry read was **retired rather than moved**: servers are owned
-    by the user now and the control plane resolves them from that user's own
+    The MCP registry endpoint was later retired when server ownership moved
+    to the user. The control plane now resolves servers from that user's own
     connections, so there is no deployment-wide registry for the gateway to
-    answer for. That is why two endpoints replace three reads.
+    answer for. Two lookup endpoints remain.
 
     | Endpoint | Replaces |
     |---|---|
@@ -35,9 +35,9 @@ info:
     widens permission at exactly the moment nobody is watching.
 
 servers:
-  - url: https://freeinference.org
+  - url: https://gateway.example.org
     description: Production
-  - url: https://staging.freeinference.org
+  - url: https://staging.gateway.example.org
     description: Staging
 
 tags:

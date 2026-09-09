@@ -5,18 +5,29 @@
 // caller.
 
 import { AuthProvider } from './AuthProvider';
+import { LocaleProvider } from './LocaleProvider';
+import { ThemeProvider } from './ThemeProvider';
 import { ToastProvider } from './ToastProvider';
 import { SiteConfigProvider } from './SiteConfigProvider';
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <SiteConfigProvider>
-      <AuthProvider>
-        {children}
-        <ToastProvider />
-      </AuthProvider>
+      {/* Theme wraps the toaster because `react-hot-toast` is styled with a
+          JS palette rather than classes, so it has to read the resolved
+          scheme from context. */}
+      <ThemeProvider>
+        <LocaleProvider>
+          <AuthProvider>
+            {children}
+            <ToastProvider />
+          </AuthProvider>
+        </LocaleProvider>
+      </ThemeProvider>
     </SiteConfigProvider>
   );
 }
 
 export { useAuth } from './AuthProvider';
+export { useLocale, useT } from './LocaleProvider';
+export { useTheme } from './ThemeProvider';

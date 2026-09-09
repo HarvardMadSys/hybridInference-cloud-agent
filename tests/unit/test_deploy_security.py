@@ -11,6 +11,7 @@ real script.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -21,7 +22,7 @@ REPO = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO / "deploy/host/docker-compose.sandbox.yml"
 SANDBOX_DOCKERFILE = REPO / "deploy/sandbox/Dockerfile.agent-sandbox"
 CODEX_REQUIREMENTS = REPO / "deploy/sandbox/codex-requirements.toml"
-WORKFLOW = REPO / ".github/workflows/agent-job-runner.yml"
+WORKFLOW_DIR = REPO / ".github/workflows"
 
 
 @pytest.fixture(scope="module")
@@ -39,6 +40,43 @@ def _mounts(service: dict) -> list[str]:
             ro = ":ro" if volume.get("read_only") else ""
             out.append(f"{volume.get('source', '')}:{volume.get('target', '')}{ro}")
     return out
+
+
+def test_private_repository_ci_uses_existing_self_hosted_pools() -> None:
+    """Keep private CI on our pools until the public-PR split in #99 lands."""
+    workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read"}
+    jobs = workflow["jobs"]
+    special_runners = {
+        "build": "${{ fromJSON(matrix.image.runner) }}",
+        "egress-proxy-starts": ["self-hosted", "Linux", "X64", "image-verify-x64"],
+        "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
+    }
+    assert special_runners.keys() <= jobs.keys()
+    for name, job in jobs.items():
+        expected = special_runners.get(name, ["self-hosted", "Linux", "ci-general"])
+        assert job["runs-on"] == expected, f"{name} left its self-hosted CI pool"
+
+
+def test_ci_images_build_on_their_deployment_architecture() -> None:
+    """Matrix indirection must preserve both self-hosting and native builds."""
+    workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
+    matrix = workflow["jobs"]["build"]["strategy"]["matrix"]
+    assert set(matrix) == {"image"}
+    images = matrix["image"]
+    x64 = ["self-hosted", "Linux", "X64", "image-verify-x64"]
+    arm64 = ["self-hosted", "Linux", "ARM64", "image-verify-arm64"]
+    expected = {
+        "deploy/host/Dockerfile.agent-runner": x64,
+        "deploy/sandbox/Dockerfile.agent-sandbox": x64,
+        "deploy/host/Dockerfile.agent-egress-proxy": x64,
+        "deploy/host/Dockerfile.agent-gateway-tunnel": x64,
+        "deploy/control-plane/Dockerfile": arm64,
+    }
+    assert len(images) == len(expected)
+    assert {image["dockerfile"] for image in images} == expected.keys()
+    for image in images:
+        assert json.loads(image["runner"]) == expected[image["dockerfile"]], image["name"]
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +250,7 @@ def test_the_egress_proxy_hands_its_log_pipes_to_the_user_it_becomes() -> None:
     disappearing from the CMD in an edit that never runs CI.
     """
     dockerfile = (REPO / "deploy/host/Dockerfile.agent-egress-proxy").read_text()
-    config = (REPO / "host/cloud_agent_host/egress_proxy.py").read_text()
+    config = (REPO / "cloud_agent_host/egress_proxy.py").read_text()
 
     logs_to_pipes = "stdio:/dev/stdout" in config or "stdio:/dev/stderr" in config
     if not logs_to_pipes:

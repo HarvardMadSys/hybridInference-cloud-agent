@@ -2,14 +2,14 @@
 #
 # The allowlist proxy for the Trusted egress tier (issue #1041).
 #
-# This container is the only thing on the sandbox's setup network with a route
-# to the internet. The network itself is `internal: true`, so this is not a
+# This container is the only thing on each chat-private setup network with a
+# route to the internet. Those networks are `internal: true`, so this is not a
 # policy the sandbox is asked to respect — it is the only door in the room.
 #
 # It holds no credentials and mounts no socket. Its whole job is to accept
 # CONNECT for a host on the generated allowlist and refuse everything else,
 # which is why it is a separate image from the runner: the runner is trusted
-# and holds the dispatcher token, and nothing that talks to an untrusted
+# and holds enrolled-host credentials, and nothing that talks to an untrusted
 # sandbox should share an image with it.
 #
 # The configuration is NOT baked in. It is rendered by
@@ -18,16 +18,19 @@
 # there is what runs the validation that keeps a hostile value out of a config
 # file.
 #
-# No compose file in this repository starts this image yet: the render service
-# and the tiered networks lived in the gateway repo's co-located overlay, which
-# was not migrated. See MIGRATION.md, Open decisions.
+# The standalone host compose starts this beside a network-isolated config
+# renderer. The proxy joins the internal discovery backplane, every active
+# chat-private setup bridge, and its routable uplink; it never joins the
+# runner/control network or mounts Docker.
 
 FROM debian:bookworm-slim
 
 # Squid from the distribution, so security updates arrive with the base image.
 # The tag pins a major version; a production deployment should pin the base by
 # digest as well.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
         squid \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*

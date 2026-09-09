@@ -13,6 +13,7 @@ import {
   getAgentConfig,
   getAgentJobFiles,
   getAgentJobGit,
+  getAgentThreadStats,
   listAgentTerminals,
   resizeAgentTerminal,
   streamAgentTerminal,
@@ -39,6 +40,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
   getAgentJobFiles: vi.fn(),
   getAgentJobGit: vi.fn(),
+  getAgentThreadStats: vi.fn(),
   listAgentTerminals: vi.fn(),
   resizeAgentTerminal: vi.fn(),
   streamAgentTerminal: vi.fn(),
@@ -72,7 +74,7 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     hasLedger: true,
     timeoutLabel: '',
     networkSetup: 'allowlist',
-    networkAgent: 'gateway only',
+    networkAgent: 'platform relays only',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
     currentAttemptNo: 1,
@@ -144,6 +146,9 @@ describe('JobDetail', () => {
       patch: '',
       commits: [],
     });
+    // Absent by default: the stats bar is additive, and every case here
+    // predates it. The bar's own file covers what it renders when present.
+    vi.mocked(getAgentThreadStats).mockReset().mockResolvedValue(null);
     vi.mocked(createAgentTerminal).mockReset();
     vi.mocked(deleteAgentTerminal).mockReset();
     vi.mocked(listAgentTerminals).mockReset().mockResolvedValue([]);
@@ -184,8 +189,49 @@ describe('JobDetail', () => {
     expect(screen.getByText('Earlier question')).toBeInTheDocument();
     expect(screen.getByText('Earlier answer')).toBeInTheDocument();
     expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
-    expect(screen.getByText('Setting up environment')).toBeInTheDocument();
+    expect(screen.getByText('Run started')).toBeInTheDocument();
     expect(screen.getByText('I found the', { exact: false })).toBeInTheDocument();
+  });
+
+  it("keeps a previous turn's tool activity after a follow-up is appended", () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          turnNo: 2,
+          threadMessages: HISTORY,
+          historyTurns: [
+            {
+              jobId: 'ajob_0',
+              turnNo: 1,
+              forkable: true,
+              messages: HISTORY,
+              events: [
+                { kind: 'message', text: 'I will inspect the repository.', attemptNo: 1 },
+                {
+                  kind: 'tool_use',
+                  tool: 'Read',
+                  detail: 'src/router.py',
+                  output: ['router source'],
+                  attemptNo: 1,
+                },
+                { kind: 'message', text: 'Earlier answer', attemptNo: 1 },
+              ],
+            },
+          ],
+        })}
+      />,
+    );
+
+    const turn = screen.getByLabelText('Turn 1');
+    const activity = within(turn).getByText('Read').closest('details');
+    expect(activity).not.toBeNull();
+    expect(activity).not.toHaveAttribute('open');
+    expect(activity).toHaveTextContent('src/router.py');
+    expect(activity).toHaveTextContent('router source');
+    expect(within(turn).getByText('Earlier answer')).toBeInTheDocument();
+    expect(screen.getAllByText('Earlier answer')).toHaveLength(1);
+    expect(within(turn).getByText('Turn 1 · 1 tool call')).toBeInTheDocument();
+    expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
   });
 
   it('shows reasoning as a status without rendering raw thinking text', () => {
@@ -282,7 +328,62 @@ describe('JobDetail', () => {
         prompt: 'Now add a regression test',
       }),
     );
-    expect(navigation.push).toHaveBeenCalledWith('/ajob_child');
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_child', { scroll: false });
+  });
+
+  it('sends the follow-up on Enter and keeps Shift+Enter a newline', async () => {
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    render(<JobDetail job={makeJob()} />);
+
+    const composer = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(composer, { target: { value: 'Now add a regression test' } });
+
+    // Shift+Enter and Alt+Enter stay the newline, so the browser keeps them.
+    expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(composer, { key: 'Enter', altKey: true })).toBe(true);
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+
+    // An IME commits its candidate with Enter; that keypress is the word, not
+    // the send.
+    fireEvent.keyDown(composer, { key: 'Enter', isComposing: true });
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(composer, { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Now add a regression test',
+      }),
+    );
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_child', { scroll: false });
+  });
+
+  it('swallows Enter on an empty follow-up rather than growing a blank line', async () => {
+    render(<JobDetail job={makeJob()} />);
+
+    const composer = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(composer, { target: { value: '   ' } });
+
+    // Enter is the send key on this composer and never the newline, so with
+    // nothing to send it does nothing at all. Shift+Enter still breaks the line.
+    expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false);
+    expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true);
+    expect(followUpAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('accepts the other send chord people arrive with', async () => {
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+    render(<JobDetail job={makeJob()} />);
+
+    const composer = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(composer, { target: { value: 'Now add a regression test' } });
+    fireEvent.keyDown(composer, { key: 'Enter', metaKey: true });
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Now add a regression test',
+      }),
+    );
   });
 
   it('switches the model for the next turn without leaving the thread', async () => {
@@ -348,6 +449,14 @@ describe('JobDetail', () => {
     expect(screen.getByText('{"event_type":"message"}')).toBeInTheDocument();
   });
 
+  it.each([null, 0])('preserves an absent or zero model-call count (%s)', (turns) => {
+    const job = makeJob();
+    render(<JobDetail job={{ ...job, usage: { ...job.usage, turns } }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const row = screen.getByText('Model calls').parentElement!;
+    expect(within(row).getByText(turns === null ? '—' : '0')).toBeInTheDocument();
+  });
+
   it('wraps unbroken failure details inside the outcome card', () => {
     const stateNote = `agent exited 1: ${'x'.repeat(300)}`;
     render(<JobDetail job={makeJob({ state: 'failed', stateNote })} />);
@@ -363,6 +472,7 @@ describe('JobDetail', () => {
     expect(workspaceButton).toHaveTextContent('');
     expect(workspaceButton).toHaveClass('h-9', 'w-9', 'justify-center');
     expect(workspaceButton).toHaveAttribute('aria-expanded', 'false');
+    expect(workspaceButton).toHaveAttribute('aria-keyshortcuts', 'Meta+J Control+J');
     expect(workspacePane).toHaveClass('hidden');
     expect(workspacePane).not.toHaveClass('flex');
     expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
@@ -422,6 +532,109 @@ describe('JobDetail', () => {
     expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute('aria-selected', 'true');
   });
 
+  it.each([
+    { key: 'j', metaKey: true },
+    { key: 'J', metaKey: true },
+    { key: 'j', ctrlKey: true },
+    { key: 'J', ctrlKey: true },
+  ])('toggles the workspace and ignores repeats: %j', (chord) => {
+    render(<JobDetail job={makeJob()} />);
+
+    expect(fireEvent.keyDown(window, chord)).toBe(false);
+    expect(screen.getByRole('button', { name: 'Close workspace' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+
+    expect(fireEvent.keyDown(window, { ...chord, repeat: true })).toBe(false);
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+
+    expect(fireEvent.keyDown(window, chord)).toBe(false);
+    expect(screen.getByRole('button', { name: 'Open workspace' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+
+    expect(fireEvent.keyDown(window, { ...chord, repeat: true })).toBe(false);
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+  });
+
+  it.each(['Git', 'Terminal', 'Files'])(
+    'preserves the selected %s tab when toggled with the keyboard and button',
+    (tab) => {
+      render(<JobDetail job={makeJob({ state: 'done' })} />);
+      openWorkspace();
+      const workspaceTabs = within(screen.getByRole('tablist', { name: 'Workspace views' }));
+      fireEvent.click(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) }));
+
+      fireEvent.keyDown(window, { key: 'j', metaKey: true });
+      expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+      fireEvent.keyDown(window, { key: 'j', ctrlKey: true });
+      expect(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
+      fireEvent.keyDown(window, { key: 'j', metaKey: true });
+      expect(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+    },
+  );
+
+  it.each([
+    { key: 'j' },
+    { key: 'j', metaKey: true, ctrlKey: true },
+    { key: 'j', metaKey: true, altKey: true },
+    { key: 'j', ctrlKey: true, altKey: true },
+    { key: 'j', metaKey: true, shiftKey: true },
+    { key: 'j', ctrlKey: true, shiftKey: true },
+    { key: 'b', metaKey: true },
+    { key: 'b', ctrlKey: true },
+  ])('leaves nonmatching keyboard input alone: %j', (chord) => {
+    render(<JobDetail job={makeJob()} />);
+
+    expect(fireEvent.keyDown(window, chord)).toBe(true);
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+  });
+
+  it.each([{ metaKey: true }, { ctrlKey: true }])(
+    'captures the workspace shortcut before a focused editor consumes it: %j',
+    (modifier) => {
+      render(<JobDetail job={makeJob()} />);
+      const composer = screen.getByLabelText('Add a follow-up');
+      // Terminal/editor handlers may stop bubbling or forward Ctrl+J as a newline.
+      const editorKeyDown = vi.fn((event: KeyboardEvent) => event.stopPropagation());
+      composer.addEventListener('keydown', editorKeyDown);
+      composer.focus();
+
+      try {
+        expect(fireEvent.keyDown(composer, { key: 'j', ...modifier })).toBe(false);
+        expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+        expect(fireEvent.keyDown(composer, { key: 'j', ...modifier, repeat: true })).toBe(false);
+        expect(editorKeyDown).not.toHaveBeenCalled();
+
+        expect(fireEvent.keyDown(composer, { key: 'j' })).toBe(true);
+        expect(editorKeyDown).toHaveBeenCalledOnce();
+        expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+      } finally {
+        composer.removeEventListener('keydown', editorKeyDown);
+      }
+    },
+  );
+
+  it('removes the workspace shortcut when leaving the task', () => {
+    const { unmount } = render(<JobDetail job={makeJob()} />);
+    unmount();
+
+    expect(fireEvent.keyDown(window, { key: 'j', metaKey: true })).toBe(true);
+    expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(true);
+  });
+
   it('resizes the workspace pane by dragging the seam, and remembers the width', () => {
     render(<JobDetail job={makeJob()} />);
 
@@ -466,7 +679,7 @@ describe('JobDetail', () => {
     openWorkspace();
 
     await waitFor(() =>
-      expect(screen.getByLabelText('Git workspace')).toHaveTextContent('Archived result'),
+      expect(screen.getByLabelText('Git workspace')).toHaveTextContent('Unavailable'),
     );
     expect(screen.getByLabelText('Git workspace')).toHaveTextContent('src/example.ts');
     fireEvent.click(screen.getByRole('tab', { name: 'review' }));
@@ -627,7 +840,7 @@ describe('JobDetail', () => {
     expect(screen.getByLabelText('Workspace files')).not.toHaveTextContent('null B');
   });
 
-  it('reads a live worktree file without offering to edit it', async () => {
+  it('reads a live workspace file without offering to edit it', async () => {
     vi.mocked(getAgentJobFiles)
       .mockResolvedValueOnce({
         path: '',
@@ -655,7 +868,7 @@ describe('JobDetail', () => {
     await waitFor(() => expect(pane).toHaveTextContent('# Before'));
     // Writable is a fact about the workspace, not an invitation: the pane is a
     // reader, so nothing here can change the run's files.
-    expect(pane).toHaveTextContent('Live worktree');
+    expect(pane).toHaveTextContent('Live workspace');
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Edit README.md' })).not.toBeInTheDocument();
@@ -807,34 +1020,514 @@ describe('JobDetail', () => {
     expect(screen.getByText(/restores any saved changes/i)).toBeInTheDocument();
   });
 
-  it('forks the conversation from an earlier assistant message', async () => {
-    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_fork' } as never);
-    render(<JobDetail job={makeJob({ threadMessages: HISTORY })} />);
+  it('does not offer a follow-up after an admitted turn lost native context', () => {
+    render(<JobDetail job={makeJob({ state: 'cancelled', contextStatus: 'lost' })} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }));
-
-    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
-    expect(navigation.push).toHaveBeenCalledWith('/ajob_fork');
+    expect(screen.getByText(/context can no longer be resumed/i)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
+    expect(screen.queryByText(/restores any saved changes/i)).toBeNull();
   });
 
-  it('edit-and-rewind forks the prior turn and leaves the prompt as a draft', async () => {
+  it('does not offer a follow-up from an older turn after the membership is lost', () => {
+    render(
+      <JobDetail job={makeJob({ state: 'done', contextStatus: 'live', nativeState: 'lost' })} />,
+    );
+
+    expect(screen.getByLabelText('Add a follow-up')).toBeDisabled();
+    expect(screen.getByText(/Agent CLI context can no longer be resumed/)).toBeInTheDocument();
+    expect(screen.getByText(/Start a new chat/)).toBeInTheDocument();
+  });
+
+  it('forks the settled current native session', async () => {
     vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_fork' } as never);
-    render(<JobDetail job={makeJob({ threadMessages: HISTORY })} />);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { rerender } = render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          events: [
+            { kind: 'message', text: 'Intermediate update', attemptNo: 1 },
+            { kind: 'message', text: 'Final answer', attemptNo: 1 },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getAllByRole('button', { name: 'Fork from here' })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }));
+
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_1'));
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_fork');
+    expect(screen.getByRole('button', { name: 'Fork from here' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }));
+    expect(forkAgentJob).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          id: 'ajob_fork',
+          state: 'done',
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          events: [{ kind: 'message', text: 'Forked answer', attemptNo: 1 }],
+        })}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Fork from here' })).not.toBeDisabled(),
+    );
+  });
+
+  it('does not fork the latest native turn from a superseded attempt view', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          attempts: [
+            { no: 1, status: 'superseded', note: 'lease expired' },
+            { no: 2, status: 'finished' },
+          ],
+          currentAttemptNo: undefined,
+          events: [
+            { kind: 'message', text: 'Superseded answer', attemptNo: 1 },
+            { kind: 'message', text: 'Final answer', attemptNo: 2 },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '1 · superseded' }));
+    expect(screen.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '2 · finished' }));
+    expect(screen.getByRole('button', { name: 'Fork from here' })).toBeInTheDocument();
+  });
+
+  it('offers current-session Fork when a successful run produced no pull request', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'needs_review',
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+        })}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Fork from here' })).toBeInTheDocument();
+  });
+
+  it('forks a historical successful assistant boundary in the shared workspace', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_historical_fork' } as never);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          turnNo: 2,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          threadMessages: HISTORY,
+          historyTurns: [
+            {
+              jobId: 'ajob_0',
+              turnNo: 1,
+              forkable: true,
+              messages: HISTORY,
+              events: [{ kind: 'message', text: 'Earlier answer', attemptNo: 1 }],
+            },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(
+      within(screen.getByLabelText('Turn 1')).getByRole('button', {
+        name: 'Fork from here',
+      }),
+    );
+
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_historical_fork');
+  });
+
+  it('offers exactly one Fork action at the final assistant boundary of a turn', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_boundary_fork' } as never);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          turnNo: 2,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          historyTurns: [
+            {
+              jobId: 'ajob_0',
+              turnNo: 1,
+              forkable: true,
+              messages: HISTORY,
+              events: [
+                { kind: 'message', text: 'Intermediate assistant update', attemptNo: 1 },
+                {
+                  kind: 'tool_use',
+                  tool: 'Read',
+                  detail: 'README.md',
+                  output: [],
+                  attemptNo: 1,
+                },
+                { kind: 'message', text: 'Final settled answer', attemptNo: 1 },
+              ],
+            },
+          ],
+        })}
+      />,
+    );
+
+    const historicalTurn = within(screen.getByLabelText('Turn 1'));
+    expect(historicalTurn.getAllByRole('button', { name: 'Fork from here' })).toHaveLength(1);
+    expect(historicalTurn.queryByRole('button', { name: 'Edit & rewind' })).not.toBeInTheDocument();
+    fireEvent.click(historicalTurn.getByRole('button', { name: 'Fork from here' }));
+
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
+  });
+
+  it('skips a failed turn and rewinds its prompt from the nearest successful boundary', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_rewind_failed' } as never);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          turnNo: 3,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          historyTurns: [
+            {
+              jobId: 'ajob_success',
+              turnNo: 1,
+              forkable: true,
+              messages: HISTORY,
+              events: [{ kind: 'message', text: 'Settled answer', attemptNo: 1 }],
+            },
+            {
+              jobId: 'ajob_failed',
+              turnNo: 2,
+              forkable: false,
+              messages: [
+                {
+                  id: 3,
+                  role: 'user',
+                  content: 'Retry this failed prompt',
+                  jobId: 'ajob_failed',
+                  createdAt: null,
+                },
+                {
+                  id: 4,
+                  role: 'assistant',
+                  content: 'Partial failed output',
+                  jobId: 'ajob_failed',
+                  createdAt: null,
+                },
+              ],
+              events: [{ kind: 'message', text: 'Partial failed output', attemptNo: 1 }],
+            },
+          ],
+        })}
+      />,
+    );
+
+    const failedTurn = within(screen.getByLabelText('Turn 2'));
+    expect(failedTurn.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
+    fireEvent.click(failedTurn.getByRole('button', { name: 'Edit & rewind' }));
+
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_success'));
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind_failed')).toBe(
+      'Retry this failed prompt',
+    );
+  });
+
+  it('forks before a user prompt and carries it to the child as a one-shot edit draft', async () => {
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_rewind' } as never);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const historicalTurn = {
+      jobId: 'ajob_0',
+      turnNo: 1,
+      forkable: true,
+      messages: HISTORY,
+      events: [{ kind: 'message' as const, text: 'Earlier answer', attemptNo: 1 }],
+    };
+    const { rerender } = render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          turnNo: 2,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+          threadMessages: HISTORY,
+          historyTurns: [historicalTurn],
+        })}
+      />,
+    );
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit & rewind' }));
 
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
-    expect(sessionStorage.getItem('agent-rewind-draft-ajob_fork')).toBe(
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind')).toBe(
       'Current task\nwith all of its detail.',
     );
-    expect(navigation.push).toHaveBeenCalledWith('/ajob_fork');
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_rewind');
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          id: 'ajob_rewind',
+          state: 'done',
+          turnNo: 1,
+          sandboxId: 'asbx_1',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+        })}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toHaveValue(
+        'Current task\nwith all of its detail.',
+      ),
+    );
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind')).toBeNull();
   });
 
-  it('prefills the composer from a rewind draft exactly once', () => {
-    sessionStorage.setItem('agent-rewind-draft-ajob_1', 'edited prompt');
+  it('does not offer a synthetic fork when no retained sandbox exists', () => {
+    render(<JobDetail job={makeJob({ threadMessages: HISTORY })} />);
+
+    expect(screen.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit & rewind' })).not.toBeInTheDocument();
+  });
+});
+
+describe('JobDetail reasoning effort', () => {
+  const THINKING_CONFIG = {
+    ...AGENT_CONFIG,
+    runtime_reasoning_efforts: { 'claude-code': ['low', 'medium', 'high', 'xhigh', 'max'] },
+    // Read as a yes/no, not as a vocabulary: the offered levels are the
+    // platform's four.
+    model_reasoning_efforts: { 'qwen-test': ['low', 'high', 'max'] },
+  };
+
+  beforeEach(() => {
+    navigation.push.mockReset();
+    vi.mocked(followUpAgentJob).mockReset();
+    vi.mocked(getAgentConfig).mockReset();
+    vi.mocked(getAgentConfig).mockResolvedValue(THINKING_CONFIG);
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_child' } as never);
+  });
+
+  afterEach(() => cleanup());
+
+  it('offers the platform levels for the turn it would run', async () => {
     render(<JobDetail job={makeJob()} />);
 
-    expect(screen.getByLabelText('Add a follow-up')).toHaveValue('edited prompt');
-    expect(sessionStorage.getItem('agent-rewind-draft-ajob_1')).toBeNull();
+    const picker = await screen.findByLabelText('Reasoning for this turn');
+    const offered = Array.from(picker.querySelectorAll('option')).map((o) => o.textContent);
+    expect(offered).toEqual(['low', 'medium', 'high', 'max']);
+  });
+
+  it('leads with the inherited level, and the deepest when nothing was inherited', async () => {
+    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'low' })} />);
+    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('low');
+    unmount();
+
+    render(<JobDetail job={makeJob()} />);
+    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('max');
+  });
+
+  it('shows the effort a turn ran at, and nothing for turns that predate it', () => {
+    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'max' })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    expect(screen.getByText('Reasoning')).toBeInTheDocument();
+    expect(screen.getByText('max')).toBeInTheDocument();
+    unmount();
+
+    render(<JobDetail job={makeJob()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    // An absent row is the honest display of a turn nobody chose a depth for,
+    // which is every turn created before this control existed.
+    expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
+  });
+
+  it('inherits silently when untouched, and sends an actual change', async () => {
+    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
+
+    // Untouched: the field is absent, which the backend reads as "inherit".
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
+    );
+    unmount();
+
+    vi.mocked(followUpAgentJob).mockClear();
+    render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
+    fireEvent.change(await screen.findByLabelText('Reasoning for this turn'), {
+      target: { value: 'low' },
+    });
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'easy one' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'easy one',
+        reasoning_effort: 'low',
+      }),
+    );
+  });
+
+  it('sends the shown level on a thread that carried none', async () => {
+    // The control cannot render blank, so a thread with no stored level shows
+    // the deepest on offer — and what is shown is what is sent.
+    render(<JobDetail job={makeJob()} />);
+    await screen.findByLabelText('Reasoning for this turn');
+
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'go' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'go',
+        reasoning_effort: 'max',
+      }),
+    );
+  });
+
+  it('drops a level the switched-to model does not offer', async () => {
+    render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
+
+    // glm-test takes no effort, so the control disappears and the inherited
+    // level must not ride along to a model that would refuse it.
+    fireEvent.change(await screen.findByLabelText('Model for this turn'), {
+      target: { value: 'glm-test' },
+    });
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Reasoning for this turn')).not.toBeInTheDocument(),
+    );
+
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'switch' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send follow-up' }));
+
+    await waitFor(() =>
+      expect(followUpAgentJob).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'switch',
+        model: 'glm-test',
+      }),
+    );
+  });
+});
+
+describe('the trajectory tab', () => {
+  afterEach(() => cleanup());
+
+  it('switches between the reading of the stream and the stream itself', () => {
+    const job = makeJob({ events: [{ kind: 'message', text: 'the build passes' }] });
+    const stored = [
+      {
+        id: 1,
+        attempt_id: 1,
+        seq: 1,
+        event_type: 'tool_use',
+        payload: { id: 't1', name: 'Bash', detail: 'cargo build' },
+        created_at: '2026-08-19T10:00:00.000Z',
+      },
+    ] as never;
+
+    render(<JobDetail job={job} events={stored} />);
+
+    // Chat first: the reading, with no trajectory chrome.
+    expect(screen.queryByLabelText('Search events')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+
+    expect(screen.getByLabelText('Search events')).toBeInTheDocument();
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+
+    expect(screen.queryByLabelText('Search events')).toBeNull();
+  });
+
+  it('separates stored events by conversation turn', () => {
+    const stored = [
+      {
+        id: 1,
+        job_id: 'ajob_0',
+        turn_no: 1,
+        attempt_id: 1,
+        seq: 1,
+        event_type: 'tool_use',
+        payload: { id: 't1', name: 'Read', detail: 'README.md' },
+        created_at: null,
+      },
+      {
+        id: 2,
+        job_id: 'ajob_1',
+        turn_no: 2,
+        attempt_id: 2,
+        seq: 1,
+        event_type: 'tool_use',
+        payload: { id: 't2', name: 'Bash', detail: 'pytest' },
+        created_at: null,
+      },
+    ] as never;
+    render(<JobDetail job={makeJob()} events={stored} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+
+    expect(screen.getByText('Turn 1')).toBeInTheDocument();
+    expect(screen.getByText('Turn 2')).toBeInTheDocument();
+    expect(screen.getByText('Read')).toBeInTheDocument();
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+  });
+
+  it('still renders when no stored stream was handed down', () => {
+    // Fixtures and older callers pass no events; the tab must degrade to its
+    // empty state rather than throwing on an undefined list.
+    render(<JobDetail job={makeJob()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+
+    expect(screen.getByText(/stored no events/)).toBeInTheDocument();
+  });
+});
+
+describe('sending a follow-up', () => {
+  afterEach(() => cleanup());
+
+  it('clears the composer instead of leaving it disabled with the sent text', async () => {
+    // A remount used to do this. Keying on the conversation rather than the
+    // turn removed the remount, and with it the only thing that ever reset
+    // either — the composer stayed disabled with the prompt still in it.
+    vi.mocked(followUpAgentJob).mockResolvedValue({ id: 'ajob_next' } as never);
+    render(<JobDetail job={makeJob()} />);
+    const box = screen.getByPlaceholderText('Add a follow-up');
+
+    fireEvent.change(box, { target: { value: 'and now the docs' } });
+    fireEvent.submit(box.closest('form') as HTMLFormElement);
+
+    await waitFor(() => expect(followUpAgentJob).toHaveBeenCalled());
+    await waitFor(() => expect((box as HTMLTextAreaElement).value).toBe(''));
+    expect(box).not.toBeDisabled();
   });
 });

@@ -37,6 +37,11 @@ permissions:
 jobs:
   deploy:
     name: Deploy control plane + web
+    # Both halves start together. The host publishes an exact target-SHA
+    # capability only after every runner, broker, tunnel and retained Docker
+    # root passes its local checks. deploy.sh waits for a fresh heartbeat and
+    # reverse broker probe before replacing the API, so the readiness fence —
+    # not serial Actions scheduling — establishes the safe rollout order.
     # `CI` is one workflow with a `CI Gate` job precisely so this condition can
     # be a single conclusion. It was four workflows until #31; gating on one of
     # four would have meant treating "that workflow was filtered out" and "that
@@ -46,6 +51,15 @@ jobs:
       (github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.conclusion == 'success') }}
     runs-on: [self-hosted, Linux, deploy-cloud-agent-control-staging]
+    # Records the deployment, so staging appears in the repository's
+    # Deployments panel beside production instead of being visible only to
+    # someone who knows to open the Actions tab — and knows that a
+    # `workflow_run` job is filed under the default branch, so filtering the
+    # run list by `dev` shows nothing and reads as "it never deployed".
+    #
+    # Both jobs write to this one environment, matching production. The
+    # workflow as a whole succeeds only when both parallel halves succeed.
+    environment: staging
     timeout-minutes: 30
 
     steps:
@@ -60,12 +74,21 @@ jobs:
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "deploying ${sha}"
 
-      # Checked out at the target commit so the script that runs is the one
-      # being shipped: a change to deploy.sh takes effect in the deploy that
-      # carries it, rather than one deploy later.
-      - uses: actions/checkout@v6
+      # The orchestrator must not roll itself back before it has applied the
+      # compatibility fence. The target tree is separate: images/config still
+      # come from exactly the requested commit.
+      - name: Check out deployment orchestrator
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .deploy-orchestrator
+          fetch-depth: 1
+
+      - name: Check out target
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.target.outputs.sha }}
+          path: .deploy-target
           fetch-depth: 0
 
       - name: Deploy
@@ -74,7 +97,12 @@ jobs:
           # machine's path. Named here so production and staging are configured
           # the same way rather than one by variable and one by default.
           DEPLOY_ROOT: ${{ vars.STAGING_CONTROL_DEPLOY_ROOT }}
-        run: bash deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
+          # Use the same project identity as the status/operations step. If the
+          # deployment has a non-default project, omitting this would build and
+          # replace `cloudagent` while reporting a different stack as healthy.
+          COMPOSE_PROJECT: ${{ vars.STAGING_CONTROL_COMPOSE_PROJECT }}
+          SOURCE_REPO: ${{ github.workspace }}/.deploy-target
+        run: bash .deploy-orchestrator/deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
         if: always()
@@ -91,17 +119,20 @@ jobs:
 
   deploy-host:
     name: Deploy runner host
-    # The other machine. Independent of the job above and deliberately not
-    # `needs:`-ed to it: they are separate hosts, and a control plane that fails
-    # to come up is not a reason to leave the runner host on an older commit —
-    # nor the reverse. Both gate on the same CI conclusion.
+    # This job may run alongside the control build/migration work. Its exact-SHA
+    # ready marker is what lets deploy.sh prove this generation before it
+    # replaces the old API.
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.conclusion == 'success') }}
     runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-staging]
+    environment: staging
     timeout-minutes: 45
     concurrency:
+      # Serialize staging host rollouts with staging only. Production owns a
+      # different Compose project/image/network/state root and may deploy in
+      # parallel; the host preflight only checks Kata and never mutates it.
       group: cloud-agent-host-deploy
       cancel-in-progress: false
 
@@ -117,9 +148,18 @@ jobs:
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "deploying ${sha}"
 
-      - uses: actions/checkout@v6
+      - name: Check out deployment orchestrator
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .deploy-orchestrator
+          fetch-depth: 1
+
+      - name: Check out target
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.target.outputs.sha }}
+          path: .deploy-target
           fetch-depth: 0
 
       - name: Deploy
@@ -134,7 +174,18 @@ jobs:
           # rather than guessing when it is empty.
           COMPOSE_PROJECT: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
           SIBLING_COMPOSE_PROJECTS: ${{ vars.PROD_SANDBOX_COMPOSE_PROJECT }}
-        run: bash deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
+          # One capacity value drives both the number of synchronous runner
+          # executors and the scheduler slots they advertise. Letting these
+          # drift can claim three simultaneous turns with only one process
+          # available to execute them, silently serialising fork siblings.
+          AGENT_HOST_SLOTS: ${{ vars.STAGING_HOST_SLOTS || '3' }}
+          AGENT_RUNNER_REPLICAS: ${{ vars.STAGING_HOST_SLOTS || '3' }}
+          AGENT_CHAT_IDLE_TIMEOUT_S: "1800"
+          # Docker, not a chat bind mount, owns retained writable layers. Set
+          # the repository variable if this daemon uses a non-default data-root.
+          AGENT_RETAINED_DOCKER_DATA_ROOT: ${{ vars.STAGING_RETAINED_DOCKER_DATA_ROOT || '/var/lib/docker' }}
+          SOURCE_REPO: ${{ github.workspace }}/.deploy-target
+        run: bash .deploy-orchestrator/deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
         if: always()

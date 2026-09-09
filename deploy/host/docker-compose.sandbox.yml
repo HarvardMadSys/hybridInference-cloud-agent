@@ -5,12 +5,12 @@
 # it at a machine with no gateway does not fail — it *starts one*, along with
 # whatever else the base file brings, on a box that was only ever meant to run
 # jobs. This file contains exactly what a remote runner host needs: the
-# runners, their workspace broker, one tunnel to the real gateway, and the two
-# networks.
+# runners, their workspace broker, three purpose-scoped tunnels, and the
+# closed/setup egress networks plus the proxy's isolated uplink.
 #
-#   sandbox ─┐
-#            ├─→ gateway-tunnel ──ssh──→ gateway host, 127.0.0.1:8080
-#   runner  ─┘
+#   sandbox ──→ gateway-tunnel ──ssh──→ inference gateway
+#           └─→ mcp-tunnel ─────ssh──→ MCP-only relay
+#   runner  ──→ control-plane-tunnel ─ssh──→ control-plane API
 #
 # Both sides address the tunnel by the same name, because they have to: the
 # runner claims over AGENT_GATEWAY_URL and the sandbox is handed that same
@@ -46,17 +46,21 @@ services:
     networks:
       # The alias is declared on BOTH networks, and it has to be. The runner is
       # only on `internal` and is handed AGENT_GATEWAY_URL pointing at
-      # this name; the sandbox is only on the egress network and is handed the same
-      # value. An alias on one network resolves for one of them and NXDOMAINs
+      # this name; chat lifecycle discovers this alias on the egress backplane
+      # and copies the relay endpoint onto each private sandbox network. An
+      # alias missing from either discovery network resolves for one side and NXDOMAINs
       # for the other — which is what this file did until it was caught in
       # review, while the comment above already claimed both.
       internal:
         aliases:
           - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
-      # On the closed network too — that is the whole trick. The sandbox can
-      # reach this container and nothing else, exactly as it reaches a local
-      # gateway and nothing else.
+      # On the closed discovery backplane too. Together with the MCP-only
+      # tunnel below, this is one of the two endpoints lifecycle code attaches
+      # to every chat-private Agent-phase bridge.
       agent-egress:
+        aliases:
+          - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
+      agent-egress-trusted:
         aliases:
           - ${AGENT_GATEWAY_HOSTNAME:-agent-gateway}
 
@@ -101,6 +105,9 @@ services:
       agent-egress:
         aliases:
           - ${AGENT_MCP_HOSTNAME:-agent-mcp}
+      agent-egress-trusted:
+        aliases:
+          - ${AGENT_MCP_HOSTNAME:-agent-mcp}
 
   # The third destination, and the one no sandbox may reach. The runner claims
   # jobs, registers this host and heartbeats against the control plane's main
@@ -124,11 +131,10 @@ services:
       # MCP tunnel must never reach.
       TUNNEL_REMOTE_PORT: ${AGENT_CONTROL_PLANE_TUNNEL_REMOTE_PORT:-8000}
       TUNNEL_LISTEN_PORT: ${AGENT_CONTROL_PLANE_TUNNEL_LISTEN_PORT:-8000}
-      # The way back, on this same connection. Unset on a co-located
-      # deployment, where the control plane is already on the broker's network
-      # and needs nothing; required when it is on another machine, because the
-      # route is one-way — this host can open a connection to it, and it cannot
-      # open one to this host.
+      # The way back, on this same connection. Required by this standalone
+      # topology even when both stacks happen to run on one physical machine:
+      # their Compose networks remain separate, so the control plane cannot
+      # resolve or dial `workspace-broker` directly.
       #
       # Without it every call that touches the broker (terminal suspend, file
       # listing, git status) reaches the control plane, which then tries to
@@ -154,38 +160,104 @@ services:
         aliases:
           - ${AGENT_CONTROL_PLANE_HOSTNAME:-agent-control-plane}
 
+  # Render the Trusted-tier allowlist with the same validation the runner uses.
+  # This one-shot service has no network and no credentials; the only artifact
+  # it can produce is the Squid config in the Docker-owned volume below.
+  agent-egress-proxy-config:
+    build:
+      context: ../..
+      dockerfile: deploy/host/Dockerfile.agent-runner
+    restart: "no"
+    network_mode: none
+    environment:
+      AGENT_EGRESS_ALLOWLIST: ${AGENT_EGRESS_ALLOWLIST:-}
+      AGENT_EGRESS_PROXY_PORT: ${AGENT_EGRESS_PROXY_PORT:-3128}
+    command:
+      - python
+      - -m
+      - cloud_agent_host.egress_proxy
+      - --out
+      - /etc/squid/generated/squid.conf
+    volumes:
+      - agent-egress-proxy-config:/etc/squid/generated
+
+  # The setup network itself has no route. This is its only door, and Squid
+  # permits CONNECT only to the validated package-registry allowlist. It is
+  # deliberately absent from `internal`, the agent network, and the Docker
+  # socket; a proxy compromise must not reach the trusted runner stack.
+  agent-egress-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/host/Dockerfile.agent-egress-proxy
+    restart: unless-stopped
+    environment:
+      # Squid reads only the generated file, but Compose needs the inputs on
+      # this long-running service too. Otherwise it reruns the renderer while
+      # leaving the old Squid process alive with its already-loaded ACL.
+      AGENT_EGRESS_CONFIG_FINGERPRINT: "${AGENT_EGRESS_ALLOWLIST:-}|${AGENT_EGRESS_PROXY_PORT:-3128}"
+    depends_on:
+      agent-egress-proxy-config:
+        condition: service_completed_successfully
+    volumes:
+      - agent-egress-proxy-config:/etc/squid/generated:ro
+    networks:
+      - agent-egress-trusted
+      - agent-egress-uplink
+
   workspace-broker:
     build:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-runner
     restart: unless-stopped
+    # sandbox_host.sh drains runner replicas before replacing this service, so
+    # no admitted agent stream should remain. Keep a bounded window for
+    # terminal/SSE cleanup and lifespan finalizers instead of Docker's short
+    # default, which can SIGKILL the supervisor mid-cleanup.
+    stop_grace_period: ${AGENT_BROKER_STOP_GRACE:-30s}
     environment:
-      # Its own secret, never the dispatcher token. These two authorize
-      # different things — the broker serves workspace files and terminals,
-      # the dispatcher token claims jobs — and setting them to one value means
-      # anything that reaches the broker's credential can also claim work as
-      # this host. Required rather than defaulted for the same reason: a
-      # fallback to the dispatcher token is the bug written as a default.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker, distinct from AGENT_DISPATCHER_TOKEN}
-      AGENT_WORKDIR_ROOT: ${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}
+      # A broker-only secret. Host enrollment/claim uses its persisted host
+      # credential; neither credential is accepted at the other's surface.
+      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
+      AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
+      # Daemon-side path, observed through `docker info`; it is deliberately
+      # not mounted into this container. Production points Docker itself at a
+      # durable block volume and sets this to that exact data-root.
+      AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
+      # Product inactivity timeout: after the latest settled turn (and after
+      # all terminals close), docker stop retains the chat writable layer.
+      # This is distinct from the per-turn AGENT_TIMEOUT_S watchdog.
+      AGENT_CHAT_IDLE_TIMEOUT_S: ${AGENT_CHAT_IDLE_TIMEOUT_S:-1800}
+      # Fork can wake and native-resume a source without a runner turn.  The
+      # broker therefore needs the same sandbox-reachable relay addresses the
+      # runner hands to ordinary resident processes.
+      AGENT_GATEWAY_URL: http://${AGENT_GATEWAY_HOSTNAME:-agent-gateway}:${AGENT_TUNNEL_LISTEN_PORT:-8080}
+      AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
       AGENT_EGRESS_NETWORK_PLATFORM_ONLY: ${AGENT_EGRESS_NETWORK_PLATFORM_ONLY:-agent-egress}
-      AGENT_EGRESS_SETUP_TIER: ${AGENT_EGRESS_SETUP_TIER:-platform_only}
+      AGENT_EGRESS_SETUP_TIER: ${AGENT_EGRESS_SETUP_TIER:-trusted}
       AGENT_EGRESS_AGENT_TIER: ${AGENT_EGRESS_AGENT_TIER:-platform_only}
-      AGENT_EGRESS_NETWORK_TRUSTED: ${AGENT_EGRESS_NETWORK_TRUSTED:-}
+      AGENT_EGRESS_NETWORK_TRUSTED: ${AGENT_EGRESS_NETWORK_TRUSTED:-agent-egress-trusted}
       AGENT_EGRESS_NETWORK_CUSTOM: ${AGENT_EGRESS_NETWORK_CUSTOM:-}
       AGENT_EGRESS_NETWORK_FULL: ${AGENT_EGRESS_NETWORK_FULL:-}
+      AGENT_EGRESS_PROXY_URL_TRUSTED: http://agent-egress-proxy:${AGENT_EGRESS_PROXY_PORT:-3128}
       AGENT_EGRESS_ALLOWLIST: ${AGENT_EGRESS_ALLOWLIST:-}
+      AGENT_EGRESS_CHAT_NETWORK_POOL: ${AGENT_EGRESS_CHAT_NETWORK_POOL:-10.240.0.0/16}
+      # Immutable owner label for daemon-wide retained-container discovery.
+      # Sibling staging/production Compose projects must never adopt each
+      # other's chat processes during broker startup reconciliation.
+      AGENT_SANDBOX_NAMESPACE: ${COMPOSE_PROJECT:?the unique host Compose project}
     command:
       - python
       - -m
       - cloud_agent_host.workspace_broker
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}:${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}
     networks:
       - internal
+    depends_on:
+      agent-egress-proxy:
+        condition: service_started
 
   runner:
     # How long docker waits after SIGTERM before SIGKILL, and therefore how
@@ -222,28 +294,28 @@ services:
       # separate name and port from the gateway's, so "may call models" and
       # "may call tools" stay two permissions rather than one.
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
-      AGENT_DISPATCHER_TOKEN: ${AGENT_DISPATCHER_TOKEN:?dispatcher credential is required}
-
-      # --- Pool membership (optional; unset is the single-host shape) ---
+      # --- Enrolled host identity (required) ---
       # A one-time token, spent at first start for a lasting per-host
-      # credential. Once that credential exists the runner claims with it
-      # instead of the dispatcher token above, and the control plane reads the
-      # host from the credential rather than from the request body — which is
-      # what makes drain, pin and revoke per-host decisions rather than
-      # suggestions.
-      #
-      # Leave it unset and nothing enrolls: the runner behaves exactly as a
-      # single-host deployment always has. That shape predates the pool and
-      # stays supported.
+      # credential. Once that credential exists the runner claims with it and
+      # the control plane reads the host from the credential rather than from
+      # the request body. The token may then be removed from configuration.
       AGENT_ENROLL_TOKEN: ${AGENT_ENROLL_TOKEN:-}
       # Where that credential is kept. **On the persisted volume below**, not
       # in the container's own filesystem: a credential that dies with the
       # container spends a fresh enrollment token on every restart, and
       # enrollment tokens are single-use.
       AGENT_HOST_CREDENTIAL_FILE: ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/credential
-      # How many jobs this machine will hold at once. Unset means unmetered,
-      # which is what every host that predates the pool is.
-      AGENT_HOST_SLOTS: ${AGENT_HOST_SLOTS:-}
+      # The host script writes this exact commit only after every runner,
+      # broker, tunnel and Docker storage check succeeds. The control-plane
+      # deploy waits for the matching heartbeat before replacing its service.
+      AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:-}
+      AGENT_SHARED_LIVE_READY_FILE: /run/cloud-agent/shared-live-ready
+      # Shared native forks need at least two synchronous executors.
+      AGENT_HOST_SLOTS: ${AGENT_HOST_SLOTS:-3}
+      # One process executes one claimed turn at a time. Pass the configured
+      # scale into every replica so its exact claim attestation can refuse a
+      # shared-live capacity that has fewer executors than scheduler slots.
+      AGENT_RUNNER_REPLICAS: ${AGENT_RUNNER_REPLICAS:-3}
       # How this runner reaches its own broker: a service name on this stack's
       # network, which is exactly right here and meaningless anywhere else.
       AGENT_WORKSPACE_BROKER_URL: http://workspace-broker:8092
@@ -253,14 +325,21 @@ services:
       # machine — the far end of the reverse forward configured on
       # `control-plane-tunnel` above.
       #
-      # Unset on a co-located deployment: there the line above is already an
-      # address the control plane can use, and reporting anything else would
-      # break what works. Set it and the tunnel together or neither; a reported
-      # address with no tunnel behind it is a 503 on every broker call.
+      # Required by the supported standalone topology. Even on the same
+      # physical machine, the control-plane stack does not share this Compose
+      # network and cannot resolve `workspace-broker`; the reverse forward is
+      # its authenticated route back. A reported address with no tunnel behind
+      # it is a 503 on every broker call.
       AGENT_WORKSPACE_BROKER_ADVERTISE_URL: ${AGENT_WORKSPACE_BROKER_ADVERTISE_URL:-}
-      # Must match the broker service above, and must differ from the
-      # dispatcher token beside it. Two credentials for two permissions.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker, distinct from AGENT_DISPATCHER_TOKEN}
+      # Must match the broker service above. It is independent from the
+      # enrollment-issued host credential used for heartbeat and claim.
+      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
+
+      # Every registered runtime has an exact pinned native-resume adapter;
+      # the host advertises capability only after conformance.
+      AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
+      AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
+      AGENT_CHAT_IDLE_TIMEOUT_S: ${AGENT_CHAT_IDLE_TIMEOUT_S:-1800}
 
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
@@ -268,19 +347,16 @@ services:
       AGENT_GIT_AUTHOR_NAME: ${AGENT_GIT_AUTHOR_NAME:-}
       AGENT_GIT_AUTHOR_EMAIL: ${AGENT_GIT_AUTHOR_EMAIL:-}
 
-      AGENT_WORKDIR_ROOT: ${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}
-      AGENT_WORKSPACE_TTL_S: ${AGENT_WORKSPACE_TTL_S:-604800}
-
       AGENT_EGRESS_NETWORK_PLATFORM_ONLY: ${AGENT_EGRESS_NETWORK_PLATFORM_ONLY:-agent-egress}
-      AGENT_EGRESS_SETUP_TIER: ${AGENT_EGRESS_SETUP_TIER:-platform_only}
+      AGENT_EGRESS_SETUP_TIER: ${AGENT_EGRESS_SETUP_TIER:-trusted}
       AGENT_EGRESS_AGENT_TIER: ${AGENT_EGRESS_AGENT_TIER:-platform_only}
-      AGENT_EGRESS_NETWORK_TRUSTED: ${AGENT_EGRESS_NETWORK_TRUSTED:-}
+      AGENT_EGRESS_NETWORK_TRUSTED: ${AGENT_EGRESS_NETWORK_TRUSTED:-agent-egress-trusted}
       AGENT_EGRESS_NETWORK_CUSTOM: ${AGENT_EGRESS_NETWORK_CUSTOM:-}
       AGENT_EGRESS_NETWORK_FULL: ${AGENT_EGRESS_NETWORK_FULL:-}
+      AGENT_EGRESS_PROXY_URL_TRUSTED: http://agent-egress-proxy:${AGENT_EGRESS_PROXY_PORT:-3128}
       AGENT_EGRESS_ALLOWLIST: ${AGENT_EGRESS_ALLOWLIST:-}
-
-      AGENT_SNAPSHOT_ROOT: ${AGENT_SNAPSHOT_ROOT:-/var/lib/hybridinference/agent-snapshots}
-      AGENT_SNAPSHOT_TTL_S: ${AGENT_SNAPSHOT_TTL_S:-604800}
+      AGENT_EGRESS_CHAT_NETWORK_POOL: ${AGENT_EGRESS_CHAT_NETWORK_POOL:-10.240.0.0/16}
+      AGENT_SANDBOX_NAMESPACE: ${COMPOSE_PROJECT:?the unique host Compose project}
 
       AGENT_LEASE_TTL: ${AGENT_LEASE_TTL:-120}
       AGENT_TIMEOUT_S: ${AGENT_TIMEOUT_S:-3600}
@@ -292,26 +368,33 @@ services:
       - python
       - -m
       - cloud_agent_host.runner
-      - --loop
-      - --workdir-root
-      - ${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}:${AGENT_WORKDIR_ROOT:-/var/lib/hybridinference/agent-jobs}
-      - ${AGENT_SNAPSHOT_ROOT:-/var/lib/hybridinference/agent-snapshots}:${AGENT_SNAPSHOT_ROOT:-/var/lib/hybridinference/agent-snapshots}
       # The host credential, and the lock the replicas enroll under. On the
       # machine, not in a container: an enrollment token is single-use, so a
       # credential that dies with the container needs a new token on every
       # restart. Shared by all three replicas, which is also what makes the
       # lock work — it is taken on this directory.
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}:${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}
+      # The deploy user owns the readiness file; runners only read it. Keep it
+      # separate from the container-owned enrollment directory. Refuse a missing
+      # file instead of letting Docker create a root-owned directory in its place.
+      - type: bind
+        source: ../../.shared-live-ready
+        target: /run/cloud-agent/shared-live-ready
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - internal
     depends_on:
-      # Not a correctness barrier — the runner's own preflight is, and it fails
-      # loudly if the tunnel is not up. This only spares an operator the first
-      # crash-loop while the forward is still being established.
-      - gateway-tunnel
+      # Neither is the correctness barrier — the runner's live network probes
+      # are. These only spare an operator the first crash-loop while a narrow
+      # destination is still starting.
+      gateway-tunnel:
+        condition: service_started
+      agent-egress-proxy:
+        condition: service_started
 
 networks:
   internal:
@@ -320,6 +403,22 @@ networks:
     driver: bridge
   agent-egress:
     name: ${AGENT_EGRESS_NETWORK_PLATFORM_ONLY:-agent-egress}
-    # No route to the outside world, exactly as on the gateway's own host. What
-    # a sandbox can reach on it is the tunnel, and the tunnel goes one place.
+    # Route-less discovery backplane for the two fixed relays. Sandboxes are
+    # attached to derived per-chat internal bridges, not left here: Docker's
+    # `internal` flag blocks off-host routing but not peer containers.
     internal: true
+  agent-egress-trusted:
+    name: ${AGENT_EGRESS_NETWORK_TRUSTED:-agent-egress-trusted}
+    # Route-less discovery backplane for the proxy and fixed relays. Setup
+    # bridges copy only the proxy endpoint; an explicitly Trusted agent phase
+    # copies the proxy plus both relays so model/MCP traffic remains usable.
+    internal: true
+  agent-egress-uplink:
+    name: ${AGENT_EGRESS_NETWORK_UPLINK:-agent-egress-uplink}
+    # Intentionally routable, and structurally restricted to the proxy service.
+    driver: bridge
+
+volumes:
+  # Infrastructure config only. Chat workspace, provider state and Agent CLI
+  # sessions remain exclusively in each chat container's writable layer.
+  agent-egress-proxy-config:

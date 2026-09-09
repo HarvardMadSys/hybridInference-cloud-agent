@@ -12,7 +12,7 @@
 // destructures it.
 
 import { createContext, useContext } from 'react';
-import { config, gatewayAuthorizeUrl } from '@/config/env';
+import { config, gatewayUrl } from '@/config/env';
 
 export interface RuntimeSiteConfig {
   branding: {
@@ -30,9 +30,9 @@ export interface RuntimeSiteConfig {
 }
 
 function gatewayOrigin(): string {
-  if (!gatewayAuthorizeUrl) return '';
+  if (!gatewayUrl) return '';
   try {
-    return new URL(gatewayAuthorizeUrl).origin;
+    return new URL(gatewayUrl).origin;
   } catch {
     return '';
   }

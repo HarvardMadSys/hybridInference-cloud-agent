@@ -121,6 +121,10 @@ class _FakeGateway:
     async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
         return list(_TEST_MODELS), {}
 
+    async def user_status(self, user_id: str) -> dict[str, Any]:
+        """What `require_agent_owner` re-reads before it allows a write."""
+        return {"exists": True, "active": True, "role": "internal"}
+
 
 class _FakeAppCredentials:
     """Just enough GitHub App to pin a ref, for the base_ref case."""

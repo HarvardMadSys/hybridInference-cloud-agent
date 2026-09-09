@@ -8,8 +8,10 @@
 //
 //   * `agentApiBase` is *this* service's control plane. It is the only origin
 //     the session cookie is sent to.
-//   * `gatewayAuthorizeUrl` is the FreeInference gateway's consent page. It
-//     owns login; we never see a password, and never hold the gateway's keys.
+//   * `gatewayUrl` is the HybridInference gateway's origin, for the links this
+//     app does not host itself. It owns login; we never see a password, never
+//     hold its keys, and — since the sign-in round trip moved into the control
+//     plane — never build an authorize URL here either.
 
 /**
  * Control plane base URL (`NEXT_PUBLIC_AGENT_API_URL`).
@@ -46,41 +48,20 @@ export function normalizeBasePath(raw: string | undefined): string {
 }
 
 /**
- * The gateway's consent page (`NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`).
+ * The gateway's origin (`NEXT_PUBLIC_GATEWAY_URL`).
  *
- * Unset means this deployment cannot sign anyone in. That is surfaced as a
- * visible error rather than a redirect to a half-built URL — a login loop is
- * much harder to diagnose than a missing-configuration message.
+ * For the links this app does not host itself — nothing about sign-in. It
+ * replaced `NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only
+ * while it assembled the authorize URL and redeemed the code itself. Both are
+ * the control plane's job now (`GATEWAY_AUTHORIZE_URL`, server-side), and a
+ * variable named for a consent page that no longer starts one here would be a
+ * standing invitation to build a second login flow next to the real one.
  */
-export const gatewayAuthorizeUrl = (process.env.NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL || '').trim();
-
-/**
- * The gateway's token endpoint, derived from the authorize URL's origin.
- *
- * Derived rather than configured because the two are the same deployment by
- * construction (ENVIRONMENT.md defines the authorize URL as
- * `${GATEWAY_BASE_URL}/authorize`), and a second variable is a second thing to
- * get out of step. Returns an empty string when authorization is unconfigured.
- */
-export function gatewayTokenUrl(): string {
-  if (!gatewayAuthorizeUrl) return '';
-  try {
-    return new URL('/v1/identity/token', gatewayAuthorizeUrl).toString();
-  } catch {
-    return '';
-  }
-}
-
-/**
- * The client id this app presents to the gateway. Fixed: the gateway's
- * `/authorize` page allowlists it by name, so it is a contract value rather
- * than a deployment choice.
- */
-export const OAUTH_CLIENT_ID = 'cloud-agent';
+export const gatewayUrl = (process.env.NEXT_PUBLIC_GATEWAY_URL || '').trim();
 
 export const config = {
   apiBase: agentApiBase,
-  appName: process.env.NEXT_PUBLIC_APP_NAME || 'FreeInference Cloud Agent',
+  appName: process.env.NEXT_PUBLIC_APP_NAME || 'Cloud Agent',
   environment: process.env.NODE_ENV || 'development',
   buildSha: process.env.NEXT_PUBLIC_BUILD_SHA || '',
   buildTimestamp: process.env.NEXT_PUBLIC_BUILD_TIMESTAMP || '',

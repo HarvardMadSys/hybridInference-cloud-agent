@@ -36,6 +36,17 @@ def store() -> SimpleNamespace:
     return SimpleNamespace(
         list_terminal_resumes_pending=AsyncMock(return_value=["ajob_test"]),
         mark_terminal_resume_complete=AsyncMock(return_value=True),
+        get_job=AsyncMock(
+            return_value={
+                "id": "ajob_test",
+                "thread_id": "athr_test",
+                "thread_sandbox": {
+                    "shared_live": True,
+                    "thread_id": "athr_test",
+                    "origin_thread_id": "athr_test",
+                },
+            }
+        ),
     )
 
 
@@ -44,9 +55,10 @@ async def test_a_settled_terminal_resume_retries_until_the_broker_confirms(
 ) -> None:
     """A refused resume leaves the marker set; the next pass clears it."""
     broker = SimpleNamespace(
+        register_shared_sandbox=AsyncMock(return_value={"ok": True}),
         resume_settled_terminals=AsyncMock(
             side_effect=[WorkspaceBrokerError(503, "broker unavailable"), {"ok": True}]
-        )
+        ),
     )
     monkeypatch.setattr(
         "cloud_agent.broker_routing.broker_for_job",
@@ -59,18 +71,16 @@ async def test_a_settled_terminal_resume_retries_until_the_broker_confirms(
     await control_plane._reconcile_settled_terminals(store)
     store.mark_terminal_resume_complete.assert_awaited_once_with(job_id="ajob_test")
     assert broker.resume_settled_terminals.await_count == 2
-    broker.resume_settled_terminals.assert_awaited_with("ajob_test")
+    broker.resume_settled_terminals.assert_awaited_with(
+        "athr_test",
+        job_id="ajob_test",
+    )
 
 
-async def test_a_deployment_with_no_broker_clears_the_marker(
+async def test_a_missing_owner_broker_keeps_the_marker_for_retry(
     monkeypatch, store: SimpleNamespace
 ) -> None:
-    """Otherwise "nothing to resume" is retried on every pass, forever.
-
-    The distinction matters more after the split than before it: a job whose
-    host has been removed from the pool resolves to no broker at all, and that
-    is a normal end state rather than an outage to wait out.
-    """
+    """A routing/configuration fault must not be reported as recovered."""
     monkeypatch.setattr(
         "cloud_agent.broker_routing.broker_for_job",
         AsyncMock(return_value=None),
@@ -78,4 +88,62 @@ async def test_a_deployment_with_no_broker_clears_the_marker(
 
     await control_plane._reconcile_settled_terminals(store)
 
+    store.mark_terminal_resume_complete.assert_not_awaited()
+
+
+async def test_a_cancelled_pre_claim_job_has_no_workspace_to_resume(
+    monkeypatch, store: SimpleNamespace
+) -> None:
+    """A queued cancellation can retire its marker without contacting Docker."""
+    store.get_job.return_value = {
+        "id": "ajob_test",
+        "thread_id": "athr_test",
+        "thread_sandbox": None,
+    }
+    broker = AsyncMock()
+    monkeypatch.setattr("cloud_agent.broker_routing.broker_for_job", broker)
+
+    await control_plane._reconcile_settled_terminals(store)
+
+    broker.assert_not_awaited()
     store.mark_terminal_resume_complete.assert_awaited_once_with(job_id="ajob_test")
+
+
+async def test_one_broken_host_does_not_skip_other_terminal_markers(
+    monkeypatch, store: SimpleNamespace
+) -> None:
+    """Recovery is isolated per job because a pool can lose only one broker."""
+    store.list_terminal_resumes_pending.return_value = ["ajob_broken", "ajob_ready"]
+    store.get_job.side_effect = [
+        {
+            "id": "ajob_broken",
+            "thread_id": "athr_broken",
+            "thread_sandbox": {"shared_live": True},
+        },
+        {
+            "id": "ajob_ready",
+            "thread_id": "athr_ready",
+            "thread_sandbox": {"shared_live": True},
+        },
+    ]
+    broken = SimpleNamespace(
+        register_shared_sandbox=AsyncMock(
+            side_effect=WorkspaceBrokerError(503, "broker unavailable")
+        )
+    )
+    ready = SimpleNamespace(
+        register_shared_sandbox=AsyncMock(return_value={"ok": True}),
+        resume_settled_terminals=AsyncMock(return_value={"ok": True}),
+    )
+    monkeypatch.setattr(
+        "cloud_agent.broker_routing.broker_for_job",
+        AsyncMock(side_effect=[broken, ready]),
+    )
+
+    await control_plane._reconcile_settled_terminals(store)
+
+    store.mark_terminal_resume_complete.assert_awaited_once_with(job_id="ajob_ready")
+    ready.resume_settled_terminals.assert_awaited_once_with(
+        "athr_ready",
+        job_id="ajob_ready",
+    )

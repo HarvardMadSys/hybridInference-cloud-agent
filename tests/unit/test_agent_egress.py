@@ -147,16 +147,19 @@ def test_both_spellings_of_the_proxy_variables_are_set():
     assert env["https_proxy"] == env["HTTPS_PROXY"]
 
 
-def test_the_gateway_is_reached_directly_rather_than_through_the_proxy():
-    """Our own service is on the sandbox's network already.
+def test_platform_relays_are_reached_directly_rather_than_through_the_proxy():
+    """Our two fixed services are on the sandbox's network already.
 
-    Routing it through the proxy would need an allowlist entry for ourselves,
-    and would put every model call through a hop that exists to police the
-    internet.
+    Routing either through the proxy would need an allowlist entry for
+    ourselves and would put model/tool calls through a hop that exists to
+    police the internet.
     """
-    env = _trusted_setup(AGENT_GATEWAY_URL="http://backend:8080").sandbox_env("setup")
+    env = _trusted_setup(
+        AGENT_GATEWAY_URL="http://agent-gateway:8080",
+        AGENT_SANDBOX_MCP_URL="http://agent-mcp:8000",
+    ).sandbox_env("setup")
 
-    assert env["NO_PROXY"].split(",")[0] == "backend"
+    assert env["NO_PROXY"].split(",")[:2] == ["agent-gateway", "agent-mcp"]
     assert env["no_proxy"] == env["NO_PROXY"]
     assert "localhost" in env["NO_PROXY"]
 
@@ -180,22 +183,46 @@ def test_a_trusted_tier_with_no_proxy_is_refused_at_the_point_of_use():
         policy.sandbox_env("setup")
 
 
-def test_a_job_cannot_unset_the_proxy_its_phase_runs_under():
+def test_a_job_cannot_unset_the_proxy_its_phase_runs_under(monkeypatch):
     """Policy is applied after the job's own environment, never before."""
+    from types import SimpleNamespace
+
+    from cloud_agent_host.chat_sandbox import (
+        ChatSandboxManager,
+        ChatSandboxSpec,
+        RetainedChatBackend,
+    )
     from cloud_agent_host.sandbox import ContainerBackend, SandboxSpec
 
     backend = ContainerBackend(image="img:1", egress=_trusted_setup())
-    command = backend.build_command(
+    manager = ChatSandboxManager(backend)
+    captured = {}
+    monkeypatch.setattr(manager, "require_network_phase", lambda *_args: None)
+
+    def spawn(_spec, _argv, *, env, **_kwargs):
+        captured.update(env)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(manager, "spawn", spawn)
+    retained = RetainedChatBackend(
+        manager,
+        ChatSandboxSpec(
+            thread_id="athr_test",
+            sandbox_id="asbx_test",
+            generation=1,
+            runtime_id="codex",
+        ),
+    )
+    retained.spawn(
         SandboxSpec(
             argv=["sh"],
-            workdir="/w",
+            workdir="/workspace",
             phase="setup",
             env={"https_proxy": "http://attacker.example:8080"},
         )
     )
 
-    assert "https_proxy=http://agent-egress-proxy:3128" in command
-    assert "https_proxy=http://attacker.example:8080" not in command
+    assert captured["https_proxy"] == "http://agent-egress-proxy:3128"
 
 
 @pytest.mark.parametrize(

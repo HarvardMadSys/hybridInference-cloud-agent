@@ -111,6 +111,23 @@ describe('jsonOrThrow', () => {
     });
   });
 
+  it('unwraps a structured error nested under FastAPI detail', async () => {
+    const resp = jsonResponse(409, {
+      detail: {
+        error: {
+          type: 'native_fork_failed',
+          message: 'historical fork could not be reconciled',
+        },
+      },
+    });
+
+    await expect(jsonOrThrow(resp)).rejects.toMatchObject({
+      code: 'native_fork_failed',
+      message: 'historical fork could not be reconciled',
+      statusCode: 409,
+    });
+  });
+
   it('throws an APIError, so callers can narrow on it', async () => {
     await expect(
       jsonOrThrow(jsonResponse(500, { error: { message: 'boom' } })),

@@ -11,7 +11,7 @@ const components: Components = {
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="text-crimson underline underline-offset-2 hover:opacity-80"
+      className="text-crimson dark:text-crimson-light underline underline-offset-2 hover:opacity-80"
     >
       {children}
     </a>
@@ -24,12 +24,12 @@ const components: Components = {
   h3: ({ children }) => <h4 className="mb-1 mt-1 text-sm font-semibold">{children}</h4>,
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
   blockquote: ({ children }) => (
-    <blockquote className="mb-2 border-l-2 border-gray-300 pl-3 italic text-gray-600">
+    <blockquote className="mb-2 border-l-2 border-gray-300 dark:border-white/15 pl-3 italic text-gray-600 dark:text-gray-400">
       {children}
     </blockquote>
   ),
   pre: ({ children }) => (
-    <pre className="mb-2 overflow-x-auto rounded-lg bg-gray-900 p-3 text-xs text-gray-100">
+    <pre className="mb-2 overflow-x-auto rounded-lg bg-gray-900 dark:bg-black p-3 text-xs text-gray-100">
       {children}
     </pre>
   ),
@@ -37,7 +37,9 @@ const components: Components = {
     /language-/.test(className || '') ? (
       <code className={className}>{children}</code>
     ) : (
-      <code className="rounded bg-gray-100 px-1 py-0.5 text-[0.85em] text-crimson">{children}</code>
+      <code className="rounded bg-gray-100 dark:bg-white/5 px-1 py-0.5 text-[0.85em] text-crimson dark:text-crimson-light">
+        {children}
+      </code>
     ),
   table: ({ children }) => (
     <div className="mb-2 overflow-x-auto">
@@ -45,9 +47,13 @@ const components: Components = {
     </div>
   ),
   th: ({ children }) => (
-    <th className="border border-gray-200 px-2 py-1 text-left font-semibold">{children}</th>
+    <th className="border border-gray-200 dark:border-white/10 px-2 py-1 text-left font-semibold">
+      {children}
+    </th>
   ),
-  td: ({ children }) => <td className="border border-gray-200 px-2 py-1">{children}</td>,
+  td: ({ children }) => (
+    <td className="border border-gray-200 dark:border-white/10 px-2 py-1">{children}</td>
+  ),
 };
 
 /** Render a Markdown string (GitHub-flavored) as styled HTML. */

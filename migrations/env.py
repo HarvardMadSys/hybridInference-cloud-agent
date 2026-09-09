@@ -38,7 +38,11 @@ def _database_url() -> str:
 
 def run_migrations_offline() -> None:
     """Emit SQL without a connection, for review or manual application."""
-    context.configure(url=_database_url(), literal_binds=True)
+    context.configure(
+        url=_database_url(),
+        literal_binds=True,
+        transaction_per_migration=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -49,7 +53,10 @@ def run_migrations_online() -> None:
     section["sqlalchemy.url"] = _database_url()
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
     with connectable.connect() as connection:
-        context.configure(connection=connection)
+        # A schema-only revision must commit before a following data backfill.
+        # Otherwise PostgreSQL retains its ACCESS EXCLUSIVE ALTER lock across
+        # every later revision in the same upgrade command.
+        context.configure(connection=connection, transaction_per_migration=True)
         with context.begin_transaction():
             context.run_migrations()
 

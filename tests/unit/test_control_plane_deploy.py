@@ -24,7 +24,10 @@ rule, so the list of forbidden names has exactly one definition.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,6 +36,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "deploy" / "control-plane" / "docker-compose.yml"
 DOCKERFILE_PATH = REPO_ROOT / "deploy" / "control-plane" / "Dockerfile"
+DEPLOY_SCRIPT_PATH = REPO_ROOT / "deploy" / "control-plane" / "deploy.sh"
 
 #: Signing and encryption keys. Each must be `:?` — required — rather than
 #: `:-` — defaulted.
@@ -116,8 +120,8 @@ def test_the_image_ships_the_host_package() -> None:
     host-only, which was wrong; an image without it builds, starts, serves, and
     fails at the first publish."""
     dockerfile = DOCKERFILE_PATH.read_text()
-    assert re.search(r"^COPY host/ host/", dockerfile, re.MULTILINE), (
-        "the control-plane image drops host/, so publishing will fail at runtime"
+    assert re.search(r"^COPY cloud_agent_host/ cloud_agent_host/", dockerfile, re.MULTILINE), (
+        "the control-plane image drops cloud_agent_host/, so publishing will fail at runtime"
     )
 
 
@@ -143,7 +147,7 @@ def test_the_compose_only_sets_variables_the_code_reads(control_plane_env: dict)
     """
     sources = "\n".join(
         path.read_text()
-        for path in (REPO_ROOT / "backend").rglob("*.py")
+        for path in (REPO_ROOT / "cloud_agent").rglob("*.py")
         if "__pycache__" not in str(path)
     )
     unread = [name for name in control_plane_env if f'"{name}"' not in sources]
@@ -172,10 +176,321 @@ def test_a_default_the_code_relies_on_is_not_blanked_out(control_plane_env: dict
         )
 
 
-def test_the_runner_credential_is_required(control_plane_env: dict) -> None:
-    """Without it every claim is 401 and the queue never drains — with nothing
-    in this service's logs saying why, because the refusal is correct."""
-    assert ":?" in control_plane_env["AGENT_DISPATCHER_TOKEN"]
+def test_control_plane_has_no_shared_claim_credential(control_plane_env: dict) -> None:
+    """Claims authenticate with enrollment-issued host credentials."""
+    assert "AGENT_DISPATCHER_TOKEN" not in control_plane_env
+
+
+def test_shared_live_readiness_is_proved_before_any_running_service_is_replaced() -> None:
+    """The target host generation must be usable before the API rolls.
+
+    The readiness command is an unconditional compatibility fence for the
+    only supported topology. It is not a switch between legacy and retained
+    execution.
+    """
+    script = DEPLOY_SCRIPT_PATH.read_text()
+    build = script.index("compose build")
+    database = script.index('compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres')
+    migration = script.index("compose run --rm --no-deps migrate")
+    running_probe = script.index("compose ps --status running -q control-plane")
+    readiness = script.index("python -m cloud_agent.deploy_readiness")
+    bring_up = script.index("compose up -d --remove-orphans")
+
+    assert build < database < migration < running_probe < readiness < bring_up
+    assert "compose run --rm --no-deps control-plane" in script
+    assert "BOOTSTRAP_SERVICES+=(control-plane)" in script
+    assert "BOOTSTRAP_SERVICES+=(mcp-relay)" in script
+    assert 'compose up -d --no-deps "${BOOTSTRAP_SERVICES[@]}"' in script
+    assert '--timeout-seconds "${SHARED_READY_TIMEOUT}"' in script
+    assert '--expected-deployment-sha "${SHA}"' in script
+    assert "AGENT_SHARED_LIVE_SANDBOX" not in script
+
+
+def _run_control_deploy(
+    tmp_path: Path,
+    *,
+    readiness_exit: int,
+    control_running: bool = True,
+    mcp_running: bool = True,
+    shared_live: str = "1",
+    deployment_environment: str = "production",
+    dotenv: str = "",
+    failed_health_match: str = "",
+    deploy_protocol: bool | str = True,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run the real deploy script against a minimal local git source."""
+    source = tmp_path / "source"
+    script_target = source / "deploy/control-plane/deploy.sh"
+    script_target.parent.mkdir(parents=True)
+    shutil.copy2(DEPLOY_SCRIPT_PATH, script_target)
+    if isinstance(deploy_protocol, str):
+        (source / "deploy/DEPLOY_PROTOCOL").write_text(deploy_protocol + "\n")
+    elif deploy_protocol:
+        shutil.copy2(REPO_ROOT / "deploy/DEPLOY_PROTOCOL", source / "deploy/DEPLOY_PROTOCOL")
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Deploy Test",
+        "GIT_AUTHOR_EMAIL": "deploy@example.invalid",
+        "GIT_COMMITTER_NAME": "Deploy Test",
+        "GIT_COMMITTER_EMAIL": "deploy@example.invalid",
+    }
+    subprocess.run(["git", "init", "-q", "-b", "dev"], cwd=source, env=git_env, check=True)
+    subprocess.run(["git", "add", "."], cwd=source, env=git_env, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "deployment fixture"],
+        cwd=source,
+        env=git_env,
+        check=True,
+    )
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+
+    deploy_root = tmp_path / "deployed"
+    subprocess.run(["git", "clone", "-q", str(source), str(deploy_root)], check=True)
+    (deploy_root / ".env").write_text(dotenv)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case "$*" in\n'
+        "  *' ps --status running -q control-plane')\n"
+        '    [ "${CONTROL_RUNNING}" = "1" ] && printf "%s\\n" existing-control ; exit 0 ;;\n'
+        "  *' ps --status running -q mcp-relay')\n"
+        '    [ "${MCP_RUNNING}" = "1" ] && printf "%s\\n" existing-mcp ; exit 0 ;;\n'
+        "  *' run --rm --no-deps control-plane python -m cloud_agent.deploy_readiness '*)\n"
+        '    exit "${READINESS_EXIT}" ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    docker.chmod(0o755)
+    curl = fake_bin / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        'if [ -n "${FAILED_HEALTH_MATCH:-}" ]; then\n'
+        '  for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        '      *"${FAILED_HEALTH_MATCH}"*) exit 1 ;;\n'
+        "    esac\n"
+        "  done\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    curl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(DEPLOY_SCRIPT_PATH), sha],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SOURCE_REPO": str(source),
+            "DEPLOY_ROOT": str(deploy_root),
+            "DEPLOYMENT_ENVIRONMENT": deployment_environment,
+            "AGENT_SHARED_LIVE_SANDBOX": shared_live,
+            "SHARED_READY_TIMEOUT": "1",
+            "HEALTH_TIMEOUT": "1",
+            "DOCKER_LOG": str(docker_log),
+            "READINESS_EXIT": str(readiness_exit),
+            "CONTROL_RUNNING": "1" if control_running else "0",
+            "MCP_RUNNING": "1" if mcp_running else "0",
+            "FAILED_HEALTH_MATCH": failed_health_match,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, docker_log.read_text() if docker_log.exists() else ""
+
+
+def test_a_failed_readiness_probe_never_replaces_the_running_stack(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(tmp_path, readiness_exit=17)
+
+    assert result.returncode == 17
+    assert " build" in docker_calls
+    assert " up -d --wait --wait-timeout 1 postgres" in docker_calls
+    assert " run --rm --no-deps migrate" in docker_calls
+    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert " up -d --remove-orphans" not in docker_calls
+
+
+def test_online_rollback_to_a_pre_fence_commit_is_refused_before_docker(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        deploy_protocol=False,
+    )
+
+    assert result.returncode != 0
+    assert "pre-fence or protocol-incompatible" in result.stderr
+    assert docker_calls == ""
+
+
+def test_online_rollback_to_an_old_protocol_is_refused_before_docker(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        deploy_protocol="shared-live-exact-sha-v1",
+    )
+
+    assert result.returncode != 0
+    assert "does not implement shared-live-exact-sha-v2" in result.stderr
+    assert docker_calls == ""
+
+
+def test_a_successful_readiness_probe_allows_the_shared_only_service(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(tmp_path, readiness_exit=0)
+
+    assert result.returncode == 0, result.stderr
+    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert re.search(r"--expected-deployment-sha [0-9a-f]{40}(?:\s|$)", docker_calls)
+    assert " up -d --remove-orphans" in docker_calls
+
+
+def test_a_cold_start_bootstraps_both_services_needed_for_host_readiness(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=False,
+        mcp_running=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    bootstrap = docker_calls.index(" up -d --no-deps control-plane mcp-relay")
+    readiness = docker_calls.index("cloud_agent.deploy_readiness")
+    full_up = docker_calls.index(" up -d --remove-orphans")
+    assert bootstrap < readiness < full_up
+    assert "parallel host readiness" in result.stdout
+    assert "bootstrap MCP relay" in result.stdout
+
+
+def test_a_failed_cold_start_gate_stops_the_bootstrap_api(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=17,
+        control_running=False,
+        mcp_running=False,
+    )
+
+    assert result.returncode == 17
+    assert " up -d --no-deps control-plane mcp-relay" in docker_calls
+    assert " stop control-plane mcp-relay" in docker_calls
+    assert " up -d --remove-orphans" not in docker_calls
+
+
+def test_post_gate_health_failure_does_not_stop_bootstrap_services(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=False,
+        mcp_running=False,
+        failed_health_match="127.0.0.1:3002",
+    )
+
+    assert result.returncode != 0
+    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert " up -d --remove-orphans" in docker_calls
+    assert " stop control-plane" not in docker_calls
+    assert " stop mcp-relay" not in docker_calls
+    assert not (tmp_path / "deployed" / ".deployed-sha").exists()
+
+
+def test_replaced_mcp_relay_must_pass_its_post_gate_health_check(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=True,
+        mcp_running=True,
+        failed_health_match="127.0.0.1:8001",
+    )
+
+    assert result.returncode != 0
+    assert " up -d --remove-orphans" in docker_calls
+    assert "MCP relay health check timed out" in result.stderr
+    assert not (tmp_path / "deployed" / ".deployed-sha").exists()
+
+
+def test_a_missing_mcp_relay_is_bootstrapped_without_replacing_the_live_api(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=True,
+        mcp_running=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert " up -d --no-deps mcp-relay" in docker_calls
+    assert " up -d --no-deps control-plane" not in docker_calls
+    assert docker_calls.index(" up -d --no-deps mcp-relay") < docker_calls.index(
+        "cloud_agent.deploy_readiness"
+    )
+
+
+def test_a_failed_partial_bootstrap_only_restores_the_service_that_was_stopped(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=17,
+        control_running=True,
+        mcp_running=False,
+    )
+
+    assert result.returncode == 17
+    assert " stop mcp-relay" in docker_calls
+    assert " stop control-plane" not in docker_calls
+
+
+def test_a_missing_api_is_bootstrapped_without_restarting_a_live_mcp_relay(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        control_running=False,
+        mcp_running=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert " up -d --no-deps control-plane" in docker_calls
+    assert " up -d --no-deps control-plane mcp-relay" not in docker_calls
+    assert "bootstrap MCP relay" not in result.stdout
+
+
+def test_removed_default_off_switch_is_inert(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        shared_live="0",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert " up -d --remove-orphans" in docker_calls
+
+
+def test_manual_staging_deploy_reads_its_persistent_environment(tmp_path: Path) -> None:
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        shared_live="",
+        deployment_environment="",
+        dotenv="DEPLOYMENT_ENVIRONMENT=staging\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "shared-live scheduling gate" not in result.stdout
+    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert " up -d --remove-orphans" in docker_calls
 
 
 def test_every_configured_file_path_is_actually_mounted(compose: dict) -> None:

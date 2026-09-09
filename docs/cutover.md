@@ -17,7 +17,7 @@ deliberate choice, and two facts make it the honest one:
   step.
 - **Terminal sessions are process memory.** `WorkspaceBroker` keeps live
   sessions in a dict on the broker process
-  (`host/cloud_agent_host/workspace_broker.py:430`). They are not in any
+  (`cloud_agent_host/workspace_broker.py:430`). They are not in any
   database, so there is nothing to migrate and no honest way to preserve them.
   They are closed deliberately, and the announcement says so.
 
@@ -36,7 +36,10 @@ for.
 > host as the undo net — hybridInference#1235 has the record). The run did not
 > follow this file step by step — the log at the bottom records what actually
 > happened, including the steps that were skipped and why. The runbook stays
-> as the template for any future stack-to-stack move.
+> as the template for any future stack-to-stack move. The migration tooling it
+> drove (`deploy/migrate/`, step 5) was **deleted on 2026-08-31** — never run,
+> and its source tables no longer exist. A future move that wants the template
+> recovers it from history: `git show 36767ea:deploy/migrate/migrate_connections.py`.
 
 ---
 
@@ -56,7 +59,7 @@ Do not start until every one of these is true.
       involved.
 - [ ] The gateway's key material is available as a **file** on whatever machine
       runs step 5, and the machine has been decided (see
-      [deploy/migrate/README.md](../deploy/migrate/README.md) § Where it runs).
+      `deploy/migrate/README.md` § Where it runs).
 - [ ] Backups of both databases are taken, and a restore has been rehearsed at
       least once. `pg_dump` of the gateway database and of the new one.
 - [ ] Step 5 has been rehearsed end to end on a copy, with `--apply` and a
@@ -92,7 +95,7 @@ blocker that vanishes without a record reads as one that was never real.
 | ~~The runner sends control-plane calls and the sandbox's inference calls to one base URL~~ | ~~`runner.py` `TODO(E9)`~~ | ✅ **resolved** — the sandbox now carries two addresses and two credentials (`AGENT_GATEWAY_URL` + `agr`, `AGENT_SANDBOX_MCP_URL` + an `mcp`-scoped token), and a runtime asked for MCP with no relay address refuses rather than resolving it against the inference host. |
 | ~~Inference grants (C5–C8) are not on the gateway~~ | ~~unmerged #1180~~ | ✅ **resolved** — #1180 through #1183, #1191 and #1195 are all on the gateway's `dev`. |
 | ~~`/internal/model-catalog`, `/internal/users/{id}/status`, `/internal/mcp-registry` do not exist upstream~~ | ~~`gateway.py`~~ | ✅ **resolved for two of the three, and the third was removed by design.** The catalog and user-status routes exist and carry an alias table; `/internal/mcp-registry` is gone — MCP belongs to this service now, so there is nothing to ask the gateway about. |
-| ~~Host enrollment exists on the control plane but **the runner does not use it**~~ | ~~`grep -rn AGENT_ENROLL_TOKEN host/` returns nothing~~ | ✅ **resolved** — `host/cloud_agent_host/enrollment.py` redeems the token and `runner.py` calls `ensure_enrolled` at startup. Staging's runner host carries a stored credential and heartbeats as `online`, so step 6 is enrolment, not environment variables. |
+| ~~Host enrollment exists on the control plane but **the runner does not use it**~~ | ~~`grep -rn AGENT_ENROLL_TOKEN host/` returns nothing~~ | ✅ **resolved** — `cloud_agent_host/enrollment.py` redeems the token and `runner.py` calls `ensure_enrolled` at startup. Staging's runner host carries a stored credential and heartbeats as `online`, so step 6 is enrolment, not environment variables. |
 | **The pool's broker token must be the *same value* on the control plane and on every host** — and nothing checks that it is. Discovered 2026-08-06: with the reverse tunnel up and the address advertised correctly, every broker call still failed, because the two machines had been configured with two different 64-character secrets. | Each host's `.env` and the control plane's | `broker_routing.py` states the design — one shared `AGENT_WORKSPACE_BROKER_TOKEN` for the whole pool — but a mismatch is not refused anywhere, it is a **401 on every file listing, terminal and git status** for jobs on that host. It reads like the tunnel is broken, and it is not; nothing distinguishes the two from the control plane's logs. Compare fingerprints (`sha256` of the value, never the value) on both machines before step 6, and re-check after any host is re-provisioned. |
 
 ---
@@ -106,7 +109,7 @@ blocker that vanishes without a record reads as one that was never real.
 - [ ] Say that open terminal sessions will be closed and any unfinished job
       will not be resumed on the other side.
 - [ ] Ask that no long job be started inside the six hours before the window —
-      the default agent timeout is 3600 s (`host/cloud_agent_host/runner.py:59`), and step 3 waits for
+      the default agent timeout is 3600 s (`cloud_agent_host/runner.py:59`), and step 3 waits for
       whatever is running.
 
 ## 2. Freeze new-job creation on the old stack — T+0
@@ -122,7 +125,7 @@ So the freeze is applied at the edge, in front of the gateway, on three routes:
 ```text
 POST /v1/agent/jobs                      # create
 POST /v1/agent/jobs/{job_id}/follow-ups  # next turn in a thread
-POST /v1/agent/jobs/{job_id}/fork        # branch a thread
+POST /v1/agent/jobs/{job_id}/fork        # immediate same-container native-session fork
 ```
 
 **And the source-control routes, which is easy to miss** — the freeze is about
@@ -170,7 +173,7 @@ curl -s https://<gateway>/openapi.json \
 ## 3. Drain the old runner
 
 The runner has **no drain mode**. `run_forever` claims in a loop and exits only
-on `KeyboardInterrupt` (`host/cloud_agent_host/runner.py:1230`), and stopping it mid-job does not
+on `KeyboardInterrupt` (`cloud_agent_host/runner.py:1230`), and stopping it mid-job does not
 finish the job: the lease expires after `AGENT_LEASE_TTL` (default 120 s), the
 reaper supersedes the attempt within 30 s of that, and the job is requeued into
 a queue nothing will ever serve again. Draining means *waiting*.
@@ -208,7 +211,7 @@ a queue nothing will ever serve again. Draining means *waiting*.
 
 ## 5. Migrate the connections
 
-This is [deploy/migrate/migrate_connections.py](../deploy/migrate/migrate_connections.py).
+This is `deploy/migrate/migrate_connections.py`.
 It moves `agent_repo_grants` and `agent_gitlab_connections` and nothing else,
 **decrypting with the gateway's key and re-encrypting with this service's**.
 A copy would produce connections that list correctly and fail at first use.
@@ -252,29 +255,25 @@ A copy would produce connections that list correctly and fail at first use.
 
 ## 6. Point the runner host at the new control plane
 
-The control plane can enrol hosts (`POST /v1/agent/host/register`, then
-`/heartbeat`), but the runner in `host/cloud_agent_host/` does not call either
-endpoint yet — it claims with `AGENT_DISPATCHER_TOKEN` and reports its name in
-the claim body. So re-pointing is an environment edit, and enrollment is
-something to fold in when the host half lands.
+The control plane enrols hosts (`POST /v1/agent/host/register`, then
+`/heartbeat`). A one-time `AGENT_ENROLL_TOKEN` is exchanged for a persisted
+credential bound to the host name; claims and heartbeats authenticate with
+that credential. Request-body host names are not identity.
 
 - [ ] Set on the runner host:
-      - `AGENT_GATEWAY_URL` → the new control plane's origin (this is also what
-        the sandbox is handed today — see the blocker table; if the E9 split has
-        landed, set `AGENT_CONTROL_PLANE_URL` for claims and leave
-        `AGENT_GATEWAY_URL` pointing at the inference gateway).
-      - `AGENT_DISPATCHER_TOKEN` → the new stack's value. It must **not** be the
-        old one: a token that opens both stacks is a token that survived a
-        migration whose whole point was that credentials do not.
-      - `AGENT_RUNNER_HOST` → the machine's name, unchanged.
-      - `AGENT_WORKSPACE_BROKER_URL` → unchanged; the broker is on the same host.
-      - `AGENT_WORKDIR_ROOT` → **unchanged**, so retained worktrees survive.
+      - `AGENT_CONTROL_PLANE_URL` → the new control plane's claim/register/
+        heartbeat endpoint.
+      - `AGENT_GATEWAY_URL` → the inference gateway reached by sandboxes.
+      - `AGENT_ENROLL_TOKEN` → a new single-use token bound to this host; remove
+        it after the persisted credential is written.
+      - `AGENT_RUNNER_HOST` → the enrolled machine name.
+      - `AGENT_WORKSPACE_BROKER_URL` and
+        `AGENT_WORKSPACE_BROKER_TOKEN` → the advertised broker and the same
+        environment secret configured on the control plane.
 - [ ] Start the runner and the broker. Confirm the startup line names the new
       host and the sandbox backend, and that preflight passed.
-- [ ] Confirm on the new control plane that the host appears
-      (`GET /admin/agent/runner-hosts` — while the runner claims with the
-      dispatcher token, a machine joins the pool by polling rather than by
-      being registered).
+- [ ] Confirm on the new control plane that the enrolled host appears online
+      with a fresh heartbeat and usable broker (`GET /admin/agent/runner-hosts`).
 - [ ] Leave the pool **unpinned**. The new database's `agent_runner_policy`
       singleton has `active_host = NULL`, which means claiming is unrestricted;
       pinning to a host that has not polled yet is refused, and pinning at all
@@ -342,9 +341,8 @@ GitLab connection re-made there. Those rows stay in the new database and are
 not copied back.
 
 1. [ ] Stop the runner on the runner host.
-2. [ ] Restore the runner's environment to the old values
-       (`AGENT_GATEWAY_URL`, `AGENT_DISPATCHER_TOKEN`). Both must change back
-       together — the old stack will not accept the new token.
+2. [ ] Restore the runner's old control-plane/gateway endpoints and its old
+       enrolled-host credential as one unit.
 3. [ ] Point the agent domain back at the old frontend, or remove the redirect.
 4. [ ] Remove the edge rules from steps 2 and 3, in that order: unblock
        `/worker/claim` **before** unblocking creation, or the first job created

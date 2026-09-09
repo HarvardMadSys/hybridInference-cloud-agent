@@ -3,8 +3,10 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useAuth } from '@/components/providers';
+import { useT } from '@/components/providers';
+import { SettingsLauncher } from '@/components/features/settings/SettingsLauncher';
 import { archiveAgentJob, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
+import type { Translator } from '@/lib/i18n/translate';
 import { groupJobsByProject, projectLabel } from './conversations';
 import type { ConversationRow, ProjectSection } from './conversations';
 import { PaneResizer } from './PaneResizer';
@@ -30,14 +32,9 @@ const DOT_CLASS: Record<AgentJobState, string> = {
   needs_review: 'bg-amber-400',
   done: 'bg-emerald-500',
   failed: 'bg-red-400',
-  cancelled: 'bg-gray-300',
-  queued: 'border border-gray-300 bg-transparent',
+  cancelled: 'bg-gray-300 dark:bg-gray-600',
+  queued: 'border border-gray-300 bg-transparent dark:border-gray-600',
 };
-
-function initialsOf(name: string | null | undefined, email: string | null | undefined): string {
-  const source = name || email || '?';
-  return source.slice(0, 2).toUpperCase();
-}
 
 /** Which folders the user has explicitly opened or closed, by repo. */
 function readExpandedOverrides(): Record<string, boolean> {
@@ -63,8 +60,7 @@ function readExpandedOverrides(): Record<string, boolean> {
 export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const pathname = usePathname() ?? '';
   const router = useRouter();
-  const { state } = useAuth();
-  const displayName = state.user?.user_name || state.user?.email || '';
+  const t = useT();
   const [hiddenThreads, setHiddenThreads] = useState<Set<string>>(new Set());
   const [archiving, setArchiving] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
@@ -185,7 +181,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       reloadProjects();
       if (jobIds.some((id) => pathname === `/${id}`)) router.replace('/');
     } catch (cause: unknown) {
-      setArchiveError(cause instanceof Error ? cause.message : 'Could not archive the task.');
+      setArchiveError(cause instanceof Error ? cause.message : t('sidebar.archiveFailed'));
     } finally {
       setArchiving(null);
     }
@@ -204,8 +200,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         cause instanceof Error
           ? cause.message
           : pinned
-            ? 'Could not pin the task.'
-            : 'Could not unpin the task.',
+            ? t('sidebar.pinFailed')
+            : t('sidebar.unpinFailed'),
       );
     } finally {
       setPinning(null);
@@ -221,19 +217,19 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       <aside
         id="agents-sidebar"
         style={{ width: pane.width }}
-        className="flex shrink-0 flex-col border-r border-gray-200/70 bg-gray-50/80"
+        className="flex shrink-0 flex-col border-r border-gray-200/70 bg-gray-50/80 dark:border-white/10 dark:bg-gray-900/60"
       >
         <div className="flex-1 overflow-y-auto px-3.5 py-4">
           <Link
             href="/"
             className={`flex w-full items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-[13px] font-medium transition-colors ${
               pathname === '/'
-                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark'
-                : 'text-gray-700 hover:bg-white/80 hover:text-gray-900'
+                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark dark:border-crimson/25 dark:bg-crimson/15 dark:text-crimson-light'
+                : 'text-gray-700 hover:bg-white/80 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/5 dark:hover:text-gray-100'
             }`}
           >
             <svg
-              className={`h-4 w-4 ${pathname === '/' ? 'text-crimson' : 'text-gray-500'}`}
+              className={`h-4 w-4 ${pathname === '/' ? 'text-crimson dark:text-crimson-light' : 'text-gray-500 dark:text-gray-400'}`}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -245,29 +241,33 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                 d="M16.86 4.49a1.5 1.5 0 0 1 2.12 0l.53.53a1.5 1.5 0 0 1 0 2.12L8.53 18.12 4 19.5l1.38-4.53L16.86 4.49Z"
               />
             </svg>
-            New task
+            {t('sidebar.newTask')}
           </Link>
 
           {busy && folders.length === 0 ? (
-            <p className="mt-2 px-2 text-[13px] text-gray-400">Loading…</p>
+            <p className="mt-2 px-2 text-[13px] text-gray-400 dark:text-gray-500">
+              {t('common.loading')}
+            </p>
           ) : null}
           {error ? (
-            <p className="mt-2 px-2 text-[13px] text-red-600" role="alert">
+            <p className="mt-2 px-2 text-[13px] text-red-600 dark:text-red-400" role="alert">
               {error}
             </p>
           ) : null}
           {archiveError ? (
-            <p className="mt-2 px-2 text-[13px] text-red-600" role="alert">
+            <p className="mt-2 px-2 text-[13px] text-red-600 dark:text-red-400" role="alert">
               {archiveError}
             </p>
           ) : null}
           {pinError ? (
-            <p className="mt-2 px-2 text-[13px] text-red-600" role="alert">
+            <p className="mt-2 px-2 text-[13px] text-red-600 dark:text-red-400" role="alert">
               {pinError}
             </p>
           ) : null}
           {!busy && !error && !archiveError && !pinError && folders.length === 0 ? (
-            <p className="mt-2 px-2 text-[13px] text-gray-400">No jobs yet.</p>
+            <p className="mt-2 px-2 text-[13px] text-gray-400 dark:text-gray-500">
+              {t('sidebar.noJobs')}
+            </p>
           ) : null}
 
           {folders.map((folder) => (
@@ -291,6 +291,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
               pinning={pinning}
               onArchive={archiveConversation}
               onSetPinned={setConversationPinned}
+              t={t}
             />
           ))}
 
@@ -298,8 +299,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
             href="/archived"
             className={`mt-4 flex items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-[13px] font-medium transition-colors ${
               pathname === '/archived'
-                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark'
-                : 'text-gray-600 hover:bg-white/80 hover:text-gray-900'
+                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark dark:border-crimson/25 dark:bg-crimson/15 dark:text-crimson-light'
+                : 'text-gray-600 hover:bg-white/80 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
             }`}
           >
             <svg
@@ -316,15 +317,15 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                 strokeLinejoin="round"
               />
             </svg>
-            Archived
+            {t('sidebar.archived')}
           </Link>
 
           <Link
             href="/integrations"
             className={`mt-0.5 flex items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-[13px] font-medium transition-colors ${
               pathname === '/integrations'
-                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark'
-                : 'text-gray-600 hover:bg-white/80 hover:text-gray-900'
+                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark dark:border-crimson/25 dark:bg-crimson/15 dark:text-crimson-light'
+                : 'text-gray-600 hover:bg-white/80 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
             }`}
           >
             <svg
@@ -340,18 +341,13 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                 d="M8 5v3m8-3v3M6.5 8h11v2.5a5.5 5.5 0 0 1-11 0V8ZM12 16v3"
               />
             </svg>
-            Integrations
+            {t('sidebar.integrations')}
           </Link>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-gray-200/80 bg-white/50 px-4 py-3">
-          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-crimson/[0.08] text-[11px] font-semibold text-crimson ring-1 ring-inset ring-crimson/10">
-            {initialsOf(state.user?.user_name, state.user?.email)}
-          </span>
-          <span className="truncate text-[13px] font-medium text-gray-800">{displayName}</span>
-        </div>
+        <SettingsLauncher />
       </aside>
-      <PaneResizer pane={pane} label="Resize task list" controls="agents-sidebar" />
+      <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />
     </>
   );
 }
@@ -370,6 +366,7 @@ function ProjectFolder({
   pinning,
   onArchive,
   onSetPinned,
+  t,
 }: {
   section: ProjectSection;
   expanded: boolean;
@@ -384,6 +381,7 @@ function ProjectFolder({
   pinning: string | null;
   onArchive: (key: string, jobId: string, jobIds: string[]) => void;
   onSetPinned: (key: string, jobId: string, repo: string, pinned: boolean) => void;
+  t: Translator;
 }) {
   const listId = `agents-project-${section.repo.replace(/[^A-Za-z0-9]/g, '-')}`;
   const visible = section.conversations.slice(0, shown);
@@ -398,10 +396,10 @@ function ProjectFolder({
           aria-expanded={expanded}
           aria-controls={listId}
           title={section.repo}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium text-gray-700 transition-colors hover:bg-white/80 hover:text-gray-900"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium text-gray-700 transition-colors hover:bg-white/80 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/5 dark:hover:text-gray-100"
         >
           <svg
-            className={`h-3 w-3 shrink-0 text-gray-400 transition-transform ${
+            className={`h-3 w-3 shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${
               expanded ? 'rotate-90' : ''
             }`}
             viewBox="0 0 24 24"
@@ -413,7 +411,7 @@ function ProjectFolder({
             <path d="m9 6 6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <svg
-            className="h-4 w-4 shrink-0 text-gray-500"
+            className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -432,15 +430,15 @@ function ProjectFolder({
           {!expanded && activeCount > 0 ? (
             <span
               className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-blue-500"
-              aria-label={`${activeCount} running or queued`}
+              aria-label={t('sidebar.runningOrQueued', { count: activeCount })}
             />
           ) : null}
         </button>
         <Link
           href={`/?repo=${encodeURIComponent(section.repo)}`}
-          aria-label={`New task in ${section.label}`}
-          title={`New task in ${section.label}`}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 opacity-70 transition hover:bg-white hover:text-gray-700 hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 group-hover:opacity-100"
+          aria-label={t('sidebar.newTaskIn', { project: section.label })}
+          title={t('sidebar.newTaskIn', { project: section.label })}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 opacity-70 transition hover:bg-white hover:text-gray-700 hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 group-hover:opacity-100 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
         >
           <svg
             className="h-4 w-4"
@@ -471,8 +469,8 @@ function ProjectFolder({
                   title={`${job.repo} · ${job.title}`}
                   className={`flex w-full items-center gap-2 rounded-lg border border-transparent py-1.5 pl-4 pr-16 text-left text-[13px] transition-colors ${
                     isActive
-                      ? 'border-gray-200/80 bg-white font-medium text-gray-900 shadow-subtle'
-                      : 'text-gray-600 hover:bg-white/70 hover:text-gray-900'
+                      ? 'border-gray-200/80 bg-white font-medium text-gray-900 shadow-subtle dark:border-white/10 dark:bg-gray-800 dark:text-gray-50'
+                      : 'text-gray-600 hover:bg-white/70 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
                   }`}
                 >
                   <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_CLASS[job.state]}`} />
@@ -480,13 +478,17 @@ function ProjectFolder({
                 </Link>
                 <button
                   type="button"
-                  aria-label={`${job.pinnedAt ? 'Unpin' : 'Pin'} ${job.title}`}
+                  aria-label={
+                    job.pinnedAt
+                      ? t('sidebar.unpin', { title: job.title })
+                      : t('sidebar.pin', { title: job.title })
+                  }
                   aria-pressed={Boolean(job.pinnedAt)}
                   aria-busy={pinning === key}
-                  title={job.pinnedAt ? 'Unpin task' : 'Pin task'}
+                  title={job.pinnedAt ? t('sidebar.unpinTask') : t('sidebar.pinTask')}
                   disabled={pinning === key || archiving === key}
                   onClick={() => onSetPinned(key, job.id, job.repo, !job.pinnedAt)}
-                  className={`absolute right-7 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 ${
+                  className={`absolute right-7 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 ${
                     job.pinnedAt
                       ? 'opacity-100'
                       : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
@@ -509,11 +511,11 @@ function ProjectFolder({
                 </button>
                 <button
                   type="button"
-                  aria-label={`Archive ${job.title}`}
-                  title="Archive task"
+                  aria-label={t('sidebar.archive', { title: job.title })}
+                  title={t('sidebar.archiveTask')}
                   disabled={archiving === key || pinning === key}
                   onClick={() => onArchive(key, job.id, jobIds)}
-                  className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 opacity-0 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 group-hover:opacity-100 group-focus-within:opacity-100"
+                  className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 opacity-0 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 group-hover:opacity-100 group-focus-within:opacity-100 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
                 >
                   <svg
                     className="h-4 w-4"
@@ -535,10 +537,12 @@ function ProjectFolder({
           })}
 
           {loading && visible.length === 0 ? (
-            <p className="px-4 py-1 text-[12px] text-gray-400">Loading…</p>
+            <p className="px-4 py-1 text-[12px] text-gray-400 dark:text-gray-500">
+              {t('common.loading')}
+            </p>
           ) : null}
           {error ? (
-            <p className="px-4 py-1 text-[12px] text-red-600" role="alert">
+            <p className="px-4 py-1 text-[12px] text-red-600 dark:text-red-400" role="alert">
               {error}
             </p>
           ) : null}
@@ -546,9 +550,9 @@ function ProjectFolder({
             <button
               type="button"
               onClick={onShowMore}
-              className="w-full rounded-md px-4 py-1.5 text-left text-[12px] text-gray-400 transition-colors hover:bg-white/70 hover:text-gray-600"
+              className="w-full rounded-md px-4 py-1.5 text-left text-[12px] text-gray-400 transition-colors hover:bg-white/70 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-gray-300"
             >
-              Show {hidden} more
+              {t('sidebar.showMore', { count: hidden })}
             </button>
           ) : null}
         </div>

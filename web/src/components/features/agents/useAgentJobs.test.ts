@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
+import { toDisplayJob } from './adapt';
 
-import { applyAgentLifecycleEvent } from './useAgentJobs';
+import {
+  applyAgentLifecycleEvent,
+  hasActiveWorkspacePublication,
+  isActiveWorkspacePublicationState,
+} from './useAgentJobs';
 
 const JOB = {
   state: 'queued',
@@ -32,6 +37,23 @@ function superseded(attemptId: number): AgentJobEventApi {
 }
 
 describe('applyAgentLifecycleEvent', () => {
+  it('keeps legacy telemetry on the fetched attempt across supersede and replacement events', () => {
+    const snapshot = {
+      ...JOB,
+      task_prompt: 'test',
+      duration_ms: 3_000,
+      context_status: 'lost' as const,
+    };
+    const requeued = applyAgentLifecycleEvent(snapshot, superseded(10));
+    const replacement = applyAgentLifecycleEvent(requeued, lifecycle(11, 'started'));
+    expect(replacement.telemetry_attempt_id).toBe(10);
+    const display = toDisplayJob(replacement, {
+      events: [superseded(10), lifecycle(11, 'started')],
+    });
+    expect(display.attempts[0].telemetry?.durationMs).toBe(3_000);
+    expect(display.attempts[1].telemetry).toBeUndefined();
+  });
+
   it('moves the cached job to the replacement attempt before workspace readiness', () => {
     const started = applyAgentLifecycleEvent(JOB, lifecycle(11, 'started'));
 
@@ -55,5 +77,51 @@ describe('applyAgentLifecycleEvent', () => {
 
     const replacement = applyAgentLifecycleEvent(ready, lifecycle(11, 'workspace_ready'));
     expect(applyAgentLifecycleEvent(replacement, superseded(10))).toBe(replacement);
+  });
+});
+
+describe('hasActiveWorkspacePublication', () => {
+  it.each(['pending', 'capturing', 'captured', 'publishing'] as const)(
+    'keeps a shared terminal job fresh while its snapshot is %s',
+    (workspace_publication_state) => {
+      expect(
+        hasActiveWorkspacePublication({
+          ...JOB,
+          state: 'succeeded',
+          workspace_shared: true,
+          workspace_publication_state,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.each(['published', 'failed', null] as const)(
+    'stops refreshing once shared publication is %s',
+    (workspace_publication_state) => {
+      expect(
+        hasActiveWorkspacePublication({
+          ...JOB,
+          state: 'succeeded',
+          workspace_shared: true,
+          workspace_publication_state,
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it('does not add publication polling to the legacy job path', () => {
+    expect(
+      hasActiveWorkspacePublication({
+        ...JOB,
+        workspace_shared: false,
+        workspace_publication_state: 'pending',
+      }),
+    ).toBe(false);
+  });
+
+  it('uses the same active-state rule for detail and sidebar refreshes', () => {
+    expect(isActiveWorkspacePublicationState('capturing')).toBe(true);
+    expect(isActiveWorkspacePublicationState('published')).toBe(false);
+    expect(isActiveWorkspacePublicationState(undefined)).toBe(false);
   });
 });

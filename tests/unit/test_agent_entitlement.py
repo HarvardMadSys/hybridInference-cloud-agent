@@ -4,7 +4,7 @@ The hole this closes is a confused deputy: the requester picks the repository
 string, and the platform later mints a real GitHub installation token for it —
 a read token to clone with and a write token to push with. Neither asked whose
 repository it was, so any authenticated user could name any repo the App
-reached and read it back through their own job's events and patch artifact.
+reached and read it back through their own job's events and retained workspace.
 """
 
 from __future__ import annotations

@@ -16,12 +16,12 @@ export interface CodeToken {
 /** Tailwind text colours per token kind, tuned for the light workspace pane. */
 export const TOKEN_CLASS: Record<TokenKind, string> = {
   plain: '',
-  comment: 'text-gray-400',
-  string: 'text-indigo-600',
-  number: 'text-cyan-700',
-  keyword: 'text-purple-700',
-  tag: 'text-rose-700',
-  attr: 'text-amber-700',
+  comment: 'text-gray-400 dark:text-gray-500',
+  string: 'text-indigo-600 dark:text-indigo-300',
+  number: 'text-cyan-700 dark:text-cyan-300',
+  keyword: 'text-purple-700 dark:text-purple-300',
+  tag: 'text-rose-700 dark:text-rose-300',
+  attr: 'text-amber-700 dark:text-amber-300',
 };
 
 /** Past this size the scan is skipped so a huge preview cannot stall the tab. */

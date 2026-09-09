@@ -183,7 +183,7 @@ workspace_browser.py   workspace_paths.py     workspace_snapshot.py
 > manifest as "rewritten, not moved", but the rewrite happened *here* — this
 > repository asks the gateway over HTTP instead. On the gateway side the module
 > is the natural implementation of the `/internal/model-catalog` contract this
-> service already calls (`backend/cloud_agent/gateway.py:120`), and
+> service already calls (`cloud_agent/gateway.py:120`), and
 > MIGRATION.md's discarded-test record says so explicitly: the
 > published/role/disabled/chat-type filters "stayed behind". It imports only
 > `serving.config.settings.has_role` and `serving.model_access`, so it has no
@@ -233,7 +233,7 @@ admin router.
 
 | Path | Where it went |
 |---|---|
-| `.github/workflows/agent-job-runner.yml` | this repo, `.github/workflows/` |
+| ~~`.github/workflows/agent-job-runner.yml`~~ | ~~this repo, `.github/workflows/`~~ **Removed 2026-09-02:** the manually dispatched disposable/process runner contradicted the retained-only topology; enrolled sandbox hosts are the sole execution substrate. |
 | `deploy/docker/Dockerfile.agent-runner` | `deploy/host/` |
 | `deploy/docker/Dockerfile.agent-sandbox` | `deploy/sandbox/` |
 | `deploy/docker/Dockerfile.agent-egress-proxy` | `deploy/host/` |

@@ -26,8 +26,6 @@ RUNNER_SCRIPT = REPO_ROOT / "deploy/host/sandbox_host.sh"
 HOST_KERNEL = "6.8.0-51-generic"
 GUEST_KERNEL = "6.12.0-kata"
 
-GUEST_KERNEL = "6.12.0-kata"
-
 
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body)
@@ -62,9 +60,11 @@ def _host(
         fake_bin / "docker",
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
-        'case "$1" in\n'
+        'case " $* " in *" config --environment "*) cat >/dev/null; printf "%s\\n" "$COMPOSE_ENVIRONMENT"; exit 0 ;; esac\n'
+        'case "$*" in\n'
+        "  'info --format {{.DockerRootDir}}') echo /var/lib/docker; exit 0 ;;\n"
         "  info) exit 0 ;;\n"
-        f"  run) {run_body}"
+        f"  run*) {run_body}"
         "  *) exit 0 ;;\n"
         "esac\n",
     )
@@ -75,16 +75,22 @@ def _host(
         "#!/bin/sh\n" + ("exit 0\n" if kata_check_passes else "echo 'not installed' >&2\nexit 1\n"),
     )
 
-    return {
+    env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "APP_DIR": str(app_dir),
         "KATA_SETUP_SCRIPT": str(kata_script),
         "DOCKER_LOG": str(tmp_path / "docker.log"),
+        "AGENT_ENROLL_TOKEN": "test-enrollment-token",
+        "COMPOSE_ENVIRONMENT": dotenv + "\nAGENT_ENROLL_TOKEN=test-enrollment-token\n",
         # Otherwise the caller's own environment decides the backend and the
         # .env precedence under test never runs.
         "AGENT_SANDBOX_BACKEND": "",
     }
+    # Absence matters: Compose gives even an exported empty value precedence
+    # over dotenv, so an empty fixture would no longer exercise the file.
+    env.pop("AGENT_SANDBOX_BACKEND", None)
+    return env
 
 
 def _run(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:

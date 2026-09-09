@@ -14,6 +14,7 @@ open-decisions register.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -40,11 +41,22 @@ _COPY = re.compile(r"^COPY(?:\s+--\S+)*\s+(\S+)\s+\S+\s*$", re.MULTILINE)
 # resolve. The list is the actual tree, not a sample: an earlier version checked
 # four prefixes while claiming to verify every path, and missed real breakage in
 # `distributions/` and `docs/` references precisely because they were not on it.
-_OWN_DIRS = ("backend", "contracts", "deploy", "docs", "host", "migrations", "tests", "web")
+_OWN_DIRS = (
+    "cloud_agent",
+    "cloud_agent_host",
+    "contracts",
+    "deploy",
+    "docs",
+    "migrations",
+    "tests",
+    "web",
+)
 
-# Top-level directories that exist only in the SOURCE repository. Any occurrence
-# is stale by construction — there is nothing here for it to resolve to.
-_SOURCE_ONLY_DIRS = ("apps", "ops", "config", "distributions", "services")
+# Top-level directories that exist only in the SOURCE repository — plus
+# `backend` and `host`, the one-package src roots this tree carried until the
+# flatten moved both packages to the top level. Any occurrence is stale by
+# construction — there is nothing here for it to resolve to.
+_SOURCE_ONLY_DIRS = ("apps", "ops", "config", "distributions", "services", "backend", "host")
 
 # Trailing dots are excluded: these paths are frequently named mid-prose in
 # comments, and a sentence-ending period is not part of the filename.
@@ -106,8 +118,21 @@ def test_every_dockerfile_copy_source_exists(dockerfile: Path) -> None:
 
 def test_the_runner_image_runs_the_host_package() -> None:
     text = (HOST / "Dockerfile.agent-runner").read_text(encoding="utf-8")
-    assert "COPY host/cloud_agent_host/ cloud_agent_host/" in text
+    assert "COPY cloud_agent_host/ cloud_agent_host/" in text
     assert '"cloud_agent_host.runner"' in text
+
+
+def test_the_runner_entrypoint_does_not_import_the_control_plane_package() -> None:
+    """The slim runner image carries only the host package at runtime."""
+    source = (REPO / "cloud_agent_host/runner.py").read_text(encoding="utf-8")
+    imports = {
+        node.module
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert not {
+        module for module in imports if module == "cloud_agent" or module.startswith("cloud_agent.")
+    }
 
 
 def test_the_remote_compose_builds_from_files_that_exist() -> None:
@@ -171,9 +196,35 @@ def test_no_file_references_a_source_repo_only_directory(path: Path) -> None:
     assert not stale, f"{path.relative_to(REPO)} references the source repo layout: {stale}"
 
 
-def test_the_workflow_targets_this_repository() -> None:
-    """A repository guard left pointing at the source repo never runs here."""
-    text = (REPO / ".github/workflows/agent-job-runner.yml").read_text(encoding="utf-8")
-    assert "HarvardMadSys/freeinference-cloud-agent" in text
-    assert "HarvardMadSys/hybridInference" not in text
-    assert "PYTHONPATH=host python -m cloud_agent_host.runner" in text
+def test_the_legacy_actions_runner_workflow_is_removed() -> None:
+    """Manual dispatch must not reopen the removed one-shot/process backend."""
+    assert not (REPO / ".github/workflows/agent-job-runner.yml").exists()
+
+
+@pytest.mark.parametrize(
+    ("workflow", "expected"),
+    [
+        (".github/workflows/deploy-staging.yml", "staging"),
+        (".github/workflows/deploy-prod.yml", "production"),
+    ],
+)
+def test_every_deploy_job_records_which_environment_it_deployed(workflow: str, expected: str):
+    """Both halves of a deploy must name their environment, or it is invisible.
+
+    A job without `environment:` deploys without leaving a record, so the
+    repository's Deployments panel shows nothing for it. Staging shipped that
+    way: the only trace of a deploy was in the Actions tab, filed under the
+    default branch because `workflow_run` runs are — so filtering the run list
+    by `dev` showed nothing at all and read as "it never deployed".
+
+    Parameterized over both workflows because the failure is asymmetry: one
+    half declared and the other not is exactly the state this replaces, and it
+    is invisible until somebody goes looking for a deployment that happened.
+    """
+    spec = yaml.safe_load((REPO / workflow).read_text(encoding="utf-8"))
+    environments = {name: job.get("environment") for name, job in spec["jobs"].items()}
+
+    assert environments, f"{workflow} declares no jobs"
+    assert all(value == expected for value in environments.values()), (
+        f"{workflow} has jobs that deploy without recording it: {environments}"
+    )

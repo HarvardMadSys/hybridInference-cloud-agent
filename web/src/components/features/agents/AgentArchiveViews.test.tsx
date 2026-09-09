@@ -29,9 +29,14 @@ vi.mock('next/link', () => ({
   ),
 }));
 
-vi.mock('@/components/providers', () => ({
-  useAuth: () => ({ state: { user: { user_name: 'Test User', email: 'test@example.com' } } }),
-}));
+vi.mock('@/components/providers', async () => {
+  const { translate } = await import('@/lib/i18n/translate');
+  return {
+    useAuth: () => ({ state: { user: { user_name: 'Test User', email: 'test@example.com' } } }),
+    useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
+      translate('en', key, vars),
+  };
+});
 
 vi.mock('@/lib/api/agents', () => ({
   archiveAgentJob: mocks.archive,

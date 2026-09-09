@@ -1,11 +1,11 @@
 <!--
 Moved from the source repository at the freeze commit `764a6f97`
-(`docs/developer/agent-sandbox-operations.md`), task H5. Paths were updated for
-this repository's layout and nothing else was rewritten; every deviation from
-the source text is listed in the "What changed when this moved" section at the
-end. "The gateway" still means the FreeInference gateway; after the split, the
-job API, the store, the publisher and the admin host switch belong to *this*
-service's control plane, and the gateway keeps inference, MCP and identity.
+(`docs/developer/agent-sandbox-operations.md`), task H5. The provenance table
+at the end records the move-only baseline. Later extraction and retained-
+sandbox work amended this page to describe the service that now ships here.
+"The gateway" means the FreeInference inference/identity service; the job API,
+store, publisher, MCP relay and admin host switch belong to this service's
+control plane.
 -->
 
 # Cloud agent sandbox — operations
@@ -18,35 +18,38 @@ in the project's issue history.
 
 ```text
 POST /v1/agent/jobs           owner queues work
-  → dispatcher claims          internal-role credential, mints three tokens
-    → runner checks out        read-only clone credential, never enters the sandbox
-    → sandbox runs the agent   only a model-scoped token crosses the boundary
-      → normalized events      streamed to the owner over SSE
-      → model calls            billed through the gateway into api_logs
-    → patch artifact           the agent never pushes
-  → publisher validates        .github/ block, secret scan, path escape, size
-    → agent/<job-id> branch    pinned refspec, never dev/main
-      → draft PR               a human reviews before anything merges
+  → enrolled host claims       exact shared-live capability attestation
+    → runner creates/starts     one retained Docker group and its writable layer
+      → native Agent CLI        one live process/session per member chat
+      → normalized events       streamed to the owner over SSE
+      → model calls             billed through the gateway into api_logs
+    → quiescent group snapshot  immutable diff; the agent never pushes
+  → publisher validates         .github/ block, secret scan, path escape, size
+    → agent/<origin-chat-id>     one stable branch per workspace group
+      → draft PR                a human reviews before anything merges
 ```
 
 Two properties are load-bearing and easy to break by accident:
 
-- **No repository credential ever enters the sandbox.** The agent emits a
-  patch; the publisher — running in the gateway, outside the sandbox — is the
+- **No repository credential ever enters the sandbox.** The host captures a
+  quiescent group diff; the publisher — running in the control plane, outside the sandbox — is the
   only component holding a GitHub token that can *write*. The runner does hold
   a clone credential, but it is read-only, scoped to the one repository, and
   deliberately never recorded in `.git/config`: the checkout adds no remote,
   the credential travels in git's environment rather than its argv, and the
   runner refuses to start the agent if it finds the token anywhere under
   `.git/`.
-- **The sandbox's only credential is model-scoped.** It buys inference as the
-  job's owner: the grant names the models it may reach, it dies on a short TTL
-  unless the control plane keeps renewing it, and what it spends lands against
-  that owner's gateway daily quota. **There is no per-job spend cap** — C5/C6
-  removed it deliberately, so do not quote one as the bound on a leaked
-  credential; the bound is the grant's scope plus its TTL. It cannot write the
-  event log, overwrite the patch, or move the job to a terminal state; the
-  runner holds the token that can.
+- **The sandbox has two narrow, non-interchangeable credentials.** The
+  gateway-issued `agr` grant buys inference as the chat owner: it names the
+  allowed model, is scoped to one member residency, and is renewed only while
+  that exact host/member generation keeps heartbeating. Spend lands against
+  the owner's gateway daily quota. This service separately mints an
+  attempt-fenced `mcp` token that reaches only the MCP relay and only the
+  servers recorded on the job. **There is no per-job spend cap** — C5/C6
+  removed it deliberately,
+  so do not quote one as the bound on a leaked grant. Neither credential can
+  write the event log, upload a replacement patch, or move the job to a
+  terminal state; the trusted runner holds the token that can.
 
 ## Verified
 
@@ -54,22 +57,23 @@ Against real components on a developer machine:
 
 | | How |
 |---|---|
-| Store: fencing, reaper, one-shot publish | dbtests against Postgres |
-| Job API, SSE resume, worker endpoints | live gateway |
-| Per-job credential: auto-revoke ~~, budget 429~~ | live gateway. The struck half exercised a per-job spend cap that no longer exists: C5/C6 replaced it with the owner's gateway daily quota, which this service does not enforce and so cannot verify here |
-| Runner + runtime adapter | real Claude Code CLI, end to end |
+| Store: fencing, reaper, retained-group snapshot publish | dbtests against Postgres |
+| Job API, SSE resume, worker endpoints | control-plane API and server suites |
+| Per-job inference grant: attempt fencing ~~, budget 429~~ | live gateway. The struck half exercised a per-job spend cap that no longer exists: C5/C6 replaced it with the owner's gateway daily quota, which this service does not enforce and so cannot verify here |
+| Retained runner + runtime adapters | Docker-only local product stack with the exact Claude Code, Codex, Pi, OpenCode, and Kilo pins: every CLI passed `NEW → LIVE → docker stop → RESTORED` |
+| Native Fork concurrency | every pinned CLI created a distinct child native session immediately; source and child were simultaneously `RUNNING` against one container/workspace and both crossed the local inference barrier |
 | Publish: patch → branch → draft PR | real `git push` to a local bare repo |
 | **A real job on a real model** | live Claude Code CLI × `deepseek-v4-flash` through the production gateway: docstring landed on disk, patch produced, 3 calls / 74,523 tokens / $0.0075 attributed to the job in `api_logs` |
-| Sandbox isolation | real Docker: non-root, `CapEff: 0000000000000000`, cap-drop enforced, `--network none`, `--rm` leaves nothing |
-| Checkout → edit → patch | real git against a real repository: pinned commit materializes the right tree, an agent edit and a new file both appear in the patch, no remote is left behind |
-| Worktree handover to the sandbox user | real Docker: root creates a `0700` worktree, chowns it to 10001, and a `--user 10001` container writes to it and produces a diff. Without the chown the same container gets `Permission denied` and `fatal: not a git repository` |
-| The gateway on staging | `/v1/agent/*` live: job create/get/list/cancel, SSE stream, and a non-dispatcher key refused at `/worker/claim` with 401 |
-| MCP: registry refusals, proxy authorization, tool filtering | unit + API tests against a mocked upstream: an unset credential refuses at load, a stdio server is rejected, a job cannot reach a server it was not granted, a dead fence loses tools with inference, a blocked tool never leaves the gateway, and a filtered catalogue never advertises one |
+| Retained Docker lifecycle | real mount-free (`Mounts=[]`) chat containers keep one writable layer and container id across group idle `docker stop` and later `docker start`; the phase bridge is released while stopped and recreated on wake, and publication capture replaces neither |
+| Source import → edit → snapshot | the trusted runner imports a credential-scrubbed source archive into `/workspace`; real Git status/diff and the quiescent group publication snapshot complete without a host worktree or snapshot bind mount |
+| Sandbox process boundary | real Docker: non-root Agent CLI member UIDs, dropped capabilities, and closed agent egress; production multi-tenant Kata/gVisor remains a deployment gate below |
+| The control plane on staging | `/v1/agent/*` live: job create/get/list/cancel, SSE stream, and an unauthenticated host refused at `/worker/claim` |
+| MCP: per-user resolution, relay authorization, tool filtering | unit + API tests against a mocked upstream: one user's credential never resolves for another, a job cannot reach a server it was not granted, a dead fence loses tools, and a blocked tool never leaves the relay |
 | **MCP: what `--strict-mcp-config` (#1129) actually prevents** | the flag was added on the strength of the CLI's documented behaviour; this is the measurement. Real Claude Code 2.1.220 in a job's exact configuration (headless, `bypassPermissions`, cwd = a checkout carrying a `.mcp.json`): without the flag the CLI reports the repository's server alongside the platform's, with it only the platform's. No approval step was involved either way |
 | MCP: the adapter's `--mcp-config` is accepted by the real CLI | the argv `ClaudeCodeRuntime.prepare` emits, run against the real binary: the platform's server appears in `system/init`, and a deliberately bogus flag in the same argv fails instantly, so the flags are being parsed rather than ignored |
 | MCP: the token can stay out of argv | the same run with the header written as `Bearer ${AGENT_MCP_TOKEN}` and the variable exported: the CLI expanded it and the proxy authenticated the request, while the command line carried only the placeholder |
 | **MCP: the proxy against a real hosted server** | the shipping router and filters against live `mcp.deepwiki.com` (which answers over SSE, so the streaming filter is the one that ran): `initialize` → `serverInfo: DeepWiki`, `tools/list` → its three real tools, `tools/call read_wiki_structure` → real documentation for `psf/requests` |
-| MCP: the allowlist, on a real catalogue | same server, `tools: [read_wiki_structure]`: `tools/list` returned that one tool of the three, and `tools/call ask_question` came back `-32601` without the request leaving the gateway |
+| MCP: the allowlist, on a real catalogue | same server, `tools: [read_wiki_structure]`: `tools/list` returned that one tool of the three, and `tools/call ask_question` came back `-32601` without the request leaving the relay |
 | MCP: the authorization matrix, end to end | live token + granted server 200; live token + a server the job was not granted 403; a superseded attempt 401; an ordinary `hyi-` key 401; no credential 401 |
 | MCP: Claude Code driving the proxy | the real CLI, pointed at the proxy, completed the whole handshake through it — `initialize`, `notifications/initialized`, the `GET` stream, `tools/list` — each reaching deepwiki and returning 200 |
 | **A self-hosted runner completing a real job** | `ajob_04de5d509a25ded2` against staging: claimed → cloned `psf/requests` at `414f0513` (verified equal to that repo's HEAD) → Claude Code 2.1.220 in a Docker sandbox as uid 10001 → `Read` + `Edit` with `is_error: false` → 518-byte patch stored → `succeeded`. The patch was read back and matches the file the agent left on disk |
@@ -160,58 +164,56 @@ An agent with no egress can still use the MCP ecosystem, because it never
 reaches a server directly:
 
 ```text
-sandbox ──[job token, gateway URL]──▶ gateway ──[deployment credential]──▶ MCP server
+sandbox ──[attempt-fenced mcp token]──▶ MCP-only relay ──[owner credential]──▶ MCP server
 ```
 
-This is the publisher's shape reused. The sandbox authenticates to
-`/v1/agent/mcp/<name>` with the capability token it already holds, over the
-network it already has, so **`platform_only` stays closed** — no allowlist
-entry, no new network, nothing to configure. The gateway holds the upstream
-address and its credential, and the sandbox learns neither.
+The MCP listener is a separate FastAPI app on port 8001; it does not expose the
+job, host, session, admin, or inference APIs. The sandbox authenticates to
+`/v1/agent/mcp/<name>` over its second fixed relay, so **`platform_only` stays
+closed**: inference and MCP are the only agent-phase destinations. The upstream
+address and the owner's credential stay in the control plane.
 
-Adopting a server is a stanza of YAML, not code — **on the gateway**, which is
-where the registry and the proxy stayed after the split. Point `MCP_CONFIG_PATH`
-(or that repository's manifest `paths.mcp`) at a registry; its
-`config/examples/mcp.example.yaml` is the one to copy. No file means no MCP
-servers, which is a supported shape. This service only ever names servers by id.
+There is no deployment YAML registry. Which providers may exist is a reviewed,
+in-code catalogue in `cloud_agent/mcp_catalogue.py`; a row in
+`agent_mcp_connections` supplies one user's credential. Both are needed, and a
+job records only opaque server ids. The credential is wrapped with
+`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under an MCP-specific domain separator.
 
-```yaml
-servers:
-  - name: github
-    url: https://api.githubcopilot.com/mcp/
-    default: true
-    headers:
-      Authorization: "Bearer ${GITHUB_MCP_TOKEN}"
-    tools: [get_issue, list_issues, get_pull_request]
-```
+The current product does not yet expose an MCP connect flow: catalogue entries
+render as *Coming soon* and ordinary jobs therefore run with no MCP unless a
+valid per-user connection row was created by a migration or another trusted
+control-plane workflow. The relay and post-connection path are implemented and
+tested, but this distinction must not be reported as an end-user feature that
+is already connectable.
 
 Four things about this that look like details and are not:
 
-- **Only remote streamable-HTTP servers.** `command:` is refused rather than
-  unimplemented. A stdio server is third-party code, and the two places to run
-  it are the sandbox that has no egress (where a server wrapping an external
-  API is useless) and the gateway that is trusted. Hosting them needs its own
+- **Only reviewed remote streamable-HTTP servers.** A stdio server would be
+  third-party code in either the untrusted sandbox or the trusted control
+  plane, so no catalogue entry can configure one. Hosting them needs its own
   isolated tier.
 - **`tools:` is the control that matters, and it is enforced in both
   directions.** A tool not listed is never advertised to the model *and* is
   refused if called anyway. Omit it and every tool the server exposes is
   reachable — including any write tool it gains in a later release, with no
-  config change here to notice. The gateway logs
-  `agent_mcp_server_unfiltered` at startup for each such server. An agent runs
-  on untrusted repository content, so a README can try to talk it into calling
-  whatever the credential permits: scope the token narrowly and list the tools.
-- **An unset `${VAR}` refuses at startup**, naming the variable, instead of
-  sending a blank `Authorization` and failing deep inside somebody's job.
+  config change here to notice. Every current catalogue entry must instead
+  declare either a provider-owned read-only endpoint or a reviewed tool-name
+  allowlist. An agent runs on untrusted repository content, so a README can try
+  to talk it into calling whatever the credential permits.
+- **Credentials are per user and fail closed.** A missing encryption key,
+  unreadable ciphertext, expired connection, disconnected provider, or retired
+  catalogue entry removes that server from the user's reachable registry.
 - **A job reaches the servers it was created with**, recorded on the job row.
   Not the registry's whole list — a token names a server in the URL, and the
   check is against the job's own grant. Omitting `mcp_servers` at creation
   takes the registry's `default: true` entries; an explicit `[]` means none.
 
 Only `claude-code` can be given servers, because it is the only adapter with a
-gateway-mediated path. Every other one still fails closed the way #1129 left
-them, so a job naming servers on one of them is refused at creation rather than
-run with the tools silently missing. Codex is a matter of verifying two flags
-against the pinned `CODEX_VERSION`, not of design.
+verified relay path that also shuts out repository-supplied MCP config. Every
+other adapter still fails closed, so a job naming servers on one of them is
+refused at creation rather than run with the tools silently missing. Codex is a
+matter of verifying two flags against the pinned `CODEX_VERSION`, not of
+design.
 
 The credential is referenced, not embedded: the generated config carries
 `${AGENT_MCP_TOKEN}` and the adapter exports it, so the job token never becomes
@@ -253,24 +255,35 @@ participates in is not a boundary.
 
 Two things are outside the code and must be done by a human.
 
-### 0. A closed agent network needs the gateway on it
+### 0. A closed agent network needs both narrow relays on its backplane
 
-`platform_only` means "our gateway and nothing else", which assumes the gateway
-is *on that network* — true when it is the compose `backend` service, false the
-moment `AGENT_GATEWAY_URL` points at a remote one. The sandbox then resolves
-nothing and every job dies at its first model call, with an error that reads
-like a broken model.
+`platform_only` means the inference gateway and MCP-only listener, with no
+caller-selected destination and no internet route. A remote deployment must
+put both fixed tunnel aliases on the configured discovery backplane. The host
+then creates one internal bridge per sandbox group and attaches only those two
+relay containers plus that group's chat container. Docker's `internal: true`
+blocks routing off a bridge but does **not** block containers on the same bridge
+from reaching each other, and by itself still leaves the bridge gateway
+reachable as a host address. Each chat bridge therefore also sets
+`com.docker.network.bridge.inhibit_ipv4=true`, so Docker assigns no host-side
+IPv4 address to it. The sandbox also sets `--dns 127.0.0.1`: Docker's embedded
+DNS still resolves the relay aliases, while unknown queries are forwarded from
+the sandbox namespace to its own loopback and fail instead of becoming a DNS
+egress path (including on daemons affected by CVE-2024-29018). Using the compose
+backplane directly for every chat, or an internal bridge without these guards,
+would violate the isolation contract. If either relay alias is missing,
+private-network creation fails before the Agent CLI starts.
 
-Preflight probes this: it starts one container on the agent phase's real
-network and **makes a request**, refusing at startup if no HTTP response comes
-back. Any status counts, 401 and 404 included — the question is whether packets
-arrive, not what the gateway makes of them. It used to stop at DNS, which
-passes for anything holding a record, including a relay that answers to the
-gateway's name and cannot reach the gateway behind it; that is exactly the
-shape of a cross-machine deployment, so the topology needing the check most was
-the one it could not see. A sandbox image with neither `curl` nor `python3`
-falls back to DNS and logs `agent_sandbox_gateway_probe_degraded` rather than
-letting the weaker check pass for the stronger one.
+The host deployment check probes both relays: it starts containers on the
+agent discovery backplane and **makes requests**, requiring HTTP 200 from the
+inference `/health` and MCP `/healthz` endpoints before it publishes the
+exact-SHA ready marker. The runner's lower-level inference connectivity probe
+still treats any HTTP response as reachability, but that weaker signal cannot
+release a deployment. Every real chat additionally reconciles its own labelled
+internal bridge and the exact relay owners before create/start. DNS alone is
+never enough: a relay can own the expected name while its upstream is down,
+which is exactly the cross-machine false positive the deployment check must
+catch.
 
 For a runner host that is not the gateway's, see
 [Running runners on another machine](#running-runners-on-another-machine) — the
@@ -285,60 +298,63 @@ AGENT_EGRESS_NETWORK_CUSTOM=agent-routable
 That gives the agent phase general egress — untrusted repository code included
 — which is the property `platform_only` exists to hold.
 
-One more compose detail worth knowing: the overlay *declares* `agent-egress`,
-so compose insists on creating it. A network of that name created by hand
-beforehand is refused with a label mismatch — let compose own it, or point the
-tier variables at names compose does not declare.
+One more compose detail worth knowing: the overlay *declares* `agent-egress` as
+the relay-discovery backplane, so compose insists on creating it. A network of
+that name created by hand beforehand is refused with a label mismatch — let
+compose own it, or point the tier variables at names compose does not declare.
+The `freeinference-chat-net-*` networks are different: Docker lifecycle code
+derives their names and labels from the sandbox generation. It allocates one `/29` from
+`AGENT_EGRESS_CHAT_NETWORK_POOL` (default `10.240.0.0/16`) and lets Docker
+arbitrate concurrent claims. The setup bridge is deleted at setup→agent; the
+current bridge is disconnected and deleted on idle/lost stop while Docker keeps
+the container writable layer. Wake creates the correct setup or agent bridge
+again. Broker reconciliation also removes labelled networks left by an
+interrupted create or transition after a five-minute grace period. The grace
+prevents status reconciliation from deleting a bridge between creation and
+sandbox attachment while still reclaiming bridge interfaces and IPAM.
 
-### 1. The workflow must be on the default branch
+### 1. Only enrolled sandbox hosts run jobs
 
-A workflow is only *registered* once its file exists on the default branch
-(`main`). Until then it cannot be triggered **by any means** — not
-`repository_dispatch`, not the schedule, and not `workflow_dispatch` even with
-an explicit `--ref dev`. Verified rather than assumed:
+The old manually dispatched `agent-job-runner` Actions workflow is deleted. It
+was a disposable one-shot substrate using the unisolated `process` backend and
+a shared dispatcher credential; keeping it manual would still leave a second
+executable topology behind the UI. There is no GitHub Actions fallback.
 
-```console
-$ gh workflow list --all | grep agent-job-runner      # absent
-$ gh api -X POST .../workflows/agent-job-runner.yml/dispatches -f ref=dev
-{"message":"Not Found","status":"404"}
-```
-
-So the Actions path is gated on a production release, not on configuration.
-
-Self-hosted runners have no such constraint: they poll `/v1/agent/worker/claim`
-and can run as soon as the gateway is deployed. That is the shorter path to a
-first real job.
+Deploy at least one host through `deploy/host/deploy.sh`, enroll it with the
+control plane, and let its runner replicas poll `/v1/agent/worker/claim`. A
+runner cannot claim until its exact replica attests the retained protocol,
+container image/runtime pins, broker configuration, execution profile, and
+host capacity.
 
 ### 2. Credentials
 
-**Dispatcher credential** — set the same `AGENT_DISPATCHER_TOKEN` on the
-gateway and the runner; the claim gate accepts it directly.
+**Host credential** — mint one short-lived enrollment token for a named host:
 
 ```bash
-# both sides — one value, one purpose
-AGENT_DISPATCHER_TOKEN=$(openssl rand -hex 32)
+# Admin API; the response shows the single-use token once.
+POST /admin/agent/runner-hosts/enroll-token
 ```
 
-Prefer this over pointing the runner at `ADMIN_TOKEN` (which the gate still
-accepts, for migration): the runner host executes untrusted repository code
-next door, and the credential it holds should open exactly one door. The
-dedicated token claims work and does nothing else — to every other route it is
-an invalid credential, and rotating it touches nothing but the two settings
-above.
+Put that value in `AGENT_ENROLL_TOKEN` for first start. Registration replaces
+it with a long-lived credential bound to that host and persists the credential
+under `AGENT_HOST_STATE_ROOT`; every heartbeat and claim then authenticates
+with it. A host name in a request is never accepted as identity by itself.
 
-It must not be an ordinary user key: that endpoint takes the oldest queued job
-**across all tenants** and returns its repo, prompt, and a working capability
-token, so an ordinary key there would be a cross-tenant read.
+**Workspace broker credential** — generate one
+`AGENT_WORKSPACE_BROKER_TOKEN` per environment and set the same value on the
+control plane and every host broker. It authorizes file, terminal, Git, and
+session-lifecycle calls. It is not a claim credential and never enters a chat
+container.
 
-**GitHub credential** — install a GitHub App and give the *gateway* its private
+**GitHub credential** — install a GitHub App and give the *control plane* its private
 key. Nothing needs to be minted or rotated by hand: the platform signs a
 ten-minute App JWT and exchanges it for an hour-long token scoped to the
 installation covering the repository being published to.
 
 ```bash
 AGENT_GITHUB_APP_ID=123456
-# A path the gateway can open — which in a Compose deployment means a path
-# inside the *backend container*. It mounts `config/`, `distributions/` and
+# A path the control plane can open — which in a Compose deployment means a path
+# inside the *control-plane container*. It mounts `config/`, `distributions/` and
 # `var/data/`, and nothing else: an /etc path on the host reads as "no such
 # file" from in there. `var/data` is gitignored, so the key survives the
 # deploy's `git reset --hard` and is never a candidate for commit.
@@ -408,15 +424,16 @@ the runner up that afternoon" is how the first real job actually ran.
 Opting a host in is a one-time `.env` edit:
 
 ```bash
-AGENT_DISPATCHER_TOKEN=<openssl rand -hex 32>   # same value gates /worker/claim
-AGENT_SANDBOX_BACKEND=container                  # accept a shared kernel
+AGENT_ENROLL_TOKEN=<single-use token for this host>
+AGENT_WORKSPACE_BROKER_TOKEN=<same environment value as the control plane>
+AGENT_SANDBOX_BACKEND=container  # explicit trusted-repository downgrade
 ```
 
-That second line is a **deliberate downgrade**, and the runner says so on every
-start: it puts every job on the host's own kernel. It was the price of getting a
-standing runner up before any host had Kata. Remove it once the host is
-provisioned **and the sandbox network is verified from inside a Kata guest** —
-see below — and the boundary is verified instead of warned about.
+The `AGENT_SANDBOX_BACKEND=container` line is a **deliberate downgrade**: sandbox
+groups share the host kernel. Before enabling Kata for new groups, provision
+the host and verify the guest runtime and relay paths with the checks below.
+Existing retained runc containers need the separate migration treatment
+described there.
 
 One command per host makes the runner standing; compose's
 `restart: unless-stopped` plus an enabled Docker daemon carries it across
@@ -424,7 +441,8 @@ crashes and reboots:
 
 ```bash
 deploy/host/sandbox_host.sh up 4    # build images, tunnel + 4 runners
-deploy/host/sandbox_host.sh check   # probe the gateway from the closed network
+deploy/host/sandbox_host.sh preflight # validate this host against an existing image
+deploy/host/sandbox_host.sh check   # probe all relay/control paths
 deploy/host/sandbox_host.sh status  # replicas + recent log tail
 deploy/host/sandbox_host.sh down    # stop them
 ```
@@ -433,17 +451,17 @@ There is one script now, not two. The co-located `agent_runner.sh` was an
 overlay on the gateway's own compose stack and did not move — see
 MIGRATION.md's open-decisions register. A runner on the gateway's own machine
 is this same standalone compose with the tunnel pointing at localhost, which
-is a configuration rather than a second file. The `preflight` verb went with
-the overlay; the runner still preflights at startup and `up` prints the
-verdict.
+is a configuration rather than a second file. Standalone `preflight` checks
+Docker, retained-mode configuration, host isolation, and the configured image;
+`up` repeats the authoritative checks after building the image it will deploy.
 
 ### Provisioning Kata on a runner host
 
 An ordinary container isolates processes; every sandbox still issues syscalls
-straight at the host kernel. Kata gives each job a lightweight VM with its own
-kernel, so a container escape has a hypervisor behind it. That is what makes the
-difference between "fine for repositories we trust" and "fine for a repository
-we have never read", because the sandbox runs whatever the repository's build
+straight at the host kernel. Kata gives each sandbox group a lightweight VM
+with its own kernel, so a container escape has a hypervisor behind it. That is
+what makes the difference between "fine for repositories we trust" and "fine
+for a repository we have never read", because the sandbox runs whatever its build
 and test scripts do.
 
 The runtime belongs to the **host**, not the runner image: the runner container
@@ -462,12 +480,113 @@ containerd finds it without a unit-file edit. The version is pinned in the
 script; upgrading is a two-line change there, and `--check` then fails on every
 host still carrying the old one.
 
+The setup also selects the release's packaged `vmlinuz-debug.container` for
+the default Kata configuration and sets `runtime.disable_guest_seccomp=false`.
+Kata's packaged default otherwise ignores the OCI seccomp filter even when
+Docker accepted the container security options. That kernel is built with Kata's reviewed
+eBPF/BTF debug fragment; the ordinary guest kernel is not sufficient for the
+process observer. `--check` verifies both the asset and the active config, and
+runner preflight goes further: it starts a disposable sandbox with the same
+non-root, capability-dropped and `no-new-privileges` shape as a real retained
+guest, then exercises the same fixed privileged exec used to start the bundled
+observer. Its self-test requires all three lifecycle probes to attach, executes
+one short-lived child, and requires that child's fork, exec, and exit records to
+arrive through the ring buffer. A missing BPF syscall, BTF image, tracepoint,
+event-delivery path, or exec-time permission is therefore a deployment failure
+before the runner can claim work, not an empty process list under a completed
+turn. The same probe also requires the fixed tool-marker helper used by Claude's
+exact boundaries. See Kata's
+[debug-kernel build contract](https://github.com/kata-containers/kata-containers/blob/main/tools/packaging/kernel/README.md#debug-kernel).
+
+The fixed observer and platform lifecycle helpers run as guest root. Agent CLIs and
+repository code still run under their per-member UIDs with all capabilities
+dropped and `no-new-privileges`; they cannot read, edit, or directly inject
+records into the root-only journal. Claude's fixed non-root marker helper talks
+to it over a credential-checked Unix socket. A same-UID tool can still execute
+that helper, so exact per-tool association is diagnostic, never a security or
+billing authority; the eBPF lifecycle census itself is independent of marks.
+Kata containers retain `BPF`, `PERFMON`, `SETUID`, `SETGID`, `CHOWN`,
+`DAC_OVERRIDE`, `KILL` and `SYS_PTRACE` in the bounding set for the fixed guest-root helpers:
+tracing, the UID-filter self-test, socket ownership, member cleanup and verifying
+the marker sender's `/proc/<pid>/exe` across member UIDs.
+Kata privileged exec cannot acquire capabilities outside that original set.
+Ordinary exec explicitly enters through `setpriv --no-new-privs`, because
+Kata 3.32 does not inherit PID 1's setting for Docker exec. Preflight requires
+non-root execution, zero effective/permitted capabilities, `NoNewPrivs=1`
+and `Seccomp=2`, then runs the observer and marker self-tests and requires a
+real non-root pre/post pair to reach the trusted observer journal. Privileged
+helpers also verify the **inspected container's** Kata runtime and execute by
+that verified container ID; changing a runner setting cannot promote an old
+runc container into a guest-root target. A shared
+container's periodic Docker statistics are group totals, so current member
+turns deliberately report aggregate CPU/memory/I/O/network as unavailable
+(`coverage=0`, `sampler_version=shared-member-v1`) instead of duplicating a
+sibling's work. Process existence is separate, event-driven telemetry:
+fork/exec/exit survives even
+when a process begins and ends entirely between two statistics samples, and
+the kernel's records carry what that process consumed — the group's peak RSS
+and the bytes it read from and dirtied to storage at exit, and its scheduler
+runtime once it left the CPU for the last time (tick-based CPU time reads
+zero for most sub-millisecond processes, so it is not used). Those are the
+per-call CPU, memory and I/O numbers under Kata: a process is charged to the
+tool call whose window alone contains its start, and a process that
+overlapping calls could both own, one whose thread group has not fully
+settled, or any process in a census that lost events, is charged to no call
+and marks those calls as partial. Work done inside the Agent CLI's own
+process belongs to no call. The self-test in preflight also requires a
+sub-millisecond child's records to carry non-zero CPU, a non-zero peak RSS
+and a group-exit flag, so a guest kernel whose BTF does not relocate them
+fails deployment rather than reporting zeros; storage and read/write byte
+accounting are kernel configuration and arrive as unavailable when absent.
+The per-turn table is therefore a member-UID lifecycle census of process starts observed
+after that turn's cursor, not a point-in-time snapshot of resident processes
+that were already running before the turn and not a whole-container total.
+
+Docker's embedded DNS resolver (`127.0.0.11`) is outside the guest. Kata
+activation and phase checks therefore refresh `/etc/hosts` with only the
+configured relays' addresses on that chat's current private bridge. Unknown
+names gain no resolver or additional egress path. The first setup-to-agent
+transition stops and restarts the Kata guest after changing networks, before
+launching a resident CLI: Docker's live network changes alone do not update
+Kata 3.32's guest interfaces. The writable layer and container identity remain.
+An already settled agent-phase activation does not restart a live guest.
+
+When switching a host from runc, keep its retained runc groups on a compatible
+broker or migrate them separately. A backend setting does not change the
+runtime of a stopped Docker container; the privileged helper fence rejects
+those old containers. Do not delete retained workspaces as part of enabling
+Kata for new jobs.
+
 Requirements: an x86_64 Linux host, bare metal or with nested virtualization
 enabled. Kata cannot run without KVM.
 
-Afterwards, drop `AGENT_SANDBOX_BACKEND=container` from the host's `.env` and
-redeploy. `deploy/host/sandbox_host.sh up` then gates on it (as does
-whatever pipeline deploys the gateway, on its own side):
+**Installing the shim is necessary, not sufficient.** A working guest kernel
+does not prove the sandbox can reach either relay. Before changing the backend
+for new groups, check the provisioned runtime and the running stack from the
+host checkout, using its `.env`:
+
+```bash
+AGENT_SANDBOX_BACKEND=kata deploy/host/sandbox_host.sh preflight
+AGENT_SANDBOX_BACKEND=kata deploy/host/sandbox_host.sh check
+```
+
+`preflight` verifies the configured image and guest kernel. `check` starts relay
+probes under Kata on `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` and requires HTTP 200
+from inference `/health` and MCP `/healthz`. It also checks the live runner's
+full sandbox preflight, broker, and control-plane paths. That compose-owned
+closed network is the relay discovery backplane; retained groups get their
+own private bridges during activation. The compose `..._internal` network is
+the host services' network and cannot substitute for either check.
+
+The Kata relay probes resolve only the configured relay endpoints through
+Docker inspection and pass their addresses into the guest, matching the
+runtime's fixed-host approach. A bare `alpine getent` probe depends on Docker's
+embedded DNS and does not verify this path. A failed check needs diagnosis of
+the reported guest, relay, or service path before switching new groups.
+
+After those checks pass and existing runc groups have been accounted for, drop
+`AGENT_SANDBOX_BACKEND=container` from the host's `.env` and redeploy.
+`deploy/host/sandbox_host.sh up` repeats the checks for the image it builds:
 
 - with the default `kata` backend, the shim must be installed, **and** one real
   container started from the sandbox image must report a kernel that is not the
@@ -477,28 +596,278 @@ whatever pipeline deploys the gateway, on its own side):
   possible and stays explicit: set `AGENT_SANDBOX_BACKEND=container`, and every
   deploy restates what it costs.
 
-**Installing the shim is necessary, not sufficient.** A host can pass
-`setup_kata_runtime.sh --check`, pass `kata-runtime check`, and start a Kata
-container that really does report a kernel of its own — and still be unusable,
-because the guest can come up with **no network interface at all**, only `lo`.
-Nothing in that sandbox can resolve the gateway relay, so every job fails at its
-first model call. Every cheap signal says the runtime is fine; only pulling a
-container onto the sandbox network finds it. Check before you drop the override:
+The control plane independently enforces the same fact at scheduling time.
+Set `AGENT_DEFAULT_EXECUTION_PROFILE=untrusted-kata-v1` for any deployment that
+accepts untrusted repositories, after at least one enrolled Kata Host passes
+preflight. A secure job is claimable only when all of the following are true in
+the same claim transaction:
 
-```bash
-NET=<the stack's sandbox network>          # ..._internal
-docker run --rm --network "$NET" alpine getent hosts agent-gateway
-docker run --rm --runtime io.containerd.kata.v2 \
-    --network "$NET" alpine getent hosts agent-gateway
-```
+- the caller presents that Host's current enrollment-issued per-host
+  credential; there is no shared dispatcher-token claim path;
+- the exact runner replica reports `io.containerd.kata.v2`;
+- Python preflight started the configured sandbox image under that runtime and
+  observed a non-empty guest kernel different from the Host kernel.
 
-The `runc` line is the control. If it resolves the relay and the Kata line does
-not, the runtime is installed but the sandbox is not usable, and
-`AGENT_SANDBOX_BACKEND=container` has to stay until the guest's networking is
-fixed. `internetworking_model` and whether the guest kernel carries `virtio-net`
-are the first two things to look at.
+The claim, not the Host's mutable heartbeat row, supplies the attempt's runtime,
+image digest, CLI version and kernel stamp. This matters during rolling deploys,
+when runc and Kata replicas can temporarily share one Host row. A missing probe,
+an old runner, a custom runtime, a self-declared `kata` capability or a revoked
+Host credential simply cannot claim the secure job; there is no fallback to
+runc. `trusted-v1` selects the reviewed shared-kernel boundary for trusted
+internal repositories; it does not select another workspace/session executor.
+Every follow-up and fork inherits the execution profile stored on its thread.
+Retained chats carry the original image digest in immutable container labels
+and use that content-addressed image for a retry before Docker returned a
+container id; a moved image tag cannot change the chat's actual image while its
+database row still reports the old one.
 
 ### How many runners
+
+The retained shared-session topology is unconditional. An ordinary chat is a
+one-member group with one container/workspace and one live CLI transport. Fork
+immediately invokes the pinned CLI's native fork-only surface and adds a second
+chat/session/process to that same container. Parent and child may execute
+concurrently without a group turn lock.
+
+Each member has a distinct fixed UID. Before handing over a turn, the host
+captures that UID's `(pid, /proc starttime)` census through the root-owned,
+mode-0555 `member-process-reaper` installed in the sandbox image. Cleanup sends
+that baseline over stdin to a fresh helper, rechecks identity immediately
+before every signal, escalates TERM→KILL, rescans, and fails closed if anything
+survives. The baseline is never a member-writable file, so repository code
+cannot edit it to preserve a process or redirect cleanup at a reused PID.
+
+`shared-sandbox-v1` is a claim attestation, not a feature switch. A host must
+advertise it from the exact runner replica that claims the job. Configure at
+least two host slots and runner replicas; staging defaults both to three. One
+runner executes one synchronous turn, so `AGENT_HOST_SLOTS` must not exceed
+`AGENT_RUNNER_REPLICAS`.
+
+Historical Fork additionally requires `native-fork-at-anchor-v1` and an exact
+match between the host's current sandbox image digest and the retained group's
+pinned digest. A container kept from the previous image remains usable for
+normal follow-ups after a rollout, but its older fork helper is never asked to
+interpret a historical anchor.
+
+The Docker socket (or reviewed mTLS Engine endpoint) is the only host
+control/data interface for chat state. No repository, workspace, Agent CLI
+home, or session file is mapped from the host. Historical rows without a
+shared retained sandbox are non-runnable and fail closed, including an old
+in-flight parent observed during rollout. A waiting tail inserted by the old
+API before cutover is failed when that parent settles; it is never promoted
+into a newly fabricated native session.
+
+### One sandbox-group inactivity clock (and separate safety watchdogs)
+
+`AGENT_CHAT_IDLE_TIMEOUT_S` is the sandbox group's sole lifecycle timeout and
+defaults to **1800 seconds (30 minutes)**. Once the latest activity across all
+members is durably settled and no member/broker operation is active, the host
+Shared Session Supervisor issues `docker stop`, disconnects and deletes the phase
+bridge, but never issues
+`docker rm`. A later acquire rebuilds the correct bridge, starts, and re-inspects
+the same labelled container. Supervisor shutdown itself leaves all chat
+containers untouched. At broker startup, reconciliation stops a still-running
+orphan before admitting it again; resident member processes from an unproven
+in-memory lease are therefore never silently adopted. The supervisor does not
+infer an active turn from an empty in-memory lease table. Docker observations
+ride the enrolled host heartbeat;
+the control plane checks the durable active-attempt fence and idle deadline,
+then returns an exact generation-scoped stop command. The following heartbeat
+records Docker's STOPPED state. While the broker has a proven activation, the
+same heartbeat carries whether a turn/terminal/file-or-Git operation is active
+and the remaining host-monotonic idle delay. A terminal carries its last
+activity timestamp when it closes: a manual close is fresh activity, while
+reaping an already-idle PTY continues the original 30-minute chat window
+instead of stacking a second one. For a reconstructed generation-zero
+RUNNING container with no durable active attempt and no deadline, the first
+heartbeat contributes one fresh 30-minute recovery window; the database accepts
+that window only once, so subsequent beats cannot keep extending it or stop an
+active turn.
+
+Before a prompt reaches Agent CLI stdin, the worker persists its `job_id` as
+the sandbox's admission receipt. If that retained activation's attempt lease
+expires, the system stops it, marks the context LOST, and fails the job; it
+does not automatically retry even when the crash may have happened just before
+stdin. Any later messages already waiting behind that turn are failed in the
+same database transaction, and a new follow-up receives
+`sandbox_context_lost` instead of becoming a permanently unclaimable queued
+job. That conservative choice prevents duplicate prompt/tool execution.
+
+The other timeout-looking settings do not form additional chat states and do
+not deactivate a healthy chat:
+
+- `AGENT_TIMEOUT_S` defaults to 3600 seconds. It is a hard watchdog for one
+  hung agent turn. A turn that reaches it is cancelled/fenced; it is never
+  interpreted as an ordinary settled-idle transition;
+- `AGENT_TERMINAL_IDLE_TTL_SECONDS` (30 minutes) closes a stale PTY whose
+  client and process have stopped producing activity. For retained chats the
+  effective PTY idle limit is the earlier of this guard and the chat clock;
+  releasing it preserves the last activity timestamp and adds no second wait;
+- `AGENT_TERMINAL_HARD_TTL_SECONDS` (8 hours) bounds one PTY even if it stays
+  noisy forever. It is a resource/security guard, not sandbox deactivation;
+- `AGENT_RESIDENCY_TTL_S` defaults to 1800 seconds and fences each member's
+  live-process ownership plus renewable inference grant. Losing that lease
+  demotes/restarts the member; it does not itself stop a healthy chat group or
+  create another inactivity clock;
+- no workspace-cleanup TTL addresses chat data. This phase never removes a
+  retained sandbox; operators monitor Docker storage separately.
+
+There is no retained/shared feature flag or runtime allowlist switch. Claude
+Code, Codex, Pi, OpenCode, and Kilo are claimable only after exact
+image/runtime/helper attestation. Compatible follow-ups send only the new
+prompt to the same resident process; recovery resumes the pinned native
+session in a replacement process. Fork from any successfully settled native
+turn with a persisted native ordinal, matching image pin, and capable owner host
+is immediate inside the same container/workspace. The UI offers it only on the
+final assistant/tool boundary of that turn. Edit & rewind resolves the nearest
+earlier such boundary for the selected user prompt and puts the replacement
+text in the child composer without sending it. The frontend treats `NEW`,
+`LIVE`, `RESTORED`, and `LOST` as context truth; hot/warm/cold/replay remains
+diagnostic telemetry and never chooses another executor. Current retained
+runners never emit `replay`; the API accepts it only so an attempt admitted by
+the previous generation can finish during a parallel rollout, and historical
+rows remain readable in the UI.
+
+After a shared turn settles, its snapshot and draft-PR fields may still change
+asynchronously. The detail view and recent-task list poll only while that
+publication state is pending/capturing/captured/publishing, and stop at
+published/failed; other terminal jobs do not acquire a background
+polling loop.
+
+Disk-pressure admission/alerting and a non-mutating pre-prompt context
+fingerprint remain deployment hardening work. The local stack below is suitable
+for functional development, not evidence that the production Kata/live-provider
+and operational gates have passed.
+
+### Complete local stack and retained database credentials
+
+`deploy/local/dev.sh up` stores its generated Postgres password and matching
+DSN in the gitignored `deploy/local/.env.local`. Preserve that file for as long
+as the selected Compose project's `agent-postgres` volume is retained.
+PostgreSQL ignores a new `POSTGRES_PASSWORD` after its data directory has been
+initialized, so losing the file cannot be repaired by generating another
+password. The script detects this state and exits without deleting the volume
+or changing the database.
+
+`up` builds the required images first. It and `start` then start only Postgres,
+wait for `pg_isready`, authenticate through `AGENT_DATABASE_URL` from the
+migration image, and run Alembic. Only then can the complete stack start. If
+the probe fails, restore the original `AGENT_POSTGRES_PASSWORD` and
+`AGENT_DATABASE_URL`; do not remove the volume unless discarding all local
+agent state is intentional.
+
+Terminal freezing is also member-concurrent: each protected job phase owns a
+separate broker suspension token for the shared workspace. Completing or
+recovering one sibling releases only that token; interactive PTYs are resumed
+only when no sibling remains in a protected phase. The broker still accepts
+the previous generation's token-less request shape during a rolling deploy,
+but current control-plane requests always identify the owning job.
+
+### Rolling deployment order
+
+The host and control-plane Actions jobs start in parallel. The host builds the
+replacement sandbox/runner stack and proves Kata before invalidating its ready
+marker. It then stops the old runner replicas and lets their five-minute grace
+drain admitted turns before replacing the broker; no new turn can be admitted
+in that interval. After the isolation, tunnel, runtime and retained Docker-root
+checks pass, it records `.deployed-sha` and only then publishes an exact
+`shared-sandbox-deployment:<sha>` capability. In parallel, the control job
+builds and migrates, then waits for a heartbeat newer than the start of that
+check and reverse-probes every new-chat placement broker before `compose up`
+can replace a running API. The claim route enforces that same exact deployment
+capability. Pending replicas register and heartbeat their base protocol so the
+host checks can inspect them, but do not poll; this also prevents the previous
+API from assigning work before it knows the new claim field. A runner with a
+pending/failed marker therefore cannot take work even during a cold-start API
+bootstrap. When placement was moved between hosts,
+it also probes every online host that still owns a retained group; changing the
+pin must not make old chats disappear from rollout safety. `SHARED_READY_TIMEOUT`
+controls that wait and defaults to 900 seconds.
+
+The deploy user writes `.shared-live-ready` in the deployment checkout, separate
+from the container-owned enrollment directory. Runners mount only that file
+read-only at `/run/cloud-agent/shared-live-ready`. The host script preserves its
+inode when changing `pending:<sha>` to `<sha>`, so existing file mounts see the
+transition; an empty or partial write cannot advertise an exact target SHA.
+No credential ownership or permission changes are needed for a rollout.
+
+Both Actions jobs use the workflow commit's deployment orchestrator against a
+separate target checkout. Online rollback therefore cannot execute a
+pre-fence target's old scripts; commits without the current
+`deploy/DEPLOY_PROTOCOL`, or with an incompatible protocol value, are refused
+before changing Docker state. Protocol `shared-live-exact-sha-v2` deliberately
+excludes ancestors whose Alembic revision identifiers predate the merged
+`0021`–`0025` chain; those commits are not schema-compatible rollback targets.
+Database changes are expand-first. Never downgrade columns underneath a
+still-running new API; roll code back to a schema-compatible commit first and
+treat any later contract migration as a separate reviewed operation.
+
+`workflow_run` loads its workflow definition from the repository's default
+branch. Synchronize this orchestrator change to `main` before relying on the
+rollback fence, and do not manually dispatch an older default-branch workflow
+against staging during that rollout window.
+
+This fence is unconditional because retained/shared-live is the only executor.
+It cannot enable a legacy path and it cannot be bypassed by stale
+`AGENT_RESTARTABLE_*` or `AGENT_SHARED_LIVE_*` values. On failure, the existing
+control plane remains running and the deploy stops for operator repair. If
+either the API or MCP relay is missing, the host cannot complete all readiness
+probes (a true cold start has neither). After migration, the control script
+independently bootstraps only the missing service or services. A failed gate
+stops only those started by that invocation, leaving a pre-existing peer
+running for diagnosis. Web does not start until the same exact-SHA fence
+succeeds. Once it does, the bootstrap peers belong to the desired target stack:
+a later final API/web probe failure leaves that stack running for diagnosis but
+does not write `.deployed-sha`.
+
+### Retained Docker storage on a host
+
+Retained chat state is the Docker container writable layer, so durable
+same-host operation attaches storage to the Docker daemon, not to each
+sandbox. A Linux host can use this shape (device and filesystem choices remain
+operator-specific):
+
+```bash
+# Mount the durable block volume before Docker starts.
+findmnt --target /mnt/agent-docker
+
+# /etc/docker/daemon.json
+{"data-root":"/mnt/agent-docker"}
+
+sudo systemctl restart docker
+docker info --format '{{.DockerRootDir}}'
+# /mnt/agent-docker
+```
+
+Then set `AGENT_RETAINED_DOCKER_DATA_ROOT=/mnt/agent-docker`. The workspace
+broker compares that exact daemon-reported value during startup and refuses a
+mismatch. It deliberately cannot prove `findmnt` itself: giving the broker a
+host-root mount just to inspect storage would violate the Docker-only boundary.
+Put the mount check in host provisioning/systemd (`RequiresMountsFor=` is a
+reasonable additional guard) before Docker and the agent stack start.
+
+Do not bind `/mnt/agent-docker`, `/var/lib/docker`, `/workspace`, or
+`/agent-state` into the broker or sandbox. Do not use generic `docker system
+prune`, container TTL cleanup, `docker rm`, or image garbage collection against
+`org.freeinference.chat-sandbox=true` objects. Inspect and operate them through
+Docker (`docker inspect`, `docker exec`, `docker cp`, and the broker RPC), not by
+walking overlay directories. Backup or move the whole Docker data-root only
+with the daemon stopped and using Docker/storage-driver-supported procedures.
+
+This makes `docker stop`/`docker start` survive runner, broker, Docker daemon,
+and host reboots as long as the same Docker data-root returns. It does **not**
+make a missing container recoverable on another host: export to object/cold
+storage and cross-host restore remain the explicitly deferred persistent
+checkpoint phase. Until that lands, loss of the Docker data-root is context
+`LOST`, and the control-plane database still supplies the authoritative
+thread→host→container identity needed to locate it.
+
+A missed heartbeat, an offline/disabled host row, or a temporarily unreachable
+broker is not evidence that this Docker state vanished. Keep the chat pinned
+and unavailable, recover or re-enrol the same named host, and reconcile its
+exact labelled container. Only an inspection on that owning Docker daemon that
+proves the expected container/data-root is gone may transition the context to
+`LOST`; never create a blank replacement on another host.
 
 **One runner runs one job at a time.** It claims, runs the job to completion,
 then claims the next — so the replica count *is* how many jobs the deployment
@@ -511,52 +880,65 @@ coordination — `claim_job` uses `FOR UPDATE SKIP LOCKED`, so they share one
 queue with no leader and no sharding — and each job's sandbox is capped at
 4g / 2 cpus, so budget roughly that per replica.
 
-Do not scale with a `--scale` flag instead: it survives exactly until the next
-`docker compose up` without it, which drops the fleet back to one and presents
-as "every user is queueing" long after anyone remembers scaling it.
+`AGENT_HOST_SLOTS` must not exceed the replica count and both values must be at
+least two. The deployment check also counts the actually running replicas
+before declaring the host ready; a configured scale is not proof that its
+containers stayed up.
+
+Do not scale with an ad-hoc `--scale` flag: it survives only until the next
+`docker compose up` without that flag. Set `AGENT_RUNNER_REPLICAS` instead;
+the Compose file's `deploy.replicas` keeps the desired fleet size on every
+subsequent deploy.
 
 Queue order is global FIFO with no per-user fairness yet, so one user
 submitting a batch can occupy every replica. Per-user concurrency quotas are
 P1 work.
 
 The script validates the required environment before starting and surfaces
-the runner's own preflight verdict (gateway reachable, image spawnable,
-workdir bind-mountable, egress network resolvable) instead of leaving it in a
-detached log. Equivalent by hand:
+the runner's own preflight verdict (gateway reachable, retained image/runtime
+usable, Docker data-root correct, egress network resolvable) instead of
+leaving it in a detached log. Equivalent by hand:
 
 ```bash
+# Put a tested alternate version in the corresponding *_EXTRA_VERSIONS build
+# argument, then select it in Admin. Default versions are shared protocol pins
+# and change in source together with SHARED_SANDBOX_RUNTIME_PINS.
 docker build -f deploy/sandbox/Dockerfile.agent-sandbox \
+             --build-arg CLAUDE_CODE_EXTRA_VERSIONS=<exact-version> \
              -t hybridinference-agent-sandbox:latest .
 
 AGENT_SANDBOX_IMAGE=hybridinference-agent-sandbox:latest \
+AGENT_HOST_SLOTS=4 AGENT_RUNNER_REPLICAS=4 \
   docker compose -f deploy/host/docker-compose.sandbox.yml \
-               up -d --scale runner=4
+               up -d
 ```
 
-Scaling is only `--scale`: `claim_job` uses `FOR UPDATE SKIP LOCKED`, so
-runners share one queue with no leader and no sharding.
+`claim_job` uses `FOR UPDATE SKIP LOCKED`, so the configured runner replicas
+share one queue with no leader and no sharding.
 
 | Variable | Default | Notes |
 |---|---|---|
 | `AGENT_SANDBOX_BACKEND` | `kata` | `process` (no isolation) refuses to start unless `AGENT_SANDBOX_ALLOW_UNISOLATED=1`. On the default `kata`, deploy refuses until the host has the shim and one real container proves it gets its own kernel; `container` is an explicit, and loudly restated, shared-kernel downgrade |
 | `AGENT_SANDBOX_IMAGE` | required | Image built from `Dockerfile.agent-sandbox` or an equivalent deployment-owned image |
-| `AGENT_SANDBOX_NETWORK` | `agent-egress` | Declared `internal: true`, so a sandbox reaches the gateway and nothing else. Also the `platform_only` network unless `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` overrides it |
-| `AGENT_EGRESS_SETUP_TIER` / `_AGENT_TIER` | `platform_only` | One of `platform_only` / `trusted` / `custom` / `full`, **per phase**. The design's external-beta shape is setup=`trusted`, agent=`platform_only`; the overlay ships both closed because there is no setup phase yet and no allowlist-fronted network to run one on |
+| `*_EXTRA_VERSIONS` | blank | Comma-separated tested versions to bake beside each source-reviewed default. Select one for new chats in Admin; retained chats keep the version they started with. The five defaults are not host settings because runner/control-plane capability admission attests them as one protocol unit |
+| `AGENT_SANDBOX_NETWORK` | `agent-egress` | Internal discovery backplane for the fixed inference and MCP relays. Also the `platform_only` template unless `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` overrides it. A chat is attached to its own derived `freeinference-chat-net-*` bridge, not directly to this shared network |
+| `AGENT_EGRESS_SETUP_TIER` / `_AGENT_TIER` | `trusted` / `platform_only` | One of `platform_only` / `trusted` / `custom` / `full`, **per phase**. Dependency setup reaches the checked-in allowlist proxy; the model-driven Agent CLI phase stays on the closed relay-only network |
 | `AGENT_EGRESS_NETWORK_*` | — | Network per tier. A tier with no network is an error when a phase selects it, never a fall back to a more open one |
-| `AGENT_SNAPSHOT_ROOT` | — | Where setup snapshots live. A snapshot holds only what the setup script added to the worktree — never the checkout — and is keyed by repository, script, and sandbox image. Unset disables caching, so every job reinstalls. Bind it at the same path inside and out, like the worktrees |
-| `AGENT_SNAPSHOT_TTL_S` | `604800` | Seven days, as the design specifies. A stale entry means a wrong dependency tree |
+| `AGENT_EGRESS_CHAT_NETWORK_POOL` | `10.240.0.0/16` | Non-overlapping private IPv4 pool split into daemon-arbitrated `/29` chat/phase bridges. Bridges are removed at phase transition or stop and rebuilt on wake |
 | `AGENT_EGRESS_ALLOWLIST` | — | Checked at startup: it may not contain an agent vendor's telemetry domain, which would let a "closed" sandbox report on the repository it was given |
-| `AGENT_WORKDIR_ROOT` | `/var/lib/hybridinference/agent-jobs` | **A host path, bind-mounted at the same path inside the runner.** Preflight test-mounts it and fails at startup if not — otherwise every job dies at spawn with an opaque exit 125 |
 | `AGENT_RUNNER_HOST` | — | Names the *machine*, shared by its replicas: the unit the admin host switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. Unset keeps the machine out of the pool and changes nothing else |
+| `AGENT_HOST_SLOTS` / `AGENT_RUNNER_REPLICAS` | `3` / `3` | Concurrent turn capacity and synchronous executors. Both must be at least two and slots may not exceed replicas |
+| `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`; provision this root on durable storage. It is verified by the host and broker and is never mounted into a chat container |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
 | `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
-| `AGENT_GITHUB_APP_INSTALL_URL` | — | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Used when OAuth finds no accessible installation, and behind *Configure repositories* for a connected user. The gateway adds a short-lived, user-bound `state`; set the App callback to `<frontend>/agents/connected?provider=github` |
-| `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | — | GitLab.com OAuth application credentials, kept on the gateway. Configure only `read_user` and `read_api` scopes |
+| `AGENT_GITHUB_APP_INSTALL_URL` | — | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Used when OAuth finds no accessible installation, and behind *Configure repositories* for a connected user. The control plane adds a short-lived, user-bound `state`; set the App callback to `<frontend>/agents/connected?provider=github` |
+| `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | — | GitLab.com OAuth application credentials, kept on the control plane. Configure only `read_user` and `read_api` scopes |
 | `AGENT_GITLAB_OAUTH_REDIRECT_URI` | — | Exact registered callback, normally `<frontend>/agents/connected?provider=gitlab`. HTTPS is required except for localhost development |
 | `AGENT_SANDBOX_ALLOW_OPEN_NETWORK` | — | Accepts a non-`internal` sandbox network. Preflight refuses one otherwise, so a missing setting cannot quietly mean full egress |
-| `MCP_CONFIG_PATH` | — | **Gateway-side.** The deployment's MCP server registry, read where the proxy runs. Unset, or a path that does not exist, means no MCP servers. Copy that repository's `config/examples/mcp.example.yaml` |
-| `AGENT_GITHUB_TOKEN` | — | Gateway-side; unset means the publisher idles |
+| `AGENT_SANDBOX_MCP_URL` | — | MCP-only relay URL as a sandbox sees it. The standalone host compose derives it from the MCP tunnel alias; never point it at inference or the full control API |
+| `AGENT_MCP_TUNNEL_*` | — | Remote MCP-only listener destination and independent restricted SSH key/known-hosts; see `ENVIRONMENT.md` for the complete set |
+| `AGENT_GITHUB_TOKEN` | — | Control-plane fallback publisher credential; unset means the publisher idles |
 | `AGENT_PUBLISH_BASE_BRANCH` | `dev` | What a draft PR targets when its job named no branch of its own. A job started from a branch targets *that* branch; this is only the fallback |
 
 The authenticated `/agents/integrations` page is the only supported place to
@@ -570,15 +952,16 @@ GitHub repositories retain the complete Agent lifecycle: checkout, branch
 discovery, push, and draft PR publishing use short-lived GitHub App installation
 tokens. GitLab is intentionally narrower in this release: it verifies the
 authenticated GitLab user and shows their accessible projects for discovery.
-GitLab projects do not appear in the Agent task composer, and the gateway does
+GitLab projects do not appear in the Agent task composer, and the control plane does
 not claim to read their source or publish GitLab merge requests yet.
 
 ### Which machine runs the jobs
 
-**Admin → Settings → Cloud Agent Host.** The list is every machine that has
-polled for work, and the radio button picks the one whose runners may claim.
-"Any host" is the default and means what it always meant: whoever polls first
-takes the job.
+**Admin → Settings → Cloud Agent Host.** The list is every enrolled machine
+with authenticated heartbeats, and the radio button picks where a chat with no
+sandbox may be materialized. "Any host" is the default and means whoever polls
+first takes a new chat. Once a retained group exists, its turns can be claimed
+only by that group's owning host.
 
 Runners *pull*, so this is a gate on the claim rather than a dispatch target —
 the gateway cannot push a job at a machine, and the only moment it gets to say
@@ -586,92 +969,93 @@ the gateway cannot push a job at a machine, and the only moment it gets to say
 before using it:
 
 - **The switch is not preemptive, and not a drain.** The new host starts
-  claiming immediately; jobs already running on the old one keep running to the
-  end, holding their leases. The two overlap — a drain would mean waiting for
-  the old host to empty first, and this does not do that. Expect the old host
-  to stay busy for as long as its longest running job.
-- **A runner reporting no host is refused while any host is pinned.** Failing
-  closed is deliberate: leaving the machine you just switched away from able to
-  claim would make the switch a lie. A runner without `AGENT_RUNNER_HOST` set
-  therefore stops taking work the moment anything is pinned.
-- **A machine joins the pool by polling, not by being registered.** Start a
-  runner there and it appears within seconds — including while it is being
-  turned away, which is what makes it selectable in the first place. Pinning to
-  a name nothing has ever polled from is refused, because the symptom is a
-  queue that hangs with nothing in the logs.
-- **A host name is a scheduling label, not a machine identity.** The runner
-  reports it, so anything holding `AGENT_DISPATCHER_TOKEN` can report any name;
-  two machines configured alike are one entry in the list. The credential is
-  the actual boundary. Use this to decide where *our* machines run *our* jobs,
-  and do not build anything on it that must survive a hostile runner.
-- **There is no failover.** Pinning turns the other machines off, so if the
-  pinned host's runners stop, the queue stops with them — nothing takes over.
-  The admin page warns when the pinned host has not polled recently, but that
-  signal is imperfect in the other direction too: `last_seen` is refreshed by
-  claims alone, so a machine whose runners are all busy on long jobs looks
-  exactly like one that is down. An independent heartbeat is the fix and is not
-  built yet.
+  claiming chats that do not have a sandbox yet; jobs already running on the
+  old one keep running to the end, holding their leases. Existing retained
+  chats stay hard-pinned to the host that owns their Docker writable layer, so
+  later follow-ups can still be claimed there. There is no cross-host migration
+  in this phase. The two hosts can therefore overlap after the switch — a drain
+  would mean waiting for the old host to empty first, and this does not do that.
+- **An unenrolled runner cannot claim.** The control plane derives the host
+  from its persisted host credential; a request-body name cannot impersonate a
+  pinned machine.
+- **A machine joins through one-time enrollment.** `AGENT_ENROLL_TOKEN` is
+  bound to the chosen host name and redeemed once. Replicas then share the
+  persisted host credential and heartbeat independently of claim traffic.
+- **There is no storage failover.** If the selected host stops, new chats wait
+  rather than materializing somewhere else. Existing retained chats likewise
+  wait when their own host is unavailable; changing the selection cannot move
+  their Docker layer. The admin page warns when the selected host has not
+  polled recently, but the authoritative operational signals are its enrolled
+  heartbeat and broker probe, not whether one runner happened to claim recently.
 
 Adding a *second* machine is not only this switch. A sandbox reaches the
-gateway over a network declared `internal: true`, which resolves nothing off
-its own host — so a runner box that is not the gateway's host needs the
+gateway over a per-chat network declared `internal: true`, which routes nowhere
+off its own host — so a runner box that is not the gateway's host needs the
 routable-network configuration from
-[§0 above](#0-a-closed-agent-network-needs-the-gateway-on-it) (or its own
-gateway). Preflight refuses at startup rather than failing every job at its
-first model call, but it refuses *there*, on that machine, not here.
+[§0 above](#0-a-closed-agent-network-needs-both-narrow-relays-on-it) (or local
+instances of both relays). Preflight refuses at startup rather than failing
+jobs at their first model or MCP call, but it refuses *there*, on that machine,
+not here.
 
 ### Running runners on another machine
 
 A second machine is worth adding for capacity, or because it is the one with
 the hardware. What makes it more than "run the script over there" is that a
-sandbox reaches the gateway over a network declared `internal: true` — no route
-off the host at all — which works only because the gateway is normally a
-container on that same network. On a machine with no gateway, that network is
-empty and every job dies at its first model call.
-
-The answer is a **fixed-destination tunnel on the closed network**:
+sandbox's agent phase uses its own network declared `internal: true` — no route
+off the host at all. A remote host therefore supplies two fixed-destination
+relays on a discovery backplane; lifecycle code attaches those relays to each
+chat-private network. A separate control-plane relay remains visible only to
+the runner:
 
 ```text
-runner host                                    gateway host
-┌───────────────────────────────────┐
-│ [sandbox] ─┐                      │
-│            ├→ gateway-tunnel      │──ssh──→ 127.0.0.1:8080
-│ [runner] ──┘        ↑             │
-│   ✗ internet   one address, fixed │
-└───────────────────────────────────┘
+runner host                                      service host(s)
+┌──────────────────────────────────────┐
+│ [sandbox, per-chat agent network]    │
+│   ├→ gateway-tunnel ─────────────────┼──ssh──→ inference :8080
+│   └→ mcp-tunnel ─────────────────────┼──ssh──→ MCP-only :8001
+│                                      │
+│ [runner, internal network]           │
+│   └→ control-plane-tunnel ───────────┼──ssh──→ control API :8000
+│                                      │
+│ [sandbox, setup network] → proxy ────┼────────→ allowlisted registries
+└──────────────────────────────────────┘
 ```
 
-The sandbox's world is unchanged: one endpoint, ours. The tunnel is a relay and
-not a proxy — no CONNECT, no caller-chosen destination — so nothing the agent
-sends can widen it.
+The sandbox's agent-phase world is exactly the inference and MCP relays. Each
+tunnel is a relay, not a proxy — no CONNECT and no caller-chosen destination —
+so nothing the agent sends can widen either route. Setup is a distinct phase
+and reaches package registries only through the allowlist proxy described
+below; the control-plane tunnel never joins either sandbox network.
 
-**Why ssh rather than exposing the gateway's port.** Every claim carries
-`AGENT_DISPATCHER_TOKEN` and every job call carries that job's capability
-token. Binding `8080` to the lab network puts both in cleartext on a shared
-segment. The tunnel keeps the gateway listening on loopback, which is where it
-already listens.
+**Why ssh rather than exposing the gateway's port.** Sandboxes carry scoped
+inference grants and runners carry enrolled-host credentials. Binding either
+service to the lab network puts those capabilities in cleartext on a shared
+segment. The tunnel keeps each service listening on loopback.
 
 ```bash
-deploy/host/sandbox_host.sh up 4     # tunnel + 4 runners
-deploy/host/sandbox_host.sh check    # probe the gateway from the closed network
+deploy/host/sandbox_host.sh up 4     # relays, broker, proxy + 4 runners
+deploy/host/sandbox_host.sh check    # probe relays and runner/broker paths
 deploy/host/sandbox_host.sh status
 deploy/host/sandbox_host.sh down
 ```
 
 `deploy/host/docker-compose.sandbox.yml` is standalone and contains
-only the runners, their workspace broker, the tunnel, and the two networks —
-no `backend` service. That was the point of it in the source repository, where
-the alternative overlay declared `depends_on: backend` and, pointed at a
-machine with no gateway, did not fail but started one there. It is the only
-topology this repository ships.
+only the runners, their workspace broker, three purpose-scoped tunnels, the
+setup allowlist proxy/config renderer, and their private networks — no
+`backend` service. That was the point of it in the source repository, where the
+alternative overlay declared `depends_on: backend` and, pointed at a machine
+with no gateway, did not fail but started one there. It is the only topology
+this repository ships.
 
 | Variable | Notes |
 |---|---|
-| `AGENT_TUNNEL_SSH_DESTINATION` | `user@gateway-host`. The only address anything on this machine can reach through the tunnel |
-| `AGENT_TUNNEL_SSH_KEY` | Private key, mounted read-only. Give it its own key and restrict it on the gateway: `command="",restrict,port-forwarding,permitopen="127.0.0.1:8080"` — a runner host needs one forwarded port, not a shell |
-| `AGENT_TUNNEL_SSH_KNOWN_HOSTS` | The gateway's host key. **Required**, and host checking is not disableable: an unverified hop would hand the dispatcher credential to whatever answers on that address, which is the attack encrypting it is meant to prevent |
-| `AGENT_TUNNEL_REMOTE_PORT` / `_HOST` | Where the gateway listens *on its own machine*; `127.0.0.1:8080` by default |
-| `AGENT_GATEWAY_HOSTNAME` | The name both the runner and the sandbox resolve the tunnel by, `agent-gateway` by default. **Do not override `AGENT_GATEWAY_URL` with the gateway's real address:** the runner would reach it and the sandbox, on the closed network, would not — jobs would be claimed and then die at their first model call |
+| `AGENT_TUNNEL_*` | Inference relay destination, key, known-hosts file and ports; remote default `127.0.0.1:8080` |
+| `AGENT_MCP_TUNNEL_*` | MCP-only relay's independent destination and SSH material; remote default `127.0.0.1:8001`. Do not point it at the full control API on 8000 |
+| `AGENT_CONTROL_PLANE_TUNNEL_*` | Runner-only control API relay; remote default `127.0.0.1:8000`. It is deliberately absent from sandbox networks |
+| `AGENT_*_TUNNEL_SSH_KEY` | Private key, mounted read-only. Use a separate restricted key per relay with `command="",restrict,port-forwarding,permitopen="127.0.0.1:<that relay's port>"`; no relay needs a shell or permission to open another relay's port |
+| `AGENT_*_TUNNEL_SSH_KNOWN_HOSTS` | Required host-key file for each relay. Host checking is not disableable: an unverified hop would hand scoped tokens and tunnel traffic to whatever answers there |
+| `AGENT_GATEWAY_HOSTNAME` / `AGENT_MCP_HOSTNAME` | The two names a sandbox resolves on the closed network, `agent-gateway` and `agent-mcp` by default. Do not replace them with routable service addresses |
+| `AGENT_CONTROL_PLANE_HOSTNAME` | Runner-only control relay name, `agent-control-plane` by default |
 
 Generate the known_hosts entry deliberately, and look at it:
 
@@ -680,9 +1064,11 @@ ssh-keyscan -p 22 <gateway-host> > /etc/agent-tunnel/known_hosts
 ```
 
 Then `sandbox_host.sh check` answers the only question that matters, from
-the only vantage point whose answer means anything — a container on the closed
-network, asking the gateway for `/health`. Reaching the gateway from the host's
-own shell proves nothing about what a sandbox can reach.
+the vantage points whose answers mean anything: sandbox-runtime containers on
+the closed network must receive HTTP 200 from inference `/health` and MCP
+`/healthz`; a live runner must also pass its full sandbox preflight and reach
+the broker and control plane. Reaching those services from the host's own shell
+proves nothing about the paths the deployed containers use.
 
 Once it is up, the machine appears in **Admin → Settings → Cloud Agent Host**
 and can be selected there.
@@ -693,14 +1079,15 @@ The tunnels above all point one way — out of this machine. One thing needs to
 come the other way.
 
 Every file listing, terminal keystroke and `git status` for a job goes **control
-plane → workspace broker**, and the broker runs here, beside the runner that
-owns the worktree. The control plane resolves which broker from the host row,
-which holds whatever the runner reported at enrolment. On a co-located
-deployment that report is `http://workspace-broker:8092` and it works,
-because the control plane is on this network too.
-
-On a separate machine it is a name that resolves nowhere. The control plane
-stores it, dials it, and gets a DNS failure it surfaces as **503** — including
+plane → workspace broker**, and the broker runs here, beside the runner whose
+Docker daemon owns the retained workspace. The control plane resolves which
+broker from the host row, which holds whatever the runner reported at
+enrolment. The integrated local Compose stack shares a network, so
+`http://workspace-broker:8092` works there. The supported standalone host stack
+does not share a network with the control-plane stack—even when the two
+projects run on one physical machine—so that service name resolves nowhere.
+The control plane stores it, dials it, and gets a DNS failure it surfaces as
+**503** — including
 on `terminals/suspend`, which the runner calls during a normal job. The job
 fails there, the lease expires, the next attempt fails at the same point, and
 the job runs out of attempts. That is not a hypothetical; it is what the first
@@ -731,8 +1118,11 @@ the **control plane host's** sshd. Without it the bind is refused and, because
 the tunnel runs with `ExitOnForwardFailure`, ssh exits and the container
 restarts rather than sitting there having bound nothing.
 
-Set all three or none. An advertise URL with no tunnel behind it is an address
-nothing answers on, which is the same 503 with a longer explanation.
+Set all three. The supported standalone host stack never publishes its broker
+and does not share a Compose network with the control plane, even when both
+stacks happen to run on the same physical machine. An advertise URL with no
+tunnel behind it is an address nothing answers on, which is the same 503 with a
+longer explanation.
 
 Check it from the control plane's side, which is the only side whose answer
 means anything:
@@ -749,52 +1139,70 @@ timeout is the failure this section exists for.
 ### Three things about this topology that look like details and are not
 
 **The runner is not the gateway image.** It builds from
-`Dockerfile.agent-runner`, which adds a Docker client (the container backend
-shells out to `docker` to start each sandbox) and `git` (the runner checks the
-repository out). The gateway image has neither, and a runner built from it
-fails preflight on every host.
+`Dockerfile.agent-runner`, which adds a Docker client to create/inspect the
+retained chat container and `git` to prepare a credential-scrubbed source
+archive. The gateway image has neither, and a runner built from it fails
+preflight on every host.
 
-**The job worktree must be a host path with the same name on both sides.** The
-runner asks the daemon to bind-mount each job directory into the sandbox, and
-the daemon resolves that path on the *host* — not inside the runner container.
-A named volume works for the runner's own file operations and then fails every
-`docker run --mount` with exit 125.
+**There is no host worktree mapping.** For the first turn, the trusted runner
+uses a temporary directory only long enough to fetch the requested commit,
+removes all repository credentials, normalizes ownership in a tar stream, and
+imports that stream into `/workspace` in the retained container. The temporary
+clone is then deleted. All subsequent edits, provider state, terminals, setup
+results, and fork siblings remain in that same Docker writable layer.
 
-**The runner runs as root, and that is the design.** It creates each job
-worktree, checks the repository out, and then chowns the tree to uid 10001 —
-the sandbox image's user — before mounting it. Skip that and the agent cannot
-write a single file, and git refuses to look at the repository at all
-("dubious ownership"). An unprivileged runner falls back to making the tree
-world-writable and logs `agent_sandbox_workdir_world_writable`; that is only
-defensible on a dedicated single-purpose host.
-
-The isolation boundary is between the runner and the sandbox it starts, not
-around the runner. Running the runner unprivileged does not buy isolation — it
-already holds the dispatcher credential and the Docker socket.
+**The Docker socket is the host authority.** Runner and broker can create,
+start, stop, inspect, and exec in chat containers, so isolating those services
+from users matters more than changing their Unix uid. The security boundary is
+the retained sandbox (Kata for untrusted multi-tenant work; plain Docker only
+for trusted repositories), not a host bind mount or a second per-turn
+container.
 
 ### Dependency installation, and the proxy that allows it
 
-A job may carry a `setup_script`. It runs before the agent, under its own
-egress tier, and its result is cached per repository and script — so a retry
-does not reinstall.
+A chat may carry a `setup_script`. It runs inside the retained container before
+the first Agent CLI turn, under its own egress tier. Its files persist in that
+container's Docker writable layer across follow-ups, idle stop/start, and host
+service restarts; there is no host-side setup cache or portable setup archive.
 
 The tier is where the work is. `setup` defaults to `trusted` and `agent` stays
-`platform_only`, which in this deployment means three networks:
+`platform_only`, which in this deployment means three compose-level networks
+plus one derived internal bridge per chat and selected phase:
 
 | Network | Internal | Who is on it |
 |---|---|---|
-| `agent-egress` | yes | the sandbox during the agent turn, and the gateway |
-| `agent-egress-trusted` | yes | the sandbox during setup, and the proxy |
+| `agent-egress` | yes | discovery backplane for inference and MCP relay containers; sandboxes are not left on it |
+| `agent-egress-trusted` | yes | discovery backplane for the setup proxy; sandboxes are not left on it |
 | `agent-egress-uplink` | **no** | the proxy, alone |
+| `freeinference-chat-net-*` | yes | one sandbox group plus only the relay(s) or proxy required by that phase |
 
-Both sandbox networks have no route of their own. The difference is that
-`agent-egress-proxy` sits on the trusted one with a second leg, and the sandbox
-is handed `http_proxy`/`https_proxy` pointing at it. The environment variables
-are a convenience for package managers, not the boundary: a setup script that
-ignored them finds a network that cannot route anywhere.
+The supported host script derives project-specific names for the two new
+Trusted/proxy networks, so staging and production on one Docker daemon do not
+share them. The historical PlatformOnly backplane name is never renamed
+automatically; a host with `SIBLING_COMPOSE_PROJECTS` must set its existing
+unique `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` explicitly. On first activation
+after this upgrade, a stopped retained chat still attached to that old shared
+backplane is moved onto its deterministic private bridge before it starts. A
+running legacy attachment fails closed until the chat is stopped; it is never
+hot-detached.
 
-The agent turn — the part driven by untrusted model output — still reaches the
-gateway and nothing else. That does not change when setup is opened.
+Both backplanes and every derived sandbox network have no route of their own.
+The difference is that `agent-egress-proxy` sits on the Trusted backplane with
+a second uplink leg; it is also attached, under the same alias, to a chat's
+private setup network. The sandbox is handed `http_proxy`/`https_proxy`
+pointing at it. The environment variables are a convenience for package
+managers, not the boundary: a setup script that ignored them finds a network
+that cannot route anywhere.
+
+With the supported `platform_only` agent tier, the agent turn — the part driven
+by untrusted model output — still reaches only the fixed inference and MCP
+relays. Opening the separate setup phase does not change that. Selecting an
+agent-phase `trusted`, `custom`, or `full` tier is an explicit wider operator
+policy, not a side effect of setup access.
+
+The renderer's named volume contains only generated Squid configuration. It is
+host infrastructure, not chat state: Docker inspection of every chat container
+still reports no bind or volume mounts.
 
 **Adding a domain.** `AGENT_EGRESS_ALLOWLIST` is *added to* the built-in
 registry list (PyPI, npm, crates, Go, RubyGems, Maven, github.com), never a
@@ -805,6 +1213,12 @@ rendered into the proxy's config by `agent-egress-proxy-config`, a one-shot
 service that runs before the proxy and fails the deploy if the list is
 unusable. Editing that config by hand skips the validation that keeps a
 hostile value out of it.
+
+The allowlist and proxy port are part of the proxy service's Compose
+configuration fingerprint. Changing either recreates the renderer/proxy instead
+of leaving a running Squid on stale ACLs. The renderer fsyncs a temporary file
+and atomically replaces `squid.conf`, so a restart can observe either the old
+complete policy or the new complete policy, never a partially rewritten ACL.
 
 **Three preflight failures and what each means.** The runner refuses to claim
 jobs unless the setup tier is genuinely enforcing:
@@ -845,10 +1259,13 @@ model or deployment credential:
 uv run pytest tests/unit/test_agent_runtimes.py
 ```
 
-The MCP suites (`test_agent_mcp.py`, `test_agent_mcp_api.py`) stayed in the
-gateway repository with the proxy and the registry, which is where an MCP tool
-call is still authenticated. Run them there after touching either side of the
-adapter contract.
+The MCP suites live here with the catalogue, per-user registry, relay, filters,
+API and runtime adapter. After changing that path, run at least:
+
+```bash
+uv run pytest tests/unit/test_mcp_registry_and_proxy.py \
+  tests/servers/test_mcp_relay.py tests/unit/test_agent_runtimes.py
+```
 
 These tests do not invoke the installed agent binaries. An installed-CLI smoke
 test and full live-model matrix belong to the deployment operating those
@@ -883,38 +1300,34 @@ evidence.
 
 Task H5 moved this page from the source repository's
 `docs/developer/agent-sandbox-operations.md` at the freeze commit `764a6f97`.
-Under the migration's move-as-is rule the edits are **paths and the artifacts
-that did not move** — nothing else was rewritten, reordered or brought
-up to date. Every deviation from the source text:
+Under the migration's move-as-is rule the initial edits were **paths and the
+artifacts that did not move**. The table below records that baseline; later
+feature work has intentionally brought the live operational sections above up
+to date.
 
 | Source | Here | Why |
 |---|---|---|
 | `ops/setup/setup_kata_runtime.sh` | `deploy/host/setup_kata_runtime.sh` | D7 |
 | `ops/deploy/sandbox_host.sh` | `deploy/host/sandbox_host.sh` | D7 |
 | `deploy/docker/Dockerfile.agent-sandbox` | `deploy/sandbox/Dockerfile.agent-sandbox` | D7 |
-| `ops/deploy/agent_runner.sh up/preflight/status/down` | the standalone script's `up/check/status/down` | The co-located overlay was dropped (MIGRATION.md, open decisions, decided 2026-08-04). It has no `preflight` verb; the runner preflights at startup and `up` prints the verdict. |
+| `ops/deploy/agent_runner.sh up/preflight/status/down` | the standalone script's `up/preflight/check/status/down` | The co-located overlay was dropped (MIGRATION.md, open decisions, decided 2026-08-04). The standalone preflight validates an already-built image; `up` builds the target image and then repeats the authoritative checks. |
 | `docker compose -f docker-compose.yml -f docker-compose.agent-runner.yml` | `docker compose -f deploy/host/docker-compose.sandbox.yml` | Same decision. There is no base compose here and no `backend` service. |
 | "Use that script, not `agent_runner.sh`" | a note that the standalone compose is the only topology | Same decision. |
 | The staging deploy-pipeline paragraph (`deploy_staging.sh`, the same-invocation requirement, the overlay attaching `backend` to the agent-egress network) | removed | It describes the *gateway's* deploy pipeline driving the overlay that did not move. Keeping it would be an instruction nobody here can follow. |
 | `AGENT_RUNNER_HOST` row naming `agent_runner.sh` and `deploy_staging.sh` | names the standalone script | Same. |
-| `MCP_CONFIG_PATH` / `config/examples/mcp.example.yaml` | marked gateway-side | The MCP registry and proxy stayed on the gateway: a tool call is authenticated with the same capability token as a model call. This service only names servers by id. |
-| `pytest … test_agent_mcp.py test_agent_mcp_api.py` | `pytest tests/unit/test_agent_runtimes.py` | Those two suites stayed with the proxy. Run them in the gateway repository. |
+| `MCP_CONFIG_PATH` / `config/examples/mcp.example.yaml` | initially marked gateway-side | The move-only baseline still used the old gateway registry. Subsequent extraction work replaced it with this service's in-code catalogue, per-user connections and isolated MCP relay. |
+| `pytest … test_agent_mcp.py test_agent_mcp_api.py` | initially `pytest tests/unit/test_agent_runtimes.py` | The move-only baseline left the proxy suites behind. They were subsequently ported and expanded in this repository. |
 
-### What did *not* change, deliberately
+### Historical statements that remain historical
 
-- **The Verified / Not verified tables.** They record what was measured against
-  the pre-split system on specific dates. Re-asserting them for the new stack
-  would be a claim nobody has tested; re-verification is E11's and H2's job, not
-  a documentation edit's.
-- **"The publisher runs in the gateway", and similar.** True when written. After
-  the split the store, the reaper and the publisher run in *this* service's
-  control plane, and the gateway keeps inference, the MCP proxy, and identity.
-  The security property the sentence is making — the component holding a
-  write-capable GitHub token is outside the sandbox — is unchanged by the move.
-- **`/var/lib/hybridinference/agent-jobs`, `hybridinference-agent-sandbox`, and
-  the other inherited names.** Renaming is a post-cutover pull request, and
-  `AGENT_WORKDIR_ROOT` in particular must not change at cutover: retained
-  worktrees live there (see [cutover.md](cutover.md) step 6).
-- **Anything the split itself changes** — the control plane's own URL, host
-  enrollment, inference grants. Those belong in [cutover.md](cutover.md) and in
-  `ENVIRONMENT.md`, not in a page that was moved rather than rewritten.
+- **The pre-split verification record.** Where a row explicitly describes an
+  old live measurement, it remains evidence of that historical run rather than
+  a claim that a new deployment gate has been exercised. Current component
+  ownership and operating instructions use the post-split topology.
+- **`hybridinference-agent-sandbox` and other inherited image/service names.**
+  Renaming remains a separate pull request. Chat workspaces and session state
+  already live only in Docker writable layers; no inherited host-worktree path
+  participates in execution.
+- **Cutover inventory.** Secret provenance and one-time migration steps remain
+  in [cutover.md](cutover.md) and `ENVIRONMENT.md`; this page documents the
+  resulting runtime topology.

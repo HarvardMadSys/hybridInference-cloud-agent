@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getAgentJob,
-  getAgentJobArtifact,
   getAgentJobFiles,
+  getAgentJobGit,
   getAgentJobThread,
-  listAgentJobEvents,
+  listAllAgentThreadEvents,
   listAgentJobs,
   listAgentProjects,
   streamAgentJob,
@@ -19,6 +19,7 @@ import type {
   AgentJobSymlinkApi,
   AgentProjectApi,
   AgentThreadApi,
+  AgentThreadEventApi,
 } from '@/lib/api/agents';
 import { toDisplayJob } from './adapt';
 import type { AgentJob } from './types';
@@ -33,23 +34,62 @@ const ACTIVE_ATTEMPT_PHASES = new Set([
   'workspace_finalizing',
 ]);
 
+const ACTIVE_WORKSPACE_PUBLICATION_STATES = new Set([
+  'pending',
+  'capturing',
+  'captured',
+  'publishing',
+]);
+
+/** Whether one shared-workspace publication still changes owner-visible data. */
+export function isActiveWorkspacePublicationState(state: unknown): boolean {
+  return typeof state === 'string' && ACTIVE_WORKSPACE_PUBLICATION_STATES.has(state);
+}
+
+/** Whether a finished shared turn still has owner-visible state to publish. */
+export function hasActiveWorkspacePublication(job: AgentJobApi | null): boolean {
+  return (
+    job?.workspace_shared === true &&
+    isActiveWorkspacePublicationState(job.workspace_publication_state)
+  );
+}
+
 /** Apply one live attempt-state event to the cached owner-facing job row. */
 export function applyAgentLifecycleEvent(
   current: AgentJobApi,
   event: AgentJobEventApi,
 ): AgentJobApi {
+  const telemetryAttemptId =
+    current.telemetry_attempt_id === undefined
+      ? current.current_attempt_id
+      : current.telemetry_attempt_id;
   if (event.event_type === 'attempt_superseded') {
     if (current.current_attempt_id !== event.attempt_id) return current;
-    return { ...current, state: 'queued', current_attempt_id: null };
+    return {
+      ...current,
+      telemetry_attempt_id: telemetryAttemptId,
+      state: 'queued',
+      current_attempt_id: null,
+    };
   }
   if (event.event_type !== 'lifecycle') return current;
   const phase = event.payload?.phase;
   if (typeof phase !== 'string') return current;
   if (ACTIVE_ATTEMPT_PHASES.has(phase)) {
-    return { ...current, state: 'running', current_attempt_id: event.attempt_id };
+    return {
+      ...current,
+      telemetry_attempt_id: telemetryAttemptId,
+      state: 'running',
+      current_attempt_id: event.attempt_id,
+    };
   }
   if (phase === 'publishing') {
-    return { ...current, state: 'publishing', current_attempt_id: event.attempt_id };
+    return {
+      ...current,
+      telemetry_attempt_id: telemetryAttemptId,
+      state: 'publishing',
+      current_attempt_id: event.attempt_id,
+    };
   }
   return current;
 }
@@ -101,7 +141,13 @@ export function useAgentJobList(
 
   // Only poll while something can still change; a list of finished jobs does
   // not need a request every ten seconds.
-  const hasLive = jobs.some((job) => job.state === 'running' || job.state === 'queued');
+  const hasLive = jobs.some(
+    (job) =>
+      job.state === 'running' ||
+      job.state === 'queued' ||
+      (job.workspaceShared === true &&
+        isActiveWorkspacePublicationState(job.workspacePublicationState)),
+  );
   useEffect(() => {
     if (!hasLive) return undefined;
     const timer = setInterval(reload, pollMs);
@@ -212,12 +258,15 @@ export function useProjectJobs(limit = 200): {
 /** One job, its event log, and its patch — kept live over SSE. */
 export function useAgentJob(jobId: string): {
   job: AgentJob | null;
+  /** Every turn's stored stream, unfolded — what the trajectory view reads. */
+  events: AgentThreadEventApi[];
   loading: boolean;
   error: string | null;
   reload: () => void;
 } {
   const [api, setApi] = useState<AgentJobApi | null>(null);
   const [events, setEvents] = useState<AgentJobEventApi[]>([]);
+  const [threadEvents, setThreadEvents] = useState<AgentThreadEventApi[]>([]);
   const [patch, setPatch] = useState<string | null>(null);
   const [thread, setThread] = useState<AgentThreadApi | null>(null);
   const [loading, setLoading] = useState(true);
@@ -234,13 +283,15 @@ export function useAgentJob(jobId: string): {
     setPatch(null);
     setLoading(true);
 
-    Promise.all([getAgentJob(jobId), listAgentJobEvents(jobId), getAgentJobThread(jobId)])
-      .then(([job, page, foundThread]) => {
+    Promise.all([getAgentJob(jobId), getAgentJobThread(jobId), listAllAgentThreadEvents(jobId)])
+      .then(([job, foundThread, foundEvents]) => {
         if (cancelled) return;
+        const ownEvents = foundEvents.filter((event) => event.job_id === jobId);
         setApi(job);
-        setEvents(page.events);
+        setEvents(ownEvents);
+        setThreadEvents(foundEvents);
         setThread(foundThread);
-        page.events.forEach((event) => seen.current.add(event.id));
+        ownEvents.forEach((event) => seen.current.add(event.id));
         setError(null);
       })
       .catch((cause: unknown) => {
@@ -255,15 +306,16 @@ export function useAgentJob(jobId: string): {
     };
   }, [jobId, tick]);
 
-  // The patch only exists once the job produced one; a 404 means "this job
-  // changed nothing", which is a real outcome rather than a failure.
+  // Diff state belongs to the retained group workspace, not to a per-turn
+  // artifact uploaded by the runner. Fork siblings therefore see the same
+  // current workspace diff, matching the Git panel below.
   const state = api?.state;
   useEffect(() => {
     if (!jobId || !state) return undefined;
     let cancelled = false;
-    getAgentJobArtifact(jobId, 'patch')
-      .then((artifact) => {
-        if (!cancelled) setPatch(artifact?.content ?? null);
+    getAgentJobGit(jobId)
+      .then((workspace) => {
+        if (!cancelled) setPatch(workspace.available ? workspace.patch : null);
       })
       .catch(() => {
         if (!cancelled) setPatch(null);
@@ -277,6 +329,8 @@ export function useAgentJob(jobId: string): {
   // opened for them at all.
   const isLive =
     state === 'waiting' || state === 'running' || state === 'queued' || state === 'publishing';
+  const currentTurnNo =
+    api?.turn_no ?? thread?.jobs.find((threadJob) => threadJob.id === jobId)?.turn_no ?? 1;
   useEffect(() => {
     if (!jobId || !isLive) return undefined;
     const controller = new AbortController();
@@ -288,6 +342,10 @@ export function useAgentJob(jobId: string): {
         if (seen.current.has(event.id)) return;
         seen.current.add(event.id);
         setEvents((current) => [...current, event]);
+        setThreadEvents((current) => [
+          ...current,
+          { ...event, job_id: jobId, turn_no: currentTurnNo },
+        ]);
         // The stream is also the fastest authority for a waiting/queued child
         // becoming active; keep the status pill in step without polling.
         setApi((current) => (current ? applyAgentLifecycleEvent(current, event) : current));
@@ -299,10 +357,42 @@ export function useAgentJob(jobId: string): {
       if (!controller.signal.aborted) reload();
     });
     return () => controller.abort();
-  }, [jobId, isLive, reload]);
+  }, [currentTurnNo, jobId, isLive, reload]);
 
-  const job = api ? toDisplayJob(api, { events, patch, thread }) : null;
-  return { job, loading, error, reload };
+  // A shared turn reaches its terminal job state before its quiescent
+  // workspace snapshot is captured and published. The SSE correctly closes
+  // at the turn boundary, so keep only that small, asynchronous tail live;
+  // otherwise the badge and draft-PR link remain stale until a full reload.
+  // Jobs without a retained group never enter this loop, and terminal
+  // publication states stop it immediately after the next response.
+  const publicationActive = hasActiveWorkspacePublication(api);
+  useEffect(() => {
+    if (!jobId || !publicationActive) return undefined;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      // Publication changes only fields on the job row. Fetching the complete
+      // conversation and event history every five seconds would add load and
+      // briefly reset unrelated UI state for no benefit.
+      void getAgentJob(jobId)
+        .then((latest) => {
+          if (!cancelled) setApi(latest);
+        })
+        .catch(() => {
+          // This is a background freshness aid. Keep the last good terminal
+          // view on a transient failure and try again on the next interval.
+        });
+    }, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [jobId, publicationActive]);
+
+  const job = api ? toDisplayJob(api, { events, patch, thread, threadEvents }) : null;
+  // Both shapes, deliberately: `job.events` is the chat view's *reading* of
+  // the stream — folded, deduplicated, unknown kinds dropped — while the
+  // trajectory needs the rows the platform actually stored.
+  return { job, events: threadEvents, loading, error, reload };
 }
 
 /** One directory of the workspace tree, as far as it has been loaded. */
@@ -320,7 +410,7 @@ export interface WorkspaceFilesState {
   file: AgentJobFileApi | AgentJobSymlinkApi | null;
   fileLoading: boolean;
   fileError: string | null;
-  source: 'workspace' | 'snapshot' | null;
+  source: 'workspace' | null;
   toggleDirectory: (path: string) => void;
   openFile: (path: string) => void;
   closeFile: () => void;
@@ -348,7 +438,7 @@ export function useWorkspaceFiles(
   const [file, setFile] = useState<AgentJobFileApi | AgentJobSymlinkApi | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
-  const [source, setSource] = useState<'workspace' | 'snapshot' | null>(null);
+  const [source, setSource] = useState<'workspace' | null>(null);
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((value) => value + 1), []);
 

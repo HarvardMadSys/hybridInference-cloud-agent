@@ -26,6 +26,12 @@ on:
   pull_request:
     branches: [main, dev]
 
+# While this repository is private, CI uses the existing self-hosted pools.
+# Before making it public, #99 must route pull requests to GitHub-hosted
+# runners; tests, package install hooks and Docker builds execute PR code.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -97,7 +103,7 @@ jobs:
           printf '%s\n' "${files}"
           echo "---------------------"
 
-          matches() { printf '%s\n' "${files}" | grep -qE "$1"; }
+          matches() { printf '%s\n' "${files}" | grep -E "$1" >/dev/null; }
 
           # Backend: everything that is not purely docs or the web app. This is
           # the old `paths-ignore` inverted, so it stays true by default — a new
@@ -106,7 +112,7 @@ jobs:
           if printf '%s\n' "${files}" \
              | grep -vE '^(docs/|web/)' \
              | grep -vE '(\.md|LICENSE|\.gitignore)$' \
-             | grep -q .; then
+             | grep . >/dev/null; then
             backend=true
           else
             backend=false
@@ -118,7 +124,7 @@ jobs:
           # Docker: the deploy files and what they COPY. README.md is here
           # because Dockerfile.agent-runner COPYs it alongside pyproject/uv.lock,
           # so deleting or renaming it breaks the build and nothing else notices.
-          if matches '^(deploy/|host/)' || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
+          if matches '^(deploy/|cloud_agent_host/)' || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
             docker=true
           else
             docker=false
@@ -137,21 +143,20 @@ jobs:
           } | tee -a "${GITHUB_OUTPUT}"
 
   # ---------------------------------------------------------------- backend
+  # One job, three checks — not a three-cell matrix. Each cell paid for its own
+  # checkout, uv install, Python install and `uv sync` in order to run a command
+  # that takes about a second: measured over one run, 14s of environment for 1s
+  # of linting. Keeping the checks together also avoids occupying several
+  # runners with identical setup for one commit.
+  #
+  # `fail-fast: false` is what the matrix bought, and it is kept below: every
+  # check runs even after one fails, and the job is red if any did. This also
+  # matches `make lint`, which has run all three as one gate all along.
   lint:
-    name: ${{ matrix.check.name }}
+    name: Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: [self-hosted, Linux, ci-general]
-    strategy:
-      fail-fast: false
-      matrix:
-        check:
-          - name: Ruff Format
-            command: uv run ruff format --check .
-          - name: Ruff Lint
-            command: uv run ruff check --no-fix .
-          - name: Pydocstyle
-            command: uv run pydocstyle backend host
     steps:
       - uses: actions/checkout@v6
         with:
@@ -181,8 +186,8 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-          # Even with UV_CACHE_DIR off the shared default, prune --ci is
-          # unnecessary on self-hosted and has raced with concurrent installs.
+          # Cache pruning adds work after the checks and is unnecessary for
+          # this job-local environment.
           prune-cache: false
 
       - name: Set up Python
@@ -191,8 +196,48 @@ jobs:
       - name: Sync dependencies
         run: uv sync
 
-      - name: ${{ matrix.check.name }}
-        run: ${{ matrix.check.command }}
+      # `continue-on-error` on the checks and nowhere else. A setup step that
+      # fails still stops the job outright — there is nothing to lint without a
+      # venv, and three identical failures would only bury the cause. A *check*
+      # that fails records its outcome and lets the others run, which is the
+      # property the matrix had.
+      - name: Ruff Format
+        id: ruff_format
+        continue-on-error: true
+        run: uv run ruff format --check .
+
+      - name: Ruff Lint
+        id: ruff_lint
+        continue-on-error: true
+        run: uv run ruff check --no-fix .
+
+      - name: Pydocstyle
+        id: pydocstyle
+        continue-on-error: true
+        run: uv run pydocstyle cloud_agent cloud_agent_host
+
+      # `continue-on-error` keeps a failed check from failing the job, so
+      # without this the job would be green with a red step inside it. Same
+      # shape as `CI Gate` below, for the same reason.
+      - name: Every check passed
+        env:
+          RESULTS: >-
+            ruff-format=${{ steps.ruff_format.outcome }}
+            ruff-lint=${{ steps.ruff_lint.outcome }}
+            pydocstyle=${{ steps.pydocstyle.outcome }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for entry in ${RESULTS}; do
+            name="${entry%%=*}"
+            result="${entry#*=}"
+            case "${result}" in
+              success) ;;
+              *) echo "::error title=Lint::${name} is ${result}"; failed=1 ;;
+            esac
+          done
+          [ "${failed}" -eq 0 ] || exit 1
+          echo "Lint: green"
 
   test:
     name: Tests
@@ -204,9 +249,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Isolate uv cache dir
+      - name: Isolate uv and npm cache dirs
         run: |
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+          echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -226,26 +272,200 @@ jobs:
       # leakage between files. A serial run silently passes on that class of bug.
       - name: Pytest
         run: uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest"
+
+      # Completion can precede the native CLI's history flush. Unit doubles
+      # cannot catch that race; exercise the shipped pin before CI can deploy.
+      # Inference is a loopback protocol fixture, with no API key or model cost.
+      - name: Set up Node for native CLI regression
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the sandbox's pinned Claude CLI
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' deploy/sandbox/Dockerfile.agent-sandbox)
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          npm install --no-audit --no-fund --prefix "${RUNNER_TEMP}/claude-context" \
+            "@anthropic-ai/claude-code@${version}"
+          echo "CLOUD_AGENT_TEST_CLAUDE_BINARY=${RUNNER_TEMP}/claude-context/node_modules/.bin/claude" >> "${GITHUB_ENV}"
+
+      - name: Native history survives close, restore and failed-turn retry
+        timeout-minutes: 10
+        run: uv run pytest -q -m external tests/external/test_claude_driver_context.py
+
+  # The other half of that command. `test` above deselects `dbtest`, and until
+  # this job existed nothing selected it — 158 tests that are written, green,
+  # and were never once executed by CI. The cost of that is on the record: the
+  # xfail in tests/integration/servers/test_agent_jobs_lifecycle.py documents a
+  # router/test mismatch that survived a whole migration, and says why in its
+  # own reason string — "It was never caught because the dbtest tier does not
+  # run in CI."
+  #
+  # These tests need a real Postgres because what they pin lives in SQL, not in
+  # Python: `FOR UPDATE SKIP LOCKED` is the entire guarantee that two workers
+  # cannot claim one job, and lease_generation fencing is the entire guarantee
+  # that a superseded attempt cannot publish a duplicate PR. A fake store can
+  # only restate what its author believed those statements do.
+  #
+  # A separate job rather than dropping the deselect from `test`: that job is
+  # the fast, dependency-free one that every backend change waits on, and it
+  # stays that way. The split also matches `make test` / `make test-db`, which
+  # is the contract AGENTS.md already documents.
+  test-db:
+    name: Tests (Postgres)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    # This pool can start service containers; postgres:15 supports ARM64.
+    runs-on: [self-hosted, Linux, ci-general]
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          # The name the fixtures already default to. They were written against
+          # the gateway repo's CI, which provides exactly this; the tests moved
+          # here in the split and the database did not.
+          POSTGRES_DB: hybridinference_test_db
+        ports:
+          - 5432/tcp
+        # 1s, not the 10s this was copied from. Docker runs the first probe one
+        # interval after start, so a 10s interval means the job waits at least
+        # ten seconds no matter how fast Postgres is. Measured on this runner:
+        # 10.3s to healthy at `10s`, 2.5s at `1s` — the server is ready in
+        # about two. `pg_isready` is a connect-and-exit, so probing it every
+        # second costs nothing worth counting.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 1s
+          --health-timeout 5s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Isolate uv cache dir
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+
+      # Into GITHUB_ENV from a step, and not a job-level `env:` block, because
+      # the `job` context — which is where the mapped host port lives — is not
+      # available to `jobs.<id>.env`. A job-level block referencing it does not
+      # fail at the step; the whole workflow is rejected before anything runs.
+      #
+      # The port is looked up rather than fixed at 5432: `ports: - 5432/tcp`
+      # asks for an ephemeral host port and avoids coupling the test to runner
+      # image internals.
+      - name: Point the fixtures at the service container
+        run: |
+          {
+            echo "TEST_DB_HOST=localhost"
+            echo "TEST_DB_PORT=${{ job.services.postgres.ports['5432'] }}"
+            echo "TEST_DB_NAME=hybridinference_test_db"
+            echo "TEST_DB_USER=postgres"
+            echo "TEST_DB_PASSWORD=postgres"
+          } >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Sync dependencies
+        run: uv sync
+
+      # Before pytest, because every dbtest fixture answers an unreachable
+      # database with `pytest.skip`, not a failure. That is right for a laptop
+      # with no Postgres and exactly wrong here: it makes "green having run
+      # nothing" this job's natural failure mode, which is the same false
+      # signal the job exists to remove. So connectivity is asserted where it
+      # can still fail loudly.
+      - name: The database is actually reachable
+        run: |
+          uv run python - <<'PY'
+          import os, sys
+          import asyncpg, asyncio
+
+          async def main():
+              conn = await asyncpg.connect(
+                  host=os.environ["TEST_DB_HOST"],
+                  port=int(os.environ["TEST_DB_PORT"]),
+                  database=os.environ["TEST_DB_NAME"],
+                  user=os.environ["TEST_DB_USER"],
+                  password=os.environ["TEST_DB_PASSWORD"],
+              )
+              print(await conn.fetchval("SELECT version()"))
+              await conn.close()
+
+          asyncio.run(main())
+          PY
+
+      # Serial, and not `-n 4` like the job above. The fixtures derive a
+      # per-worker database name (`..._gw0`, `..._gw1`, …) so that xdist
+      # workers cannot truncate each other's tables — but the service
+      # container creates one database, so under `-n 4` all four workers would
+      # fail to connect and every test would skip. The tier runs in about 15
+      # seconds; there is nothing here worth sharding.
+      - name: Pytest (dbtest tier)
+        run: uv run pytest -q -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml"
+
+      # The second half of the same guard. A fixture that skips on a database
+      # it cannot reach turns a broken service container into a passing job,
+      # and a `pytest -m` that silently matches nothing exits 0 too. Neither is
+      # distinguishable from success in the check list, so assert the shape of
+      # the run rather than trusting its exit code.
+      - name: The tier actually ran
+        run: |
+          uv run python - <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+
+          root = ET.parse(os.environ["RUNNER_TEMP"] + "/dbtest.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          ran = int(suite.get("tests", 0))
+
+          # Per-testcase, not the suite's `skipped` attribute: junit counts an
+          # xfail as a skip, and this tier has a standing one. Only
+          # type="pytest.skip" is a test that declined to run, which is what a
+          # database-less run produces.
+          skipped = [
+              tc.get("name")
+              for tc in suite.iter("testcase")
+              for sk in tc.findall("skipped")
+              if sk.get("type") == "pytest.skip"
+          ]
+          print(f"dbtest: {ran} collected, {len(skipped)} skipped")
+
+          # A floor, not the exact count, so adding tests never fails this. It
+          # only has to be high enough that a database-less run cannot clear
+          # it — that run skips all of them.
+          if ran < 100:
+              sys.exit(f"only {ran} dbtests ran; the tier is not being selected")
+          if skipped:
+              sys.exit(
+                  f"{len(skipped)} dbtests skipped — the fixtures skip when Postgres "
+                  f"is unreachable, so this job proved nothing: {skipped[:5]}"
+              )
+          PY
   # -------------------------------------------------------------------- web
+  # One job, five checks, for the reason spelled out over `lint` above — and
+  # more sharply here, because Node costs more to install than uv does. Measured
+  # over one run: 55s of setup across the five cells for 27s of actual checking,
+  # and four of the five spent longer installing than working (Prettier: 10s of
+  # setup, 1s of formatting check).
   check:
-    name: Web ${{ matrix.check.name }}
+    name: Web
     needs: changes
     if: needs.changes.outputs.web == 'true'
     runs-on: [self-hosted, Linux, ci-general]
-    strategy:
-      fail-fast: false
-      matrix:
-        check:
-          - name: ESLint
-            command: npm run lint
-          - name: Prettier
-            command: npm run format:check
-          - name: TypeScript
-            command: npm run type-check
-          - name: Tests
-            command: npm run test
-          - name: Build
-            command: npm run build
     steps:
       - uses: actions/checkout@v6
         with:
@@ -292,10 +512,69 @@ jobs:
         working-directory: ./web
         run: npm ci
 
-      - name: ${{ matrix.check.name }}
+      # Ordered cheapest-first so a formatting slip is reported in seconds
+      # rather than after the build. They no longer run concurrently, so the
+      # order is now something a reader can spend.
+      - name: ESLint
+        id: eslint
         if: steps.detect.outputs.present == 'true'
+        continue-on-error: true
         working-directory: ./web
-        run: ${{ matrix.check.command }}
+        run: npm run lint
+
+      - name: Prettier
+        id: prettier
+        if: steps.detect.outputs.present == 'true'
+        continue-on-error: true
+        working-directory: ./web
+        run: npm run format:check
+
+      - name: TypeScript
+        id: typescript
+        if: steps.detect.outputs.present == 'true'
+        continue-on-error: true
+        working-directory: ./web
+        run: npm run type-check
+
+      - name: Tests
+        id: tests
+        if: steps.detect.outputs.present == 'true'
+        continue-on-error: true
+        working-directory: ./web
+        run: npm run test
+
+      - name: Build
+        id: build
+        if: steps.detect.outputs.present == 'true'
+        continue-on-error: true
+        working-directory: ./web
+        run: npm run build
+
+      # Skipped along with the checks when web/ is absent, so this stays the
+      # deliberate no-op the `Detect web app` step describes rather than
+      # reading five empty outcomes as five failures.
+      - name: Every check passed
+        if: steps.detect.outputs.present == 'true'
+        env:
+          RESULTS: >-
+            eslint=${{ steps.eslint.outcome }}
+            prettier=${{ steps.prettier.outcome }}
+            typescript=${{ steps.typescript.outcome }}
+            tests=${{ steps.tests.outcome }}
+            build=${{ steps.build.outcome }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for entry in ${RESULTS}; do
+            name="${entry%%=*}"
+            result="${entry#*=}"
+            case "${result}" in
+              success) ;;
+              *) echo "::error title=Web::${name} is ${result}"; failed=1 ;;
+            esac
+          done
+          [ "${failed}" -eq 0 ] || exit 1
+          echo "Web: green"
   # ------------------------------------------------------------------ secret
   gitleaks:
     name: Gitleaks
@@ -350,12 +629,11 @@ jobs:
     name: Build ${{ matrix.image.name }}
     needs: changes
     if: needs.changes.outputs.docker == 'true'
-    # **Each image builds on the architecture it is deployed to.** These five do
-    # not all run in the same place: `control-plane` runs on spark2 (ARM64) with
-    # the web app, and the other four run on the runner host (x86_64), which is
-    # a different machine. Building them all in one place verified four of them
-    # against an architecture they never see — the build resolving on aarch64
-    # says nothing about a base image without an amd64 layer, or the reverse.
+    # **Each image builds on the architecture it is deployed to.** The control
+    # plane targets ARM64; the host images target x86_64. Each image uses the
+    # matching self-hosted image verification pool.
+    # A build resolving on ARM64 says nothing about a base image without an
+    # amd64 layer, or the reverse.
     #
     # `push: false` still: nothing here publishes. The point is that the build
     # resolves *where it matters*.
@@ -448,10 +726,8 @@ jobs:
       # did a first attempted fix (`cache_effective_user root`, which squid
       # rejects outright). Only starting the thing does.
       #
-      # A self-hosted runner shares its machine, its /tmp and its image store
-      # with every other job on it, so the tag, the container and the rendered
-      # config are per-run. Two runs colliding on `egress-proxy:ci` would have
-      # one testing the other's image.
+      # Keep the tag, container and rendered config per-run so retries and
+      # concurrent workflow attempts remain independently diagnosable.
       - name: Name this run's artifacts
         run: |
           suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -466,11 +742,8 @@ jobs:
         run: |
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
-      # setup-uv rather than `pipx install uv || pip install uv`: on a
-      # self-hosted runner that second branch installs into the machine's
-      # system Python, where a modern Debian/Ubuntu refuses it outright
-      # (externally-managed-environment) and an older one silently mutates a
-      # shared interpreter every other job also uses.
+      # setup-uv rather than mutating the runner image's system Python; the
+      # action also gives this job the same pinned setup path as backend CI.
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
@@ -503,7 +776,7 @@ jobs:
           fi
           # Up is not the same as listening: a squid that started and then
           # failed to bind would still read as `running` for a moment.
-          docker logs "$cid" 2>&1 | grep -q "Accepting HTTP Socket connections" || {
+          docker logs "$cid" 2>&1 | grep -F "Accepting HTTP Socket connections" >/dev/null || {
             echo "::error::the proxy is up but never accepted connections"
             exit 1
           }
@@ -527,8 +800,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     # The one docker job with no architecture to match: `docker compose config`
-    # parses and interpolates, it does not build or start anything. Left on the
-    # larger pool so it does not queue behind the x86 image builds.
+    # parses and interpolates, it does not build or start anything. Use the
+    # ARM64 pool so this does not queue behind the x64 image builds.
     runs-on: [self-hosted, Linux, ARM64, image-verify-arm64]
     steps:
       - uses: actions/checkout@v6
@@ -558,11 +831,10 @@ jobs:
           # behaviour being checked: a required variable that stopped being
           # required would silently weaken the deployment.
           cat > .env <<'ENVFILE'
-          AGENT_DISPATCHER_TOKEN=ci-placeholder-token
-          # Distinct from the dispatcher token above, and distinct here on
-          # purpose: the stack refuses to render when they are one value, and
-          # a placeholder that reused it would make this check pass on the
-          # arrangement it exists to forbid.
+          # Broker authorization is distinct from enrollment-issued host
+          # credentials. The latter are persisted after one-time enrollment
+          # and therefore are not a Compose secret.
+          COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-ci
           AGENT_WORKSPACE_BROKER_TOKEN=ci-placeholder-broker-token
           AGENT_SANDBOX_IMAGE=cloud-agent-sandbox:ci
           AGENT_GATEWAY_URL=http://agent-gateway:8080
@@ -600,8 +872,16 @@ jobs:
           AGENT_SESSION_SECRET=ci-placeholder-value-not-a-real-secret
           AGENT_CONTROL_TOKEN_SECRET=ci-placeholder-value-not-a-real-secret
           AGENT_SOURCE_CONTROL_ENCRYPTION_KEY=ci-placeholder-value-not-real
+          AGENT_DEPLOYMENT_SHA=ci-deployment-sha
           AGENT_POSTGRES_PASSWORD=ci-placeholder
-          AGENT_DISPATCHER_TOKEN=ci-placeholder
+          AGENT_WORKSPACE_BROKER_TOKEN=ci-placeholder-broker-token
+          # Sign-in is assembled server-side now, so the control plane needs
+          # the consent page, its own callback as the gateway must see it
+          # (byte-identical to an IDENTITY_ALLOWED_REDIRECTS entry there),
+          # and where to land the browser afterwards.
+          GATEWAY_AUTHORIZE_URL=https://gateway.invalid/authorize
+          AGENT_SESSION_REDIRECT_URI=https://agents.invalid/agents/api/v1/session/callback
+          AGENT_WEB_BASE_URL=https://agents.invalid/agents
           # The web build arguments are required rather than defaulted to
           # empty: empty is a real answer for a deployment that owns its
           # hostname and silently wrong for one mounted under a prefix, and
@@ -609,7 +889,7 @@ jobs:
           # part of what this step checks.
           AGENT_WEB_BASE_PATH=/agents
           AGENT_WEB_API_URL=/agents/api
-          AGENT_WEB_GATEWAY_AUTHORIZE_URL=https://gateway.invalid/authorize
+          AGENT_WEB_GATEWAY_URL=https://gateway.invalid
           ENVFILE
           docker compose \
             -f deploy/control-plane/docker-compose.yml \
@@ -624,10 +904,9 @@ jobs:
         run: |
           set -euo pipefail
           # Each fails for its own reason: a session secret left blank signs
-          # cookies with nothing; a missing dispatcher token means every claim
-          # 401s and the queue never drains; a missing broker token used to
-          # fall back to the dispatcher token, which handed one secret two
-          # permissions.
+          # cookies with nothing; a missing broker token leaves the control
+          # plane unable to route files, terminals, Fork, snapshots or native
+          # session operations to an enrolled host.
           check() {
             local stack="$1" envfile="$2" required="$3"
             grep -v "^${required}=" "$envfile" > .env.missing
@@ -640,20 +919,20 @@ jobs:
 
           CP=deploy/control-plane/docker-compose.yml
           HOST=deploy/host/docker-compose.sandbox.yml
-          for required in AGENT_SESSION_SECRET AGENT_DISPATCHER_TOKEN; do
+          for required in AGENT_SESSION_SECRET AGENT_WORKSPACE_BROKER_TOKEN AGENT_DEPLOYMENT_SHA; do
             check "$CP" .env.control-plane "$required"
           done
-          for required in AGENT_DISPATCHER_TOKEN AGENT_WORKSPACE_BROKER_TOKEN; do
+          for required in AGENT_WORKSPACE_BROKER_TOKEN; do
             check "$HOST" .env "$required"
           done
 
       - name: The rendered stack keeps its security properties
         run: |
           set -euo pipefail
-          # `uv run --with pyyaml`, not a bare python3: a self-hosted runner is
-          # whatever the machine has, and PyYAML is preinstalled on a hosted
-          # image rather than guaranteed. The heredoc is quoted, so the path
-          # comes through the environment rather than shell interpolation.
+          # `uv run --with pyyaml`, not a bare python3: incidental packages in
+          # the runner environment are not a dependency guarantee. The heredoc is
+          # quoted, so the path comes through the environment rather than shell
+          # interpolation.
           uv run --no-project --with pyyaml python - <<'PY'
           import os, sys, yaml
           stack = yaml.safe_load(open(os.environ["RUNNER_TEMP"] + "/rendered.yml"))
@@ -699,6 +978,7 @@ jobs:
       - changes
       - lint
       - test
+      - test-db
       - check
       - gitleaks
       - build
@@ -711,6 +991,7 @@ jobs:
             changes=${{ needs.changes.result }}
             lint=${{ needs.lint.result }}
             test=${{ needs.test.result }}
+            test-db=${{ needs.test-db.result }}
             web=${{ needs.check.result }}
             gitleaks=${{ needs.gitleaks.result }}
             build=${{ needs.build.result }}

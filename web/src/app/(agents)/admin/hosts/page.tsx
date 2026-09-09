@@ -2,32 +2,34 @@
 
 // The runner host pool — the whole of this service's operations surface.
 //
-// Runners pull work, so nothing here moves a job to a machine: every control on
-// this page changes who may *claim*, and takes effect on the losing host's next
-// poll. The wording follows that. "Pinned", not "assigned"; "last polled", not
-// "online".
+// Runners pull work, so nothing here moves a sandbox to a machine. The pin
+// chooses where chats without a sandbox may be materialized; an existing
+// retained chat remains claimable only by its Docker-owning host. "Pinned",
+// not "assigned"; "last polled", not "online".
 //
-// It replaces the section that lived in the gateway's admin settings tab, which
-// had the pin, the poll age and forget — a third of the pool's lifecycle,
-// because the other two thirds (enroll, drain/remove) did not exist yet.
+// Enrolment is deliberately absent. Minting a host credential is a real
+// operation and its endpoint stays, but it exists to stop a machine claiming
+// to be a machine it is not — and every runner in this pool is ours, so the
+// control was answering a question nobody here asks. Issue a token from the
+// API on the rare day a new host needs one.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasRole } from '@/components/providers/AuthProvider';
-import type { AgentRunnerHost } from '@/lib/api/admin';
+import type { AgentRunnerHost, AgentRunnerHostPool } from '@/lib/api/admin';
 import {
   drainAgentRunnerHost,
   forgetAgentRunnerHost,
   getAgentRunnerHosts,
-  issueHostEnrollToken,
   removeAgentRunnerHost,
   setActiveAgentRunnerHost,
+  setAgentRuntimeVersion,
   undrainAgentRunnerHost,
 } from '@/lib/api/admin';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import { formatAge, formatSlots } from './format';
+import { formatAge, formatSlots, runtimeMenu } from './format';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
 // easily as "gone". Carried over from the gateway's section along with the
@@ -38,13 +40,15 @@ const RECENT_POLL_SECONDS = 300;
 // as stale within a poll or two of actually becoming so.
 const REFRESH_MS = 30_000;
 
-const ENROLL_TTL_SECONDS = 900;
-
 const STATUS_STYLES: Record<string, string> = {
-  online: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-  draining: 'bg-amber-50 text-amber-700 ring-amber-600/20',
-  enrolling: 'bg-blue-50 text-blue-700 ring-blue-600/20',
-  disabled: 'bg-gray-100 text-gray-600 ring-gray-500/20',
+  online:
+    'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-emerald-600/20 dark:ring-emerald-500/25',
+  draining:
+    'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-amber-600/20 dark:ring-amber-500/25',
+  enrolling:
+    'bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 ring-blue-600/20 dark:ring-blue-500/25',
+  disabled:
+    'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400 ring-gray-500/20 dark:ring-white/15',
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -62,12 +66,11 @@ export default function AdminHostsPage() {
   const { state } = useAuth();
   const [hosts, setHosts] = useState<AgentRunnerHost[]>([]);
   const [activeHost, setActiveHost] = useState<string | null>(null);
+  const [runtimeVersions, setRuntimeVersions] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [enrollHost, setEnrollHost] = useState('');
-  const [issuedToken, setIssuedToken] = useState<{ host: string; token: string } | null>(null);
 
   const mounted = useRef(true);
   const isAdmin = hasRole(state.user?.role, 'admin');
@@ -80,6 +83,7 @@ export default function AdminHostsPage() {
       if (!mounted.current) return;
       setHosts(next.hosts);
       setActiveHost(next.active_host);
+      setRuntimeVersions(next.runtime_versions ?? {});
     } catch (e) {
       if (!mounted.current) return;
       // A failed background poll leaves the last good pool on screen rather
@@ -113,34 +117,43 @@ export default function AdminHostsPage() {
   }, [load, isAdmin]);
 
   // Every action returns the whole pool, so they all end the same way.
-  const run = useCallback(
-    async (
-      action: () => Promise<{ hosts: AgentRunnerHost[]; active_host: string | null }>,
-      ok: string,
-    ) => {
-      setBusy(true);
-      setNotice(null);
-      try {
-        const next = await action();
-        if (!mounted.current) return;
-        setHosts(next.hosts);
-        setActiveHost(next.active_host);
-        setNotice(ok);
-      } catch (e) {
-        if (mounted.current) setNotice(getErrorMessage(e));
-      } finally {
-        if (mounted.current) setBusy(false);
-      }
-    },
-    [],
-  );
+  const run = useCallback(async (action: () => Promise<AgentRunnerHostPool>, ok: string) => {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const next = await action();
+      if (!mounted.current) return;
+      setHosts(next.hosts);
+      setActiveHost(next.active_host);
+      setRuntimeVersions(next.runtime_versions ?? {});
+      setNotice(ok);
+    } catch (e) {
+      if (mounted.current) setNotice(getErrorMessage(e));
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  }, []);
 
   const handlePin = (host: string | null) =>
     run(
       () => setActiveAgentRunnerHost(host),
       host
-        ? `New agent jobs now go to ${host}. Jobs already running elsewhere keep running there.`
-        : 'Agent jobs unpinned — any runner may claim.',
+        ? `New chats now go to ${host}. Existing retained chats stay on their owning hosts.`
+        : 'New chats are unpinned — any runner may materialize one.',
+    );
+
+  // Unioned across the pool, because the selection is deployment-wide while
+  // the menus are per-image. Derived on render rather than held in state: it is
+  // a view of `hosts`, and a second copy could disagree with the table beside
+  // it after a poll.
+  const menu = runtimeMenu(hosts);
+
+  const handleVersion = (runtime: string, version: string) =>
+    run(
+      () => setAgentRuntimeVersion(runtime, version || null),
+      version
+        ? `New ${runtime} threads will run ${version}. Threads already running keep theirs.`
+        : `${runtime} is back on each host's image default.`,
     );
 
   const handleRemove = (host: string, slotsUsed: number) => {
@@ -157,54 +170,50 @@ export default function AdminHostsPage() {
     void run(() => removeAgentRunnerHost(host, slotsUsed > 0), `Removed ${host} from the pool.`);
   };
 
-  const handleEnroll = async () => {
-    const host = enrollHost.trim();
-    if (!host) return;
-    setBusy(true);
-    setNotice(null);
-    try {
-      const issued = await issueHostEnrollToken(host, ENROLL_TTL_SECONDS);
-      if (!mounted.current) return;
-      setIssuedToken({ host: issued.host, token: issued.enroll_token });
-      setEnrollHost('');
-    } catch (e) {
-      if (mounted.current) setNotice(getErrorMessage(e));
-    } finally {
-      if (mounted.current) setBusy(false);
-    }
-  };
-
   if (!isAdmin) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
-        <h1 className="text-xl font-semibold text-gray-900">Admin access required</h1>
-        <p className="text-sm text-gray-500">The runner host pool is visible to admins only.</p>
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
+          Admin access required
+        </h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          The runner host pool is visible to admins only.
+        </p>
       </div>
     );
   }
 
-  // Only the pinned host's silence is an incident: nothing else can pick the
-  // queue up, because pinning is what turned the others off.
+  // Silence blocks new-chat placement on the selected host. Existing retained
+  // chats have the same host-local dependency on each of their own owners.
   const staleActive = hosts.find((h) => h.active && h.seconds_since_seen > RECENT_POLL_SECONDS);
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="mx-auto max-w-5xl">
-        <h1 className="text-[17px] font-semibold text-gray-900">Runner hosts</h1>
-        <p className="mt-1 max-w-3xl text-[12px] text-gray-500">
-          The machines that may run agent jobs. A host appears here once a runner on it has reported
-          in, so this is the set that has polled — not a claim that any of them is reachable right
-          now. Pinning is not a drain: the new host starts claiming immediately, while jobs already
-          running on the old one keep running to the end.
-        </p>
+    <div className="flex-1 overflow-y-auto">
+      {/* The page shell the rest of the app uses (see IntegrationsView): one
+          wide column, a real heading, and sections that are cards rather than
+          controls floating between paragraphs. This page had grown its own
+          denser dialect, which read as unfinished beside every other screen. */}
+      <section className="mx-auto w-full max-w-5xl px-6 py-12 lg:px-12 lg:py-16">
+        {/* This is the admin area, not a page about one subject — which is
+            what "Runner hosts" made it, with the harness selector reading as a
+            sub-heading of the machine list. A CLI version is not a property of
+            a machine; both are settings an admin comes here to change, and
+            naming the container rather than one of its contents leaves room
+            for the next one without another rename.
+
+            No subtitle: the two section headings already say what is here, and
+            a sentence restating them is the prose this page kept accumulating. */}
+        <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
+          Admin
+        </h1>
 
         {error && (
-          <div className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-[12px] text-red-600">
-            {error}
+          <div className="mt-6 flex items-center justify-between gap-4 rounded-xl border border-red-200 dark:border-red-500/25 bg-red-50 dark:bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-400">
+            <span>{error}</span>
             <button
               type="button"
               onClick={() => void load()}
-              className="ml-2 font-medium underline"
+              className="shrink-0 font-medium hover:underline"
             >
               Retry
             </button>
@@ -213,7 +222,7 @@ export default function AdminHostsPage() {
 
         {notice && (
           <div
-            className="mt-4 rounded-lg bg-gray-50 px-3 py-2 text-[12px] text-gray-700"
+            className="mt-6 rounded-xl border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/5 px-4 py-3 text-sm text-gray-700 dark:text-gray-300"
             role="status"
           >
             {notice}
@@ -221,201 +230,263 @@ export default function AdminHostsPage() {
         )}
 
         {staleActive && (
-          <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
-            {staleActive.host} last polled {formatAge(staleActive.seconds_since_seen)}. Jobs are
-            pinned to it, so if its runner is down the queue is stopped — pin another host or choose
-            Any host. (A machine that is simply busy also stops polling, so check before switching.)
+          <div className="mt-6 rounded-xl border border-amber-200 dark:border-amber-500/25 bg-amber-50 dark:bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+            {staleActive.host} last polled {formatAge(staleActive.seconds_since_seen)}. New chats
+            are pinned to it, so they will wait while its runners are down — pin another host or
+            choose Any host. Existing retained chats do not move. (A machine that is simply busy
+            also stops polling, so check before switching.)
           </div>
         )}
 
-        <div className="mt-5 flex items-center gap-3">
-          <button
-            type="button"
-            disabled={busy || activeHost === null}
-            onClick={() => void handlePin(null)}
-            className="rounded-md border border-gray-200 px-2.5 py-1.5 text-[12px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
-          >
-            Any host
-          </button>
-          <span className="text-[12px] text-gray-500">
-            {activeHost ? `Pinned to ${activeHost}` : 'Unpinned — any runner may claim'}
-          </span>
-        </div>
+        {/* ── Harness version ──────────────────────────────────────────
+            One row per runtime, because the previous inline strip put five
+            selects and five bare runtime names on a single line: five copies
+            of "Image default" with nothing to say which was which, and no
+            room to explain that the options come from the image.
 
-        {loading ? (
-          <p className="mt-6 text-[12px] text-gray-500">Loading…</p>
-        ) : hosts.length === 0 ? (
-          <p className="mt-6 text-[12px] text-gray-500">
-            No runner has polled yet. Start one and it will appear here.
-          </p>
-        ) : (
-          <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full text-left text-[12px]">
-              <thead className="text-gray-500">
-                <tr>
-                  <th className="py-2 pr-4 font-medium">Host</th>
-                  <th className="py-2 pr-4 font-medium">Status</th>
-                  <th className="py-2 pr-4 font-medium">Slots</th>
-                  <th className="py-2 pr-4 font-medium">Capabilities</th>
-                  <th className="py-2 pr-4 font-medium">Runner</th>
-                  <th className="py-2 pr-4 font-medium">Last polled</th>
-                  <th className="py-2 pr-4 font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {hosts.map((host) => (
-                  <tr key={host.host} className="align-top">
-                    <td className="py-2.5 pr-4">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-gray-900">{host.host}</span>
-                        {host.active && (
-                          <span className="rounded-full bg-crimson/[0.08] px-2 py-0.5 text-[11px] text-crimson">
-                            pinned
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-gray-500">
-                        {/* Which door the machine came through decides what its
-                            name is worth: reported by the runner (a scheduling
-                            label anything with the dispatcher credential can
-                            claim) or bound to a credential by enrollment. */}
-                        {host.enrolled ? 'enrolled' : 'self-reported name'}
-                        {host.last_worker_id ? ` · ${host.last_worker_id}` : ''}
-                      </div>
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <StatusBadge status={host.status} />
-                    </td>
-                    <td className="py-2.5 pr-4 text-gray-700">{formatSlots(host)}</td>
-                    <td className="py-2.5 pr-4 text-gray-700">
-                      {host.capabilities.length > 0 ? host.capabilities.join(', ') : '—'}
-                    </td>
-                    <td className="py-2.5 pr-4 text-gray-700">{host.runner_version ?? '—'}</td>
-                    <td className="py-2.5 pr-4 text-gray-700">
-                      {formatAge(host.seconds_since_seen)}
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <div className="flex flex-wrap gap-2">
-                        {!host.active && (
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => void handlePin(host.host)}
-                            className="rounded-md border border-gray-200 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
-                          >
-                            Pin
-                          </button>
-                        )}
-                        {host.status === 'draining' ? (
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              void run(
-                                () => undrainAgentRunnerHost(host.host),
-                                `${host.host} is taking work again.`,
-                              )
-                            }
-                            className="rounded-md border border-gray-200 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
-                          >
-                            Undrain
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              void run(
-                                () => drainAgentRunnerHost(host.host),
-                                `${host.host} stops taking new work; running attempts finish.`,
-                              )
-                            }
-                            className="rounded-md border border-gray-200 px-2 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
-                          >
-                            Drain
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => handleRemove(host.host, host.slots_used)}
-                          className="rounded-md border border-gray-200 px-2 py-1 font-medium text-red-600 hover:bg-red-50 disabled:opacity-40"
-                        >
-                          Remove
-                        </button>
-                        {!host.active && (
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              void run(
-                                () => forgetAgentRunnerHost(host.host),
-                                `Dropped ${host.host} from the list. A runner still polling there re-adds itself.`,
-                              )
-                            }
-                            className="rounded-md px-2 py-1 font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-40"
-                          >
-                            Forget
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            Two layers the wording has to keep apart: the *menu* is built into
+            each sandbox image and changes only by rebuilding; this picks which
+            item on it new work runs. A runtime with one option is an image
+            holding one version — add more through that host's
+            `*_EXTRA_VERSIONS`. */}
+        {menu.length > 0 && (
+          <div className="mt-10">
+            {/* No subtitle, unlike the section below, because both of the
+                things one would say are already said where they land: that a
+                running conversation keeps its version is in the confirmation
+                after the change, and where the options come from — and how to
+                add one — is deployment documentation, in `.env.example` and
+                ENVIRONMENT.md, read by the person editing the `.env` rather
+                than by anyone standing on this page. */}
+            <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+              Harness version
+            </h2>
+            <div className="mt-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 shadow-sm">
+              {/* A name and its control. Nothing here pre-announces what opening
+                  the control would show: the versions on offer are in the
+                  select, and the version each host is actually holding is in
+                  the table below — said twice already, and the second telling
+                  was the abstract one. */}
+              {menu.map(([runtime, versions], index) => (
+                <div
+                  key={runtime}
+                  className={`flex flex-col justify-center gap-3 py-2.5 sm:flex-row sm:items-center ${
+                    index > 0 ? 'border-t border-gray-100 dark:border-white/5' : ''
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <label
+                      htmlFor={`harness-version-${runtime}`}
+                      className="text-sm text-gray-700 dark:text-gray-300"
+                    >
+                      {runtime}
+                    </label>
+                  </div>
+                  <div className="flex shrink-0 justify-end">
+                    <select
+                      id={`harness-version-${runtime}`}
+                      disabled={busy}
+                      value={runtimeVersions[runtime] ?? ''}
+                      onChange={(event) => void handleVersion(runtime, event.target.value)}
+                      className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                    >
+                      <option value="">Image default</option>
+                      {versions.map((version) => (
+                        <option key={version} value={version}>
+                          {version}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
-        <div className="mt-8 rounded-xl border border-gray-200 bg-white p-5">
-          <h2 className="text-[14px] font-semibold text-gray-900">Enroll a host</h2>
-          <p className="mt-1 max-w-3xl text-[12px] text-gray-500">
-            Mints a one-time token for the machine named here. The name is chosen on this side
-            because registration upserts: a name already in use has that host&apos;s credential
-            revoked and its row reset, so a typo can evict a working machine.
-          </p>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <label htmlFor="enroll-host" className="sr-only">
-              Host name
-            </label>
-            <input
-              id="enroll-host"
-              value={enrollHost}
-              onChange={(e) => setEnrollHost(e.target.value)}
-              placeholder="runner-b"
-              className="rounded-md border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25"
-            />
-            <button
-              type="button"
-              disabled={busy || enrollHost.trim() === ''}
-              onClick={() => void handleEnroll()}
-              className="rounded-md bg-gray-900 px-2.5 py-1.5 text-[12px] font-medium text-white hover:bg-gray-800 disabled:opacity-40"
-            >
-              Issue token
-            </button>
-          </div>
+        {/* ── The pool ─────────────────────────────────────────────────
+            Six columns, not nine. `Capabilities` and `Runner` were empty on
+            every real row and still took a column each; they now sit in the
+            host's own meta line and appear only when there is something to
+            say. What a machine will *run* — CLI versions and the image they
+            came from — is one question, so it is one cell. */}
+        <div className="mt-10">
+          {/* Six columns became four. `Runs` listed the CLI versions each host
+              holds and the digest they came from; with one runner it restated
+              the section above, and it was the widest, most-wrapping cell in
+              the table.
 
-          {issuedToken && (
-            <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-[12px] text-amber-900">
-              <p className="font-medium">
-                Token for {issuedToken.host} — copy it now, it is not shown again.
-              </p>
-              {/* Only its hash is stored, so there is no call that can recover
-                  it. An operator who loses it issues another. */}
-              <code className="mt-1 block break-all font-mono text-[11px]">
-                {issuedToken.token}
-              </code>
+              The cost, recorded because it is real: nothing in the UI now
+              shows a host running a *different* image from its neighbour. The
+              data is still on the host row and still in the admin response, so
+              the column comes back as markup alone the day two hosts diverge.
+
+              The caveat that used to sit above the table — a host appears once
+              its runner polled, which is not a claim it is reachable now — is
+              what the "Last polled" column is called. */}
+          <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">Runner hosts</h2>
+
+          {/* Which hosts take work, stated where the hosts are.
+              This was a section of its own, and the split was the confusion:
+              the *state* sat in a card at the top while the only way to change
+              it — Pin — was a button in the table below, so reading it and
+              acting on it happened in two places. It is one sentence about the
+              list, so it belongs to the list.
+
+              Worth saying out loud rather than leaving to the badge: an absent
+              "pinned" chip is ambiguous (nothing pinned, or did I miss it?),
+              and pinning is not a drain — the machine that lost the pin keeps
+              running and resuming retained chats it already owns. */}
+          {activeHost && (
+            <div className="mt-2">
               <button
                 type="button"
-                onClick={() => setIssuedToken(null)}
-                className="mt-2 font-medium underline"
+                disabled={busy}
+                onClick={() => void handlePin(null)}
+                className="inline-flex items-center rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
               >
-                Dismiss
+                Any host
               </button>
             </div>
           )}
+
+          {loading ? (
+            <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">Loading…</p>
+          ) : hosts.length === 0 ? (
+            <div className="mt-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400 shadow-sm">
+              No runner has polled yet. Start one and it will appear here.
+            </div>
+          ) : (
+            <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm">
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="border-b border-gray-100 dark:border-white/5 text-xs text-gray-500 dark:text-gray-400">
+                    <tr>
+                      <th className="px-6 py-3 font-medium">Host</th>
+                      <th className="px-3 py-3 font-medium">Status</th>
+                      <th className="px-3 py-3 font-medium">Slots</th>
+                      <th className="px-3 py-3 font-medium whitespace-nowrap">Last polled</th>
+                      <th className="px-6 py-3 text-right font-medium">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+                    {hosts.map((host) => (
+                      <tr key={host.host} className="align-top">
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-gray-900 dark:text-gray-50">
+                              {host.host}
+                            </span>
+                            {host.active && (
+                              <span className="rounded-full bg-crimson/[0.08] dark:bg-crimson/20 px-2 py-0.5 text-xs font-medium text-crimson dark:text-crimson-light">
+                                pinned
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
+                            {/* Deliberately not "enrolled" / "self-reported
+                                name". That distinction is about whether a
+                                machine could be lying about which machine it
+                                is, and every host in this pool is one of ours —
+                                it answered a question nobody operating this
+                                page is asking. The mechanism is untouched; the
+                                credential still binds drain and remove to a
+                                machine. It is just not a thing to read here. */}
+                            {host.last_worker_id ?? '—'}
+                            {host.runner_version ? ` · runner ${host.runner_version}` : ''}
+                            {host.capabilities.length > 0
+                              ? ` · ${host.capabilities.join(', ')}`
+                              : ''}
+                          </div>
+                        </td>
+                        <td className="px-3 py-4">
+                          <StatusBadge status={host.status} />
+                        </td>
+                        <td className="px-3 py-4 whitespace-nowrap text-gray-700 dark:text-gray-300">
+                          {formatSlots(host)}
+                        </td>
+                        <td className="px-3 py-4 whitespace-nowrap text-gray-700 dark:text-gray-300">
+                          {formatAge(host.seconds_since_seen)}
+                        </td>
+                        <td className="px-6 py-4">
+                          {/* One line, right-aligned, and the destructive pair
+                              carries no border: four equally-weighted buttons
+                              wrapping onto two ragged lines made Remove the
+                              loudest thing in the row. */}
+                          <div className="flex items-center justify-end gap-1">
+                            {!host.active && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void handlePin(host.host)}
+                                className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                              >
+                                Pin
+                              </button>
+                            )}
+                            {host.status === 'draining' ? (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() =>
+                                  void run(
+                                    () => undrainAgentRunnerHost(host.host),
+                                    `${host.host} is taking work again.`,
+                                  )
+                                }
+                                className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                              >
+                                Undrain
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() =>
+                                  void run(
+                                    () => drainAgentRunnerHost(host.host),
+                                    `${host.host} stops taking new work; running attempts finish.`,
+                                  )
+                                }
+                                className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                              >
+                                Drain
+                              </button>
+                            )}
+                            {!host.active && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() =>
+                                  void run(
+                                    () => forgetAgentRunnerHost(host.host),
+                                    `Dropped ${host.host} from the list. A runner still polling there re-adds itself.`,
+                                  )
+                                }
+                                className="rounded-lg px-2.5 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                              >
+                                Forget
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleRemove(host.host, host.slots_used)}
+                              className="rounded-lg px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-40"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
-      </div>
+      </section>
     </div>
   );
 }

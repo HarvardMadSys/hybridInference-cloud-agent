@@ -1,21 +1,21 @@
 #!/bin/sh
 # One encrypted hop to the gateway, and nothing else.
 #
-# A sandbox runs untrusted repository code on a network declared `internal:
-# true` — no route off the host at all. That works because the gateway is
-# normally a container on that same network. On a machine that has no gateway,
-# it works because this does: one container on both the closed network and a
-# routable one, forwarding a single port to a single destination.
+# A sandbox runs untrusted repository code on a chat-private network declared
+# `internal: true` — no route off the host at all. Lifecycle code attaches this
+# relay container to that network after discovering it on the compose
+# backplane. The relay's other leg is SSH: one fixed forwarded port to one fixed
+# destination.
 #
 # It is deliberately not a proxy. There is no CONNECT, no request routing, no
-# destination the caller can choose: the address is fixed at startup, so through
-# the agent phase the sandbox's reachable world stays exactly one endpoint — the
-# same guarantee it has when the gateway is local. (Setup runs earlier, on its
-# own tier, and may also reach the allowlist proxy; this tunnel is not on that
-# path.)
+# destination the caller can choose: this instance's address is fixed at
+# startup. Each chat Agent-phase network contains two such instances, one for
+# inference and one for the MCP-only listener, and no other chat or general
+# route. (Setup runs earlier, on its own tier, and may also reach the allowlist
+# proxy; this tunnel is not on that path.)
 #
 # SSH rather than plain TCP because the hop crosses a shared network and the
-# traffic is not incidental: every claim carries the dispatcher credential, and
+# traffic is not incidental: every claim carries an enrolled-host credential, and
 # every job call carries a capability token for that job. Those must not cross
 # a lab LAN in the clear, and it lets the gateway keep listening on loopback.
 set -eu
@@ -62,7 +62,7 @@ die() { printf '[agent-gateway-tunnel] ERROR: %s\n' "$*" >&2; exit 1; }
     "no known_hosts at $KNOWN_HOSTS. Generate it on the runner host with
      'ssh-keyscan -p $SSH_PORT <gateway-host>', check the fingerprint, and mount
      it. This is not disabled by an option: an unverified hop would leak the
-     dispatcher credential to anything that answers."
+     enrolled-host credential to anything that answers."
 
 # Both or neither. A port with no bind address is a loopback-only forward: it
 # binds successfully on the far host, ssh reports nothing wrong, and the

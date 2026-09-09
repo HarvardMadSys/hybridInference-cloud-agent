@@ -1,0 +1,185 @@
+#!/opt/claude-agent-sdk/bin/python
+"""Prompt-free native Claude session fork using the pinned Agent SDK."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+from claude_agent_sdk import fork_session
+from claude_agent_sdk._internal.sessions import _resolve_session_file_path
+
+
+def _session_entries(session_id: str, directory: str) -> list[dict[str, Any]]:
+    """Return the current raw chain, retaining history across compaction."""
+    path = _resolve_session_file_path(session_id, directory)
+    if path is None:
+        raise ValueError(f"native session {session_id} was not found")
+    try:
+        content = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"native session {session_id} could not be read") from exc
+
+    entries: list[dict[str, Any]] = []
+    for line in content.splitlines():
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if (
+            isinstance(entry, dict)
+            and entry.get("type") in {"user", "assistant", "progress", "system", "attachment"}
+            and isinstance(entry.get("uuid"), str)
+            and entry["uuid"]
+        ):
+            entries.append(entry)
+    if not entries:
+        raise ValueError(f"native session {session_id} has no transcript messages")
+
+    by_uuid = {entry["uuid"]: entry for entry in entries}
+    positions = {entry["uuid"]: index for index, entry in enumerate(entries)}
+    parent_uuids = {
+        parent
+        for entry in entries
+        if isinstance((parent := entry.get("parentUuid")), str) and parent
+    }
+    terminals = [entry for entry in entries if entry["uuid"] not in parent_uuids]
+
+    leaves: list[dict[str, Any]] = []
+    for terminal in terminals:
+        current: dict[str, Any] | None = terminal
+        seen: set[str] = set()
+        while current is not None and current["uuid"] not in seen:
+            seen.add(current["uuid"])
+            if current.get("type") in {"user", "assistant"}:
+                leaves.append(current)
+                break
+            parent = current.get("parentUuid")
+            current = by_uuid.get(parent) if isinstance(parent, str) else None
+    main_leaves = [
+        entry
+        for entry in leaves
+        if not entry.get("isSidechain")
+        and not entry.get("isMeta")
+        and not entry.get("teamName")
+    ]
+    candidates = main_leaves or leaves
+    if not candidates:
+        raise ValueError(f"native session {session_id} has no main conversation")
+    leaf = max(candidates, key=lambda entry: positions[entry["uuid"]])
+
+    chain: list[dict[str, Any]] = []
+    current = leaf
+    seen: set[str] = set()
+    while current is not None and current["uuid"] not in seen:
+        seen.add(current["uuid"])
+        chain.append(current)
+        # A compact boundary severs parentUuid but preserves the real history
+        # in logicalParentUuid. Following it gives us stable platform ordinals
+        # while the SDK's display-oriented reader intentionally starts at the
+        # synthetic summary.
+        parent = (
+            current.get("logicalParentUuid")
+            if current.get("subtype") == "compact_boundary"
+            else current.get("parentUuid")
+        )
+        current = by_uuid.get(parent) if isinstance(parent, str) else None
+    chain.reverse()
+    return chain
+
+
+def _is_main_entry(entry: dict[str, Any]) -> bool:
+    return not entry.get("isSidechain") and not entry.get("isMeta") and not entry.get("teamName")
+
+
+def _is_platform_user(entry: dict[str, Any]) -> bool:
+    if entry.get("type") != "user" or not _is_main_entry(entry):
+        return False
+    if entry.get("isCompactSummary") or entry.get("isVisibleInTranscriptOnly"):
+        return False
+    message = entry.get("message")
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    # Claude writes tool results as user-role records. They are continuations of
+    # the same platform prompt, not a second native turn.
+    if isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    ):
+        return False
+    return True
+
+
+def assistant_anchor(entries: list[dict[str, Any]], source_native_turn_no: int) -> str:
+    """Return the inclusive main-assistant UUID closing one platform turn."""
+    if source_native_turn_no < 1:
+        raise ValueError("native turn number must be positive")
+    top_level_users = [
+        index for index, entry in enumerate(entries) if _is_platform_user(entry)
+    ]
+    if source_native_turn_no > len(top_level_users):
+        raise ValueError(
+            "native history does not contain the requested fork turn "
+            f"({source_native_turn_no} of {len(top_level_users)})"
+        )
+    start = top_level_users[source_native_turn_no - 1] + 1
+    end = (
+        top_level_users[source_native_turn_no]
+        if source_native_turn_no < len(top_level_users)
+        else len(entries)
+    )
+    assistant = next(
+        (
+            entry
+            for entry in reversed(entries[start:end])
+            if entry.get("type") == "assistant"
+            and _is_main_entry(entry)
+            and isinstance(entry.get("uuid"), str)
+            and entry["uuid"]
+        ),
+        None,
+    )
+    if assistant is None:
+        raise ValueError("requested native turn has no settled assistant boundary")
+    return str(assistant["uuid"])
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: claude-session-fork <source-session-id> <native-turn-no>")
+    try:
+        source_native_turn_no = int(sys.argv[2])
+    except ValueError:
+        raise SystemExit("native turn number must be an integer") from None
+    if source_native_turn_no < 1:
+        raise SystemExit("native turn number must be positive")
+
+    try:
+        anchor = assistant_anchor(
+            _session_entries(sys.argv[1], directory="/workspace"),
+            source_native_turn_no,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+
+    result = fork_session(
+        sys.argv[1],
+        directory="/workspace",
+        up_to_message_id=anchor,
+    )
+    print(
+        json.dumps(
+            {
+                "source_session_id": sys.argv[1],
+                "session_id": result.session_id,
+            },
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

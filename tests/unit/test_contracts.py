@@ -38,8 +38,8 @@ DOCUMENTS = sorted(CONTRACTS.glob("*.yaml"))
 
 #: The client modules whose calls must be described by some document.
 CLIENT_SOURCES = (
-    REPO_ROOT / "backend" / "cloud_agent" / "gateway.py",
-    REPO_ROOT / "backend" / "cloud_agent" / "grants.py",
+    REPO_ROOT / "cloud_agent" / "gateway.py",
+    REPO_ROOT / "cloud_agent" / "grants.py",
 )
 
 

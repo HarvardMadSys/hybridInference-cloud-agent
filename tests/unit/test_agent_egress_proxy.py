@@ -151,7 +151,7 @@ def test_the_environment_adds_to_the_built_in_registries_rather_than_replacing_t
 def test_the_default_list_carries_no_write_capable_endpoint():
     """The selection rule is exfiltration, not download safety.
 
-    The sandbox is disposable and unprivileged, so fetching something hostile
+    The sandbox is retained and unprivileged, so fetching something hostile
     is already priced in. What matters is whether a listed host can *receive* a
     private repository — `api.github.com` can (an issue body), and is therefore
     absent while `github.com` is present.
@@ -182,6 +182,23 @@ def test_the_renderer_writes_the_file_the_proxy_starts_from(tmp_path):
 
     assert main(["--out", str(out)]) == 0
     assert "http_access deny all" in out.read_text()
+
+
+def test_renderer_never_exposes_a_partially_rewritten_live_acl(tmp_path, monkeypatch):
+    from cloud_agent_host import egress_proxy
+
+    out = tmp_path / "squid.conf"
+    out.write_text("old complete policy\n")
+
+    def fail_replace(_source, _destination):
+        raise OSError("simulated interrupted replace")
+
+    monkeypatch.setattr(egress_proxy.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="interrupted"):
+        main(["--out", str(out)])
+    assert out.read_text() == "old complete policy\n"
+    assert list(tmp_path.glob(".squid.*")) == []
 
 
 def test_a_refused_allowlist_stops_the_deploy_instead_of_starting_a_proxy(

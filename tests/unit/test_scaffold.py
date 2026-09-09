@@ -16,7 +16,7 @@ import cloud_agent
 import cloud_agent_host
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PACKAGE_ROOTS = (_REPO_ROOT / "backend", _REPO_ROOT / "host")
+_PACKAGE_ROOTS = (_REPO_ROOT / "cloud_agent", _REPO_ROOT / "cloud_agent_host")
 
 # Matches `import serving...` and `from serving... import ...`, which would mean
 # a moved file still reaches into the HybridInference gateway package.
@@ -29,10 +29,13 @@ def test_packages_are_importable() -> None:
 
 
 def test_no_gateway_imports() -> None:
+    sources = [path for root in _PACKAGE_ROOTS for path in root.rglob("*.py")]
+    # The roots have moved once already (the src-layout flatten). Empty means
+    # they are wrong again — and a guard that scans nothing passes forever.
+    assert sources, f"no sources under {_PACKAGE_ROOTS}; update _PACKAGE_ROOTS"
     offenders = [
         path.relative_to(_REPO_ROOT)
-        for root in _PACKAGE_ROOTS
-        for path in root.rglob("*.py")
+        for path in sources
         if _GATEWAY_IMPORT.search(path.read_text(encoding="utf-8"))
     ]
     assert not offenders, (

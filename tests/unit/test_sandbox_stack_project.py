@@ -14,15 +14,19 @@ and that a compose command without one refuses rather than guessing.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SANDBOX_HOST = REPO_ROOT / "deploy/host/sandbox_host.sh"
 HOST_DEPLOY = REPO_ROOT / "deploy/host/deploy.sh"
+HOST_ENV_EXAMPLE = REPO_ROOT / "deploy/host/.env.example"
 
 
-def _host(tmp_path: Path, *, dotenv: str = "") -> dict[str, str]:
+def _host(
+    tmp_path: Path, *, dotenv: str = "", compose_environment: str | None = None
+) -> dict[str, str]:
     """An APP_DIR with a .env, and a docker that records what it was asked."""
     app_dir = tmp_path / "app"
     app_dir.mkdir(exist_ok=True)
@@ -31,18 +35,32 @@ def _host(tmp_path: Path, *, dotenv: str = "") -> dict[str, str]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
     docker = fake_bin / "docker"
-    docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\nexit 0\n')
+    docker.write_text(
+        """#!/bin/sh
+printf "%s\\n" "$*" >> "$DOCKER_LOG"
+case " $* " in
+  *" config --environment "*)
+    cat >/dev/null
+    printf "%s\\n" "$COMPOSE_ENVIRONMENT"
+    ;;
+esac
+exit 0
+"""
+    )
     docker.chmod(0o755)
 
-    return {
+    env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "APP_DIR": str(app_dir),
         "DOCKER_LOG": str(tmp_path / "docker.log"),
-        # The caller's own environment must not decide this, or the .env
-        # precedence under test never runs.
-        "COMPOSE_PROJECT": "",
+        "COMPOSE_ENVIRONMENT": compose_environment if compose_environment is not None else dotenv,
     }
+    # The caller's own environment must not decide this, or the .env precedence
+    # under test never runs. Absence matters: Compose treats exported emptiness
+    # as an override rather than falling back to dotenv.
+    env.pop("COMPOSE_PROJECT", None)
+    return env
 
 
 def _run(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
@@ -65,7 +83,9 @@ def test_a_compose_command_refuses_without_a_project(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "COMPOSE_PROJECT is not set" in result.stderr
-    assert not Path(tmp_path / "docker.log").exists(), "it reached docker before checking"
+    invocations = Path(tmp_path / "docker.log").read_text()
+    assert "config --environment" in invocations
+    assert " down" not in invocations, "it acted on a stack before checking"
 
 
 def test_the_project_comes_from_dotenv(tmp_path: Path) -> None:
@@ -89,11 +109,24 @@ def test_the_environment_beats_dotenv(tmp_path: Path) -> None:
     """
     env = _host(tmp_path, dotenv="COMPOSE_PROJECT=from-dotenv\n")
     env["COMPOSE_PROJECT"] = "from-the-environment"
+    env["COMPOSE_ENVIRONMENT"] = "COMPOSE_PROJECT=from-the-environment\n"
 
     result = _run(env, "down")
 
     assert result.returncode == 0, result.stderr
     assert "compose -p from-the-environment" in Path(env["DOCKER_LOG"]).read_text()
+
+
+def test_an_empty_environment_value_also_beats_dotenv(tmp_path: Path) -> None:
+    """Compose treats exported emptiness as an override, not as absence."""
+    env = _host(tmp_path, dotenv="COMPOSE_PROJECT=from-dotenv\n")
+    env["COMPOSE_PROJECT"] = ""
+    env["COMPOSE_ENVIRONMENT"] = "COMPOSE_PROJECT=\n"
+
+    result = _run(env, "down")
+
+    assert result.returncode != 0
+    assert "COMPOSE_PROJECT is not set" in result.stderr
 
 
 def test_no_project_name_is_written_into_the_scripts() -> None:
@@ -134,32 +167,151 @@ _SHARED_HOST_ENV = "\n".join(
     [
         "COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-prod",
         "SIBLING_COMPOSE_PROJECTS=freeinference-cloud-agent-sandbox-staging",
-        "AGENT_DISPATCHER_TOKEN=t",
+        "AGENT_ENROLL_TOKEN=test-enrollment-token",
         "AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:prod",
         "AGENT_TUNNEL_SSH_DESTINATION=user@gateway",
         "AGENT_TUNNEL_SSH_KEY=/dev/null",
         "AGENT_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
+        "AGENT_MCP_TUNNEL_SSH_DESTINATION=user@control",
+        "AGENT_MCP_TUNNEL_SSH_KEY=/dev/null",
+        "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
+        "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION=user@control",
+        "AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY=/dev/null",
+        "AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
+        "AGENT_BROKER_REVERSE_BIND=172.24.0.1",
+        "AGENT_BROKER_REVERSE_PORT=18092",
+        "AGENT_WORKSPACE_BROKER_ADVERTISE_URL=http://172.24.0.1:18092",
+        "AGENT_WORKSPACE_BROKER_TOKEN=test-broker-token",
         "",
     ]
 )
 
 
-def test_a_shared_machine_must_name_its_own_state_roots(tmp_path: Path) -> None:
-    """Two stacks accepting the default paths do not sit beside each other.
+def test_a_shared_machine_must_name_its_own_host_state_root(tmp_path: Path) -> None:
+    """Two stacks may not share the persisted host enrollment identity.
 
-    The three roots are host directories bind-mounted into the containers, and
-    they default to the same `/var/lib/hybridinference/*` for every stack. The
-    dangerous one is the enrolment credential: the control plane reads a host
-    from the credential rather than from the claim body, so a shared state root
-    means the second stack registers as the first — and `AGENT_RUNNER_HOST`
-    cannot correct it, because nothing consults it after enrolment.
+    Chat data has no host worktree/snapshot root. The one remaining host bind
+    contains the enrolment credential: the control plane reads a host from the
+    credential rather than from the claim body, so sharing it makes the second
+    stack register as the first and AGENT_RUNNER_HOST cannot correct it.
     """
     result = _run(_host(tmp_path, dotenv=_SHARED_HOST_ENV), "up")
 
     assert result.returncode != 0
     assert "AGENT_HOST_STATE_ROOT" in result.stderr
-    assert "AGENT_WORKDIR_ROOT" in result.stderr
-    assert "AGENT_SNAPSHOT_ROOT" in result.stderr
+
+
+def test_the_host_template_assigns_each_setting_once() -> None:
+    """The final dotenv assignment wins, so duplicate defaults bypass the guard."""
+    template = HOST_ENV_EXAMPLE.read_text()
+    assignments: dict[str, list[str]] = {}
+    for name, value in re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", template, flags=re.MULTILINE):
+        assignments.setdefault(name, []).append(value)
+    duplicates = {name: values for name, values in assignments.items() if len(values) != 1}
+    assert not duplicates, f"dotenv uses the final duplicate assignment: {duplicates}"
+    for name in (
+        "AGENT_HOST_STATE_ROOT",
+        "AGENT_EGRESS_NETWORK_PLATFORM_ONLY",
+    ):
+        assert assignments[name] == [""], f"{name} must stay explicit in the template"
+
+
+def test_a_shared_machine_refuses_the_legacy_shared_state_roots(tmp_path: Path) -> None:
+    """Spelling the old defaults explicitly is still cross-environment sharing."""
+    dotenv = _SHARED_HOST_ENV + "\n".join(
+        [
+            "AGENT_HOST_STATE_ROOT=/var/lib/hybridinference/agent-host",
+            "AGENT_WORKDIR_ROOT=/var/lib/hybridinference/agent-jobs",
+            "AGENT_SNAPSHOT_ROOT=/var/lib/hybridinference/agent-snapshots",
+            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=freeinference-cloud-agent-egress-prod",
+            "",
+        ]
+    )
+
+    result = _run(_host(tmp_path, dotenv=dotenv), "up")
+
+    assert result.returncode != 0
+    assert "AGENT_HOST_STATE_ROOT" in result.stderr
+
+
+def test_a_shared_machine_refuses_the_legacy_shared_egress_network(tmp_path: Path) -> None:
+    """Duplicate tunnel aliases on one Docker network cross the environment boundary."""
+    dotenv = _SHARED_HOST_ENV + "\n".join(
+        [
+            "AGENT_HOST_STATE_ROOT=/var/lib/freeinference-cloud-agent-prod/host",
+            "AGENT_WORKDIR_ROOT=/var/lib/freeinference-cloud-agent-prod/jobs",
+            "AGENT_SNAPSHOT_ROOT=/var/lib/freeinference-cloud-agent-prod/snapshots",
+            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress",
+            "",
+        ]
+    )
+
+    result = _run(_host(tmp_path, dotenv=dotenv), "up")
+
+    assert result.returncode != 0
+    assert "AGENT_EGRESS_NETWORK_PLATFORM_ONLY" in result.stderr
+
+
+def test_the_shared_guard_uses_compose_resolved_values(tmp_path: Path) -> None:
+    """Interpolation and inline comments must not disguise shared defaults."""
+    dotenv = _SHARED_HOST_ENV + "\n".join(
+        [
+            "STATE_BASE=/var/lib/hybridinference",
+            "AGENT_HOST_STATE_ROOT=${STATE_BASE}/agent-host",
+            "AGENT_WORKDIR_ROOT=/var/lib/freeinference-cloud-agent-prod/jobs",
+            "AGENT_SNAPSHOT_ROOT=/var/lib/freeinference-cloud-agent-prod/snapshots",
+            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress # legacy shared name",
+            "",
+        ]
+    )
+    resolved = dotenv.replace(
+        "AGENT_HOST_STATE_ROOT=${STATE_BASE}/agent-host",
+        "AGENT_HOST_STATE_ROOT=/var/lib/hybridinference/agent-host",
+    ).replace(
+        "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress # legacy shared name",
+        "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=agent-egress",
+    )
+
+    result = _run(_host(tmp_path, dotenv=dotenv, compose_environment=resolved), "up")
+
+    assert result.returncode != 0
+    assert "AGENT_HOST_STATE_ROOT" in result.stderr
+    assert "AGENT_EGRESS_NETWORK_PLATFORM_ONLY" in result.stderr
+
+
+def test_the_shared_guard_canonicalizes_state_roots(tmp_path: Path) -> None:
+    """Equivalent legacy paths must not evade an exact string comparison."""
+    dotenv = _SHARED_HOST_ENV + "\n".join(
+        [
+            "AGENT_HOST_STATE_ROOT=/var/lib/hybridinference/agent-host/../agent-host///",
+            "AGENT_WORKDIR_ROOT=/var/lib/freeinference-cloud-agent-prod/jobs",
+            "AGENT_SNAPSHOT_ROOT=/var/lib/freeinference-cloud-agent-prod/snapshots",
+            "AGENT_EGRESS_NETWORK_PLATFORM_ONLY=freeinference-cloud-agent-egress-prod",
+            "",
+        ]
+    )
+
+    result = _run(_host(tmp_path, dotenv=dotenv), "up")
+
+    assert result.returncode != 0
+    assert "AGENT_HOST_STATE_ROOT" in result.stderr
+
+
+def test_ready_marker_is_owned_by_the_deployment_checkout(tmp_path: Path) -> None:
+    """Compose enrollment paths must not redirect deployment metadata writes."""
+    state_root = tmp_path / "host-state"
+    state_root.mkdir()
+    dotenv = "AGENT_HOST_STATE_ROOT=${STATE_BASE}/host-state\n"
+    resolved = f"AGENT_HOST_STATE_ROOT={state_root}\n"
+    env = _host(tmp_path, dotenv=dotenv, compose_environment=resolved)
+    marker = Path(env["APP_DIR"]) / ".shared-live-ready"
+    marker.write_text("pending:target-sha\n")
+
+    result = _run(env, "mark-ready", "target-sha")
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text() == "target-sha\n"
+    assert not (state_root / "shared-live-ready").exists()
 
 
 def test_a_lone_stack_needs_no_such_thing(tmp_path: Path) -> None:
@@ -177,7 +329,7 @@ def test_a_lone_stack_needs_no_such_thing(tmp_path: Path) -> None:
 
     result = _run(_host(tmp_path, dotenv=alone), "up")
 
-    assert "AGENT_WORKDIR_ROOT" not in result.stderr
+    assert "AGENT_HOST_STATE_ROOT" not in result.stderr
 
 
 def test_the_stray_matcher_still_recognises_this_stack(tmp_path: Path) -> None:

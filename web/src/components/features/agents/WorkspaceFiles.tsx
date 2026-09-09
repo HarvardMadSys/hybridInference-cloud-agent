@@ -20,9 +20,9 @@ type SidebarMode = 'files' | 'changes';
 type FileStatus = 'added' | 'modified' | 'deleted';
 
 function statusClass(status?: FileStatus | null): string {
-  if (status === 'added') return 'text-emerald-600';
-  if (status === 'deleted') return 'text-red-500';
-  return 'text-amber-600';
+  if (status === 'added') return 'text-emerald-600 dark:text-emerald-400';
+  if (status === 'deleted') return 'text-red-500 dark:text-red-400';
+  return 'text-amber-600 dark:text-amber-400';
 }
 
 function formatFileSize(size?: number | null): string {
@@ -60,7 +60,7 @@ function Caret({ open }: { open: boolean }) {
       fill="none"
       stroke="currentColor"
       strokeWidth={2.4}
-      className={`h-3 w-3 shrink-0 text-gray-500 transition-transform ${open ? 'rotate-90' : ''}`}
+      className={`h-3 w-3 shrink-0 text-gray-500 dark:text-gray-400 transition-transform ${open ? 'rotate-90' : ''}`}
     >
       <path strokeLinecap="round" strokeLinejoin="round" d="m9 18 6-6-6-6" />
     </svg>
@@ -205,7 +205,7 @@ function FileGlyph({ name }: { name: string }) {
       strokeWidth={1.5}
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="h-4 w-4 shrink-0 text-gray-500"
+      className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
     >
       {glyph.paths.map((d) => (
         <path key={d} d={d} />
@@ -249,21 +249,25 @@ function TreeLevel({
 
   if (state?.error) {
     return (
-      <p role="alert" style={indent} className="py-1 pr-2 text-[11px] text-red-600">
+      <p
+        role="alert"
+        style={indent}
+        className="py-1 pr-2 text-[11px] text-red-600 dark:text-red-400"
+      >
         {state.error}
       </p>
     );
   }
   if (!state?.entries) {
     return state?.loading ? (
-      <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400">
+      <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
         Loading…
       </p>
     ) : null;
   }
   if (state.entries.length === 0) {
     return (
-      <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400">
+      <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
         Empty
       </p>
     );
@@ -284,7 +288,9 @@ function TreeLevel({
               title={entry.name}
               style={indent}
               className={`flex w-full items-center gap-2 rounded-md py-[5px] pr-2 text-left text-[13px] ${
-                active ? 'bg-gray-200/60 text-gray-900' : 'text-gray-800 hover:bg-gray-100'
+                active
+                  ? 'bg-gray-200/60 dark:bg-white/10 text-gray-900 dark:text-gray-50'
+                  : 'text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'
               }`}
             >
               {isDirectory ? <Caret open={open} /> : <FileGlyph name={entry.name} />}
@@ -325,7 +331,11 @@ function ChangedList({
   }));
 
   if (rows.length === 0) {
-    return <p className="px-3 py-4 text-[11px] text-gray-400">This run changed no files.</p>;
+    return (
+      <p className="px-3 py-4 text-[11px] text-gray-400 dark:text-gray-500">
+        This run changed no files.
+      </p>
+    );
   }
 
   return (
@@ -338,16 +348,16 @@ function ChangedList({
           title={row.path}
           className={`flex w-full items-center gap-2 rounded-md py-[5px] pl-2 pr-2 text-left text-[13px] ${
             selected === row.path
-              ? 'bg-gray-200/60 text-gray-900'
-              : 'text-gray-800 hover:bg-gray-100'
+              ? 'bg-gray-200/60 dark:bg-white/10 text-gray-900 dark:text-gray-50'
+              : 'text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'
           }`}
         >
           <FileGlyph name={basename(row.path)} />
           <span className="min-w-0 flex-1 truncate">{basename(row.path)}</span>
           {row.stat ? (
-            <span className="shrink-0 font-mono text-[10px] text-gray-400">
-              <span className="text-emerald-600">+{row.stat.add}</span>{' '}
-              <span className="text-red-500">−{row.stat.del}</span>
+            <span className="shrink-0 font-mono text-[10px] text-gray-400 dark:text-gray-500">
+              <span className="text-emerald-600 dark:text-emerald-400">+{row.stat.add}</span>{' '}
+              <span className="text-red-500 dark:text-red-400">−{row.stat.del}</span>
             </span>
           ) : null}
         </button>
@@ -391,16 +401,16 @@ function CodeView({ path, content }: { path: string; content: string }) {
     <div className="py-2 font-mono text-[12px] leading-[1.7]">
       {shown.map(({ tokens, breakAnywhere }, index) => (
         // The line number *is* the identity here, so the index is a valid key.
-        <div key={index} className="flex hover:bg-gray-50">
+        <div key={index} className="flex hover:bg-gray-50 dark:hover:bg-white/5">
           <span
             aria-hidden="true"
-            className="w-12 shrink-0 select-none pr-4 text-right text-gray-300"
+            className="w-12 shrink-0 select-none pr-4 text-right text-gray-300 dark:text-gray-600"
           >
             {index + 1}
           </span>
           {/* Wrapped continuations hang under the line, as an editor would. */}
           <span
-            className={`min-w-0 flex-1 whitespace-pre-wrap pl-6 pr-4 -indent-6 text-gray-700 ${
+            className={`min-w-0 flex-1 whitespace-pre-wrap pl-6 pr-4 -indent-6 text-gray-700 dark:text-gray-300 ${
               breakAnywhere ? 'break-all' : 'break-words'
             }`}
           >
@@ -409,7 +419,7 @@ function CodeView({ path, content }: { path: string; content: string }) {
         </div>
       ))}
       {lines.length > shown.length ? (
-        <p className="px-4 py-3 text-[11px] text-gray-400">
+        <p className="px-4 py-3 text-[11px] text-gray-400 dark:text-gray-500">
           Preview limited to the first {MAX_PREVIEW_LINES.toLocaleString()} lines.
         </p>
       ) : null}
@@ -419,7 +429,7 @@ function CodeView({ path, content }: { path: string; content: string }) {
 
 function PaneMessage({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-full items-center justify-center px-6 py-16 text-center text-sm text-gray-400">
+    <div className="flex h-full items-center justify-center px-6 py-16 text-center text-sm text-gray-400 dark:text-gray-500">
       {children}
     </div>
   );
@@ -429,9 +439,8 @@ function PaneMessage({ children }: { children: React.ReactNode }) {
  * Two-pane workspace browser: a lazily expanded tree beside a file viewer.
  *
  * Read-only: the workspace write endpoint exists, but changing a run's files
- * by hand belongs in the conversation, not in this pane. The header still says
- * whether this is the live worktree or an archived snapshot, because that
- * decides whether what you are reading can still change.
+ * by hand belongs in the conversation, not in this pane. Every successful
+ * response comes from the retained container's current workspace.
  */
 export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean }) {
   const {
@@ -489,18 +498,16 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
   const sourceLabel = root?.error
     ? 'Unavailable'
     : (file?.source ?? source) === 'workspace'
-      ? 'Live worktree'
-      : root?.entries || file
-        ? 'Archived snapshot'
-        : 'Loading…';
+      ? 'Live workspace'
+      : 'Loading…';
 
   return (
     <section
       ref={attachPane}
       aria-label="Workspace files"
-      className="flex h-[36rem] max-h-[calc(100vh-11rem)] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white"
+      className="flex h-[36rem] max-h-[calc(100vh-11rem)] flex-col overflow-hidden rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
     >
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-gray-200 bg-gray-50/70 px-2.5">
+      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-gray-200 dark:border-white/10 bg-gray-50/70 dark:bg-gray-900/60 px-2.5">
         <button
           type="button"
           onClick={() => (narrow && selected ? closeFile() : setSidebarOpen((open) => !open))}
@@ -508,8 +515,8 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
           aria-pressed={showTree}
           className={`shrink-0 rounded-md p-1.5 ${
             showTree
-              ? 'bg-gray-200/70 text-gray-700'
-              : 'text-gray-400 hover:bg-gray-200/50 hover:text-gray-700'
+              ? 'bg-gray-200/70 dark:bg-white/10 text-gray-700 dark:text-gray-300'
+              : 'text-gray-400 dark:text-gray-500 hover:bg-gray-200/50 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200'
           }`}
         >
           <svg
@@ -526,18 +533,20 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
 
         {selected ? (
           <span className="flex min-w-0 items-baseline gap-2">
-            <span className="truncate text-[13px] font-medium text-gray-900">
+            <span className="truncate text-[13px] font-medium text-gray-900 dark:text-gray-50">
               {basename(selected)}
             </span>
             {dirname(selected) && !narrow ? (
-              <span className="truncate text-[11px] text-gray-400">{dirname(selected)}</span>
+              <span className="truncate text-[11px] text-gray-400 dark:text-gray-500">
+                {dirname(selected)}
+              </span>
             ) : null}
           </span>
         ) : (
-          <span className="text-[13px] text-gray-500">Files</span>
+          <span className="text-[13px] text-gray-500 dark:text-gray-400">Files</span>
         )}
 
-        <span className="ml-auto shrink-0 rounded bg-white px-2 py-0.5 text-[11px] text-gray-400 ring-1 ring-gray-200">
+        <span className="ml-auto shrink-0 rounded bg-white dark:bg-gray-900 px-2 py-0.5 text-[11px] text-gray-400 dark:text-gray-500 ring-1 ring-gray-200 dark:ring-white/10">
           {sourceLabel}
         </span>
       </div>
@@ -545,14 +554,14 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
       <div className="flex min-h-0 flex-1">
         {showTree ? (
           <aside
-            className={`flex shrink-0 flex-col border-r border-gray-200 bg-white ${
+            className={`flex shrink-0 flex-col border-r border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 ${
               narrow ? 'w-full' : 'w-56'
             }`}
           >
             <div
               role="tablist"
               aria-label="File list"
-              className="flex shrink-0 items-center gap-3 border-b border-gray-200 px-3 py-2 text-[12px]"
+              className="flex shrink-0 items-center gap-3 border-b border-gray-200 dark:border-white/10 px-3 py-2 text-[12px]"
             >
               {(
                 [
@@ -567,12 +576,16 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
                   aria-selected={mode === key}
                   onClick={() => setMode(key)}
                   className={
-                    mode === key ? 'font-medium text-gray-900' : 'text-gray-400 hover:text-gray-700'
+                    mode === key
+                      ? 'font-medium text-gray-900 dark:text-gray-50'
+                      : 'text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200'
                   }
                 >
                   {label}
                   {key === 'changes' && job.diffFiles.length ? (
-                    <span className="ml-1 text-[10px] text-gray-400">{job.diffFiles.length}</span>
+                    <span className="ml-1 text-[10px] text-gray-400 dark:text-gray-500">
+                      {job.diffFiles.length}
+                    </span>
                   ) : null}
                 </button>
               ))}
@@ -580,7 +593,7 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
                 type="button"
                 onClick={reload}
                 aria-label="Refresh files"
-                className="ml-auto rounded p-1 text-gray-400 hover:bg-gray-200/60 hover:text-gray-700"
+                className="ml-auto rounded p-1 text-gray-400 dark:text-gray-500 hover:bg-gray-200/60 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200"
               >
                 <svg
                   aria-hidden="true"
@@ -617,13 +630,13 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
         ) : null}
 
         <div
-          className={`min-w-0 flex-1 overflow-auto bg-white ${showTree && narrow ? 'hidden' : ''}`}
+          className={`min-w-0 flex-1 overflow-auto bg-white dark:bg-gray-900 ${showTree && narrow ? 'hidden' : ''}`}
         >
           {fileLoading ? (
             <PaneMessage>Loading file…</PaneMessage>
           ) : fileError ? (
             <PaneMessage>
-              <span role="alert" className="text-red-600">
+              <span role="alert" className="text-red-600 dark:text-red-400">
                 {fileError}
               </span>
             </PaneMessage>
@@ -631,13 +644,13 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
             <PaneMessage>
               {root?.error ? (
                 <span className="flex flex-col items-center gap-3">
-                  <span role="alert" className="text-red-600">
+                  <span role="alert" className="text-red-600 dark:text-red-400">
                     {root.error}
                   </span>
                   <button
                     type="button"
                     onClick={reload}
-                    className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+                    className="rounded-md border border-gray-200 dark:border-white/10 px-3 py-1.5 text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5"
                   >
                     Try again
                   </button>
@@ -654,7 +667,7 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
             <PaneMessage>Binary files cannot be previewed.</PaneMessage>
           ) : (
             <>
-              <div className="flex items-center gap-2 border-b border-gray-100 px-4 py-1.5 text-[11px] text-gray-400">
+              <div className="flex items-center gap-2 border-b border-gray-100 dark:border-white/5 px-4 py-1.5 text-[11px] text-gray-400 dark:text-gray-500">
                 <span>{formatFileSize(file.size)}</span>
                 {file.status ? (
                   <span className={`font-medium ${statusClass(file.status)}`}>{file.status}</span>

@@ -16,10 +16,12 @@ import {
   followUpAgentJob,
   forkAgentJob,
   getAgentIntegrations,
-  getAgentJobArtifact,
+  getAgentJob,
+  getAgentAttemptTelemetry,
   getAgentJobFiles,
   getAgentJobGit,
   getAgentJobThread,
+  listAllAgentThreadEvents,
   listAgentTerminals,
   listAgentJobs,
   pinAgentJob,
@@ -83,6 +85,34 @@ describe('agents api', () => {
     vi.restoreAllMocks();
   });
 
+  it('pins legacy telemetry identity when fetching a snapshot', async () => {
+    fetchWithAuth.mockResolvedValue(jsonResponse({ current_attempt_id: 10 }));
+    expect((await getAgentJob('ajob_1')).telemetry_attempt_id).toBe(10);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/jobs/ajob_1?include_resources=false',
+    );
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ current_attempt_id: 11, telemetry_attempt_id: 10 }),
+    );
+    expect((await getAgentJob('ajob_1')).telemetry_attempt_id).toBe(10);
+    fetchWithAuth.mockResolvedValue(
+      jsonResponse({ current_attempt_id: 11, telemetry_attempt_id: null }),
+    );
+    expect((await getAgentJob('ajob_1')).telemetry_attempt_id).toBeNull();
+  });
+
+  it('fetches one selected attempt with an abortable owner-scoped request', async () => {
+    fetchWithAuth.mockResolvedValue(jsonResponse({ attempt_id: 10, resources: null }));
+    const { signal } = new AbortController();
+    expect((await getAgentAttemptTelemetry('job/one', 10, signal)).attempt_id).toBe(10);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/jobs/job%2Fone/attempts/10/telemetry',
+      { signal },
+    );
+  });
+
   it('lists jobs', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ jobs: [{ id: 'ajob_1' }] }));
     const jobs = await listAgentJobs();
@@ -99,6 +129,34 @@ describe('agents api', () => {
     expect(fetchWithAuth).toHaveBeenCalledWith(
       expect.any(String),
       '/v1/agent/jobs?limit=25&archived=true',
+    );
+  });
+
+  it('reads every page of a conversation event log', async () => {
+    const first = Array.from({ length: 1000 }, (_, index) => ({
+      id: index + 1,
+      job_id: 'ajob_1',
+      turn_no: 1,
+      attempt_id: 1,
+      seq: index + 1,
+      event_type: 'message',
+      payload: {},
+      created_at: null,
+    }));
+    fetchWithAuth
+      .mockResolvedValueOnce(jsonResponse({ events: first, next_cursor: 1000 }))
+      .mockResolvedValueOnce(
+        jsonResponse({ events: [{ ...first[0], id: 1001, turn_no: 2 }], next_cursor: 1001 }),
+      );
+
+    const events = await listAllAgentThreadEvents('job/one');
+
+    expect(events).toHaveLength(1001);
+    expect(events[1000].turn_no).toBe(2);
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      '/v1/agent/jobs/job%2Fone/thread/events?after=1000&limit=1000',
     );
   });
 
@@ -157,8 +215,55 @@ describe('agents api', () => {
     expect(fetchWithAuth).toHaveBeenCalledWith(
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/fork',
-      { method: 'POST' },
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': expect.any(String) },
+      },
     );
+  });
+
+  it('keeps the fork idempotency key while an ambiguous request is retryable', async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            detail: {
+              error: { type: 'sandbox_host_unavailable', message: 'host unavailable' },
+            },
+          },
+          503,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_recovered', state: 'succeeded' }));
+
+    await expect(forkAgentJob('job/retryable')).rejects.toThrow();
+    await expect(forkAgentJob('job/retryable')).resolves.toMatchObject({ id: 'ajob_recovered' });
+
+    const firstHeaders = fetchWithAuth.mock.calls[0][2]?.headers as Record<string, string>;
+    const secondHeaders = fetchWithAuth.mock.calls[1][2]?.headers as Record<string, string>;
+    expect(secondHeaders['Idempotency-Key']).toBe(firstHeaders['Idempotency-Key']);
+  });
+
+  it('rotates the fork idempotency key after a durably failed saga', async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            detail: {
+              error: { type: 'native_fork_failed', message: 'reconciled as failed' },
+            },
+          },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_retried', state: 'succeeded' }));
+
+    await expect(forkAgentJob('job/failed')).rejects.toThrow();
+    await expect(forkAgentJob('job/failed')).resolves.toMatchObject({ id: 'ajob_retried' });
+
+    const firstHeaders = fetchWithAuth.mock.calls[0][2]?.headers as Record<string, string>;
+    const secondHeaders = fetchWithAuth.mock.calls[1][2]?.headers as Record<string, string>;
+    expect(secondHeaders['Idempotency-Key']).not.toBe(firstHeaders['Idempotency-Key']);
   });
 
   it('loads source-control integrations', async () => {
@@ -200,12 +305,6 @@ describe('agents api', () => {
       '/v1/agent/integrations/gitlab/connections/group%2Fid',
       { method: 'DELETE' },
     );
-  });
-
-  it('treats a missing artifact as absent rather than an error', async () => {
-    // A job that changed nothing legitimately has no patch.
-    fetchWithAuth.mockResolvedValue(jsonResponse({ detail: 'nope' }, 404));
-    await expect(getAgentJobArtifact('ajob_1', 'patch')).resolves.toBeNull();
   });
 
   it('browses a job workspace with an encoded relative path', async () => {

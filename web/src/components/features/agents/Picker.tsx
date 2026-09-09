@@ -6,6 +6,15 @@
 // and a model, and the Run handler submitted its own hardcoded values. So the
 // screen described one job and queued another — worse than an obviously
 // disabled control, because nothing looked wrong.
+//
+// **The value is drawn, and the <select> sits invisibly on top of it.** A bare
+// native select is as wide as its *widest option*, not its selected one, so the
+// model picker rendered `glm-5.3` followed by a hand's width of blank — sized
+// for `kimi-k2.7-code-highspeed`, which the user had not chosen. Every option
+// list here is short enough that the gap read as a layout bug rather than as a
+// menu that happens to contain long names. The select keeps its options, its
+// keyboard behaviour and its accessible name; only the painting is ours, which
+// is why the chevron below is drawn too — the native one goes with the box.
 export function Picker({
   label,
   value,
@@ -21,13 +30,28 @@ export function Picker({
     return null;
   }
   return (
-    <label className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-gray-600 hover:bg-gray-100">
+    <label className="relative inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-[13px] font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10">
       <span className="sr-only">{label}</span>
+      {/* The width of the control. Truncated rather than unbounded so one
+          pathological model id cannot push the run button off the row. */}
+      <span aria-hidden className="max-w-[13rem] truncate text-gray-700 dark:text-gray-300">
+        {value}
+      </span>
+      <svg
+        aria-hidden
+        viewBox="0 0 20 20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.6}
+        className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500"
+      >
+        <path strokeLinecap="round" strokeLinejoin="round" d="m6 8 4 4 4-4" />
+      </svg>
       <select
         aria-label={label}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="cursor-pointer border-0 bg-transparent p-0 pr-5 text-[13px] font-medium text-gray-700 focus:outline-none focus:ring-0"
+        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
       >
         {options.map((option) => (
           <option key={option} value={option}>

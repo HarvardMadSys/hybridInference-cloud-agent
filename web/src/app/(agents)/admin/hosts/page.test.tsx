@@ -27,18 +27,18 @@ vi.mock('@/lib/api/admin', () => ({
   drainAgentRunnerHost: vi.fn(),
   undrainAgentRunnerHost: vi.fn(),
   removeAgentRunnerHost: vi.fn(),
-  issueHostEnrollToken: vi.fn(),
+  setAgentRuntimeVersion: vi.fn(),
 }));
 
 import {
   drainAgentRunnerHost,
   getAgentRunnerHosts,
-  issueHostEnrollToken,
   removeAgentRunnerHost,
   setActiveAgentRunnerHost,
+  setAgentRuntimeVersion,
 } from '@/lib/api/admin';
 
-import { formatAge, formatSlots } from './format';
+import { formatAge, formatSlots, runtimeMenu } from './format';
 import AdminHostsPage from './page';
 
 const mocked = {
@@ -46,7 +46,7 @@ const mocked = {
   pin: setActiveAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   drain: drainAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   remove: removeAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
-  enroll: issueHostEnrollToken as unknown as ReturnType<typeof vi.fn>,
+  setVersion: setAgentRuntimeVersion as unknown as ReturnType<typeof vi.fn>,
 };
 
 function host(over: Partial<Record<string, unknown>> = {}) {
@@ -66,12 +66,20 @@ function host(over: Partial<Record<string, unknown>> = {}) {
     runner_version: '1.2.3',
     broker_url: 'http://runner-a:8092',
     last_heartbeat_at: '2026-08-05T00:00:00Z',
+    sandbox_runtime: '',
+    sandbox_image_digest: 'freeinference-cloud-agent-job@sha256:abcdef0123456789',
+    runtime_versions: { 'claude-code': '2.1.220' },
+    runtime_versions_available: { 'claude-code': ['2.1.220', '2.1.235'] },
     ...over,
   };
 }
 
-function pool(hosts: unknown[], active: string | null = null) {
-  return { hosts, active_host: active };
+function pool(
+  hosts: unknown[],
+  active: string | null = null,
+  runtimeVersions: Record<string, string> = {},
+) {
+  return { hosts, active_host: active, runtime_versions: runtimeVersions };
 }
 
 describe('AdminHostsPage', () => {
@@ -114,13 +122,11 @@ describe('AdminHostsPage', () => {
     render(<AdminHostsPage />);
 
     expect(await screen.findByText('legacy-box')).toBeInTheDocument();
-    // Rendered beside the worker id in one line, hence the substring match.
-    expect(screen.getByText(/self-reported name/)).toBeInTheDocument();
     // No ceiling declared: the slot cell is the count alone, not "0 / null".
     expect(screen.getByText('0')).toBeInTheDocument();
   });
 
-  it('pins a host and reports that running jobs stay where they are', async () => {
+  it('pins new chats and reports that retained chats stay on their owning hosts', async () => {
     mocked.pin.mockResolvedValue(pool([host({ active: true })], 'runner-a'));
     render(<AdminHostsPage />);
 
@@ -128,7 +134,7 @@ describe('AdminHostsPage', () => {
 
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('runner-a'));
     expect(await screen.findByRole('status')).toHaveTextContent(
-      /Jobs already running elsewhere keep running there/,
+      /Existing retained chats stay on their owning hosts/,
     );
   });
 
@@ -188,7 +194,9 @@ describe('AdminHostsPage', () => {
     );
     render(<AdminHostsPage />);
 
-    expect(await screen.findByText(/the queue is stopped/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/New chats are pinned to it, so they will wait/),
+    ).toBeInTheDocument();
   });
 
   it('does not warn when an unpinned host is quiet — nothing depends on it', async () => {
@@ -199,22 +207,16 @@ describe('AdminHostsPage', () => {
     expect(screen.queryByText(/the queue is stopped/)).not.toBeInTheDocument();
   });
 
-  it('shows an enrollment token once, with the warning that it is not recoverable', async () => {
-    mocked.enroll.mockResolvedValue({
-      enroll_token: 'tok-abc',
-      host: 'runner-b',
-      expires_at: '2026-08-05T01:00:00Z',
-    });
+  it('does not offer to enrol a host', async () => {
+    // Removed on purpose, not lost. Enrolment binds a credential to a machine
+    // so it cannot claim to be another one, and every runner in this pool is
+    // ours — the control answered a question nobody operating this page asks.
+    // The endpoint and its client are untouched for the rare new host.
     render(<AdminHostsPage />);
 
-    fireEvent.change(await screen.findByLabelText('Host name'), {
-      target: { value: 'runner-b' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Issue token' }));
-
-    expect(await screen.findByText('tok-abc')).toBeInTheDocument();
-    expect(screen.getByText(/not shown again/)).toBeInTheDocument();
-    expect(mocked.enroll).toHaveBeenCalledWith('runner-b', 900);
+    await screen.findByText('runner-a');
+    expect(screen.queryByRole('button', { name: 'Issue token' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/enrol/i)).not.toBeInTheDocument();
   });
 
   it('keeps the last good pool when a background refresh fails', async () => {
@@ -247,5 +249,132 @@ describe('formatting', () => {
   it('omits the ceiling for a host that declares none', () => {
     expect(formatSlots({ slots_used: 2, slots_total: 4 } as never)).toBe('2 / 4');
     expect(formatSlots({ slots_used: 2, slots_total: null } as never)).toBe('2');
+  });
+});
+
+describe('harness version selection', () => {
+  beforeEach(() => {
+    auth.role = 'admin';
+    Object.values(mocked).forEach((m) => m.mockReset());
+    mocked.list.mockResolvedValue(pool([host()]));
+  });
+
+  afterEach(cleanup);
+
+  it('offers every version the pool holds, with the image default first', async () => {
+    render(<AdminHostsPage />);
+
+    const select = (await screen.findByLabelText('claude-code')) as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual([
+      'Image default',
+      '2.1.220',
+      '2.1.235',
+    ]);
+    // Nothing selected means the image default — not "2.1.220 happens to be
+    // first". The two differ the moment a host is rebuilt.
+    expect(select.value).toBe('');
+  });
+
+  it('shows the deployment-wide selection, not a per-host value', async () => {
+    mocked.list.mockResolvedValue(pool([host()], null, { 'claude-code': '2.1.235' }));
+    render(<AdminHostsPage />);
+
+    const select = (await screen.findByLabelText('claude-code')) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('2.1.235'));
+  });
+
+  it('sends the choice and takes the whole pool back', async () => {
+    mocked.setVersion.mockResolvedValue(pool([host()], null, { 'claude-code': '2.1.235' }));
+    render(<AdminHostsPage />);
+
+    const select = await screen.findByLabelText('claude-code');
+    fireEvent.change(select, { target: { value: '2.1.235' } });
+
+    await waitFor(() => expect(mocked.setVersion).toHaveBeenCalledWith('claude-code', '2.1.235'));
+    // The wording is the contract with the operator: this is not retroactive,
+    // and a page that implied otherwise would be the bug.
+    expect(
+      await screen.findByText(/New claude-code threads will run 2\.1\.235/),
+    ).toBeInTheDocument();
+  });
+
+  it('clears back to the image default with null, not an empty string', async () => {
+    mocked.list.mockResolvedValue(pool([host()], null, { 'claude-code': '2.1.235' }));
+    mocked.setVersion.mockResolvedValue(pool([host()]));
+    render(<AdminHostsPage />);
+
+    const select = await screen.findByLabelText('claude-code');
+    fireEvent.change(select, { target: { value: '' } });
+
+    await waitFor(() => expect(mocked.setVersion).toHaveBeenCalledWith('claude-code', null));
+  });
+
+  it('hides the selector when no host reports a menu', async () => {
+    // A pool of pre-menu hosts. An empty control that cannot do anything is
+    // worse than no control: it reads as broken rather than as absent.
+    mocked.list.mockResolvedValue(pool([host({ runtime_versions_available: null })]));
+    render(<AdminHostsPage />);
+
+    await screen.findByText('runner-a');
+    expect(screen.queryByText('Harness version')).not.toBeInTheDocument();
+  });
+});
+
+describe('version and image cells', () => {
+  it('unions menus across hosts without losing the default ordering', () => {
+    const menu = runtimeMenu([
+      host({ runtime_versions_available: { 'claude-code': ['2.1.220'] } }),
+      host({
+        runtime_versions_available: { 'claude-code': ['2.1.220', '2.1.235'], pi: ['0.73.1'] },
+      }),
+    ] as never);
+    expect(menu).toEqual([
+      ['claude-code', ['2.1.220', '2.1.235']],
+      ['pi', ['0.73.1']],
+    ]);
+  });
+});
+
+describe('the harness section reads as a choice, not a list', () => {
+  beforeEach(() => {
+    auth.role = 'admin';
+    Object.values(mocked).forEach((m) => m.mockReset());
+    mocked.list.mockResolvedValue(pool([host()]));
+  });
+
+  afterEach(cleanup);
+
+  it('is the runtimes and their controls, and no prose', async () => {
+    // Everything this section could explain is already said elsewhere: the
+    // versions on offer are in the select, what each host holds is in the
+    // table below, that a running conversation keeps its version is in the
+    // confirmation after the change, and how to add a version is deployment
+    // documentation. Written here it was a third telling every time.
+    render(<AdminHostsPage />);
+
+    await screen.findByLabelText('claude-code');
+    expect(screen.queryByText(/also built in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/The image holds only/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/EXTRA_VERSIONS/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Applies to new threads/)).not.toBeInTheDocument();
+  });
+
+  it('still offers a fixed runtime, compressed but not removed', async () => {
+    // Pinning a single-version runtime is a weak choice, not an absent one:
+    // the control stays, it just stops taking three lines to say nothing.
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          runtime_versions_available: {
+            'claude-code': ['2.1.220', '2.1.235'],
+            codex: ['0.145.0'],
+          },
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    const codex = (await screen.findByLabelText('codex')) as HTMLSelectElement;
+    expect([...codex.options].map((o) => o.textContent)).toEqual(['Image default', '0.145.0']);
   });
 });

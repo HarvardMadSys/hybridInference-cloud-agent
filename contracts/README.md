@@ -8,9 +8,9 @@ drifts silently.
 
 | Document | Gateway module | Consumed here by |
 |---|---|---|
-| [`identity.openapi.yaml`](identity.openapi.yaml) | `serving/servers/routers/identity.py` | `backend/cloud_agent/identity.py` (E7), `api/session.py` (E8) |
-| [`inference-grants.openapi.yaml`](inference-grants.openapi.yaml) | `serving/servers/routers/agent_grants.py` | `backend/cloud_agent/grants.py` (E9) |
-| [`internal-lookups.openapi.yaml`](internal-lookups.openapi.yaml) | `serving/servers/routers/internal_lookups.py` | `backend/cloud_agent/gateway.py` (E4, E6, E7, E8) |
+| [`identity.openapi.yaml`](identity.openapi.yaml) | `serving/servers/routers/identity.py` | `cloud_agent/identity.py` (E7), `api/session.py` (E8) |
+| [`inference-grants.openapi.yaml`](inference-grants.openapi.yaml) | `serving/servers/routers/agent_grants.py` | `cloud_agent/grants.py` (E9) |
+| [`internal-lookups.openapi.yaml`](internal-lookups.openapi.yaml) | `serving/servers/routers/internal_lookups.py` | `cloud_agent/gateway.py` (E4, E6, E7, E8) |
 
 ## What these are, and what they are not
 

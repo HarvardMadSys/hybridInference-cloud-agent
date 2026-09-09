@@ -16,7 +16,7 @@ function IntegrationsPageContent() {
 
 export default function IntegrationsPage() {
   return (
-    <Suspense fallback={<div className="h-full bg-white" />}>
+    <Suspense fallback={<div className="h-full bg-white dark:bg-gray-900" />}>
       <IntegrationsPageContent />
     </Suspense>
   );

@@ -24,3 +24,25 @@ export function formatSlots(host: AgentRunnerHost): string {
     ? `${host.slots_used}`
     : `${host.slots_used} / ${host.slots_total}`;
 }
+
+/**
+ * Every (runtime, versions) pair the pool as a whole offers.
+ *
+ * Unioned across hosts because the selection is deployment-wide while the menus
+ * are per-image: with two hosts on different images, a version only one of them
+ * holds is still selectable — the claim falls back on the host that lacks it
+ * rather than refusing, which is the documented behaviour and better than
+ * hiding the option. Sorted so the list does not reshuffle between polls.
+ */
+export function runtimeMenu(hosts: AgentRunnerHost[]): [string, string[]][] {
+  const menu = new Map<string, string[]>();
+  for (const host of hosts) {
+    for (const [runtime, versions] of Object.entries(host.runtime_versions_available ?? {})) {
+      const seen = menu.get(runtime) ?? [];
+      // Order is the image's — default first — and preserved for the host that
+      // introduced each version, so the first option is a real default.
+      menu.set(runtime, [...seen, ...versions.filter((v) => !seen.includes(v))]);
+    }
+  }
+  return [...menu.entries()].sort(([a], [b]) => a.localeCompare(b));
+}

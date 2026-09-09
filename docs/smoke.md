@@ -1,25 +1,28 @@
 # Single-host end-to-end smoke (task E11)
 
+For a deterministic, provider-key-free local product run, use
+[`deploy/local/dev.sh`](../deploy/local/README.md) first. That Docker-only stack
+has been executed end to end against the real browser/control-plane/runner and
+all five pinned Agent CLI binaries, including `NEW → LIVE`, idle `docker stop`,
+and same-container `RESTORED`. This document remains the separate staging
+gateway + real GitHub publishing runbook; the local substitute intentionally
+does not claim to prove an external provider or pull-request publication.
 Bring up the control plane and one runner host on a single machine, point them
 at a **staging** gateway, and drive one real job from an empty workspace to a
 pull request on a scratch repository.
 
-> **Partly executed: sections 1–2, without containers.** The rest has not been
-> run. See the log at the bottom for exactly what was and was not covered — the
-> short version is that the control plane starts, migrates and serves on its
-> own, and everything involving a sandbox, a gateway or a host is untouched.
+> **The external staging-to-GitHub runbook below remains partly executed.** See
+> the dated log at the bottom for exactly what reached staging. The Docker-only
+> local stack linked above now separately proves image builds, migrations,
+> browser/control-plane/host wiring, retained sandboxes, and all five CLI
+> session paths; it does not prove an external provider or real pull-request
+> publication.
 >
-> **The original note, still true of the rest.** It was written from the code and the
-> deployment files, and E11's acceptance is a runbook *written from what was
-> actually executed*. Until someone runs it and fills in the log at the bottom,
-> treat every step as a claim to be checked rather than a route known to work
-> — and **when a step is wrong, fix this file in the same sitting**. A runbook
-> corrected a week later is a runbook nobody trusts.
->
-> Two things in particular are unverified by anything: the control-plane image
-> has never been built locally (no Docker daemon was available where it was
-> written; CI's `docker-build` matrix builds it), and no step here has been run
-> against a live gateway.
+> The remaining staging steps were written from code and deployment files.
+> Until someone runs them and fills in the log, treat each as a claim to check,
+> not a route known to work — and fix any incorrect step in the same sitting.
+> The still-unverified boundary here is the live external gateway/GitHub path,
+> not whether the standalone images and retained topology can run locally.
 
 ## What this proves, and what it does not
 
@@ -37,16 +40,19 @@ check is that they are live on the staging gateway you are pointing at**.
 ## 0. Preconditions
 
 - [ ] A machine with Docker, ≥8 GB RAM, and a checkout of this repository.
-- [ ] **The staging gateway serves the contracts.** All four must answer:
+- [ ] **The staging gateway serves the contracts it still owns.** JWKS must
+      answer:
       ```bash
       curl -sS -o /dev/null -w '%{http_code} %{url_effective}\n' \
         "$GATEWAY_BASE_URL/v1/identity/jwks"
       ```
-      then, with the dispatch token, `/internal/mcp-registry`,
+      Then, with the dispatch token, check
       `/internal/model-catalog?user_id=<a real user>` and
-      `/internal/users/<id>/status`. A 404 on any of them means the gateway
-      side has not landed; **stop here** — everything below will fail closed,
-      correctly, and you will spend an hour proving that.
+      `/internal/users/<id>/status`. The old `/internal/mcp-registry` endpoint
+      was removed: MCP configuration is owned by this service and requiring
+      that path would make the smoke fail before it began. A 404 on either
+      remaining gateway lookup means the gateway side has not landed; **stop
+      here** — everything below will fail closed correctly.
 - [ ] A scratch GitHub repository this run may open pull requests against, and
       a token that can. Not a repository anyone depends on: the point of this
       exercise is that a machine writes to it.

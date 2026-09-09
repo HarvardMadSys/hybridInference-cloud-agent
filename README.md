@@ -1,11 +1,12 @@
-# FreeInference Cloud Agent
+# Cloud Agent
 
 Cloud coding agents that run in sandboxed containers on a pool of hosts, drive a
 user's repository, and publish the result as a pull request.
 
-## Powered by FreeInference
+## Powered by a HybridInference gateway
 
-Model calls go through the [FreeInference](https://freeinference.org) gateway,
+Model calls go through a [HybridInference](https://github.com/HarvardMadSys/hybridInference) gateway
+(FreeInference is the hosted deployment of one),
 and **HTTP is the only thing these two services share** — no database, no
 signing secret, no Python import. Three contracts, each written down in
 [`contracts/`](contracts/):
@@ -22,90 +23,89 @@ live minutes and are renewed while an attempt is genuinely still running, so
 revocation is expiry rather than bookkeeping — and this service, not the
 gateway, is what decides an attempt is still current.
 
-MCP is in neither contract. A grant carried an MCP scope, and the lookups
-carried a registry read, until server ownership moved to the user: each person
-connects their own servers and the control plane resolves them per user, so
-there is no deployment-wide registry left for the gateway to answer for.
+MCP servers are owned by each user and resolved from their connections by the
+control plane. They are no longer part of the gateway's grants or internal
+lookups. The sandbox calls the control plane's MCP-only relay with a separate,
+scoped credential.
 
 Every call to the gateway fails **closed**. An unreachable catalog resolves to
 no models, not every model; an unreadable user status resolves to "cannot use
 the service", not "fine".
 
 > **Status: serving production.** The extraction from the HybridInference
-> monorepo is complete — production cut over on 2026-08-07 and the gateway's own
-> agent routes were deleted on 2026-08-09, so this repository is now the only
-> implementation. [MIGRATION.md](MIGRATION.md) records what moved, what was
-> decided, and which paths are still unproven on this stack.
+> monorepo is complete: production cut over on 2026-08-07 and the gateway's own
+> agent routes were deleted on 2026-08-09. [MIGRATION.md](MIGRATION.md) records
+> the split, its decisions, and deferred work. New work tracks in this
+> repository's issues and pull requests.
 
 ## Architecture
 
 ```text
-                 ┌──────────────────────────────────────┐
-   browser ─────▶│  web/  (Next.js + BFF)               │
-                 └──────────────────┬───────────────────┘
-                                    │ session cookie
-                 ┌──────────────────▼───────────────────┐
-                 │  backend/cloud_agent — control plane │◀──┐
-                 │  jobs · scheduler · publishing       │   │
-                 │  thread residency · affinity claim   │   │  identity JWT (JWKS)
-                 │  ThreadCheckpoint store · MCP relay  │   │  inference grants
-                 └──────────────────┬───────────────────┘   │  internal lookups
-                                    │ claim / heartbeat     │
-                 ┌──────────────────▼───────────────────┐   │
-                 │  host/cloud_agent_host — host agent  │   │  ┌─────────────────┐
-                 │  runner · workspace broker · relay   │   └─▶│  FreeInference  │
-                 │  HarnessDriver / Session / Turn      │      │  gateway        │
-                 │  residency heartbeat (gen-scoped)    │      └────────▲────────┘
-                 └──────────────────┬───────────────────┘               │
-                                    │ spawns                            │
-                 ┌──────────────────▼───────────────────┐               │
-                 │  sandbox — process | container | kata│───────────────┘
-                 │  claude-code · codex · pi ·          │  scoped grant token, through
-                 │  opencode · kilo                     │  the egress relay
-                 └──────────────────────────────────────┘
+browser ──▶ web/ (Next.js + BFF)
+                 │ session cookie
+                 ▼
+         cloud_agent/ — control plane ◀── HTTP ──▶ HybridInference gateway
+         jobs · scheduling · publishing           identity · grants · lookups
+                 │ claim / heartbeat / workspace
+                 ▼
+         cloud_agent_host/ — enrolled host
+         runner · workspace broker · group supervisor
+                 │ Docker lifecycle / per-member live transports
+                 ▼
+         retained sandbox group — kata | container
+         one Docker container · shared /workspace
+         one native session and active CLI process per chat member
+         claude-code · codex · pi · opencode · kilo
+                 │ scoped credentials over fixed relays
+                 ├──▶ inference gateway
+                 └──▶ control plane's MCP-only listener
 ```
 
-The sandbox backend is chosen per host. `kata` gives each job its own kernel and
-is what public multi-tenant use requires; `container` is an explicit
-shared-kernel downgrade that every deploy restates; `process` is no isolation at
-all and refuses to start unless the operator acknowledges that. Whichever one
-runs, the harness inside it runs with its permission prompts disabled — the
-sandbox is the boundary, so a prompt inside it has nothing left to protect.
-[docs/operations.md](docs/operations.md) covers provisioning and the checks that
-gate each backend.
+The deployment defaults to `kata`, which provides a separate guest kernel per
+sandbox group and is required for public multi-tenant use. `container` is an
+explicit shared-kernel downgrade for trusted repositories. The unisolated
+`process` backend remains a unit-test seam and cannot attest the deployed
+retained-session topology. See [docs/operations.md](docs/operations.md) for
+execution profiles and deployment checks.
 
-### Threads are resident sessions
+### Threads use retained native sessions
 
-A thread is not a transcript replayed into a fresh process. The harness session
-stays resident on a host between turns, and each turn takes the highest rung
-still available:
+A new chat starts in a one-member sandbox group. The container's writable layer
+holds the workspace and native Agent CLI state. The broker's group supervisor
+keeps a live CLI process per active member; a compatible follow-up sends only
+the new message to that process. If the process must be replaced, the CLI
+resumes its native session in the same retained container.
 
-| Rung | What the turn does | Needs |
-|---|---|---|
-| `hot` | injected into the live process on its existing session | a process that predates this turn |
-| `warm_native` | resident workspace, harness restarted with its own `--resume` | the residency survived, the process did not |
-| `cold_native` | fresh sandbox, `ThreadCheckpoint` imported | a checkpoint was exported |
-| `replay` | fresh sandbox, transcript replayed as a prompt | always available |
+Fork creates a separate chat and native session in the same group. Parent and
+child share the container and workspace and may run concurrently, with separate
+member UIDs, credentials, and process control.
 
-Degradation is automatic and observable: each step triggers only when the one
-above it is unavailable, and every attempt records which rung it ran on. The
-design — residency generation fencing, the driver contract, and the credential
-model — is in
-[`docs/specs/2026-08-17-session-resident-harness-threads-design.md`](docs/specs/2026-08-17-session-resident-harness-threads-design.md).
+| Context status | Meaning |
+|---|---|
+| `NEW` | The member has no previously settled native turn. |
+| `LIVE` | The turn uses the compatible resident process already running. |
+| `RESTORED` | A replacement process resumes the same native session from the retained container. |
+| `LOST` | The required native state or container cannot be proved intact; execution fails closed. |
+
+`docker stop` preserves the writable layer for a later `docker start`. Losing
+the container or Docker data root is not recoverable through transcript replay
+or a platform checkpoint; portable storage and cross-host restore are deferred.
+The implemented design is
+[`docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md`](docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
 
 Three deployment units, one repository:
 
 | Unit | Path | Runs where |
 |---|---|---|
 | Web + BFF | `web/` | alongside the control plane |
-| Control plane | `backend/cloud_agent/` | one service, owns the Postgres database |
-| Host agent | `host/cloud_agent_host/` | every machine in the host pool; the runner, the workspace broker, the egress proxy and the gateway/control-plane/MCP tunnels deploy together |
+| Control plane | `cloud_agent/` | one service, owns the Postgres database |
+| Host agent | `cloud_agent_host/` | every enrolled host; runner, workspace broker, egress proxy, and gateway/control-plane/MCP tunnels deploy together |
 
 ## Repository layout
 
 ```text
-backend/cloud_agent/   control plane: API, auth adapter, scheduler, publishing
-host/cloud_agent_host/ runner, sandbox, runtimes, workspace broker
+cloud_agent/           control plane: API, auth adapter, scheduler, publishing
+cloud_agent_host/      runner, sandbox, runtimes, workspace broker
 web/                   Next.js app (user UI + admin dashboard)
 contracts/             OpenAPI documents for the three gateway contracts
 migrations/            Alembic migrations for the agent-owned database
@@ -132,11 +132,28 @@ make check
 | `make test` | pytest, excluding `external` and `dbtest` |
 | `make test-db` | the `dbtest` tier (needs Postgres) |
 
+### Complete local Docker run
+
+To exercise the actual browser, OAuth boundary, control plane, enrolled host,
+all five pinned Agent CLIs, and retained sandbox lifecycle without a staging
+gateway or provider key:
+
+```bash
+./deploy/local/dev.sh up
+./deploy/local/dev.sh smoke
+```
+
+Open <http://127.0.0.1:13002>. The stack publishes only that loopback edge;
+repository, session, and database state remain Docker-owned. `dev.sh stop`
+stops rather than deletes the stack, so the same chat containers can be
+started and resumed later. See [deploy/local/README.md](deploy/local/README.md)
+for the topology and commands.
+
 ## Contributing
 
 Read [AGENTS.md](AGENTS.md) first — it is the onboarding guide for both humans
-and AI coding agents, and it carries the migration rules that are currently in
-force.
+and AI coding agents, including the current workflow and permanent service
+boundaries.
 
 Branch off `dev` as `<user>/<scope>/<name>`; pull requests target `dev`.
 

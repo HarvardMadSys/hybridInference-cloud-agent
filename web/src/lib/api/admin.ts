@@ -17,8 +17,9 @@ import { fetchWithAuth, jsonOrThrow } from './client';
 
 const API_BASE = config.apiBase;
 const HOSTS = '/admin/agent/runner-hosts';
+const RUNTIME_VERSIONS = '/admin/agent/runtime-versions';
 
-/** Status values the control plane stores; see `backend/cloud_agent/host_pool.py`. */
+/** Status values the control plane stores; see `cloud_agent/host_pool.py`. */
 export type AgentHostStatus = 'enrolling' | 'online' | 'draining' | 'disabled';
 
 export interface AgentRunnerHost {
@@ -52,12 +53,33 @@ export interface AgentRunnerHost {
   runner_version: string | null;
   broker_url: string | null;
   last_heartbeat_at: string | null;
+  /**
+   * The container runtime this host's jobs actually execute under. `''` is a
+   * positive statement — shared-kernel runc — where null means the host has
+   * never said.
+   */
+  sandbox_runtime: string | null;
+  /** Digest of the sandbox image this host launches, as last reported. */
+  sandbox_image_digest: string | null;
+  /** The *default* CLI version per runtime id: what a job runs unselected. */
+  runtime_versions: Record<string, string> | null;
+  /**
+   * Every CLI version this host's image holds, keyed by runtime id, default
+   * first. The menu an admin may select from — the control plane cannot serve
+   * a version absent from it, because it is not in the image.
+   */
+  runtime_versions_available: Record<string, string[]> | null;
 }
 
 export interface AgentRunnerHostPool {
   hosts: AgentRunnerHost[];
-  /** Pinned host, or null when any runner may claim. */
+  /** New-chat placement host, or null when any runner may materialize one. */
   active_host: string | null;
+  /**
+   * The deployment's chosen CLI version per runtime id. A runtime absent here
+   * runs whatever its claiming host reports as the image default.
+   */
+  runtime_versions: Record<string, string>;
 }
 
 export interface HostEnrollToken {
@@ -70,12 +92,35 @@ export async function getAgentRunnerHosts(): Promise<AgentRunnerHostPool> {
   return jsonOrThrow<AgentRunnerHostPool>(await fetchWithAuth(API_BASE, HOSTS));
 }
 
-/** Pin new claims to one host, or pass null so any runner may claim. */
+/** Pin new-chat placement; existing retained groups stay on their owning host. */
 export async function setActiveAgentRunnerHost(host: string | null): Promise<AgentRunnerHostPool> {
   const resp = await fetchWithAuth(API_BASE, `${HOSTS}/active`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ host }),
+  });
+  return jsonOrThrow<AgentRunnerHostPool>(resp);
+}
+
+/**
+ * Choose the agent CLI version this deployment runs for one runtime; pass null
+ * to go back to the image default.
+ *
+ * Bounded by what the pool's images contain — a version no host offers is
+ * refused with a 404 rather than stored, because the claim would silently fall
+ * back and the page would then show a version that never runs.
+ *
+ * Not retroactive: a thread already running keeps the version it started on,
+ * because moving a live harness session between versions costs it its memory.
+ */
+export async function setAgentRuntimeVersion(
+  runtime: string,
+  version: string | null,
+): Promise<AgentRunnerHostPool> {
+  const resp = await fetchWithAuth(API_BASE, RUNTIME_VERSIONS, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runtime, version }),
   });
   return jsonOrThrow<AgentRunnerHostPool>(resp);
 }

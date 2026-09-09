@@ -12,8 +12,8 @@ Ships in the sandbox image (reviewed and pinned there, like the CLI itself).
 Three properties are deliberate:
 
 - **The prompt never passes through a shell.** argv in, argv out, one exec.
-- **The config lives in the container's HOME, not the job worktree** — a file
-  dropped in the worktree would surface in ``git diff`` and pollute the patch.
+- **The config never lives in the workspace.** It is written into the
+  member's activation tmpfs.
 - **json.dump does the quoting**, so a model id or URL that would break
   hand-rolled string templating cannot corrupt the config.
 """
@@ -36,15 +36,29 @@ def main() -> None:
         )
         raise SystemExit(64) from None
 
-    config_dir = os.path.expanduser("~/.pi/agent")
+    # The runtime points PI_CODING_AGENT_DIR at the activation tmpfs. The
+    # generated models.json contains the short-lived turn credential and must
+    # disappear when the chat container stops; native session JSONL lives in
+    # the separately supplied --session-dir under /agent-state.
+    config_dir = os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
     os.makedirs(config_dir, exist_ok=True)
+    entry: dict[str, object] = {"id": model}
+    if os.environ.get("PI_GATEWAY_REASONING"):
+        # `--thinking` on its own does nothing. Verified against pi 0.73.1
+        # against a recording endpoint: with the model entry as written above,
+        # every level produced a request with no `reasoning_effort` at all;
+        # adding this made the flag land. The runner sets the variable only
+        # for a turn that asked for a depth, because declaring it always would
+        # make pi send `medium` on every turn — which would quietly change
+        # what every existing job does.
+        entry["reasoning"] = True
     config = {
         "providers": {
             "freeinference": {
                 "baseUrl": base_url,
                 "api": "openai-completions",
                 "apiKey": api_key,
-                "models": [{"id": model}],
+                "models": [entry],
             }
         }
     }

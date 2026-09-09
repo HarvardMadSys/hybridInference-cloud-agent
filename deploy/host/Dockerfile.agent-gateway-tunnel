@@ -1,6 +1,6 @@
-# The fixed-destination hop that lets a runner host without a gateway still
-# give its sandboxes, on the closed agent-phase network, one — and only one —
-# thing to talk to.
+# One fixed-destination hop used by the remote-host topology. Separate image
+# instances expose the inference and MCP-only listeners on the closed
+# agent-phase network; another exposes the control API only to runners.
 #
 # Small on purpose: it sits on the closed agent network, so everything
 # installed here is something a sandbox can reach. openssh-client and a shell,

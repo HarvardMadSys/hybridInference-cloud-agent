@@ -2,11 +2,11 @@
 #
 # The self-hosted agent runner (issue #1041).
 #
-# This is the TRUSTED side. It holds the dispatcher credential, checks the
-# job's repository out, and starts one disposable sandbox per job — only a
-# model-scoped token ever crosses into that sandbox. The agent itself never
-# runs here, which is why this image carries a Docker client and the sandbox
-# image deliberately does not.
+# This is the TRUSTED side. It holds the enrolled-host and short-lived clone
+# credentials, then coordinates turns with the retained shared sandbox. Only
+# the inference grant and MCP token cross into that sandbox. The agent itself
+# never runs here, which is why this image carries a Docker client and the
+# sandbox image deliberately does not.
 #
 # Two tools this image must have, and the reason each is load-bearing:
 #
@@ -19,9 +19,13 @@
 
 FROM python:3.12-slim AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
+ARG PIP_DEFAULT_TIMEOUT=120
+ARG UV_HTTP_TIMEOUT=120
 RUN pip install uv
 
 WORKDIR /app
@@ -43,7 +47,9 @@ RUN --mount=type=secret,id=github_token \
 
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -57,12 +63,17 @@ WORKDIR /app
 COPY --from=builder /app/.venv .venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-COPY host/cloud_agent_host/ cloud_agent_host/
+COPY cloud_agent_host/ cloud_agent_host/
+# A new runner may adopt retained containers created from the previous image.
+# Keep the reviewed helper on the trusted side so it can atomically upgrade
+# those containers before their first post-deploy activation.
+COPY deploy/sandbox/member-process-reaper /usr/local/libexec/member-process-reaper
+RUN chmod 0555 /usr/local/libexec/member-process-reaper
 
-# Root on purpose, and only here. The runner chowns each job worktree to the
-# sandbox user before mounting it — an unprivileged runner cannot, and falls
-# back to making the tree world-readable on the host. The isolation boundary is
-# between this container and the sandbox it starts, not around this container.
+# Root on purpose, and only here. The runner and broker need the host Docker
+# socket to create/start/stop retained containers. Repository source is cloned
+# into a short-lived runner directory, credential-scrubbed, and streamed into
+# the container; that directory is never bind-mounted into the sandbox.
 USER root
 
-CMD ["python", "-m", "cloud_agent_host.runner", "--loop"]
+CMD ["python", "-m", "cloud_agent_host.runner"]

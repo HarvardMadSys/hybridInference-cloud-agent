@@ -32,7 +32,7 @@ lint:  ## Run linters (ruff format check, ruff lint, pydocstyle)
 	@echo "$(YELLOW)Running linters...$(RESET)"
 	$(UV_RUN) ruff format --check .
 	$(UV_RUN) ruff check --no-fix .
-	$(UV_RUN) pydocstyle backend host
+	$(UV_RUN) pydocstyle cloud_agent cloud_agent_host
 	@echo "$(GREEN)OK Linting passed$(RESET)"
 
 test:  ## Run tests (exclude external and db-dependent)
@@ -40,7 +40,7 @@ test:  ## Run tests (exclude external and db-dependent)
 	$(UV_RUN) pytest -q -m "not external and not dbtest"
 	@echo "$(GREEN)OK Tests passed$(RESET)"
 
-test-db:  ## Run tests that require PostgreSQL (set AGENT_TEST_DATABASE_URL)
+test-db:  ## Run the dbtest tier (needs Postgres; see TEST_DB_* in ENVIRONMENT.md)
 	$(UV_RUN) pytest -vv -m "dbtest"
 
 test-all:  ## Run all tests except external (includes db-dependent)

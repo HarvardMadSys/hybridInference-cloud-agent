@@ -1,6 +1,6 @@
 name: Sync dev to main
 
-# `main` is the production branch: what is on it is what `deploy-production.yml`
+# `main` is the production branch: what is on it is what `deploy-prod.yml`
 # ships. Nothing lands on it directly — it only ever fast-forwards to `dev`, and
 # only when somebody asks.
 #

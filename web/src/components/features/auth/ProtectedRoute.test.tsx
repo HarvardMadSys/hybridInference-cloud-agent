@@ -16,16 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // and six tests failed here with a rendering error that named none of this.
 vi.mock('@/config/env', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/config/env')>()),
-  gatewayAuthorizeUrl: 'https://gateway.example.org/authorize',
-  gatewayTokenUrl: () => 'https://gateway.example.org/v1/identity/token',
+  gatewayUrl: 'https://gateway.example.org',
   config: { apiBase: '', appName: 'Cloud Agent' },
 }));
 
 vi.mock('@/lib/api/session', () => ({
   getSessionUser: vi.fn(),
   endSession: vi.fn(),
-  startSession: vi.fn(),
-  exchangeAuthorizationCode: vi.fn(),
 }));
 
 import { getSessionUser } from '@/lib/api/session';
@@ -60,51 +57,42 @@ describe('ProtectedRoute', () => {
   });
   afterEach(() => cleanup());
 
-  it('sends an unauthenticated visitor to the gateway with a PKCE challenge', async () => {
+  it("sends an unauthenticated visitor to this app's own login page", async () => {
+    // Not straight at the control plane. Somebody who has never seen this
+    // service should be told what it is and which authority they are about to
+    // authenticate against, rather than arriving at a third party's consent
+    // screen having been bounced through two redirects.
     vi.mocked(getSessionUser).mockResolvedValue(null);
 
     renderApp();
 
     await waitFor(() => expect(assign).toHaveBeenCalledOnce());
-    const url = new URL(assign.mock.calls[0][0] as string);
+    const url = new URL(assign.mock.calls[0][0] as string, 'https://agents.example.org');
 
-    expect(url.origin + url.pathname).toBe('https://gateway.example.org/authorize');
-    expect(url.searchParams.get('client_id')).toBe('cloud-agent');
-    expect(url.searchParams.get('redirect_uri')).toBe('https://agents.example.org/callback');
-    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
-    // 32 bytes of SHA-256, base64url, unpadded.
-    expect(url.searchParams.get('code_challenge')).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(url.searchParams.get('state')).toBeTruthy();
-
+    expect(url.pathname).toBe('/login');
+    expect(url.searchParams.get('return_to')).toBe('/task-1?tab=diff');
     expect(screen.queryByText('task list')).not.toBeInTheDocument();
   });
 
-  it('parks a verifier that matches the challenge it sent, and the page to return to', async () => {
+  it('builds no PKCE flow and parks nothing a script could read', async () => {
+    // The regression this whole change exists to prevent. The verifier used to
+    // be minted here and parked in `localStorage`, and the callback page
+    // redeemed the code for the gateway's identity token — two bearer
+    // credentials in page JavaScript. Both now live in the control plane, so
+    // there is nothing in browser storage and nothing on the wire from here
+    // but a landing path.
     vi.mocked(getSessionUser).mockResolvedValue(null);
 
     renderApp();
 
     await waitFor(() => expect(assign).toHaveBeenCalledOnce());
-    const url = new URL(assign.mock.calls[0][0] as string);
-    // Parked under the state it sent — one entry per flow, so two tabs signing
-    // in at once do not overwrite each other's verifier.
-    const pending = JSON.parse(
-      localStorage.getItem(`cloud-agent:pkce:${url.searchParams.get('state')}`) ?? '{}',
-    );
+    const target = assign.mock.calls[0][0] as string;
 
-    expect(pending.state).toBe(url.searchParams.get('state'));
-    expect(pending.returnTo).toBe('/task-1?tab=diff');
-    // The challenge really is S256(verifier) — a mismatch here is a login loop
-    // that only shows up against a live gateway.
-    const digest = await crypto.subtle.digest(
-      'SHA-256',
-      new TextEncoder().encode(pending.verifier),
-    );
-    const expected = btoa(String.fromCharCode(...new Uint8Array(digest)))
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
-    expect(url.searchParams.get('code_challenge')).toBe(expected);
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+    for (const leaked of ['code_challenge', 'code_verifier', 'client_id']) {
+      expect(target).not.toContain(leaked);
+    }
   });
 
   it('renders the app for a signed-in user and redirects nobody', async () => {
@@ -120,10 +108,15 @@ describe('ProtectedRoute', () => {
     expect(assign).not.toHaveBeenCalled();
   });
 
-  it('refuses to sign in rather than loop when no gateway is configured', async () => {
+  it('refuses to sign in rather than loop when the server says it cannot', async () => {
+    // The browser cannot see the control plane's configuration, so it learns
+    // this by being sent back with a flag. Asking again would be told the same
+    // thing again — which is the loop this refusal exists to prevent.
     vi.mocked(getSessionUser).mockResolvedValue(null);
-    const env = await import('@/config/env');
-    vi.spyOn(env, 'gatewayAuthorizeUrl', 'get').mockReturnValue('');
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, assign, search: '?sign_in_error=unavailable' },
+    });
 
     renderApp();
 

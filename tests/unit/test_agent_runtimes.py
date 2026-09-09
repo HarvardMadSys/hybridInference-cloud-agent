@@ -20,9 +20,11 @@ from cloud_agent_host.runtimes import (
     KiloRuntime,
     OpencodeRuntime,
     PiRuntime,
+    RuntimeEffortUnsupportedError,
     RuntimeMCPConfig,
     RuntimeMCPUnavailableError,
     get_runtime,
+    runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
 
@@ -95,6 +97,60 @@ def test_error_result_maps_to_error():
     event = ClaudeCodeRuntime().parse_event(line)
     assert event.event_type == "error"
     assert event.payload["subtype"] == "error_max_turns"
+
+
+@pytest.mark.parametrize("kind", ["text", "thinking", "tool_result", "result"])
+def test_claude_transcript_preserves_content_past_4000_characters(kind):
+    """A long answer or tool result must survive normalization in full."""
+    content = "repository detail\n" * 500 + "END OF CONTENT"
+    if kind == "result":
+        raw = {"type": "result", "result": content}
+        key = "text"
+    elif kind == "tool_result":
+        raw = {
+            "type": "user",
+            "message": {"content": [{"type": kind, "content": content}]},
+        }
+        key = "content"
+    else:
+        raw = {
+            "type": "assistant",
+            "message": {"content": [{"type": kind, kind: content}]},
+        }
+        key = "text"
+    event = ClaudeCodeRuntime().parse_event(json.dumps(raw))
+    assert event.payload[key] == content
+
+
+@pytest.mark.parametrize("kind", ["text", "thinking", "tool_use"])
+def test_claude_assistant_blocks_keep_the_response_identity(kind):
+    """Parallel blocks repeat one model response's usage, not separate calls."""
+    usage = {"input_tokens": 100, "output_tokens": 0}
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_shared",
+                    "content": [{"type": kind, kind: "content"}],
+                    "usage": usage,
+                },
+            }
+        )
+    )
+    assert event.payload["usage_id"] == "msg_shared"
+    assert event.payload["usage"] == usage
+
+
+@pytest.mark.parametrize("is_error", [False, True])
+def test_claude_result_keeps_the_completed_turn_usage(is_error):
+    """Success and failure both carry usage that supersedes streamed estimates."""
+    usage = {"input_tokens": 42, "output_tokens": 7, "cache_read_input_tokens": 100}
+    event = ClaudeCodeRuntime().parse_event(
+        json.dumps({"type": "result", "is_error": is_error, "usage": usage})
+    )
+    assert event.payload["usage"] == usage
+    assert event.payload["usage_scope"] == "attempt"
 
 
 def _pi_contract_lines() -> list[str]:
@@ -315,6 +371,33 @@ def test_codex_events_normalize():
     assert runtime.parse_event(json.dumps({"type": "turn.completed"})).event_type == "lifecycle"
 
 
+def test_codex_native_session_id_is_captured_and_resumed_from_state_root():
+    runtime = CodexRuntime()
+    started = runtime.parse_event(
+        json.dumps({"type": "thread.started", "thread_id": "codex-thread-123"})
+    )
+    assert started.event_type == "lifecycle"
+    assert runtime.session_id == "codex-thread-123"
+
+    argv, env = runtime.prepare(
+        workdir="/tmp/x",
+        task_prompt="only the follow-up",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="ajt.a.b",
+        provides_isolation=True,
+        session_state_dir="/agent-state",
+        resume_session_id="codex-thread-123",
+    )
+    resume_at = argv.index("resume")
+    assert argv[resume_at : resume_at + 3] == [
+        "resume",
+        "codex-thread-123",
+        "only the follow-up",
+    ]
+    assert env["CODEX_HOME"] == "/agent-state"
+
+
 def test_generic_runtime_streams_raw_and_never_uses_a_shell():
     """Tier 2 gets a log tail for free, with no shell interpretation."""
     runtime = GenericRuntime("mytool --prompt {prompt} --model {model}")
@@ -332,15 +415,12 @@ def test_generic_runtime_streams_raw_and_never_uses_a_shell():
 
 
 def test_registry_resolution_and_refusal():
-    """Known runtimes resolve; unknown ones refuse unless Tier 2 is requested."""
+    """Only runtimes with a registered live-session transport resolve."""
     assert isinstance(get_runtime("claude-code"), ClaudeCodeRuntime)
     assert isinstance(get_runtime("codex"), CodexRuntime)
     assert isinstance(get_runtime("pi"), PiRuntime)
     assert isinstance(get_runtime("opencode"), OpencodeRuntime)
     assert isinstance(get_runtime("kilo"), KiloRuntime)
-    assert isinstance(
-        get_runtime("some-new-cli", generic_command="some-new-cli run"), GenericRuntime
-    )
     with pytest.raises(KeyError):
         get_runtime("does-not-exist")
 
@@ -369,6 +449,7 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     assert "do the thing; carefully" in argv
     assert argv[argv.index("--model") + 1] == "glm-5.1"
     assert "--mode" in argv and argv[argv.index("--mode") + 1] == "json"
+    assert "--no-session" not in argv
     # The pinned pi release implements MCP through executable extensions,
     # including extensions committed under .pi/.
     assert "--no-extensions" in argv
@@ -379,6 +460,28 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     # Tier 1 since the recorded staging runs pinned the format.
     assert runtime.capabilities().tier == 1
     assert runtime.capabilities().normalized_events is True
+
+
+def test_pi_native_session_is_persisted_and_resumed_explicitly():
+    runtime = PiRuntime()
+    event = runtime.parse_event(
+        json.dumps({"type": "session", "id": "pi-session-123", "version": 3})
+    )
+    assert event.payload["session_id"] == "pi-session-123"
+    assert runtime.session_id == "pi-session-123"
+
+    argv, env = runtime.prepare(
+        workdir="/tmp/x",
+        task_prompt="only the follow-up",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="ajt.a.b",
+        session_state_dir="/agent-state",
+        resume_session_id="pi-session-123",
+    )
+    assert argv[argv.index("--session-dir") + 1] == "/agent-state"
+    assert argv[argv.index("--session") + 1] == "pi-session-123"
+    assert env["PI_CODING_AGENT_DIR"] == "/run/agent-activation/pi"
 
 
 @pytest.mark.parametrize(
@@ -392,7 +495,7 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     ],
     ids=["codex", "pi", "opencode", "kilo", "generic"],
 )
-def test_mcp_config_fails_closed_without_a_gateway_broker(runtime):
+def test_mcp_config_fails_closed_without_an_isolated_relay(runtime):
     """An adapter with no mediated path refuses rather than dropping servers.
 
     ``ClaudeCodeRuntime`` is excluded because it now *has* that path; the
@@ -503,6 +606,24 @@ def test_opencode_runtime_targets_the_gateway_through_its_wrapper():
     assert runtime.capabilities().tier == 2
 
 
+def test_opencode_native_session_id_and_xdg_state_are_explicit():
+    runtime = OpencodeRuntime()
+    runtime.parse_event('{"type":"text","sessionID":"ses_open_123"}')
+    assert runtime.session_id == "ses_open_123"
+    argv, env = runtime.prepare(
+        workdir="/tmp/x",
+        task_prompt="only the follow-up",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="ajt.a.b",
+        session_state_dir="/agent-state",
+        resume_session_id="ses_open_123",
+    )
+    assert argv[argv.index("--session") + 1] == "ses_open_123"
+    assert env["XDG_DATA_HOME"] == "/agent-state/opencode/data"
+    assert env["OPENCODE_FREEINFERENCE_CONFIG_DIR"] == "/run/agent-activation/opencode"
+
+
 def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
     """Kilo is invoked via the wrapper, with everything it needs.
 
@@ -534,6 +655,24 @@ def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
     assert env["KILO_GATEWAY_MODEL"] == "glm-5.1"
     assert runtime.parse_event('{"type":"text"}').event_type == "raw"
     assert runtime.capabilities().tier == 2
+
+
+def test_kilo_native_session_id_and_xdg_state_are_explicit():
+    runtime = KiloRuntime()
+    runtime.parse_event('{"type":"text","sessionID":"ses_kilo_123"}')
+    assert runtime.session_id == "ses_kilo_123"
+    argv, env = runtime.prepare(
+        workdir="/tmp/x",
+        task_prompt="only the follow-up",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="ajt.a.b",
+        session_state_dir="/agent-state",
+        resume_session_id="ses_kilo_123",
+    )
+    assert argv[argv.index("--session") + 1] == "ses_kilo_123"
+    assert env["XDG_DATA_HOME"] == "/agent-state/kilo/data"
+    assert env["KILO_FREEINFERENCE_CONFIG_DIR"] == "/run/agent-activation/kilo"
 
 
 def test_capabilities_declare_tiers():
@@ -595,16 +734,16 @@ def test_suppression_does_not_leak_between_jobs():
 
 # ── MCP wiring ported from the gateway at H4 ──────────────────────────
 #
-# These three lived in the gateway's ``test_agent_mcp.py``, whose *other* half
-# — the registry and the proxy filters — stays there because that half is the
-# gateway's code. Splitting a file is how a case gets dropped, and a sweep at
-# H4 found these three pin properties nothing here covered: the flag that shuts
+# These three lived in the gateway's ``test_agent_mcp.py``. The registry and
+# proxy filters were subsequently moved here too; this note records why the
+# runtime-specific cases remain in the adapter suite. A sweep at H4 found these
+# three pin properties nothing here covered: the flag that shuts
 # out a repository's own servers when a job requests none, the one-normalisation
 # of the gateway base url, and which runtimes may claim MCP at all. The other
 # three cases in that section were already covered here under different names
-# (``test_a_brokered_runtime_emits_only_gateway_endpoints_and_no_credential``,
+# (``test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential``,
 # ``test_runtime_credentials_stay_out_of_process_arguments``,
-# ``test_mcp_config_fails_closed_without_a_gateway_broker``) and were not
+# ``test_mcp_config_fails_closed_without_an_isolated_relay``) and were not
 # duplicated.
 
 _MCP_GATEWAY = "http://backend:8080"
@@ -684,3 +823,173 @@ def test_only_runtimes_that_can_also_shut_out_repo_config_report_mcp():
     assert runtimes_supporting_mcp() == ["claude-code"]
     assert ClaudeCodeRuntime().capabilities().mcp is True
     assert CodexRuntime().capabilities().mcp is False
+
+
+def _prepare(runtime, **kwargs):
+    return runtime.prepare(
+        workdir="/w",
+        task_prompt="do it",
+        model="glm-5.3",
+        gateway_base_url="https://gw.test/v1",
+        credential="tok",
+        **kwargs,
+    )
+
+
+def test_claude_code_puts_the_effort_on_the_argv():
+    argv, _env = _prepare(ClaudeCodeRuntime(), reasoning_effort="max")
+
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_auto_adds_no_flag():
+    """The whole compatibility story: an unset effort invokes exactly as before."""
+    argv, _env = _prepare(ClaudeCodeRuntime())
+
+    assert "--effort" not in argv
+
+
+def test_claude_code_subagents_use_the_concrete_granted_model():
+    """An `inherit` sentinel leaves the subagent's own model choice in force."""
+    _argv, env = _prepare(ClaudeCodeRuntime())
+
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3"
+
+
+def test_claude_code_offers_xhigh():
+    """Captured from 2.1.220. The first declaration read --help and missed it."""
+    argv, _env = _prepare(ClaudeCodeRuntime(), reasoning_effort="xhigh")
+
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_a_level_the_cli_does_not_have_is_refused_not_passed_through():
+    """Fail closed, and here that is load-bearing rather than tidy.
+
+    claude-code does not reject an unknown level — `--effort ultra`, `none`
+    and `minimal` all arrive on the wire as `high`. Forwarding one would run
+    the turn at a depth nobody chose while the UI reported the one they did.
+    """
+    for level in ("ultra", "none", "minimal"):
+        with pytest.raises(RuntimeEffortUnsupportedError):
+            _prepare(ClaudeCodeRuntime(), reasoning_effort=level)
+
+
+def test_codex_expresses_effort_as_a_config_override():
+    """Verified against the pinned 0.145.0, not assumed — see the wire fixture.
+
+    The CLI turns this into ``reasoning.effort`` in its /v1/responses body,
+    which is the field the gateway's Responses translation already reads.
+    """
+    argv, _env = _prepare(CodexRuntime(), reasoning_effort="high")
+
+    at = argv.index('model_reasoning_effort="high"')
+    assert argv[at - 1] == "-c"
+
+
+def test_codex_auto_adds_no_override():
+    argv, _env = _prepare(CodexRuntime())
+
+    assert not any(part.startswith("model_reasoning_effort") for part in argv)
+
+
+def test_pi_needs_both_the_flag_and_the_provider_declaration():
+    """`--thinking` alone is a no-op — verified against 0.73.1, not assumed.
+
+    Without the provider entry declaring the model as a reasoning model, pi
+    emits no ``reasoning_effort`` whatsoever, so the flag would look set and
+    change nothing. The wrapper writes that entry, hence the environment half.
+    """
+    argv, env = _prepare(PiRuntime(), reasoning_effort="low")
+
+    assert argv[argv.index("--thinking") + 1] == "low"
+    assert env["PI_GATEWAY_REASONING"] == "1"
+
+
+def test_pi_auto_leaves_the_provider_entry_alone():
+    """Declaring the model as reasoning would make pi send `medium` always."""
+    argv, env = _prepare(PiRuntime())
+
+    assert "--thinking" not in argv
+    assert "PI_GATEWAY_REASONING" not in env
+
+
+def test_pi_does_not_offer_the_levels_that_do_not_survive():
+    """`xhigh` reaches the wire as `high`, so offering it would be a lie."""
+    for level in ("xhigh", "off"):
+        with pytest.raises(RuntimeEffortUnsupportedError):
+            _prepare(PiRuntime(), reasoning_effort=level)
+
+
+def test_config_file_runtimes_carry_the_level_in_the_environment():
+    """opencode and kilo have no flag for this; their wrapper's config does."""
+    for runtime, var in (
+        (OpencodeRuntime(), "OPENCODE_GATEWAY_REASONING_EFFORT"),
+        (KiloRuntime(), "KILO_GATEWAY_REASONING_EFFORT"),
+    ):
+        argv, env = _prepare(runtime, reasoning_effort="high")
+        assert env[var] == "high"
+        # Nothing lands on the command line, so a wrapper that ignored the
+        # variable would produce a turn with no effort rather than a broken one.
+        assert not any("reasoning" in part.lower() for part in argv)
+
+        _argv, auto_env = _prepare(runtime)
+        assert var not in auto_env
+
+
+def test_an_unknown_runtime_still_refuses_rather_than_ignores():
+    """The base class stays fail-closed for whatever gets registered next."""
+
+    class Newcomer(GenericRuntime):
+        name = "newcomer"
+
+    with pytest.raises(RuntimeEffortUnsupportedError):
+        _prepare(Newcomer("newcomer {prompt}"), reasoning_effort="high")
+
+
+def test_the_live_invocation_carries_the_same_effort_as_the_one_shot():
+    """Built by the same code, so HOT and COLD cannot drift apart."""
+    runtime = ClaudeCodeRuntime()
+    one_shot, _ = _prepare(runtime, reasoning_effort="low")
+    live, _ = runtime.prepare_live(
+        workdir="/w",
+        model="glm-5.3",
+        gateway_base_url="https://gw.test/v1",
+        credential="tok",
+        reasoning_effort="low",
+    )
+
+    assert one_shot[one_shot.index("--effort") + 1] == "low"
+    assert live[live.index("--effort") + 1] == "low"
+
+
+def test_only_runtimes_with_a_verified_flag_are_advertised():
+    """Absent, not empty-listed: the composer reads absence as "no control"."""
+    advertised = runtime_reasoning_efforts()
+
+    # Every registered runtime was captured against the pinned CLI; see
+    # tests/fixtures/agent_runtime_streams/effort_wire_shapes.md.
+    assert set(advertised) == {"claude-code", "codex", "pi", "opencode", "kilo"}
+    assert advertised["claude-code"] == ["low", "medium", "high", "xhigh", "max"]
+    # pi is the short list, and deliberately: two of its six flag levels do not
+    # survive the trip to the wire.
+    assert advertised["pi"] == ["minimal", "low", "medium", "high"]
+
+
+#: Increasing effort, as both CLI vocabularies spell it. Not a platform scale —
+#: nothing consults this at run time. It exists so the ordering contract on
+#: `reasoning_efforts` is checked here rather than trusted.
+_EFFORT_RANK = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def test_every_declaration_is_ordered_weakest_to_strongest():
+    """The composer takes the last level as the deepest, so order is a contract.
+
+    A declaration written out of order would silently make the composer
+    preselect the wrong depth — cheap where it should be deep, or the reverse
+    on someone's bill.
+    """
+    for name, levels in runtime_reasoning_efforts().items():
+        ranks = [_EFFORT_RANK.index(level) for level in levels]
+        assert ranks == sorted(ranks), f"{name} declares {levels} out of order"
+        assert len(set(ranks)) == len(ranks), f"{name} declares a level twice"

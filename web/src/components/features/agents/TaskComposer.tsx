@@ -1,10 +1,13 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
 import type { AgentConfigApi } from '@/lib/api/agents';
+import { isComposerSubmit } from './composerKeys';
 import { ConnectSourceControl } from './ConnectSourceControl';
+import { highestEffort, offeredEfforts } from './effort';
+import { useT } from '@/components/providers';
 import { Picker } from './Picker';
 
 // New-task composer (the /agents index state). Runtime × model are first-class
@@ -25,6 +28,7 @@ const TIER_LABELS: Record<string, string> = {
 
 export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const router = useRouter();
+  const t = useT();
   const [task, setTask] = useState('');
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
@@ -33,9 +37,16 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   const [branch, setBranch] = useState('');
   const [runtime, setRuntime] = useState('');
   const [model, setModel] = useState('');
+  const [effort, setEffort] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The config fetch runs once on mount, but its fallback message has to be
+  // translated. Depending on `t` would refetch the config every time the
+  // language changed; a ref keeps the effect's dependency list honest.
+  const tRef = useRef(t);
+  tRef.current = t;
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +66,10 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         setModel(modelIds[0] ?? '');
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'could not load config');
+        if (!cancelled)
+          setError(
+            cause instanceof Error ? cause.message : tRef.current('composer.loadConfigFailed'),
+          );
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -64,6 +78,20 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       cancelled = true;
     };
   }, [initialRepo]);
+
+  // The offered efforts follow the (runtime, model) pair, so switching either
+  // can empty the set or drop the current choice out of it.
+  const efforts = useMemo(() => offeredEfforts(config, runtime, model), [config, runtime, model]);
+  useEffect(() => {
+    // Only once the config has arrived: before that the offered set is empty
+    // because nothing is *known*, not because nothing is offered.
+    if (!config) return;
+    // Deepest by default, and reset to it whenever the pair changes under a
+    // selection it no longer offers. Falling back rather than submitting a
+    // level the new pair does not have: the backend would refuse it, and the
+    // picker would have shown a value it could not deliver.
+    if (!efforts.includes(effort)) setEffort(highestEffort(efforts));
+  }, [config, efforts, effort]);
 
   // Branches follow the selected repository, so they reload when it changes.
   useEffect(() => {
@@ -110,10 +138,13 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
         // Sent as a ref; the platform pins it to a commit at creation, because
         // a branch moves and the publisher applies onto a fixed one.
         ...(branch ? { base_ref: branch } : {}),
+        // Whatever the control shows is what is sent. Empty only when the
+        // pair offers no control at all, and then there is nothing to say.
+        ...(effort ? { reasoning_effort: effort } : {}),
       });
       router.push(`/${job.id}`);
     } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : 'could not start the job');
+      setError(cause instanceof Error ? cause.message : t('composer.startFailed'));
       setSubmitting(false);
     }
   }
@@ -121,18 +152,20 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   if (loading) {
     return (
       <section className="mx-auto w-full max-w-3xl px-6 pt-28">
-        <p className="text-center text-sm text-gray-500">Loading…</p>
+        <p className="text-center text-sm text-gray-500 dark:text-gray-400">
+          {t('common.loading')}
+        </p>
       </section>
     );
   }
 
   return (
     <section className="mx-auto w-full max-w-3xl px-6 pb-20 pt-28">
-      <h1 className="text-center text-[28px] font-semibold tracking-[-0.025em] text-gray-950">
-        What should the agent do?
+      <h1 className="text-center text-[28px] font-semibold tracking-[-0.025em] text-gray-950 dark:text-gray-50">
+        {t('composer.heading')}
       </h1>
-      <p className="mt-2 text-center text-sm leading-relaxed text-gray-500">
-        Runs in an isolated sandbox. No credentials inside — the output is a draft PR.
+      <p className="mt-2 text-center text-sm leading-relaxed text-gray-500 dark:text-gray-400">
+        {t('composer.subheading')}
       </p>
 
       {disconnected ? (
@@ -143,28 +176,31 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
 
       <div
         aria-disabled={disconnected || undefined}
-        className={`rounded-xl border border-gray-200/90 shadow-[0_14px_40px_-28px_rgba(17,24,39,0.5)] transition ${
+        className={`rounded-xl border border-gray-200/90 dark:border-white/10 shadow-[0_14px_40px_-28px_rgba(17,24,39,0.5)] transition ${
           disconnected
-            ? 'mt-4 bg-gray-50'
-            : 'mt-8 bg-white focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]'
+            ? 'mt-4 bg-gray-50 dark:bg-gray-950'
+            : 'mt-8 bg-white dark:bg-gray-900 focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]'
         }`}
       >
         <textarea
           rows={4}
           value={task}
           onChange={(event) => setTask(event.target.value)}
+          onKeyDown={(event) => {
+            if (!isComposerSubmit(event)) return;
+            event.preventDefault();
+            void run();
+          }}
           disabled={disconnected}
           placeholder={
-            disconnected
-              ? 'Connect GitHub to describe a task'
-              : 'Describe a task… e.g. Fix the SSE total-timeout regression on /v1/messages and add a unit test'
+            disconnected ? t('composer.placeholderDisconnected') : t('composer.placeholder')
           }
-          className="w-full resize-none rounded-t-xl border-0 bg-transparent px-5 pb-2 pt-4 text-[15px] leading-relaxed text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0 disabled:cursor-not-allowed"
+          className="w-full resize-none rounded-t-xl border-0 bg-transparent px-5 pb-2 pt-4 text-[15px] leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0 disabled:cursor-not-allowed"
         />
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-gray-100/90 px-3.5 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 border-t border-gray-100/90 dark:border-white/5 px-3.5 py-2.5">
           {disconnected ? (
-            <span className="inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] text-gray-400">
+            <span className="inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] text-gray-400 dark:text-gray-500">
               <svg
                 className="h-4 w-4 shrink-0"
                 viewBox="0 0 24 24"
@@ -179,25 +215,41 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
                   d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
                 />
               </svg>
-              Connect GitHub to select a repository and run
+              {t('composer.connectToRun')}
             </span>
           ) : (
             <>
               <Picker
-                label="Repository"
+                label={t('composer.repository')}
                 value={repo}
                 options={config?.repos ?? []}
                 onChange={setRepo}
               />
-              <Picker label="Branch" value={branch} options={branches} onChange={setBranch} />
-              <span className="h-4 w-px bg-gray-200" />
               <Picker
-                label="Agent"
+                label={t('composer.branch')}
+                value={branch}
+                options={branches}
+                onChange={setBranch}
+              />
+              <span className="h-4 w-px bg-gray-200 dark:bg-white/10" />
+              <Picker
+                label={t('composer.agent')}
                 value={runtime}
                 options={config?.runtimes ?? []}
                 onChange={setRuntime}
               />
-              <Picker label="Model" value={model} options={models} onChange={setModel} />
+              <Picker
+                label={t('composer.model')}
+                value={model}
+                options={models}
+                onChange={setModel}
+              />
+              <Picker
+                label={t('composer.reasoning')}
+                value={effort}
+                options={efforts}
+                onChange={setEffort}
+              />
             </>
           )}
 
@@ -205,11 +257,12 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
             type="button"
             disabled={!canRun}
             onClick={() => void run()}
+            title={t('composer.runTitle')}
             className={`ml-auto inline-flex items-center gap-1.5 rounded-lg bg-crimson px-3.5 py-1.5 text-[13px] font-medium text-white shadow-sm transition-colors ${
               canRun ? 'hover:bg-crimson-dark' : 'cursor-not-allowed opacity-60'
             }`}
           >
-            {submitting ? 'Starting…' : 'Run'}
+            {submitting ? t('composer.starting') : t('composer.run')}
             <svg
               className="h-3.5 w-3.5"
               fill="none"
@@ -224,7 +277,7 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
       </div>
 
       {error ? (
-        <p className="mt-3 text-center text-[13px] text-red-600" role="alert">
+        <p className="mt-3 text-center text-[13px] text-red-600 dark:text-red-400" role="alert">
           {error}
         </p>
       ) : null}
@@ -233,9 +286,11 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
           a fixed "$2.00" the composer never sent — it is a backend cap, not a
           choice made on this screen, so it belongs on the job instead. */}
       {config?.github_connected && config.agent_egress_tier ? (
-        <p className="mt-3 text-center text-[12px] text-gray-500">
-          Network: setup {TIER_LABELS[config.setup_egress_tier ?? ''] ?? config.setup_egress_tier} ·
-          agent {TIER_LABELS[config.agent_egress_tier] ?? config.agent_egress_tier}
+        <p className="mt-3 text-center text-[12px] text-gray-500 dark:text-gray-400">
+          {t('composer.network', {
+            setup: TIER_LABELS[config.setup_egress_tier ?? ''] ?? config.setup_egress_tier ?? '',
+            agent: TIER_LABELS[config.agent_egress_tier] ?? config.agent_egress_tier,
+          })}
         </p>
       ) : null}
     </section>

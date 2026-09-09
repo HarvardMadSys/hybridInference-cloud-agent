@@ -13,13 +13,47 @@
 #    anything this container holds. There is no GitHub token here, because the
 #    agent never pushes — it emits a patch and the trusted publisher outside
 #    handles git.
-# 2. **Nothing here is trusted at run time.** The container is thrown away
-#    after each job, runs as a non-root user, and (under the kata backend) has
-#    its own kernel. Anything the agent installs lives and dies with the job.
+# 2. **Nothing here is trusted at run time.** Every chat uses a retained Docker
+#    container; timeout stops it without removing its writable layer. The
+#    process runs as non-root and (under the kata backend) has its own kernel.
 #
 # Runtimes are pinned rather than floating: an agent CLI that silently updates
 # changes its own event format, and the normalized event mapping in
 # cloud_agent_host/runtimes.py is written against a specific shape.
+
+# Build the trusted Kata guest observer outside the final image.  The BPF
+# object is CO-RE: it is compiled once here and relocated against the guest
+# kernel's BTF when the host starts it.  clang/libbpf headers never enter the
+# untrusted runtime image.
+FROM debian:bookworm-slim AS guest-observer-build
+
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        clang \
+        gcc \
+        libc6-dev \
+        libbpf-dev \
+        libelf-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY deploy/sandbox/guest-observer.h \
+     deploy/sandbox/guest-observer.bpf.c \
+     deploy/sandbox/guest-observer.c \
+     deploy/sandbox/tool-mark.h \
+     deploy/sandbox/tool-mark.c ./
+RUN clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
+        -I"/usr/include/$(gcc -dumpmachine)" \
+        -c guest-observer.bpf.c -o freeinference-guest-observer.bpf.o \
+    && gcc -O2 -Wall -Wextra -Werror guest-observer.c \
+        -o freeinference-guest-observer -lbpf -lelf -lz \
+    && gcc -O2 -Wall -Wextra -Werror tool-mark.c \
+        -o freeinference-tool-mark
 
 FROM node:22-bookworm-slim
 
@@ -35,16 +69,67 @@ FROM node:22-bookworm-slim
 # `400 System message must be at the beginning` — so each job died at its first
 # turn, with an error that pointed at the model rather than at the CLI version.
 # An unpinned agent CLI is a dependency that changes under you between builds.
+#
+# The defaults live here, beside the event parser in
+# `cloud_agent_host/runtimes.py` that is written against them — those two
+# are the pair that has to agree, so the reviewed value belongs in the same
+# tree as the code it was reviewed against.
+#
+# They remain build arguments so the Dockerfile can derive labels and install
+# paths from one value, but the supported host deploy deliberately refuses a
+# per-machine override. These defaults are part of the shared protocol
+# attestation and must change in source together with
+# `SHARED_SANDBOX_RUNTIME_PINS`. To soak another reviewed CLI without changing
+# the default, add its exact version to the matching `*_EXTRA_VERSIONS` menu and
+# select it through runner policy. The check at the end still proves every
+# advertised default is exact and matches the binary on PATH.
 ARG CLAUDE_CODE_VERSION=2.1.220
 ARG CODEX_VERSION=0.145.0
 ARG PI_VERSION=0.73.1
 ARG OPENCODE_VERSION=1.18.9
 ARG KILO_VERSION=7.4.17
 
+# Extra versions this image also carries, comma-separated, so an admin can
+# switch a deployment between them from the admin page without a rebuild
+# (`agent_runner_policy.runtime_versions`; the runner selects one by PATH).
+#
+# Empty by default, and an empty list means this image holds exactly the pins
+# above — the shape every deployment is in today, byte for byte.
+#
+# Separate from the pin rather than folded into one list because the pin
+# answers a different question and must keep answering it alone: it is the
+# *default*, what a job runs when nothing has selected anything, and what the
+# `.version` label below reports. A single list would make "the default" the
+# first element of a string, which nothing downstream could read.
+#
+# **Every extra version is a version the event parser must handle.**
+# `runtimes.py` normalizes one shape per runtime, and offering a version is a
+# claim that it parses — see the conformance suite in `tests/external/`. Adding
+# an entry here without running it is how a broken option reaches the menu.
+ARG CLAUDE_CODE_EXTRA_VERSIONS=
+ARG CODEX_EXTRA_VERSIONS=
+ARG PI_EXTRA_VERSIONS=
+ARG OPENCODE_EXTRA_VERSIONS=
+ARG KILO_EXTRA_VERSIONS=
+
+# The menu: default first, extras after. Derived, never passed — a caller that
+# could set these directly could put a version in a label that the install
+# below never installed.
+ARG CLAUDE_CODE_VERSIONS=${CLAUDE_CODE_VERSION}${CLAUDE_CODE_EXTRA_VERSIONS:+,${CLAUDE_CODE_EXTRA_VERSIONS}}
+ARG CODEX_VERSIONS=${CODEX_VERSION}${CODEX_EXTRA_VERSIONS:+,${CODEX_EXTRA_VERSIONS}}
+ARG PI_VERSIONS=${PI_VERSION}${PI_EXTRA_VERSIONS:+,${PI_EXTRA_VERSIONS}}
+ARG OPENCODE_VERSIONS=${OPENCODE_VERSION}${OPENCODE_EXTRA_VERSIONS:+,${OPENCODE_EXTRA_VERSIONS}}
+ARG KILO_VERSIONS=${KILO_VERSION}${KILO_EXTRA_VERSIONS:+,${KILO_EXTRA_VERSIONS}}
+
 # Tools an agent legitimately needs to understand and change a repository.
 # Deliberately not installed: anything that would let it reach the host
 # (docker CLI) or persist beyond the job.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         git \
         ca-certificates \
         curl \
@@ -54,27 +139,73 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-venv \
         build-essential \
+        libbpf1 \
+        libelf1 \
+        tini \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g \
-        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-        "@openai/codex@${CODEX_VERSION}" \
-        "@mariozechner/pi-coding-agent@${PI_VERSION}" \
-        "opencode-ai@${OPENCODE_VERSION}" \
-        "@kilocode/cli@${KILO_VERSION}" \
-    && npm cache clean --force
+# One prefix per version, the default symlinked onto PATH, and each version
+# checked against its own binary. See the script's header for why the layout is
+# what it does the work — the runner selects a version by prepending
+# `/opt/runtimes/<runtime-id>/<version>/bin`, and nothing in the adapters or the
+# wrappers has to know that happened.
+#
+# Removed afterwards: an agent that can install another CLI version into its own
+# sandbox is an agent that can step outside the version its attempt is stamped
+# with.
+COPY deploy/sandbox/install-runtimes.sh /tmp/install-runtimes.sh
+RUN --mount=type=cache,id=cloud-agent-sandbox-npm,target=/root/.npm,sharing=locked \
+    chmod 0755 /tmp/install-runtimes.sh \
+    && /tmp/install-runtimes.sh claude-code @anthropic-ai/claude-code claude "${CLAUDE_CODE_VERSIONS}" \
+    && /tmp/install-runtimes.sh codex @openai/codex codex "${CODEX_VERSIONS}" \
+    && /tmp/install-runtimes.sh pi @mariozechner/pi-coding-agent pi "${PI_VERSIONS}" \
+    && /tmp/install-runtimes.sh opencode opencode-ai opencode "${OPENCODE_VERSIONS}" \
+    && /tmp/install-runtimes.sh kilo @kilocode/cli kilo "${KILO_VERSIONS}" \
+    && rm /tmp/install-runtimes.sh
+
+# Claude's CLI has a live stdin transport but no prompt-free public fork RPC.
+# The exact-version Python SDK supplies that native transcript mutation. Keep
+# it in a dedicated immutable venv so the runtime helper never depends on a
+# package from the repository or the host.
+ARG PIP_DEFAULT_TIMEOUT=120
+RUN python3 -m venv /opt/claude-agent-sdk \
+    && /opt/claude-agent-sdk/bin/pip install --no-cache-dir \
+        "claude-agent-sdk==0.2.148"
 
 # The version stamp the runner reads (issue #54): image labels, keyed by
 # registry id, derived from the pins above so a label can never disagree with
 # what is installed. The heartbeat reports them, the claim copies them onto
-# each attempt, and the checkpoint gate compares them before handing a session
-# to a resumed turn — an unlabeled image degrades every one of those to
-# "unknown", which is a replay, not an error.
+# each attempt, and native-session admission compares them before handing a
+# session to a resumed turn. An unlabeled image is ineligible to claim work.
+#
+# Two labels per runtime, answering two questions that diverge the moment an
+# image carries more than one version:
+#
+#   .version   what a job gets when nothing selected anything — the default,
+#              and the only one an older control plane knows how to read.
+#   .versions  the whole menu, which is what the admin page offers and what the
+#              claim checks a selection against before honouring it.
+#
+# `.version` is deliberately still a single exact version rather than the first
+# element of `.versions`: every existing reader parses it as one, and a reader
+# that has not been taught about menus must degrade to "the default", not to a
+# comma-separated string it will happily stamp onto an attempt.
 LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
+      org.freeinference.helper.claude-agent-sdk.version="0.2.148" \
+      org.freeinference.helper.http-agent-live-bridge.version="2" \
+      org.freeinference.helper.guest-observer.version="1" \
+      org.freeinference.helper.tool-mark.version="1" \
       org.freeinference.runtime.codex.version="${CODEX_VERSION}" \
       org.freeinference.runtime.pi.version="${PI_VERSION}" \
       org.freeinference.runtime.opencode.version="${OPENCODE_VERSION}" \
-      org.freeinference.runtime.kilo.version="${KILO_VERSION}"
+      org.freeinference.runtime.kilo.version="${KILO_VERSION}" \
+      org.freeinference.runtime.claude-code.versions="${CLAUDE_CODE_VERSIONS}" \
+      org.freeinference.runtime.codex.versions="${CODEX_VERSIONS}" \
+      org.freeinference.runtime.pi.versions="${PI_VERSIONS}" \
+      org.freeinference.runtime.opencode.versions="${OPENCODE_VERSIONS}" \
+      org.freeinference.runtime.kilo.versions="${KILO_VERSIONS}" \
+      org.freeinference.shared-sandbox.protocol="v2"
 
 # pi, OpenCode, and Kilo all ignore OPENAI_BASE_URL; each one's supported
 # route to a custom gateway is a provider config file whose content (gateway
@@ -87,8 +218,22 @@ LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
 COPY deploy/sandbox/pi-freeinference /usr/local/bin/pi-freeinference
 COPY deploy/sandbox/opencode-freeinference /usr/local/bin/opencode-freeinference
 COPY deploy/sandbox/kilo-freeinference /usr/local/bin/kilo-freeinference
+COPY deploy/sandbox/http-agent-live-bridge /usr/local/bin/http-agent-live-bridge
+COPY deploy/sandbox/claude-session-fork /usr/local/bin/claude-session-fork
+COPY deploy/sandbox/member-process-reaper /usr/local/bin/member-process-reaper
+COPY --from=guest-observer-build /src/freeinference-guest-observer \
+     /usr/local/libexec/freeinference-guest-observer
+COPY --from=guest-observer-build /src/freeinference-guest-observer.bpf.o \
+     /usr/local/libexec/freeinference-guest-observer.bpf.o
+COPY --from=guest-observer-build /src/freeinference-tool-mark \
+     /usr/local/libexec/freeinference-tool-mark
 RUN chmod 0755 /usr/local/bin/pi-freeinference /usr/local/bin/opencode-freeinference \
-        /usr/local/bin/kilo-freeinference
+        /usr/local/bin/kilo-freeinference /usr/local/bin/http-agent-live-bridge \
+        /usr/local/bin/claude-session-fork \
+        /usr/local/libexec/freeinference-guest-observer \
+        /usr/local/libexec/freeinference-tool-mark \
+    && chmod 0555 /usr/local/bin/member-process-reaper \
+    && chmod 0644 /usr/local/libexec/freeinference-guest-observer.bpf.o
 
 # `--ignore-user-config` does not suppress a trusted repository's
 # .codex/config.toml. Codex 0.145 applies this requirements allowlist after all
@@ -96,17 +241,30 @@ RUN chmod 0755 /usr/local/bin/pi-freeinference /usr/local/bin/opencode-freeinfer
 COPY deploy/sandbox/codex-requirements.toml /etc/codex/requirements.toml
 RUN chmod 0644 /etc/codex/requirements.toml
 
-# Non-root by default. The runner bind-mounts the worktree and the container is
-# disposable, so there is no reason for the agent to have root — and a kernel
-# escape needs a much better bug when it starts unprivileged.
+# Non-root by default. Retained chats keep the workspace in the container
+# writable layer; the agent has no reason to be root, and a kernel escape needs
+# a much better bug when it starts unprivileged.
 #
 # The uid is PINNED, and must match SANDBOX_UID in
-# host/cloud_agent_host/sandbox.py: the runner chowns each job
-# worktree to that id before mounting it. If the two drift, the agent cannot
-# write a single file in its own working tree and git refuses to run at all
+# cloud_agent_host/sandbox.py and the base retained-container user. If the two
+# drift, the agent cannot write its workspace and git refuses to run at all
 # ("dubious ownership") — a failure that looks nothing like its cause.
+#
+# Retained chat containers keep both directories in their Docker writable
+# layer (never a host bind or named volume). Create them while still root so
+# every unprivileged member can use the shared group-owned paths.
 RUN groupadd --gid 10001 agent \
-    && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash agent
+    && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash agent \
+    && slot=0; while [ "$slot" -lt 128 ]; do \
+         uid=$((11001 + slot)); \
+         useradd --uid "$uid" --gid 10001 --create-home \
+           --home-dir "/home/agent-member-$slot" --shell /bin/bash \
+           "agent-member-$slot"; \
+         slot=$((slot + 1)); \
+       done \
+    && install -d -m 2770 -o 10001 -g 10001 /workspace /agent-state \
+    && install -d -m 0700 -o 10001 -g 10001 /run/agent-activation \
+    && install -d -m 0711 -o 0 -g 10001 /run/agent-members
 USER agent
 WORKDIR /workspace
 
@@ -122,9 +280,44 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     PI_OFFLINE=1
 
 # Fail loudly at build time if a runtime did not land, rather than at 3am when
-# a job claims it and dies.
-RUN claude --version && codex --version && pi --version && opencode --version \
-    && kilo --version
+# a job claims it and dies — and prove each one *is* the version this image
+# claims to hold.
+#
+# The second half is what makes the pins safe to hand to a deployment. The
+# labels above are derived from the build arguments, and everything downstream
+# treats a label as a statement of fact about the binary: the heartbeat reports
+# it, the claim copies it onto the attempt, and native-session admission compares it
+# before letting a thread resume its own session. Hand-reviewed exact pins made
+# that true by construction. An operator-supplied value does not — `latest`, a
+# range like `^2.1`, or a version npm quietly resolved elsewhere each produce an
+# image whose label is a lie, and the first symptom of that lie is a thread
+# that silently forgets its history (a version mismatch fails closed).
+#
+# So the rule is: the pin must be an exact version, and this proves it before
+# the image exists.
+#
+# `install-runtimes.sh` already made this check against *every* version under
+# its own prefix. This one is not a duplicate: it runs each binary the way a job
+# does, through PATH, and so proves the separate claim that the symlinked
+# default is the version `.version` advertises. An extras list that shadowed the
+# default — a bad symlink, an install ordering mistake — passes there and fails
+# here.
+RUN set -eu; \
+    check() { \
+        got="$("$1" --version 2>&1 | tail -1)"; \
+        case "$got" in \
+            *"$2"*) echo "$1: $got" ;; \
+            *) echo "ERROR: $1 reports '$got', but this image is labelled '$2'." >&2; \
+               echo "A runtime pin must be an exact version — a dist-tag or a range" >&2; \
+               echo "makes the version label, and every record derived from it, a lie." >&2; \
+               exit 1 ;; \
+        esac; \
+    }; \
+    check claude "${CLAUDE_CODE_VERSION}"; \
+    check codex "${CODEX_VERSION}"; \
+    check pi "${PI_VERSION}"; \
+    check opencode "${OPENCODE_VERSION}"; \
+    check kilo "${KILO_VERSION}"
 
 # No ENTRYPOINT: the runner supplies the full argv from the runtime adapter,
 # so this image never decides what an agent run looks like.

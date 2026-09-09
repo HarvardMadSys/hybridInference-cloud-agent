@@ -26,12 +26,106 @@ export type AgentJobApiState =
   | 'failed'
   | 'cancelled';
 
+/** One tool call's timing and attributable resource evidence. */
+export interface ToolCallResourcesApi {
+  call_seq: number;
+  tool_use_id: string;
+  tool_name: string;
+  /** `exact` = the sandbox's own hooks; `message` = bracketed from outside. */
+  timing_source: string;
+  duration_ms: number | null;
+  /** Historical sampled readings; current shared-member rows always carry 0. */
+  sample_count: number;
+  /** Calls that shared these readings, including this one. */
+  overlap_n: number;
+  measured_span_ms: number | null;
+  cpu_usec_exclusive: number | null;
+  cpu_usec_shared: number | null;
+  mem_peak_exclusive_bytes: number | null;
+  mem_peak_shared_bytes: number | null;
+  /** Guest-kernel process starts plausibly belonging to this call. */
+  process_count?: number;
+  /**
+   * What the processes this call alone started consumed, from the guest
+   * kernel's exit-time accounting. Sums for CPU and I/O, the largest single
+   * process for the peak. Null where nothing exited that belonged to this
+   * call alone, or where the kernel does not account that counter.
+   */
+  process_cpu_usec?: number | null;
+  process_mem_peak_bytes?: number | null;
+  process_io_read_bytes?: number | null;
+  process_io_write_bytes?: number | null;
+  /** A process this call may own was left out, so the numbers are floors. */
+  process_resources_partial?: boolean;
+}
+
+export interface ProcessObservationApi {
+  process_seq: number;
+  uid: number;
+  pid: number;
+  tgid: number;
+  ppid: number | null;
+  comm: string;
+  executable: string | null;
+  started_offset_ms: number;
+  duration_ms: number | null;
+  exit_code: number | null;
+  observed_fork: boolean;
+  observed_exec: boolean;
+  observed_exit: boolean;
+  tool_call_seqs: number[];
+  /** Exit-time accounting for the Linux process group; null until it exited. */
+  cpu_usec?: number | null;
+  mem_peak_bytes?: number | null;
+  io_read_bytes?: number | null;
+  io_write_bytes?: number | null;
+  io_rchar_bytes?: number | null;
+  io_wchar_bytes?: number | null;
+}
+
+export interface AttemptResourcesApi {
+  cpu_usec: number | null;
+  mem_peak_bytes: number | null;
+  mem_avg_bytes: number | null;
+  io_read_bytes: number | null;
+  io_write_bytes: number | null;
+  net_rx_bytes: number | null;
+  net_tx_bytes: number | null;
+  sample_count: number;
+  /** Fraction of the attempt window actually sampled, 0..1. */
+  coverage: number;
+  sampler_version: string | null;
+  /** Union of the turn's tool windows, never their sum. */
+  tool_time_ms?: number | null;
+  tool_calls?: ToolCallResourcesApi[];
+  tool_calls_truncated?: boolean;
+  process_observer?: string | null;
+  process_observation_complete?: boolean;
+  process_events_lost?: number;
+  processes_truncated?: boolean;
+  processes?: ProcessObservationApi[];
+}
+
+export interface AgentAttemptSummaryApi {
+  attempt_id: number;
+  attempt_no: number;
+  continuity_mode: 'hot' | 'warm_native' | 'cold_native' | 'replay' | null;
+  context_status: 'new' | 'live' | 'restored' | 'lost' | null;
+  duration_ms: number | null;
+}
+
+export interface AgentAttemptTelemetryApi extends AgentAttemptSummaryApi {
+  resources: AttemptResourcesApi | null;
+}
+
 export interface AgentJobApi {
   id: string;
   repo: string;
   task_prompt: string;
   runtime: string;
   model: string;
+  /** How hard the model was asked to think. Null is Auto — nobody chose. */
+  reasoning_effort?: string | null;
   /** Requested branch/ref before the backend pinned it to base_sha. */
   base_ref?: string | null;
   base_sha: string | null;
@@ -57,6 +151,37 @@ export interface AgentJobApi {
   model_calls: number | null;
   setup_egress_tier: string | null;
   agent_egress_tier: string | null;
+  /** Attempt whose continuity and resource telemetry is attached below. */
+  telemetry_attempt_id?: number | null;
+  /** Which continuity rung this turn ran on. Null on turns that predate it. */
+  continuity_mode?: 'hot' | 'warm_native' | 'cold_native' | 'replay' | null;
+  /** Canonical user-facing context state for restartable chat sandboxes. */
+  context_status?: 'new' | 'live' | 'restored' | 'lost' | null;
+  /** Process state is independent from context correctness. */
+  resident_state?: 'stopped' | 'starting' | 'live' | 'restarting' | 'lost' | null;
+  sandbox_id?: string | null;
+  workspace_shared?: boolean;
+  native_state?: 'new' | 'ready' | 'fork_preparing' | 'lost' | null;
+  fork_anchor_job_id?: string | null;
+  native_fork_available?: boolean;
+  workspace_publication_state?:
+    | 'pending'
+    | 'capturing'
+    | 'captured'
+    | 'publishing'
+    | 'published'
+    | 'failed'
+    | null;
+  workspace_epoch?: number | null;
+  duration_ms?: number | null;
+  /**
+   * Resource evidence for this attempt. Null when no accounting row exists.
+   * Current shared-member rows intentionally have no container totals;
+   * historical sampled rows with partial coverage remain lower bounds.
+   */
+  resources?: AttemptResourcesApi | null;
+  /** Lightweight retry summaries; resource detail is loaded only on selection. */
+  attempt_telemetry?: AgentAttemptSummaryApi[];
   /** Conversation fields are optional so pre-thread deployments remain readable. */
   thread_id?: string | null;
   parent_job_id?: string | null;
@@ -81,6 +206,28 @@ export interface AgentThreadApi {
   jobs: AgentJobApi[];
   created_at?: string | null;
   updated_at?: string | null;
+}
+
+/**
+ * Aggregate numbers for a thread. A null field means the thread's runtime
+ * does not report that measure — render it as a dash, never as a zero.
+ */
+export interface AgentThreadStatsApi {
+  thread_id: string;
+  turns: number;
+  tool_calls: number;
+  failed_tool_calls: number;
+  wall_seconds: number;
+  model_seconds: number;
+  tool_seconds: number;
+  ttft_seconds: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_hit_ratio: number | null;
+  output_tokens_per_second: number | null;
+  tokens_source: string;
+  timing_source: string;
 }
 
 export interface AgentJobEventApi {
@@ -110,7 +257,7 @@ export interface AgentJobDirectoryApi {
   kind: 'directory';
   entries: AgentJobFileEntryApi[] | null;
   writable?: boolean;
-  source?: 'workspace' | 'snapshot';
+  source?: 'workspace';
 }
 
 export interface AgentJobFileApi {
@@ -123,7 +270,7 @@ export interface AgentJobFileApi {
   status?: AgentJobFileStatus | null;
   omitted_reason?: string | null;
   writable?: boolean;
-  source?: 'workspace' | 'snapshot';
+  source?: 'workspace';
 }
 
 export interface AgentJobSymlinkApi {
@@ -132,7 +279,7 @@ export interface AgentJobSymlinkApi {
   status?: AgentJobFileStatus | null;
   omitted_reason?: string | null;
   writable?: boolean;
-  source?: 'workspace' | 'snapshot';
+  source?: 'workspace';
 }
 
 export type AgentJobFilesApi = AgentJobDirectoryApi | AgentJobFileApi | AgentJobSymlinkApi;
@@ -146,6 +293,17 @@ export interface AgentConfigApi {
   mcp_servers?: AgentMcpServerApi[];
   /** Runtimes that can be given MCP servers; others refuse such a job. */
   mcp_runtimes?: string[];
+  /**
+   * Effort levels each runtime can express, in its own vocabulary. A runtime
+   * absent here cannot express one at all.
+   */
+  runtime_reasoning_efforts?: Record<string, string[]>;
+  /**
+   * Effort levels each model accepts. Offer the intersection with the chosen
+   * runtime's, and no control when it is empty — which is also what a backend
+   * too old to answer these produces.
+   */
+  model_reasoning_efforts?: Record<string, string[]>;
   setup_egress_tier: string | null;
   agent_egress_tier: string | null;
   github_connected: boolean;
@@ -274,6 +432,8 @@ export interface CreateAgentJobRequest {
   task_prompt: string;
   model: string;
   runtime?: string;
+  /** Omitted is Auto: the runtime and model decide for themselves. */
+  reasoning_effort?: string;
   /** A branch. The platform pins it to a commit at creation. */
   base_ref?: string;
   base_sha?: string;
@@ -370,8 +530,28 @@ export async function unpinAgentJob(jobId: string): Promise<AgentThreadPinApi> {
 }
 
 export async function getAgentJob(jobId: string): Promise<AgentJobApi> {
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}`);
-  return jsonOrThrow<AgentJobApi>(resp);
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}?include_resources=false`,
+  );
+  const job = await jsonOrThrow<AgentJobApi>(resp);
+  // Pin legacy telemetry to the fetched attempt before SSE advances current_attempt_id.
+  return job.telemetry_attempt_id === undefined
+    ? { ...job, telemetry_attempt_id: job.current_attempt_id }
+    : job;
+}
+
+export async function getAgentAttemptTelemetry(
+  jobId: string,
+  attemptId: number,
+  signal?: AbortSignal,
+): Promise<AgentAttemptTelemetryApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/attempts/${attemptId}/telemetry`,
+    { signal },
+  );
+  return jsonOrThrow<AgentAttemptTelemetryApi>(resp);
 }
 
 /** Load the conversation containing a job. Old standalone jobs return null. */
@@ -379,6 +559,16 @@ export async function getAgentJobThread(jobId: string): Promise<AgentThreadApi |
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread`);
   if (resp.status === 404) return null;
   return jsonOrThrow<AgentThreadApi>(resp);
+}
+
+/** Load a thread's aggregate stats. Old standalone jobs return null. */
+export async function getAgentThreadStats(jobId: string): Promise<AgentThreadStatsApi | null> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/stats`,
+  );
+  if (resp.status === 404) return null;
+  return jsonOrThrow<AgentThreadStatsApi>(resp);
 }
 
 export async function createAgentJob(body: CreateAgentJobRequest): Promise<AgentJobApi> {
@@ -404,6 +594,14 @@ export interface FollowUpAgentJobRequest {
   /** Omitted values inherit the parent run's harness and model. */
   runtime?: string;
   model?: string;
+  /**
+   * Omitted inherits the previous turn's effort. The literal `'auto'` clears
+   * it back to unset — null cannot mean "clear", it is already what "inherit"
+   * sends. No composer sends the sentinel (they always show a real level and
+   * send it); it stays because it is the only way an API caller can undo an
+   * inherited choice.
+   */
+  reasoning_effort?: string;
 }
 
 /** Queue another turn in the same thread, after its currently active run. */
@@ -424,16 +622,92 @@ export async function followUpAgentJob(
 }
 
 /**
- * Copy the conversation up to a settled turn into a new thread.
+ * Capability-gated shared chats native-fork the selected settled assistant
+ * boundary into a second live CLI session in the same sandbox/workspace.
+ * Chats without retained native state fail closed; transcript copying never
+ * substitutes for provider context.
  *
- * Nothing runs and nothing publishes until the owner sends the next turn
- * there. Returns the copied anchor turn — the page to navigate to.
+ * The fork-only call starts/probes the child's resident CLI but sends no
+ * prompt and performs no model call. Returns the copied anchor turn — the
+ * page to navigate to.
  */
+const pendingForkRequestIds = new Map<string, string>();
+
+function forkRequestStorageKey(jobId: string): string {
+  return `agent-native-fork-request-${jobId}`;
+}
+
+function pendingForkRequestId(jobId: string): string {
+  const memory = pendingForkRequestIds.get(jobId);
+  if (memory) return memory;
+  try {
+    const stored = globalThis.sessionStorage?.getItem(forkRequestStorageKey(jobId));
+    if (stored) {
+      pendingForkRequestIds.set(jobId, stored);
+      return stored;
+    }
+  } catch {
+    // Privacy settings may block browser storage; in-memory idempotency still
+    // protects repeated clicks for the lifetime of this page.
+  }
+  const created =
+    globalThis.crypto?.randomUUID?.() ??
+    `fork-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  pendingForkRequestIds.set(jobId, created);
+  try {
+    globalThis.sessionStorage?.setItem(forkRequestStorageKey(jobId), created);
+  } catch {
+    // See the read path above.
+  }
+  return created;
+}
+
+function clearPendingForkRequest(jobId: string): void {
+  pendingForkRequestIds.delete(jobId);
+  try {
+    globalThis.sessionStorage?.removeItem(forkRequestStorageKey(jobId));
+  } catch {
+    // A successful response is already authoritative; storage cleanup is best effort.
+  }
+}
+
+async function forkFailureType(resp: Response): Promise<string | null> {
+  if (resp.ok) return null;
+  try {
+    const body = (await resp.clone().json()) as {
+      error?: { type?: unknown };
+      detail?: { error?: { type?: unknown } };
+    };
+    const type = body.error?.type ?? body.detail?.error?.type;
+    return typeof type === 'string' ? type : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function forkAgentJob(jobId: string): Promise<AgentJobApi> {
-  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/fork`, {
-    method: 'POST',
-  });
-  return jsonOrThrow<AgentJobApi>(resp);
+  const requestId = pendingForkRequestId(jobId);
+  try {
+    const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/fork`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': requestId },
+    });
+    // Network/5xx/ordinary conflict retries must retain this key: the host may
+    // already have materialized the child and the repeated request is how the
+    // control plane recovers it. A durable FAILED saga is different: replaying
+    // its key can only return the same failure forever, so allow the next user
+    // click to start a new, independently fenced operation after reconciliation.
+    if ((await forkFailureType(resp)) === 'native_fork_failed') {
+      clearPendingForkRequest(jobId);
+    }
+    const result = await jsonOrThrow<AgentJobApi>(resp);
+    clearPendingForkRequest(jobId);
+    return result;
+  } catch (cause) {
+    // A lost response may hide a committed fork. Keep the same key so the
+    // owner's retry returns that child instead of creating another one.
+    throw cause;
+  }
 }
 
 /** Page through the event log. Used to backfill before the stream attaches. */
@@ -449,20 +723,38 @@ export async function listAgentJobEvents(
   return jsonOrThrow(resp);
 }
 
-export async function getAgentJobArtifact(
+/** One stored event labelled with the conversation turn it belongs to. */
+export interface AgentThreadEventApi extends AgentJobEventApi {
+  job_id: string;
+  turn_no: number;
+}
+
+/** Page through every turn's event log in append order. */
+export async function listAgentThreadEvents(
   jobId: string,
-  kind: string,
-): Promise<{ content: string; attempt_id: number } | null> {
+  after = 0,
+  limit = 1000,
+): Promise<{ events: AgentThreadEventApi[]; next_cursor: number }> {
   const resp = await fetchWithAuth(
     API_BASE,
-    `/v1/agent/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(kind)}`,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/thread/events?after=${after}&limit=${limit}`,
   );
-  // A job that changed nothing legitimately has no patch; that is not an error.
-  if (resp.status === 404) return null;
   return jsonOrThrow(resp);
 }
 
-/** Browse the live worktree, falling back to an archived snapshot for old jobs. */
+/** Read a complete thread without imposing the server's page size on Chat. */
+export async function listAllAgentThreadEvents(jobId: string): Promise<AgentThreadEventApi[]> {
+  const events: AgentThreadEventApi[] = [];
+  let cursor = 0;
+  for (;;) {
+    const page = await listAgentThreadEvents(jobId, cursor, 1000);
+    events.push(...page.events);
+    if (page.events.length < 1000 || page.next_cursor <= cursor) return events;
+    cursor = page.next_cursor;
+  }
+}
+
+/** Browse the retained container's live workspace. */
 export async function getAgentJobFiles(jobId: string, path = ''): Promise<AgentJobFilesApi> {
   const query = path ? `?path=${encodeURIComponent(path)}` : '';
   const resp = await fetchWithAuth(
@@ -472,7 +764,7 @@ export async function getAgentJobFiles(jobId: string, path = ''): Promise<AgentJ
   return jsonOrThrow<AgentJobFilesApi>(resp);
 }
 
-/** Save one UTF-8 file in the live worktree. */
+/** Save one UTF-8 file in the live workspace. */
 export async function writeAgentJobFile(
   jobId: string,
   path: string,
@@ -510,7 +802,7 @@ export async function listAgentTerminals(jobId: string): Promise<AgentTerminalAp
   return Array.isArray(body) ? body : body.terminals;
 }
 
-/** Start an isolated shell that shares the job's worktree. */
+/** Start an isolated shell that shares the job's retained workspace. */
 export async function createAgentTerminal(
   jobId: string,
   size: { rows: number; cols: number } = { rows: 24, cols: 80 },
@@ -765,7 +1057,7 @@ export interface AgentGitWorkspaceApi {
   }>;
 }
 
-/** Read Git status/diff/commits from the live worktree. */
+/** Read Git status/diff/commits from the live workspace. */
 export async function getAgentJobGit(jobId: string): Promise<AgentGitWorkspaceApi> {
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/git`);
   return jsonOrThrow<AgentGitWorkspaceApi>(resp);

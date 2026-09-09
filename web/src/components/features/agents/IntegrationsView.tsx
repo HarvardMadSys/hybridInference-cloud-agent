@@ -41,7 +41,7 @@ function emptyProvider(provider: AgentIntegrationProvider): AgentIntegrationProv
 
 function ProviderIcon({ provider }: { provider: AgentIntegrationProvider }) {
   return (
-    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-gray-500">
+    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400">
       {provider === 'github' ? (
         <svg className="h-5 w-5" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
           <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
@@ -90,18 +90,18 @@ function ProviderActions({
     // and "Admin setup required" reads as "ask someone and you can have it".
     if (COMING_SOON.includes(integration.provider)) {
       return (
-        <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-500">
+        <span className="rounded-full bg-gray-100 dark:bg-white/5 px-2.5 py-1 text-xs font-medium text-gray-500 dark:text-gray-400">
           Coming soon
         </span>
       );
     }
     if (!integration.configured) {
-      return <span className="text-sm text-gray-500">Admin setup required</span>;
+      return <span className="text-sm text-gray-500 dark:text-gray-400">Admin setup required</span>;
     }
     return integration.connect_url ? (
       <a
         href={integration.connect_url}
-        className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-800 shadow-sm hover:bg-gray-50"
+        className="inline-flex items-center gap-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5"
       >
         Connect
         <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -115,13 +115,13 @@ function ProviderActions({
         </svg>
       </a>
     ) : (
-      <span className="text-sm text-gray-400">Temporarily unavailable</span>
+      <span className="text-sm text-gray-400 dark:text-gray-500">Temporarily unavailable</span>
     );
   }
 
   return (
     <details className="group relative">
-      <summary className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-800 shadow-sm hover:bg-gray-50 [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 [&::-webkit-details-marker]:hidden">
         Manage
         <svg
           className="h-4 w-4 transition-transform group-open:rotate-180"
@@ -138,11 +138,11 @@ function ProviderActions({
           />
         </svg>
       </summary>
-      <div className="absolute right-0 z-10 mt-1 w-56 rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg">
+      <div className="absolute right-0 z-10 mt-1 w-56 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 p-1.5 shadow-lg">
         {integration.connect_url ? (
           <a
             href={integration.connect_url}
-            className="block rounded-lg px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+            className="block rounded-lg px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
           >
             Reauthorize {copy.name}
           </a>
@@ -150,7 +150,7 @@ function ProviderActions({
         {integration.manage_url ? (
           <a
             href={integration.manage_url}
-            className="block rounded-lg px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+            className="block rounded-lg px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/5"
           >
             Configure repositories
           </a>
@@ -161,7 +161,7 @@ function ProviderActions({
             type="button"
             disabled={disconnecting === account.id}
             onClick={() => onDisconnect(account.id, account.label)}
-            className="block w-full rounded-lg px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+            className="block w-full rounded-lg px-3 py-2 text-left text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {disconnecting === account.id
               ? `Disconnecting ${account.label}…`
@@ -232,14 +232,16 @@ export function IntegrationsView({
 
   return (
     <section className="mx-auto w-full max-w-5xl px-6 py-12 lg:px-12 lg:py-16">
-      <h1 className="text-3xl font-semibold tracking-tight text-gray-900">Integrations</h1>
-      <p className="mt-2 text-base text-gray-500">
+      <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
+        Integrations
+      </h1>
+      <p className="mt-2 text-base text-gray-500 dark:text-gray-400">
         Connect source control providers and extend your agents with MCP servers.
       </p>
 
       {notice ? (
         <div
-          className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+          className="mt-6 rounded-xl border border-emerald-200 dark:border-emerald-500/25 bg-emerald-50 dark:bg-emerald-500/10 px-4 py-3 text-sm text-emerald-800 dark:text-emerald-300"
           role="status"
         >
           {notice}
@@ -247,7 +249,7 @@ export function IntegrationsView({
       ) : null}
       {error ? (
         <div
-          className="mt-6 flex items-center justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+          className="mt-6 flex items-center justify-between gap-4 rounded-xl border border-red-200 dark:border-red-500/25 bg-red-50 dark:bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-400"
           role="alert"
         >
           <span>{error}</span>
@@ -262,8 +264,8 @@ export function IntegrationsView({
       ) : null}
 
       <div className="mt-10">
-        <h2 className="text-sm font-medium text-gray-600">Source Control</h2>
-        <div className="mt-4 rounded-2xl border border-gray-200 bg-white px-6 shadow-sm">
+        <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">Source Control</h2>
+        <div className="mt-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 shadow-sm">
           {PROVIDERS.map((provider, index) => {
             const foundIntegration = providersByName.get(provider);
             const integration = foundIntegration ?? emptyProvider(provider);
@@ -273,14 +275,14 @@ export function IntegrationsView({
               <div
                 key={provider}
                 className={`flex min-h-24 flex-col justify-center gap-4 py-5 sm:flex-row sm:items-center ${
-                  index > 0 ? 'border-t border-gray-100' : ''
+                  index > 0 ? 'border-t border-gray-100 dark:border-white/5' : ''
                 }`}
               >
                 <div className="flex min-w-0 flex-1 items-center gap-4">
                   <ProviderIcon provider={provider} />
                   <div className="min-w-0">
-                    <h3 className="font-medium text-gray-900">{copy.name}</h3>
-                    <p className="mt-0.5 text-sm leading-5 text-gray-500">
+                    <h3 className="font-medium text-gray-900 dark:text-gray-50">{copy.name}</h3>
+                    <p className="mt-0.5 text-sm leading-5 text-gray-500 dark:text-gray-400">
                       {loading
                         ? 'Loading connection status…'
                         : statusUnavailable
@@ -296,11 +298,11 @@ export function IntegrationsView({
                 <div className="flex shrink-0 justify-end pl-14 sm:pl-0">
                   {loading ? (
                     <span
-                      className="h-8 w-24 animate-pulse rounded-lg bg-gray-100"
+                      className="h-8 w-24 animate-pulse rounded-lg bg-gray-100 dark:bg-white/5"
                       aria-label={`Loading ${copy.name}`}
                     />
                   ) : statusUnavailable ? (
-                    <span className="text-sm text-gray-400">Unavailable</span>
+                    <span className="text-sm text-gray-400 dark:text-gray-500">Unavailable</span>
                   ) : (
                     <ProviderActions
                       integration={integration}
@@ -318,9 +320,9 @@ export function IntegrationsView({
       </div>
 
       <div className="mt-10">
-        <h2 className="text-sm font-medium text-gray-600">MCP Servers</h2>
-        <div className="mt-4 flex items-center gap-4 rounded-2xl border border-gray-200 bg-white px-6 py-5 shadow-sm">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-gray-500">
+        <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">MCP Servers</h2>
+        <div className="mt-4 flex items-center gap-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 py-5 shadow-sm">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400">
             <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path
                 d="M8 8.5 5.5 11a3.54 3.54 0 0 0 5 5l2.5-2.5m3-3L18.5 8a3.54 3.54 0 0 0-5-5L11 5.5m-3 6 8-8"
@@ -332,13 +334,13 @@ export function IntegrationsView({
             </svg>
           </span>
           <div className="min-w-0 flex-1">
-            <h3 className="font-medium text-gray-900">Your own MCP servers</h3>
-            <p className="mt-0.5 text-sm text-gray-500">
+            <h3 className="font-medium text-gray-900 dark:text-gray-50">Your own MCP servers</h3>
+            <p className="mt-0.5 text-sm text-gray-500 dark:text-gray-400">
               Connect MCP servers with your own credentials to give your agents more tools. Coming
               soon.
             </p>
           </div>
-          <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-500">
+          <span className="rounded-full bg-gray-100 dark:bg-white/5 px-2.5 py-1 text-xs font-medium text-gray-500 dark:text-gray-400">
             Coming soon
           </span>
         </div>

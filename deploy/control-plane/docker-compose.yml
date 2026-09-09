@@ -65,6 +65,20 @@ services:
       # under a different name than it mints under, and pinning `iss` wrongly
       # locks every user out.
       GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
+      # The consent page a sign-in starts at. Server-side: the whole PKCE round
+      # trip is assembled in the control plane now, so the web app no longer
+      # needs its own copy of this.
+      GATEWAY_AUTHORIZE_URL: ${GATEWAY_AUTHORIZE_URL:?the gateway origin plus /authorize}
+      # Where the gateway sends the browser back — this service's callback, as
+      # the public internet addresses it, and **byte-identical to an entry in
+      # the gateway's IDENTITY_ALLOWED_REDIRECTS**, which is matched as an exact
+      # string. Configured rather than derived from request headers so that
+      # whatever sits in front of this service cannot decide where sign-in
+      # returns to.
+      AGENT_SESSION_REDIRECT_URI: ${AGENT_SESSION_REDIRECT_URI:?public URL of /v1/session/callback, allowlisted at the gateway}
+      # Where the browser lands once the cookie is set: the web app's public
+      # origin including any base path, e.g. https://example.org/agents.
+      AGENT_WEB_BASE_URL: ${AGENT_WEB_BASE_URL:?public origin of the web app, including any base path}
 
       # --- This service's own secrets ---------------------------------------
       # Required, never defaulted. A default here is a deployment that looks
@@ -72,14 +86,19 @@ services:
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:?32+ random bytes, unique per environment}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32+ random bytes, unique per environment}
+      # The API enforces the same exact host-generation capability as the
+      # deploy gate. Without this, a pending runner could claim queued work
+      # while deploy.sh correctly refused to replace the old API.
+      AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
-      # How long a hot sandbox's residency lease lives between beats (design
-      # §7). Also the cap on how long an idle resident process is kept at all.
+      # How long a member-scoped resident credential lives between runner
+      # heartbeats. Chat inactivity is a separate group clock on the host
+      # (AGENT_CHAT_IDLE_TIMEOUT_S); refreshing this lease does not keep an
+      # otherwise idle container running.
       AGENT_RESIDENCY_TTL_S: ${AGENT_RESIDENCY_TTL_S:-1800}
       # What a runner presents to claim work. Without it every claim is 401 and
       # the queue simply never drains — with nothing in the control plane's own
       # logs saying why, because the refusal is correct.
-      AGENT_DISPATCHER_TOKEN: ${AGENT_DISPATCHER_TOKEN:?the credential runners claim with}
       # The gateway alert relay's door (/v1/agent/service/oncall/*). Optional
       # as a pair: a deployment without on-call sets neither, the door answers
       # 401/503, and nothing else changes. The user id decides whose role and
@@ -94,7 +113,7 @@ services:
       AGENT_SESSION_COOKIE_SECURE: ${AGENT_SESSION_COOKIE_SECURE:-true}
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
-
+      AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-trusted-v1}
       # --- Publishing and source control ------------------------------------
       # The only component that holds a git credential, which is precisely what
       # keeps the sandbox credential-free. Unset means this deployment never
@@ -138,7 +157,7 @@ services:
       # --- Workspaces -------------------------------------------------------
       # Authorizes this service to the hosts' workspace brokers. Per-host
       # broker addresses come from each host's registration row, not from here.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:-}
+      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?shared with every enrolled host workspace broker}
       # Which hosts a registering machine may name as its broker. The token
       # above is shared across the pool, so an address accepted at
       # registration is an address that receives a credential good for every
@@ -188,6 +207,11 @@ services:
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
+      # The relay resolves each owner's stored MCP connection and therefore
+      # must decrypt it under the same key/domain as the main control-plane
+      # listener. Without this, health stays green but every connected server
+      # is reported as unavailable at the first tool call.
+      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:?32 random bytes, unique per environment}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
     depends_on:
       migrate:
@@ -214,14 +238,18 @@ services:
         # for the other, and the wrongness does not show at start: the stack
         # comes up healthy with the app mounted at the wrong path, calling the
         # gateway instead of the control plane, and unable to sign anyone in.
-        # A `:?` makes the deployment say which shape it is.
-        NEXT_PUBLIC_BASE_PATH: ${AGENT_WEB_BASE_PATH:?the prefix this app is mounted under; empty string for a deployment that owns its own hostname}
+        # `?` (without `:`) requires an explicit choice while still accepting
+        # the empty string, which is the value for a deployment that owns its
+        # hostname. `:?` would contradict that contract by rejecting empty.
+        NEXT_PUBLIC_BASE_PATH: ${AGENT_WEB_BASE_PATH?the prefix this app is mounted under; empty string for a deployment that owns its own hostname}
         # Relative on purpose when mounted under a prefix: a same-origin path
         # means the cookie is sent without `SameSite=None`, and no absolute
         # host has to be known at build time. Under a base path this is that
         # base path plus `/api`, which the reverse proxy strips.
         NEXT_PUBLIC_AGENT_API_URL: ${AGENT_WEB_API_URL:?control-plane base URL as the browser calls it, e.g. /agents/api}
-        NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL: ${AGENT_WEB_GATEWAY_AUTHORIZE_URL:?the gateway's consent page; without it this deployment cannot sign anyone in}
+        # The gateway's origin, for links this app does not host. Sign-in does
+        # not pass through the browser any more, so nothing here starts one.
+        NEXT_PUBLIC_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
         NEXT_PUBLIC_APP_NAME: ${AGENT_WEB_APP_NAME:-}
         # The rest of the header's identity. Optional — empty hides the link or
         # the name rather than rendering a blank one — but they have to be
@@ -242,6 +270,31 @@ services:
       control-plane:
         condition: service_started
     networks: [control-plane]
+
+  # --- Optional: the edge for a deployment that owns its own hostname -------
+  # Under the gateway's hostname the console proxies `/agents/*` to these two
+  # services and this one has no job, which is why it sits behind a profile:
+  # those deployments never run it. On a standalone hostname
+  # (agents.example.org) the tunnel or load balancer in front points at this
+  # one port and nginx splits the origin — `/api/*` to the control plane with
+  # the prefix stripped, everything else to the web app. One origin for both
+  # is what lets the session cookie travel; two hostnames would not.
+  #
+  # Enable with `COMPOSE_PROFILES=edge` in .env, and build the web app for the
+  # root: AGENT_WEB_BASE_PATH= (empty) and AGENT_WEB_API_URL=/api. Loopback by
+  # default, like every other published port here: the tunnel is on this host.
+  edge:
+    profiles: [edge]
+    image: nginx:1.27.5-alpine
+    volumes:
+      - ./edge.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${AGENT_EDGE_BIND:-127.0.0.1}:${AGENT_EDGE_PORT:-3003}:80"
+    depends_on:
+      - control-plane
+      - web
+    networks: [control-plane]
+    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine

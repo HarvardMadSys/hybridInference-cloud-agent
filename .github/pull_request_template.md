@@ -12,7 +12,7 @@ Delete this section if the PR is not a migration task.
 - [ ] Ported tests are unmodified except for imports and fixtures. **No assertion
       was weakened.** Any test that could not pass unmodified is reported in this
       PR description rather than adapted.
-- [ ] No `serving.*` import anywhere under `backend/` or `host/` (CI enforces this).
+- [ ] No `serving.*` import anywhere under `cloud_agent/` or `cloud_agent_host/` (CI enforces this).
 - [ ] No gateway secret (`API_KEY_SECRET`, `JWT_SECRET_KEY`) is read, stored, or
       referenced.
 

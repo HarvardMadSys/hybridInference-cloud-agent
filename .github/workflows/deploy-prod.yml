@@ -9,15 +9,6 @@ name: Deploy Prod
 # merge timing rather than of a decision. `sync-main.yml` moves `main`, this
 # ships it, and the two stay separate acts.
 #
-# **The machines do not exist yet.** Both jobs ask for runner labels that
-# nothing carries (`deploy-cloud-agent-control-prod`,
-# `deploy-cloud-agent-sandbox-prod`), so a dispatch today queues and deploys
-# nothing. That is deliberate: the alternative — borrowing staging's labels
-# until the production hosts arrive — is a workflow that ships the production
-# commit onto staging's boxes the first time anyone tries it. Register runners
-# carrying these labels, set the repository variables below, and this starts
-# working.
-#
 # **Deploy the gateway first, this second.** The contract runs one way: this
 # service calls the gateway's identity and `/internal/*` routes, and the gateway
 # calls nothing here. A control plane shipped ahead of the gateway that serves
@@ -55,6 +46,11 @@ permissions:
 jobs:
   deploy:
     name: Deploy control plane + web
+    # Both halves start together. The retained executor is the only topology;
+    # host deployment publishes exact target-SHA readiness, and deploy.sh waits
+    # for a fresh heartbeat plus reverse-broker probe before replacing this
+    # stack. The protocol fence preserves host-before-API compatibility without
+    # serializing image builds and migrations in Actions.
     runs-on: [self-hosted, Linux, deploy-cloud-agent-control-prod]
     # Records the deployment and gives protection rules somewhere to live.
     # Required-reviewer rules need a public repository or a paid plan, so on
@@ -91,12 +87,18 @@ jobs:
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "deploying ${sha}"
 
-      # Checked out at the target commit so the script that runs is the one
-      # being shipped: a change to deploy.sh takes effect in the deploy that
-      # carries it, rather than one deploy later.
-      - uses: actions/checkout@v6
+      - name: Check out deployment orchestrator
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .deploy-orchestrator
+          fetch-depth: 1
+
+      - name: Check out target
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.target.outputs.sha }}
+          path: .deploy-target
           fetch-depth: 0
 
       - name: Deploy
@@ -107,7 +109,8 @@ jobs:
           # service, in which case two deploys under one project name are one
           # deploy.
           COMPOSE_PROJECT: ${{ vars.PROD_CONTROL_COMPOSE_PROJECT }}
-        run: bash deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
+          SOURCE_REPO: ${{ github.workspace }}/.deploy-target
+        run: bash .deploy-orchestrator/deploy/control-plane/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
         if: always()
@@ -124,13 +127,15 @@ jobs:
 
   deploy-host:
     name: Deploy sandbox host
-    # The other machine, and deliberately not `needs:`-ed to the job above: they
-    # are separate hosts, and a control plane that fails to come up is not a
-    # reason to leave the sandbox host on an older commit — nor the reverse.
+    # Runs in parallel with the control build. The control deployment cannot
+    # replace its old API until this exact SHA has passed host readiness.
     runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-prod]
     environment: production
     timeout-minutes: 45
     concurrency:
+      # Serialize production host rollouts with production only. Staging uses
+      # its own namespaced stack and may deploy in parallel; exact-SHA
+      # readiness still fences each control-plane rollout against its host.
       group: cloud-agent-prod-host-deploy
       cancel-in-progress: false
 
@@ -166,9 +171,18 @@ jobs:
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "deploying ${sha}"
 
-      - uses: actions/checkout@v6
+      - name: Check out deployment orchestrator
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .deploy-orchestrator
+          fetch-depth: 1
+
+      - name: Check out target
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.target.outputs.sha }}
+          path: .deploy-target
           fetch-depth: 0
 
       - name: Deploy
@@ -179,7 +193,13 @@ jobs:
           # stray. Naming it keeps the guard pointed at what it is actually for:
           # a second copy of *this* stack under a name nobody meant.
           SIBLING_COMPOSE_PROJECTS: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
-        run: bash deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
+          AGENT_HOST_SLOTS: ${{ vars.PROD_HOST_SLOTS || '3' }}
+          AGENT_RUNNER_REPLICAS: ${{ vars.PROD_HOST_SLOTS || '3' }}
+          AGENT_CHAT_IDLE_TIMEOUT_S: "1800"
+          # Daemon-owned retained state, never a per-chat bind mount.
+          AGENT_RETAINED_DOCKER_DATA_ROOT: ${{ vars.PROD_RETAINED_DOCKER_DATA_ROOT || '/var/lib/docker' }}
+          SOURCE_REPO: ${{ github.workspace }}/.deploy-target
+        run: bash .deploy-orchestrator/deploy/host/deploy.sh "${{ steps.target.outputs.sha }}"
 
       - name: What is running now
         if: always()

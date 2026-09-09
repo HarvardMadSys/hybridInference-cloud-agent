@@ -34,7 +34,7 @@ export function PaneResizer({
         className={`pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
           pane.dragging
             ? 'bg-crimson'
-            : 'bg-gray-200 group-hover:bg-gray-400 group-focus-visible:bg-crimson'
+            : 'bg-gray-200 dark:bg-white/10 group-hover:bg-gray-400 dark:group-hover:bg-white/25 group-focus-visible:bg-crimson'
         }`}
       />
     </div>

@@ -16,12 +16,17 @@ vi.mock('@/components/features/auth/ProtectedRoute', () => ({
   ProtectedRoute: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-vi.mock('@/components/providers', () => ({
-  useAuth: () => ({
-    state: { user: { user_name: 'Ada', email: 'ada@example.com', role: 'internal' } },
-    logout: vi.fn(),
-  }),
-}));
+vi.mock('@/components/providers', async () => {
+  const { translate } = await import('@/lib/i18n/translate');
+  return {
+    useAuth: () => ({
+      state: { user: { user_name: 'Ada', email: 'ada@example.com', role: 'internal' } },
+      logout: vi.fn(),
+    }),
+    useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
+      translate('en', key, vars),
+  };
+});
 
 vi.mock('@/components/providers/AuthProvider', () => ({
   hasRole: () => true,
@@ -60,6 +65,7 @@ describe('AgentsLayout sidebar collapse', () => {
     expect(toggle()).toHaveAccessibleName('Collapse task list');
     expect(toggle()).toHaveAttribute('aria-expanded', 'true');
     expect(toggle()).toHaveAttribute('aria-controls', 'agents-sidebar');
+    expect(toggle()).toHaveAttribute('aria-keyshortcuts', 'Meta+B Control+B');
 
     fireEvent.click(toggle());
 
@@ -85,6 +91,38 @@ describe('AgentsLayout sidebar collapse', () => {
 
     expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
     expect(toggle()).toHaveAccessibleName('Expand task list');
+  });
+
+  it('toggles and persists the task list with Command+B or Control+B', () => {
+    render(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+
+    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true })).toBe(false);
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('1');
+
+    expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true })).toBe(false);
+    expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('0');
+  });
+
+  it('ignores repeated or additionally modified shortcut variants', () => {
+    render(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+
+    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true, repeat: true })).toBe(false);
+    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true, shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true, altKey: true })).toBe(true);
+    expect(fireEvent.keyDown(window, { key: 'b' })).toBe(true);
+
+    expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
   });
 });
 
@@ -136,15 +174,15 @@ describe('AgentsLayout product navigation', () => {
     renderLayout();
 
     expect(screen.getByRole('link', { name: 'Agents' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.getByRole('link', { name: 'Hosts' })).not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('link', { name: 'Admin' })).not.toHaveAttribute('aria-current');
   });
 
-  it('moves the highlight to Hosts on the host pool page', () => {
+  it('moves the highlight to Admin on the admin page', () => {
     pathname = '/admin/hosts';
 
     renderLayout();
 
-    expect(screen.getByRole('link', { name: 'Hosts' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Admin' })).toHaveAttribute('aria-current', 'page');
 
     // And Agents is a way back rather than a label: it was a bare <span>, so
     // the only route off this page was the browser's back button.

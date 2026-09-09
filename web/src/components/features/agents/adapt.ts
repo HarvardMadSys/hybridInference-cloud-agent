@@ -8,11 +8,28 @@
 import type {
   AgentJobApi,
   AgentJobEventApi,
+  AgentAttemptTelemetryApi,
+  AgentAttemptSummaryApi,
+  AttemptResourcesApi,
   AgentThreadApi,
+  AgentThreadEventApi,
   AgentThreadMessageApi,
+  ToolCallResourcesApi,
+  ProcessObservationApi,
 } from '@/lib/api/agents';
 
-import type { AgentDiffFile, AgentEvent, AgentJob, AgentJobState, DiffLine } from './types';
+import type {
+  AgentDiffFile,
+  AgentEvent,
+  AgentHistoryTurn,
+  AgentAttempt,
+  AgentJob,
+  AgentJobState,
+  DiffLine,
+  ToolCallResources,
+  ProcessObservation,
+  TurnResources,
+} from './types';
 
 /**
  * Map a server state onto a display state.
@@ -74,6 +91,25 @@ function toolOutput(payload: Record<string, unknown>): string[] | undefined {
 }
 
 /** Map one stored event onto a UI row, or null when it has nothing to show. */
+/**
+ * The span between a tool call and its result, when both carry a time.
+ *
+ * Message-level by construction: the window opens when the model asked for
+ * the call rather than when the sandbox began running it, so it includes
+ * whatever thinking preceded execution. Returns an empty object rather than
+ * a null field so a row without usable times carries no duration at all.
+ */
+export function durationBetween(
+  startedAt: string | null | undefined,
+  endedAt: string | null | undefined,
+): { durationMs?: number } {
+  if (!startedAt || !endedAt) return {};
+  const start = Date.parse(startedAt);
+  const end = Date.parse(endedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return {};
+  return { durationMs: end - start };
+}
+
 export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   const payload = event.payload ?? {};
   const type = event.event_type;
@@ -94,6 +130,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       kind: 'tool_use',
       tool: name,
       id: asText(payload, 'id') || undefined,
+      ...(event.created_at ? { at: event.created_at } : {}),
       detail: asText(payload, 'detail', 'text') || commandText(payload.input) || 'Running tool',
       ...(output ? { output } : {}),
       ...(outputIsError ? { outputIsError: true } : {}),
@@ -110,6 +147,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
         asText(payload, 'text', 'detail'),
       toolUseId: asText(payload, 'tool_use_id') || undefined,
       isError: payload.is_error === true,
+      ...(event.created_at ? { at: event.created_at } : {}),
     };
   }
 
@@ -129,7 +167,13 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     return { kind: 'lifecycle', text: `attempt superseded (${reason})` };
   }
   if (type === 'lifecycle') {
-    return { kind: 'lifecycle', text: asText(payload, 'phase', 'text') || 'lifecycle' };
+    const phase = asText(payload, 'phase', 'text') || 'lifecycle';
+    // The runner reports whether it reused the tree; the milestone reads
+    // differently depending on the answer, and only the runner can know it.
+    if (phase === 'checked_out' && payload.reused === true) {
+      return { kind: 'lifecycle', text: 'workspace_reused' };
+    }
+    return { kind: 'lifecycle', text: phase };
   }
   if (type === 'raw') {
     // Raw records are unclassified runtime protocol data. They remain available
@@ -137,8 +181,8 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     return null;
   }
 
-  // Diff is rendered from the complete patch artifact rather than a stream
-  // marker that only says whether an artifact was stored.
+  // Diff is rendered from the retained workspace rather than a stream marker
+  // that only says whether files changed.
   if (type === 'diff') return null;
 
   // An unrecognized kind still appears, rather than silently disappearing.
@@ -211,7 +255,7 @@ function diffStat(patch: string): { add: number; del: number } | undefined {
 }
 
 const TIER_LABELS: Record<string, string> = {
-  platform_only: 'gateway only',
+  platform_only: 'platform relays only',
   trusted: 'allowlist',
   custom: 'custom',
   full: 'open',
@@ -260,15 +304,25 @@ function rawEventLine(event: AgentJobEventApi): string {
 
 export interface AdaptOptions {
   events?: AgentJobEventApi[];
+  threadEvents?: AgentThreadEventApi[];
   patch?: string | null;
   thread?: AgentThreadApi | null;
 }
 
 const LIFECYCLE_LABELS: Record<string, string> = {
-  started: 'Setting up environment',
-  init: 'Setting up environment',
-  system: 'Setting up environment',
+  // Three phases used to share one label, so the platform starting a turn and
+  // the agent announcing itself rendered as the same ticked step, twice. They
+  // are different milestones and now say so — the back-to-back collapse below
+  // only ever hid the pair when nothing came between them, which on a resident
+  // turn it does.
+  started: 'Run started',
+  init: 'Agent ready',
+  system: 'Agent ready',
   checked_out: 'Repository ready',
+  // A resident turn skipped the clone: the tree is the one this conversation
+  // has been building. Saying "repository ready" either way told the owner
+  // their thread had been rebuilt when it had not.
+  workspace_reused: 'Reusing this conversation\u2019s workspace',
   context_restored: 'Previous work restored',
   setup: 'Installing project dependencies',
   workspace_preparing: 'Preparing workspace',
@@ -332,6 +386,12 @@ function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
           ...target,
           output: row.text ? row.text.split('\n') : ['Command completed with no output.'],
           outputIsError: row.isError,
+          // Folding is where the pair still exists. Downstream only sees the
+          // surviving tool_use row, so a consumer that wanted to time the
+          // call — the turn footer does — would find nothing left to pair
+          // with and render every call as unfinished. The window is resolved
+          // here, while both ends are in hand.
+          ...durationBetween(target.at, row.at),
         };
         continue;
       }
@@ -361,7 +421,134 @@ function displayEvents(events: AgentJobEventApi[]): AgentEvent[] {
   return rows;
 }
 
-/** Build the UI job model from the API job plus whatever else we have. */
+/** Rename the host's rollup into the UI's shape, keeping every null a null. */
+export function toTurnResources(api: AttemptResourcesApi): TurnResources {
+  const toolCallsTruncated = api.tool_calls_truncated === true;
+  const toolCalls = (api.tool_calls ?? []).map((call) => {
+    const adapted = toToolCallResources(call);
+    if (!toolCallsTruncated) return adapted;
+    // A dropped call may have started processes the retained rows now
+    // claim; nothing per-call survives a truncated list, exit-accounted or
+    // sampled alike.
+    return {
+      ...adapted,
+      sampleCount: 0,
+      measuredSpanMs: null,
+      cpuUsec: null,
+      memPeakBytes: null,
+      exclusive: false,
+      processCpuUsec: null,
+      processMemPeakBytes: null,
+      processIoReadBytes: null,
+      processIoWriteBytes: null,
+      processResourcesPartial: false,
+    };
+  });
+  const processObserver = api.process_observer ?? null;
+  const processEventsLost = api.process_events_lost ?? 0;
+  const processesTruncated = api.processes_truncated === true;
+  const processObservationComplete =
+    processObserver !== null &&
+    api.process_observation_complete === true &&
+    processEventsLost === 0 &&
+    !processesTruncated;
+  // An incomplete census may have lost a process a call started, so no
+  // call's exit-accounted numbers can be presented as its total. The host
+  // marks this too; the reader is kept conservative even against an older
+  // or wrong row.
+  const conservativeCalls = toolCalls.map((call) => {
+    if (processObservationComplete || (call.processCount ?? 0) === 0) return call;
+    return { ...call, processResourcesPartial: true };
+  });
+  return {
+    cpuUsec: api.cpu_usec,
+    memPeakBytes: api.mem_peak_bytes,
+    memAvgBytes: api.mem_avg_bytes,
+    ioReadBytes: api.io_read_bytes,
+    ioWriteBytes: api.io_write_bytes,
+    netRxBytes: api.net_rx_bytes,
+    netTxBytes: api.net_tx_bytes,
+    sampleCount: api.sample_count,
+    samplerVersion: api.sampler_version,
+    coverage: api.coverage,
+    toolTimeMs: toolCallsTruncated ? null : (api.tool_time_ms ?? null),
+    toolCalls: conservativeCalls,
+    toolCallsTruncated,
+    processObserver,
+    processObservationComplete,
+    processEventsLost,
+    processesTruncated,
+    processes: (api.processes ?? []).map(toProcessObservation),
+  };
+}
+
+/**
+ * Collapse the exclusive/shared column pair into one number and a flag.
+ *
+ * The pair exists in the database so a shared measurement cannot be read as
+ * an exclusive one by a query that does not know the difference. Here the
+ * difference is carried by `exclusive`, and every renderer of these numbers
+ * has to answer it — a value with no flag beside it is what this shape makes
+ * impossible.
+ */
+function toToolCallResources(api: ToolCallResourcesApi): ToolCallResources {
+  const exclusive = api.cpu_usec_exclusive !== null || api.mem_peak_exclusive_bytes !== null;
+  return {
+    toolUseId: api.tool_use_id,
+    toolName: api.tool_name,
+    timingSource: api.timing_source === 'exact' ? 'exact' : 'message',
+    durationMs: api.duration_ms,
+    sampleCount: api.sample_count,
+    overlapN: api.overlap_n,
+    measuredSpanMs: api.measured_span_ms,
+    cpuUsec: exclusive ? api.cpu_usec_exclusive : api.cpu_usec_shared,
+    memPeakBytes: exclusive ? api.mem_peak_exclusive_bytes : api.mem_peak_shared_bytes,
+    exclusive,
+    processCount: api.process_count ?? 0,
+    processCpuUsec: api.process_cpu_usec ?? null,
+    processMemPeakBytes: api.process_mem_peak_bytes ?? null,
+    processIoReadBytes: api.process_io_read_bytes ?? null,
+    processIoWriteBytes: api.process_io_write_bytes ?? null,
+    processResourcesPartial: api.process_resources_partial === true,
+  };
+}
+
+function toProcessObservation(api: ProcessObservationApi): ProcessObservation {
+  return {
+    processSeq: api.process_seq,
+    uid: api.uid,
+    pid: api.pid,
+    tgid: api.tgid,
+    ppid: api.ppid,
+    comm: api.comm,
+    executable: api.executable,
+    startedOffsetMs: api.started_offset_ms,
+    durationMs: api.duration_ms,
+    exitCode: api.exit_code,
+    observedFork: api.observed_fork,
+    observedExec: api.observed_exec,
+    observedExit: api.observed_exit,
+    toolCallSeqs: api.tool_call_seqs,
+    cpuUsec: api.cpu_usec ?? null,
+    memPeakBytes: api.mem_peak_bytes ?? null,
+    ioReadBytes: api.io_read_bytes ?? null,
+    ioWriteBytes: api.io_write_bytes ?? null,
+    ioRcharBytes: api.io_rchar_bytes ?? null,
+    ioWcharBytes: api.io_wchar_bytes ?? null,
+  };
+}
+
+export function toAttemptTelemetry(
+  api: AgentAttemptSummaryApi & Partial<Pick<AgentAttemptTelemetryApi, 'resources'>>,
+): NonNullable<AgentAttempt['telemetry']> {
+  return {
+    ...(api.continuity_mode ? { continuityMode: api.continuity_mode } : {}),
+    ...(api.context_status ? { contextStatus: api.context_status } : {}),
+    ...(typeof api.duration_ms === 'number' ? { durationMs: api.duration_ms } : {}),
+    ...(api.resources ? { resources: toTurnResources(api.resources) } : {}),
+  };
+}
+
 export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): AgentJob {
   const events = options.events ?? [];
   const patch = options.patch ?? '';
@@ -373,20 +560,47 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
   const attemptIds = [...new Set(events.map((event) => event.attempt_id))].sort((a, b) => a - b);
   const currentAttemptIndex =
     job.current_attempt_id === null ? -1 : attemptIds.indexOf(job.current_attempt_id);
+  const telemetryAttemptIndex =
+    job.telemetry_attempt_id == null ? -1 : attemptIds.indexOf(job.telemetry_attempt_id);
   const supersededIds = new Set(
     events
       .filter((event) => event.event_type === 'attempt_superseded')
       .map((event) => event.attempt_id),
   );
-  const attempts = attemptIds.map((id, index) => ({
-    no: index + 1,
-    status: supersededIds.has(id)
-      ? ('superseded' as const)
-      : job.state === 'running' || job.state === 'publishing'
-        ? ('live' as const)
-        : ('finished' as const),
-    note: supersededIds.has(id) ? 'lease expired; a new attempt took over' : undefined,
-  }));
+  const telemetryByAttemptId = new Map(
+    (job.attempt_telemetry ?? []).map((attempt) => [attempt.attempt_id, attempt]),
+  );
+  const attempts = attemptIds.map((id, index): AgentAttempt => {
+    const recorded = telemetryByAttemptId.get(id);
+    // Only legacy servers need the top-level fallback. Its identity belongs
+    // to the fetched snapshot, not whichever attempt SSE has since started.
+    let telemetry: AgentAttempt['telemetry'];
+    if (recorded) {
+      telemetry = toAttemptTelemetry(recorded);
+    } else if (
+      job.attempt_telemetry === undefined &&
+      id ===
+        (job.telemetry_attempt_id === undefined ? job.current_attempt_id : job.telemetry_attempt_id)
+    ) {
+      telemetry = {
+        ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
+        ...(job.context_status ? { contextStatus: job.context_status } : {}),
+        ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
+        ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),
+      };
+    }
+    return {
+      id,
+      no: index + 1,
+      status: supersededIds.has(id)
+        ? 'superseded'
+        : job.state === 'running' || job.state === 'publishing'
+          ? 'live'
+          : 'finished',
+      note: supersededIds.has(id) ? 'lease expired; a new attempt took over' : undefined,
+      ...(telemetry ? { telemetry } : {}),
+    };
+  });
 
   const egressDenials = renderedEvents.filter((event) => event.kind === 'egress_denied').length;
   const currentTurn =
@@ -411,6 +625,28 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       priorJobIds ? priorJobIds.has(message.job_id) : message.job_id !== job.id,
     )
     .map(mapMessage);
+  const historicalJobs = (options.thread?.jobs ?? []).filter(
+    (threadJob) =>
+      threadJob.id !== job.id &&
+      (currentTurn === undefined || (threadJob.turn_no ?? 1) < currentTurn),
+  );
+  const threadEvents = options.threadEvents;
+  let historyTurns: AgentHistoryTurn[] | undefined;
+  if (threadEvents !== undefined) {
+    historyTurns = historicalJobs.map((threadJob) => ({
+      jobId: threadJob.id,
+      turnNo: threadJob.turn_no ?? 1,
+      // This is stronger than platform success: the API has also proved a
+      // settled native ordinal, compatible online host/image, and idle source
+      // membership. Showing a button from state alone creates a predictable
+      // 409 for failed rollout generations.
+      forkable: threadJob.native_fork_available === true,
+      messages: (options.thread?.messages ?? [])
+        .filter((message) => message.job_id === threadJob.id)
+        .map(mapMessage),
+      events: displayEvents(threadEvents.filter((event) => event.job_id === threadJob.id)),
+    }));
+  }
   // A turn copied by fork has no events; its durable messages are the only
   // record of what it said. For a settled job whose event log carries no
   // message rows, render the thread's copy of the turn — prompt included, so
@@ -442,17 +678,33 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     branch: job.output_branch ?? `agent/${job.thread_id ?? options.thread?.thread_id ?? job.id}`,
     runtime: job.runtime,
     model: job.model,
+    reasoningEffort: job.reasoning_effort ?? undefined,
     // Summed server-side from api_logs. Null there means no ledger is
     // configured; 0 is the honest display for that, but the panel below reads
     // `hasLedger` so it can say so rather than imply the job was free.
     spentUsd: job.spent_usd ?? 0,
     hasLedger: job.spent_usd !== null,
+    ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
+    ...(job.context_status ? { contextStatus: job.context_status } : {}),
+    ...(job.resident_state ? { residentState: job.resident_state } : {}),
+    ...(job.sandbox_id ? { sandboxId: job.sandbox_id } : {}),
+    ...(job.workspace_shared ? { workspaceShared: true } : {}),
+    ...(job.native_state ? { nativeState: job.native_state } : {}),
+    ...(job.native_fork_available ? { nativeForkAvailable: true } : {}),
+    ...(job.workspace_publication_state
+      ? { workspacePublicationState: job.workspace_publication_state }
+      : {}),
+    ...(typeof job.workspace_epoch === 'number' ? { workspaceEpoch: job.workspace_epoch } : {}),
+    ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
+    ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),
     timeoutLabel: '',
     networkSetup: tierLabel(job.setup_egress_tier),
     networkAgent: tierLabel(job.agent_egress_tier),
     sandbox: sandboxLabel(events, job.current_attempt_id),
     attempts,
+    attemptTelemetryAvailable: job.attempt_telemetry !== undefined,
     currentAttemptNo: currentAttemptIndex >= 0 ? currentAttemptIndex + 1 : undefined,
+    telemetryAttemptNo: telemetryAttemptIndex >= 0 ? telemetryAttemptIndex + 1 : undefined,
     events: renderedEvents,
     eventCount: events.length,
     diffFiles: toDiffFiles(patch),
@@ -465,7 +717,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
       tokensIn: formatTokens(job.tokens_in),
       tokensOut: formatTokens(job.tokens_out),
       cachePct: 0,
-      turns: job.model_calls ?? 0,
+      turns: job.model_calls,
     },
     egressDenials,
     prLabel: publishedPrUrl ? `draft PR ${publishedPrUrl.split('/').pop()}` : undefined,
@@ -474,6 +726,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     parentJobId: job.parent_job_id ?? undefined,
     turnNo: job.turn_no,
     threadMessages: [...priorMessages, ...ownMessages],
+    ...(historyTurns ? { historyTurns } : {}),
     historyIncludesPrompt: ownMessages.some((message) => message.role === 'user'),
   };
 }

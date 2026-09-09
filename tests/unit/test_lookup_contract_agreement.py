@@ -37,11 +37,14 @@ CATALOG_READS = {
 }
 
 STATUS_READS = {
-    "exists": "session._may_sign_in",
-    "active": "session._may_sign_in",
-    "status": "session._may_sign_in (the named-status fallback)",
-    "role": "session.begin — the role the session is minted with",
-    "email": "session.begin — preferred over the identity token's",
+    "exists": "deps.may_sign_in",
+    "active": "deps.may_sign_in",
+    "status": "deps.may_sign_in (the named-status fallback)",
+    "role": (
+        "session._establish_session — the role the session is minted with; and "
+        "routes.require_agent_owner, which re-reads it on every write"
+    ),
+    "email": "session._establish_session — preferred over the identity token's",
 }
 
 

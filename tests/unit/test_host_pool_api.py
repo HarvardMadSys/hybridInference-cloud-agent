@@ -56,11 +56,15 @@ class FakeHostPoolStore:
         self.rows: dict[str, dict[str, Any]] = {}
         self.tokens: dict[str, dict[str, Any]] = {}
         self.active_host: str | None = None
+        self.runtime_versions: dict[str, str] = {}
         self.establish_answer: dict[str, Any] | None = None
         self.linked: list[tuple[str, int, str]] = []
         self.link_ok = True
         self.beat_answers: dict[tuple[str, int], str | None] = {}
         self.release_answer: str | None = None
+        self.release_calls: list[tuple[str, int, str, int | None]] = []
+        self.sandbox_observations: list[dict[str, Any]] = []
+        self.sandbox_stop_due: dict[str, Any] | None = None
 
     # -- enrollment tokens
 
@@ -102,6 +106,7 @@ class FakeHostPoolStore:
             "sandbox_runtime": None,
             "sandbox_image_digest": None,
             "runtime_versions": None,
+            "runtime_versions_available": None,
             "enrolled": False,
             "credential_hash": None,
         }
@@ -151,6 +156,7 @@ class FakeHostPoolStore:
         sandbox_runtime: str | None = None,
         sandbox_image_digest: str | None = None,
         runtime_versions: dict[str, str] | None = None,
+        runtime_versions_available: dict[str, list[str]] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
@@ -167,6 +173,7 @@ class FakeHostPoolStore:
             ("sandbox_runtime", sandbox_runtime),
             ("sandbox_image_digest", sandbox_image_digest),
             ("runtime_versions", runtime_versions),
+            ("runtime_versions_available", runtime_versions_available),
         ):
             if value is not None:
                 row[field] = value
@@ -198,9 +205,22 @@ class FakeHostPoolStore:
         row["enrolled"] = False
         return "ok"
 
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None]:
+    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
         rows = [{**row, "is_active": row["host"] == self.active_host} for row in self.rows.values()]
-        return rows, self.active_host
+        return rows, self.active_host, dict(self.runtime_versions)
+
+    async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
+        if version is None:
+            self.runtime_versions.pop(runtime, None)
+            return True
+        offered = (
+            version in ((row.get("runtime_versions_available") or {}).get(runtime) or [])
+            for row in self.rows.values()
+        )
+        if not any(offered):
+            return False
+        self.runtime_versions[runtime] = version
+        return True
 
     # -- thread residencies
     #
@@ -223,7 +243,27 @@ class FakeHostPoolStore:
         return self.beat_answers.get((thread_id, generation))
 
     async def release_residency(self, *, thread_id: str, generation: int, host: str) -> str | None:
+        self.release_calls.append((thread_id, generation, host, None))
         return self.release_answer
+
+    async def release_shared_residency_if_quiescent(
+        self,
+        *,
+        thread_id: str,
+        generation: int,
+        process_generation: int,
+        host: str,
+        sandbox_id: str,
+    ) -> str | None:
+        self.release_calls.append((thread_id, generation, host, process_generation))
+        return self.release_answer
+
+    async def reconcile_thread_sandbox_observation(self, **kwargs: Any) -> str | None:
+        self.sandbox_observations.append(dict(kwargs))
+        return "running" if kwargs["running"] else "stopped"
+
+    async def due_thread_sandbox_stop(self, **_kwargs: Any) -> dict[str, Any] | None:
+        return self.sandbox_stop_due
 
 
 class RecordingGrants:
@@ -265,6 +305,7 @@ def _build_app(store: FakeHostPoolStore) -> FastAPI:
 @pytest_asyncio.fixture()
 async def client(monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
 
     async def _no_audit(*_args, **_kwargs):
         return None
@@ -282,6 +323,7 @@ async def client(monkeypatch):
 async def residency_client(monkeypatch):
     """Like ``client``, plus a recording grant client behind the dependency."""
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
 
     async def _no_audit(*_args, **_kwargs):
         return None
@@ -298,6 +340,17 @@ async def residency_client(monkeypatch):
         yield async_client, store, grants
 
 
+def _registration_body(token: str, name: str, **overrides) -> dict[str, Any]:
+    """Build the minimum retained-host enrollment payload."""
+    return {
+        "enroll_token": token,
+        "name": name,
+        "slots_total": 3,
+        "broker_url": "http://broker.test:8092",
+        **overrides,
+    }
+
+
 async def _enroll(client, store, name="runner-a", **body) -> str:
     """Issue a token for ``name``, redeem it, and return the host credential."""
     issued = await client.post(
@@ -306,7 +359,7 @@ async def _enroll(client, store, name="runner-a", **body) -> str:
     assert issued.status_code == 200
     response = await client.post(
         "/v1/agent/host/register",
-        json={"enroll_token": issued.json()["enroll_token"], "name": name, **body},
+        json=_registration_body(issued.json()["enroll_token"], name, **body),
     )
     assert response.status_code == 200, response.text
     return response.json()["credential"]
@@ -350,10 +403,10 @@ async def test_a_replayed_enrollment_token_is_refused(client):
     token = issued.json()["enroll_token"]
 
     first = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
     second = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
 
     assert first.status_code == 200
@@ -361,6 +414,28 @@ async def test_a_replayed_enrollment_token_is_refused(client):
     assert (
         "runner-a" not in second.text or second.json()["detail"]["error"]["type"] == "unauthorized"
     )
+
+
+async def test_an_invalid_broker_url_does_not_spend_the_enrollment_token(client):
+    """A retryable host configuration typo must not require a new admin token."""
+    async_client, store = client
+    issued = await async_client.post(
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
+    )
+    token = issued.json()["enroll_token"]
+
+    refused = await async_client.post(
+        "/v1/agent/host/register",
+        json=_registration_body(token, "runner-a", broker_url="file:///etc/passwd"),
+    )
+    retry = await async_client.post(
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
+    )
+
+    assert refused.status_code == 400
+    assert refused.json()["detail"]["error"]["type"] == "invalid_broker_url"
+    assert retry.status_code == 200
+    assert store.rows["runner-a"]["broker_url"] == "http://broker.test:8092"
 
 
 async def test_a_typo_cannot_evict_a_live_host(client):
@@ -390,7 +465,7 @@ async def test_a_typo_cannot_evict_a_live_host(client):
     token = issued.json()["enroll_token"]
 
     typo = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
 
     assert typo.status_code == 401
@@ -401,7 +476,7 @@ async def test_a_typo_cannot_evict_a_live_host(client):
     # And the token survives the typo, so the machine it was minted for can
     # still use it — a spent token would mean re-issuing one per mistake.
     retry = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-b"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-b")
     )
     assert retry.status_code == 200
     assert store.rows["runner-b"]["status"] == HOST_ENROLLING
@@ -416,7 +491,7 @@ async def test_a_token_admits_only_the_name_it_was_issued_for(client):
 
     response = await async_client.post(
         "/v1/agent/host/register",
-        json={"enroll_token": issued.json()["enroll_token"], "name": "runner-c"},
+        json=_registration_body(issued.json()["enroll_token"], "runner-c"),
     )
 
     assert response.status_code == 401
@@ -471,7 +546,7 @@ async def test_an_expired_enrollment_token_is_refused(client):
     store.tokens[hash_secret(token)]["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
 
     response = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": token, "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
 
     assert response.status_code == 401
@@ -481,7 +556,7 @@ async def test_an_invented_enrollment_token_is_refused(client):
     async_client, _ = client
 
     response = await async_client.post(
-        "/v1/agent/host/register", json={"enroll_token": "made-up", "name": "runner-a"}
+        "/v1/agent/host/register", json=_registration_body("made-up", "runner-a")
     )
 
     assert response.status_code == 401
@@ -733,19 +808,37 @@ class ClaimRecorder(FakeHostPoolStore):
         super().__init__()
         self.claims: list[dict[str, Any]] = []
 
-    async def claim_job(self, *, worker_id: str, lease_ttl_seconds: float, host: str | None = None):
-        self.claims.append({"worker_id": worker_id, "host": host})
+    async def claim_job(
+        self,
+        *,
+        worker_id: str,
+        lease_ttl_seconds: float,
+        host: str,
+        host_credential_hash: str,
+        claim_attestation: dict[str, Any] | None = None,
+        expected_deployment_sha: str | None = None,
+    ):
+        self.claims.append(
+            {
+                "worker_id": worker_id,
+                "host": host,
+                "host_credential_hash": host_credential_hash,
+                "claim_attestation": claim_attestation,
+                "expected_deployment_sha": expected_deployment_sha,
+            }
+        )
         return None
 
 
 @pytest_asyncio.fixture()
 async def claim_client(monkeypatch):
-    """The moved worker router, with only E7's raising placeholder supplied."""
+    """The worker router using its real enrolled-host claim authenticator."""
     from cloud_agent.api import routes
     from cloud_agent.api.deps import get_agent_app_credentials
 
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
-    monkeypatch.setenv("AGENT_DISPATCHER_TOKEN", "the-shared-dispatcher-token")
+    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
+    monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "deployment-under-test")
 
     store = ClaimRecorder()
     app = FastAPI()
@@ -759,13 +852,7 @@ async def claim_client(monkeypatch):
 
 
 async def test_a_host_credential_names_the_claiming_machine(claim_client):
-    """The body cannot rename a machine that authenticated as itself.
-
-    The shared dispatcher token says "a runner" and not "which", so #1158's
-    pool is a list of names anything holding it can invent. A host credential
-    is the fix, and it is only a fix if the claim reads the name from the
-    credential rather than from the request.
-    """
+    """The claim reads the machine name only from its enrolled credential."""
     async_client, store = claim_client
     from cloud_agent.tokens import mint_host_token
 
@@ -774,26 +861,79 @@ async def test_a_host_credential_names_the_claiming_machine(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1", "host": "runner-b"},
+        json={
+            "worker_id": "w1",
+            "attestation": {
+                "sandbox_runtime": "io.containerd.kata.v2",
+                "host_kernel": "host",
+                "guest_kernel": "guest",
+            },
+        },
         headers={"Authorization": f"Bearer {credential}"},
     )
 
     assert response.status_code == 200
-    assert store.claims == [{"worker_id": "w1", "host": "runner-a"}]
+    assert store.claims == [
+        {
+            "worker_id": "w1",
+            "host": "runner-a",
+            "host_credential_hash": hash_secret(credential),
+            "expected_deployment_sha": "deployment-under-test",
+            "claim_attestation": {
+                "sandbox_runtime": "io.containerd.kata.v2",
+                "sandbox_image_digest": None,
+                "runtime_versions": {},
+                # Present even when the request omitted it: the claim checks a
+                # stored selection against this, and an absent key would be
+                # indistinguishable from "this host offers nothing".
+                "runtime_versions_available": {},
+                # Non-CLI helpers (currently the Claude Agent SDK fork
+                # helper) are attested separately from runtime binaries.
+                "helper_versions": {},
+                # Shared-live claims carry a process-local protocol/version
+                # fence; omitted values normalize to safe non-attestation.
+                "shared_sandbox_protocol": None,
+                "runner_capabilities": [],
+                "host_kernel": "host",
+                "guest_kernel": "guest",
+            },
+        }
+    ]
 
 
-async def test_the_shared_dispatcher_token_still_reports_its_host_in_the_body(claim_client):
-    """#1158's path, untouched. Existing runners keep working unchanged."""
+async def test_request_body_host_identity_is_rejected(claim_client):
+    """A stale or malicious caller cannot supply a host name in JSON."""
+    async_client, store = claim_client
+    from cloud_agent.tokens import mint_host_token
+
+    credential = mint_host_token(host="runner-a")
+    store.seed("runner-a", credential_hash=hash_secret(credential), enrolled=True)
+
+    response = await async_client.post(
+        "/v1/agent/worker/claim",
+        json={
+            "worker_id": "w1",
+            "host": "runner-b",
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 422
+    assert store.claims == []
+
+
+async def test_pool_wide_token_is_not_a_claim_credential(claim_client):
+    """Pool-wide bearer strings no longer open the cross-tenant claim route."""
     async_client, store = claim_client
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1", "host": "runner-b"},
-        headers={"Authorization": "Bearer the-shared-dispatcher-token"},
+        json={"worker_id": "w1"},
+        headers={"Authorization": "Bearer pool-wide-token"},
     )
 
-    assert response.status_code == 200
-    assert store.claims == [{"worker_id": "w1", "host": "runner-b"}]
+    assert response.status_code == 401
+    assert store.claims == []
 
 
 async def test_a_revoked_host_credential_cannot_claim(claim_client):
@@ -999,118 +1139,30 @@ def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
     assert validate_broker_url("http://anything:8081") == "http://anything:8081"
 
 
-# ── residency grant choreography (design §14) ──────────────────────────
+# ── removed host-level residency control plane ─────────────────────────
 
 
-def _establish_row(**overrides: Any) -> dict[str, Any]:
-    row = {
-        "thread_id": "th-1",
-        "generation": 1,
-        "status": "hot",
-        "previous_grant_id": None,
-        "establishing_job_id": "job-1",
-        "establishing_attempt_id": "att-1",
-        "user_id": "u1",
-        "model": "glm-5.1",
-    }
-    row.update(overrides)
-    return row
-
-
-async def test_establish_mints_a_thread_attributed_grant(residency_client):
-    """The credential in the answer is the residency's own: minted against the
-    thread (not the establishing attempt's job), linked under the generation
-    the row was fenced with, and scoped to the establishing turn's model."""
+async def test_legacy_host_residency_mutations_are_not_executable(residency_client):
+    """Only attempt-fenced worker routes may create or release member grants."""
     client, store, grants = residency_client
     credential = await _enroll(client, store)
-    store.establish_answer = _establish_row()
+    headers = {"Authorization": f"Bearer {credential}"}
 
-    response = await client.post(
+    establish = await client.post(
         "/v1/agent/host/residencies",
         json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
+        headers=headers,
+    )
+    release = await client.post(
+        "/v1/agent/host/residencies/release",
+        json={"thread_id": "th-1", "generation": 1},
+        headers=headers,
     )
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["credential"] == "tok-1"
-    assert body["model"] == "glm-5.1"
-    assert store.linked == [("th-1", 1, "agr-1")]
-    (mint,) = grants.minted
-    assert mint["job_id"] == "thread:th-1"
-    assert mint["user_id"] == "u1"
-    assert mint["models"] == ["glm-5.1"]
-    assert mint["attempt_id"] == "att-1"
-    assert grants.revoked == []
-
-
-async def test_a_takeover_revokes_the_predecessors_grant(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.establish_answer = _establish_row(generation=2, previous_grant_id="agr-old")
-
-    response = await client.post(
-        "/v1/agent/host/residencies",
-        json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200
-    # The zombie's credential dies at takeover, not at its TTL.
-    assert "agr-old" in grants.revoked
-
-
-async def test_a_failed_mint_degrades_to_a_workspace_only_residency(residency_client):
-    """No grant is no outage: the residency stands, the credential is null,
-    and turns ride warm_native on their own per-attempt grants."""
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.establish_answer = _establish_row()
-    grants.fail_mint = True
-
-    response = await client.post(
-        "/v1/agent/host/residencies",
-        json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["credential"] is None
-    assert store.linked == []
-
-
-async def test_a_grant_that_cannot_be_linked_is_revoked_not_handed_over(residency_client):
-    """The link is the only thing that will ever renew or revoke the grant;
-    a takeover between mint and link must leave no orphan credential."""
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.establish_answer = _establish_row()
-    store.link_ok = False
-
-    response = await client.post(
-        "/v1/agent/host/residencies",
-        json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["credential"] is None
-    assert grants.revoked == ["agr-1"]
-
-
-async def test_the_earn_gate_refusal_is_a_409_and_mints_nothing(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.establish_answer = None
-
-    response = await client.post(
-        "/v1/agent/host/residencies",
-        json={"thread_id": "th-1", "runtime_id": "claude-code"},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 409
+    assert establish.status_code == 404
+    assert release.status_code == 404
     assert grants.minted == []
+    assert grants.revoked == []
 
 
 async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_client):
@@ -1139,33 +1191,186 @@ async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_clie
     assert response.json()["residencies_lost"] == [{"thread_id": "th-lost", "generation": 3}]
 
 
-async def test_release_revokes_the_grant_it_returns(residency_client):
-    client, store, grants = residency_client
+async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):
+    client, store, _grants = residency_client
     credential = await _enroll(client, store)
-    store.release_answer = "agr-1"
 
     response = await client.post(
-        "/v1/agent/host/residencies/release",
-        json={"thread_id": "th-1", "generation": 1},
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_1",
+                    "sandbox_id": "asbx_1",
+                    "container_id": "0123456789abcdef",
+                    "generation": 3,
+                    "activation_generation": 7,
+                    "running": True,
+                    "activity_active": False,
+                    "idle_remaining_seconds": 1799.5,
+                    "shared_live": True,
+                    "members": [],
+                }
+            ]
+        },
         headers={"Authorization": f"Bearer {credential}"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert grants.revoked == ["agr-1"]
+    assert response.status_code == 200, response.text
+    assert store.sandbox_observations == [
+        {
+            "thread_id": "athr_1",
+            "host": "runner-a",
+            "sandbox_id": "asbx_1",
+            "container_id": "0123456789abcdef",
+            "sandbox_generation": 3,
+            "running": True,
+            "activity_active": False,
+            "idle_remaining_seconds": 1799.5,
+            "members": [],
+        }
+    ]
 
 
-async def test_a_stale_release_is_ok_false_and_revokes_nothing(residency_client):
-    client, store, grants = residency_client
+async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency_client):
+    client, store, _grants = residency_client
     credential = await _enroll(client, store)
-    store.release_answer = None
 
     response = await client.post(
-        "/v1/agent/host/residencies/release",
-        json={"thread_id": "th-1", "generation": 1},
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_old",
+                    "sandbox_id": "asbx_old",
+                    "container_id": "0123456789abcdef",
+                    "generation": 1,
+                    "activation_generation": 1,
+                    "running": True,
+                    "shared_live": False,
+                }
+            ]
+        },
         headers={"Authorization": f"Bearer {credential}"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is False
-    assert grants.revoked == []
+    assert response.status_code == 422
+    assert store.sandbox_observations == []
+
+
+async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(residency_client):
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    store.sandbox_stop_due = {
+        "thread_id": "athr_1",
+        "generation": 3,
+        "activation_generation": 8,
+        "reason": "idle",
+    }
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_1",
+                    "sandbox_id": "asbx_1",
+                    "container_id": "0123456789abcdef",
+                    "generation": 3,
+                    "activation_generation": 8,
+                    "running": True,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["retained_sandboxes_stop"] == [
+        {**store.sandbox_stop_due, "shared_live": True}
+    ]
+
+
+async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(residency_client):
+    """A broker-reconstructed pre-turn fork target has no activation yet."""
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    store.sandbox_stop_due = {
+        "thread_id": "athr_fork",
+        "generation": 1,
+        "activation_generation": 0,
+        "reason": "idle",
+    }
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_fork",
+                    "sandbox_id": "asbx_fork",
+                    "container_id": "0123456789abcdef",
+                    "generation": 1,
+                    "activation_generation": 0,
+                    "running": True,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["retained_sandboxes_stop"] == [
+        {**store.sandbox_stop_due, "shared_live": True}
+    ]
+
+
+async def test_stopped_shared_group_releases_and_revokes_each_member_residency(residency_client):
+    client, store, grants = residency_client
+    credential = await _enroll(client, store)
+    store.release_answer = "agr-stopped"
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_source",
+                    "sandbox_id": "asbx_shared",
+                    "container_id": "0123456789abcdef",
+                    "generation": 1,
+                    "activation_generation": 2,
+                    "running": False,
+                    "shared_live": True,
+                    "members": [
+                        {
+                            "thread_id": "athr_source",
+                            "native_session_id": "native-source",
+                            "process_generation": 11,
+                            "residency_generation": 7,
+                            "resident_state": "stopped",
+                            "resident_slot_id": 0,
+                        },
+                        {
+                            "thread_id": "athr_child",
+                            "native_session_id": "native-child",
+                            "process_generation": 12,
+                            "residency_generation": 8,
+                            "resident_state": "stopped",
+                            "resident_slot_id": 1,
+                        },
+                    ],
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert store.release_calls == [
+        ("athr_source", 7, "runner-a", 11),
+        ("athr_child", 8, "runner-a", 12),
+    ]
+    assert grants.renewed == []
+    assert grants.revoked == ["agr-stopped", "agr-stopped"]
+    assert response.json()["residencies_lost"] == []

@@ -13,6 +13,10 @@
   scrollbar-width: thin;
 }
 
+.dark .agent-xterm .xterm-viewport {
+  scrollbar-color: #4b5563 transparent;
+}
+
 @layer base {
   html {
     @apply min-h-full;

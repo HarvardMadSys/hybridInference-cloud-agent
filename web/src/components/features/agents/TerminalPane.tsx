@@ -1,14 +1,71 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import type { Terminal } from '@xterm/xterm';
+import type { ITheme, Terminal } from '@xterm/xterm';
 
+import { useTheme } from '@/components/providers';
+import type { ResolvedTheme } from '@/lib/theme';
 import {
   resizeAgentTerminal,
   streamAgentTerminal,
   writeAgentTerminalInput,
   type AgentTerminalApi,
 } from '@/lib/api/agents';
+
+// xterm paints to a canvas from a JS palette, so it is the one surface a
+// `dark:` class cannot reach. Both palettes live here, and the effect below
+// swaps them on the live terminal rather than rebuilding it — a rebuild would
+// drop the scrollback and re-open the PTY stream just to change a colour.
+const TERMINAL_THEMES: Record<ResolvedTheme, ITheme> = {
+  light: {
+    background: '#ffffff',
+    foreground: '#202124',
+    cursor: '#202124',
+    cursorAccent: '#ffffff',
+    selectionBackground: '#dbeafe',
+    black: '#202124',
+    red: '#b42318',
+    green: '#34766f',
+    yellow: '#9a6700',
+    blue: '#0969da',
+    magenta: '#8250df',
+    cyan: '#267f99',
+    white: '#f6f8fa',
+    brightBlack: '#6e7781',
+    brightRed: '#cf222e',
+    brightGreen: '#1a7f37',
+    brightYellow: '#bf8700',
+    brightBlue: '#218bff',
+    brightMagenta: '#a475f9',
+    brightCyan: '#3192aa',
+    brightWhite: '#ffffff',
+  },
+  dark: {
+    // Matches the pane's own `dark:bg-gray-900`, so the canvas does not sit as
+    // a visibly different rectangle inside its frame.
+    background: '#111827',
+    foreground: '#e5e7eb',
+    cursor: '#e5e7eb',
+    cursorAccent: '#111827',
+    selectionBackground: '#1e40af',
+    black: '#484f58',
+    red: '#ff7b72',
+    green: '#3fb950',
+    yellow: '#d29922',
+    blue: '#58a6ff',
+    magenta: '#bc8cff',
+    cyan: '#39c5cf',
+    white: '#b1bac4',
+    brightBlack: '#6e7681',
+    brightRed: '#ffa198',
+    brightGreen: '#56d364',
+    brightYellow: '#e3b341',
+    brightBlue: '#79c0ff',
+    brightMagenta: '#d2a8ff',
+    brightCyan: '#56d4dd',
+    brightWhite: '#f0f6fc',
+  },
+};
 
 function decodeBase64(value: string): Uint8Array {
   const binary = atob(value);
@@ -85,6 +142,10 @@ export function TerminalPane({
 }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
+  const { resolved } = useTheme();
+  // Read by the creation effect, which must not re-run on a theme change.
+  const themeRef = useRef(resolved);
+  themeRef.current = resolved;
   const inputEnabledRef = useRef(ready && terminal.state === 'running');
   const tabListRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -97,6 +158,11 @@ export function TerminalPane({
       if (inputEnabled) terminalRef.current.focus();
     }
   }, [inputEnabled]);
+
+  // Repaint an already-open terminal when the theme changes.
+  useEffect(() => {
+    if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_THEMES[resolved];
+  }, [resolved]);
 
   useEffect(() => {
     const tabList = tabListRef.current;
@@ -151,29 +217,7 @@ export function TerminalPane({
           fontSize: 13,
           lineHeight: 1.25,
           scrollback: 5000,
-          theme: {
-            background: '#ffffff',
-            foreground: '#202124',
-            cursor: '#202124',
-            cursorAccent: '#ffffff',
-            selectionBackground: '#dbeafe',
-            black: '#202124',
-            red: '#b42318',
-            green: '#34766f',
-            yellow: '#9a6700',
-            blue: '#0969da',
-            magenta: '#8250df',
-            cyan: '#267f99',
-            white: '#f6f8fa',
-            brightBlack: '#6e7781',
-            brightRed: '#cf222e',
-            brightGreen: '#1a7f37',
-            brightYellow: '#bf8700',
-            brightBlue: '#218bff',
-            brightMagenta: '#a475f9',
-            brightCyan: '#3192aa',
-            brightWhite: '#ffffff',
-          },
+          theme: TERMINAL_THEMES[themeRef.current],
         });
         const fitAddon = new FitAddon();
         xterm.loadAddon(fitAddon);
@@ -286,10 +330,10 @@ export function TerminalPane({
   return (
     <section
       aria-label={`${selectedLabel} pane`}
-      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm"
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm"
     >
-      <header className="flex min-h-11 shrink-0 items-center gap-1 border-b border-gray-200 px-2.5">
-        <span aria-hidden="true" className="ml-0.5 text-gray-500">
+      <header className="flex min-h-11 shrink-0 items-center gap-1 border-b border-gray-200 dark:border-white/10 px-2.5">
+        <span aria-hidden="true" className="ml-0.5 text-gray-500 dark:text-gray-400">
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24">
             <rect
               x="3.5"
@@ -333,8 +377,8 @@ export function TerminalPane({
                 onClick={() => onSelect(candidate.id)}
                 className={`shrink-0 rounded-md px-2 py-1 text-[13px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50 ${
                   selected
-                    ? 'bg-gray-100 text-gray-900'
-                    : 'text-gray-500 hover:bg-gray-50 hover:text-gray-800'
+                    ? 'bg-gray-100 dark:bg-white/5 text-gray-900 dark:text-gray-50'
+                    : 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 hover:text-gray-800 dark:hover:text-gray-200'
                 }`}
               >
                 {label}
@@ -349,7 +393,7 @@ export function TerminalPane({
             title={canCreate ? 'New terminal' : 'Maximum of four terminal sessions'}
             onClick={onNew}
             disabled={!canCreate || busy}
-            className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-35"
+            className="rounded-md p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100 disabled:cursor-not-allowed disabled:opacity-35"
           >
             <NewIcon />
           </button>
@@ -359,7 +403,7 @@ export function TerminalPane({
             title={canSplit ? 'Split terminal' : 'Two terminal panes are already visible'}
             onClick={onSplit}
             disabled={!canSplit || busy}
-            className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-35"
+            className="rounded-md p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-gray-100 disabled:cursor-not-allowed disabled:opacity-35"
           >
             <SplitIcon />
           </button>
@@ -369,7 +413,7 @@ export function TerminalPane({
             title={`Kill ${selectedLabel}`}
             onClick={onKill}
             disabled={busy}
-            className="rounded-md p-1.5 text-gray-500 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-35"
+            className="rounded-md p-1.5 text-gray-500 dark:text-gray-400 hover:bg-red-50 dark:hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-35"
           >
             <KillIcon />
           </button>
@@ -379,7 +423,7 @@ export function TerminalPane({
         ref={hostRef}
         role="application"
         aria-label={`${selectedLabel} terminal`}
-        className="agent-xterm min-h-64 flex-1 bg-white p-3"
+        className="agent-xterm min-h-64 flex-1 bg-white dark:bg-gray-900 p-3"
       />
     </section>
   );

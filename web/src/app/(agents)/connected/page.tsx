@@ -60,9 +60,14 @@ function ConnectedInner() {
   if (error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
-        <h1 className="text-xl font-semibold text-gray-900">Could not connect {providerName}</h1>
-        <p className="max-w-md text-center text-sm text-gray-500">{error}</p>
-        <Link href="/integrations" className="text-sm font-medium text-crimson hover:underline">
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
+          Could not connect {providerName}
+        </h1>
+        <p className="max-w-md text-center text-sm text-gray-500 dark:text-gray-400">{error}</p>
+        <Link
+          href="/integrations"
+          className="text-sm font-medium text-crimson dark:text-crimson-light hover:underline"
+        >
           Back to integrations
         </Link>
       </div>
@@ -72,9 +77,11 @@ function ConnectedInner() {
   if (installUrl) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
-        <h1 className="text-xl font-semibold text-gray-900">Install the GitHub App</h1>
-        <p className="max-w-md text-center text-sm text-gray-500">
-          GitHub authorization succeeded, but this account has no FreeInference installation yet.
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
+          Install the GitHub App
+        </h1>
+        <p className="max-w-md text-center text-sm text-gray-500 dark:text-gray-400">
+          GitHub authorization succeeded, but this account has no GitHub App installation yet.
         </p>
         <a
           href={installUrl}
@@ -88,7 +95,7 @@ function ConnectedInner() {
 
   return (
     <div className="flex h-full items-center justify-center">
-      <p className="text-sm text-gray-500">Connecting {providerName}…</p>
+      <p className="text-sm text-gray-500 dark:text-gray-400">Connecting {providerName}…</p>
     </div>
   );
 }

@@ -2,18 +2,19 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
-import { useAuth } from '@/components/providers';
+import { useAuth, useT } from '@/components/providers';
 import { hasRole } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = 'agents.sidebar.collapsed';
 
-const NAV_ITEM = 'rounded-md px-2.5 py-1.5 transition-colors hover:bg-gray-100 hover:text-gray-900';
+const NAV_ITEM =
+  'rounded-md px-2.5 py-1.5 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-white/10 dark:hover:text-gray-100';
 const NAV_ITEM_CURRENT =
-  'rounded-md bg-crimson/[0.06] px-2.5 py-1.5 text-crimson ring-1 ring-inset ring-crimson/10';
+  'rounded-md bg-crimson/[0.06] px-2.5 py-1.5 text-crimson ring-1 ring-inset ring-crimson/10 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25';
 
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
@@ -29,6 +30,7 @@ function AgentsHeader({
   const pathname = usePathname() ?? '/';
   const { state, logout } = useAuth();
   const { branding, features } = useSiteConfig();
+  const t = useT();
 
   // Which nav item is lit has to follow the route. The highlight used to be
   // painted on `Agents` unconditionally — a leftover from when this app had one
@@ -46,16 +48,17 @@ function AgentsHeader({
   };
 
   return (
-    <header className="flex shrink-0 items-center justify-between border-b border-gray-200/80 bg-white/95 px-5 py-2.5 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
+    <header className="flex shrink-0 items-center justify-between border-b border-gray-200/80 bg-white/95 px-5 py-2.5 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur dark:border-white/10 dark:bg-gray-900/95">
       <div className="flex min-w-0 items-baseline gap-2">
         <button
           type="button"
           onClick={onToggleSidebar}
-          aria-label={sidebarCollapsed ? 'Expand task list' : 'Collapse task list'}
+          aria-label={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
           aria-expanded={!sidebarCollapsed}
           aria-controls="agents-sidebar"
-          title={sidebarCollapsed ? 'Expand task list' : 'Collapse task list'}
-          className="-ml-1.5 self-center rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25"
+          aria-keyshortcuts="Meta+B Control+B"
+          title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
+          className="-ml-1.5 self-center rounded-md p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
         >
           <svg
             aria-hidden="true"
@@ -71,14 +74,14 @@ function AgentsHeader({
         </button>
         <Link
           href="/"
-          className="text-[17px] font-semibold tracking-[-0.02em] text-gray-950 transition-colors hover:text-crimson"
+          className="text-[17px] font-semibold tracking-[-0.02em] text-gray-950 transition-colors hover:text-crimson dark:text-gray-50 dark:hover:text-crimson-light"
         >
           {branding.appName}
         </Link>
         {branding.orgName && (
           <a
             href={branding.orgUrl}
-            className="font-serif text-[13px] tracking-[0.01em] text-gray-500 transition-colors hover:text-crimson"
+            className="font-serif text-[13px] tracking-[0.01em] text-gray-500 transition-colors hover:text-crimson dark:text-gray-400 dark:hover:text-crimson-light"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -87,8 +90,8 @@ function AgentsHeader({
         )}
       </div>
       <nav
-        aria-label="Product navigation"
-        className="flex items-center gap-0.5 text-[13px] font-medium text-gray-600"
+        aria-label={t('nav.aria')}
+        className="flex items-center gap-0.5 text-[13px] font-medium text-gray-600 dark:text-gray-400"
       >
         {/* Guarded like every other external link here, and for a sharper
             reason than tidiness: an anchor with an empty `href` resolves to the
@@ -102,7 +105,7 @@ function AgentsHeader({
             target="_blank"
             rel="noopener noreferrer"
           >
-            Status
+            {t('nav.status')}
           </a>
         )}
         {/* Docs Assistant and Dashboard are the gateway's pages, not ours. In
@@ -111,7 +114,7 @@ function AgentsHeader({
             not been told where the gateway is. */}
         {features.rag && branding.gatewayUrl && (
           <a href={`${branding.gatewayUrl}/chat`} className={NAV_ITEM}>
-            Docs Assistant
+            {t('nav.docsAssistant')}
           </a>
         )}
         <Link
@@ -119,7 +122,7 @@ function AgentsHeader({
           className={onTasks ? NAV_ITEM_CURRENT : NAV_ITEM}
           aria-current={onTasks ? 'page' : undefined}
         >
-          Agents
+          {t('nav.agents')}
         </Link>
         {/* This service's own operations page, so it is a route rather than a
             link back to the gateway. Admin-only, matching the endpoints it
@@ -131,16 +134,16 @@ function AgentsHeader({
             className={onHosts ? NAV_ITEM_CURRENT : NAV_ITEM}
             aria-current={onHosts ? 'page' : undefined}
           >
-            Hosts
+            {t('nav.admin')}
           </Link>
         )}
         {branding.gatewayUrl && (
           <a href={`${branding.gatewayUrl}/dashboard`} className={NAV_ITEM}>
-            Dashboard
+            {t('nav.dashboard')}
           </a>
         )}
         <button type="button" onClick={handleLogout} className={NAV_ITEM}>
-          Log out
+          {t('nav.logOut')}
         </button>
       </nav>
     </header>
@@ -156,22 +159,26 @@ function AgentsShell({
 }) {
   const { state } = useAuth();
   const { branding } = useSiteConfig();
+  const t = useT();
 
-  // Internal-only while the sandbox is dogfood (P0) — same gate as the
-  // playground; opens up behind a site-config feature flag in P1.
-  if (!hasRole(state.user?.role, 'internal')) {
+  // Admin-only: the same bar `require_agent_owner` enforces server-side. The
+  // two must agree — a UI that lets someone in only to 403 every request they
+  // make is worse than a clear refusal. Raised from 'internal' on 2026-09-04.
+  if (!hasRole(state.user?.role, 'admin')) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3">
-        <h1 className="text-xl font-semibold text-gray-900">Internal access required</h1>
-        <p className="text-sm text-gray-500">
-          The agent sandbox is dogfood-only for now (issue #1041).
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+          {t('shell.internalRequired.title')}
+        </h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          {t('shell.internalRequired.body')}
         </p>
         {branding.gatewayUrl && (
           <a
             href={`${branding.gatewayUrl}/dashboard`}
-            className="text-sm font-medium text-crimson hover:underline"
+            className="text-sm font-medium text-crimson hover:underline dark:text-crimson-light"
           >
-            Back to Dashboard
+            {t('shell.internalRequired.back')}
           </a>
         )}
       </div>
@@ -181,13 +188,27 @@ function AgentsShell({
   return (
     <div className="flex min-h-0 flex-1">
       <AgentsSidebar collapsed={sidebarCollapsed} />
-      <main className="min-w-0 flex-1 overflow-y-auto bg-gray-50/40">{children}</main>
+      <main className="min-w-0 flex-1 overflow-y-auto bg-gray-50/40 dark:bg-gray-950">
+        {children}
+      </main>
     </div>
   );
 }
 
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
+      } catch {
+        // Non-persisted collapse still works for this session.
+      }
+      return next;
+    });
+  }, []);
 
   // Read after mount so the server-rendered shell and the first client render
   // agree; the sidebar then folds away on the same frame as hydration.
@@ -199,21 +220,31 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
     }
   }, []);
 
-  function toggleSidebar() {
-    setSidebarCollapsed((current) => {
-      const next = !current;
-      try {
-        window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
-      } catch {
-        // Non-persisted collapse still works for this session.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const hasOnePrimaryModifier = event.metaKey !== event.ctrlKey;
+      if (
+        event.key.toLowerCase() !== 'b' ||
+        !hasOnePrimaryModifier ||
+        event.altKey ||
+        event.shiftKey
+      ) {
+        return;
       }
-      return next;
-    });
-  }
+
+      event.preventDefault();
+      if (!event.repeat) {
+        toggleSidebar();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleSidebar]);
 
   return (
     <ProtectedRoute>
-      <div className="fixed inset-0 z-50 flex flex-col bg-gray-50">
+      <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-gray-950">
         <AgentsHeader sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
         <AgentsShell sidebarCollapsed={sidebarCollapsed}>{children}</AgentsShell>
       </div>

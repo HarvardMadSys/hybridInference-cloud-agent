@@ -17,14 +17,18 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
 }));
 
-vi.mock('@/components/providers', () => ({
-  useAuth: () => ({ state: { user: { user_name: 'Ada', email: 'ada@example.com' } } }),
-}));
+vi.mock('@/components/providers', async () => {
+  const { translate } = await import('@/lib/i18n/translate');
+  return {
+    useAuth: () => ({ state: { user: { user_name: 'Ada', email: 'ada@example.com' } } }),
+    useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
+      translate('en', key, vars),
+  };
+});
 
 vi.mock('@/lib/api/agents', () => ({
   archiveAgentJob: vi.fn(),
   getAgentJob: vi.fn(),
-  getAgentJobArtifact: vi.fn(),
   getAgentJobFiles: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAgentJobEvents: vi.fn(),

@@ -10,6 +10,7 @@ import pytest
 
 from cloud_agent_host.patch_gate import (
     MAX_CHANGED_FILES,
+    MAX_PATCH_BYTES,
     branch_name_for,
     validate_patch,
 )
@@ -170,6 +171,72 @@ def test_default_file_limit_is_generous_enough_for_real_work():
     patch = "".join(_patch_for(f"src/file_{index}.py") for index in range(50))
     assert MAX_CHANGED_FILES >= 50
     assert validate_patch(patch).ok is True
+
+
+# ── The shipped limits ─────────────────────────────────────────────────
+#
+# The two tests above hand `validate_patch` a limit of their own — 3 files,
+# 1000 bytes — which verifies the mechanism and says nothing about the number
+# production runs with. Mutation testing found the gap: raising
+# MAX_CHANGED_FILES from 200 to 500, or MAX_PATCH_BYTES from 1MB to 100MB,
+# left the whole suite green, because the only assertion about either constant
+# was a one-sided `>= 50`.
+#
+# One-sided is the wrong side. This gate is the containment boundary of the
+# patch-out model, and a cap only ever weakens by growing. So both bounds are
+# pinned to the shipped value: raising a limit should require editing the test
+# that states it, which is the point at which somebody has to say why.
+
+
+def test_the_shipped_file_limit_is_the_one_that_was_agreed():
+    """MAX_CHANGED_FILES is pinned, not merely bounded from below."""
+    assert MAX_CHANGED_FILES == 200
+
+
+def test_the_shipped_byte_limit_is_the_one_that_was_agreed():
+    """MAX_PATCH_BYTES is pinned, not merely bounded from below."""
+    assert MAX_PATCH_BYTES == 1_000_000
+
+
+# ── Where the limits actually bite ─────────────────────────────────────
+#
+# `>` versus `>=` is invisible to every test that clears the limit by a
+# margin: the file-count case above sends 5 files at a cap of 3, so an
+# off-by-one in the comparison changes nothing it asserts. These sit the patch
+# exactly on the boundary and one step past it, which is the only arrangement
+# that can tell those two operators apart.
+
+
+def test_a_patch_exactly_at_the_file_limit_is_allowed():
+    """The cap is the largest accepted value, not the smallest rejected one."""
+    patch = "".join(_patch_for(f"src/file_{index}.py") for index in range(3))
+    result = validate_patch(patch, max_files=3)
+    assert result.ok is True
+    assert len(result.changed_files) == 3
+
+
+def test_one_file_over_the_limit_is_refused():
+    """Exceeding the cap by the smallest possible amount still refuses."""
+    patch = "".join(_patch_for(f"src/file_{index}.py") for index in range(4))
+    result = validate_patch(patch, max_files=3)
+    assert result.ok is False
+    assert "over the 3 limit" in result.reason
+
+
+def test_a_patch_exactly_at_the_byte_limit_is_allowed():
+    """Same boundary, measured in bytes rather than files."""
+    patch = _patch_for("src/app.py")
+    size = len(patch.encode("utf-8"))
+    assert validate_patch(patch, max_bytes=size).ok is True
+
+
+def test_one_byte_over_the_limit_is_refused():
+    """A patch one byte past the cap is refused, not rounded down to it."""
+    patch = _patch_for("src/app.py")
+    size = len(patch.encode("utf-8"))
+    result = validate_patch(patch, max_bytes=size - 1)
+    assert result.ok is False
+    assert f"over the {size - 1} byte limit" in result.reason
 
 
 def test_renames_are_tracked():

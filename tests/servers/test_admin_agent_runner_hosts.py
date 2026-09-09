@@ -27,8 +27,9 @@ class FakeHostStore:
 
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
-        # The singleton policy row: one fact, in one place, as in the store.
+        # The singleton policy row: two facts, in one place, as in the store.
         self.active_host: str | None = None
+        self.runtime_versions: dict[str, str] = {}
 
     def seed(self, host: str, *, active: bool = False, seen_minutes_ago: float = 0.0) -> None:
         seen = datetime.now(timezone.utc) - timedelta(minutes=seen_minutes_ago)
@@ -37,6 +38,8 @@ class FakeHostStore:
             "last_worker_id": f"w-{host}",
             "first_seen_at": seen,
             "last_seen_at": seen,
+            "runtime_versions": {"claude-code": "2.1.220"},
+            "runtime_versions_available": {"claude-code": ["2.1.220", "2.1.235"]},
         }
         if active:
             self.active_host = host
@@ -44,13 +47,27 @@ class FakeHostStore:
     async def active_runner_host(self) -> str | None:
         return self.active_host
 
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None]:
+    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
         rows = sorted(
             ({**row, "is_active": row["host"] == self.active_host} for row in self.rows.values()),
             key=lambda row: row["last_seen_at"],
             reverse=True,
         )
-        return rows, self.active_host
+        return rows, self.active_host, dict(self.runtime_versions)
+
+    async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
+        # Mirrors the store: a version no host offers is refused, never stored.
+        if version is None:
+            self.runtime_versions.pop(runtime, None)
+            return True
+        offered = any(
+            version in ((row.get("runtime_versions_available") or {}).get(runtime) or [])
+            for row in self.rows.values()
+        )
+        if not offered:
+            return False
+        self.runtime_versions[runtime] = version
+        return True
 
     async def set_active_runner_host(self, *, host: str | None) -> bool:
         # Mirrors the store: an unknown host changes nothing at all.
@@ -223,3 +240,77 @@ async def test_endpoints_report_unconfigured_deployments_as_503(monkeypatch):
         response = await client.get("/admin/agent/runner-hosts", headers=ADMIN)
 
     assert response.status_code == 503
+
+
+# ── Choosing the harness version ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_pool_reports_which_versions_it_offers_and_which_is_chosen(admin_client):
+    """Both halves in one response: the menu per host, the choice pool-wide."""
+    client, store = admin_client
+    store.seed("runner-a")
+
+    body = (await client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+
+    assert body["hosts"][0]["runtime_versions_available"] == {"claude-code": ["2.1.220", "2.1.235"]}
+    assert body["hosts"][0]["runtime_versions"] == {"claude-code": "2.1.220"}
+    # Nothing selected is the state every deployment starts in, and it must be
+    # distinguishable from "selected the default".
+    assert body["runtime_versions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_selecting_a_version_the_pool_offers_returns_the_new_state(admin_client):
+    client, store = admin_client
+    store.seed("runner-a")
+
+    response = await client.put(
+        "/admin/agent/runtime-versions",
+        json={"runtime": "claude-code", "version": "2.1.235"},
+        headers=ADMIN,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runtime_versions"] == {"claude-code": "2.1.235"}
+    assert store.runtime_versions == {"claude-code": "2.1.235"}
+
+
+@pytest.mark.asyncio
+async def test_a_version_no_image_holds_is_refused_rather_than_stored(admin_client):
+    """Storing it would put a version on the page that no job ever runs.
+
+    The claim falls back when its host cannot serve a selection, so an
+    unservable choice is not an outage — it is worse, a control that silently
+    does nothing while reporting success.
+    """
+    client, store = admin_client
+    store.seed("runner-a")
+
+    response = await client.put(
+        "/admin/agent/runtime-versions",
+        json={"runtime": "claude-code", "version": "9.9.9"},
+        headers=ADMIN,
+    )
+
+    assert response.status_code == 404
+    # The refusal has to say how to make it true, or it is a dead end: the
+    # version has to be built into the image before it can be picked.
+    assert "EXTRA_VERSIONS" in response.json()["detail"]
+    assert store.runtime_versions == {}
+
+
+@pytest.mark.asyncio
+async def test_clearing_a_selection_returns_the_runtime_to_the_image_default(admin_client):
+    client, store = admin_client
+    store.seed("runner-a")
+    store.runtime_versions = {"claude-code": "2.1.235"}
+
+    response = await client.put(
+        "/admin/agent/runtime-versions",
+        json={"runtime": "claude-code", "version": None},
+        headers=ADMIN,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runtime_versions"] == {}
