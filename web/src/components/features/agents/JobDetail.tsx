@@ -1229,6 +1229,30 @@ export function JobDetail({
     setWorkspaceOpen(true);
   }
 
+  const toggleWorkspace = useCallback(() => {
+    setWorkspaceOpen((current) => !current);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const hasOnePrimaryModifier = event.metaKey !== event.ctrlKey;
+      if (
+        event.key.toLowerCase() !== 'j' ||
+        !hasOnePrimaryModifier ||
+        event.altKey ||
+        event.shiftKey
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) toggleWorkspace();
+    };
+    // Capture before terminal/editor handlers consume the chord or send Ctrl+J to the shell.
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [toggleWorkspace]);
+
   const stop = useCallback(async () => {
     if (stopRequestedRef.current) return;
     stopRequestedRef.current = true;
@@ -1452,10 +1476,12 @@ export function JobDetail({
         </div>
         <button
           type="button"
-          onClick={() => setWorkspaceOpen((current) => !current)}
+          onClick={toggleWorkspace}
           aria-label={workspaceOpen ? 'Close workspace' : 'Open workspace'}
           aria-expanded={workspaceOpen}
           aria-controls="job-workspace-pane"
+          aria-keyshortcuts="Meta+J Control+J"
+          title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'} (⌘J / Ctrl+J)`}
           className={`absolute right-6 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md border transition-colors ${
             workspaceOpen
               ? 'border-gray-900 dark:border-gray-100 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white'

@@ -472,6 +472,7 @@ describe('JobDetail', () => {
     expect(workspaceButton).toHaveTextContent('');
     expect(workspaceButton).toHaveClass('h-9', 'w-9', 'justify-center');
     expect(workspaceButton).toHaveAttribute('aria-expanded', 'false');
+    expect(workspaceButton).toHaveAttribute('aria-keyshortcuts', 'Meta+J Control+J');
     expect(workspacePane).toHaveClass('hidden');
     expect(workspacePane).not.toHaveClass('flex');
     expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
@@ -529,6 +530,109 @@ describe('JobDetail', () => {
 
     openWorkspace();
     expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it.each([
+    { key: 'j', metaKey: true },
+    { key: 'J', metaKey: true },
+    { key: 'j', ctrlKey: true },
+    { key: 'J', ctrlKey: true },
+  ])('toggles the workspace and ignores repeats: %j', (chord) => {
+    render(<JobDetail job={makeJob()} />);
+
+    expect(fireEvent.keyDown(window, chord)).toBe(false);
+    expect(screen.getByRole('button', { name: 'Close workspace' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+
+    expect(fireEvent.keyDown(window, { ...chord, repeat: true })).toBe(false);
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+
+    expect(fireEvent.keyDown(window, chord)).toBe(false);
+    expect(screen.getByRole('button', { name: 'Open workspace' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+
+    expect(fireEvent.keyDown(window, { ...chord, repeat: true })).toBe(false);
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+  });
+
+  it.each(['Git', 'Terminal', 'Files'])(
+    'preserves the selected %s tab when toggled with the keyboard and button',
+    (tab) => {
+      render(<JobDetail job={makeJob({ state: 'done' })} />);
+      openWorkspace();
+      const workspaceTabs = within(screen.getByRole('tablist', { name: 'Workspace views' }));
+      fireEvent.click(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) }));
+
+      fireEvent.keyDown(window, { key: 'j', metaKey: true });
+      expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+      fireEvent.keyDown(window, { key: 'j', ctrlKey: true });
+      expect(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
+      fireEvent.keyDown(window, { key: 'j', metaKey: true });
+      expect(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+    },
+  );
+
+  it.each([
+    { key: 'j' },
+    { key: 'j', metaKey: true, ctrlKey: true },
+    { key: 'j', metaKey: true, altKey: true },
+    { key: 'j', ctrlKey: true, altKey: true },
+    { key: 'j', metaKey: true, shiftKey: true },
+    { key: 'j', ctrlKey: true, shiftKey: true },
+    { key: 'b', metaKey: true },
+    { key: 'b', ctrlKey: true },
+  ])('leaves nonmatching keyboard input alone: %j', (chord) => {
+    render(<JobDetail job={makeJob()} />);
+
+    expect(fireEvent.keyDown(window, chord)).toBe(true);
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+  });
+
+  it.each([{ metaKey: true }, { ctrlKey: true }])(
+    'captures the workspace shortcut before a focused editor consumes it: %j',
+    (modifier) => {
+      render(<JobDetail job={makeJob()} />);
+      const composer = screen.getByLabelText('Add a follow-up');
+      // Terminal/editor handlers may stop bubbling or forward Ctrl+J as a newline.
+      const editorKeyDown = vi.fn((event: KeyboardEvent) => event.stopPropagation());
+      composer.addEventListener('keydown', editorKeyDown);
+      composer.focus();
+
+      try {
+        expect(fireEvent.keyDown(composer, { key: 'j', ...modifier })).toBe(false);
+        expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+        expect(fireEvent.keyDown(composer, { key: 'j', ...modifier, repeat: true })).toBe(false);
+        expect(editorKeyDown).not.toHaveBeenCalled();
+
+        expect(fireEvent.keyDown(composer, { key: 'j' })).toBe(true);
+        expect(editorKeyDown).toHaveBeenCalledOnce();
+        expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+      } finally {
+        composer.removeEventListener('keydown', editorKeyDown);
+      }
+    },
+  );
+
+  it('removes the workspace shortcut when leaving the task', () => {
+    const { unmount } = render(<JobDetail job={makeJob()} />);
+    unmount();
+
+    expect(fireEvent.keyDown(window, { key: 'j', metaKey: true })).toBe(true);
+    expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(true);
   });
 
   it('resizes the workspace pane by dragging the seam, and remembers the width', () => {
