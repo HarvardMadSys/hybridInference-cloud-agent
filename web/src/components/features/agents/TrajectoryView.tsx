@@ -145,7 +145,12 @@ export function TrajectoryView({ events }: { events: (AgentJobEventApi | AgentTh
 
   return (
     <section aria-label="Trajectory" className="space-y-3">
-      <Minimap rows={rows} selectedId={selectedId} onSelect={setSelectedId} />
+      <div className="rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 p-4">
+        <h2 className="mb-3 text-[12px] font-medium text-gray-600 dark:text-gray-400">
+          Execution overview
+        </h2>
+        <Minimap rows={rows} selectedId={selectedId} onSelect={setSelectedId} />
+      </div>
 
       <div className="flex items-center gap-2">
         <input
