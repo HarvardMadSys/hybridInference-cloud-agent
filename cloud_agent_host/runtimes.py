@@ -34,6 +34,8 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
+from cloud_agent_host.event_payloads import bound_event_payload
+
 # Normalized event kinds. Kept in lockstep with agent_job_events.event_type and
 # the frontend's types.ts; anything else must be reported as ``raw``.
 THINKING = "thinking"
@@ -58,6 +60,10 @@ class NormalizedEvent:
 
     event_type: str
     payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Bound the report before it crosses the broker or worker transport."""
+        object.__setattr__(self, "payload", bound_event_payload(self.payload))
 
 
 @dataclass(frozen=True)

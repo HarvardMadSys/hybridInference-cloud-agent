@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import pytest
 import pytest_asyncio
 
+from cloud_agent.schemas import WorkerEventRequest
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent.thread_stats import summarize_thread
 from cloud_agent_host.shared_protocol import (
@@ -153,6 +154,31 @@ async def test_thread_stats_keep_output_presence_when_omitting_long_transcripts(
     assert stats.input_tokens == 100
     assert stats.output_tokens is None
     assert stats.output_tokens_per_second is None
+
+
+async def test_bounded_event_stays_bounded_in_postgres_and_marks_the_assistant_message(
+    store: AgentJobStore,
+):
+    """Both event readers and the plain thread-message path see bounded content."""
+    await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    event = WorkerEventRequest(event_type="message", payload={"text": '界😀\n"\\' * 100_000})
+    event_id = await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type=event.event_type,
+        payload=event.payload,
+    )
+    async with store._pool.acquire() as conn:
+        size = await conn.fetchval(
+            "SELECT octet_length(payload::text) FROM agent_job_events WHERE id = $1", event_id
+        )
+        content = await conn.fetchval(
+            "SELECT content FROM agent_thread_messages WHERE source_event_id = $1", event_id
+        )
+    assert size <= 256 * 1024
+    assert content.endswith("[Content truncated: event payload exceeded 256 KiB.]")
 
 
 async def _expire_attempt(store: AgentJobStore, attempt_id: int) -> None:

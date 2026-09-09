@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
+from cloud_agent_host.event_payloads import bound_event_payload
 from cloud_agent_host.shared_protocol import SHARED_MEMBER_ACCOUNTING_VERSION
 
 # A lease is the only thing that lets the reaper take a job back from a stuck
@@ -904,6 +905,12 @@ class WorkerEventRequest(BaseModel):
             "that predate it; those keep today's at-least-once behaviour."
         ),
     )
+
+    @field_validator("payload")
+    @classmethod
+    def bound_payload(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Keep stored events bounded even when an older worker uploads them."""
+        return bound_event_payload(value) if value is not None else None
 
 
 class WorkerEventResponse(BaseModel):
