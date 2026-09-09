@@ -61,6 +61,8 @@ services:
       # Authorizes this service to mint and revoke inference grants. A service
       # credential: it must never reach a sandbox or a browser.
       GATEWAY_GRANT_DISPATCH_TOKEN: ${GATEWAY_GRANT_DISPATCH_TOKEN:?shared with the gateway, distinct per environment}
+      GATEWAY_GRANT_BASE_PATH: ${GATEWAY_GRANT_BASE_PATH:-/internal/agent-grants}
+      GATEWAY_GRANT_BINDING_ID: ${GATEWAY_GRANT_BINDING_ID:-}
       # Optional, and optional on purpose: a deployment may front the gateway
       # under a different name than it mints under, and pinning `iss` wrongly
       # locks every user out.

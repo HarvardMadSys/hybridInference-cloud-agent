@@ -2,14 +2,16 @@ openapi: 3.1.0
 
 info:
   title: HybridInference gateway — inference grants
-  version: "1.0.0"
+  version: "1.1.0"
   x-source:
     repo: HarvardMadSys/hybridInference
-    branch: murphy/claude/c7-grant-usage
+    branch: murphy/claude/agent-grant-usage-window
+    commit: 0a2513b6ff7d33312755bffe72e41d789f2596e1
     files:
       - apps/backend/serving/servers/routers/agent_grants.py
       - apps/backend/serving/grants.py
-      - apps/backend/serving/agent_jobs/model_auth.py
+      - apps/backend/serving/grant_auth.py
+      - apps/backend/serving/storage/postgres_log.py
     tasks: [C5, C6, C7]
   description: |
     How a sandbox gets the right to call models, when the service running that
@@ -268,41 +270,81 @@ paths:
     get:
       tags: [internal]
       operationId: grantUsage
-      summary: What the grant's job has spent so far
+      summary: Read grant usage over a request-start window, or legacy job totals
       description: |
         **Informational attribution, not a limit.** Nothing consults this to
         decide whether a call may proceed — that is the account's daily quota.
         Reading it as a ceiling would reintroduce the per-job budget this
         design removed, and would do so in a component that cannot enforce one.
 
-        Numbers come from the gateway's billing ledger, keyed by the grant's
-        `external_job_id`, so they are what was actually billed rather than
-        anything an agent reports about itself.
+        With no query parameters, this retains the legacy flat response:
+        lifetime totals keyed by the grant's `external_job_id`. With any new
+        parameter, `since` and `detail` are required and select the versioned
+        response. This consumer uses `detail=totals` and always sends both
+        window bounds. It rejects legacy responses from older deployments
+        that ignore unknown query parameters.
 
-        **Nothing in this repository calls it yet.** It is described because
-        C7 shipped it and because the job-cost display it exists for is
-        expected to land here; a reader should not infer from its presence
-        that a consumer is wired. `grants.py` has no `usage` method.
+        Windowed results match the exact authenticated grant ID and use
+        `[since, until)` over `request_started_at`. Logging-time boundaries
+        would lose long requests recorded after a turn ends. Only newly
+        attributed request logs carry this identity/start-time metadata;
+        this operation does not reconstruct historical missing attribution.
+
+        Each total sums the rows that reported it; `unknown_rows` counts the
+        missing rows beside that partial sum. A metric is null when no row
+        reports it, including an empty window (calls=0). Input tokens include
+        cache reads/writes, and reasoning tokens are a subset of output.
+        `spent_usd` is the recorded platform `cost_usd` as a fixed-point
+        decimal string, not an upstream supplier invoice. `estimated_calls`
+        counts requests whose usage was estimated. Calls count request-log
+        rows, not internal upstream retries or unlogged authentication failures.
+
+        Logs arrive asynchronously. `finalized` is always false and `as_of`
+        records the read time, not a settlement watermark. Totals cover the
+        full window independently of request pagination. Pages use ascending
+        `(request_started_at, request_id)` keyset order. Cursor scope includes
+        the grant and both normalized bounds: carry the echoed `until` on
+        every continuation (omitting it recomputes now and invalidates the
+        cursor). Cross-page reads are not frozen; late rows can land behind
+        a cursor. To refresh, start from page one and deduplicate request IDs.
+
+        The service credential may read a revoked or expired grant's history.
+        Grant possession is not authorization to read this endpoint. The
+        gateway origin and grant prefix come from control-plane configuration;
+        future installation ownership checks must not change this payload.
       security:
         - dispatchToken: []
       parameters:
         - $ref: "#/components/parameters/GrantId"
+        - name: since
+          in: query
+          description: Inclusive ISO 8601 bound with explicit UTC offset; required with detail.
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          description: Exclusive offset-aware bound; defaults to now and is echoed back.
+          schema: { type: string, format: date-time }
+        - name: detail
+          in: query
+          description: Required for windowed reports; requests adds paginated detail rows.
+          schema: { type: string, enum: [totals, requests] }
+        - name: limit
+          in: query
+          description: Valid only with detail=requests.
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: cursor
+          in: query
+          description: Opaque continuation bound to grant, since, until and sort order.
+          schema: { type: string }
       responses:
         "200":
-          description: Spend and token totals for the grant's job.
+          description: Legacy job totals or one grant's versioned windowed report.
           content:
             application/json:
               schema:
-                type: object
-                required:
-                  [grant_id, external_job_id, spent_usd, request_count, tokens_in, tokens_out]
-                properties:
-                  grant_id: { type: string }
-                  external_job_id: { type: string }
-                  spent_usd: { type: number }
-                  request_count: { type: integer }
-                  tokens_in: { type: integer }
-                  tokens_out: { type: integer }
+                oneOf:
+                  - $ref: "#/components/schemas/LegacyUsage"
+                  - $ref: "#/components/schemas/WindowedUsage"
         "401":
           description: Wrong or missing dispatch token.
           content:
@@ -310,6 +352,13 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: No such grant, or internal endpoints are not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: |
+            `invalid_usage_query` for missing/invalid bounds, detail, or page
+            size; `invalid_cursor` for malformed or mismatched continuation.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -347,6 +396,109 @@ components:
         and answers 404 to every path in this document.
 
   schemas:
+    NonnegativeCount:
+      type: integer
+      minimum: 0
+
+    NullableCount:
+      type: [integer, "null"]
+      minimum: 0
+
+    NullableMoney:
+      type: [string, "null"]
+      pattern: '^[0-9]+(?:\.[0-9]+)?$'
+      description: Fixed-point USD decimal string; null when no row reports a cost.
+
+    LegacyUsage:
+      type: object
+      required: [grant_id, external_job_id, spent_usd, request_count, tokens_in, tokens_out]
+      properties:
+        grant_id: { type: string }
+        external_job_id: { type: string }
+        spent_usd: { type: number }
+        request_count: { type: integer }
+        tokens_in: { type: integer }
+        tokens_out: { type: integer }
+
+    UsageTotals:
+      type: object
+      required: [calls, tokens_in, tokens_out, cache_read, cache_write, reasoning, spent_usd]
+      properties:
+        calls: { $ref: "#/components/schemas/NonnegativeCount" }
+        tokens_in: { $ref: "#/components/schemas/NullableCount" }
+        tokens_out: { $ref: "#/components/schemas/NullableCount" }
+        cache_read: { $ref: "#/components/schemas/NullableCount" }
+        cache_write: { $ref: "#/components/schemas/NullableCount" }
+        reasoning: { $ref: "#/components/schemas/NullableCount" }
+        spent_usd: { $ref: "#/components/schemas/NullableMoney" }
+
+    UsageUnknownRows:
+      type: object
+      required: [tokens_in, tokens_out, cache_read, cache_write, reasoning, spent_usd]
+      description: Missing-row counts per metric; each must be at most totals.calls.
+      properties:
+        tokens_in: { $ref: "#/components/schemas/NonnegativeCount" }
+        tokens_out: { $ref: "#/components/schemas/NonnegativeCount" }
+        cache_read: { $ref: "#/components/schemas/NonnegativeCount" }
+        cache_write: { $ref: "#/components/schemas/NonnegativeCount" }
+        reasoning: { $ref: "#/components/schemas/NonnegativeCount" }
+        spent_usd: { $ref: "#/components/schemas/NonnegativeCount" }
+
+    UsageRequest:
+      type: object
+      required:
+        [request_id, request_started_at, logged_at, model, served_model_id,
+         tokens_in, tokens_out, cache_read, cache_write, reasoning, spent_usd,
+         ttft_ms, latency_ms, status_code, usage_estimated]
+      description: Safe request metadata only; no prompt, response, raw metadata or credentials.
+      properties:
+        request_id: { type: string }
+        request_started_at: { type: string, format: date-time }
+        logged_at: { type: string, format: date-time }
+        model: { type: [string, "null"] }
+        served_model_id: { type: [string, "null"] }
+        tokens_in: { $ref: "#/components/schemas/NullableCount" }
+        tokens_out: { $ref: "#/components/schemas/NullableCount" }
+        cache_read: { $ref: "#/components/schemas/NullableCount" }
+        cache_write: { $ref: "#/components/schemas/NullableCount" }
+        reasoning: { $ref: "#/components/schemas/NullableCount" }
+        spent_usd: { $ref: "#/components/schemas/NullableMoney" }
+        ttft_ms: { $ref: "#/components/schemas/NullableCount" }
+        latency_ms: { $ref: "#/components/schemas/NullableCount" }
+        status_code: { type: [integer, "null"] }
+        usage_estimated: { type: boolean }
+
+    WindowedUsage:
+      type: object
+      required:
+        [schema_version, source, grant_id, external_job_id, attribution, window,
+         as_of, finalized, totals, unknown_rows, estimated_calls]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        source: { type: string, const: gateway_api_logs }
+        grant_id: { type: string }
+        external_job_id: { type: string }
+        attribution: { type: string, const: grant_time_window }
+        window:
+          type: object
+          required: [since, until, basis]
+          properties:
+            since: { type: string, format: date-time }
+            until: { type: string, format: date-time }
+            basis: { type: string, const: request_started_at }
+        as_of: { type: string, format: date-time }
+        finalized: { type: boolean, const: false }
+        totals: { $ref: "#/components/schemas/UsageTotals" }
+        unknown_rows: { $ref: "#/components/schemas/UsageUnknownRows" }
+        estimated_calls: { $ref: "#/components/schemas/NonnegativeCount" }
+        requests:
+          type: array
+          description: Present only for detail=requests; totals still cover the whole window.
+          items: { $ref: "#/components/schemas/UsageRequest" }
+        next_cursor:
+          type: [string, "null"]
+          description: Present only for detail=requests; null at the current end of the result.
+
     Grant:
       type: object
       required:
@@ -404,6 +556,8 @@ x-pinned-by:
     - tests/unit/test_grant_model_auth.py
   consumer:
     - tests/unit/test_grant_client.py
+    - tests/unit/test_grant_usage_client.py
+    - tests/unit/test_grant_usage_contract.py
     - tests/unit/test_grant_lifecycle.py
     - tests/servers/test_grant_at_claim.py
     - tests/integration/storage/test_agent_grant_store.py

@@ -373,8 +373,10 @@ async def _mint_residency_grant(
     token = str(grant.get("token") or "")
     if not grant_id or not token:
         return None
+    binding_id = getattr(grants, "binding_id", None)
+    binding = {"binding_id": binding_id} if isinstance(binding_id, str) and binding_id else {}
     linked = await job_store.link_residency_grant(
-        thread_id=row["thread_id"], generation=row["generation"], grant_id=grant_id
+        thread_id=row["thread_id"], generation=row["generation"], grant_id=grant_id, **binding
     )
     if not linked:
         await grants.revoke(grant_id)

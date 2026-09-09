@@ -13,13 +13,16 @@ import {
   getAgentConfig,
   getAgentJobFiles,
   getAgentJobGit,
+  getAgentJobUsage,
   getAgentThreadStats,
   listAgentTerminals,
   resizeAgentTerminal,
+  refreshAgentJobUsage,
   streamAgentTerminal,
   writeAgentTerminalInput,
   writeAgentJobFile,
   type AgentJobFilesApi,
+  type AgentJobUsageApi,
 } from '@/lib/api/agents';
 
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
@@ -40,9 +43,11 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
   getAgentJobFiles: vi.fn(),
   getAgentJobGit: vi.fn(),
+  getAgentJobUsage: vi.fn(),
   getAgentThreadStats: vi.fn(),
   listAgentTerminals: vi.fn(),
   resizeAgentTerminal: vi.fn(),
+  refreshAgentJobUsage: vi.fn(),
   streamAgentTerminal: vi.fn(),
   writeAgentTerminalInput: vi.fn(),
   writeAgentJobFile: vi.fn(),
@@ -149,6 +154,8 @@ describe('JobDetail', () => {
     // Absent by default: the stats bar is additive, and every case here
     // predates it. The bar's own file covers what it renders when present.
     vi.mocked(getAgentThreadStats).mockReset().mockResolvedValue(null);
+    vi.mocked(getAgentJobUsage).mockReset().mockResolvedValue(null);
+    vi.mocked(refreshAgentJobUsage).mockReset().mockResolvedValue(null);
     vi.mocked(createAgentTerminal).mockReset();
     vi.mocked(deleteAgentTerminal).mockReset();
     vi.mocked(listAgentTerminals).mockReset().mockResolvedValue([]);
@@ -440,21 +447,54 @@ describe('JobDetail', () => {
 
     expect(screen.queryByText('Input tokens')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Details' })).not.toBeInTheDocument();
+    expect(getAgentJobUsage).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
     expect(screen.getByRole('dialog', { name: 'Run details' })).toBeInTheDocument();
     expect(screen.getByText('Input tokens')).toBeInTheDocument();
     expect(screen.getByText('Sandbox')).toBeInTheDocument();
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole('button', { name: /Raw events/ }));
     expect(screen.getByText('{"event_type":"message"}')).toBeInTheDocument();
   });
 
-  it.each([null, 0])('preserves an absent or zero model-call count (%s)', (turns) => {
+  it.each([null, 0])('preserves an absent or zero Gateway model-call count (%s)', async (turns) => {
+    const measuredTotals = {
+      calls: turns ?? 0,
+      tokens_in: null,
+      tokens_out: null,
+      cache_read: null,
+      cache_write: null,
+      reasoning: null,
+      spent_usd: null,
+    };
+    vi.mocked(getAgentJobUsage).mockResolvedValue({
+      ledger: {
+        status: turns === null ? 'unavailable' : 'available',
+        source: 'gateway_api_logs',
+        attribution: 'grant_time_window',
+        finalized: false,
+        totals: turns === null ? null : measuredTotals,
+        unknown_rows: null,
+        estimated_calls: 0,
+        queried_at: null,
+        missing_attempts: 0,
+        attempts: [],
+      },
+      runtime: {
+        source: 'runtime',
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+      },
+    } satisfies AgentJobUsageApi);
     const job = makeJob();
-    render(<JobDetail job={{ ...job, usage: { ...job.usage, turns } }} />);
+    render(<JobDetail job={{ ...job, usage: { ...job.usage, turns: 999 } }} />);
     fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    await waitFor(() => expect(screen.queryByText('Loading usage…')).not.toBeInTheDocument());
     const row = screen.getByText('Model calls').parentElement!;
     expect(within(row).getByText(turns === null ? '—' : '0')).toBeInTheDocument();
+    expect(within(row).queryByText('999')).not.toBeInTheDocument();
   });
 
   it('wraps unbroken failure details inside the outcome card', () => {

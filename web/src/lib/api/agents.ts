@@ -118,6 +118,62 @@ export interface AgentAttemptTelemetryApi extends AgentAttemptSummaryApi {
   resources: AttemptResourcesApi | null;
 }
 
+export type AgentLedgerStatus = 'pending' | 'available' | 'partial' | 'unavailable' | 'stale';
+
+export interface AgentLedgerTotalsApi {
+  calls: number;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+  reasoning: number | null;
+  /** Decimal USD, preserving the Gateway's precision. */
+  spent_usd: string | null;
+}
+
+export type AgentLedgerUnknownRowsApi = Record<
+  Exclude<keyof AgentLedgerTotalsApi, 'calls'>,
+  number
+>;
+
+export interface AgentAttemptUsageApi {
+  attempt_id: number;
+  attempt_no: number;
+  status: AgentLedgerStatus;
+  reason: string | null;
+  totals: AgentLedgerTotalsApi | null;
+  unknown_rows: AgentLedgerUnknownRowsApi | null;
+  estimated_calls: number;
+  queried_at: string | null;
+  refreshing?: boolean;
+  next_refresh_at?: string | null;
+  windows: Array<{ since: string; until: string; basis: 'request_started_at' }>;
+}
+
+/** Cached job-scoped usage, including retries. The browser never queries the Gateway. */
+export interface AgentJobUsageApi {
+  ledger: {
+    status: AgentLedgerStatus;
+    source: 'gateway_api_logs';
+    attribution: 'grant_time_window';
+    finalized: false;
+    totals: AgentLedgerTotalsApi | null;
+    unknown_rows: AgentLedgerUnknownRowsApi | null;
+    estimated_calls: number;
+    queried_at: string | null;
+    missing_attempts: number;
+    refreshing?: boolean;
+    next_refresh_at?: string | null;
+    attempts: AgentAttemptUsageApi[];
+  };
+  runtime: {
+    source: 'runtime';
+    input_tokens: number | null;
+    output_tokens: number | null;
+    cache_read_tokens: number | null;
+  };
+}
+
 export interface AgentJobApi {
   id: string;
   repo: string;
@@ -552,6 +608,32 @@ export async function getAgentAttemptTelemetry(
     { signal },
   );
   return jsonOrThrow<AgentAttemptTelemetryApi>(resp);
+}
+
+/** Read cached snapshots; a pre-ledger control plane returns null, never zero usage. */
+export async function getAgentJobUsage(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<AgentJobUsageApi | null> {
+  const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/usage`, {
+    signal,
+  });
+  if (resp.status === 404) return null;
+  return jsonOrThrow<AgentJobUsageApi>(resp);
+}
+
+/** Queue a refresh in the control plane and return the current cached snapshots. */
+export async function refreshAgentJobUsage(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<AgentJobUsageApi | null> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/usage/refresh`,
+    { method: 'POST', signal },
+  );
+  if (resp.status === 404) return null;
+  return jsonOrThrow<AgentJobUsageApi>(resp);
 }
 
 /** Load the conversation containing a job. Old standalone jobs return null. */

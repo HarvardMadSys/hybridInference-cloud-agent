@@ -807,6 +807,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
+    from cloud_agent.ledger import collect_usage_snapshots
     from cloud_agent.storage.store import AgentJobStore
 
     dsn = os.environ.get(ENV_DATABASE_URL, "")
@@ -839,17 +840,22 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     if background:
         reaper = asyncio.create_task(reap_expired_attempts(store, grants=app.state.grants))
         snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(store))
+        ledger_collector = asyncio.create_task(collect_usage_snapshots(store, app.state.grants))
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
+        _BACKGROUND_TASKS.add(ledger_collector)
         reaper.add_done_callback(_BACKGROUND_TASKS.discard)
         snapshot_coordinator.add_done_callback(_BACKGROUND_TASKS.discard)
+        ledger_collector.add_done_callback(_BACKGROUND_TASKS.discard)
         app.state.reaper_task = reaper
         app.state.snapshot_task = snapshot_coordinator
+        app.state.ledger_task = ledger_collector
         _start_publisher(app, store)
         logger.info("cloud agent control plane started")
     else:
         app.state.reaper_task = None
         app.state.snapshot_task = None
+        app.state.ledger_task = None
         app.state.publish_task = None
         logger.info("cloud agent relay listener started")
 
@@ -859,6 +865,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         for task in (
             app.state.reaper_task,
             app.state.snapshot_task,
+            app.state.ledger_task,
             app.state.publish_task,
         ):
             if task is None:
@@ -874,7 +881,7 @@ def create_app() -> FastAPI:
     """Build the control plane application."""
     configure_process_logging()
 
-    from cloud_agent.api import admin_hosts, hosts, mcp_relay, routes, service_jobs, session
+    from cloud_agent.api import admin_hosts, hosts, mcp_relay, routes, service_jobs, session, usage
 
     app = FastAPI(
         title="Cloud Agent",
@@ -883,6 +890,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(routes.router)
+    app.include_router(usage.router)
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)
     app.include_router(admin_hosts.router)

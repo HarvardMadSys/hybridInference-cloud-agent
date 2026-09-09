@@ -1,0 +1,56 @@
+"""Owner-scoped reads and refresh requests for a job's inference usage."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from fastapi import APIRouter, Depends
+
+from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.routes import _owned_job, _require_store, require_agent_owner
+from cloud_agent.ledger import JobUsageResponse, RuntimeUsage, summarize_ledger
+from cloud_agent.thread_stats import summarize_thread
+
+if TYPE_CHECKING:
+    from cloud_agent.storage.store import AgentJobStore
+
+router = APIRouter(prefix="/v1/agent", tags=["agent"])
+
+
+async def _usage_response(store: AgentJobStore, job_id: str) -> JobUsageResponse:
+    rows = await store.ledger_rows_for_job(job_id=job_id)
+    inputs = await store.job_usage_inputs(job_id=job_id)
+    stats = summarize_thread(**inputs)
+    return JobUsageResponse(
+        ledger=summarize_ledger(rows),
+        runtime=RuntimeUsage(
+            input_tokens=stats.input_tokens,
+            output_tokens=stats.output_tokens,
+            cache_read_tokens=stats.cache_read_tokens,
+        ),
+    )
+
+
+@router.get("/jobs/{job_id}/usage", response_model=JobUsageResponse)
+async def get_job_usage(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> JobUsageResponse:
+    """Read cached Gateway snapshots and runtime usage for the same job."""
+    job_store = _require_store(store)
+    await _owned_job(job_store, job_id, user)
+    return await _usage_response(job_store, job_id)
+
+
+@router.post("/jobs/{job_id}/usage/refresh", response_model=JobUsageResponse)
+async def refresh_job_usage(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> JobUsageResponse:
+    """Queue a bounded refresh and return cached data without waiting for HTTP."""
+    job_store = _require_store(store)
+    await _owned_job(job_store, job_id, user)
+    await job_store.queue_job_ledger_refresh(job_id=job_id)
+    return await _usage_response(job_store, job_id)

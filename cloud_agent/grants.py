@@ -6,7 +6,7 @@ gateway. It no longer holds that key, and should not: minting a credential
 that spends someone's inference quota is the gateway's decision, and asking
 for one is this service's.
 
-Three calls, and the asymmetry between them is deliberate:
+Three capability operations, with a deliberate asymmetry:
 
 - **mint** is idempotent on ``(job, attempt)``. A retry after a timeout gets
   the same grant back rather than a second capability nothing is tracking.
@@ -17,6 +17,10 @@ Three calls, and the asymmetry between them is deliberate:
   fail: the TTL is the backstop, which is the only reason revoke needs no
   durable outbox behind it.
 
+**usage** is read-only attribution. It returns a validated snapshot over an
+explicit request-start window; unavailable or incomplete usage never changes
+whether an attempt may run or how much inference it may request.
+
 **The fence lives here, not at the gateway.** After the split the gateway holds
 no attempt or lease state at all, so nothing there can notice that an attempt
 was superseded. This service notices, and stops renewing. Anything that makes
@@ -26,18 +30,27 @@ removes the fence.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
+from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from cloud_agent.gateway import ENV_BASE_URL, ENV_DISPATCH_TOKEN, GatewayError
+from cloud_agent.grant_usage import GrantUsageReport, parse_usage_report
 from cloud_agent.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
 _TIMEOUT_S = 10.0
 _CONNECT_TIMEOUT_S = 5.0
+ENV_GRANT_BASE_PATH = "GATEWAY_GRANT_BASE_PATH"
+ENV_GRANT_BINDING_ID = "GATEWAY_GRANT_BINDING_ID"
+_DEFAULT_GRANT_BASE_PATH = "/internal/agent-grants"
 
 
 # ── The cadence and the lifetime are one decision ──────────────────────
@@ -81,13 +94,15 @@ GATEWAY_RENEWAL_STEP_S = 300
 
 
 class GrantClient:
-    """Mints, renews and revokes inference grants at the gateway."""
+    """Manage inference grants and read their attributed gateway usage."""
 
     def __init__(
         self,
         base_url: str | None = None,
         dispatch_token: str | None = None,
         *,
+        base_path: str | None = None,
+        binding_id: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         """Build a client.
@@ -96,16 +111,49 @@ class GrantClient:
             base_url: Gateway origin; defaults to ``GATEWAY_BASE_URL``.
             dispatch_token: Service credential; defaults to
                 ``GATEWAY_GRANT_DISPATCH_TOKEN``.
+            base_path: Grant route prefix; defaults to
+                ``GATEWAY_GRANT_BASE_PATH`` or ``/internal/agent-grants``.
+            binding_id: Optional nonsecret installation identity, also read
+                from ``GATEWAY_GRANT_BINDING_ID``. When supplied, this names
+                the authority across URL, prefix and credential migrations.
             client: An existing httpx client, for tests and pooling.
         """
         self._base_url = (base_url or os.environ.get(ENV_BASE_URL) or "").rstrip("/")
         self._token = dispatch_token or os.environ.get(ENV_DISPATCH_TOKEN) or ""
+        self._base_path = (
+            base_path or os.environ.get(ENV_GRANT_BASE_PATH) or _DEFAULT_GRANT_BASE_PATH
+        ).rstrip("/")
+        if not self._base_path.startswith("/") or any(
+            character in self._base_path for character in ("?", "#")
+        ):
+            raise ValueError("the grant base path must be an absolute URL path")
+        identity = (
+            binding_id if binding_id is not None else os.environ.get(ENV_GRANT_BINDING_ID, "")
+        ).strip()
+        binding_parts = (
+            ["installation", identity]
+            if identity
+            else ["endpoint", self._base_url, self._base_path]
+        )
+        binding = json.dumps(binding_parts, separators=(",", ":"))
+        self._binding_id = "gw_" + hashlib.sha256(binding.encode()).hexdigest()
         self._client = client
 
     @property
     def configured(self) -> bool:
         """Whether this deployment can ask for grants at all."""
         return bool(self._base_url and self._token)
+
+    @property
+    def binding_id(self) -> str:
+        """Identify a gateway installation without storing its credential.
+
+        An explicitly configured installation identity survives URL, prefix
+        and token migrations. Operators must change it when the authority
+        changes. Without one, URL and prefix form a conservative fallback;
+        token rotation preserves either fingerprint.
+        """
+        return self._binding_id
 
     async def _post(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """Perform one authorized POST, or raise.
@@ -205,7 +253,7 @@ class GrantClient:
         # now, by the relay's scope check and the attempt fence.
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
-        return await self._post("/internal/agent-grants", body)
+        return await self._post(self._base_path, body)
 
     async def renew(self, grant_id: str) -> dict[str, Any]:
         """Extend a live grant by another bounded step.
@@ -224,7 +272,74 @@ class GrantClient:
             GatewayError: If the grant is unknown, revoked, expired, or its
                 owner is no longer active.
         """
-        return await self._post(f"/internal/agent-grants/{grant_id}/renew")
+        return await self._post(f"{self._base_path}/{quote(grant_id, safe='')}/renew")
+
+    async def usage(self, grant_id: str, *, since: datetime, until: datetime) -> GrantUsageReport:
+        """Read a revisable totals snapshot for one fixed request-start window.
+
+        Both bounds are always sent explicitly. Reusing a fixed interval lets
+        delayed request logs increase the snapshot without changing which
+        turn it describes. Missing, old, or malformed reports raise instead
+        of manufacturing zero usage.
+
+        Raises:
+            GatewayError: For invalid bounds, unavailable service, gateway
+                refusal, an unsupported schema, or a mismatched report.
+        """
+        if (
+            any(
+                not isinstance(bound, datetime) or bound.tzinfo is None or bound.utcoffset() is None
+                for bound in (since, until)
+            )
+            or since >= until
+        ):
+            raise GatewayError(
+                "usage requires an ordered window with UTC offsets",
+                error_type="usage_query_invalid",
+            )
+        if not self.configured:
+            raise GatewayError("gateway usage is not configured", error_type="usage_unconfigured")
+        since, until = since.astimezone(UTC), until.astimezone(UTC)
+        path = f"{self._base_path}/{quote(grant_id, safe='')}/usage"
+        params = {"since": since.isoformat(), "until": until.isoformat(), "detail": "totals"}
+        headers = {"Authorization": f"Bearer {self._token}"}
+        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        try:
+            if self._client is not None:
+                response = await self._client.get(
+                    f"{self._base_url}{path}", params=params, headers=headers, timeout=timeout
+                )
+            else:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.get(
+                        f"{self._base_url}{path}", params=params, headers=headers
+                    )
+        except httpx.HTTPError:
+            raise GatewayError(
+                "gateway usage is unreachable", error_type="usage_unavailable"
+            ) from None
+        if response.status_code != 200:
+            error_type = "usage_http_error"
+            try:
+                payload = response.json()
+                error = payload.get("error") if isinstance(payload, dict) else None
+                raw_type = error.get("type") if isinstance(error, dict) else None
+                if isinstance(raw_type, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", raw_type):
+                    error_type = raw_type
+            except ValueError:
+                pass
+            raise GatewayError(
+                "gateway refused the usage query",
+                status_code=response.status_code,
+                error_type=error_type,
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            raise GatewayError(
+                "gateway returned invalid usage JSON", error_type="usage_invalid_response"
+            ) from None
+        return parse_usage_report(payload, grant_id=grant_id, since=since, until=until)
 
     async def revoke(self, grant_id: str) -> bool:
         """Withdraw a grant now rather than waiting for its TTL.
@@ -241,7 +356,7 @@ class GrantClient:
             Whether the gateway confirmed the revocation.
         """
         try:
-            await self._post(f"/internal/agent-grants/{grant_id}/revoke")
+            await self._post(f"{self._base_path}/{quote(grant_id, safe='')}/revoke")
         except GatewayError:
             logger.warning(
                 "agent_grant_revoke_failed",

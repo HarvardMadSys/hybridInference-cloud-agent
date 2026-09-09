@@ -113,6 +113,23 @@ def _new_session_fork_id() -> str:
 # upgraded into a different topology.
 _NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
 
+# Bound a shared grant to one attempt's execution interval. A subsequent
+# attempt may start before a delayed predecessor is marked finished; clamp
+# that predecessor rather than counting the same requests twice. PostgreSQL
+# LEAST ignores the NULL produced when there is no following attempt.
+_LEDGER_WINDOW_UNTIL_SQL = """
+LEAST(
+    COALESCE(a.finished_at, NOW()),
+    (
+        SELECT MIN(next_attempt.started_at)
+        FROM agent_attempts next_attempt
+        JOIN agent_jobs next_job ON next_job.id = next_attempt.job_id
+        WHERE next_job.thread_id = j.thread_id
+          AND (next_attempt.started_at, next_attempt.id) > (a.started_at, a.id)
+    )
+)
+"""
+
 
 _THREAD_SANDBOX_SOURCE = f"""
 (
@@ -1250,7 +1267,8 @@ class AgentJobStore:
                         runtime_id = EXCLUDED.runtime_id,
                         runtime_version = EXCLUDED.runtime_version,
                         status = 'hot', lease_expires_at = EXCLUDED.lease_expires_at,
-                        grant_id = NULL, established_at = NOW(), last_active_at = NOW()
+                        grant_id = NULL, ledger_binding_id = NULL,
+                        established_at = NOW(), last_active_at = NOW()
                     RETURNING *
                     """,
                     thread_id,
@@ -1993,6 +2011,184 @@ class AgentJobStore:
                 for row in events
             ],
         }
+
+    async def job_usage_inputs(self, *, job_id: str) -> dict[str, Any]:
+        """Read runtime usage for this job's attempts, excluding sibling turns.
+
+        Keep the same compact payload projection as thread_stats_inputs so
+        output-presence detection and retry deduplication have identical
+        semantics when compared with this job's Gateway snapshots.
+        """
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            attempts = await conn.fetch(
+                "SELECT job_id, started_at FROM agent_attempts WHERE job_id = $1",
+                job_id,
+            )
+            events = await conn.fetch(
+                """
+                SELECT job_id, attempt_id, seq, event_type, created_at,
+                       (payload - ARRAY['text', 'input', 'content'])
+                       || jsonb_build_object(
+                           'has_text', COALESCE(payload->>'text', '') ~ '[^[:space:]]'
+                       ) AS payload
+                FROM agent_job_events
+                WHERE job_id = $1
+                ORDER BY attempt_id, seq
+                """,
+                job_id,
+            )
+        return {
+            "job_ids": [job_id],
+            "attempts": [dict(row) for row in attempts],
+            "events": [{**dict(row), "payload": _load_json(row["payload"])} for row in events],
+        }
+
+    async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
+        """Read stored grant snapshots and retain attempts without attribution."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT a.id AS attempt_id, a.job_id, a.attempt_no,
+                       a.status AS attempt_status, a.started_at, a.finished_at,
+                       l.id, l.grant_id, l.residency_generation, l.binding_id,
+                       l.window_since, {_LEDGER_WINDOW_UNTIL_SQL} AS window_until,
+                       l.snapshot, l.queried_at, l.last_error_code, l.next_refresh_at,
+                       l.last_refresh_attempt_at, l.refresh_generation,
+                       l.refresh_lease_expires_at, l.terminal_refresh_count,
+                       (l.id IS NOT NULL AND (
+                           l.refresh_lease_expires_at IS NOT NULL
+                           OR l.next_refresh_at <= NOW()
+                           OR (a.status <> 'running' AND l.terminal_refresh_count = 0
+                               AND l.next_refresh_at IS NULL)
+                       )) IS TRUE AS refreshing
+                FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
+                WHERE a.job_id = $1
+                ORDER BY a.attempt_no, l.id
+                """,
+                job_id,
+            )
+        return [{**dict(row), "snapshot": _load_json(row["snapshot"])} for row in rows]
+
+    async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
+        """Queue known references, sharing in-flight work and throttling retries."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                UPDATE agent_attempt_ledger l
+                SET next_refresh_at = GREATEST(
+                    NOW(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
+                )
+                FROM agent_attempts a
+                WHERE a.id = l.attempt_id AND a.job_id = $1
+                  AND (l.refresh_lease_expires_at IS NULL
+                       OR l.refresh_lease_expires_at <= NOW())
+                  AND (l.next_refresh_at IS NULL OR l.next_refresh_at > GREATEST(
+                      NOW(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
+                  ))
+                RETURNING l.id
+                """,
+                job_id,
+            )
+        return len(rows)
+
+    async def claim_due_ledger_refresh(self, *, lease_seconds: float = 60) -> dict[str, Any] | None:
+        """Fence one due snapshot query across control-plane workers.
+
+        A crashed worker's expired lease is independently due, including
+        running jobs for which there is no automatic periodic refresh.
+        """
+        if lease_seconds <= 0:
+            raise ValueError("ledger refresh lease must be positive")
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                f"""
+                WITH due AS (
+                    SELECT l.id, a.job_id, a.status <> 'running' AS terminal,
+                           {_LEDGER_WINDOW_UNTIL_SQL} AS window_until
+                    FROM agent_attempt_ledger l
+                    JOIN agent_attempts a ON a.id = l.attempt_id
+                    JOIN agent_jobs j ON j.id = a.job_id
+                    WHERE (l.refresh_lease_expires_at IS NULL
+                           OR l.refresh_lease_expires_at <= NOW())
+                      AND (l.next_refresh_at <= NOW()
+                           OR l.refresh_lease_expires_at <= NOW()
+                           OR (a.status <> 'running' AND l.terminal_refresh_count = 0
+                               AND l.next_refresh_at IS NULL))
+                    ORDER BY COALESCE(l.next_refresh_at, l.refresh_lease_expires_at,
+                                      a.finished_at, a.started_at), l.id
+                    LIMIT 1
+                    FOR UPDATE OF l SKIP LOCKED
+                )
+                UPDATE agent_attempt_ledger l
+                SET refresh_generation = l.refresh_generation + 1,
+                    refresh_lease_expires_at = NOW() + make_interval(secs => $1),
+                    last_refresh_attempt_at = NOW(), next_refresh_at = NULL
+                FROM due
+                WHERE l.id = due.id
+                RETURNING l.id, l.attempt_id, l.grant_id, l.binding_id,
+                          l.residency_generation, l.window_since, due.window_until,
+                          due.terminal, l.terminal_refresh_count, l.refresh_generation,
+                          due.job_id
+                """,
+                lease_seconds,
+            )
+        return None if row is None else dict(row)
+
+    async def complete_ledger_refresh(
+        self,
+        *,
+        ledger_id: int,
+        refresh_generation: int,
+        terminal: bool,
+        report: dict[str, Any] | None,
+        error_code: str | None,
+    ) -> bool:
+        """Store one fenced result without discarding the last usable snapshot.
+
+        Terminal queries get two delayed retries for late Gateway writes.
+        Failures consume retries too; an unavailable Gateway must not create
+        an unbounded loop. A running query which finishes after the attempt
+        ends does not count as a query of its final, closed time window.
+        """
+        if (report is None) == (error_code is None):
+            raise ValueError("a ledger refresh must have either a report or an error code")
+        encoded = None if report is None else json.dumps(report)
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    UPDATE agent_attempt_ledger l
+                    SET snapshot = CASE WHEN $4::jsonb IS NULL THEN l.snapshot ELSE $4 END,
+                        queried_at = CASE WHEN $4::jsonb IS NULL THEN l.queried_at ELSE NOW() END,
+                        last_error_code = $5,
+                        refresh_lease_expires_at = NULL,
+                        terminal_refresh_count = CASE
+                            WHEN $3 THEN LEAST(l.terminal_refresh_count + 1, 3)
+                            ELSE l.terminal_refresh_count END,
+                        next_refresh_at = CASE
+                            WHEN NOT $3 THEN NULL
+                            WHEN l.terminal_refresh_count = 0 THEN NOW() + INTERVAL '30 seconds'
+                            WHEN l.terminal_refresh_count = 1
+                                THEN GREATEST(NOW(), a.finished_at + INTERVAL '300 seconds')
+                            ELSE NULL END
+                    FROM agent_attempts a
+                    WHERE l.id = $1 AND l.refresh_generation = $2
+                      AND l.refresh_lease_expires_at > NOW()
+                      AND a.id = l.attempt_id
+                    RETURNING l.id
+                    """,
+                    ledger_id,
+                    refresh_generation,
+                    terminal,
+                    encoded,
+                    error_code,
+                )
+            )
 
     async def resolve_model_credential(
         self,
@@ -4326,6 +4522,38 @@ class AgentJobStore:
             )
             return shared is not None
 
+    @staticmethod
+    async def _capture_attempt_ledger(
+        conn: asyncpg.Connection, *, thread_id: str, attempt_id: int
+    ) -> None:
+        """Copy the exact residency grant inside a fenced admission transaction.
+
+        The per-attempt grant is a separate, disposable credential. A NULL
+        residency binding means an older writer never recorded its Gateway,
+        so it deliberately leaves this attempt untracked. Re-admission keeps
+        the first reference; rotation preserves an additional distinct grant.
+        """
+        await conn.execute(
+            """
+            INSERT INTO agent_attempt_ledger (
+                attempt_id, grant_id, residency_generation, binding_id, window_since
+            )
+            SELECT a.id, r.grant_id, r.generation, r.ledger_binding_id, a.started_at
+            FROM agent_thread_sandbox_memberships m
+            JOIN agent_thread_residencies r ON r.thread_id = m.thread_id
+                AND r.generation = m.residency_generation
+                AND r.sandbox_id = m.sandbox_id
+            JOIN agent_attempts a ON a.id = m.active_attempt_id
+            JOIN agent_jobs j ON j.id = a.job_id AND j.thread_id = m.thread_id
+            WHERE m.thread_id = $1 AND a.id = $2
+              AND r.grant_id IS NOT NULL AND r.grant_id <> ''
+              AND r.ledger_binding_id IS NOT NULL AND r.ledger_binding_id <> ''
+            ON CONFLICT (attempt_id, grant_id) DO NOTHING
+            """,
+            thread_id,
+            attempt_id,
+        )
+
     async def record_shared_thread_residency(
         self,
         *,
@@ -4335,31 +4563,46 @@ class AgentJobStore:
         sandbox_id: str,
         residency_generation: int,
     ) -> bool:
-        """Bind one renewable residency generation to its active membership."""
-        async with self._pool.acquire() as conn:
-            return bool(
+        """Bind a residency and its immutable attribution before CLI startup."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            # The new ledger FK locks its attempt too. Acquire that lock
+            # before membership, matching terminal transition/reaper order,
+            # and keep the live-attempt fence stable through the capture.
+            if (
                 await conn.fetchval(
-                    """
-                    UPDATE agent_thread_sandbox_memberships m
-                    SET residency_generation = $5,
-                        resident_state = CASE
-                            WHEN resident_state = 'live' THEN 'live' ELSE 'starting' END,
-                        updated_at = NOW()
-                    FROM agent_sandboxes g, agent_attempts a
-                    WHERE m.thread_id = $1 AND m.sandbox_id = $4
-                      AND g.id = m.sandbox_id AND g.mode = 'shared_live'
-                      AND m.active_attempt_id = $2
-                      AND a.id = $2 AND a.lease_generation = $3
-                      AND a.status = 'running' AND a.lease_expires_at > NOW()
-                    RETURNING m.thread_id
-                    """,
-                    thread_id,
+                    "SELECT id FROM agent_attempts WHERE id = $1 AND lease_generation = $2 "
+                    "AND status = 'running' AND lease_expires_at > NOW() FOR SHARE",
                     attempt_id,
                     lease_generation,
-                    sandbox_id,
-                    residency_generation,
                 )
+                is None
+            ):
+                return False
+            shared = await conn.fetchval(
+                """
+                UPDATE agent_thread_sandbox_memberships m
+                SET residency_generation = $5,
+                    resident_state = CASE
+                        WHEN resident_state = 'live' THEN 'live' ELSE 'starting' END,
+                    updated_at = NOW()
+                FROM agent_sandboxes g, agent_attempts a
+                WHERE m.thread_id = $1 AND m.sandbox_id = $4
+                  AND g.id = m.sandbox_id AND g.mode = 'shared_live'
+                  AND m.active_attempt_id = $2
+                  AND a.id = $2 AND a.lease_generation = $3
+                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                RETURNING m.thread_id
+                """,
+                thread_id,
+                attempt_id,
+                lease_generation,
+                sandbox_id,
+                residency_generation,
             )
+            if shared is None:
+                return False
+            await self._capture_attempt_ledger(conn, thread_id=thread_id, attempt_id=attempt_id)
+            return True
 
     async def admit_thread_sandbox_turn(
         self,
@@ -4378,7 +4621,19 @@ class AgentJobStore:
         followed by a runner crash is intentionally conservative: the reaper
         records LOST instead of sending the same user message a second time.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            # Keep the same attempt -> membership order as startup capture
+            # and finishing an attempt. The FK insert must not invert it.
+            if (
+                await conn.fetchval(
+                    "SELECT id FROM agent_attempts WHERE id = $1 AND lease_generation = $2 "
+                    "AND status = 'running' AND lease_expires_at > NOW() FOR SHARE",
+                    attempt_id,
+                    lease_generation,
+                )
+                is None
+            ):
+                return False
             shared = await conn.fetchval(
                 """
                 UPDATE agent_thread_sandbox_memberships m
@@ -4406,6 +4661,7 @@ class AgentJobStore:
             )
             if shared is None:
                 return False
+            await self._capture_attempt_ledger(conn, thread_id=thread_id, attempt_id=attempt_id)
             await conn.execute(
                 """
                 UPDATE agent_sandboxes g
@@ -5035,6 +5291,7 @@ class AgentJobStore:
                     runtime_id = EXCLUDED.runtime_id,
                     runtime_version = EXCLUDED.runtime_version,
                     status = 'hot',
+                    grant_id = NULL, ledger_binding_id = NULL,
                     lease_expires_at = EXCLUDED.lease_expires_at,
                     established_at = NOW(),
                     last_active_at = NOW()
@@ -5055,7 +5312,14 @@ class AgentJobStore:
         result["model"] = earns["model"]
         return result
 
-    async def link_residency_grant(self, *, thread_id: str, generation: int, grant_id: str) -> bool:
+    async def link_residency_grant(
+        self,
+        *,
+        thread_id: str,
+        generation: int,
+        grant_id: str,
+        binding_id: str | None = None,
+    ) -> bool:
         """Record the grant a residency runs on — only its own generation.
 
         A link that matched nothing means the residency was taken over between
@@ -5067,13 +5331,14 @@ class AgentJobStore:
                 await conn.fetchval(
                     """
                     UPDATE agent_thread_residencies
-                    SET grant_id = $3
+                    SET grant_id = $3, ledger_binding_id = $4
                     WHERE thread_id = $1 AND generation = $2 AND status = 'hot'
                     RETURNING thread_id
                     """,
                     thread_id,
                     generation,
                     grant_id,
+                    binding_id,
                 )
             )
 

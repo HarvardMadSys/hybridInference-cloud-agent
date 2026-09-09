@@ -27,6 +27,7 @@ import {
 import { lifecyclePhaseLabel, toDiffFileDetails } from './adapt';
 import { isComposerSubmit } from './composerKeys';
 import { highestEffort, offeredEfforts } from './effort';
+import { LedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { TerminalWorkspace } from './TerminalWorkspace';
@@ -601,22 +602,7 @@ function DetailsDrawer({
                   <DetailStat label="Draft PR" value={job.prLabel ?? 'Not published'} />
                 </dl>
               </section>
-              <section>
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                  Usage
-                </h3>
-                <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
-                  <DetailStat
-                    label="Spend"
-                    value={
-                      job.hasLedger === false ? 'Ledger unavailable' : `$${job.spentUsd.toFixed(4)}`
-                    }
-                  />
-                  <DetailStat label="Input tokens" value={job.usage.tokensIn} />
-                  <DetailStat label="Output tokens" value={job.usage.tokensOut} />
-                  <DetailStat label="Model calls" value={String(job.usage.turns ?? '—')} />
-                </dl>
-              </section>
+              <LedgerUsage job={job} />
               <section>
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
                   Environment
