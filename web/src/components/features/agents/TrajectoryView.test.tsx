@@ -102,9 +102,34 @@ describe('TrajectoryView', () => {
   it('selects a row when its minimap mark is clicked', () => {
     render(<TrajectoryView events={EVENTS} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Bash (tool_use)' }));
+    const mark = screen.getByRole('button', { name: 'Bash (tool_use)' });
+    expect(mark).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(mark);
 
     expect(screen.getByText('Payload')).toBeInTheDocument();
+    expect(mark).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'message (message)' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+
+    fireEvent.click(screen.getByText('Bash'));
+
+    expect(mark).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('shows measured call duration in mark hints without inventing one for other events', () => {
+    render(<TrajectoryView events={EVENTS} />);
+
+    expect(screen.getByRole('button', { name: 'Bash (tool_use)' })).toHaveAttribute(
+      'title',
+      'Bash (tool_use) · 15s',
+    );
+    expect(screen.getByRole('button', { name: 'message (message)' })).toHaveAttribute(
+      'title',
+      'message (message)',
+    );
   });
 
   it('explains an empty stream rather than rendering a bare panel', () => {
