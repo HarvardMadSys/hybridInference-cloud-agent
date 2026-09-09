@@ -59,9 +59,12 @@ snapshot remains readable. No credential or grant identity enters the usage UI.
 
 A dedicated collector runs independently of grant renewal and the reaper,
 with at most four HTTP reads in flight and a timeout on each read. It observes
-terminal attempts durably, then makes two further reads after approximately
-30 seconds and five minutes to pick up late rows. Failures consume these
-bounded automatic retries too. A crashed collector's lease can be reclaimed;
+terminal attempts durably, then makes two further reads once the attempt has
+been finished for 30 seconds and five minutes to pick up late rows. Manual
+reads before a boundary can update the cache but do not consume that later
+reconciliation. Eligibility uses the query's claimed start time, so a slow
+early response cannot satisfy a later stage. Failures at due stages consume
+these bounded automatic retries too. A crashed collector's lease can be reclaimed;
 an expired or superseded refresh cannot overwrite a newer result.
 
 Owner endpoints are:

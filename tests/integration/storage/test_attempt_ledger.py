@@ -538,15 +538,25 @@ async def test_failure_preserves_cached_snapshot_and_throttles_manual_retry(stor
 async def test_terminal_refresh_retries_are_bounded_and_failures_consume_attempts(store):
     """Terminal jobs refresh immediately, after 30 s, and at least 5 min after finish."""
     end = datetime.now(timezone.utc)
-    job, _, ledger_id = await _seed_attempt(store, finished_at=end)
+    job, attempt_id, ledger_id = await _seed_attempt(
+        store, started_at=end - timedelta(minutes=10), finished_at=end
+    )
     first = await store.claim_due_ledger_refresh()
     assert first["terminal"] is True and first["window_until"] == end
     assert await _complete(store, first, error="gateway_unavailable")
     row = (await store.ledger_rows_for_job(job_id=job["id"]))[0]
     assert row["terminal_refresh_count"] == 1
-    assert row["next_refresh_at"] >= row["last_refresh_attempt_at"] + timedelta(seconds=30)
+    assert row["next_refresh_at"] == end + timedelta(seconds=30)
     assert await store.claim_due_ledger_refresh() is None
 
+    # Advance the fixture's terminal age rather than sleeping; forcing only
+    # next_refresh_at must no longer consume a reconciliation ahead of time.
+    async with store._pool.acquire() as conn:
+        end = await conn.fetchval(
+            "UPDATE agent_attempts SET finished_at = NOW() - INTERVAL '31 seconds' "
+            "WHERE id = $1 RETURNING finished_at",
+            attempt_id,
+        )
     await _force_due(store, ledger_id)
     assert await _complete(store, await store.claim_due_ledger_refresh(), calls=2)
     row = (await store.ledger_rows_for_job(job_id=job["id"]))[0]
@@ -554,6 +564,11 @@ async def test_terminal_refresh_retries_are_bounded_and_failures_consume_attempt
     assert row["next_refresh_at"] >= end + timedelta(seconds=300)
     assert await store.claim_due_ledger_refresh() is None
 
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempts SET finished_at = NOW() - INTERVAL '301 seconds' WHERE id = $1",
+            attempt_id,
+        )
     await _force_due(store, ledger_id)
     assert await _complete(
         store, await store.claim_due_ledger_refresh(), error="gateway_unavailable"
@@ -568,6 +583,87 @@ async def test_terminal_refresh_retries_are_bounded_and_failures_consume_attempt
     await _force_due(store, ledger_id)
     assert await _complete(store, await store.claim_due_ledger_refresh(), calls=5)
     assert (await store.ledger_rows_for_job(job_id=job["id"]))[0]["next_refresh_at"] is None
+
+
+async def test_early_manual_reads_preserve_both_terminal_reconciliations(store):
+    """Refresh clicks can replace cached data without spending the later stages."""
+    end = datetime.now(timezone.utc)
+    job, attempt_id, ledger_id = await _seed_attempt(
+        store, started_at=end - timedelta(minutes=10), finished_at=end
+    )
+    assert await _complete(store, await store.claim_due_ledger_refresh(), calls=1)
+
+    for stage, delay in ((1, 30), (2, 300)):
+        if stage == 2:
+            # The +30-second reconciliation is now due; its failure still
+            # consumes this stage and schedules the five-minute read.
+            async with store._pool.acquire() as conn:
+                end = await conn.fetchval(
+                    "UPDATE agent_attempts SET finished_at = NOW() - INTERVAL '31 seconds' "
+                    "WHERE id = $1 RETURNING finished_at",
+                    attempt_id,
+                )
+            await _force_due(store, ledger_id)
+            assert await _complete(
+                store, await store.claim_due_ledger_refresh(), error="usage_unavailable"
+            )
+        for click in range(3):
+            # Bypass only the click throttle. The reconciliation's actual
+            # time boundary remains in the future for every manual read.
+            async with store._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE agent_attempt_ledger "
+                    "SET last_refresh_attempt_at = NOW() - INTERVAL '6 seconds' WHERE id = $1",
+                    ledger_id,
+                )
+            assert await store.queue_job_ledger_refresh(job_id=job["id"]) == 1
+            claim = await store.claim_due_ledger_refresh()
+            assert claim is not None
+            assert await _complete(
+                store,
+                claim,
+                calls=click + 2,
+                error="usage_unavailable" if click == 1 else None,
+            )
+            row = (await store.ledger_rows_for_job(job_id=job["id"]))[0]
+            assert row["terminal_refresh_count"] == stage
+            assert row["next_refresh_at"] == end + timedelta(seconds=delay)
+            assert row["last_refresh_attempt_at"] < row["next_refresh_at"]
+            assert await store.claim_due_ledger_refresh() is None
+
+
+@pytest.mark.parametrize("failure", [False, True])
+async def test_slow_early_read_cannot_consume_the_five_minute_reconciliation(store, failure):
+    """A query started at +299 seconds stays early even if it finishes after +300."""
+    end = datetime.now(timezone.utc) - timedelta(seconds=301)
+    job, _, ledger_id = await _seed_attempt(
+        store, started_at=end - timedelta(minutes=10), finished_at=end
+    )
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempt_ledger SET terminal_refresh_count = 2 WHERE id = $1",
+            ledger_id,
+        )
+    await _force_due(store, ledger_id)
+    claim = await store.claim_due_ledger_refresh()
+    async with store._pool.acquire() as conn:
+        # Model the persisted start of an HTTP query whose response is only
+        # now arriving. Its lease/generation remain live and unchanged.
+        await conn.execute(
+            "UPDATE agent_attempt_ledger SET last_refresh_attempt_at = $2 WHERE id = $1",
+            ledger_id,
+            end + timedelta(seconds=299),
+        )
+    assert await _complete(store, claim, calls=3, error="usage_unavailable" if failure else None)
+    row = (await store.ledger_rows_for_job(job_id=job["id"]))[0]
+    assert row["terminal_refresh_count"] == 2
+    assert row["next_refresh_at"] >= end + timedelta(seconds=300)
+    final = await store.claim_due_ledger_refresh()
+    assert final is not None and final["refresh_generation"] > claim["refresh_generation"]
+    assert await _complete(store, final, error="usage_unavailable")
+    row = (await store.ledger_rows_for_job(job_id=job["id"]))[0]
+    assert row["terminal_refresh_count"] == 3 and row["next_refresh_at"] is None
+    assert await store.claim_due_ledger_refresh() is None
 
 
 async def test_running_query_finishing_after_attempt_still_gets_closed_window_refresh(store):

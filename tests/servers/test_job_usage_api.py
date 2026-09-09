@@ -104,6 +104,45 @@ async def test_another_owner_cannot_read_or_queue_usage(app, store, method, path
     store.queue_job_ledger_refresh.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,path", [("get", "/usage"), ("post", "/usage/refresh")])
+@pytest.mark.parametrize(
+    "state,expected",
+    [
+        ("cancelled", "unavailable"),
+        ("failed", "unavailable"),
+        ("succeeded", "unavailable"),
+        ("queued", "pending"),
+        ("waiting", "pending"),
+    ],
+)
+async def test_jobs_without_attempts_only_wait_for_usage_while_still_runnable(
+    app, store, method, path, state, expected
+):
+    """An unexecuted terminal job cannot wait forever for a nonexistent collector row."""
+    store.get_job.return_value = {"id": "ajob_1", "user_id": "owner", "state": state}
+    store.ledger_rows_for_job.return_value = []
+    store.job_usage_inputs.return_value = {"job_ids": ["ajob_1"], "attempts": [], "events": []}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await getattr(client, method)("/v1/agent/jobs/ajob_1" + path)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ledger"]["status"] == expected
+    assert body["ledger"]["attempts"] == []
+    assert body["ledger"]["totals"] is None
+    assert body["ledger"]["refreshing"] is False
+    assert body["ledger"]["next_refresh_at"] is None
+    assert body["runtime"] == {
+        "source": "runtime",
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_read_tokens": None,
+    }
+    store.get_job.assert_awaited_once_with("ajob_1")
+    store.ledger_rows_for_job.assert_awaited_once_with(job_id="ajob_1")
+    store.job_usage_inputs.assert_awaited_once_with(job_id="ajob_1")
+
+
 def test_usage_routes_are_available_only_on_the_control_plane():
     public_paths = create_app().openapi()["paths"]
     relay_paths = create_mcp_app().openapi()["paths"]

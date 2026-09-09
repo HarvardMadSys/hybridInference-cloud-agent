@@ -2152,8 +2152,10 @@ class AgentJobStore:
 
         Terminal queries get two delayed retries for late Gateway writes.
         Failures consume retries too; an unavailable Gateway must not create
-        an unbounded loop. A running query which finishes after the attempt
-        ends does not count as a query of its final, closed time window.
+        an unbounded loop. Early manual queries update the cache but cannot
+        consume a later reconciliation: stages advance by the saved query
+        start time, never the response completion time. A running query which
+        finishes after the attempt ends does not count as a closed-window query.
         """
         if (report is None) == (error_code is None):
             raise ValueError("a ledger refresh must have either a report or an error code")
@@ -2162,24 +2164,44 @@ class AgentJobStore:
             return bool(
                 await conn.fetchval(
                     """
+                    WITH refresh AS (
+                        SELECT l.id, a.finished_at,
+                               CASE
+                                   WHEN NOT $3 THEN l.terminal_refresh_count
+                                   WHEN l.terminal_refresh_count = 0 THEN 1
+                                   WHEN l.terminal_refresh_count = 1 AND (
+                                       a.finished_at IS NULL
+                                       OR l.last_refresh_attempt_at >=
+                                           a.finished_at + INTERVAL '30 seconds'
+                                   ) THEN 2
+                                   WHEN l.terminal_refresh_count = 2 AND (
+                                       a.finished_at IS NULL
+                                       OR l.last_refresh_attempt_at >=
+                                           a.finished_at + INTERVAL '300 seconds'
+                                   ) THEN 3
+                                   ELSE l.terminal_refresh_count
+                               END AS next_stage
+                        FROM agent_attempt_ledger l
+                        JOIN agent_attempts a ON a.id = l.attempt_id
+                        WHERE l.id = $1 AND l.refresh_generation = $2
+                          AND l.refresh_lease_expires_at > NOW()
+                    )
                     UPDATE agent_attempt_ledger l
                     SET snapshot = CASE WHEN $4::jsonb IS NULL THEN l.snapshot ELSE $4 END,
                         queried_at = CASE WHEN $4::jsonb IS NULL THEN l.queried_at ELSE NOW() END,
                         last_error_code = $5,
                         refresh_lease_expires_at = NULL,
-                        terminal_refresh_count = CASE
-                            WHEN $3 THEN LEAST(l.terminal_refresh_count + 1, 3)
-                            ELSE l.terminal_refresh_count END,
+                        terminal_refresh_count = refresh.next_stage,
                         next_refresh_at = CASE
                             WHEN NOT $3 THEN NULL
-                            WHEN l.terminal_refresh_count = 0 THEN NOW() + INTERVAL '30 seconds'
-                            WHEN l.terminal_refresh_count = 1
-                                THEN GREATEST(NOW(), a.finished_at + INTERVAL '300 seconds')
+                            WHEN refresh.next_stage = 1
+                                THEN GREATEST(NOW(), refresh.finished_at + INTERVAL '30 seconds')
+                            WHEN refresh.next_stage = 2
+                                THEN GREATEST(NOW(), refresh.finished_at + INTERVAL '300 seconds')
                             ELSE NULL END
-                    FROM agent_attempts a
-                    WHERE l.id = $1 AND l.refresh_generation = $2
+                    FROM refresh
+                    WHERE l.id = refresh.id AND l.refresh_generation = $2
                       AND l.refresh_lease_expires_at > NOW()
-                      AND a.id = l.attempt_id
                     RETURNING l.id
                     """,
                     ledger_id,
