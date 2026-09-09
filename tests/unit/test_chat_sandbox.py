@@ -592,33 +592,60 @@ def test_daemon_wide_discovery_never_adopts_a_sibling_stack() -> None:
     assert not manager._belongs_to_namespace(inspection(None, ()))
 
 
-def test_foreign_namespace_cannot_fail_broker_startup_with_its_mounts(monkeypatch) -> None:
+def test_foreign_namespace_is_not_inspected_during_broker_startup(monkeypatch) -> None:
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_namespace="this-stack"))
-    spec = _spec()
-    labels = {
-        **spec.docker_labels(),
-        CHAT_NAMESPACE_LABEL: "sibling-stack",
-    }
 
     def run(argv, **_kwargs):
         if argv[1:3] == ["container", "ls"]:
-            return SimpleNamespace(returncode=0, stdout="foreign-container\n", stderr="")
-        if argv[1:3] == ["container", "inspect"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout=_inspect_payload(
-                    spec,
-                    labels=labels,
-                    mounts=[{"Type": "bind", "Destination": CHAT_WORKDIR}],
-                    networks=(),
-                ),
+                stdout=json.dumps({"id": "foreign-container", "namespace": "sibling-stack"}),
                 stderr="",
             )
+        if argv[1:3] == ["container", "inspect"]:
+            raise AssertionError("foreign inspect would hang on a wedged Kata shim")
         raise AssertionError(argv)
 
     monkeypatch.setattr(manager, "_run", run)
 
     assert manager.list() == []
+
+
+@pytest.mark.parametrize("namespace", ["this-stack", ""])
+@pytest.mark.parametrize("inspect_fails", [False, True])
+def test_listing_keeps_owned_and_legacy_containers_and_their_failures(
+    monkeypatch, namespace, inspect_fails
+):
+    manager = ChatSandboxManager(
+        ContainerBackend(image="img", network="agent-net", sandbox_namespace="this-stack")
+    )
+    spec = _spec()
+    labels = spec.docker_labels()
+    if namespace:
+        labels[CHAT_NAMESPACE_LABEL] = namespace
+
+    def run(argv, **_kwargs):
+        if argv[1:3] == ["container", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"id": "owned-container", "namespace": namespace}),
+                stderr="",
+            )
+        assert argv[1:] == ["container", "inspect", "owned-container"]
+        if inspect_fails:
+            raise SandboxError("owned inspection failed")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_inspect_payload(spec, labels=labels, networks=("agent-net",)),
+            stderr="",
+        )
+
+    monkeypatch.setattr(manager, "_run", run)
+    if inspect_fails:
+        with pytest.raises(SandboxError, match="owned inspection failed"):
+            manager.list()
+    else:
+        assert len(manager.list()) == 1
 
 
 def test_private_network_contains_only_the_discovered_fixed_services(monkeypatch):

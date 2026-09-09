@@ -11,13 +11,18 @@ info:
       - apps/backend/serving/servers/routers/internal_auth.py
     tasks: [C9]
   description: |
-    The three questions the control plane can no longer answer by importing.
+    The two questions the control plane can no longer answer by importing.
 
     Before the split, cloud agent code ran inside the gateway process and read
     the model registry, the MCP registry and the users table directly. Each of
     those reads needed an endpoint *before* the task that moved its caller, or
     that task either fails to import or silently degrades — and a silent
     degrade here looks like a feature that stopped working for no reason.
+
+    The MCP registry endpoint was later retired when server ownership moved
+    to the user. The control plane now resolves servers from that user's own
+    connections, so there is no deployment-wide registry for the gateway to
+    answer for. Two lookup endpoints remain.
 
     | Endpoint | Replaces |
     |---|---|

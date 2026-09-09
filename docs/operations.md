@@ -429,10 +429,11 @@ AGENT_WORKSPACE_BROKER_TOKEN=<same environment value as the control plane>
 AGENT_SANDBOX_BACKEND=container  # explicit trusted-repository downgrade
 ```
 
-That second line is a **deliberate downgrade**, and the runner says so on every
-start: it puts every job on the host's own kernel. It was the price of getting a
-standing runner up before any host had Kata. Remove it once the host is
-provisioned — see below — and the boundary is verified instead of warned about.
+The `AGENT_SANDBOX_BACKEND=container` line is a **deliberate downgrade**: sandbox
+groups share the host kernel. Before enabling Kata for new groups, provision
+the host and verify the guest runtime and relay paths with the checks below.
+Existing retained runc containers need the separate migration treatment
+described there.
 
 One command per host makes the runner standing; compose's
 `restart: unless-stopped` plus an enabled Docker daemon carries it across
@@ -457,10 +458,10 @@ Docker, retained-mode configuration, host isolation, and the configured image;
 ### Provisioning Kata on a runner host
 
 An ordinary container isolates processes; every sandbox still issues syscalls
-straight at the host kernel. Kata gives each job a lightweight VM with its own
-kernel, so a container escape has a hypervisor behind it. That is what makes the
-difference between "fine for repositories we trust" and "fine for a repository
-we have never read", because the sandbox runs whatever the repository's build
+straight at the host kernel. Kata gives each sandbox group a lightweight VM
+with its own kernel, so a container escape has a hypervisor behind it. That is
+what makes the difference between "fine for repositories we trust" and "fine
+for a repository we have never read", because the sandbox runs whatever its build
 and test scripts do.
 
 The runtime belongs to the **host**, not the runner image: the runner container
@@ -559,9 +560,33 @@ Kata for new jobs.
 Requirements: an x86_64 Linux host, bare metal or with nested virtualization
 enabled. Kata cannot run without KVM.
 
-Afterwards, drop `AGENT_SANDBOX_BACKEND=container` from the host's `.env` and
-redeploy. `deploy/host/sandbox_host.sh up` then gates on it (as does
-whatever pipeline deploys the gateway, on its own side):
+**Installing the shim is necessary, not sufficient.** A working guest kernel
+does not prove the sandbox can reach either relay. Before changing the backend
+for new groups, check the provisioned runtime and the running stack from the
+host checkout, using its `.env`:
+
+```bash
+AGENT_SANDBOX_BACKEND=kata deploy/host/sandbox_host.sh preflight
+AGENT_SANDBOX_BACKEND=kata deploy/host/sandbox_host.sh check
+```
+
+`preflight` verifies the configured image and guest kernel. `check` starts relay
+probes under Kata on `AGENT_EGRESS_NETWORK_PLATFORM_ONLY` and requires HTTP 200
+from inference `/health` and MCP `/healthz`. It also checks the live runner's
+full sandbox preflight, broker, and control-plane paths. That compose-owned
+closed network is the relay discovery backplane; retained groups get their
+own private bridges during activation. The compose `..._internal` network is
+the host services' network and cannot substitute for either check.
+
+The Kata relay probes resolve only the configured relay endpoints through
+Docker inspection and pass their addresses into the guest, matching the
+runtime's fixed-host approach. A bare `alpine getent` probe depends on Docker's
+embedded DNS and does not verify this path. A failed check needs diagnosis of
+the reported guest, relay, or service path before switching new groups.
+
+After those checks pass and existing runc groups have been accounted for, drop
+`AGENT_SANDBOX_BACKEND=container` from the host's `.env` and redeploy.
+`deploy/host/sandbox_host.sh up` repeats the checks for the image it builds:
 
 - with the default `kata` backend, the shim must be installed, **and** one real
   container started from the sandbox image must report a kernel that is not the
