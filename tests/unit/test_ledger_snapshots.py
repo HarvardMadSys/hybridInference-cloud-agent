@@ -93,11 +93,26 @@ def test_retries_are_summed_without_losing_partial_metrics_or_decimal_precision(
     assert summary.totals.spent_usd == "0.00024690"
     assert summary.unknown_rows.reasoning == 2
     assert summary.estimated_calls == 1
-    assert summary.status == "partial"
+    # Unreported reasoning is informational: the core metrics are all known.
+    assert summary.status == "available"
+    assert [a.status for a in summary.attempts] == ["available", "available"]
     assert summary.queried_at == END
     assert summary.missing_attempts == 0
     assert [a.attempt_id for a in summary.attempts] == [10, 11]
     assert summary.finalized is False
+
+
+def test_only_a_missing_core_metric_makes_a_snapshot_partial():
+    payload = report_payload()
+    payload["totals"] = {**payload["totals"], "spent_usd": None}
+    payload["unknown_rows"] = {**payload["unknown_rows"], "spent_usd": 1}
+    summary = summarize_ledger([ledger_row(snapshot=payload)])
+    assert summary.status == "partial"
+    assert summary.attempts[0].status == "partial"
+    assert summary.totals.spent_usd is None
+    assert summary.unknown_rows.spent_usd == 1
+    # The reasoning gap is still reported, it just does not decide the status.
+    assert summary.unknown_rows.reasoning == 1
 
 
 def test_historical_attempts_stay_unknown_and_make_a_partial_job_explicit():

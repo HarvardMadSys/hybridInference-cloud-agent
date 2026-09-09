@@ -83,6 +83,11 @@ The run details drawer displays the Gateway and runtime sources separately.
 Gateway input includes cache tokens; Claude's runtime input reports uncached
 input separately. A difference is therefore not automatically an accounting
 error. Partial metrics and missing attempts remain visible alongside sums.
+Only the core metrics (tokens, cache and spend) decide whether a snapshot is
+`partial`. Unreported reasoning tokens stay counted in `unknown_rows` and the
+drawer names them, but they do not degrade the status: the Gateway records a
+reasoning breakdown only when an upstream reports a positive one, and never on
+its Anthropic-messages surface, so a null there means "not reported", not zero.
 `available` means a readable snapshot, not complete or settled billing.
 The aggregate refresh timestamp is the oldest contributing snapshot's timestamp.
 Failed refreshes preserve the last successful values and timestamp and mark
