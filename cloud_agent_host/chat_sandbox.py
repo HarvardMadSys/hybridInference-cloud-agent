@@ -1531,7 +1531,9 @@ class ChatSandboxManager:
                 "container",
                 "ls",
                 "--all",
-                "--quiet",
+                "--no-trunc",
+                "--format",
+                '{"id":{{json .ID}},"namespace":{{json (.Label "' + CHAT_NAMESPACE_LABEL + '")}}}',
                 "--filter",
                 f"label={CHAT_SANDBOX_LABEL}=true",
             ],
@@ -1540,7 +1542,21 @@ class ChatSandboxManager:
         if result.returncode != 0:
             raise SandboxError("chat sandbox listing failed: " + result.stderr.strip()[:300])
         found: list[ChatSandboxInspection] = []
-        for container_id in result.stdout.split():
+        for line in result.stdout.splitlines():
+            try:
+                row = json.loads(line)
+                container_id, namespace = row["id"], row["namespace"]
+                if not isinstance(container_id, str) or not container_id:
+                    raise ValueError("missing container id")
+                if not isinstance(namespace, str):
+                    raise ValueError("invalid namespace")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SandboxError("Docker returned an invalid chat sandbox listing") from exc
+            # Read ownership from ls before making a per-container RPC: a
+            # wedged foreign Kata shim can block even docker inspect. Empty
+            # labels still take the legacy network-based ownership path.
+            if namespace and namespace != self.backend.sandbox_namespace:
+                continue
             # A foreign namespace cannot make this broker fail startup by
             # carrying policy-invalid mounts. Apply this stack's mount fence
             # only after ownership is established.
