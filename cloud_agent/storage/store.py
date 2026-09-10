@@ -424,6 +424,37 @@ def _encode_session_cursor(sort_at: datetime, thread_id: str, scope: str) -> str
     ).decode()
 
 
+def _decode_conversation_cursor(
+    cursor: str, scope: str
+) -> tuple[bool, datetime | None, datetime, str]:
+    """Validate a pagination boundary, including its owner and search scope."""
+    try:
+        if not cursor or len(cursor) > 2048:
+            raise ValueError
+        data = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
+        if (
+            not isinstance(data, dict)
+            or type(data.get("v")) is not int
+            or data["v"] != 1
+            or data.get("scope") != scope
+        ):
+            raise ValueError
+        pin = data["pin"]
+        activity = datetime.fromisoformat(data["activity"])
+        thread = data["thread"]
+        if pin is not None:
+            pin = datetime.fromisoformat(pin)
+            if pin.tzinfo is None:
+                raise ValueError
+        if activity.tzinfo is None or not isinstance(thread, str) or not 1 <= len(thread) <= 128:
+            raise ValueError
+        if "\x00" in thread:
+            raise ValueError
+        return pin is not None, pin, activity, thread
+    except (ValueError, TypeError, KeyError, binascii.Error, OverflowError, RecursionError) as exc:
+        raise ValueError("Invalid conversation cursor for this search") from exc
+
+
 # Everything a caller may see about a host. ``credential_hash`` is deliberately
 # not in it — reading it back out would make the row as good as the credential
 # — and is reported only as the boolean ``enrolled``.
@@ -2026,6 +2057,7 @@ class AgentJobStore:
             "title": thread["title"],
             "created_at": thread["created_at"],
             "updated_at": thread["updated_at"],
+            "archived_at": thread["archived_at"],
             "messages": [dict(message) for message in messages],
             "jobs": job_rows,
         }
@@ -2478,6 +2510,112 @@ class AgentJobStore:
             )
         return [_job_row_to_dict(row) for row in rows]
 
+    async def list_conversations(
+        self,
+        *,
+        user_id: str,
+        q: str = "",
+        repo: str | None = None,
+        include_archived: bool = False,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Page complete owned conversations, searching their canonical title.
+
+        One SQL read aggregates thread-wide activity, then uses the thread-turn
+        index to fetch the latest job only for the bounded result page.
+        Activity includes messages and job transitions;
+        lease heartbeats do not change it. The unique thread id breaks ties.
+        A cursor is scoped to its owner and filters, and is a pagination hint,
+        never authority to read a thread. Updates may move a thread ahead of a
+        previously issued cursor; refreshing starts again from the latest page.
+        """
+        q = q.strip()
+        if not 1 <= limit <= 200 or len(q) > 200 or "\x00" in q:
+            raise ValueError("Invalid conversation search parameters")
+        scope = hashlib.sha256(
+            json.dumps([user_id, q, repo, include_archived]).encode()
+        ).hexdigest()
+        boundary = (
+            _decode_conversation_cursor(cursor, scope)
+            if cursor is not None
+            else (None, None, None, None)
+        )
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                WITH owned AS (
+                    SELECT t.id AS thread_id, t.title, t.pinned_at,
+                           t.archived_at IS NOT NULL AS archived,
+                           GREATEST(t.updated_at, MAX(j.updated_at)) AS last_activity_at
+                    FROM agent_threads t
+                    JOIN agent_jobs j ON j.thread_id = t.id AND j.user_id = $1
+                    WHERE t.user_id = $1 AND t.deleted_at IS NULL
+                      AND ($2::text IS NULL OR t.repo = $2)
+                      AND ($3::text = '' OR POSITION(LOWER($3) IN LOWER(t.title)) > 0
+                           OR POSITION(LOWER($3) IN LOWER(t.repo)) > 0)
+                      AND ($4::boolean OR t.archived_at IS NULL)
+                    GROUP BY t.id
+                ), page AS (
+                    SELECT * FROM owned
+                    WHERE ($6::boolean IS NULL OR (
+                          pinned_at IS NOT NULL,
+                          COALESCE(pinned_at, '-infinity'::timestamptz),
+                          last_activity_at, thread_id
+                      ) < (
+                          $6, COALESCE($7::timestamptz, '-infinity'::timestamptz),
+                          $8::timestamptz, $9::text
+                      ))
+                    ORDER BY pinned_at DESC NULLS LAST, last_activity_at DESC, thread_id DESC
+                    LIMIT $5
+                )
+                SELECT {_QUALIFIED_JOB_COLUMNS}, page.title, page.pinned_at,
+                       page.archived, page.last_activity_at
+                FROM page
+                JOIN LATERAL (
+                    SELECT * FROM agent_jobs latest
+                    WHERE latest.thread_id = page.thread_id AND latest.user_id = $1
+                    ORDER BY latest.turn_no DESC
+                    LIMIT 1
+                ) j ON TRUE
+                ORDER BY page.pinned_at DESC NULLS LAST,
+                         page.last_activity_at DESC, page.thread_id DESC
+                """,
+                user_id,
+                repo,
+                q,
+                include_archived,
+                limit + 1,
+                *boundary,
+            )
+        next_cursor = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            next_cursor = base64.urlsafe_b64encode(
+                json.dumps(
+                    {
+                        "v": 1,
+                        "scope": scope,
+                        "pin": last["pinned_at"].isoformat() if last["pinned_at"] else None,
+                        "activity": last["last_activity_at"].isoformat(),
+                        "thread": last["thread_id"],
+                    },
+                    separators=(",", ":"),
+                ).encode()
+            ).decode()
+        return {
+            "conversations": [
+                {
+                    "job": _job_row_to_dict(row),
+                    "title": row["title"],
+                    "archived": row["archived"],
+                    "last_activity_at": row["last_activity_at"],
+                }
+                for row in rows[:limit]
+            ],
+            "next_cursor": next_cursor,
+        }
+
     async def list_projects(self, *, user_id: str, archived: bool = False) -> list[dict[str, Any]]:
         """Summarize a user's repos, most recently active first.
 
@@ -2493,7 +2631,7 @@ class AgentJobStore:
                        COUNT(*) FILTER (
                            WHERE j.state IN ('queued', 'waiting', 'running', 'publishing')
                        ) AS active_count,
-                       MAX(j.created_at) AS last_activity_at,
+                       MAX(GREATEST(t.updated_at, j.updated_at)) AS last_activity_at,
                        COUNT(DISTINCT j.thread_id) FILTER (
                            WHERE t.pinned_at IS NOT NULL
                        ) AS pinned_count,

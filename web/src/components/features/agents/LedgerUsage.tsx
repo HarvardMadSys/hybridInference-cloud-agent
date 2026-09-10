@@ -15,6 +15,13 @@ import type { AgentJob } from './types';
 const POLL_INTERVAL_MS = 15_000;
 const MAX_POLLS = 20;
 
+// The metrics that decide whether a snapshot is partial. Reasoning is
+// informational: the Gateway records a reasoning breakdown only when an
+// upstream reports a positive one, and never on its Anthropic-messages
+// surface, so an unreported value is named below rather than degrading the
+// whole snapshot.
+const CORE_METRICS = ['tokens_in', 'tokens_out', 'cache_read', 'cache_write', 'spent_usd'] as const;
+
 const STATUS_LABELS: Record<AgentLedgerStatus, string> = {
   pending: 'Pending',
   available: 'Available snapshot',
@@ -211,10 +218,12 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
   const reason =
     selected?.reason ?? (ledger?.attempts.length === 1 ? ledger.attempts[0].reason : null);
   const missingAttempts = selected ? (selected.totals ? 0 : 1) : (ledger?.missing_attempts ?? 0);
+  const unknownRows = summary?.unknown_rows;
   const partial =
     summary?.status === 'partial' ||
     missingAttempts > 0 ||
-    Object.values(summary?.unknown_rows ?? {}).some((value) => value > 0);
+    CORE_METRICS.some((key) => (unknownRows?.[key] ?? 0) > 0);
+  const reasoningUnknown = summary?.totals ? (unknownRows?.reasoning ?? 0) : 0;
   const failed = result?.failed || result?.unsupported;
   const status = failed && summary?.totals ? 'stale' : (summary?.status ?? 'unavailable');
   const loading = !result || result.loading;
@@ -325,6 +334,12 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
             {missingAttempts > 0
               ? ` ${count(missingAttempts)} attempt${missingAttempts === 1 ? '' : 's'} without a usable snapshot.`
               : ''}
+          </p>
+        ) : null}
+        {!partial && !loading && reasoningUnknown > 0 ? (
+          <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            Core usage is complete. The Gateway did not report reasoning tokens for{' '}
+            {count(reasoningUnknown)} call{reasoningUnknown === 1 ? '' : 's'}.
           </p>
         ) : null}
 

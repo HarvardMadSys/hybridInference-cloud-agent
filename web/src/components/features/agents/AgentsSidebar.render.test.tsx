@@ -7,6 +7,7 @@ import type { AgentJobApi, AgentProjectApi } from '@/lib/api/agents';
 
 const mocks = vi.hoisted(() => ({
   listAgentJobs: vi.fn(),
+  listAgentConversations: vi.fn(),
   listAgentProjects: vi.fn(),
   pinAgentJob: vi.fn(),
   unpinAgentJob: vi.fn(),
@@ -14,13 +15,14 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('next/navigation', () => ({
   usePathname: () => '/',
+  useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
 }));
 
 vi.mock('@/components/providers', async () => {
   const { translate } = await import('@/lib/i18n/translate');
   return {
-    useAuth: () => ({ state: { user: { user_name: 'Ada', email: 'ada@example.com' } } }),
+    useAuth: () => ({ state: { user: { id: 'ada', user_name: 'Ada', email: 'ada@example.com' } } }),
     useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
       translate('en', key, vars),
   };
@@ -33,6 +35,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJobThread: vi.fn(),
   listAgentJobEvents: vi.fn(),
   listAgentJobs: mocks.listAgentJobs,
+  listAgentConversations: mocks.listAgentConversations,
   listAgentProjects: mocks.listAgentProjects,
   pinAgentJob: mocks.pinAgentJob,
   streamAgentJob: vi.fn(),
@@ -69,6 +72,22 @@ function apiProject(overrides: Partial<AgentProjectApi> = {}): AgentProjectApi {
 describe('AgentsSidebar layout', () => {
   beforeEach(() => {
     localStorage.clear();
+    mocks.listAgentConversations.mockImplementation(async (options: { repo?: string } = {}) => {
+      const jobs: AgentJobApi[] = await mocks.listAgentJobs(
+        options.repo ? 200 : 50,
+        false,
+        options.repo,
+      );
+      return {
+        conversations: jobs.map((job) => ({
+          job,
+          title: job.task_prompt,
+          archived: false,
+          last_activity_at: job.created_at,
+        })),
+        next_cursor: null,
+      };
+    });
     window.innerWidth = 1400;
     mocks.listAgentJobs.mockResolvedValue([]);
     mocks.listAgentProjects.mockResolvedValue([]);
@@ -118,6 +137,22 @@ describe('AgentsSidebar layout', () => {
 describe('AgentsSidebar project tree', () => {
   beforeEach(() => {
     localStorage.clear();
+    mocks.listAgentConversations.mockImplementation(async (options: { repo?: string } = {}) => {
+      const jobs: AgentJobApi[] = await mocks.listAgentJobs(
+        options.repo ? 200 : 50,
+        false,
+        options.repo,
+      );
+      return {
+        conversations: jobs.map((job) => ({
+          job,
+          title: job.task_prompt,
+          archived: false,
+          last_activity_at: job.created_at,
+        })),
+        next_cursor: null,
+      };
+    });
     window.innerWidth = 1400;
     mocks.listAgentProjects.mockResolvedValue([
       apiProject({ task_count: 2, active_count: 1 }),
@@ -152,7 +187,7 @@ describe('AgentsSidebar project tree', () => {
             }),
           ];
         }
-        if (repo) return [];
+        if (repo && repo !== 'murphy/hybridInference') return [];
         return [
           apiJob({ id: 'hi-1', thread_id: 'hi-1', task_prompt: 'Explain this repo' }),
           apiJob({
@@ -214,7 +249,9 @@ describe('AgentsSidebar project tree', () => {
 
     await waitFor(() => expect(screen.getByText('Profile the scheduler')).toBeInTheDocument());
     expect(mocks.listAgentJobs).toHaveBeenCalledWith(200, false, 'murphy/sglang');
-    expect(JSON.parse(localStorage.getItem('agents.sidebar.projects') ?? '{}')).toMatchObject({
+    expect(
+      JSON.parse(localStorage.getItem('agents.sidebar.navigation.ada') ?? '{}').expanded,
+    ).toMatchObject({
       'murphy/sglang': true,
     });
   });

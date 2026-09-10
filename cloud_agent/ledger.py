@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grant_usage import (
+    CORE_METRICS,
     USAGE_METRICS,
     GrantUsageReport,
     GrantUsageTotals,
@@ -130,7 +131,9 @@ def _status(
         return "partial"
     if failed:
         return "stale"
-    if any(any(report.unknown_rows.model_dump().values()) for report in reports):
+    # Only a missing core metric degrades the snapshot. Unreported reasoning
+    # rows stay visible in ``unknown_rows``; see ``CORE_METRICS``.
+    if any(getattr(report.unknown_rows, name) for report in reports for name in CORE_METRICS):
         return "partial"
     return "available"
 

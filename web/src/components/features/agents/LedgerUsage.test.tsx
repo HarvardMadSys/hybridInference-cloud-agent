@@ -42,7 +42,7 @@ function usage(): AgentJobUsageApi {
   };
   return {
     ledger: {
-      status: 'partial',
+      status: 'available',
       source: 'gateway_api_logs',
       attribution: 'grant_time_window',
       finalized: false,
@@ -56,7 +56,7 @@ function usage(): AgentJobUsageApi {
         {
           attempt_id: 10,
           attempt_no: 1,
-          status: 'partial',
+          status: 'available',
           reason: null,
           totals: { ...totals, calls: 1, tokens_in: 400 },
           unknown_rows: { ...unknown, reasoning: 1 },
@@ -73,7 +73,7 @@ function usage(): AgentJobUsageApi {
         {
           attempt_id: 11,
           attempt_no: 2,
-          status: 'partial',
+          status: 'available',
           reason: null,
           totals: { ...totals, calls: 2, tokens_in: 800 },
           unknown_rows: { ...unknown, reasoning: 2 },
@@ -128,6 +128,12 @@ describe('LedgerUsage', () => {
     expect(gatewayRow('Model calls')).toHaveTextContent('3');
     expect(gatewayRow('Reasoning tokens')).toHaveTextContent('—');
     expect(gatewayRow('Reasoning tokens')).toHaveTextContent('3 requests missing this value');
+    // Unreported reasoning is named, not treated as a partial snapshot.
+    expect(screen.getByText('Available snapshot')).toBeInTheDocument();
+    expect(screen.getByText(/Core usage is complete/)).toHaveTextContent(
+      'did not report reasoning tokens for 3 calls',
+    );
+    expect(screen.queryByText(/Partial totals/)).toBeNull();
     expect(screen.getByText(/Claude Code reports uncached input separately/)).toBeInTheDocument();
     const runtime = screen.getByRole('region', { name: 'Runtime reported usage' });
     expect(within(runtime).getByText('Reported input tokens').parentElement).toHaveTextContent(
@@ -151,6 +157,8 @@ describe('LedgerUsage', () => {
     expect(gatewayRow('Input tokens')).toHaveTextContent('2 requests missing this value');
     expect(gatewayRow('Spend (USD)')).toHaveTextContent('—');
     expect(screen.getByText('1 call includes estimated usage.')).toBeInTheDocument();
+    expect(screen.getByText(/Partial totals: only known values are included/)).toBeInTheDocument();
+    expect(screen.queryByText(/Core usage is complete/)).toBeNull();
   });
 
   it('selects cached attempts without extra requests and keeps runtime scope on all retries', async () => {

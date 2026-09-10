@@ -24,6 +24,13 @@ from pydantic import (
 from cloud_agent.gateway import GatewayError
 
 USAGE_METRICS = ("tokens_in", "tokens_out", "cache_read", "cache_write", "reasoning", "spent_usd")
+#: The metrics a snapshot must know for its totals to count as complete.
+#: Reasoning is informational: the Gateway records a reasoning breakdown only
+#: when an upstream reports a positive one, and its Anthropic-messages surface
+#: never carries the breakdown at all, so a null there means "not reported",
+#: never zero. It stays in ``unknown_rows`` so the drawer can say so, but it
+#: does not turn an otherwise complete snapshot into a partial one.
+CORE_METRICS = tuple(name for name in USAGE_METRICS if name != "reasoning")
 NonnegativeInt = Annotated[StrictInt, Field(ge=0)]
 Money = Annotated[StrictStr, Field(pattern=r"^[0-9]+(?:\.[0-9]+)?$", max_length=128)]
 Identifier = Annotated[StrictStr, Field(min_length=1, max_length=128)]
