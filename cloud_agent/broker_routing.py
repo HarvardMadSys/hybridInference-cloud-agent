@@ -29,7 +29,7 @@ from cloud_agent_host.workspace_broker_client import (
 )
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.ports.host_pool import HostPoolRepository
 
 #: Hosts a broker URL may name. Empty means "any", which is the shape a
 #: single-host deployment runs in and the shape this had before the check.
@@ -95,22 +95,22 @@ def _client_for(host: dict[str, Any]) -> WorkspaceBrokerClient | None:
 
 
 async def broker_for_attempt(
-    store: AgentJobStore | None, attempt_id: int | None
+    hosts: HostPoolRepository | None, attempt_id: int | None
 ) -> WorkspaceBrokerClient | None:
     """Resolve the enrolled host broker holding ``attempt_id``'s container."""
-    if store is not None and attempt_id is not None:
-        host = await store.host_for_attempt(attempt_id=attempt_id)
+    if hosts is not None and attempt_id is not None:
+        host = await hosts.host_for_attempt(attempt_id=attempt_id)
         if host is not None:
             return _client_for(host)
     return None
 
 
 async def broker_for_job(
-    store: AgentJobStore | None, job_id: str | None
+    hosts: HostPoolRepository | None, job_id: str | None
 ) -> WorkspaceBrokerClient | None:
     """Resolve the broker for a job, via its current attempt's host."""
-    if store is not None and job_id:
-        host = await store.host_for_job(job_id=job_id)
+    if hosts is not None and job_id:
+        host = await hosts.host_for_job(job_id=job_id)
         if host is not None:
             return _client_for(host)
     return None

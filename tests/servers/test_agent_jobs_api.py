@@ -1125,6 +1125,7 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
         "ledger",
         "mcp",
         "credentials",
+        "source_control",
         "hosts",
         "grants",
     )

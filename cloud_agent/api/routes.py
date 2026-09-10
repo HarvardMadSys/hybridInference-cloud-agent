@@ -43,12 +43,16 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_agent_gitlab_oauth,
     get_agent_job_store,
+    get_conversation_commands,
     get_current_user,
     get_gateway_client,
     get_grant_client,
+    get_host_pool,
     get_log_store,
     get_mcp_connections,
     looks_like_agent_token,
+    require_conversation_commands,
+    require_host_pool,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
 from cloud_agent.broker_routing import (
@@ -198,6 +202,8 @@ from cloud_agent_host.workspace_browser import (
 )
 
 if TYPE_CHECKING:
+    from cloud_agent.ports.conversations import ConversationCommands
+    from cloud_agent.ports.host_pool import HostPoolRepository
     from cloud_agent.ports.mcp import McpConnectionRepository
     from cloud_agent.storage.store import AgentJobStore
 
@@ -1756,6 +1762,7 @@ async def cancel_agent_job(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one of the caller's agent jobs.
 
@@ -1768,7 +1775,7 @@ async def cancel_agent_job(
     if state in TERMINAL_STATES:
         resumed = True
         if owned.get("thread_sandbox") is not None:
-            settled_broker = await _workspace_broker_for_job(job_store, owned)
+            settled_broker = await _workspace_broker_for_job(require_host_pool(hosts), owned)
             resumed = await resume_settled_terminal(
                 _workspace_id(owned),
                 job_id=job_id,
@@ -2105,6 +2112,7 @@ async def fork_agent_job(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     grants: Any = Depends(get_grant_client),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentJobResponse:
     """Fork one settled native session into the same shared Docker workspace."""
     job_store = _require_store(store)
@@ -2255,7 +2263,7 @@ async def fork_agent_job(
         # mutation.  READY and MATERIALIZED are durable control-plane states:
         # a retry after a lost HTTP response must return/finalize the same
         # child even when the retaining host has since become unreachable.
-        broker = await broker_for_job(job_store, job_id)
+        broker = await broker_for_job(require_host_pool(hosts), job_id)
         if broker is None:
             raise HTTPException(
                 status_code=503,
@@ -2623,11 +2631,11 @@ def _workspace_not_materialized(exc: WorkspaceBrokerError) -> bool:
 
 
 async def _workspace_broker_for_job(
-    store: AgentJobStore,
+    hosts: HostPoolRepository,
     job: dict[str, Any],
 ) -> WorkspaceBrokerClient | None:
     """Resolve the owning broker and restore shared aliases before use."""
-    broker = await broker_for_job(store, job["id"])
+    broker = await broker_for_job(hosts, job["id"])
     try:
         return await hydrate_shared_broker(job, broker)
     except WorkspaceBrokerError as exc:
@@ -2693,6 +2701,7 @@ async def _require_workspace_entitlement(
 
 
 async def _terminal_owner_workspace(
+    hosts: HostPoolRepository,
     *,
     job_id: str,
     user: dict[str, Any],
@@ -2725,7 +2734,7 @@ async def _terminal_owner_workspace(
             store=job_store,
             app_credentials=app_credentials,
         )
-    broker = await _workspace_broker_for_job(job_store, job)
+    broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         raise HTTPException(
             status_code=409,
@@ -2766,6 +2775,7 @@ async def get_agent_job_workspace_file(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentWorkspaceResponse:
     """Browse the chat's retained workspace through its owning host broker."""
     job_store = _require_store(store)
@@ -2782,7 +2792,7 @@ async def get_agent_job_workspace_file(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
 
-    broker = await _workspace_broker_for_job(job_store, job)
+    broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         raise HTTPException(
             status_code=409,
@@ -2807,6 +2817,7 @@ async def write_agent_job_workspace_file(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentWorkspaceResponse:
     """Save one text file directly into the retained chat workspace."""
     job_store = _require_store(store)
@@ -2824,7 +2835,7 @@ async def write_agent_job_workspace_file(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
     await _require_mutable_workspace_ready(job=job, store=job_store)
-    broker = await _workspace_broker_for_job(job_store, job)
+    broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         raise HTTPException(
             status_code=409,
@@ -2860,6 +2871,7 @@ async def run_agent_job_terminal_command(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalResponse:
     """Run an owner-entered command inside the retained chat sandbox."""
     job_store = _require_store(store)
@@ -2868,7 +2880,7 @@ async def run_agent_job_terminal_command(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
     await _require_mutable_workspace_ready(job=job, store=job_store)
-    broker = await _workspace_broker_for_job(job_store, job)
+    broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         raise HTTPException(status_code=409, detail="This deployment has no live workspace broker.")
     try:
@@ -2898,9 +2910,11 @@ async def create_agent_job_terminal(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionResponse:
     """Open an interactive PTY in the agent's workspace."""
     job, broker = await _terminal_owner_workspace(
+        require_host_pool(hosts),
         job_id=job_id,
         user=user,
         store=store,
@@ -2930,9 +2944,11 @@ async def list_agent_job_terminals(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionListResponse:
     """List interactive terminals, including exited sessions kept for replay."""
     job, broker = await _terminal_owner_workspace(
+        require_host_pool(hosts),
         job_id=job_id,
         user=user,
         store=store,
@@ -2954,9 +2970,11 @@ async def stream_agent_job_terminal(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> StreamingResponse:
     """Relay a resumable private PTY stream without exposing its broker token."""
     job, broker = await _terminal_owner_workspace(
+        require_host_pool(hosts),
         job_id=job_id,
         user=user,
         store=store,
@@ -2994,9 +3012,11 @@ async def write_agent_job_terminal_input(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionResponse:
     """Write bounded base64 input to an active interactive terminal."""
     job, broker = await _terminal_owner_workspace(
+        require_host_pool(hosts),
         job_id=job_id,
         user=user,
         store=store,
@@ -3023,9 +3043,11 @@ async def resize_agent_job_terminal(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionResponse:
     """Resize an active interactive terminal."""
     job, broker = await _terminal_owner_workspace(
+        require_host_pool(hosts),
         job_id=job_id,
         user=user,
         store=store,
@@ -3055,9 +3077,11 @@ async def delete_agent_job_terminal(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionResponse:
     """Idempotently kill an interactive terminal, even while a new job runs."""
     job, broker = await _terminal_owner_workspace(
+        require_host_pool(hosts),
         job_id=job_id,
         user=user,
         store=store,
@@ -3078,6 +3102,7 @@ async def get_agent_job_git_workspace(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentGitWorkspaceResponse:
     """Read live retained-workspace status, diff and recent commits."""
     job_store = _require_store(store)
@@ -3085,7 +3110,7 @@ async def get_agent_job_git_workspace(
     await _require_workspace_entitlement(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
-    broker = await _workspace_broker_for_job(job_store, job)
+    broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         return AgentGitWorkspaceResponse(available=False)
     try:
@@ -3537,6 +3562,7 @@ async def worker_claim(
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     grants: Any = Depends(get_grant_client),
+    conversation_commands: ConversationCommands | None = Depends(get_conversation_commands),
 ) -> WorkerClaimResponse | None:
     """Claim the next queued job and mint this attempt's capability token.
 
@@ -3724,7 +3750,7 @@ async def worker_claim(
         # retain a stable title without making further title-generation calls.
         background_tasks.add_task(
             generate_thread_title,
-            job_store,
+            require_conversation_commands(conversation_commands),
             **fence,
             prompt=claim["task_prompt"],
             model=claim["model"],

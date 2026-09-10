@@ -355,6 +355,9 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
         store=store,
         app_credentials=None,
         grants=grants,
+        # Title generation writes through the conversation commands now, so the
+        # handler is called with the capability rather than the store.
+        conversation_commands=store,
     )
     assert response.job_id == _JOB
     generate.assert_not_awaited()

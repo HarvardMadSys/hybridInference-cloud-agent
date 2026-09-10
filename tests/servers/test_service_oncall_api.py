@@ -174,6 +174,7 @@ def _build_app(store: FakeOnCallStore, *, app_credentials: Any | None = None) ->
         "ledger",
         "mcp",
         "credentials",
+        "source_control",
         "hosts",
         "grants",
     )

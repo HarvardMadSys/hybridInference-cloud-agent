@@ -210,6 +210,28 @@ def require_capability(capability: Capability | None, what: str) -> Capability:
     return capability
 
 
+def require_conversation_commands(
+    capability: ConversationCommands | None,
+) -> ConversationCommands:
+    """Require the conversation commands."""
+    return require_capability(capability, "conversation writes")
+
+
+def require_host_pool(capability: HostPoolRepository | None) -> HostPoolRepository:
+    """Require the host reads."""
+    return require_capability(capability, "host lookups")
+
+
+def require_queries(capability: ConversationQueries | None) -> ConversationQueries:
+    """Require the conversation read projections."""
+    return require_capability(capability, "conversation reads")
+
+
+def require_ledger(capability: LedgerRepository | None) -> LedgerRepository:
+    """Require the usage-ledger reads."""
+    return require_capability(capability, "usage")
+
+
 def get_agent_job_store(request: Request) -> AgentJobStore | None:
     """Dependency to obtain the agent job store (if configured).
 
