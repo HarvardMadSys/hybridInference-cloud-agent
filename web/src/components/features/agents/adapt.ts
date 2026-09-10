@@ -380,7 +380,7 @@ export function ownerFailureMessage(detail: string): string {
     return 'The response finished, but its completion could not be confirmed. Review the response before continuing.';
   }
   if (
-    /lease[ _](expired|lost)|lease[^.\n]*expir|indeterminate.*(?:turn|admission)|turn.*indeterminate|context[ _](?:lost|marked lost)|native(?: Agent CLI)?[ _](?:context|session|state)|Session Supervisor|shared (?:live|chat|supervisor|Agent CLI)/i.test(
+    /lease[ _](expired|lost)|lease[^.\n]*expir|indeterminate.*(?:turn|admission)|turn.*indeterminate|context[ _](?:lost|marked lost)|native(?: Agent CLI)?[- _](?:context|session|state)|Session Supervisor|shared (?:live|chat|supervisor|Agent CLI)/i.test(
       detail,
     )
   ) {

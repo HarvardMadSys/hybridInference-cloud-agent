@@ -362,13 +362,19 @@ describe('JobDetail', () => {
     expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeEnabled();
   });
 
-  it('keeps the archived view intact if unarchive fails', async () => {
-    vi.mocked(restoreAgentJob).mockRejectedValue(new Error('Connection lost'));
+  it.each([
+    ['Connection lost', 'Connection lost'],
+    [
+      'native context unavailable',
+      'The connection was interrupted before this response could be confirmed.',
+    ],
+  ])('keeps the archived view intact if unarchive fails: %s', async (detail, message) => {
+    vi.mocked(restoreAgentJob).mockRejectedValue(new Error(detail));
     const onReload = vi.fn();
     render(<JobDetail job={makeJob({ archivedAt: '2026-09-10T00:00:00Z' })} onReload={onReload} />);
     expect(screen.getByText(/Archiving does not stop it/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Unarchive and continue' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Connection lost');
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
     expect(onReload).not.toHaveBeenCalled();
     expect(screen.queryByRole('textbox', { name: 'Add a follow-up' })).not.toBeInTheDocument();
     expect(cancelAgentJob).not.toHaveBeenCalled();

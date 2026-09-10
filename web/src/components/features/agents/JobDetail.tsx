@@ -817,7 +817,9 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
         ) : null}
       </div>
 
-      {error ? <p className="text-xs text-red-600 dark:text-red-400">{error}</p> : null}
+      {error ? (
+        <p className="text-xs text-red-600 dark:text-red-400">{ownerFailureMessage(error)}</p>
+      ) : null}
 
       {view === 'diff' && files.length ? (
         <section className="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10 lg:grid lg:grid-cols-[minmax(14rem,0.35fr)_minmax(0,1fr)]">
@@ -1732,7 +1734,7 @@ export function JobDetail({
               <ThreadStatsBar job={job} />
               {actionError ? (
                 <p className="mt-2 text-center text-xs text-red-600 dark:text-red-400" role="alert">
-                  {actionError}
+                  {ownerFailureMessage(actionError)}
                 </p>
               ) : null}
             </div>
