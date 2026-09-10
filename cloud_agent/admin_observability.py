@@ -32,6 +32,10 @@ class AdminRun(BaseModel):
     created_at: datetime
     updated_at: datetime
     hosts: list[str] = Field(default_factory=list)
+    physical_hosts: list[str] = Field(
+        default_factory=list,
+        description="Distinct physical host labels, falling back to runner IDs when unreported.",
+    )
     tool_calls: int = 0
 
 

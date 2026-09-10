@@ -256,6 +256,35 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('admin runs list', () => {
+  it('displays physical hosts and counts machines instead of runner deployments', async () => {
+    vi.mocked(getAdminRuns).mockResolvedValue(
+      page([run({ hosts: ['gpu-box', 'gpu-box-kata'], physical_hosts: ['gpu-box'] })]),
+    );
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    expect(screen.getByTitle('gpu-box')).toBeInTheDocument();
+    expect(screen.queryByText('gpu-box-kata')).not.toBeInTheDocument();
+    expect(screen.queryByText('+1')).not.toBeInTheDocument();
+  });
+
+  it('keeps legacy runner names when the API has no physical host field', async () => {
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    expect(screen.getByTitle('host-a')).toBeInTheDocument();
+  });
+
+  it('shows the number of additional physical machines', async () => {
+    vi.mocked(getAdminRuns).mockResolvedValue(
+      page([
+        run({ hosts: ['runner-a', 'runner-b', 'runner-c'], physical_hosts: ['box-a', 'box-b'] }),
+      ]),
+    );
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    expect(screen.getByTitle('box-a, box-b')).toBeInTheDocument();
+    expect(screen.getByText('+1')).toBeInTheDocument();
+  });
+
   it.each<AgentAccessApi | undefined>([
     undefined,
     { allowed: false, permissions: ['agent.admin'] },

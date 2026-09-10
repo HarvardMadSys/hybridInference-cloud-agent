@@ -21,6 +21,8 @@ export interface AdminRun {
   created_at: string;
   updated_at: string;
   hosts: string[];
+  /** Display names; older control planes only return runner IDs in hosts. */
+  physical_hosts?: string[];
   tool_calls: number;
 }
 

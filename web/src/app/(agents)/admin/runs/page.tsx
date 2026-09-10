@@ -314,29 +314,7 @@ function RunsTable({ runs }: { runs: AdminRunsPage['runs'] }) {
                   </span>
                 </td>
                 <td className="px-4 py-3">
-                  {run.hosts.length > 0 ? (
-                    <div className="flex min-w-0 items-center gap-1" title={run.hosts.join(', ')}>
-                      <span className="sr-only">{run.hosts.join(', ')}</span>
-                      <span
-                        aria-hidden
-                        className="min-w-0 truncate rounded-md bg-gray-100 px-1.5 py-0.5 font-mono text-[11px] text-gray-600 dark:bg-white/5 dark:text-gray-300"
-                      >
-                        {run.hosts[0]}
-                      </span>
-                      {run.hosts.length > 1 && (
-                        <span
-                          aria-hidden
-                          className="shrink-0 text-xs text-gray-500 dark:text-gray-400"
-                        >
-                          +{run.hosts.length - 1}
-                        </span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="block truncate text-xs text-gray-400 dark:text-gray-500">
-                      Unassigned
-                    </span>
-                  )}
+                  <RunHosts hosts={run.physical_hosts ?? run.hosts} />
                 </td>
                 <td className="px-4 py-3 text-right tabular-nums text-gray-800 dark:text-gray-200">
                   <span className="block truncate" title={run.tool_calls.toLocaleString()}>
@@ -400,5 +378,30 @@ function EmptyRuns() {
         Widen the time window or adjust the filters.
       </p>
     </div>
+  );
+}
+
+function RunHosts({ hosts }: { hosts: string[] }) {
+  return (
+    <>
+      {hosts.length > 0 ? (
+        <div className="flex min-w-0 items-center gap-1" title={hosts.join(', ')}>
+          <span className="sr-only">{hosts.join(', ')}</span>
+          <span
+            aria-hidden
+            className="min-w-0 truncate rounded-md bg-gray-100 px-1.5 py-0.5 font-mono text-[11px] text-gray-600 dark:bg-white/5 dark:text-gray-300"
+          >
+            {hosts[0]}
+          </span>
+          {hosts.length > 1 && (
+            <span aria-hidden className="shrink-0 text-xs text-gray-500 dark:text-gray-400">
+              +{hosts.length - 1}
+            </span>
+          )}
+        </div>
+      ) : (
+        <span className="block truncate text-xs text-gray-400 dark:text-gray-500">Unassigned</span>
+      )}
+    </>
   );
 }

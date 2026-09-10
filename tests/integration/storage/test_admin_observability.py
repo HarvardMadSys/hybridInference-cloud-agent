@@ -107,6 +107,44 @@ async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turn
     assert "event_count" not in run
 
 
+async def test_run_physical_hosts_group_runners_without_changing_ids_or_filters(store):
+    job = await _create_job(store)
+    hosts = {
+        "gpu-box": {"physical_host": "gpu-box"},
+        "gpu-box-kata": {"physical_host": "  gpu-box  "},
+        "legacy-kata": {},
+        "blank-label": {"physical_host": "   "},
+        "invalid-label": {"physical_host": {"unexpected": "object"}},
+        "null-label": {"physical_host": None},
+    }
+    for number, (host, labels) in enumerate(hosts.items(), 1):
+        _, attempt, _ = await _seed_attempt(store, job=job, attempt_no=number, grant_id=None)
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO agent_runner_hosts (host, labels, first_seen_at, last_seen_at) "
+                "VALUES ($1, $2::jsonb, NOW(), NOW())",
+                host,
+                json.dumps(labels),
+            )
+            await conn.execute(
+                "UPDATE agent_attempts SET host_id = $1 WHERE id = $2", host, attempt
+            )
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET created_at = $1 WHERE id = $2", START, job["id"])
+    queries = AdminRunQueries(store._pool)
+    # Filtering still targets the exact runner, even when its display name is shared.
+    page = await queries.list_runs(
+        filters=RunFilters(host="gpu-box-kata"), since=START, until=END, cursor=None, limit=20
+    )
+    assert [run.id for run in page.runs] == [job["id"]]
+    expected = ["blank-label", "gpu-box", "invalid-label", "legacy-kata", "null-label"]
+    assert page.runs[0].physical_hosts == expected
+    assert page.runs[0].hosts == sorted(hosts)
+    detail = await queries.get_run(job["id"])
+    assert detail["physical_hosts"] == expected
+    assert detail["hosts"] == sorted(hosts)
+
+
 @pytest.mark.parametrize("title_source", ["fallback", "generated", "manual"])
 async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypatch, title_source):
     job = await _create_job(store, task_prompt="PRIVATE-PROMPT-FIRST-LINE\nMore private content")
