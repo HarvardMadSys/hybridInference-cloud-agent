@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { SettingsLauncher } from '@/components/features/settings/SettingsLauncher';
 import { archiveAgentJob, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
+import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { Translator } from '@/lib/i18n/translate';
 import { groupJobsByProject, projectLabel } from './conversations';
 import type { ConversationRow, ProjectSection } from './conversations';
@@ -84,6 +85,21 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   // Restore after mount, not during render: the server has no storage, so
   // seeding initial state from it would be a hydration mismatch.
   useEffect(() => setExpandedOverrides(readExpandedOverrides()), []);
+
+  useEffect(
+    () =>
+      onAgentSessionsChanged((change) => {
+        setHiddenThreads((current) => {
+          const next = new Set(current);
+          for (const id of change.threadIds) {
+            if (change.archived === false && !change.deleted) next.delete(id);
+            else next.add(id);
+          }
+          return next;
+        });
+      }),
+    [],
+  );
 
   // Collapsing hands this width to the panes on the right, which size themselves
   // against what is left of the shell.

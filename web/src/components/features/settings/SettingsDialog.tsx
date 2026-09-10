@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef } from 'react';
+import Link from 'next/link';
 import { useAuth, useLocale, useTheme } from '@/components/providers';
 import { LOCALES, LOCALE_LABELS, isLocale } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
@@ -27,7 +28,13 @@ const FIELD_HINT = 'mt-1.5 text-[12px] leading-relaxed text-gray-500 dark:text-g
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-export function SettingsDialog({ onClose }: { onClose: () => void }) {
+export function SettingsDialog({
+  onClose,
+  initialSection,
+}: {
+  onClose: () => void;
+  initialSection?: 'appearance' | 'language';
+}) {
   const { t, locale, setLocale } = useLocale();
   const { preference, setPreference } = useTheme();
   const { state } = useAuth();
@@ -39,8 +46,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   // continues through the page behind it — which is still rendered, just
   // covered.
   useEffect(() => {
-    panel.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
-  }, []);
+    const selector =
+      initialSection === 'language'
+        ? '#settings-language + div select'
+        : initialSection === 'appearance'
+          ? 'input[name="theme-preference"]:checked'
+          : FOCUSABLE;
+    panel.current?.querySelector<HTMLElement>(selector)?.focus();
+  }, [initialSection]);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -198,6 +211,19 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               </label>
               <p className={FIELD_HINT}>{t('settings.language.hint')}</p>
             </div>
+          </section>
+          <section aria-labelledby="settings-conversations" className="mt-6">
+            <h3 id="settings-conversations" className={SECTION_TITLE}>
+              {t('settings.conversations')}
+            </h3>
+            <Link
+              href="/archived"
+              onClick={onClose}
+              className="mt-3 flex items-center justify-between rounded-lg border border-gray-200 px-3 py-2.5 text-[13px] font-medium text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5"
+            >
+              {t('settings.archived')}
+              <span aria-hidden="true">→</span>
+            </Link>
           </section>
         </div>
 

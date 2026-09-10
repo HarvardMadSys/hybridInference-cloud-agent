@@ -538,7 +538,11 @@ class FakeAgentJobStore:
         job = self.jobs.get(job_id)
         if job is None:
             return None
-        return {**job, "pinned_at": self.pinned_threads.get(job["thread_id"])}
+        return {
+            **job,
+            "pinned_at": self.pinned_threads.get(job["thread_id"]),
+            "archived_at": self.archived_threads.get(job["thread_id"]),
+        }
 
     async def list_thread_events_after(
         self, *, job_id: str, user_id: str, after_id: int = 0, limit: int = 500
@@ -5516,3 +5520,175 @@ async def test_a_thread_event_read_refuses_a_foreign_job(
     response = await client.get(f"/v1/agent/jobs/{job_id}/thread/events")
 
     assert response.status_code == 404
+
+
+async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    job_id = await _create_job(client)
+    await store.set_thread_archived(job_id=job_id, user_id=_OWNER, archived=True)
+    job = await store.get_job(job_id)
+    assert job is not None
+    listing = AsyncMock(
+        return_value={
+            "sessions": [
+                {
+                    "thread_id": job["thread_id"],
+                    "title": "Stable conversation title",
+                    "archived_at": job["archived_at"],
+                    "job": job,
+                    "can_delete": False,
+                    "delete_block_reason": "session_active",
+                }
+            ],
+            "total": 51,
+            "next_cursor": "opaque-next-page",
+            "projects": [{"repo": "owner/name", "count": 51}],
+        }
+    )
+    monkeypatch.setattr(store, "list_sessions", listing, raising=False)
+
+    response = await client.get(
+        "/v1/agent/sessions",
+        params={
+            "archived": "true",
+            "search": "  Stable  ",
+            "repo": "owner/name",
+            "state": "queued",
+            "limit": 20,
+            "cursor": "previous-page",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sessions"][0]["title"] == "Stable conversation title"
+    assert body["sessions"][0]["archived_at"] == body["sessions"][0]["job"]["archived_at"]
+    assert body["sessions"][0]["delete_block_reason"] == "session_active"
+    assert body["total"] == 51 and body["next_cursor"] == "opaque-next-page"
+    assert body["projects"] == [{"repo": "owner/name", "count": 51}]
+    listing.assert_awaited_once_with(
+        user_id=_OWNER,
+        archived=True,
+        search="Stable",
+        repo="owner/name",
+        state="queued",
+        limit=20,
+        cursor="previous-page",
+    )
+
+
+async def test_session_list_rejects_bad_cursor_and_display_filters(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    listing = AsyncMock(side_effect=ValueError("Invalid session cursor for these filters"))
+    monkeypatch.setattr(store, "list_sessions", listing, raising=False)
+    assert (await client.get("/v1/agent/sessions?cursor=bad")).status_code == 400
+    for params in ({"state": "succeeded"}, {"limit": 201}, {"search": "bad\x00search"}):
+        assert (await client.get("/v1/agent/sessions", params=params)).status_code == 422
+    assert listing.await_count == 1
+
+
+async def test_session_mutations_use_explicit_owner_snapshot(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    thread_ids = ["athr_1", "athr_2"]
+    archive = AsyncMock(
+        return_value={
+            "sessions": [{"thread_id": value, "archived_at": None} for value in thread_ids]
+        }
+    )
+    delete = AsyncMock(return_value={"thread_ids": thread_ids})
+    monkeypatch.setattr(store, "set_sessions_archived", archive, raising=False)
+    monkeypatch.setattr(store, "delete_sessions", delete, raising=False)
+    response = await client.post(
+        "/v1/agent/sessions/archive", json={"thread_ids": thread_ids, "archived": False}
+    )
+    assert response.status_code == 200
+    assert all(row["archived"] is False for row in response.json()["sessions"])
+    archive.assert_awaited_once_with(thread_ids=thread_ids, user_id=_OWNER, archived=False)
+    response = await client.post("/v1/agent/sessions/delete", json={"thread_ids": thread_ids})
+    assert response.status_code == 200 and response.json() == {"thread_ids": thread_ids}
+    delete.assert_awaited_once_with(thread_ids=thread_ids, user_id=_OWNER)
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        ("not_found", 404),
+        ("not_archived", 409),
+        ("session_active", 409),
+        ("fork_in_progress", 409),
+        ("publication_pending", 409),
+    ],
+)
+async def test_session_delete_conflicts_have_actionable_types(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch, error: str, status: int
+):
+    delete = AsyncMock(return_value={"error": error})
+    monkeypatch.setattr(store, "delete_sessions", delete, raising=False)
+    response = await client.post("/v1/agent/sessions/delete", json={"thread_ids": ["athr_1"]})
+    assert response.status_code == status
+    assert response.json()["detail"]["error"]["type"] == error
+
+
+@pytest.mark.parametrize("thread_ids", [[], [""], ["a", "a"], ["bad\x00id"], ["x" * 129]])
+async def test_session_mutations_refuse_ambiguous_selections(client: AsyncClient, thread_ids):
+    for path, body in (
+        ("archive", {"thread_ids": thread_ids, "archived": False}),
+        ("delete", {"thread_ids": thread_ids}),
+    ):
+        assert (await client.post(f"/v1/agent/sessions/{path}", json=body)).status_code == 422
+    too_many = {"thread_ids": [f"athr_{index}" for index in range(1001)]}
+    assert (await client.post("/v1/agent/sessions/delete", json=too_many)).status_code == 422
+
+
+async def test_archived_history_is_readable_but_follow_up_requires_unarchive(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    job_id = await _create_job(client)
+    assert (await client.post(f"/v1/agent/jobs/{job_id}/archive")).status_code == 200
+    detail = await client.get(f"/v1/agent/jobs/{job_id}")
+    assert detail.status_code == 200 and detail.json()["archived_at"] is not None
+    assert (await client.get(f"/v1/agent/jobs/{job_id}/thread")).status_code == 200
+    blocked = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "continue"})
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["error"]["type"] == "session_archived"
+    assert len(store.jobs) == 1
+    assert (await client.delete(f"/v1/agent/jobs/{job_id}/archive")).status_code == 200
+    assert (
+        await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "continue"})
+    ).status_code == 201
+
+
+async def test_follow_up_rechecks_archive_at_the_atomic_store_boundary(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    job_id = await _create_job(client)
+    monkeypatch.setattr(
+        store, "create_follow_up", AsyncMock(return_value={"error": "session_archived"})
+    )
+    response = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "continue"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"]["type"] == "session_archived"
+
+
+async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspace(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    job_id = await _create_job(client)
+    store.jobs[job_id]["deleted_at"] = datetime.now(timezone.utc)
+    for suffix in (
+        "",
+        "/thread",
+        "/thread/stats",
+        "/thread/events",
+        "/events",
+        "/stream",
+        "/files",
+        "/git",
+    ):
+        response = await client.get(f"/v1/agent/jobs/{job_id}{suffix}")
+        assert response.status_code == 404, (suffix, response.text)
+    for suffix, body in (("/follow-ups", {"prompt": "continue"}), ("/fork", {}), ("/cancel", {})):
+        response = await client.post(f"/v1/agent/jobs/{job_id}{suffix}", json=body)
+        assert response.status_code == 404, (suffix, response.text)

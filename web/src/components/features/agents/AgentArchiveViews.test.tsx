@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentJob } from './types';
 
@@ -49,8 +49,8 @@ vi.mock('./useAgentJobs', () => ({
   useProjectJobs: mocks.useProjectJobs,
 }));
 
-import { ArchivedTasksView } from './ArchivedTasksView';
 import { AgentsSidebar } from './AgentsSidebar';
+import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 
 function job(overrides: Partial<AgentJob> = {}): AgentJob {
   return {
@@ -127,27 +127,25 @@ describe('agent task archiving', () => {
     expect(screen.getByRole('link', { name: 'Archived' })).toHaveAttribute('href', '/archived');
   });
 
-  it('loads archived conversations separately and restores them', async () => {
+  it('shows a locally hidden sidebar conversation again after it is unarchived elsewhere', async () => {
     mocks.useAgentJobList.mockReturnValue({
-      jobs: [job({ state: 'running' })],
+      jobs: [job()],
       loading: false,
       error: null,
       reload: mocks.reload,
     });
-    mocks.restore.mockResolvedValue({
+    mocks.archive.mockResolvedValue({
       thread_id: 'thread-1',
-      archived: false,
-      archived_at: null,
+      archived: true,
+      archived_at: new Date().toISOString(),
     });
 
-    render(<ArchivedTasksView />);
-
-    expect(mocks.useAgentJobList).toHaveBeenCalledWith(10_000, true);
-    expect(screen.getByText('Running')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
-
-    await waitFor(() => expect(mocks.restore).toHaveBeenCalledWith('job-1'));
-    expect(mocks.reload).toHaveBeenCalledOnce();
-    expect(screen.queryByText('Development environment setup')).not.toBeInTheDocument();
+    render(<AgentsSidebar />);
+    fireEvent.click(screen.getByRole('button', { name: 'Archive Development environment setup' }));
+    await waitFor(() =>
+      expect(screen.queryByText('Development environment setup')).not.toBeInTheDocument(),
+    );
+    act(() => announceAgentSessionsChanged({ threadIds: ['thread-1'], archived: false }));
+    expect(await screen.findByText('Development environment setup')).toBeInTheDocument();
   });
 });

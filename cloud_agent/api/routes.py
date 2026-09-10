@@ -91,6 +91,13 @@ from cloud_agent.schemas import (
     AgentJobResponse,
     AgentProject,
     AgentProjectListResponse,
+    AgentSessionArchiveRequest,
+    AgentSessionArchiveResponse,
+    AgentSessionDeleteResponse,
+    AgentSessionListResponse,
+    AgentSessionResponse,
+    AgentSessionSelection,
+    AgentSessionState,
     AgentTerminalRequest,
     AgentTerminalResponse,
     AgentTerminalSessionCreateRequest,
@@ -539,6 +546,7 @@ def _job_response(
         created_at=_iso(job["created_at"]),
         updated_at=_iso(job["updated_at"]),
         pinned_at=_iso(job.get("pinned_at")),
+        archived_at=_iso(job.get("archived_at")),
         spent_usd=usage.get("spent_usd"),
         tokens_in=usage.get("tokens_in"),
         tokens_out=usage.get("tokens_out"),
@@ -587,7 +595,7 @@ async def _owned_job(
     cannot be probed for existence across accounts.
     """
     job = await store.get_job(job_id)
-    if job is None or job["user_id"] != user["user_id"]:
+    if job is None or job["user_id"] != user["user_id"] or job.get("deleted_at") is not None:
         raise HTTPException(
             status_code=404,
             detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
@@ -1541,6 +1549,104 @@ async def list_agent_jobs(
     return AgentJobListResponse(jobs=[_job_response(job) for job in jobs])
 
 
+@router.get("/sessions", response_model=AgentSessionListResponse)
+async def list_agent_sessions(
+    limit: int = Query(50, ge=1, le=200),
+    archived: bool = Query(False),
+    cursor: str | None = Query(None, max_length=1024),
+    search: str | None = Query(None, max_length=200, pattern=r"^[^\x00]*$"),
+    repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
+    state: AgentSessionState | None = Query(None),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> AgentSessionListResponse:
+    """Search complete conversations by stable title, project and display state."""
+    job_store = _require_store(store)
+    try:
+        result = await job_store.list_sessions(
+            user_id=user["user_id"],
+            archived=archived,
+            limit=limit,
+            cursor=cursor,
+            search=(search.strip() or None) if search is not None else None,
+            repo=repo,
+            state=state,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return AgentSessionListResponse(
+        sessions=[
+            AgentSessionResponse(
+                thread_id=session["thread_id"],
+                title=session["title"],
+                archived_at=_iso(session["archived_at"]),
+                job=_job_response(session["job"]),
+                can_delete=session["can_delete"],
+                delete_block_reason=session.get("delete_block_reason"),
+            )
+            for session in result["sessions"]
+        ],
+        total=result["total"],
+        next_cursor=result["next_cursor"],
+        projects=result["projects"],
+    )
+
+
+def _raise_session_mutation_error(result: dict[str, Any]) -> None:
+    """Translate atomic selection failures without exposing foreign ownership."""
+    error = result.get("error")
+    if error is None:
+        return
+    messages = {
+        "not_found": "One or more selected sessions are no longer available.",
+        "not_archived": "Archive every selected session before deleting it.",
+        "session_active": "A selected session is still active. Wait for its work to finish.",
+        "fork_in_progress": "A selected session is being forked. Wait for the fork to finish.",
+        "publication_pending": "A selected session has unfinished publication. Wait for it to finish.",
+    }
+    raise HTTPException(
+        status_code=404 if error == "not_found" else 409,
+        detail={"error": {"type": error, "message": messages[error]}},
+    )
+
+
+@router.post("/sessions/archive", response_model=AgentSessionArchiveResponse)
+async def archive_agent_sessions(
+    body: AgentSessionArchiveRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> AgentSessionArchiveResponse:
+    """Archive or unarchive an explicit owner-selected snapshot atomically."""
+    result = await _require_store(store).set_sessions_archived(
+        thread_ids=body.thread_ids, user_id=user["user_id"], archived=body.archived
+    )
+    _raise_session_mutation_error(result)
+    return AgentSessionArchiveResponse(
+        sessions=[
+            AgentThreadArchiveResponse(
+                thread_id=session["thread_id"],
+                archived=body.archived,
+                archived_at=_iso(session["archived_at"]),
+            )
+            for session in result["sessions"]
+        ]
+    )
+
+
+@router.post("/sessions/delete", response_model=AgentSessionDeleteResponse)
+async def delete_agent_sessions(
+    body: AgentSessionSelection,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> AgentSessionDeleteResponse:
+    """Permanently remove archived sessions from owner history, retaining audit data."""
+    result = await _require_store(store).delete_sessions(
+        thread_ids=body.thread_ids, user_id=user["user_id"]
+    )
+    _raise_session_mutation_error(result)
+    return AgentSessionDeleteResponse(thread_ids=result["thread_ids"])
+
+
 @router.get("/projects", response_model=AgentProjectListResponse)
 async def list_agent_projects(
     archived: bool = Query(False),
@@ -1752,6 +1858,19 @@ def _sandbox_context_lost_error() -> HTTPException:
     )
 
 
+def _session_archived_error() -> HTTPException:
+    """Require an explicit unarchive before accepting another conversation turn."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "session_archived",
+                "message": "Unarchive this session before continuing the conversation.",
+            }
+        },
+    )
+
+
 @router.post("/jobs/{job_id}/follow-ups", response_model=AgentJobResponse, status_code=201)
 async def create_agent_follow_up(
     job_id: str,
@@ -1764,6 +1883,8 @@ async def create_agent_follow_up(
     """Append a turn and queue its member in the retained shared sandbox."""
     job_store = _require_store(store)
     parent = await _owned_job(job_store, job_id, user)
+    if parent.get("archived_at") is not None:
+        raise _session_archived_error()
     retained = parent.get("thread_sandbox")
     if isinstance(retained, dict) and (
         retained.get("context_status") == "lost"
@@ -1860,6 +1981,8 @@ async def create_agent_follow_up(
             status_code=404,
             detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
         )
+    if job.get("error") == "session_archived":
+        raise _session_archived_error()
     if job.get("error") == "sandbox_context_lost":
         # The durable store repeats the check under its thread/sandbox locks.
         # It can legitimately disagree with the advisory read above when the

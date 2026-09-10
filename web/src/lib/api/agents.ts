@@ -12,6 +12,7 @@
 //    UI stays complete across that.
 
 import { fetchWithAuth, jsonOrThrow } from './client';
+import { announceAgentSessionsChanged } from './agentSessionEvents';
 import { config } from '@/config/env';
 
 const API_BASE = config.apiBase;
@@ -199,6 +200,7 @@ export interface AgentJobApi {
   created_at: string | null;
   updated_at: string | null;
   pinned_at?: string | null;
+  archived_at?: string | null;
   // Read server-side from the billing ledger, never from the agent's own
   // report. Null means "no ledger configured", which is not the same as zero.
   spent_usd: number | null;
@@ -539,6 +541,91 @@ export interface AgentThreadArchiveApi {
   archived_at: string | null;
 }
 
+export type AgentSessionState =
+  | 'running'
+  | 'queued'
+  | 'needs_review'
+  | 'done'
+  | 'failed'
+  | 'cancelled';
+
+export interface AgentSessionApi {
+  thread_id: string;
+  title: string;
+  archived_at: string | null;
+  job: AgentJobApi;
+  can_delete: boolean;
+  delete_block_reason?:
+    | 'session_active'
+    | 'fork_in_progress'
+    | 'publication_pending'
+    | 'not_archived'
+    | null;
+}
+
+export interface AgentSessionProjectApi {
+  repo: string;
+  count: number;
+}
+
+export interface AgentSessionListApi {
+  sessions: AgentSessionApi[];
+  total: number;
+  next_cursor: string | null;
+  /** Facets honor search and state, before selecting one repository. */
+  projects: AgentSessionProjectApi[];
+}
+
+export interface AgentSessionListOptions {
+  archived?: boolean;
+  limit?: number;
+  cursor?: string;
+  search?: string;
+  repo?: string;
+  state?: AgentSessionState;
+}
+
+export async function listAgentSessions(
+  options: AgentSessionListOptions = {},
+  signal?: AbortSignal,
+): Promise<AgentSessionListApi> {
+  const query = new URLSearchParams({
+    archived: String(options.archived ?? true),
+    limit: String(options.limit ?? 50),
+  });
+  if (options.cursor) query.set('cursor', options.cursor);
+  if (options.search) query.set('search', options.search);
+  if (options.repo !== undefined) query.set('repo', options.repo);
+  if (options.state) query.set('state', options.state);
+  const response = await fetchWithAuth(API_BASE, `/v1/agent/sessions?${query}`, { signal });
+  return jsonOrThrow<AgentSessionListApi>(response);
+}
+
+export async function setAgentSessionsArchived(
+  threadIds: string[],
+  archived: boolean,
+): Promise<{ sessions: AgentThreadArchiveApi[] }> {
+  const response = await fetchWithAuth(API_BASE, '/v1/agent/sessions/archive', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ thread_ids: threadIds, archived }),
+  });
+  const result = await jsonOrThrow<{ sessions: AgentThreadArchiveApi[] }>(response);
+  announceAgentSessionsChanged({ threadIds: result.sessions.map((s) => s.thread_id), archived });
+  return result;
+}
+
+export async function deleteAgentSessions(threadIds: string[]): Promise<{ thread_ids: string[] }> {
+  const response = await fetchWithAuth(API_BASE, '/v1/agent/sessions/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ thread_ids: threadIds }),
+  });
+  const result = await jsonOrThrow<{ thread_ids: string[] }>(response);
+  announceAgentSessionsChanged({ threadIds: result.thread_ids, deleted: true });
+  return result;
+}
+
 /** Hide the entire conversation containing this job from active task history. */
 export async function archiveAgentJob(jobId: string): Promise<AgentThreadArchiveApi> {
   const resp = await fetchWithAuth(
@@ -548,7 +635,9 @@ export async function archiveAgentJob(jobId: string): Promise<AgentThreadArchive
       method: 'POST',
     },
   );
-  return jsonOrThrow(resp);
+  const result = await jsonOrThrow<AgentThreadArchiveApi>(resp);
+  announceAgentSessionsChanged({ threadIds: [result.thread_id], archived: true });
+  return result;
 }
 
 /** Return an archived conversation to active task history. */
@@ -560,7 +649,9 @@ export async function restoreAgentJob(jobId: string): Promise<AgentThreadArchive
       method: 'DELETE',
     },
   );
-  return jsonOrThrow(resp);
+  const result = await jsonOrThrow<AgentThreadArchiveApi>(resp);
+  announceAgentSessionsChanged({ threadIds: [result.thread_id], archived: false });
+  return result;
 }
 
 export interface AgentThreadPinApi {

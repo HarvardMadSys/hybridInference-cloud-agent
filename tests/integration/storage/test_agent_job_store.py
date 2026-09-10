@@ -835,6 +835,14 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert operation["sandbox_id"] == sandbox["sandbox_id"]
     assert operation["container_id"] == "container-shared-one"
     assert operation["target_thread_id"] != job["thread_id"]
+    await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=True)
+    assert (await store.list_sessions(user_id=job["user_id"], archived=True))["sessions"][0][
+        "delete_block_reason"
+    ] == "fork_in_progress"
+    assert await store.delete_sessions(thread_ids=[job["thread_id"]], user_id=job["user_id"]) == {
+        "error": "fork_in_progress"
+    }
+    await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=False)
     async with store._pool.acquire() as conn:
         assert (
             await conn.fetchval(
@@ -964,7 +972,28 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         receipt=receipt,
     )
     assert materialized is not None and materialized["state"] == "materialized"
-    child = await store.finalize_session_fork(operation_id=operation["id"])
+    # Queue finalization before an idempotent owner retry while holding the
+    # operation lock. A retry that takes thread -> operation would deadlock
+    # against finalization's operation -> thread once this lock is released.
+    async with store._pool.acquire() as conn, conn.transaction():
+        await conn.fetchrow(
+            "SELECT id FROM agent_session_forks WHERE id = $1 FOR UPDATE", operation["id"]
+        )
+        finalization = asyncio.create_task(
+            store.finalize_session_fork(operation_id=operation["id"])
+        )
+        await asyncio.sleep(0.03)
+        retry = asyncio.create_task(
+            store.prepare_session_fork(
+                source_job_id=job["id"],
+                user_id=job["user_id"],
+                idempotency_key="native-fork-one",
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert not finalization.done() and not retry.done()
+    child, replayed = await asyncio.wait_for(asyncio.gather(finalization, retry), timeout=3)
+    assert replayed is not None and replayed["state"] == "ready"
     assert child is not None
     assert child["thread_id"] == operation["target_thread_id"]
     assert child["fork_source_job_id"] == job["id"]
@@ -3669,3 +3698,299 @@ async def test_thread_events_stop_at_the_owner(store: AgentJobStore):
 
     assert await store.list_thread_events_after(job_id=mine["id"], user_id="user-2") is None
     assert await store.list_thread_events_after(job_id=mine["id"], user_id="user-1") == []
+
+
+async def test_session_pages_count_threads_and_keep_long_conversation_titles(store: AgentJobStore):
+    """A long thread cannot consume the history window or replace its title."""
+    jobs = [await _create_job(store, task_prompt=f"History task {index}") for index in range(55)]
+    long_thread = jobs[0]
+    for index in range(60):
+        child = await store.create_follow_up(
+            parent_job_id=long_thread["id"], user_id="user-1", prompt=f"Follow-up {index}"
+        )
+        assert child is not None and child["turn_no"] == index + 2
+    await store.set_sessions_archived(
+        thread_ids=[job["thread_id"] for job in jobs], user_id="user-1", archived=True
+    )
+    first = await store.list_sessions(user_id="user-1", archived=True, limit=50)
+    assert first["total"] == 55 and len(first["sessions"]) == 50
+    assert first["next_cursor"] is not None
+    # Removing a preceding row must not skip the next conversation, as an
+    # offset cursor would. Counts reflect the current owner history.
+    await store.set_sessions_archived(
+        thread_ids=[first["sessions"][0]["thread_id"]], user_id="user-1", archived=False
+    )
+    second = await store.list_sessions(
+        user_id="user-1", archived=True, limit=50, cursor=first["next_cursor"]
+    )
+    assert second["total"] == 54 and len(second["sessions"]) == 5
+    assert second["next_cursor"] is None
+    all_sessions = first["sessions"] + second["sessions"]
+    assert {session["thread_id"] for session in all_sessions} == {job["thread_id"] for job in jobs}
+    long_session = next(row for row in all_sessions if row["thread_id"] == long_thread["thread_id"])
+    assert long_session["title"] == "History task 0"
+    assert long_session["job"]["turn_no"] == 61
+    assert long_session["job"]["task_prompt"] == "Follow-up 59"
+    assert long_session["job"]["archived_at"] == long_session["archived_at"]
+
+
+async def test_session_search_state_and_project_facets_apply_before_pagination(
+    store: AgentJobStore,
+):
+    target = await _create_job(store, task_prompt="Repair 100%_ Coverage", repo="acme/api")
+    other_project = await _create_job(store, task_prompt="Repair Dashboard", repo="acme/web")
+    needs_review = await _create_job(store, task_prompt="Repair renderer", repo="acme/api")
+    foreign = await _create_job(store, user_id="user-2", task_prompt="Repair 100%_ Coverage")
+    for job in (target, other_project, needs_review, foreign):
+        await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=True)
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = 'succeeded'")
+        await conn.execute(
+            "UPDATE agent_jobs SET published_pr_url = 'https://example.test/pr/1' "
+            "WHERE id = ANY($1::text[])",
+            [target["id"], other_project["id"]],
+        )
+    literal = await store.list_sessions(user_id="user-1", archived=True, search="100%_")
+    assert [row["thread_id"] for row in literal["sessions"]] == [target["thread_id"]]
+    found = await store.list_sessions(
+        user_id="user-1", archived=True, search="rEPAir", state="done", repo="acme/api", limit=1
+    )
+    assert found["total"] == 1
+    assert found["projects"] == [{"repo": "acme/api", "count": 1}, {"repo": "acme/web", "count": 1}]
+    assert found["sessions"][0]["thread_id"] == target["thread_id"]
+    review = await store.list_sessions(user_id="user-1", archived=True, state="needs_review")
+    assert review["total"] == 1 and review["sessions"][0]["thread_id"] == needs_review["thread_id"]
+    missing = await store.list_sessions(user_id="user-1", archived=True, repo="acme/missing")
+    assert missing["total"] == 0 and missing["sessions"] == []
+    assert missing["projects"] == [
+        {"repo": "acme/api", "count": 2},
+        {"repo": "acme/web", "count": 1},
+    ]
+
+
+async def test_session_cursor_is_scoped_to_owner_and_filters(store: AgentJobStore):
+    for _ in range(2):
+        job = await _create_job(store)
+        await store.set_thread_archived(job_id=job["id"], user_id="user-1", archived=True)
+    page = await store.list_sessions(user_id="user-1", archived=True, limit=1)
+    assert page["next_cursor"] is not None
+    for overrides in (
+        {"user_id": "user-2"},
+        {"archived": False},
+        {"search": "another title"},
+        {"repo": "different/repo"},
+        {"state": "queued"},
+        {"cursor": "bad cursor"},
+    ):
+        args = {"user_id": "user-1", "archived": True, "cursor": page["next_cursor"], **overrides}
+        with pytest.raises(ValueError, match="Invalid session cursor"):
+            await store.list_sessions(**args)
+
+
+async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(store: AgentJobStore):
+    mine = await _create_job(store)
+    busy = await _create_job(store)
+    foreign = await _create_job(store, user_id="user-2")
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = 'failed' WHERE id = $1", mine["id"])
+    assert await store.set_sessions_archived(
+        thread_ids=[mine["thread_id"], foreign["thread_id"]], user_id="user-1", archived=True
+    ) == {"error": "not_found"}
+    assert (await store.get_job(mine["id"]))["archived_at"] is None
+    assert await store.delete_sessions(thread_ids=[mine["thread_id"]], user_id="user-1") == {
+        "error": "not_archived"
+    }
+    selection = [mine["thread_id"], busy["thread_id"]]
+    archived = await store.set_sessions_archived(
+        thread_ids=selection, user_id="user-1", archived=True
+    )
+    assert len(archived["sessions"]) == 2
+    assert len({row["archived_at"] for row in archived["sessions"]}) == 1
+    assert await store.delete_sessions(thread_ids=selection, user_id="user-1") == {
+        "error": "session_active"
+    }
+    assert await store.delete_sessions(
+        thread_ids=[mine["thread_id"], foreign["thread_id"]], user_id="user-1"
+    ) == {"error": "not_found"}
+    assert (await store.get_job(mine["id"]))["deleted_at"] is None
+    assert await store.delete_sessions(thread_ids=[mine["thread_id"]], user_id="user-1") == {
+        "thread_ids": [mine["thread_id"]]
+    }
+    retained = await store.get_job(mine["id"])
+    assert retained is not None and retained["deleted_at"] is not None
+    assert retained["task_prompt"] == mine["task_prompt"]
+    assert await store.get_thread_for_job(job_id=mine["id"], user_id="user-1") is None
+    assert await store.list_thread_events_after(job_id=mine["id"], user_id="user-1") is None
+    assert await store.thread_stats_inputs(job_id=mine["id"], user_id="user-1") is None
+    assert (
+        await store.set_thread_archived(job_id=mine["id"], user_id="user-1", archived=False) is None
+    )
+    assert await store.set_thread_pinned(job_id=mine["id"], user_id="user-1", pinned=True) is None
+    assert await store.set_sessions_archived(
+        thread_ids=selection, user_id="user-1", archived=False
+    ) == {"error": "not_found"}
+    assert (await store.get_job(busy["id"]))["archived_at"] is not None
+    assert (
+        await store.create_follow_up(
+            parent_job_id=mine["id"], user_id="user-1", prompt="must not resurrect"
+        )
+        is None
+    )
+    assert (
+        await store.prepare_session_fork(
+            source_job_id=mine["id"], user_id="user-1", idempotency_key="deleted-history"
+        )
+        is None
+    )
+    assert {job["id"] for job in await store.list_jobs(user_id="user-1", archived=True)} == {
+        busy["id"]
+    }
+    assert (await store.list_sessions(user_id="user-1", archived=True))["total"] == 1
+    assert (await store.list_projects(user_id="user-1", archived=True))[0]["task_count"] == 1
+
+
+async def test_archiving_serializes_with_follow_up_creation(store: AgentJobStore):
+    job = await _create_job(store)
+    async with store._pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE agent_threads SET archived_at = NOW() WHERE id = $1", job["thread_id"]
+        )
+        follow_up = asyncio.create_task(
+            store.create_follow_up(
+                parent_job_id=job["id"], user_id="user-1", prompt="racing message"
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert not follow_up.done()
+    assert await asyncio.wait_for(follow_up, timeout=3) == {"error": "session_archived"}
+    assert len((await store.get_thread_for_job(job_id=job["id"], user_id="user-1"))["jobs"]) == 1
+    await store.set_sessions_archived(
+        thread_ids=[job["thread_id"]], user_id="user-1", archived=False
+    )
+    resumed = await store.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="resume"
+    )
+    assert resumed is not None and resumed["turn_no"] == 2
+
+
+async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billing(
+    store: AgentJobStore,
+):
+    """History deletion is independent of the shared container's lifetime."""
+    source, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": source["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence, container_id="container-history-delete", context_status="new"
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=source["id"])
+    assert await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="message",
+        payload={"text": "Retained answer for the source session"},
+    )
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=source["id"],
+        context_status="live",
+        native_session_id="native-source-history",
+        idle_timeout_seconds=1800,
+        base_sha=source["base_sha"],
+    )
+    assert await store.transition(
+        job_id=source["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    await store.set_thread_archived(job_id=source["id"], user_id="user-1", archived=True)
+    pending = await store.list_sessions(user_id="user-1", archived=True)
+    assert pending["sessions"][0]["delete_block_reason"] == "publication_pending"
+    assert await store.delete_sessions(thread_ids=[source["thread_id"]], user_id="user-1") == {
+        "error": "publication_pending"
+    }
+    sibling = await _create_job(store, task_prompt="forked sibling")
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_sandbox_snapshots SET state = 'published'")
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'succeeded', fork_source_job_id = $2 WHERE id = $1",
+            sibling["id"],
+            source["id"],
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_thread_sandbox_memberships (
+                thread_id, sandbox_id, native_session_id, native_state, context_status,
+                resident_state, last_settled_job_id, forked_from_thread_id, fork_anchor_job_id
+            ) VALUES ($1, $2, 'native-sibling-history', 'ready', 'live', 'live', $3, $4, $5)
+            """,
+            sibling["thread_id"],
+            sandbox["sandbox_id"],
+            sibling["id"],
+            source["thread_id"],
+            source["id"],
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_thread_residencies
+                (thread_id, host, sandbox_id, runtime_id, status, lease_expires_at, grant_id)
+            VALUES ($1, 'shared-runner', $2, 'claude-code', 'hot', NOW() + INTERVAL '1 hour', 'grant-history')
+            """,
+            source["thread_id"],
+            sandbox["sandbox_id"],
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_attempt_ledger
+                (attempt_id, grant_id, residency_generation, binding_id, window_since, snapshot)
+            VALUES ($1, 'grant-history', 1, 'binding-test', NOW(), '{"spent_usd": 0.42}')
+            """,
+            claim["attempt_id"],
+        )
+    sibling_turn = await store.create_follow_up(
+        parent_job_id=sibling["id"], user_id="user-1", prompt="independent work"
+    )
+    assert sibling_turn is not None and sibling_turn["state"] == "queued"
+    before = await store.thread_sandbox(thread_id=source["thread_id"])
+    assert before["resident_state"] == "live"
+    assert (await store.list_sessions(user_id="user-1", archived=True))["sessions"][0]["can_delete"]
+    assert await store.delete_sessions(thread_ids=[source["thread_id"]], user_id="user-1") == {
+        "thread_ids": [source["thread_id"]]
+    }
+    assert await store.thread_sandbox(thread_id=source["thread_id"]) == before
+    assert (await store.get_job(sibling_turn["id"]))["state"] == "queued"
+    assert await store.get_thread_for_job(job_id=sibling["id"], user_id="user-1") is not None
+    async with store._pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT snapshot FROM agent_attempt_ledger WHERE attempt_id = $1",
+                claim["attempt_id"],
+            )
+            == '{"spent_usd": 0.42}'
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT grant_id FROM agent_thread_residencies WHERE thread_id = $1",
+                source["thread_id"],
+            )
+            == "grant-history"
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_job_events WHERE job_id = $1", source["id"]
+            )
+            > 0
+        )
+    assert (
+        await store.heartbeat_residency(
+            thread_id=source["thread_id"], generation=1, host="shared-runner", ttl_seconds=120
+        )
+        == "grant-history"
+    )
