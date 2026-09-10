@@ -1405,6 +1405,255 @@ async def test_cutover_waiting_tail_is_failed_instead_of_promoted(store):
     assert "predates retained-session continuity" in failed["detail"]
 
 
+async def test_conversations_page_all_history_with_pins_and_equal_activity(store: AgentJobStore):
+    """Keyset pages cross the pinned boundary without missing tied threads."""
+    jobs = [await _create_job(store, task_prompt=f"Historical task {i}") for i in range(61)]
+    same_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET created_at = $1, updated_at = $1", same_time)
+        await conn.execute("UPDATE agent_threads SET created_at = $1, updated_at = $1", same_time)
+        await conn.execute(
+            "UPDATE agent_threads SET pinned_at = $1 WHERE id = ANY($2::text[])",
+            same_time,
+            [job["thread_id"] for job in jobs[:3]],
+        )
+    first = await store.list_conversations(user_id="user-1")
+    assert len(first["conversations"]) == 50
+    assert first["next_cursor"]
+    assert all(item["job"]["pinned_at"] for item in first["conversations"][:3])
+    second = await store.list_conversations(user_id="user-1", cursor=first["next_cursor"])
+    assert len(second["conversations"]) == 11
+    assert second["next_cursor"] is None
+    assert {item["job"]["id"] for item in first["conversations"] + second["conversations"]} == {
+        job["id"] for job in jobs
+    }
+    seen = []
+    cursor = None
+    while True:
+        page = await store.list_conversations(user_id="user-1", limit=2, cursor=cursor)
+        seen.extend(item["job"]["thread_id"] for item in page["conversations"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    expected = sorted((job["thread_id"] for job in jobs[:3]), reverse=True) + sorted(
+        (job["thread_id"] for job in jobs[3:]), reverse=True
+    )
+    assert seen == expected
+
+
+async def test_conversations_search_canonical_title_and_repo_with_literal_unicode(
+    store: AgentJobStore,
+):
+    """Later turns and prompt body text cannot replace the durable task title."""
+    original = await _create_job(
+        store, task_prompt="修复 Café 100%_\\Bug\nprivate body-only keyword"
+    )
+    tip = original
+    for _ in range(52):
+        tip = await store.create_follow_up(
+            parent_job_id=tip["id"], user_id="user-1", prompt="later-turn-only keyword"
+        )
+        assert tip is not None and "error" not in tip
+    await _create_job(store, task_prompt="Unrelated task")
+    for query in ["修复", "CAFÉ", "100%_\\bug", "%", "_", "\\", "  修复  "]:
+        result = await store.list_conversations(user_id="user-1", q=query)
+        assert len(result["conversations"]) == 1, query
+        item = result["conversations"][0]
+        assert item["title"] == "修复 Café 100%_\\Bug"
+        assert item["job"]["id"] == tip["id"]
+        assert item["job"]["turn_no"] == 53
+    for query in ["private body-only", "later-turn-only", "missing"]:
+        assert (await store.list_conversations(user_id="user-1", q=query))["conversations"] == []
+    by_repo = await store.list_conversations(user_id="user-1", q="EXAMPLE-ORG/EXAMPLE")
+    assert len(by_repo["conversations"]) == 2
+    assert len((await store.list_conversations(user_id="user-1", q="  "))["conversations"]) == 2
+
+
+async def test_conversations_archive_repo_and_tenant_filters_are_independent(store: AgentJobStore):
+    """Including archives widens state visibility without crossing ownership."""
+    active = await _create_job(store, task_prompt="shared search title")
+    archived = await _create_job(store, task_prompt="shared search title")
+    elsewhere = await _create_job(store, repo="other/project", task_prompt="shared search title")
+    foreign = await _create_job(store, user_id="user-2", task_prompt="shared search title")
+    await store.set_thread_archived(job_id=archived["id"], user_id="user-1", archived=True)
+    await store.set_thread_archived(job_id=foreign["id"], user_id="user-2", archived=True)
+    normal = await store.list_conversations(user_id="user-1", q="shared")
+    assert {item["job"]["id"] for item in normal["conversations"]} == {
+        active["id"],
+        elsewhere["id"],
+    }
+    both = await store.list_conversations(
+        user_id="user-1", q="shared", repo=active["repo"], include_archived=True
+    )
+    assert {item["job"]["id"]: item["archived"] for item in both["conversations"]} == {
+        active["id"]: False,
+        archived["id"]: True,
+    }
+    assert (await store.list_conversations(user_id="nobody", include_archived=True)) == {
+        "conversations": [],
+        "next_cursor": None,
+    }
+    assert (await store.list_conversations(user_id="user-1", repo="missing/repo"))[
+        "conversations"
+    ] == []
+    # Even a malformed historical owner association cannot leak a job via
+    # an owned thread, or a thread title via an owned job.
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET user_id = 'user-2' WHERE id = $1", active["id"])
+        await conn.execute(
+            "UPDATE agent_threads SET user_id = 'user-2' WHERE id = $1", elsewhere["thread_id"]
+        )
+    only_archive = await store.list_conversations(user_id="user-1", include_archived=True)
+    assert [item["job"]["id"] for item in only_archive["conversations"]] == [archived["id"]]
+
+
+async def test_conversations_latest_job_and_activity_ignore_foreign_turn(store: AgentJobStore):
+    """Both the activity aggregate and bounded latest-job read enforce ownership."""
+    parent = await _create_job(store)
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="foreign turn body"
+    )
+    assert child is not None
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET updated_at = $2 WHERE id = $1",
+            parent["thread_id"],
+            timestamp,
+        )
+        await conn.execute(
+            "UPDATE agent_jobs SET updated_at = $2 WHERE id = $1", parent["id"], timestamp
+        )
+        await conn.execute(
+            "UPDATE agent_jobs SET user_id = 'user-2', updated_at = $2 WHERE id = $1",
+            child["id"],
+            datetime(2030, 1, 1, tzinfo=timezone.utc),
+        )
+    page = await store.list_conversations(user_id="user-1")
+    assert len(page["conversations"]) == 1
+    conversation = page["conversations"][0]
+    assert conversation["job"]["id"] == parent["id"]
+    assert conversation["last_activity_at"] == timestamp
+    assert (await store.list_conversations(user_id="user-2"))["conversations"] == []
+
+
+async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
+    store: AgentJobStore,
+):
+    """Cursor data never broadens owner, repo, archive, or text search scope."""
+    import base64
+    import json
+
+    await _create_job(store)
+    await _create_job(store)
+    page = await store.list_conversations(user_id="user-1", limit=1)
+    cursor = page["next_cursor"]
+    assert cursor
+    for changed in [
+        {"user_id": "user-2"},
+        {"q": "different"},
+        {"repo": "different/repo"},
+        {"include_archived": True},
+    ]:
+        with pytest.raises(ValueError, match="Invalid conversation cursor"):
+            await store.list_conversations(**{"user_id": "user-1", "cursor": cursor, **changed})
+    data = json.loads(base64.urlsafe_b64decode(cursor))
+    malformed = ["", "not-base64", "x" * 2049, base64.urlsafe_b64encode(b"[]").decode()]
+    for field, value in [("v", 2), ("activity", "2026-01-01"), ("pin", 17), ("thread", "\x00")]:
+        malformed.append(
+            base64.urlsafe_b64encode(json.dumps({**data, field: value}).encode()).decode()
+        )
+    for invalid in malformed:
+        with pytest.raises(ValueError, match="Invalid conversation cursor"):
+            await store.list_conversations(user_id="user-1", cursor=invalid)
+    with pytest.raises(ValueError, match="Invalid conversation search"):
+        await store.list_conversations(user_id="user-1", q="\x00")
+
+
+async def test_conversation_activity_counts_messages_and_transitions_without_lease_noise(
+    store: AgentJobStore,
+):
+    """Running work rises on meaningful changes without every heartbeat reordering it."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="activity-worker", lease_ttl_seconds=60)
+    assert claim is not None
+    before = (await store.list_conversations(user_id="user-1"))["conversations"][0]
+    assert await store.heartbeat(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        lease_ttl_seconds=60,
+    )
+    heartbeat = (await store.list_conversations(user_id="user-1"))["conversations"][0]
+    assert heartbeat["last_activity_at"] == before["last_activity_at"]
+    assert await store.append_event(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        event_type="message",
+        payload={"text": "meaningful assistant reply"},
+    )
+    after = (await store.list_conversations(user_id="user-1"))["conversations"][0]
+    assert after["last_activity_at"] > before["last_activity_at"]
+    assert after["job"]["id"] == job["id"]
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'failed', updated_at = NOW() WHERE id = $1", job["id"]
+        )
+    final = (await store.list_conversations(user_id="user-1"))["conversations"][0]
+    assert final["job"]["state"] == "failed"
+    assert final["last_activity_at"] > after["last_activity_at"]
+
+
+async def test_projects_sort_by_message_and_job_activity_preserving_pins(store: AgentJobStore):
+    """An older project's new reply or completion changes its recency."""
+    older = await _create_job(store, repo="owner/older")
+    newer = await _create_job(store, repo="owner/newer")
+    dates = [datetime(2026, 1, day, tzinfo=timezone.utc) for day in range(1, 5)]
+    async with store._pool.acquire() as conn:
+        for job, timestamp in zip((older, newer), dates[:2], strict=True):
+            await conn.execute(
+                "UPDATE agent_jobs SET created_at = $2, updated_at = $2 WHERE id = $1",
+                job["id"],
+                timestamp,
+            )
+            await conn.execute(
+                "UPDATE agent_threads SET created_at = $2, updated_at = $2 WHERE id = $1",
+                job["thread_id"],
+                timestamp,
+            )
+    assert [p["repo"] for p in await store.list_projects(user_id="user-1")] == [
+        "owner/newer",
+        "owner/older",
+    ]
+    # Assistant messages advance the thread timestamp, without a new job.
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET updated_at = $2 WHERE id = $1", older["thread_id"], dates[2]
+        )
+    projects = await store.list_projects(user_id="user-1")
+    assert [p["repo"] for p in projects] == ["owner/older", "owner/newer"]
+    assert projects[0]["last_activity_at"] == dates[2]
+    # A completion advances the job timestamp, without another user turn.
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET updated_at = $2, state = 'succeeded' WHERE id = $1",
+            newer["id"],
+            dates[3],
+        )
+    projects = await store.list_projects(user_id="user-1")
+    assert [p["repo"] for p in projects] == ["owner/newer", "owner/older"]
+    conversations = await store.list_conversations(user_id="user-1")
+    assert (
+        projects[0]["last_activity_at"]
+        == conversations["conversations"][0]["last_activity_at"]
+        == dates[3]
+    )
+    await store.set_thread_pinned(job_id=older["id"], user_id="user-1", pinned=True)
+    assert [p["repo"] for p in await store.list_projects(user_id="user-1")] == [
+        "owner/older",
+        "owner/newer",
+    ]
+
+
 async def test_projects_summarize_a_user_s_repos_and_page_one_at_a_time(store: AgentJobStore):
     """The sidebar's task tree: a folder per repo, and a page inside one."""
     first = await _create_job(store)
@@ -1501,6 +1750,8 @@ async def test_archive_and_restore_filter_owned_threads_without_cancelling(
         job_id=parent["id"], user_id="user-1", archived=True
     )
     assert archived_again == archived
+    archived_thread = await store.get_thread_for_job(job_id=child["id"], user_id="user-1")
+    assert archived_thread["archived_at"] == archived["archived_at"]
     assert await store.list_jobs(user_id="user-1") == []
     assert {job["id"] for job in await store.list_jobs(user_id="user-1", archived=True)} == {
         parent["id"],
@@ -1526,6 +1777,8 @@ async def test_archive_and_restore_filter_owned_threads_without_cancelling(
     )
 
     assert restored == {"thread_id": parent["thread_id"], "archived_at": None}
+    restored_thread = await store.get_thread_for_job(job_id=parent["id"], user_id="user-1")
+    assert restored_thread["archived_at"] is None
     assert await store.list_jobs(user_id="user-1", archived=True) == []
     assert {job["id"] for job in await store.list_jobs(user_id="user-1")} == {
         parent["id"],

@@ -12,12 +12,14 @@ const mocks = vi.hoisted(() => ({
   loadRepo: vi.fn(),
   replace: vi.fn(),
   useAgentJobList: vi.fn(),
+  useConversationList: vi.fn(),
   useAgentProjects: vi.fn(),
   useProjectJobs: vi.fn(),
 }));
 
 vi.mock('next/navigation', () => ({
   usePathname: () => '/job-1',
+  useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({ replace: mocks.replace }),
 }));
 
@@ -41,7 +43,11 @@ vi.mock('@/components/providers', async () => {
 vi.mock('@/lib/api/agents', () => ({
   archiveAgentJob: mocks.archive,
   restoreAgentJob: mocks.restore,
+  getAgentJob: vi.fn().mockRejectedValue(new Error('fixture')),
+  getAgentJobThread: vi.fn().mockRejectedValue(new Error('fixture')),
 }));
+
+vi.mock('./useConversationList', () => ({ useConversationList: mocks.useConversationList }));
 
 vi.mock('./useAgentJobs', () => ({
   useAgentJobList: mocks.useAgentJobList,
@@ -51,6 +57,7 @@ vi.mock('./useAgentJobs', () => ({
 
 import { ArchivedTasksView } from './ArchivedTasksView';
 import { AgentsSidebar } from './AgentsSidebar';
+import { CONVERSATION_RESTORED_EVENT } from './conversationEvents';
 
 function job(overrides: Partial<AgentJob> = {}): AgentJob {
   return {
@@ -84,8 +91,18 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
 }
 
 beforeEach(() => {
+  mocks.useConversationList.mockReturnValue({
+    rows: [
+      { key: 'thread-1', job: job(), jobIds: ['job-1'], archived: false, lastActivityAt: null },
+    ],
+    cursor: null,
+    loading: false,
+    error: null,
+    reload: mocks.reload,
+    loadMore: vi.fn(),
+  });
   mocks.useAgentProjects.mockReturnValue({
-    projects: [],
+    projects: [{ repo: 'owner/repo', task_count: 1, active_count: 0, last_activity_at: null }],
     loading: false,
     error: null,
     reload: mocks.reloadProjects,
@@ -118,10 +135,13 @@ describe('agent task archiving', () => {
     });
 
     render(<AgentsSidebar />);
+    expect(mocks.useConversationList).toHaveBeenCalledWith(expect.objectContaining({ refresh: 0 }));
+    mocks.useConversationList.mockClear();
     fireEvent.click(screen.getByRole('button', { name: 'Archive Development environment setup' }));
 
     await waitFor(() => expect(mocks.archive).toHaveBeenCalledWith('job-1'));
-    expect(mocks.reload).toHaveBeenCalledOnce();
+    expect(mocks.reloadProjects).toHaveBeenCalledOnce();
+    expect(mocks.useConversationList).toHaveBeenCalledWith(expect.objectContaining({ refresh: 1 }));
     expect(mocks.replace).toHaveBeenCalledWith('/');
     expect(screen.queryByText('Development environment setup')).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Archived' })).toHaveAttribute('href', '/archived');
@@ -140,6 +160,8 @@ describe('agent task archiving', () => {
       archived_at: null,
     });
 
+    const restored = vi.fn();
+    window.addEventListener(CONVERSATION_RESTORED_EVENT, restored);
     render(<ArchivedTasksView />);
 
     expect(mocks.useAgentJobList).toHaveBeenCalledWith(10_000, true);
@@ -147,6 +169,12 @@ describe('agent task archiving', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
 
     await waitFor(() => expect(mocks.restore).toHaveBeenCalledWith('job-1'));
+    expect(restored).toHaveBeenCalledOnce();
+    expect((restored.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      threadId: 'thread-1',
+      userId: undefined,
+    });
+    window.removeEventListener(CONVERSATION_RESTORED_EVENT, restored);
     expect(mocks.reload).toHaveBeenCalledOnce();
     expect(screen.queryByText('Development environment setup')).not.toBeInTheDocument();
   });

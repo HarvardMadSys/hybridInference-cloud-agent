@@ -1,217 +1,370 @@
 'use client';
-
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useT } from '@/components/providers';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react';
+import { useAuth, useT } from '@/components/providers';
 import { SettingsLauncher } from '@/components/features/settings/SettingsLauncher';
-import { archiveAgentJob, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
-import type { Translator } from '@/lib/i18n/translate';
-import { groupJobsByProject, projectLabel } from './conversations';
-import type { ConversationRow, ProjectSection } from './conversations';
+import {
+  archiveAgentJob,
+  pinAgentJob,
+  unpinAgentJob,
+  getAgentJob,
+  getAgentJobThread,
+} from '@/lib/api/agents';
+import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { PaneResizer } from './PaneResizer';
-import { useAgentJobList, useAgentProjects, useProjectJobs } from './useAgentJobs';
+import { useAgentProjects } from './useAgentJobs';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
-import type { AgentJob, AgentJobState } from './types';
-
+import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
+import { SidebarViewMenu } from './SidebarViewMenu';
+import {
+  useConversationList,
+  conversationRow,
+  type SidebarConversation,
+} from './useConversationList';
+import { TaskRow, ProjectFolder, ListStatus, type RowActions } from './SidebarRows';
 export { groupJobsByConversation, groupJobsByProject } from './conversations';
-
 export const SIDEBAR_WIDTH_STORAGE_KEY = 'agents.sidebar.width';
-export const SIDEBAR_PROJECTS_STORAGE_KEY = 'agents.sidebar.projects';
-const SIDEBAR_DEFAULT_WIDTH = 288; // matches the previous fixed w-72
-const SIDEBAR_MIN_WIDTH = 180;
-const SIDEBAR_MAX_WIDTH = 520;
-/** Conversations shown per project before "Show more". */
-const PROJECT_PAGE_SIZE = 15;
-
-// Sidebar status dots stay deliberately minimal (Codex-style titles-only
-// rows), but unlike Codex our jobs burn budget and can be held by publish
-// gates, so "which job is running / held" must be visible without opening it.
-const DOT_CLASS: Record<AgentJobState, string> = {
-  running: 'bg-blue-500 animate-pulse',
-  needs_review: 'bg-amber-400',
-  done: 'bg-emerald-500',
-  failed: 'bg-red-400',
-  cancelled: 'bg-gray-300 dark:bg-gray-600',
-  queued: 'border border-gray-300 bg-transparent dark:border-gray-600',
-};
-
-/** Which folders the user has explicitly opened or closed, by repo. */
-function readExpandedOverrides(): Record<string, boolean> {
-  let raw: string | null = null;
-  try {
-    raw = window.localStorage.getItem(SIDEBAR_PROJECTS_STORAGE_KEY);
-  } catch {
-    return {};
-  }
-  if (!raw) return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const entries = Object.entries(parsed as Record<string, unknown>).filter(
-      ([, value]) => typeof value === 'boolean',
-    );
-    return Object.fromEntries(entries) as Record<string, boolean>;
-  } catch {
-    return {};
-  }
-}
-
 export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const pathname = usePathname() ?? '';
+  const params = useSearchParams();
   const router = useRouter();
   const t = useT();
+  const { state } = useAuth();
+  const userId = state.user?.id;
+  const [preferences, updatePreferences] = useSidebarPreferences(userId);
+  const [refresh, setRefresh] = useState(0);
+  const reload = useCallback(() => setRefresh((v) => v + 1), []);
+  const {
+    projects,
+    loading: projectsLoading,
+    error: projectsError,
+    reload: reloadProjects,
+  } = useAgentProjects();
+  const list = useConversationList({ userId, refresh, enabled: preferences.group === 'flat' });
+  const [selected, setSelected] = useState<{ path: string; row: SidebarConversation } | null>(null);
   const [hiddenThreads, setHiddenThreads] = useState<Set<string>>(new Set());
   const [archiving, setArchiving] = useState<string | null>(null);
-  const [archiveError, setArchiveError] = useState<string | null>(null);
   const [pinning, setPinning] = useState<string | null>(null);
-  const [pinError, setPinError] = useState<string | null>(null);
-  const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
-  const [shownPerRepo, setShownPerRepo] = useState<Record<string, number>>({});
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [debounced, setDebounced] = useState('');
+  const [scope, setScope] = useState('all');
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchButton = useRef<HTMLButtonElement>(null);
+  const resultList = useRef<HTMLDivElement>(null);
   const pane = useResizablePane({
     storageKey: SIDEBAR_WIDTH_STORAGE_KEY,
-    defaultWidth: SIDEBAR_DEFAULT_WIDTH,
-    minWidth: SIDEBAR_MIN_WIDTH,
-    maxWidth: SIDEBAR_MAX_WIDTH,
+    defaultWidth: 288,
+    minWidth: 180,
+    maxWidth: 520,
     side: 'start',
     maxViewportFraction: 0.4,
   });
-
-  const { jobs, loading, error, reload } = useAgentJobList();
-  const { projects, loading: projectsLoading, reload: reloadProjects } = useAgentProjects();
-  const { jobsByRepo, loadingRepos, errorRepos, load: loadRepo } = useProjectJobs();
-
-  // Restore after mount, not during render: the server has no storage, so
-  // seeding initial state from it would be a hydration mismatch.
-  useEffect(() => setExpandedOverrides(readExpandedOverrides()), []);
-
-  // Collapsing hands this width to the panes on the right, which size themselves
-  // against what is left of the shell.
+  const current =
+    selected?.path === pathname
+      ? selected.row
+      : list.rows.find((row) => row.jobIds.some((id) => pathname === `/${id}`));
+  const activeKey = current?.key ?? null;
+  const activeRepo = pathname === '/' ? params.get('repo') : (current?.job.repo ?? null);
+  const searching = searchOpen && (query.trim() !== '' || scope !== 'all' || includeArchived);
+  const search = useConversationList({
+    q: debounced,
+    repo: scope === 'current' ? (activeRepo ?? undefined) : undefined,
+    includeArchived,
+    enabled: searching && debounced === query.trim(),
+    userId,
+    refresh,
+  });
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(query.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [query]);
+  useEffect(() => {
+    if (!activeRepo) setScope('all');
+  }, [activeRepo]);
   useEffect(() => {
     announcePaneResize();
   }, [collapsed]);
-
-  // The list polls only while something is live, so a conversation created by
-  // navigation — a new task, a fork — would otherwise not appear until a
-  // manual refresh. Reload on route change; the mount fetch already ran.
-  const mountPath = useRef(true);
   useEffect(() => {
-    if (mountPath.current) {
-      mountPath.current = false;
-      return;
-    }
+    setHiddenThreads(new Set());
+  }, [userId]);
+  useEffect(() => {
+    const restored = (event: Event) => {
+      const detail = (event as CustomEvent<ConversationRestoredDetail>).detail;
+      if (!detail || detail.userId !== userId || typeof detail.threadId !== 'string') return;
+      setHiddenThreads((old) => {
+        const next = new Set(old);
+        next.delete(detail.threadId);
+        return next;
+      });
+      setSelected((old) =>
+        old?.row.key === detail.threadId ? { ...old, row: { ...old.row, archived: false } } : old,
+      );
+      reload();
+      reloadProjects();
+    };
+    window.addEventListener(CONVERSATION_RESTORED_EVENT, restored);
+    return () => window.removeEventListener(CONVERSATION_RESTORED_EVENT, restored);
+  }, [userId, reload, reloadProjects]);
+  useEffect(() => {
+    let cancelled = false;
+    setSelected(null);
+    const id = /^\/([^/]+)$/.exec(pathname)?.[1];
+    if (!id || ['archived', 'integrations', 'admin', 'login'].includes(id)) return;
+    Promise.all([getAgentJob(id), getAgentJobThread(id)])
+      .then(([job, thread]) => {
+        if (cancelled) return;
+        const latest =
+          thread?.jobs.reduce((a, b) => ((b.turn_no ?? 1) > (a.turn_no ?? 1) ? b : a), job) ?? job;
+        const row = conversationRow({
+          job: latest,
+          title: thread?.title ?? job.task_prompt.split('\n')[0],
+          archived: Boolean(thread?.archived_at),
+          last_activity_at: thread?.updated_at ?? latest.created_at ?? null,
+        });
+        row.jobIds = thread?.jobs.map((turn) => turn.id) ?? [id];
+        setSelected({ path: pathname, row });
+        updatePreferences((old) => ({
+          ...old,
+          expanded: { ...old.expanded, [row.job.repo]: true },
+        }));
+      })
+      .catch(() => {
+        /* Detail page owns errors; never guess a project. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname, userId, updatePreferences]);
+  const mountPath = useRef(pathname);
+  useEffect(() => {
+    if (mountPath.current === pathname) return;
+    mountPath.current = pathname;
     reload();
     reloadProjects();
   }, [pathname, reload, reloadProjects]);
-
-  // A project's own page supersedes nothing — it is merged with the shared
-  // newest-first page, which is the one that keeps polling, so live state from
-  // the poll wins wherever the two overlap.
-  const visibleJobs = useMemo(() => {
-    const byId = new Map<string, AgentJob>();
-    for (const list of jobsByRepo.values()) for (const job of list) byId.set(job.id, job);
-    for (const job of jobs) byId.set(job.id, job);
-    return [...byId.values()].filter((job) => !hiddenThreads.has(job.threadId ?? job.id));
-  }, [jobs, jobsByRepo, hiddenThreads]);
-
-  const projectByRepo = useMemo(
-    () => new Map(projects.map((project) => [project.repo, project])),
-    [projects],
-  );
-
-  // The summary decides which folders exist and in what order. A repo the job
-  // page knows about but the summary does not — a project created since the
-  // last summary fetch — is newer than all of them, so it goes in front. When
-  // the summary is unavailable the tree degrades to what the jobs imply.
-  const folders = useMemo<ProjectSection[]>(() => {
-    const byRepo = new Map(groupJobsByProject(visibleJobs).map((entry) => [entry.repo, entry]));
-    const summarized = projects.map((project) => {
-      const section = byRepo.get(project.repo);
-      byRepo.delete(project.repo);
-      return (
-        section ?? { repo: project.repo, label: projectLabel(project.repo), conversations: [] }
-      );
-    });
-    return [...byRepo.values(), ...summarized];
-  }, [projects, visibleJobs]);
-
-  const activeRepo = visibleJobs.find((job) => pathname === `/${job.id}`)?.repo ?? null;
-  // With nothing open, the most recent project is the one worth showing.
-  const defaultRepo = activeRepo ?? folders[0]?.repo ?? null;
-  const isExpanded = useCallback(
-    (repo: string) => expandedOverrides[repo] ?? repo === defaultRepo,
-    [expandedOverrides, defaultRepo],
-  );
-
-  // An expanded folder holding fewer conversations than the project has must
-  // pull its own page. Keyed on the count so it refetches when the project
-  // grows, rather than on every poll.
-  const requested = useRef<Set<string>>(new Set());
   useEffect(() => {
-    for (const folder of folders) {
-      if (!isExpanded(folder.repo)) continue;
-      const summary = projectByRepo.get(folder.repo);
-      if (!summary || summary.task_count <= folder.conversations.length) continue;
-      const key = `${folder.repo}:${summary.task_count}`;
-      if (requested.current.has(key)) continue;
-      requested.current.add(key);
-      loadRepo(folder.repo);
-    }
-  }, [folders, isExpanded, projectByRepo, loadRepo]);
-
-  function toggleProject(repo: string) {
-    setExpandedOverrides((current) => {
-      const next = { ...current, [repo]: !isExpanded(repo) };
-      try {
-        window.localStorage.setItem(SIDEBAR_PROJECTS_STORAGE_KEY, JSON.stringify(next));
-      } catch {
-        // Blocked storage only forgets the tree's shape, never breaks it.
-      }
-      return next;
-    });
-  }
-
-  async function archiveConversation(key: string, jobId: string, jobIds: string[]) {
-    setArchiving(key);
-    setArchiveError(null);
-    try {
-      await archiveAgentJob(jobId);
-      setHiddenThreads((current) => new Set(current).add(key));
+    if (!projects.some((project) => project.active_count > 0)) return;
+    const timer = setInterval(() => {
       reload();
       reloadProjects();
-      if (jobIds.some((id) => pathname === `/${id}`)) router.replace('/');
-    } catch (cause: unknown) {
-      setArchiveError(cause instanceof Error ? cause.message : t('sidebar.archiveFailed'));
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [projects, reload, reloadProjects]);
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setQuery('');
+    setDebounced('');
+    setScope('all');
+    setIncludeArchived(false);
+    searchButton.current?.focus();
+  }, []);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !collapsed) {
+        event.preventDefault();
+        setSearchOpen(true);
+        requestAnimationFrame(() => searchInput.current?.focus());
+      }
+    };
+    document.addEventListener('keydown', keydown);
+    return () => document.removeEventListener('keydown', keydown);
+  }, [collapsed]);
+  const knownRows = useRef(new Map<string, SidebarConversation>());
+  useEffect(() => {
+    knownRows.current.clear();
+  }, [userId]);
+  const registerRows = useCallback(
+    (rows: SidebarConversation[]) => {
+      if (!rows.length) return;
+      rows.forEach((row) => knownRows.current.set(row.key, row));
+      updatePreferences((old) => {
+        if (!old.manualInitialized && old.order !== 'manual') return old;
+        const tasks = { ...old.tasks };
+        let changed = false;
+        for (const row of rows)
+          for (const group of ['flat', `repo:${row.job.repo}`]) {
+            const ids = tasks[group] ?? [];
+            if (!ids.includes(row.key)) {
+              tasks[group] = [...ids, row.key];
+              changed = true;
+            }
+          }
+        return changed ? { ...old, tasks } : old;
+      });
+    },
+    [updatePreferences],
+  );
+  useEffect(() => {
+    registerRows(list.rows);
+  }, [list.rows, registerRows]);
+  const baseFolders = useMemo(() => {
+    const repos = new Map(projects.map((project) => [project.repo, project]));
+    for (const row of preferences.group === 'flat' ? list.rows : [])
+      if (!repos.has(row.job.repo))
+        repos.set(row.job.repo, {
+          repo: row.job.repo,
+          task_count: 1,
+          active_count: 0,
+          last_activity_at: row.lastActivityAt,
+        });
+    if (activeRepo && !repos.has(activeRepo))
+      repos.set(activeRepo, {
+        repo: activeRepo,
+        task_count: 0,
+        active_count: 0,
+        last_activity_at: null,
+      });
+    return [...repos.values()].sort(
+      (a, b) =>
+        (Date.parse(b.pinned_at ?? '') || 0) - (Date.parse(a.pinned_at ?? '') || 0) ||
+        (Date.parse(b.last_activity_at ?? '') || 0) - (Date.parse(a.last_activity_at ?? '') || 0),
+    );
+  }, [projects, list.rows, activeRepo, preferences.group]);
+  useEffect(() => {
+    updatePreferences((old) => {
+      if (!old.manualInitialized && old.order !== 'manual') return old;
+      const added = baseFolders.map((p) => p.repo).filter((repo) => !old.projects.includes(repo));
+      return added.length ? { ...old, projects: [...old.projects, ...added] } : old;
+    });
+  }, [baseFolders, updatePreferences]);
+  const folders =
+    preferences.order === 'manual'
+      ? manualOrder(baseFolders, preferences.projects, (p) => p.repo)
+      : baseFolders;
+  const defaultRepo = activeRepo ?? folders[0]?.repo;
+  const drag = useRef<{ group: string; id: string } | null>(null);
+  const [announcement, setAnnouncement] = useState('');
+  function reorder(group: string, ids: string[], source: string, target: string, after = false) {
+    let next = moveBefore(ids, source, target);
+    if (after && source !== target && ids.includes(source) && ids.includes(target)) {
+      next = ids.filter((id) => id !== source);
+      next.splice(next.indexOf(target) + 1, 0, source);
+    }
+    updatePreferences((old) => {
+      if (group === 'projects') return { ...old, projects: next };
+      const saved = old.tasks[group] ?? ids;
+      const peers = new Set(ids);
+      let index = 0;
+      const merged = saved.map((id) => (peers.has(id) ? next[index++] : id));
+      merged.push(...next.slice(index));
+      return { ...old, tasks: { ...old.tasks, [group]: merged } };
+    });
+    setAnnouncement(t('sidebar.moved'));
+  }
+  function reorderProps(group: string, ids: string[], id: string): HTMLAttributes<HTMLDivElement> {
+    if (preferences.order !== 'manual' || searching) return {};
+    return {
+      draggable: true,
+      title: t('sidebar.reorderHint'),
+      onDragStart: (event) => {
+        drag.current = { group, id };
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', id);
+        event.stopPropagation();
+      },
+      onDragEnd: () => {
+        drag.current = null;
+      },
+      onDragOver: (event) => {
+        if (drag.current?.group === group) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      },
+      onDrop: (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (drag.current?.group === group) reorder(group, ids, drag.current.id, id);
+        drag.current = null;
+      },
+      onKeyDown: (event) => {
+        if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const index = ids.indexOf(id),
+          target = ids[index + (event.key === 'ArrowDown' ? 1 : -1)];
+        if (target) reorder(group, ids, id, target, event.key === 'ArrowDown');
+      },
+    };
+  }
+  function orderedRows(rows: SidebarConversation[], flat = false) {
+    if (preferences.order !== 'manual') return rows;
+    const result = manualOrder(
+      rows,
+      preferences.tasks[flat ? 'flat' : `repo:${rows[0]?.job.repo}`] ?? [],
+      (row) => row.key,
+    );
+    return result.sort((a, b) => Number(Boolean(b.job.pinnedAt)) - Number(Boolean(a.job.pinnedAt)));
+  }
+  function taskReorder(rows: SidebarConversation[], row: SidebarConversation, flat = false) {
+    // Flat ordering changes position only. Pins stay in their own partition.
+    const peers = rows.filter((peer) => Boolean(peer.job.pinnedAt) === Boolean(row.job.pinnedAt));
+    return reorderProps(
+      flat ? 'flat' : `repo:${row.job.repo}`,
+      peers.map((peer) => peer.key),
+      row.key,
+    );
+  }
+  async function archiveConversation(key: string, jobId: string) {
+    setArchiving(key);
+    setActionError(null);
+    try {
+      await archiveAgentJob(jobId);
+      setHiddenThreads((old) => new Set(old).add(key));
+      reload();
+      reloadProjects();
+      if (activeKey === key) router.replace('/');
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : t('sidebar.archiveFailed'));
     } finally {
       setArchiving(null);
     }
   }
-
-  async function setConversationPinned(key: string, jobId: string, repo: string, pinned: boolean) {
+  async function setConversationPinned(key: string, jobId: string, _repo: string, pinned: boolean) {
     setPinning(key);
-    setPinError(null);
+    setActionError(null);
     try {
       await (pinned ? pinAgentJob(jobId) : unpinAgentJob(jobId));
       reload();
       reloadProjects();
-      loadRepo(repo);
-    } catch (cause: unknown) {
-      setPinError(
-        cause instanceof Error
-          ? cause.message
-          : pinned
-            ? t('sidebar.pinFailed')
-            : t('sidebar.unpinFailed'),
-      );
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : t('sidebar.pinFailed'));
     } finally {
       setPinning(null);
     }
   }
-
+  const actions: RowActions = {
+    activeKey,
+    archiving,
+    pinning,
+    onArchive: archiveConversation,
+    onSetPinned: setConversationPinned,
+  };
+  useEffect(() => {
+    setHiddenThreads((old) => {
+      const next = new Set([...old].filter((key) => !list.rows.some((row) => row.key === key)));
+      return next.size === old.size ? old : next;
+    });
+  }, [list.rows]);
+  const visible = (rows: SidebarConversation[]) =>
+    rows.filter((row) => row.archived || !hiddenThreads.has(row.key));
+  const flatSource =
+    current && !current.archived && !list.rows.some((row) => row.key === current.key)
+      ? [...list.rows, current]
+      : list.rows;
+  const flatRows = orderedRows(
+    visible(flatSource).sort(
+      (a, b) =>
+        (Date.parse(b.job.pinnedAt ?? '') || 0) - (Date.parse(a.job.pinnedAt ?? '') || 0) ||
+        (Date.parse(b.lastActivityAt ?? '') || 0) - (Date.parse(a.lastActivityAt ?? '') || 0),
+    ),
+    true,
+  );
   if (collapsed) return null;
-
-  const busy = loading || projectsLoading;
-
   return (
     <>
       <aside
@@ -244,57 +397,237 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
             {t('sidebar.newTask')}
           </Link>
 
-          {busy && folders.length === 0 ? (
-            <p className="mt-2 px-2 text-[13px] text-gray-400 dark:text-gray-500">
-              {t('common.loading')}
+          <div className="mb-2 mt-5 flex items-center justify-between px-2 text-[13px] text-gray-500 dark:text-gray-400">
+            <span>{t('sidebar.projects')}</span>
+            <div className="flex items-center gap-1">
+              <button
+                ref={searchButton}
+                type="button"
+                aria-label={t('sidebar.search')}
+                title={`${t('sidebar.search')} (⌘K / Ctrl K)`}
+                aria-expanded={searchOpen}
+                className="rounded-md p-1.5 hover:bg-gray-200/60 dark:hover:bg-white/10"
+                onClick={() => {
+                  if (searchOpen) closeSearch();
+                  else {
+                    setSearchOpen(true);
+                    requestAnimationFrame(() => searchInput.current?.focus());
+                  }
+                }}
+              >
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  aria-hidden="true"
+                >
+                  <circle cx="10" cy="10" r="6.5" />
+                  <path d="m15 15 5 5" />
+                </svg>
+              </button>
+              <SidebarViewMenu
+                value={preferences}
+                onChange={(field, value) =>
+                  updatePreferences((old) => {
+                    if (field !== 'order' || value !== 'manual' || old.manualInitialized)
+                      return { ...old, [field]: value };
+                    const rows = [...knownRows.current.values()].sort(
+                      (a, b) =>
+                        (Date.parse(b.job.pinnedAt ?? '') || 0) -
+                          (Date.parse(a.job.pinnedAt ?? '') || 0) ||
+                        (Date.parse(b.lastActivityAt ?? '') || 0) -
+                          (Date.parse(a.lastActivityAt ?? '') || 0),
+                    );
+                    const tasks: Record<string, string[]> = { flat: rows.map((row) => row.key) };
+                    for (const row of rows) (tasks[`repo:${row.job.repo}`] ??= []).push(row.key);
+                    return {
+                      ...old,
+                      order: 'manual',
+                      manualInitialized: true,
+                      projects: baseFolders.map((p) => p.repo),
+                      tasks,
+                    };
+                  })
+                }
+              />
+            </div>
+          </div>
+          {searchOpen && (
+            <div
+              className="mb-3 space-y-2 px-1 text-[12px]"
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  closeSearch();
+                }
+              }}
+            >
+              <input
+                ref={searchInput}
+                value={query}
+                aria-label={t('sidebar.search')}
+                placeholder={t('sidebar.searchPlaceholder')}
+                onChange={(event) => setQuery(event.target.value)}
+                className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-[13px] outline-none focus:border-crimson dark:border-white/10 dark:bg-gray-800"
+                onKeyDown={(event) => {
+                  if (['ArrowDown', 'Enter'].includes(event.key)) {
+                    event.preventDefault();
+                    const first =
+                      resultList.current?.querySelector<HTMLAnchorElement>('[data-search-result]');
+                    if (event.key === 'Enter') first?.click();
+                    else first?.focus();
+                  }
+                }}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  aria-label={t('sidebar.currentProject')}
+                  value={scope}
+                  onChange={(event) => setScope(event.target.value)}
+                  className="min-w-0 rounded border border-gray-200 bg-transparent p-1 dark:border-white/10"
+                >
+                  <option value="all">{t('sidebar.allProjects')}</option>
+                  <option value="current" disabled={!activeRepo}>
+                    {t('sidebar.currentProject')}
+                  </option>
+                </select>
+                <button
+                  type="button"
+                  onClick={closeSearch}
+                  className="ml-auto text-gray-500 dark:text-gray-400"
+                  aria-label={t('sidebar.closeSearch')}
+                >
+                  ×
+                </button>
+              </div>
+              <label className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={includeArchived}
+                  onChange={(event) => setIncludeArchived(event.target.checked)}
+                />
+                {t('sidebar.includeArchived')}
+              </label>
+            </div>
+          )}
+          {actionError && (
+            <p role="alert" className="px-2 text-[12px] text-red-500">
+              {actionError}
             </p>
-          ) : null}
-          {error ? (
-            <p className="mt-2 px-2 text-[13px] text-red-600 dark:text-red-400" role="alert">
-              {error}
+          )}
+          {projectsError && (
+            <p role="alert" className="px-2 text-[12px] text-red-500">
+              {projectsError}
+              <button onClick={reloadProjects}>{t('sidebar.retry')}</button>
             </p>
-          ) : null}
-          {archiveError ? (
-            <p className="mt-2 px-2 text-[13px] text-red-600 dark:text-red-400" role="alert">
-              {archiveError}
-            </p>
-          ) : null}
-          {pinError ? (
-            <p className="mt-2 px-2 text-[13px] text-red-600 dark:text-red-400" role="alert">
-              {pinError}
-            </p>
-          ) : null}
-          {!busy && !error && !archiveError && !pinError && folders.length === 0 ? (
-            <p className="mt-2 px-2 text-[13px] text-gray-400 dark:text-gray-500">
-              {t('sidebar.noJobs')}
-            </p>
-          ) : null}
-
-          {folders.map((folder) => (
-            <ProjectFolder
-              key={folder.repo}
-              section={folder}
-              expanded={isExpanded(folder.repo)}
-              onToggle={() => toggleProject(folder.repo)}
-              activeCount={projectByRepo.get(folder.repo)?.active_count ?? 0}
-              shown={shownPerRepo[folder.repo] ?? PROJECT_PAGE_SIZE}
-              onShowMore={() =>
-                setShownPerRepo((current) => ({
-                  ...current,
-                  [folder.repo]: (current[folder.repo] ?? PROJECT_PAGE_SIZE) + PROJECT_PAGE_SIZE,
-                }))
-              }
-              loading={loadingRepos.has(folder.repo)}
-              error={errorRepos.get(folder.repo) ?? null}
-              pathname={pathname}
-              archiving={archiving}
-              pinning={pinning}
-              onArchive={archiveConversation}
-              onSetPinned={setConversationPinned}
-              t={t}
-            />
-          ))}
-
+          )}
+          {searching ? (
+            <div
+              ref={resultList}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  closeSearch();
+                  return;
+                }
+                if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+                event.preventDefault();
+                const items = [
+                  ...resultList.current!.querySelectorAll<HTMLAnchorElement>(
+                    '[data-search-result]',
+                  ),
+                ];
+                const index = items.indexOf(document.activeElement as HTMLAnchorElement);
+                const next = items[index + (event.key === 'ArrowDown' ? 1 : -1)];
+                if (next) next.focus();
+                else if (event.key === 'ArrowUp') searchInput.current?.focus();
+              }}
+            >
+              {debounced === query.trim() &&
+                visible(search.rows).map((row) => (
+                  <TaskRow key={row.key} row={row} flat search query={debounced} {...actions} />
+                ))}
+              <ListStatus
+                loading={search.loading || debounced !== query.trim()}
+                error={search.error}
+                empty={!search.rows.length}
+                more={Boolean(search.cursor)}
+                onMore={search.loadMore}
+                onRetry={search.reload}
+                search
+              />
+            </div>
+          ) : preferences.group === 'flat' ? (
+            <div className="space-y-0.5">
+              {flatRows.map((row) => (
+                <TaskRow
+                  key={row.key}
+                  row={row}
+                  flat
+                  {...actions}
+                  reorderProps={taskReorder(flatRows, row, true)}
+                />
+              ))}
+              <ListStatus
+                loading={list.loading}
+                error={list.error}
+                empty={!flatRows.length}
+                more={Boolean(list.cursor)}
+                onMore={list.loadMore}
+                onRetry={list.reload}
+              />
+            </div>
+          ) : (
+            <>
+              {folders.map((folder) => (
+                <ProjectFolder
+                  key={folder.repo}
+                  repo={folder.repo}
+                  active={activeRepo === folder.repo}
+                  activeCount={folder.active_count}
+                  expanded={preferences.expanded[folder.repo] ?? folder.repo === defaultRepo}
+                  onToggle={() =>
+                    updatePreferences((old) => ({
+                      ...old,
+                      expanded: {
+                        ...old.expanded,
+                        [folder.repo]: !(old.expanded[folder.repo] ?? folder.repo === defaultRepo),
+                      },
+                    }))
+                  }
+                  initial={[]}
+                  selected={current?.job.repo === folder.repo ? current : undefined}
+                  userId={userId}
+                  refresh={refresh}
+                  {...actions}
+                  hiddenThreads={hiddenThreads}
+                  registerRows={registerRows}
+                  orderRows={orderedRows}
+                  taskReorder={taskReorder}
+                  reorderProps={reorderProps(
+                    'projects',
+                    folders.map((p) => p.repo),
+                    folder.repo,
+                  )}
+                />
+              ))}
+              {!folders.length && (
+                <ListStatus
+                  loading={list.loading || projectsLoading}
+                  error={list.error}
+                  empty
+                  more={false}
+                  onMore={list.loadMore}
+                  onRetry={list.reload}
+                />
+              )}
+            </>
+          )}
+          <span role="status" className="sr-only">
+            {announcement}
+          </span>
           <Link
             href="/archived"
             className={`mt-4 flex items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-[13px] font-medium transition-colors ${
@@ -349,214 +682,5 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       </aside>
       <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />
     </>
-  );
-}
-
-function ProjectFolder({
-  section,
-  expanded,
-  onToggle,
-  activeCount,
-  shown,
-  onShowMore,
-  loading,
-  error,
-  pathname,
-  archiving,
-  pinning,
-  onArchive,
-  onSetPinned,
-  t,
-}: {
-  section: ProjectSection;
-  expanded: boolean;
-  onToggle: () => void;
-  activeCount: number;
-  shown: number;
-  onShowMore: () => void;
-  loading: boolean;
-  error: string | null;
-  pathname: string;
-  archiving: string | null;
-  pinning: string | null;
-  onArchive: (key: string, jobId: string, jobIds: string[]) => void;
-  onSetPinned: (key: string, jobId: string, repo: string, pinned: boolean) => void;
-  t: Translator;
-}) {
-  const listId = `agents-project-${section.repo.replace(/[^A-Za-z0-9]/g, '-')}`;
-  const visible = section.conversations.slice(0, shown);
-  const hidden = section.conversations.length - visible.length;
-
-  return (
-    <div className="mt-4">
-      <div className="group flex items-center gap-0.5">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={expanded}
-          aria-controls={listId}
-          title={section.repo}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium text-gray-700 transition-colors hover:bg-white/80 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/5 dark:hover:text-gray-100"
-        >
-          <svg
-            className={`h-3 w-3 shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${
-              expanded ? 'rotate-90' : ''
-            }`}
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2.4}
-            aria-hidden="true"
-          >
-            <path d="m9 6 6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          <svg
-            className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.8}
-            aria-hidden="true"
-          >
-            <path
-              d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17V7.5Z"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          <span className="min-w-0 flex-1 truncate">{section.label}</span>
-          {/* A folded folder must still say it is hiding live work — the same
-              reason the rows carry status dots at all. */}
-          {!expanded && activeCount > 0 ? (
-            <span
-              className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-blue-500"
-              aria-label={t('sidebar.runningOrQueued', { count: activeCount })}
-            />
-          ) : null}
-        </button>
-        <Link
-          href={`/?repo=${encodeURIComponent(section.repo)}`}
-          aria-label={t('sidebar.newTaskIn', { project: section.label })}
-          title={t('sidebar.newTaskIn', { project: section.label })}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 opacity-70 transition hover:bg-white hover:text-gray-700 hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 group-hover:opacity-100 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
-        >
-          <svg
-            className="h-4 w-4"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.8}
-            aria-hidden="true"
-          >
-            <path
-              d="M13.5 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-7.5M16.5 3.5a2.12 2.12 0 0 1 3 3L11 15l-4 1 1-4 8.5-8.5Z"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </Link>
-      </div>
-
-      {expanded ? (
-        <div id={listId} className="mt-1 space-y-0.5">
-          {visible.map(({ key, job, jobIds }: ConversationRow) => {
-            const href = `/${job.id}`;
-            const isActive = jobIds.some((id) => pathname === `/${id}`);
-            return (
-              <div key={key} className="group relative">
-                <Link
-                  href={href}
-                  title={`${job.repo} · ${job.title}`}
-                  className={`flex w-full items-center gap-2 rounded-lg border border-transparent py-1.5 pl-4 pr-16 text-left text-[13px] transition-colors ${
-                    isActive
-                      ? 'border-gray-200/80 bg-white font-medium text-gray-900 shadow-subtle dark:border-white/10 dark:bg-gray-800 dark:text-gray-50'
-                      : 'text-gray-600 hover:bg-white/70 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
-                  }`}
-                >
-                  <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_CLASS[job.state]}`} />
-                  <span className="min-w-0 flex-1 truncate">{job.title}</span>
-                </Link>
-                <button
-                  type="button"
-                  aria-label={
-                    job.pinnedAt
-                      ? t('sidebar.unpin', { title: job.title })
-                      : t('sidebar.pin', { title: job.title })
-                  }
-                  aria-pressed={Boolean(job.pinnedAt)}
-                  aria-busy={pinning === key}
-                  title={job.pinnedAt ? t('sidebar.unpinTask') : t('sidebar.pinTask')}
-                  disabled={pinning === key || archiving === key}
-                  onClick={() => onSetPinned(key, job.id, job.repo, !job.pinnedAt)}
-                  className={`absolute right-7 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 ${
-                    job.pinnedAt
-                      ? 'opacity-100'
-                      : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
-                  } ${pinning === key ? 'animate-pulse' : ''}`}
-                >
-                  <svg
-                    className="h-3.5 w-3.5"
-                    viewBox="0 0 24 24"
-                    fill={job.pinnedAt ? 'currentColor' : 'none'}
-                    stroke="currentColor"
-                    strokeWidth={1.8}
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="m15 4 5 5-3.5 1.5-4 4L13 19l-1 1-3.5-4.5-4.5-3.5 1-1 4.5.5 4-4L15 4ZM5 19l4-4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  aria-label={t('sidebar.archive', { title: job.title })}
-                  title={t('sidebar.archiveTask')}
-                  disabled={archiving === key || pinning === key}
-                  onClick={() => onArchive(key, job.id, jobIds)}
-                  className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 opacity-0 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 group-hover:opacity-100 group-focus-within:opacity-100 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
-                >
-                  <svg
-                    className="h-4 w-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={1.8}
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="M4 7.5h16m-14 0V20h12V7.5M5 4h14l1 3.5H4L5 4Zm5 7h4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-              </div>
-            );
-          })}
-
-          {loading && visible.length === 0 ? (
-            <p className="px-4 py-1 text-[12px] text-gray-400 dark:text-gray-500">
-              {t('common.loading')}
-            </p>
-          ) : null}
-          {error ? (
-            <p className="px-4 py-1 text-[12px] text-red-600 dark:text-red-400" role="alert">
-              {error}
-            </p>
-          ) : null}
-          {hidden > 0 ? (
-            <button
-              type="button"
-              onClick={onShowMore}
-              className="w-full rounded-md px-4 py-1.5 text-left text-[12px] text-gray-400 transition-colors hover:bg-white/70 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-gray-300"
-            >
-              {t('sidebar.showMore', { count: hidden })}
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
   );
 }

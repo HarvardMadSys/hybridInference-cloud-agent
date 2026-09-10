@@ -1,0 +1,334 @@
+import Link from 'next/link';
+import { useEffect, useState, type HTMLAttributes } from 'react';
+import { useT } from '@/components/providers';
+import { projectLabel } from './conversations';
+import { useConversationList, type SidebarConversation } from './useConversationList';
+import type { AgentJobState } from './types';
+
+const DOT_CLASS: Record<AgentJobState, string> = {
+  running: 'bg-blue-500 animate-pulse',
+  needs_review: 'bg-amber-400',
+  done: 'bg-emerald-500',
+  failed: 'bg-red-400',
+  cancelled: 'bg-gray-300 dark:bg-gray-600',
+  queued: 'border border-gray-300 bg-transparent dark:border-gray-600',
+};
+export function Highlight({ text, query }: { text: string; query: string }) {
+  if (!query) return <>{text}</>;
+  const pieces = [];
+  let offset = 0;
+  // Match against the original string: Unicode case conversion can change its length.
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(escaped, 'giu');
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index;
+    pieces.push(
+      text.slice(offset, index),
+      <mark
+        key={index}
+        className="rounded bg-crimson/10 text-crimson-dark dark:bg-crimson/30 dark:text-rose-300"
+      >
+        {match[0]}
+      </mark>,
+    );
+    offset = index + match[0].length;
+  }
+  pieces.push(text.slice(offset));
+  return <>{pieces}</>;
+}
+export interface RowActions {
+  activeKey: string | null;
+  archiving: string | null;
+  pinning: string | null;
+  onArchive: (key: string, jobId: string, jobIds: string[]) => void;
+  onSetPinned: (key: string, jobId: string, repo: string, pinned: boolean) => void;
+}
+export function TaskRow({
+  row,
+  flat = false,
+  query = '',
+  search = false,
+  reorderProps,
+  activeKey,
+  archiving,
+  pinning,
+  onArchive,
+  onSetPinned,
+}: RowActions & {
+  row: SidebarConversation;
+  flat?: boolean;
+  query?: string;
+  search?: boolean;
+  reorderProps?: HTMLAttributes<HTMLDivElement>;
+}) {
+  const t = useT();
+  const { key, job, jobIds } = row;
+  const isActive = key === activeKey;
+  return (
+    <div className="group relative" {...reorderProps}>
+      <Link
+        href={`/${job.id}`}
+        aria-label={
+          flat
+            ? `${job.title} · ${job.repo}${row.archived ? ` · ${t('sidebar.archived')}` : ''}`
+            : job.title
+        }
+        aria-current={isActive ? 'page' : undefined}
+        data-search-result={search ? 'true' : undefined}
+        title={`${job.repo} · ${job.title}`}
+        className={`flex w-full items-center gap-2 rounded-lg border border-transparent py-1.5 pl-4 pr-16 text-left text-[13px] transition-colors ${
+          isActive
+            ? 'border-gray-200/80 bg-white font-medium text-gray-900 shadow-subtle dark:border-white/10 dark:bg-gray-800 dark:text-gray-50'
+            : 'text-gray-600 hover:bg-white/70 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+        }`}
+      >
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_CLASS[job.state]}`} />
+        <span className="min-w-0 flex-1 truncate">
+          <Highlight text={job.title} query={query} />
+          {flat && (
+            <span className="block truncate text-[11px] font-normal text-gray-500 dark:text-gray-400">
+              <Highlight text={job.repo} query={query} />
+              {row.archived ? ` · ${t('sidebar.archived')}` : ''}
+            </span>
+          )}
+        </span>
+      </Link>
+      <button
+        type="button"
+        aria-label={
+          job.pinnedAt
+            ? t('sidebar.unpin', { title: job.title })
+            : t('sidebar.pin', { title: job.title })
+        }
+        aria-pressed={Boolean(job.pinnedAt)}
+        aria-busy={pinning === key}
+        title={job.pinnedAt ? t('sidebar.unpinTask') : t('sidebar.pinTask')}
+        disabled={pinning === key || archiving === key}
+        onClick={() => onSetPinned(key, job.id, job.repo, !job.pinnedAt)}
+        className={`absolute right-7 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 ${
+          job.pinnedAt
+            ? 'opacity-100'
+            : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
+        } ${pinning === key ? 'animate-pulse' : ''}`}
+      >
+        <svg
+          className="h-3.5 w-3.5"
+          viewBox="0 0 24 24"
+          fill={job.pinnedAt ? 'currentColor' : 'none'}
+          stroke="currentColor"
+          strokeWidth={1.8}
+          aria-hidden="true"
+        >
+          <path
+            d="m15 4 5 5-3.5 1.5-4 4L13 19l-1 1-3.5-4.5-4.5-3.5 1-1 4.5.5 4-4L15 4ZM5 19l4-4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      <button
+        type="button"
+        aria-label={t('sidebar.archive', { title: job.title })}
+        title={t('sidebar.archiveTask')}
+        disabled={row.archived || archiving === key || pinning === key}
+        onClick={() => onArchive(key, job.id, jobIds)}
+        className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 opacity-0 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 group-hover:opacity-100 group-focus-within:opacity-100 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+      >
+        <svg
+          className="h-4 w-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.8}
+          aria-hidden="true"
+        >
+          <path
+            d="M4 7.5h16m-14 0V20h12V7.5M5 4h14l1 3.5H4L5 4Zm5 7h4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+export function ListStatus({
+  loading,
+  error,
+  empty,
+  more,
+  onMore,
+  onRetry,
+  search = false,
+}: {
+  loading: boolean;
+  error: string | null;
+  empty: boolean;
+  more: boolean;
+  onMore: () => void;
+  onRetry: () => void;
+  search?: boolean;
+}) {
+  const t = useT();
+  return (
+    <>
+      {loading && (
+        <p role="status" className="px-4 py-2 text-[12px] text-gray-500 dark:text-gray-400">
+          {t('common.loading')}
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="px-4 py-2 text-[12px] text-red-500">
+          {error}{' '}
+          <button onClick={onRetry} className="underline">
+            {t('sidebar.retry')}
+          </button>
+        </p>
+      )}
+      {!loading && !error && empty && (
+        <p className="px-4 py-2 text-[12px] text-gray-500 dark:text-gray-400">
+          {t(search ? 'sidebar.noMatches' : 'sidebar.noJobs')}
+        </p>
+      )}
+      {more && (
+        <button
+          disabled={loading}
+          onClick={onMore}
+          className="w-full rounded-md px-4 py-1.5 text-left text-[12px] text-gray-500 dark:text-gray-400 hover:bg-gray-100 disabled:opacity-50 dark:hover:bg-white/5"
+        >
+          {t('sidebar.loadMore')}
+        </button>
+      )}
+    </>
+  );
+}
+export function ProjectFolder({
+  repo,
+  active,
+  activeCount,
+  expanded,
+  onToggle,
+  initial,
+  selected,
+  userId,
+  refresh,
+  hiddenThreads,
+  registerRows,
+  orderRows,
+  taskReorder,
+  reorderProps,
+  ...actions
+}: RowActions & {
+  repo: string;
+  active: boolean;
+  activeCount: number;
+  expanded: boolean;
+  onToggle: () => void;
+  initial: SidebarConversation[];
+  selected?: SidebarConversation;
+  userId?: string;
+  refresh: number;
+  hiddenThreads: Set<string>;
+  registerRows: (rows: SidebarConversation[]) => void;
+  orderRows: (rows: SidebarConversation[]) => SidebarConversation[];
+  taskReorder: (
+    rows: SidebarConversation[],
+    row: SidebarConversation,
+  ) => HTMLAttributes<HTMLDivElement>;
+  reorderProps: HTMLAttributes<HTMLDivElement>;
+}) {
+  const t = useT();
+  const list = useConversationList({ repo, enabled: expanded, userId, refresh });
+  const [shown, setShown] = useState(15);
+  useEffect(() => {
+    registerRows(list.rows);
+  }, [list.rows, registerRows]);
+  const byKey = new Map(initial.map((row) => [row.key, row]));
+  for (const row of list.rows) byKey.set(row.key, row);
+  if (selected && !selected.archived && !byKey.has(selected.key)) byKey.set(selected.key, selected);
+  const rows = orderRows(
+    [...byKey.values()]
+      .filter((row) => !hiddenThreads.has(row.key))
+      .sort(
+        (a, b) =>
+          (Date.parse(b.job.pinnedAt ?? '') || 0) - (Date.parse(a.job.pinnedAt ?? '') || 0) ||
+          (Date.parse(b.lastActivityAt ?? '') || 0) - (Date.parse(a.lastActivityAt ?? '') || 0),
+      ),
+  );
+  const selectedIndex = rows.findIndex((row) => row.key === actions.activeKey);
+  const visible = rows.slice(0, Math.max(shown, selectedIndex + 1));
+  const listId = `project-${encodeURIComponent(repo)}`;
+  return (
+    <div className="mt-3">
+      <div className="group flex items-center gap-0.5" {...reorderProps}>
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={listId}
+          aria-label={active ? `${projectLabel(repo)} ${t('sidebar.current')}` : undefined}
+          title={repo}
+          onClick={onToggle}
+          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border-l-2 px-2 py-2 text-left text-[13px] font-medium ${active ? 'border-crimson bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-rose-300' : 'border-transparent text-gray-700 hover:bg-white/80 dark:text-gray-300 dark:hover:bg-white/5'}`}
+        >
+          <svg
+            className={`h-3 w-3 shrink-0 text-gray-500 dark:text-gray-400 ${expanded ? 'rotate-90' : ''}`}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-hidden="true"
+          >
+            <path d="m9 6 6 6-6 6" />
+          </svg>
+          <svg
+            className={`h-4 w-4 shrink-0 ${active ? 'text-crimson dark:text-rose-300' : 'text-gray-500 dark:text-gray-400'}`}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            aria-hidden="true"
+          >
+            <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17V7.5Z" />
+          </svg>
+          <span className="min-w-0 flex-1 truncate">{projectLabel(repo)}</span>
+          {active && (
+            <span className="shrink-0 text-[10px] font-normal">{t('sidebar.current')}</span>
+          )}
+          {!expanded && activeCount > 0 && (
+            <span
+              className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-blue-500"
+              aria-label={t('sidebar.runningOrQueued', { count: activeCount })}
+            />
+          )}
+        </button>
+        <Link
+          href={`/?repo=${encodeURIComponent(repo)}`}
+          aria-label={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
+          title={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:bg-white focus:ring-2 focus:ring-crimson/30 dark:hover:bg-white/10"
+        >
+          +
+        </Link>
+      </div>
+      {expanded && (
+        <div id={listId} className="mt-1 space-y-0.5">
+          {visible.map((row) => (
+            <TaskRow key={row.key} row={row} {...actions} reorderProps={taskReorder(rows, row)} />
+          ))}
+          <ListStatus
+            loading={list.loading}
+            error={list.error}
+            empty={!rows.length}
+            more={rows.length > visible.length || Boolean(list.cursor)}
+            onMore={() => {
+              setShown((v) => v + 15);
+              if (rows.length <= visible.length + 15) list.loadMore();
+            }}
+            onRetry={list.reload}
+          />
+        </div>
+      )}
+    </div>
+  );
+}

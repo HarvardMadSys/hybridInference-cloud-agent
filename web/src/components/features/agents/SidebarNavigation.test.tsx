@@ -1,0 +1,360 @@
+// @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
+const api = vi.hoisted(() => ({
+  list: vi.fn(),
+  projects: vi.fn(),
+  get: vi.fn(),
+  thread: vi.fn(),
+  archive: vi.fn(),
+  restore: vi.fn(),
+  archivedJobs: vi.fn(),
+  pin: vi.fn(),
+  pathname: '/',
+  params: '',
+  user: 'alice',
+}));
+vi.mock('next/navigation', () => ({
+  usePathname: () => api.pathname,
+  useSearchParams: () => new URLSearchParams(api.params),
+  useRouter: () => ({ replace: vi.fn() }),
+}));
+vi.mock('@/components/providers', async () => {
+  const { translate } = await import('@/lib/i18n/translate');
+  return {
+    useAuth: () => ({ state: { user: { id: api.user } } }),
+    useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
+      translate('en', key, vars),
+  };
+});
+vi.mock('@/components/features/settings/SettingsLauncher', () => ({
+  SettingsLauncher: () => null,
+}));
+vi.mock('@/lib/api/agents', () => ({
+  listAgentConversations: api.list,
+  listAgentProjects: api.projects,
+  getAgentJob: api.get,
+  getAgentJobThread: api.thread,
+  archiveAgentJob: api.archive,
+  restoreAgentJob: api.restore,
+  listAgentJobs: api.archivedJobs,
+  pinAgentJob: api.pin,
+  unpinAgentJob: api.pin,
+}));
+import { AgentsSidebar } from './AgentsSidebar';
+import { ArchivedTasksView } from './ArchivedTasksView';
+import { announceConversationRestored } from './conversationEvents';
+import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
+function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
+  return {
+    job: {
+      id,
+      thread_id: `thread-${id}`,
+      turn_no: 1,
+      repo,
+      state: 'succeeded',
+      task_prompt: 'Follow-up',
+      created_at: '2026-09-01T00:00:00Z',
+    } as AgentJobApi,
+    title: `Task ${id}`,
+    archived: false,
+    last_activity_at: '2026-09-01T00:00:00Z',
+  };
+}
+const base = [conversation('a'), conversation('b')];
+beforeEach(() => {
+  localStorage.clear();
+  api.pathname = '/';
+  api.params = '';
+  api.user = 'alice';
+  api.list.mockResolvedValue({ conversations: base, next_cursor: null });
+  api.projects.mockResolvedValue([
+    {
+      repo: 'owner/repo',
+      task_count: 2,
+      active_count: 0,
+      last_activity_at: '2026-09-01T00:00:00Z',
+    },
+  ]);
+  api.get.mockRejectedValue(new Error('not a task'));
+  api.thread.mockResolvedValue(null);
+  api.archive.mockResolvedValue({});
+});
+afterEach(() => {
+  cleanup();
+  vi.resetAllMocks();
+});
+describe('sidebar navigation interactions', () => {
+  it('has exactly four menu options, applies immediately, and returns keyboard focus', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    const trigger = screen.getByRole('button', { name: 'View options' });
+    fireEvent.click(trigger);
+    const menu = screen.getByRole('menu');
+    expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(4);
+    expect(
+      within(menu)
+        .getAllByRole('menuitemradio')
+        .filter((el) => el.getAttribute('aria-checked') === 'true'),
+    ).toHaveLength(2);
+    expect(screen.getByRole('menuitemradio', { name: 'Project' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitemradio', { name: 'In one list' })).toHaveFocus();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'In one list' }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(screen.queryByRole('button', { name: 'repo' })).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+    expect(trigger).toHaveFocus();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+  it('highlights repo query on new tasks without falsely highlighting the first project', async () => {
+    const { rerender } = render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    expect(screen.queryByText('Current')).not.toBeInTheDocument();
+    api.params = 'repo=owner%2Frepo';
+    rerender(<AgentsSidebar />);
+    expect(screen.getByText('Current')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'repo Current' }));
+    expect(screen.getByText('Current')).toBeInTheDocument();
+  });
+  it('resolves historical turns through detail and selects canonical latest thread in flat mode', async () => {
+    localStorage.setItem(
+      sidebarPreferencesKey('alice'),
+      JSON.stringify({ ...DEFAULT_PREFERENCES, group: 'flat' }),
+    );
+    api.pathname = '/old-turn';
+    const latest = conversation('latest');
+    latest.job.thread_id = 'old-thread';
+    latest.job.turn_no = 7;
+    api.get.mockResolvedValue({ ...latest.job, id: 'old-turn', turn_no: 1 });
+    api.thread.mockResolvedValue({
+      thread_id: 'old-thread',
+      title: 'Original canonical title',
+      archived_at: null,
+      jobs: [latest.job],
+      messages: [],
+    });
+    render(<AgentsSidebar />);
+    const selected = await screen.findByRole('link', {
+      name: 'Original canonical title · owner/repo',
+    });
+    expect(selected).toHaveAttribute('aria-current', 'page');
+    expect(selected).toHaveAttribute('href', '/latest');
+  });
+  it('does not inject an archived historical selection into the normal tree', async () => {
+    api.pathname = '/archived-turn';
+    const archived = conversation('archived-turn');
+    api.get.mockResolvedValue(archived.job);
+    api.thread.mockResolvedValue({
+      thread_id: archived.job.thread_id,
+      title: 'Archived only',
+      archived_at: '2026-09-02T00:00:00Z',
+      jobs: [archived.job],
+      messages: [],
+    });
+    render(<AgentsSidebar />);
+    await screen.findByText('Current');
+    expect(screen.queryByText('Archived only')).not.toBeInTheDocument();
+  });
+  it('searches server history including archived results, escapes highlights, and restores grouping', async () => {
+    const archived = { ...conversation('old'), archived: true, title: 'Old <img> task' };
+    api.list.mockImplementation(
+      async ({ q, includeArchived }: { q?: string; includeArchived?: boolean }) => ({
+        conversations: q ? (includeArchived ? [archived] : []) : base,
+        next_cursor: null,
+      }),
+    );
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+    const input = screen.getByRole('textbox', { name: 'Search tasks' });
+    fireEvent.change(input, { target: { value: '<img>' } });
+    await screen.findByText('No matching tasks. Try another title or repository.');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Include archived' }));
+    const match = await screen.findByText('<img>');
+    expect(match.tagName).toBe('MARK');
+    expect(document.querySelector('img')).not.toBeInTheDocument();
+    expect(api.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ q: '<img>', includeArchived: true }),
+    );
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(screen.getByRole('link', { name: /Old <img> task/ })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    await screen.findByText('Task a');
+    expect(screen.getByRole('button', { name: 'repo' })).toHaveAttribute('aria-expanded', 'true');
+  });
+  it('keeps manual task and project movement accessible and remembered across modes', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'View options' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Manual' }));
+    const row = screen.getByRole('link', { name: 'Task b' });
+    row.focus();
+    fireEvent.keyDown(row, { key: 'ArrowUp', altKey: true });
+    expect(
+      screen
+        .getAllByRole('link')
+        .filter((link) => link.textContent?.startsWith('Task'))
+        .map((link) => link.textContent),
+    ).toEqual(['Task b', 'Task a']);
+    const saved = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
+    expect(saved.tasks['repo:owner/repo']).toEqual(['thread-b', 'thread-a']);
+    fireEvent.click(screen.getByRole('button', { name: 'View options' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Last updated' }));
+    fireEvent.click(screen.getByRole('button', { name: 'View options' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Manual' }));
+    expect(
+      screen
+        .getAllByRole('link')
+        .filter((link) => link.textContent?.startsWith('Task'))
+        .map((link) => link.textContent),
+    ).toEqual(['Task b', 'Task a']);
+    await act(async () => {});
+  });
+  it('supports drag ordering within a repository and refuses cross-repository drops', async () => {
+    const other = conversation('other', 'second/repo');
+    api.projects.mockResolvedValue([
+      {
+        repo: 'owner/repo',
+        task_count: 2,
+        active_count: 0,
+        last_activity_at: base[0].last_activity_at,
+      },
+      { repo: 'second/repo', task_count: 1, active_count: 0, last_activity_at: null },
+    ]);
+    api.list.mockImplementation(async ({ repo }: { repo?: string }) => ({
+      conversations: repo === 'second/repo' ? [other] : base,
+      next_cursor: null,
+    }));
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'View options' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Manual' }));
+    const transfer = { effectAllowed: '', setData: vi.fn() };
+    const a = screen.getByRole('link', { name: 'Task a' }).parentElement!;
+    const b = screen.getByRole('link', { name: 'Task b' }).parentElement!;
+    fireEvent.dragStart(b, { dataTransfer: transfer });
+    fireEvent.dragOver(a);
+    fireEvent.drop(a);
+    expect(
+      JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!).tasks['repo:owner/repo'],
+    ).toEqual(['thread-b', 'thread-a']);
+    fireEvent.click(screen.getAllByRole('button', { name: 'repo' })[1]);
+    const otherLink = await screen.findByRole('link', { name: 'Task other' });
+    fireEvent.dragStart(b, { dataTransfer: transfer });
+    fireEvent.drop(otherLink.parentElement!);
+    expect(otherLink).toHaveAttribute('href', '/other');
+    expect(
+      JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!).tasks['repo:second/repo'],
+    ).toEqual(['thread-other']);
+  });
+  it('can search a just-archived conversation when archived results are included', async () => {
+    let archived = false;
+    api.archive.mockImplementation(async () => {
+      archived = true;
+    });
+    api.list.mockImplementation(
+      async ({ q, includeArchived }: { q?: string; includeArchived?: boolean }) => ({
+        conversations:
+          q && includeArchived ? [{ ...base[0], archived: true }] : archived ? [base[1]] : base,
+        next_cursor: null,
+      }),
+    );
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'Archive Task a' }));
+    await waitFor(() => expect(screen.queryByText('Task a')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Search tasks' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Task a' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Include archived' }));
+    expect(
+      await screen.findByRole('link', { name: 'Task a · owner/repo · Archived' }),
+    ).toHaveAttribute('href', '/a');
+  });
+  it('loads only expanded project pages and records no history IDs before manual order', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
+    expect(api.list.mock.calls.every(([options]) => options.repo === 'owner/repo')).toBe(true);
+    expect(localStorage.getItem(sidebarPreferencesKey('alice'))).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'View options' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'In one list' }));
+    await screen.findByRole('link', { name: 'Task a · owner/repo' });
+    const saved = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
+    expect(saved.tasks).toBeUndefined();
+    expect(saved.projects).toBeUndefined();
+    fireEvent.click(screen.getByRole('button', { name: 'View options' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Manual' }));
+    const manual = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
+    expect(manual.tasks.flat).toEqual(['thread-a', 'thread-b']);
+    expect(manual.projects).toEqual(['owner/repo']);
+  });
+  it('restores an old hidden thread directly into search and its project without a global-page hit', async () => {
+    let archived = false;
+    const old = conversation('old');
+    old.job.task_prompt = old.title;
+    old.last_activity_at = '2025-01-01T00:00:00Z';
+    api.archive.mockImplementation(async () => {
+      archived = true;
+    });
+    api.restore.mockImplementation(async () => {
+      archived = false;
+    });
+    api.archivedJobs.mockImplementation(async () => (archived ? [old.job] : []));
+    api.list.mockImplementation(async ({ q, repo }: { q?: string; repo?: string }) => ({
+      // This old task never belongs to the unscoped first page.
+      conversations: q
+        ? archived
+          ? []
+          : [old]
+        : repo
+          ? [...base, ...(archived ? [] : [old])]
+          : base,
+      next_cursor: null,
+    }));
+    const { rerender } = render(
+      <>
+        <AgentsSidebar />
+      </>,
+    );
+    await screen.findByText('Task old');
+    fireEvent.click(screen.getByRole('button', { name: 'Archive Task old' }));
+    await waitFor(() => expect(screen.queryByText('Task old')).not.toBeInTheDocument());
+    rerender(
+      <>
+        <AgentsSidebar />
+        <ArchivedTasksView />
+      </>,
+    );
+    await screen.findByRole('button', { name: 'Restore' });
+    fireEvent.click(screen.getByRole('button', { name: 'Search tasks' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Task old' } });
+    await screen.findByText('No matching tasks. Try another title or repository.');
+    const queriesBeforeRestore = api.projects.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    await screen.findByRole('link', { name: 'Task old · owner/repo' });
+    expect(api.projects.mock.calls.length).toBeGreaterThan(queriesBeforeRestore);
+    fireEvent.click(screen.getByRole('button', { name: 'Close search' }));
+    expect(await screen.findByRole('link', { name: 'Task old' })).toHaveAttribute('href', '/old');
+    expect(old.last_activity_at).toBe('2025-01-01T00:00:00Z');
+  });
+  it('ignores restore invalidation from a different signed-in account', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    api.list.mockClear();
+    api.projects.mockClear();
+    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'bob' }));
+    expect(api.list).not.toHaveBeenCalled();
+    expect(api.projects).not.toHaveBeenCalled();
+    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'alice' }));
+    await waitFor(() => expect(api.projects).toHaveBeenCalledOnce());
+    expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
+  });
+});

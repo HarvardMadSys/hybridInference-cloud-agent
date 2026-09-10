@@ -499,6 +499,7 @@ class FakeAgentJobStore:
             "id": thread_id,
             "repo": job["repo"],
             "title": jobs[0]["task_prompt"].splitlines()[0],
+            "archived_at": self.archived_threads.get(thread_id),
             "created_at": None,
             "updated_at": None,
             "messages": sorted(
@@ -1242,6 +1243,105 @@ async def test_repo_filter_rejects_a_value_git_would_read_as_an_option(client: A
     assert rejected.status_code == 422
 
 
+async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """Search returns the canonical title separately from the latest prompt."""
+    job_id = await _create_job(client)
+    job = store.jobs[job_id]
+    job["updated_at"] = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    search = AsyncMock(
+        return_value={
+            "conversations": [
+                {
+                    "job": job,
+                    "title": "Original conversation title",
+                    "archived": True,
+                    "last_activity_at": job["updated_at"],
+                }
+            ],
+            "next_cursor": "opaque-page-boundary",
+        }
+    )
+    monkeypatch.setattr(store, "list_conversations", search, raising=False)
+    response = await client.get(
+        "/v1/agent/conversations",
+        params={
+            "q": "  Original  ",
+            "repo": "owner/name",
+            "include_archived": "true",
+            "limit": 17,
+            "cursor": "previous-page",
+        },
+    )
+    assert response.status_code == 200
+    search.assert_awaited_once_with(
+        user_id=_OWNER,
+        q="Original",
+        repo="owner/name",
+        include_archived=True,
+        limit=17,
+        cursor="previous-page",
+    )
+    item = response.json()["conversations"][0]
+    assert item["job"]["id"] == job_id
+    assert "user_id" not in item["job"]
+    assert item["title"] == "Original conversation title"
+    assert item["archived"] is True
+    assert item["last_activity_at"] == job["updated_at"].isoformat()
+    assert response.json()["next_cursor"] == "opaque-page-boundary"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"limit": 0},
+        {"limit": 201},
+        {"repo": "--upload-pack=sh"},
+        {"q": "x" * 201},
+        {"include_archived": "invalid"},
+        {"cursor": ""},
+        {"cursor": "x" * 2049},
+    ],
+)
+async def test_conversation_search_rejects_invalid_parameters(client: AsyncClient, params):
+    """Malformed searches never reach persistence."""
+    response = await client.get("/v1/agent/conversations", params=params)
+    assert response.status_code == 422
+
+
+async def test_conversation_search_rejects_invalid_cursor(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    search = AsyncMock(side_effect=ValueError("Invalid conversation cursor for this search"))
+    monkeypatch.setattr(store, "list_conversations", search, raising=False)
+    response = await client.get("/v1/agent/conversations", params={"cursor": "invalid"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Invalid conversation cursor for this search"
+
+
+async def test_conversation_search_requires_owner_and_accepts_browser_session(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Anonymous searches are refused; signed-in searches use the JWT owner."""
+    search = AsyncMock(return_value={"conversations": [], "next_cursor": None})
+    monkeypatch.setattr(store, "list_conversations", search, raising=False)
+    app = _build_app(store)
+    app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        anonymous = await client.get("/v1/agent/conversations")
+        assert anonymous.status_code == 401
+        search.assert_not_awaited()
+        response = await client.get(
+            "/v1/agent/conversations", headers={"Authorization": f"Bearer {_browser_session()}"}
+        )
+    assert response.status_code == 200
+    assert response.json() == {"conversations": [], "next_cursor": None}
+    search.assert_awaited_once_with(
+        user_id=_OWNER, q="", repo=None, include_archived=False, limit=50, cursor=None
+    )
+
+
 def _seed_event(
     store: FakeAgentJobStore,
     *,
@@ -1379,6 +1479,8 @@ async def test_archive_and_restore_filter_the_entire_thread_without_cancelling(
     assert archived.json()["thread_id"] == thread_id
     assert archived.json()["archived"] is True
     assert archived.json()["archived_at"] is not None
+    thread = (await client.get(f"/v1/agent/jobs/{child_id}/thread")).json()
+    assert thread["archived_at"] == archived.json()["archived_at"]
     assert store.jobs[parent_id]["state"] == "running"
     assert store.jobs[parent_id]["cancel_requested"] is False
     assert (await client.get("/v1/agent/jobs")).json() == {"jobs": []}
@@ -1394,6 +1496,8 @@ async def test_archive_and_restore_filter_the_entire_thread_without_cancelling(
         "archived_at": None,
     }
     assert (await client.get("/v1/agent/jobs?archived=true")).json() == {"jobs": []}
+    thread = (await client.get(f"/v1/agent/jobs/{parent_id}/thread")).json()
+    assert thread["archived_at"] is None
     active_jobs = (await client.get("/v1/agent/jobs")).json()["jobs"]
     assert {job["id"] for job in active_jobs} == {parent_id, child_id}
 
