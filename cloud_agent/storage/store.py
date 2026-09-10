@@ -47,21 +47,32 @@ from cloud_agent.execution_profiles import (
     default_execution_profile,
     shared_sandbox_claim_attested,
 )
-from cloud_agent.host_pool import (
-    CLAIMABLE_STATUSES,
-    HOST_DISABLED,
-    HOST_ENROLLING,
-    HOST_OFFLINE,
-    HOST_ONLINE,
-    normalize_capabilities,
-    transition_allowed,
-)
+from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.storage._sql import (
+    NATIVE_FORK_CAPABILITY_JSON as _NATIVE_FORK_CAPABILITY_JSON,
+    THREAD_SANDBOX_SOURCE as _THREAD_SANDBOX_SOURCE,
+    load_json as _load_json,
+)
+from cloud_agent.storage.repositories import (
+    GrantStore,
+    HostPoolStore,
+    LedgerStore,
+    McpConnectionStore,
+    SourceControlStore,
+)
 from cloud_agent.task_titles import fallback_title
-from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
 
 if TYPE_CHECKING:
     import asyncpg
+
+    from cloud_agent.ports import (
+        GrantRepository,
+        HostPoolRepository,
+        LedgerRepository,
+        McpConnectionRepository,
+        SourceControlRepository,
+    )
 
 logger = get_logger(__name__)
 
@@ -109,104 +120,6 @@ def _new_sandbox_id() -> str:
 def _new_session_fork_id() -> str:
     """Generate one shared native-session fork operation id."""
     return f"asfork_{secrets.token_hex(16)}"
-
-
-# Every runnable chat is a member of a retained shared-live group. Historical
-# ``agent_thread_sandboxes`` rows remain in the migration history so an
-# upgraded database is readable, but they are deliberately absent from this
-# executable read shape: old rows cannot be resumed, forked, or silently
-# upgraded into a different topology.
-_NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
-
-# Bound a shared grant to one attempt's execution interval. A subsequent
-# attempt may start before a delayed predecessor is marked finished; clamp
-# that predecessor rather than counting the same requests twice. PostgreSQL
-# LEAST ignores the NULL produced when there is no following attempt.
-_LEDGER_WINDOW_UNTIL_SQL = """
-LEAST(
-    COALESCE(a.finished_at, NOW()),
-    (
-        SELECT MIN(next_attempt.started_at)
-        FROM agent_attempts next_attempt
-        JOIN agent_jobs next_job ON next_job.id = next_attempt.job_id
-        WHERE next_job.thread_id = j.thread_id
-          AND (next_attempt.started_at, next_attempt.id) > (a.started_at, a.id)
-    )
-)
-"""
-
-
-_THREAD_SANDBOX_SOURCE = f"""
-(
-    SELECT
-        m.thread_id, g.id AS sandbox_id, g.generation, g.host, g.container_id,
-        g.container_name, g.runtime_id, g.runtime_version,
-        g.sandbox_image_digest, g.execution_profile, g.state,
-        g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
-        m.context_status, m.activation_generation, m.process_generation,
-        m.active_attempt_id, m.admitted_job_id, m.admitted_at,
-        m.last_settled_job_id, m.native_session_id, g.idle_deadline,
-        COALESCE(m.last_error, g.last_error) AS last_error,
-        m.created_at, m.updated_at, m.fork_operation_id,
-        TRUE AS shared_live, g.origin_thread_id, m.resident_state,
-        m.residency_generation, m.resident_slot_id,
-        g.resident_slot_capacity, m.native_state,
-        m.forked_from_thread_id, m.fork_anchor_job_id,
-        g.last_activity_at AS group_last_activity_at,
-        (
-            SELECT snapshot.state
-            FROM agent_sandbox_snapshots snapshot
-            WHERE snapshot.sandbox_id = g.id
-            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-            LIMIT 1
-        ) AS workspace_publication_state,
-        g.workspace_epoch,
-        EXISTS (
-            SELECT 1 FROM agent_runner_hosts h
-            WHERE h.host = g.host
-              AND h.status = 'online'
-              AND h.capabilities @> '{_NATIVE_FORK_CAPABILITY_JSON}'::jsonb
-              AND h.sandbox_image_digest = g.sandbox_image_digest
-        ) AS native_fork_capable,
-        COALESCE((
-            SELECT jsonb_agg(
-                jsonb_build_object(
-                    'thread_id', peer.thread_id,
-                    'native_session_id', peer.native_session_id,
-                    'native_state', peer.native_state,
-                    'context_status', peer.context_status,
-                    'activation_generation', peer.activation_generation,
-                    'process_generation', peer.process_generation,
-                    'residency_generation', peer.residency_generation,
-                    'resident_state', peer.resident_state,
-                    'resident_slot_id', peer.resident_slot_id,
-                    'active_attempt_id', peer.active_attempt_id,
-                    'admitted_job_id', peer.admitted_job_id,
-                    'admitted_at', peer.admitted_at,
-                    'last_settled_job_id', peer.last_settled_job_id,
-                    'forked_from_thread_id', peer.forked_from_thread_id,
-                    'fork_anchor_job_id', peer.fork_anchor_job_id
-                ) ORDER BY peer.created_at, peer.thread_id
-            )
-            FROM agent_thread_sandbox_memberships peer
-            WHERE peer.sandbox_id = g.id
-        ), '[]'::jsonb) AS group_members
-    FROM agent_thread_sandbox_memberships m
-    JOIN agent_sandboxes g ON g.id = m.sandbox_id
-    WHERE g.mode = 'shared_live'
-) AS s
-"""
-
-
-def _load_json(value: Any) -> Any:
-    """Decode a JSONB column that asyncpg may hand back as str or object."""
-    if isinstance(value, (str, bytes)):
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("Failed to decode agent job JSON column", exc_info=True)
-            return None
-    return value
 
 
 def _sandbox_row_to_dict(row: Any) -> dict[str, Any]:
@@ -459,43 +372,331 @@ def _decode_conversation_cursor(
         raise ValueError("Invalid conversation cursor for this search") from exc
 
 
-# Everything a caller may see about a host. ``credential_hash`` is deliberately
-# not in it — reading it back out would make the row as good as the credential
-# — and is reported only as the boolean ``enrolled``.
-_HOST_COLUMN_NAMES = (
-    "host",
-    "last_worker_id",
-    "first_seen_at",
-    "last_seen_at",
-    "status",
-    "labels",
-    "capabilities",
-    "slots_total",
-    "slots_used",
-    "runner_version",
-    "broker_url",
-    "last_heartbeat_at",
-    "sandbox_runtime",
-    "sandbox_image_digest",
-    "runtime_versions",
-    "runtime_versions_available",
-)
-_HOST_COLUMNS = ", ".join(_HOST_COLUMN_NAMES) + ", (credential_hash IS NOT NULL) AS enrolled"
-# The same list qualified with ``h.``. Required wherever the query joins
-# ``agent_attempts``, which has its own ``status`` and ``host_id``: unqualified,
-# Postgres rejects the whole statement as ambiguous.
-_QUALIFIED_HOST_COLUMNS = (
-    ", ".join(f"h.{column}" for column in _HOST_COLUMN_NAMES)
-    + ", (h.credential_hash IS NOT NULL) AS enrolled"
-)
-
-
 class AgentJobStore:
     """Postgres-backed store for jobs, attempts, events, and retained groups."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
-        """Wrap a shared asyncpg pool."""
+        """Wrap a shared asyncpg pool and compose the domain repositories."""
         self._pool = pool
+        self.hosts: HostPoolRepository = HostPoolStore(pool)
+        self.source_control: SourceControlRepository = SourceControlStore(pool)
+        self.mcp_connections: McpConnectionRepository = McpConnectionStore(pool)
+        self.grants: GrantRepository = GrantStore(pool)
+        self.ledger: LedgerRepository = LedgerStore(pool)
+
+    # -- delegation to the composed repositories --
+    #
+    # Kept so existing callers and their tests are untouched by the split.
+    # New code should reach for the repository attribute (and depend on the
+    # port, not on this class); a delegator goes away with its last caller.
+
+    async def issue_enroll_token(
+        self, *, token_hash: str, host: str, ttl_seconds: float, issued_by: str | None = None
+    ) -> dict[str, Any]:
+        """Record a one-time enrollment token by hash and return its expiry."""
+        return await self.hosts.issue_enroll_token(
+            token_hash=token_hash, host=host, ttl_seconds=ttl_seconds, issued_by=issued_by
+        )
+
+    async def consume_enroll_token(self, *, token_hash: str, host: str) -> bool:
+        """Spend an enrollment token, exactly once and only under its own name."""
+        return await self.hosts.consume_enroll_token(token_hash=token_hash, host=host)
+
+    async def get_host(self, *, host: str) -> dict[str, Any] | None:
+        """Return one host row, without its credential hash."""
+        return await self.hosts.get_host(host=host)
+
+    async def register_host(
+        self,
+        *,
+        host: str,
+        credential_hash: str,
+        capabilities: list[str] | None = None,
+        slots_total: int | None = None,
+        broker_url: str | None = None,
+        runner_version: str | None = None,
+        labels: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Enrol a machine, or re-enrol one that was rebuilt."""
+        return await self.hosts.register_host(
+            host=host,
+            credential_hash=credential_hash,
+            capabilities=capabilities,
+            slots_total=slots_total,
+            broker_url=broker_url,
+            runner_version=runner_version,
+            labels=labels,
+        )
+
+    async def authenticate_host(self, *, host: str, credential_hash: str) -> dict[str, Any] | None:
+        """Return the host iff this credential is the one it currently holds."""
+        return await self.hosts.authenticate_host(host=host, credential_hash=credential_hash)
+
+    async def record_host_heartbeat(
+        self,
+        *,
+        host: str,
+        physical_host: str | None = None,
+        slots_total: int | None = None,
+        runner_version: str | None = None,
+        broker_url: str | None = None,
+        capabilities: list[str] | None = None,
+        sandbox_runtime: str | None = None,
+        sandbox_image_digest: str | None = None,
+        runtime_versions: dict[str, str] | None = None,
+        runtime_versions_available: dict[str, list[str]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Record a heartbeat, promoting the host to ``online`` when it may."""
+        return await self.hosts.record_host_heartbeat(
+            host=host,
+            physical_host=physical_host,
+            slots_total=slots_total,
+            runner_version=runner_version,
+            broker_url=broker_url,
+            capabilities=capabilities,
+            sandbox_runtime=sandbox_runtime,
+            sandbox_image_digest=sandbox_image_digest,
+            runtime_versions=runtime_versions,
+            runtime_versions_available=runtime_versions_available,
+        )
+
+    async def set_host_status(self, *, host: str, status: str) -> str:
+        """Move a host to ``status``, refusing transitions the table forbids."""
+        return await self.hosts.set_host_status(host=host, status=status)
+
+    async def remove_host(self, *, host: str, force: bool = False) -> str:
+        """Revoke a host's credential and take it out of the pool."""
+        return await self.hosts.remove_host(host=host, force=force)
+
+    async def reap_offline_hosts(
+        self, *, interval_seconds: float, missed_intervals: int
+    ) -> list[str]:
+        """Mark enrolled hosts that stopped heartbeating as ``offline``."""
+        return await self.hosts.reap_offline_hosts(
+            interval_seconds=interval_seconds, missed_intervals=missed_intervals
+        )
+
+    async def host_for_attempt(self, *, attempt_id: int) -> dict[str, Any] | None:
+        """The host row an attempt ran on, or ``None`` when it had none."""
+        return await self.hosts.host_for_attempt(attempt_id=attempt_id)
+
+    async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
+        """The job attempt's host, or its retained thread's durable host."""
+        return await self.hosts.host_for_job(job_id=job_id)
+
+    async def active_runner_host(self) -> str | None:
+        """The new-chat placement host, or ``None`` when any may materialize."""
+        return await self.hosts.active_runner_host()
+
+    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
+        """The pool, the pinned host and the version selection, read together."""
+        return await self.hosts.runner_pool()
+
+    async def deployment_runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], set[str]]:
+        """Read placement policy, hosts, and retained owners for rollout fencing."""
+        return await self.hosts.deployment_runner_pool()
+
+    async def list_runner_hosts(self) -> list[dict[str, Any]]:
+        """Return every host seen polling, most recent poll first."""
+        return await self.hosts.list_runner_hosts()
+
+    async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
+        """Choose the CLI version this deployment runs for one runtime."""
+        return await self.hosts.set_runtime_version(runtime=runtime, version=version)
+
+    async def set_active_runner_host(self, *, host: str | None) -> bool:
+        """Pin new-chat placement to one host, or unpin with ``None``."""
+        return await self.hosts.set_active_runner_host(host=host)
+
+    async def forget_runner_host(self, *, host: str) -> str:
+        """Drop a host from the pool. A runner still polling re-adds itself."""
+        return await self.hosts.forget_runner_host(host=host)
+
+    async def record_repo_grant(
+        self, *, user_id: str, installation_id: int, account_login: str | None = None
+    ) -> None:
+        """Record that this user may use this installation."""
+        return await self.source_control.record_repo_grant(
+            user_id=user_id, installation_id=installation_id, account_login=account_login
+        )
+
+    async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
+        """Return the installations this user has connected."""
+        return await self.source_control.list_repo_grants(user_id=user_id)
+
+    async def revoke_repo_grant(self, *, user_id: str, installation_id: int) -> bool:
+        """Drop one connection. Uninstalling on GitHub is the other half."""
+        return await self.source_control.revoke_repo_grant(
+            user_id=user_id, installation_id=installation_id
+        )
+
+    async def create_oauth_state(
+        self,
+        *,
+        state_hash: str,
+        user_id: str,
+        provider: str,
+        code_verifier_ciphertext: str | None,
+        expires_at: Any,
+    ) -> None:
+        """Persist a short-lived state without retaining the bearer value."""
+        return await self.source_control.create_oauth_state(
+            state_hash=state_hash,
+            user_id=user_id,
+            provider=provider,
+            code_verifier_ciphertext=code_verifier_ciphertext,
+            expires_at=expires_at,
+        )
+
+    async def consume_oauth_state(
+        self, *, state_hash: str, user_id: str, provider: str
+    ) -> dict[str, Any] | None:
+        """Consume one live state exactly once for its owning user/provider."""
+        return await self.source_control.consume_oauth_state(
+            state_hash=state_hash, user_id=user_id, provider=provider
+        )
+
+    async def upsert_gitlab_connection(
+        self,
+        *,
+        user_id: str,
+        external_user_id: int,
+        username: str,
+        display_name: str | None,
+        web_url: str | None,
+        access_token_ciphertext: str,
+        refresh_token_ciphertext: str,
+        expires_at: Any,
+    ) -> int:
+        """Store one GitLab.com identity per platform user."""
+        return await self.source_control.upsert_gitlab_connection(
+            user_id=user_id,
+            external_user_id=external_user_id,
+            username=username,
+            display_name=display_name,
+            web_url=web_url,
+            access_token_ciphertext=access_token_ciphertext,
+            refresh_token_ciphertext=refresh_token_ciphertext,
+            expires_at=expires_at,
+        )
+
+    async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
+        """Return the owning user's connection, including encrypted tokens."""
+        return await self.source_control.get_gitlab_connection(user_id=user_id)
+
+    async def update_gitlab_tokens(
+        self,
+        *,
+        connection_id: int,
+        user_id: str,
+        access_token_ciphertext: str,
+        refresh_token_ciphertext: str,
+        expires_at: Any,
+    ) -> bool:
+        """Rotate encrypted OAuth tokens without crossing user ownership."""
+        return await self.source_control.update_gitlab_tokens(
+            connection_id=connection_id,
+            user_id=user_id,
+            access_token_ciphertext=access_token_ciphertext,
+            refresh_token_ciphertext=refresh_token_ciphertext,
+            expires_at=expires_at,
+        )
+
+    async def delete_gitlab_connection(self, *, user_id: str, connection_id: int) -> bool:
+        """Delete only a connection owned by the authenticated user."""
+        return await self.source_control.delete_gitlab_connection(
+            user_id=user_id, connection_id=connection_id
+        )
+
+    async def list_mcp_connections(self, *, user_id: str) -> list[dict[str, Any]]:
+        """Return this user's MCP connections, including encrypted tokens."""
+        return await self.mcp_connections.list_mcp_connections(user_id=user_id)
+
+    async def upsert_mcp_connection(
+        self,
+        *,
+        user_id: str,
+        server: str,
+        account_label: str | None,
+        access_token_ciphertext: str,
+        refresh_token_ciphertext: str | None,
+        expires_at: Any,
+    ) -> int:
+        """Store one credential per user per server, replacing any earlier one."""
+        return await self.mcp_connections.upsert_mcp_connection(
+            user_id=user_id,
+            server=server,
+            account_label=account_label,
+            access_token_ciphertext=access_token_ciphertext,
+            refresh_token_ciphertext=refresh_token_ciphertext,
+            expires_at=expires_at,
+        )
+
+    async def delete_mcp_connection(self, *, user_id: str, server: str) -> bool:
+        """Disconnect one server for this user; ``False`` if it was not connected."""
+        return await self.mcp_connections.delete_mcp_connection(user_id=user_id, server=server)
+
+    async def record_attempt_grant(
+        self, *, attempt_id: int, lease_generation: int, grant_id: str
+    ) -> bool:
+        """Attach a minted grant to the attempt it was minted for."""
+        return await self.grants.record_attempt_grant(
+            attempt_id=attempt_id, lease_generation=lease_generation, grant_id=grant_id
+        )
+
+    async def list_renewable_grants(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """List the grants belonging to attempts that are still current."""
+        return await self.grants.list_renewable_grants(limit=limit)
+
+    async def take_revocable_grants(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Claim the grants of attempts that stopped being current, and clear them."""
+        return await self.grants.take_revocable_grants(limit=limit)
+
+    async def link_residency_grant(
+        self, *, thread_id: str, generation: int, grant_id: str, binding_id: str | None = None
+    ) -> bool:
+        """Record the grant a residency runs on — only its own generation."""
+        return await self.grants.link_residency_grant(
+            thread_id=thread_id, generation=generation, grant_id=grant_id, binding_id=binding_id
+        )
+
+    async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
+        """Read stored grant snapshots and retain attempts without attribution."""
+        return await self.ledger.ledger_rows_for_job(job_id=job_id)
+
+    async def ledger_rows_for_conversation(
+        self, *, job_id: str, user_id: str
+    ) -> list[dict[str, Any]]:
+        """Read only this owner's conversation snapshots, including unstarted turns."""
+        return await self.ledger.ledger_rows_for_conversation(job_id=job_id, user_id=user_id)
+
+    async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
+        """Queue known references, sharing in-flight work and throttling retries."""
+        return await self.ledger.queue_job_ledger_refresh(job_id=job_id)
+
+    async def claim_due_ledger_refresh(self, *, lease_seconds: float = 60) -> dict[str, Any] | None:
+        """Fence one due snapshot query across control-plane workers."""
+        return await self.ledger.claim_due_ledger_refresh(lease_seconds=lease_seconds)
+
+    async def complete_ledger_refresh(
+        self,
+        *,
+        ledger_id: int,
+        refresh_generation: int,
+        terminal: bool,
+        report: dict[str, Any] | None,
+        error_code: str | None,
+    ) -> bool:
+        """Store one fenced result without discarding the last usable snapshot."""
+        return await self.ledger.complete_ledger_refresh(
+            ledger_id=ledger_id,
+            refresh_generation=refresh_generation,
+            terminal=terminal,
+            report=report,
+            error_code=error_code,
+        )
 
     @staticmethod
     async def _fail_unrunnable_follow_ups(
@@ -624,190 +825,9 @@ class AgentJobStore:
         """
         return None
 
-    async def record_repo_grant(
-        self, *, user_id: str, installation_id: int, account_login: str | None = None
-    ) -> None:
-        """Record that this user may use this installation."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agent_repo_grants (user_id, installation_id, account_login)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (user_id, installation_id)
-                DO UPDATE SET account_login = EXCLUDED.account_login
-                """,
-                user_id,
-                installation_id,
-                account_login,
-            )
-
-    async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Return the installations this user has connected."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT installation_id, account_login FROM agent_repo_grants "
-                "WHERE user_id = $1 ORDER BY id",
-                user_id,
-            )
-        return [
-            {"installation_id": row["installation_id"], "account_login": row["account_login"]}
-            for row in rows
-        ]
-
-    async def revoke_repo_grant(self, *, user_id: str, installation_id: int) -> bool:
-        """Drop one connection. Uninstalling on GitHub is the other half."""
-        async with self._pool.acquire() as conn:
-            deleted = await conn.fetchval(
-                "DELETE FROM agent_repo_grants WHERE user_id = $1 AND installation_id = $2 "
-                "RETURNING id",
-                user_id,
-                installation_id,
-            )
-        return deleted is not None
-
     # OAuth state is stored hashed and consumed atomically. A callback for a
     # different user/provider, an expired state, and a replay all return no
     # row and therefore cannot be distinguished or used to claim authority.
-
-    async def create_oauth_state(
-        self,
-        *,
-        state_hash: str,
-        user_id: str,
-        provider: str,
-        code_verifier_ciphertext: str | None,
-        expires_at: Any,
-    ) -> None:
-        """Persist a short-lived state without retaining the bearer value."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute(
-                "DELETE FROM agent_oauth_states WHERE expires_at < NOW() - INTERVAL '1 day'"
-            )
-            await conn.execute(
-                """
-                INSERT INTO agent_oauth_states
-                    (state_hash, user_id, provider, code_verifier_ciphertext, expires_at)
-                VALUES ($1, $2, $3, $4, $5)
-                """,
-                state_hash,
-                user_id,
-                provider,
-                code_verifier_ciphertext,
-                expires_at,
-            )
-
-    async def consume_oauth_state(
-        self, *, state_hash: str, user_id: str, provider: str
-    ) -> dict[str, Any] | None:
-        """Consume one live state exactly once for its owning user/provider."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE agent_oauth_states
-                SET consumed_at = NOW()
-                WHERE state_hash = $1 AND user_id = $2 AND provider = $3
-                  AND consumed_at IS NULL AND expires_at > NOW()
-                RETURNING code_verifier_ciphertext
-                """,
-                state_hash,
-                user_id,
-                provider,
-            )
-        return dict(row) if row else None
-
-    async def upsert_gitlab_connection(
-        self,
-        *,
-        user_id: str,
-        external_user_id: int,
-        username: str,
-        display_name: str | None,
-        web_url: str | None,
-        access_token_ciphertext: str,
-        refresh_token_ciphertext: str,
-        expires_at: Any,
-    ) -> int:
-        """Store one GitLab.com identity per platform user."""
-        async with self._pool.acquire() as conn:
-            connection_id = await conn.fetchval(
-                """
-                INSERT INTO agent_gitlab_connections
-                    (user_id, external_user_id, username, display_name, web_url,
-                     access_token_ciphertext, refresh_token_ciphertext, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (user_id) DO UPDATE SET
-                    external_user_id = EXCLUDED.external_user_id,
-                    username = EXCLUDED.username,
-                    display_name = EXCLUDED.display_name,
-                    web_url = EXCLUDED.web_url,
-                    access_token_ciphertext = EXCLUDED.access_token_ciphertext,
-                    refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
-                    expires_at = EXCLUDED.expires_at,
-                    updated_at = NOW()
-                RETURNING id
-                """,
-                user_id,
-                external_user_id,
-                username,
-                display_name,
-                web_url,
-                access_token_ciphertext,
-                refresh_token_ciphertext,
-                expires_at,
-            )
-        return int(connection_id)
-
-    async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
-        """Return the owning user's connection, including encrypted tokens."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT id, user_id, external_user_id, username, display_name, web_url,
-                       access_token_ciphertext, refresh_token_ciphertext, expires_at
-                FROM agent_gitlab_connections WHERE user_id = $1
-                """,
-                user_id,
-            )
-        return dict(row) if row else None
-
-    async def update_gitlab_tokens(
-        self,
-        *,
-        connection_id: int,
-        user_id: str,
-        access_token_ciphertext: str,
-        refresh_token_ciphertext: str,
-        expires_at: Any,
-    ) -> bool:
-        """Rotate encrypted OAuth tokens without crossing user ownership."""
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_gitlab_connections SET
-                    access_token_ciphertext = $3,
-                    refresh_token_ciphertext = $4,
-                    expires_at = $5,
-                    updated_at = NOW()
-                WHERE id = $1 AND user_id = $2
-                RETURNING id
-                """,
-                connection_id,
-                user_id,
-                access_token_ciphertext,
-                refresh_token_ciphertext,
-                expires_at,
-            )
-        return updated is not None
-
-    async def delete_gitlab_connection(self, *, user_id: str, connection_id: int) -> bool:
-        """Delete only a connection owned by the authenticated user."""
-        async with self._pool.acquire() as conn:
-            deleted = await conn.fetchval(
-                "DELETE FROM agent_gitlab_connections WHERE user_id = $1 AND id = $2 RETURNING id",
-                user_id,
-                connection_id,
-            )
-        return deleted is not None
 
     # ── MCP connections ────────────────────────────────────────────────
     #
@@ -816,73 +836,6 @@ class AgentJobStore:
     # connection id alone, so there is no shape in which one user's row can be
     # read or removed through another's request — the property the deployment
     # registry could not have, because it had no user to scope by.
-
-    async def list_mcp_connections(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Return this user's MCP connections, including encrypted tokens.
-
-        Ordered by server name so the composer and the Integrations page agree
-        on order without either sorting again.
-        """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, user_id, server, account_label, access_token_ciphertext,
-                       refresh_token_ciphertext, expires_at, created_at, updated_at
-                FROM agent_mcp_connections WHERE user_id = $1 ORDER BY server
-                """,
-                user_id,
-            )
-        return [dict(row) for row in rows]
-
-    async def upsert_mcp_connection(
-        self,
-        *,
-        user_id: str,
-        server: str,
-        account_label: str | None,
-        access_token_ciphertext: str,
-        refresh_token_ciphertext: str | None,
-        expires_at: Any,
-    ) -> int:
-        """Store one credential per user per server, replacing any earlier one.
-
-        Reconnecting is an update rather than a second row: "connected" is a
-        yes/no per person per server, and two live credentials for one pair
-        would leave which one a job used down to row order.
-        """
-        async with self._pool.acquire() as conn:
-            connection_id = await conn.fetchval(
-                """
-                INSERT INTO agent_mcp_connections
-                    (user_id, server, account_label, access_token_ciphertext,
-                     refresh_token_ciphertext, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (user_id, server) DO UPDATE SET
-                    account_label = EXCLUDED.account_label,
-                    access_token_ciphertext = EXCLUDED.access_token_ciphertext,
-                    refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
-                    expires_at = EXCLUDED.expires_at,
-                    updated_at = NOW()
-                RETURNING id
-                """,
-                user_id,
-                server,
-                account_label,
-                access_token_ciphertext,
-                refresh_token_ciphertext,
-                expires_at,
-            )
-        return int(connection_id)
-
-    async def delete_mcp_connection(self, *, user_id: str, server: str) -> bool:
-        """Disconnect one server for this user; ``False`` if it was not connected."""
-        async with self._pool.acquire() as conn:
-            deleted = await conn.fetchval(
-                "DELETE FROM agent_mcp_connections WHERE user_id = $1 AND server = $2 RETURNING id",
-                user_id,
-                server,
-            )
-        return deleted is not None
 
     # ── Jobs ───────────────────────────────────────────────────────────
 
@@ -2231,206 +2184,6 @@ class AgentJobStore:
             "events": [{**dict(row), "payload": _load_json(row["payload"])} for row in events],
         }
 
-    async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
-        """Read stored grant snapshots and retain attempts without attribution."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT a.id AS attempt_id, a.job_id, a.attempt_no,
-                       a.status AS attempt_status, a.started_at, a.finished_at,
-                       l.id, l.grant_id, l.residency_generation, l.binding_id,
-                       l.window_since, {_LEDGER_WINDOW_UNTIL_SQL} AS window_until,
-                       l.snapshot, l.queried_at, l.last_error_code, l.next_refresh_at,
-                       l.last_refresh_attempt_at, l.refresh_generation,
-                       l.refresh_lease_expires_at, l.terminal_refresh_count,
-                       (l.id IS NOT NULL AND (
-                           l.refresh_lease_expires_at IS NOT NULL
-                           OR l.next_refresh_at <= NOW()
-                           OR (a.status <> 'running' AND l.terminal_refresh_count = 0
-                               AND l.next_refresh_at IS NULL)
-                       )) IS TRUE AS refreshing
-                FROM agent_attempts a
-                JOIN agent_jobs j ON j.id = a.job_id
-                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
-                WHERE a.job_id = $1
-                ORDER BY a.attempt_no, l.id
-                """,
-                job_id,
-            )
-        return [{**dict(row), "snapshot": _load_json(row["snapshot"])} for row in rows]
-
-    async def ledger_rows_for_conversation(
-        self, *, job_id: str, user_id: str
-    ) -> list[dict[str, Any]]:
-        """Read only this owner's conversation snapshots, including unstarted turns.
-
-        Forks share a workspace but have distinct thread IDs and usage. Read
-        cached totals in one query; a drawer must not fan out to the Gateway
-        or load historical event payloads to calculate a conversation total.
-        """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT j.id AS job_id, j.state AS job_state, a.id AS attempt_id, a.attempt_no,
-                       l.id, l.grant_id, l.snapshot, l.queried_at,
-                       l.last_error_code, l.next_refresh_at,
-                       (l.id IS NOT NULL AND (
-                           l.refresh_lease_expires_at IS NOT NULL
-                           OR l.next_refresh_at <= NOW()
-                           OR (a.status <> 'running' AND l.terminal_refresh_count = 0
-                               AND l.next_refresh_at IS NULL)
-                       )) IS TRUE AS refreshing
-                FROM agent_jobs anchor
-                JOIN agent_jobs j ON (j.thread_id = anchor.thread_id OR j.id = anchor.id)
-                    AND j.user_id = $2
-                LEFT JOIN agent_attempts a ON a.job_id = j.id
-                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
-                WHERE anchor.id = $1 AND anchor.user_id = $2
-                ORDER BY j.turn_no, a.attempt_no, l.id
-                """,
-                job_id,
-                user_id,
-            )
-        return [{**dict(row), "snapshot": _load_json(row["snapshot"])} for row in rows]
-
-    async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
-        """Queue known references, sharing in-flight work and throttling retries."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                UPDATE agent_attempt_ledger l
-                SET next_refresh_at = GREATEST(
-                    NOW(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
-                )
-                FROM agent_attempts a
-                WHERE a.id = l.attempt_id AND a.job_id = $1
-                  AND (l.refresh_lease_expires_at IS NULL
-                       OR l.refresh_lease_expires_at <= NOW())
-                  AND (l.next_refresh_at IS NULL OR l.next_refresh_at > GREATEST(
-                      NOW(), l.last_refresh_attempt_at + INTERVAL '5 seconds'
-                  ))
-                RETURNING l.id
-                """,
-                job_id,
-            )
-        return len(rows)
-
-    async def claim_due_ledger_refresh(self, *, lease_seconds: float = 60) -> dict[str, Any] | None:
-        """Fence one due snapshot query across control-plane workers.
-
-        A crashed worker's expired lease is independently due, including
-        running jobs for which there is no automatic periodic refresh.
-        """
-        if lease_seconds <= 0:
-            raise ValueError("ledger refresh lease must be positive")
-        async with self._pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                f"""
-                WITH due AS (
-                    SELECT l.id, a.job_id, a.status <> 'running' AS terminal,
-                           {_LEDGER_WINDOW_UNTIL_SQL} AS window_until
-                    FROM agent_attempt_ledger l
-                    JOIN agent_attempts a ON a.id = l.attempt_id
-                    JOIN agent_jobs j ON j.id = a.job_id
-                    WHERE (l.refresh_lease_expires_at IS NULL
-                           OR l.refresh_lease_expires_at <= NOW())
-                      AND (l.next_refresh_at <= NOW()
-                           OR l.refresh_lease_expires_at <= NOW()
-                           OR (a.status <> 'running' AND l.terminal_refresh_count = 0
-                               AND l.next_refresh_at IS NULL))
-                    ORDER BY COALESCE(l.next_refresh_at, l.refresh_lease_expires_at,
-                                      a.finished_at, a.started_at), l.id
-                    LIMIT 1
-                    FOR UPDATE OF l SKIP LOCKED
-                )
-                UPDATE agent_attempt_ledger l
-                SET refresh_generation = l.refresh_generation + 1,
-                    refresh_lease_expires_at = NOW() + make_interval(secs => $1),
-                    last_refresh_attempt_at = NOW(), next_refresh_at = NULL
-                FROM due
-                WHERE l.id = due.id
-                RETURNING l.id, l.attempt_id, l.grant_id, l.binding_id,
-                          l.residency_generation, l.window_since, due.window_until,
-                          due.terminal, l.terminal_refresh_count, l.refresh_generation,
-                          due.job_id
-                """,
-                lease_seconds,
-            )
-        return None if row is None else dict(row)
-
-    async def complete_ledger_refresh(
-        self,
-        *,
-        ledger_id: int,
-        refresh_generation: int,
-        terminal: bool,
-        report: dict[str, Any] | None,
-        error_code: str | None,
-    ) -> bool:
-        """Store one fenced result without discarding the last usable snapshot.
-
-        Terminal queries get two delayed retries for late Gateway writes.
-        Failures consume retries too; an unavailable Gateway must not create
-        an unbounded loop. Early manual queries update the cache but cannot
-        consume a later reconciliation: stages advance by the saved query
-        start time, never the response completion time. A running query which
-        finishes after the attempt ends does not count as a closed-window query.
-        """
-        if (report is None) == (error_code is None):
-            raise ValueError("a ledger refresh must have either a report or an error code")
-        encoded = None if report is None else json.dumps(report)
-        async with self._pool.acquire() as conn:
-            return bool(
-                await conn.fetchval(
-                    """
-                    WITH refresh AS (
-                        SELECT l.id, a.finished_at,
-                               CASE
-                                   WHEN NOT $3 THEN l.terminal_refresh_count
-                                   WHEN l.terminal_refresh_count = 0 THEN 1
-                                   WHEN l.terminal_refresh_count = 1 AND (
-                                       a.finished_at IS NULL
-                                       OR l.last_refresh_attempt_at >=
-                                           a.finished_at + INTERVAL '30 seconds'
-                                   ) THEN 2
-                                   WHEN l.terminal_refresh_count = 2 AND (
-                                       a.finished_at IS NULL
-                                       OR l.last_refresh_attempt_at >=
-                                           a.finished_at + INTERVAL '300 seconds'
-                                   ) THEN 3
-                                   ELSE l.terminal_refresh_count
-                               END AS next_stage
-                        FROM agent_attempt_ledger l
-                        JOIN agent_attempts a ON a.id = l.attempt_id
-                        WHERE l.id = $1 AND l.refresh_generation = $2
-                          AND l.refresh_lease_expires_at > NOW()
-                    )
-                    UPDATE agent_attempt_ledger l
-                    SET snapshot = CASE WHEN $4::jsonb IS NULL THEN l.snapshot ELSE $4 END,
-                        queried_at = CASE WHEN $4::jsonb IS NULL THEN l.queried_at ELSE NOW() END,
-                        last_error_code = $5,
-                        refresh_lease_expires_at = NULL,
-                        terminal_refresh_count = refresh.next_stage,
-                        next_refresh_at = CASE
-                            WHEN NOT $3 THEN NULL
-                            WHEN refresh.next_stage = 1
-                                THEN GREATEST(NOW(), refresh.finished_at + INTERVAL '30 seconds')
-                            WHEN refresh.next_stage = 2
-                                THEN GREATEST(NOW(), refresh.finished_at + INTERVAL '300 seconds')
-                            ELSE NULL END
-                    FROM refresh
-                    WHERE l.id = refresh.id AND l.refresh_generation = $2
-                      AND l.refresh_lease_expires_at > NOW()
-                    RETURNING l.id
-                    """,
-                    ledger_id,
-                    refresh_generation,
-                    terminal,
-                    encoded,
-                    error_code,
-                )
-            )
-
     async def resolve_model_credential(
         self,
         *,
@@ -2976,191 +2729,6 @@ class AgentJobStore:
     # Hosts enter the pool only through one-time enrollment and authenticated
     # heartbeats. Claims pull work, but never create or rename host rows.
 
-    async def active_runner_host(self) -> str | None:
-        """The new-chat placement host, or ``None`` when any may materialize."""
-        async with self._pool.acquire() as conn:
-            return await conn.fetchval("SELECT active_host FROM agent_runner_policy WHERE id")
-
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
-        """The pool, the pinned host and the version selection, read together.
-
-        One transaction because all three are shown side by side: read
-        separately, a switch landing between them renders a page whose list and
-        whose header name different hosts, which reads as a bug in the thing
-        the operator is using to fix a bug. The version selection joined that
-        for the same reason — a page offering a menu that no longer contains
-        the selection it displays is the same failure wearing a different hat.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            policy = await conn.fetchrow(
-                "SELECT active_host, runtime_versions FROM agent_runner_policy WHERE id"
-            )
-            rows = await conn.fetch(
-                f"""
-                SELECT {_HOST_COLUMNS}
-                FROM agent_runner_hosts
-                ORDER BY last_seen_at DESC
-                """
-            )
-        active = None if policy is None else policy["active_host"]
-        selected = {} if policy is None else _load_json(policy["runtime_versions"]) or {}
-        return (
-            [{**self._host_row_to_dict(row), "is_active": row["host"] == active} for row in rows],
-            active,
-            selected,
-        )
-
-    async def deployment_runner_pool(
-        self,
-    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], set[str]]:
-        """Read placement policy, hosts, and retained owners for rollout fencing.
-
-        The admin pin governs only chats with no sandbox. A control-plane
-        rollout must also know which other hosts still own shared-live Docker
-        layers so it can reverse-probe their brokers. Read the policy under a
-        shared lock and the owners in the same transaction: a concurrent host
-        switch cannot make the snapshot describe two different placement
-        policies, and any newly claimed group while this lock is held belongs
-        to one of the placement hosts this snapshot already includes.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            policy = await conn.fetchrow(
-                "SELECT active_host, runtime_versions FROM agent_runner_policy WHERE id FOR SHARE"
-            )
-            rows = await conn.fetch(
-                f"""
-                SELECT {_HOST_COLUMNS}
-                FROM agent_runner_hosts
-                ORDER BY last_seen_at DESC
-                """
-            )
-            owner_rows = await conn.fetch(
-                """
-                SELECT DISTINCT host
-                FROM agent_sandboxes
-                WHERE mode = 'shared_live' AND state <> 'lost'
-                """
-            )
-        active = None if policy is None else policy["active_host"]
-        selected = {} if policy is None else _load_json(policy["runtime_versions"]) or {}
-        return (
-            [{**self._host_row_to_dict(row), "is_active": row["host"] == active} for row in rows],
-            active,
-            selected,
-            {str(row["host"]) for row in owner_rows},
-        )
-
-    async def list_runner_hosts(self) -> list[dict[str, Any]]:
-        """Return every host seen polling, most recent poll first."""
-        hosts, _, _ = await self.runner_pool()
-        return hosts
-
-    async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
-        """Choose the CLI version this deployment runs for one runtime.
-
-        ``version=None`` clears the choice, which returns that runtime to
-        whatever its claiming host reports as the image default.
-
-        Returns ``False`` when no host in the pool offers ``version``. Storing a
-        selection nothing can serve is not harmless: the claim would fall back
-        silently, so the admin page would show a version that never runs — the
-        pin's "switching to a typo" failure, one layer along.
-
-        Same lock order as ``set_active_runner_host`` — policy row first, then
-        the host rows it is checked against — so the two admin writes and the
-        claim's shared read serialize with no cycle to deadlock on.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            current = await conn.fetchval(
-                "SELECT runtime_versions FROM agent_runner_policy WHERE id FOR UPDATE"
-            )
-            if version is not None:
-                offered = await conn.fetch(
-                    "SELECT runtime_versions_available FROM agent_runner_hosts "
-                    "WHERE runtime_versions_available IS NOT NULL FOR SHARE"
-                )
-                menus = (_load_json(row[0]) or {} for row in offered)
-                if not any(version in (menu.get(runtime) or []) for menu in menus):
-                    return False
-            selection = dict(_load_json(current) or {})
-            if version is None:
-                selection.pop(runtime, None)
-            else:
-                selection[runtime] = version
-            # Upsert for the same reason the host pin is one: against a database
-            # whose singleton row is missing, a bare UPDATE touches nothing and
-            # still reports success.
-            await conn.execute(
-                """
-                INSERT INTO agent_runner_policy (id, runtime_versions) VALUES (TRUE, $1::jsonb)
-                ON CONFLICT (id) DO UPDATE
-                SET runtime_versions = EXCLUDED.runtime_versions, updated_at = NOW()
-                """,
-                json.dumps(selection),
-            )
-            return True
-
-    async def set_active_runner_host(self, *, host: str | None) -> bool:
-        """Pin new-chat placement to one host, or unpin with ``None``.
-
-        Returns ``False`` when ``host`` names a machine that has never polled —
-        pinning to one would park every chat without a sandbox on a host that
-        may not exist. Existing groups remain on their owning hosts.
-
-        Takes the policy row exclusively *first*, then the host row it is about
-        to point at. Every writer here uses that order, and the claim takes the
-        policy row shared, so the paths serialize with no cycle to deadlock on:
-        a claim past its own read finishes before this commits, one that has
-        not reached it waits and then sees this value, and a concurrent removal
-        of the host being pinned cannot slip in between the check and the write.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute("SELECT active_host FROM agent_runner_policy WHERE id FOR UPDATE")
-            # Checked before anything is written — and locked, not merely read:
-            # a bare existence check lets a concurrent removal commit before
-            # this does, leaving the queue pinned to a host that is gone.
-            if host is not None:
-                known = await conn.fetchval(
-                    "SELECT 1 FROM agent_runner_hosts WHERE host = $1 FOR SHARE", host
-                )
-                if not known:
-                    return False
-            # Upsert, not a bare UPDATE: against a database whose policy row is
-            # missing, an UPDATE touches nothing and still reports success —
-            # the switch would read as applied while the gate kept using the
-            # old value.
-            await conn.execute(
-                """
-                INSERT INTO agent_runner_policy (id, active_host) VALUES (TRUE, $1)
-                ON CONFLICT (id) DO UPDATE
-                SET active_host = EXCLUDED.active_host, updated_at = NOW()
-                """,
-                host,
-            )
-            return True
-
-    async def forget_runner_host(self, *, host: str) -> str:
-        """Drop a host from the pool. A runner still polling re-adds itself.
-
-        Returns ``"deleted"``, ``"active"`` (refused) or ``"unknown"``.
-
-        The active-host refusal lives here rather than in the caller because
-        checking there is a read the switch can outrun: the endpoint sees the
-        host idle, an admin pins it, and the delete then removes the row the
-        new-chat placement gate is pointing at — silently unpinning that
-        policy. Same policy row, same order as the switch, so the two serialize.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            active = await conn.fetchval(
-                "SELECT active_host FROM agent_runner_policy WHERE id FOR UPDATE"
-            )
-            if active == host:
-                return "active"
-            deleted = await conn.fetchval(
-                "DELETE FROM agent_runner_hosts WHERE host = $1 RETURNING host", host
-            )
-        return "deleted" if deleted is not None else "unknown"
-
     # ── Host pool: enrollment, heartbeat, capacity ─────────────────────
     #
     # The methods above are #1158's: a host appears by polling, and an operator
@@ -3176,386 +2744,6 @@ class AgentJobStore:
     # Lock order everywhere below: policy row, then job rows, then host rows —
     # the order #1167 established, extended by one table. Nothing here takes a
     # host row and then reaches back for a job or the policy.
-
-    @staticmethod
-    def _host_row_to_dict(row: Any) -> dict[str, Any]:
-        """Decode a host row's JSON columns; ``credential_hash`` never leaves."""
-        host = dict(row)
-        host["labels"] = _load_json(host.get("labels")) or {}
-        host["capabilities"] = _load_json(host.get("capabilities")) or []
-        # None (never reported) and {} (reported: no labels) stay distinct.
-        host["runtime_versions"] = _load_json(host.get("runtime_versions"))
-        host["runtime_versions_available"] = _load_json(host.get("runtime_versions_available"))
-        return host
-
-    async def issue_enroll_token(
-        self, *, token_hash: str, host: str, ttl_seconds: float, issued_by: str | None = None
-    ) -> dict[str, Any]:
-        """Record a one-time enrollment token by hash and return its expiry.
-
-        Only the hash is stored. An operator who loses the token issues another
-        one; nobody — including anyone who can read this table — can recover
-        the value that was handed out.
-
-        ``host`` is the name this token may register, and it is stored in
-        clear: it is not a secret, it is the authenticated decision the token
-        carries. See :meth:`consume_enroll_token`.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO agent_host_enroll_tokens (token_hash, host, issued_by, expires_at)
-                VALUES ($1, $2, $3, NOW() + make_interval(secs => $4))
-                RETURNING expires_at, created_at
-                """,
-                token_hash,
-                host,
-                issued_by,
-                ttl_seconds,
-            )
-        return {"expires_at": row["expires_at"], "created_at": row["created_at"]}
-
-    async def consume_enroll_token(self, *, token_hash: str, host: str) -> bool:
-        """Spend an enrollment token, exactly once and only under its own name.
-
-        Single-use is the UPDATE's own ``consumed_at IS NULL`` predicate rather
-        than a read followed by a write: two machines booting from the same
-        pasted token race here, and only one row update can win.
-
-        **The name is part of the predicate, not a check after the fact.**
-        ``register_host`` upserts, so registering under a live host's name
-        revokes that host's credential and resets its row to ``enrolling`` —
-        one typo during a setup takes a working machine out of the pool. The
-        name therefore comes from the token an admin issued rather than from
-        the machine presenting it. Because it is a predicate, a mismatch also
-        does not *spend* the token: the typo is retried, not re-issued.
-
-        A row whose ``host`` is NULL — issued before the binding existed —
-        matches nothing, because ``NULL = $2`` is never true. That is the
-        fail-closed direction: such a token was redeemable under any name.
-        """
-        async with self._pool.acquire() as conn:
-            consumed = await conn.fetchval(
-                """
-                UPDATE agent_host_enroll_tokens
-                SET consumed_at = NOW(), consumed_host = $2
-                WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
-                  AND host = $2
-                RETURNING token_hash
-                """,
-                token_hash,
-                host,
-            )
-        return consumed is not None
-
-    async def get_host(self, *, host: str) -> dict[str, Any] | None:
-        """Return one host row, without its credential hash."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"SELECT {_HOST_COLUMNS} FROM agent_runner_hosts WHERE host = $1", host
-            )
-        return None if row is None else self._host_row_to_dict(row)
-
-    async def register_host(
-        self,
-        *,
-        host: str,
-        credential_hash: str,
-        capabilities: list[str] | None = None,
-        slots_total: int | None = None,
-        broker_url: str | None = None,
-        runner_version: str | None = None,
-        labels: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Enrol a machine, or re-enrol one that was rebuilt.
-
-        Starts at ``enrolling``, not ``online``: registration proves somebody
-        held a valid enrollment token, not that the machine is up. The first
-        heartbeat is what says that, and it is one round trip away.
-
-        Re-enrollment resets ``slots_used`` to the number of attempts actually
-        running on this host rather than to zero. A machine that was rebuilt
-        mid-job has a stale counter, and zero would over-subscribe it while the
-        old attempts are still leased; counting is the only answer that is
-        right in both the rebuilt and the merely-re-registered case.
-
-        The upsert is what makes a rebuild possible, and it is also what makes
-        a mistyped name destructive — it revokes whatever credential the name
-        currently holds. It stays an upsert; what changed is who chooses the
-        name. :meth:`consume_enroll_token` will only spend a token under the
-        name an admin bound to it, so reaching this method under a live host's
-        name is an operator's decision rather than a machine's.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                f"""
-                INSERT INTO agent_runner_hosts
-                    (host, status, capabilities, slots_total, broker_url, runner_version,
-                     labels, credential_hash)
-                VALUES ($1, '{HOST_ENROLLING}', $2::jsonb, $3, $4, $5, $6::jsonb, $7)
-                ON CONFLICT (host) DO UPDATE
-                SET status = '{HOST_ENROLLING}',
-                    capabilities = EXCLUDED.capabilities,
-                    slots_total = EXCLUDED.slots_total,
-                    broker_url = EXCLUDED.broker_url,
-                    runner_version = EXCLUDED.runner_version,
-                    labels = EXCLUDED.labels,
-                    credential_hash = EXCLUDED.credential_hash,
-                    last_heartbeat_at = NULL,
-                    slots_used = (
-                        SELECT count(*) FROM agent_attempts
-                        WHERE host_id = EXCLUDED.host AND status = 'running'
-                    )
-                RETURNING {_HOST_COLUMNS}
-                """,
-                host,
-                json.dumps(normalize_capabilities(capabilities)),
-                slots_total,
-                broker_url,
-                runner_version,
-                json.dumps(labels or {}),
-                credential_hash,
-            )
-        return self._host_row_to_dict(row)
-
-    async def authenticate_host(self, *, host: str, credential_hash: str) -> dict[str, Any] | None:
-        """Return the host iff this credential is the one it currently holds.
-
-        Fails closed on every other reading: an unknown host, a revoked
-        credential (``credential_hash`` nulled), a superseded one, or a
-        disabled row all answer ``None``. Compared in SQL so a revocation that
-        commits mid-request is seen by the next call rather than by the next
-        restart.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT {_HOST_COLUMNS} FROM agent_runner_hosts
-                WHERE host = $1 AND credential_hash IS NOT NULL AND credential_hash = $2
-                  AND status <> '{HOST_DISABLED}'
-                """,
-                host,
-                credential_hash,
-            )
-        return None if row is None else self._host_row_to_dict(row)
-
-    async def record_host_heartbeat(
-        self,
-        *,
-        host: str,
-        physical_host: str | None = None,
-        slots_total: int | None = None,
-        runner_version: str | None = None,
-        broker_url: str | None = None,
-        capabilities: list[str] | None = None,
-        sandbox_runtime: str | None = None,
-        sandbox_image_digest: str | None = None,
-        runtime_versions: dict[str, str] | None = None,
-        runtime_versions_available: dict[str, list[str]] | None = None,
-    ) -> dict[str, Any] | None:
-        """Record a heartbeat, promoting the host to ``online`` when it may.
-
-        ``enrolling → online`` and ``offline → online`` both happen here: a
-        machine that comes back after a network partition needs no operator to
-        put it back to work. ``draining`` and ``disabled`` deliberately do
-        **not** — a heartbeat is the host saying "I am here", not "I should be
-        taking work", and letting it re-promote itself would make drain a
-        suggestion.
-
-        Returns ``None`` for an unknown host. Every field is optional and only
-        overwrites when supplied, so a heartbeat that carries nothing but
-        liveness does not blank out what enrollment declared.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_runner_hosts
-                SET last_heartbeat_at = NOW(),
-                    last_seen_at = NOW(),
-                    status = CASE
-                        WHEN status IN ('{HOST_ENROLLING}', '{HOST_OFFLINE}') THEN '{HOST_ONLINE}'
-                        ELSE status
-                    END,
-                    slots_total = COALESCE($2, slots_total),
-                    runner_version = COALESCE($3, runner_version),
-                    broker_url = COALESCE($4, broker_url),
-                    capabilities = COALESCE($5::jsonb, capabilities),
-                    sandbox_runtime = COALESCE($6, sandbox_runtime),
-                    sandbox_image_digest = COALESCE($7, sandbox_image_digest),
-                    runtime_versions = COALESCE($8::jsonb, runtime_versions),
-                    runtime_versions_available =
-                        COALESCE($9::jsonb, runtime_versions_available),
-                    labels = COALESCE(labels, '{{}}'::jsonb) || $10::jsonb
-                WHERE host = $1
-                RETURNING {_HOST_COLUMNS}
-                """,
-                host,
-                slots_total,
-                runner_version,
-                broker_url,
-                None if capabilities is None else json.dumps(normalize_capabilities(capabilities)),
-                # "" survives COALESCE deliberately: an empty runtime is the
-                # host attesting shared-kernel runc, not declining to answer.
-                sandbox_runtime,
-                sandbox_image_digest,
-                None if runtime_versions is None else json.dumps(runtime_versions),
-                (
-                    None
-                    if runtime_versions_available is None
-                    else json.dumps(runtime_versions_available)
-                ),
-                json.dumps({"physical_host": physical_host} if physical_host is not None else {}),
-            )
-        return None if row is None else self._host_row_to_dict(row)
-
-    async def set_host_status(self, *, host: str, status: str) -> str:
-        """Move a host to ``status``, refusing transitions the table forbids.
-
-        Returns ``"ok"``, ``"unknown"`` or ``"invalid"``. The table is consulted
-        inside the transaction that writes, on a locked row: checking it in the
-        caller means an admin draining a host and the reaper marking it offline
-        can both read ``online`` and both write, and the loser's decision is the
-        one that sticks.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            current = await conn.fetchval(
-                "SELECT status FROM agent_runner_hosts WHERE host = $1 FOR UPDATE", host
-            )
-            if current is None:
-                return "unknown"
-            if not transition_allowed(current, status):
-                return "invalid"
-            await conn.execute(
-                "UPDATE agent_runner_hosts SET status = $2 WHERE host = $1", host, status
-            )
-        return "ok"
-
-    async def remove_host(self, *, host: str, force: bool = False) -> str:
-        """Revoke a host's credential and take it out of the pool.
-
-        Returns ``"ok"``, ``"unknown"`` or ``"busy"``. Busy means the host is
-        still holding slots: removing it then would leave running attempts
-        whose machine has officially stopped existing, and nothing would notice
-        until their leases lapsed. ``force`` accepts exactly that — the lease
-        expiry *is* the recovery path. A retained activation cannot be replayed
-        safely after its host disappears, so its expiry marks that chat LOST
-        and fails already-waiting descendants instead.
-
-        Disabling rather than deleting. The row is what
-        ``agent_attempts.host_id`` points at, and what an operator reads when
-        asking where a job ran; #1158's ``forget`` is still there for the
-        machine that is genuinely gone. Removing or forgetting the host row is
-        administrative bookkeeping; it is not by itself proof that a retained
-        Docker writable layer was deleted.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT status, slots_used FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
-                host,
-            )
-            if row is None:
-                return "unknown"
-            if row["slots_used"] > 0 and not force:
-                return "busy"
-            await conn.execute(
-                f"""
-                UPDATE agent_runner_hosts
-                SET status = '{HOST_DISABLED}', credential_hash = NULL
-                WHERE host = $1
-                """,
-                host,
-            )
-        return "ok"
-
-    async def reap_offline_hosts(
-        self,
-        *,
-        interval_seconds: float,
-        missed_intervals: int,
-    ) -> list[str]:
-        """Mark enrolled hosts that stopped heartbeating as ``offline``.
-
-        Only *enrolled* hosts — ones holding a credential — are candidates.
-        A host that joined by polling never promised to heartbeat, and marking
-        it offline would stop the claims of a machine that is working
-        perfectly, which is the whole pre-G deployment.
-
-        ``COALESCE(last_heartbeat_at, first_seen_at)`` so a machine that
-        registered and then never came up ages out of ``enrolling`` too,
-        instead of sitting there looking like it is mid-setup forever.
-
-        **``draining`` is not a candidate, and that is the point.** It was, and
-        the result was that an operator's drain undid itself: this pass moved
-        ``draining → offline``, and the next heartbeat moved ``offline →
-        online``, because a machine returning from a partition is supposed to
-        come back without an operator. A drained host that goes quiet and
-        returns would silently rejoin the claim pool — quietly taking work the
-        operator had just decided it must not take. Drain is an instruction,
-        not an observation, so nothing here overwrites it; ``remove`` is what
-        ends a drained host's life.
-
-        Returns the hosts it changed.
-        """
-        deadline = interval_seconds * missed_intervals
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                UPDATE agent_runner_hosts
-                SET status = '{HOST_OFFLINE}'
-                WHERE credential_hash IS NOT NULL
-                  AND status IN ('{HOST_ENROLLING}', '{HOST_ONLINE}')
-                  AND COALESCE(last_heartbeat_at, first_seen_at)
-                      < NOW() - make_interval(secs => $1)
-                RETURNING host
-                """,
-                deadline,
-            )
-        return [row["host"] for row in rows]
-
-    async def host_for_attempt(self, *, attempt_id: int) -> dict[str, Any] | None:
-        """The host row an attempt ran on, or ``None`` when it had none.
-
-        ``None`` covers both "this attempt predates host reporting" and "the
-        host it ran on was forgotten" — the FK is ``ON DELETE SET NULL``, so
-        both present as the same absence, and both mean the caller falls back
-        to the single-host configuration.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT {_QUALIFIED_HOST_COLUMNS} FROM agent_runner_hosts h
-                JOIN agent_attempts a ON a.host_id = h.host
-                WHERE a.id = $1
-                """,
-                attempt_id,
-            )
-        return None if row is None else self._host_row_to_dict(row)
-
-    async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The job attempt's host, or its retained thread's durable host."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT COALESCE(a.host_id, s.host) AS owner_host,
-                       {_QUALIFIED_HOST_COLUMNS}
-                FROM agent_jobs j
-                LEFT JOIN agent_attempts a ON a.id = j.current_attempt_id
-                LEFT JOIN {_THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
-                LEFT JOIN agent_runner_hosts h
-                  ON h.host = COALESCE(a.host_id, s.host)
-                WHERE j.id = $1
-                """,
-                job_id,
-            )
-        if row is None or row["owner_host"] is None:
-            return None
-        host = self._host_row_to_dict(row)
-        # A retained sandbox remains hard-pinned even if its host row was
-        # administratively forgotten. Returning a placeholder (with no broker
-        # URL) makes broker routing fail closed instead of falling back to a
-        # different machine's single-host environment setting.
-        host["host"] = row["owner_host"]
-        return host
 
     @staticmethod
     async def _release_host_slot(conn: Any, host: str | None) -> None:
@@ -5878,36 +5066,6 @@ class AgentJobStore:
         result["model"] = earns["model"]
         return result
 
-    async def link_residency_grant(
-        self,
-        *,
-        thread_id: str,
-        generation: int,
-        grant_id: str,
-        binding_id: str | None = None,
-    ) -> bool:
-        """Record the grant a residency runs on — only its own generation.
-
-        A link that matched nothing means the residency was taken over between
-        mint and link; the caller revokes the orphan grant rather than handing
-        out a credential nothing owns.
-        """
-        async with self._pool.acquire() as conn:
-            return bool(
-                await conn.fetchval(
-                    """
-                    UPDATE agent_thread_residencies
-                    SET grant_id = $3, ledger_binding_id = $4
-                    WHERE thread_id = $1 AND generation = $2 AND status = 'hot'
-                    RETURNING thread_id
-                    """,
-                    thread_id,
-                    generation,
-                    grant_id,
-                    binding_id,
-                )
-            )
-
     async def heartbeat_residency(
         self, *, thread_id: str, generation: int, ttl_seconds: float, host: str | None = None
     ) -> str | None:
@@ -7125,165 +6283,6 @@ class AgentJobStore:
     # all, so nothing there can notice that an attempt was superseded — this
     # store is the only place that knows, which is why renewal reads from here
     # rather than from a timer.
-
-    async def record_attempt_grant(
-        self, *, attempt_id: int, lease_generation: int, grant_id: str
-    ) -> bool:
-        """Attach a minted grant to the attempt it was minted for.
-
-        Fenced like every other worker write: an attempt that was superseded
-        between the claim and this call does not get the grant recorded against
-        it, so the renewal pass never picks it up and the capability dies at its
-        own TTL.
-
-        **The same three predicates as ``list_renewable_grants``, deliberately.**
-        That query is the fence, and this write is what puts a row inside it —
-        so a row this accepts and that rejects is a grant nothing will ever
-        renew, bound to an attempt whose lease another runner may already have
-        taken. The expiry check was missing here while being present there,
-        which is exactly the pair that produces two live sandboxes for one job:
-        a lease can lapse between the claim and this call without the
-        generation changing, because nothing bumps a generation on expiry
-        alone.
-
-        Args:
-            attempt_id: The attempt the grant belongs to.
-            lease_generation: The fence the claim returned.
-            grant_id: The gateway's identifier for the grant.
-
-        Returns:
-            Whether the row was still current enough to write.
-        """
-        async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                UPDATE agent_attempts SET grant_id = $3
-                WHERE id = $1
-                  AND lease_generation = $2
-                  AND status = 'running'
-                  AND lease_expires_at > NOW()
-                """,
-                attempt_id,
-                lease_generation,
-                grant_id,
-            )
-        return result.endswith(" 1")
-
-    async def list_renewable_grants(self, *, limit: int = 200) -> list[dict[str, Any]]:
-        """List the grants belonging to attempts that are still current.
-
-        **This is the fence.** A renewal loop that skipped this query and
-        renewed whatever it minted would keep a superseded attempt's sandbox
-        alive and spending, and the gateway could not catch it — it has no
-        attempt state to check. Every predicate here is load-bearing:
-        ``status = 'running'`` drops superseded and finished attempts, and
-        ``lease_expires_at > NOW()`` drops the ones whose lease died before the
-        reaper noticed.
-
-        ``lease_generation`` rides along because the renewal pass may have to
-        *end* one of these attempts — a grant the gateway keeps refusing — and
-        every write that ends an attempt is fenced. Looking the generation up
-        again at that point would read a row that may have moved on in between.
-
-        Args:
-            limit: Most rows to return in one pass.
-
-        Returns:
-            ``[{"attempt_id", "job_id", "grant_id", "lease_generation"}]`` for
-            live attempts only.
-        """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id AS attempt_id, job_id, grant_id, lease_generation
-                FROM agent_attempts
-                WHERE grant_id IS NOT NULL
-                  AND status = 'running'
-                  AND lease_expires_at > NOW()
-                -- **Most urgent first, not lowest id.** `ORDER BY id` returns
-                -- the same first `limit` rows on every pass, so in a pool with
-                -- more live attempts than that, everything above the cut is
-                -- never renewed at all — its grants expire and its jobs die at
-                -- a model call, while the loop reports itself healthy.
-                --
-                -- Ordering by the lease also rotates: a heartbeat pushes an
-                -- attempt to the back, so the window moves. It is an
-                -- approximation — the grant's own expiry lives at the gateway
-                -- and this side cannot sort on it — which is why the caller
-                -- logs a truncated pass rather than trusting the ordering to
-                -- be sufficient on its own.
-                ORDER BY lease_expires_at ASC, id ASC
-                LIMIT $1
-                """,
-                limit,
-            )
-        return [
-            {
-                "attempt_id": row["attempt_id"],
-                "job_id": row["job_id"],
-                "grant_id": row["grant_id"],
-                "lease_generation": row["lease_generation"],
-            }
-            for row in rows
-        ]
-
-    async def take_revocable_grants(self, *, limit: int = 200) -> list[dict[str, Any]]:
-        """Claim the grants of attempts that stopped being current, and clear them.
-
-        The complement of :meth:`list_renewable_grants`: a superseded attempt,
-        a finished one, or one whose lease lapsed. Returning them and clearing
-        the column in one statement is what stops two control-plane replicas —
-        or two passes of the same loop — from both trying to revoke, and what
-        stops a grant the gateway refuses to revoke from being retried forever.
-
-        The clear is a data-modifying CTE rather than
-        ``UPDATE ... RETURNING grant_id``, because ``RETURNING`` reports the
-        **new** value — which is the ``NULL`` just written. That version passed
-        every in-memory test and handed ``None`` to ``revoke`` against a real
-        database; ``tests/integration/storage/test_agent_grant_store.py`` is
-        what caught it.
-
-        Clearing before the gateway has confirmed anything is deliberate.
-        Revocation is an *acceleration* of the TTL, not the mechanism: the
-        capability expires on its own, so a failed revoke costs lateness, and a
-        row that kept being retried would cost a call every pass for as long as
-        the deployment ran.
-
-        Args:
-            limit: Most rows to take in one pass.
-
-        Returns:
-            ``[{"attempt_id", "job_id", "grant_id"}]``, now detached from their
-            attempts.
-        """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                WITH dead AS (
-                    SELECT id, job_id, grant_id
-                    FROM agent_attempts
-                    WHERE grant_id IS NOT NULL
-                      AND (status <> 'running' OR lease_expires_at <= NOW())
-                    ORDER BY id
-                    LIMIT $1
-                    FOR UPDATE SKIP LOCKED
-                ), cleared AS (
-                    UPDATE agent_attempts a SET grant_id = NULL
-                    FROM dead WHERE a.id = dead.id
-                    RETURNING a.id
-                )
-                SELECT id AS attempt_id, job_id, grant_id FROM dead
-                """,
-                limit,
-            )
-        return [
-            {
-                "attempt_id": row["attempt_id"],
-                "job_id": row["job_id"],
-                "grant_id": row["grant_id"],
-            }
-            for row in rows
-        ]
 
     # ── Admin audit trail (E7) ─────────────────────────────────────────
 

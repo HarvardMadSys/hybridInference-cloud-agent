@@ -22,7 +22,7 @@ from cloud_agent.admin_observability import (
     encode_cursor,
 )
 from cloud_agent.schemas import AttemptResources, ProcessObservation, ToolCallResources
-from cloud_agent.storage.store import _load_json
+from cloud_agent.storage._sql import load_json as _load_json
 from cloud_agent.thread_stats import _TOKEN_KEY_GROUPS
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES, bound_event_payload
 
