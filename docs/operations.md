@@ -856,20 +856,32 @@ host's registration must survive the rebuild. So must the users' source
 control and MCP connections, which are credentials nobody can re-mint from
 the database side.
 
-Rehearsed on a copy of the old schema (2026-09-10); the compose project below
-is staging's (`cloudagent`). Run it on the control-plane host, with the
-target commit checked out in the deploy root.
+Rehearsed on a copy of the old schema (2026-09-10), including the two ways
+the naive version fails: a positional insert lands values in the wrong
+columns because the rewritten baseline orders some differently, and a host
+row restored with its old `slots_used` never claims again because the
+attempts that held those slots are gone. Every `docker compose` below is the
+invocation `deploy/control-plane/deploy.sh` makes — project, env file,
+compose file — and it runs in the deploy root with the target commit checked
+out. The compose project below is staging's (`cloudagent`).
 
-1. Stop the services that hold connections, leaving Postgres up:
+1. Let the host finish. Drain it from the admin page (or
+   `POST /admin/agent/runner-hosts/<host>/drain`), wait until it holds no
+   running attempts, and only then stop the services that hold database
+   connections, leaving Postgres up:
 
    ```bash
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
+     "SELECT host, slots_used FROM agent_runner_hosts; \
+      SELECT count(*) FROM agent_attempts WHERE status = 'running'"
    docker stop cloudagent-control-plane-1 cloudagent-mcp-relay-1 cloudagent-web-1
    ```
 
 2. Take the forensic dump of everything, then the data-only dump of the state
-   that survives. `--column-inserts` is load-bearing: the rewritten baseline
-   orders some columns differently, and positional inserts land values in the
-   wrong columns.
+   that survives, then the placement policy as one statement. `--column-inserts`
+   is load-bearing (see above), and `format('%L')` is what keeps an unpinned
+   `active_host` a SQL `NULL` rather than an empty string the new foreign key
+   would refuse:
 
    ```bash
    docker exec cloudagent-postgres-1 pg_dump -U cloudagent -Fc cloudagent > cloudagent-$(date +%F).dump
@@ -877,31 +889,63 @@ target commit checked out in the deploy root.
      -t agent_runner_hosts -t agent_repo_grants -t agent_gitlab_connections -t agent_mcp_connections \
      cloudagent > cloudagent-state-$(date +%F).sql
    docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     'SELECT active_host FROM agent_runner_policy'
+     "SELECT format('UPDATE agent_runner_policy SET active_host = %L, runtime_versions = %L::jsonb;', \
+                    active_host, runtime_versions) FROM agent_runner_policy" \
+     > cloudagent-policy-$(date +%F).sql
    ```
 
-3. Recreate the database and apply the baseline from the target checkout:
+3. Build the target's `migrate` image **before** touching the database. The
+   migrations are copied into the image at build time, not mounted from the
+   checkout, so a stale image would rebuild the old chain into the empty
+   database:
+
+   ```bash
+   export AGENT_DEPLOYMENT_SHA="$(git rev-parse HEAD)"
+   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml config --services
+   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml build migrate
+   ```
+
+4. Recreate the database, apply the baseline, and check what it is stamped
+   with:
 
    ```bash
    docker exec cloudagent-postgres-1 psql -U cloudagent -d postgres \
      -c 'DROP DATABASE cloudagent' -c 'CREATE DATABASE cloudagent OWNER cloudagent'
-   docker compose run --rm --no-deps migrate
+   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml \
+     run --rm --no-deps migrate
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
+     'SELECT version_num FROM alembic_version'
    ```
 
-4. Restore the surviving state, then the placement pin recorded in step 2:
+   The version must be the head of the rewritten chain (`0001_schema_baseline`
+   or a later revision on it); an `00xx_…` from the old chain means step 3 ran
+   the wrong image.
+
+5. Restore the surviving state, reset the counter that described attempts
+   that no longer exist, then restore the policy:
 
    ```bash
    docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-state-$(date +%F).sql
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent \
-     -c "UPDATE agent_runner_policy SET active_host = '<the value from step 2>'"
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -c 'UPDATE agent_runner_hosts SET slots_used = 0'
+   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-policy-$(date +%F).sql
    ```
 
-5. Deploy the target commit as usual. `migrate` finds the database at head,
+   `slots_used` counts running attempts on the host, and the rebuild kept
+   none; a restored non-zero value would park every new task at "queued"
+   once it reached `slots_total`, with a runner that authenticates and
+   heartbeats normally.
+
+6. Deploy the target commit as usual. `migrate` finds the database at head,
    the control plane starts, and the runner's next heartbeat authenticates
    against the restored `credential_hash`; readiness then sees a fresh
    heartbeat and the deploy completes. If the host stack was restarted
    meanwhile and died on `agent_host_credential_rejected`, restart it after
-   step 4 — the credential it holds is valid again.
+   step 5 — the credential it holds is valid again.
+
+7. Prove it end to end before calling it done: create a task and confirm it
+   is claimed (`SELECT state FROM agent_jobs` reaches `running`), then a
+   follow-up, a cancel, a fork, a publish, and a restart of the host stack
+   with a follow-up into the retained chat afterwards.
 
 If the host registration cannot be restored, the fallback is a controlled
 re-enrolment: remove the credential file on the host, mint an enrolment token
