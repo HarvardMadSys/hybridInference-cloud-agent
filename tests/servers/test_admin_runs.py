@@ -15,11 +15,12 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent import identity
 from cloud_agent.admin_observability import AdminActivityPage, AdminRunList, cursor_scope
 from cloud_agent.api import admin_runs, usage
-from cloud_agent.api.deps import get_agent_job_store, get_gateway_client
+from cloud_agent.api.deps import get_admin_queries, get_gateway_client
 from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 from tests.servers.test_owner_revalidation import _AccessGateway
+from tests.support.storage_fakes import capability_overrides
 from tests.unit.test_ledger_snapshots import END, START, ledger_row
 
 ADMIN = {"Authorization": "Bearer admin-observations-test"}
@@ -126,8 +127,18 @@ def setup(monkeypatch):
     app = FastAPI()
     app.include_router(admin_runs.router)
     app.include_router(usage.router)
-    app.dependency_overrides[admin_runs.get_admin_run_queries] = lambda: queries
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The projections are injected now rather than built from a pool handle, and
+    # the usage routes take the capabilities they read through. The fake answers
+    # all of them, so the fixture names each one these routes use.
+    app.dependency_overrides[get_admin_queries] = lambda: queries
+    capability_overrides(
+        app,
+        store,
+        "conversation_queries",
+        "execution_queries",
+        "ledger",
+        "audit",
+    )
     app.dependency_overrides[get_gateway_client] = lambda: gateway
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "admin-person"}
     return app, queries, store, gateway

@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports.session_forks import SessionForkRepository
     from cloud_agent.ports.snapshots import SnapshotRepository
     from cloud_agent.ports.source_control import SourceControlRepository
+    from cloud_agent.storage.admin_queries import AdminRunQueries
     from cloud_agent.storage.store import AgentJobStore
 
 
@@ -210,6 +211,28 @@ def require_capability(capability: Capability | None, what: str) -> Capability:
     return capability
 
 
+def get_admin_queries(request: Request) -> AdminRunQueries | None:
+    """Dependency to obtain the purpose-built admin projections.
+
+    A dependency rather than a route constructing it from a private pool handle.
+    ``AdminRunQueries`` opens its own repeatable-read, read-only transaction with
+    a statement timeout, and that is a property of the object; a route reaching
+    into a repository for its pool to build a second one is how the boundary
+    erodes one line at a time.
+    """
+    return getattr(request.app.state, "admin_queries", None)
+
+
+def require_admin_queries(capability: AdminRunQueries | None) -> AdminRunQueries:
+    """Require the admin projections."""
+    return require_capability(capability, "admin reads")
+
+
+def require_audit(capability: AuditRepository | None) -> AuditRepository:
+    """Require the durable admin audit trail."""
+    return require_capability(capability, "admin audit")
+
+
 def require_conversation_commands(
     capability: ConversationCommands | None,
 ) -> ConversationCommands:
@@ -220,6 +243,13 @@ def require_conversation_commands(
 def require_host_pool(capability: HostPoolRepository | None) -> HostPoolRepository:
     """Require the host reads."""
     return require_capability(capability, "host lookups")
+
+
+def require_execution_queries(
+    capability: ExecutionQueries | None,
+) -> ExecutionQueries:
+    """Require the execution observation reads."""
+    return require_capability(capability, "execution reads")
 
 
 def require_queries(capability: ConversationQueries | None) -> ConversationQueries:

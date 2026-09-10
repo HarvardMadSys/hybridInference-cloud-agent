@@ -22,16 +22,26 @@ from cloud_agent.admin_observability import (
     decode_cursor,
     resolve_run_window,
 )
-from cloud_agent.api.deps import get_agent_job_store, get_client_ip, verify_admin_access
-from cloud_agent.api.routes import _attempt_duration_ms, _attempt_resources, _require_store
+from cloud_agent.api.deps import (
+    get_admin_queries,
+    get_audit_repository,
+    get_client_ip,
+    get_ledger_repository,
+    require_admin_queries,
+    require_audit,
+    require_ledger,
+    verify_admin_access,
+)
+from cloud_agent.api.routes import _attempt_duration_ms, _attempt_resources
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry
-from cloud_agent.storage.admin_queries import AdminRunQueries
 from cloud_agent.storage.store import TERMINAL_STATES
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.ports.audit import AuditRepository
+    from cloud_agent.ports.ledger import LedgerRepository
+    from cloud_agent.storage.admin_queries import AdminRunQueries
 
 logger = get_logger(__name__)
 
@@ -44,10 +54,10 @@ router = APIRouter(prefix="/admin/agent/runs", dependencies=[Depends(_no_store)]
 
 
 def get_admin_run_queries(
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    queries: AdminRunQueries | None = Depends(get_admin_queries),
 ) -> AdminRunQueries:
     """Expose only purpose-built projections to the default admin routes."""
-    return AdminRunQueries(_require_store(store)._pool)
+    return require_admin_queries(queries)
 
 
 async def _run(queries: AdminRunQueries, job_id: str) -> dict[str, Any]:
@@ -91,12 +101,12 @@ async def get_admin_run(
     job_id: str = Path(max_length=256),
     _admin: str = Depends(verify_admin_access),
     queries: AdminRunQueries = Depends(get_admin_run_queries),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    ledger: LedgerRepository | None = Depends(get_ledger_repository),
 ) -> AdminRunDetail:
     """Read a turn's metadata and existing accounting without owner impersonation."""
     run = await _run(queries, job_id)
     usage = summarize_job_usage(
-        ledger_rows=await _require_store(store).ledger_rows_for_job(job_id=job_id),
+        ledger_rows=await require_ledger(ledger).ledger_rows_for_job(job_id=job_id),
         runtime_inputs=await queries.usage_inputs(job_id),
         runtime=run["runtime"],
         terminal=run["state"] in TERMINAL_STATES,
@@ -154,7 +164,7 @@ async def reveal_admin_event_content(
     event_id: int = Path(ge=1, le=2**63 - 1),
     admin: str = Depends(verify_admin_access),
     queries: AdminRunQueries = Depends(get_admin_run_queries),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> AdminEventContent:
     """Reveal one bounded event only after its content access is durably audited."""
     run = await _run(queries, job_id)
@@ -165,7 +175,7 @@ async def reveal_admin_event_content(
     try:
         # log_admin_action intentionally swallows failures for mutations that
         # have already happened. Content disclosure needs the opposite policy.
-        audit_id = await _require_store(store).record_admin_action(
+        audit_id = await require_audit(audit).record_admin_action(
             action="agent.run.event_content.read",
             actor_id=admin,
             admin_ip=get_client_ip(request),

@@ -11,9 +11,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import usage
-from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.app import create_app, create_mcp_app
+from tests.support.storage_fakes import capability_overrides
 from tests.unit.test_ledger_snapshots import END, START, ledger_row
 
 
@@ -53,7 +53,15 @@ def store():
 def app(store):
     app = FastAPI()
     app.include_router(usage.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The usage routes take the capabilities they read through rather than the
+    # store they were split from. The fake answers all of them.
+    capability_overrides(
+        app,
+        store,
+        "conversation_queries",
+        "execution_queries",
+        "ledger",
+    )
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "owner"}
     return app
 
