@@ -42,7 +42,6 @@ import { TrajectoryView } from './TrajectoryView';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
-type DrawerView = 'overview' | 'diff';
 type WorkspaceTab = 'git' | 'terminal' | 'files';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
@@ -682,16 +681,13 @@ function RunTiming({ job }: { job: AgentJob }) {
 
 function DetailsDrawer({
   job,
-  initialView,
   onClose,
   onOpenDiff,
 }: {
   job: AgentJob;
-  initialView: DrawerView;
   onClose: () => void;
   onOpenDiff: () => void;
 }) {
-  const [view, setView] = useState(initialView);
   const pill = STATE_PILL[job.state];
   const runNote = ownerRunNote(job);
   const hasDiff = job.workspaceDiffAvailable ?? job.diffFiles.length > 0;
@@ -725,220 +721,159 @@ function DetailsDrawer({
           </button>
         </div>
 
-        <div className="flex gap-1 border-b border-gray-100 dark:border-white/5 px-4 pt-2 text-[13px] font-medium">
-          {(
-            [
-              ['overview', 'Overview'],
-              ['diff', `Changes${job.diffFiles.length ? ` · ${job.diffFiles.length}` : ''}`],
-            ] as [DrawerView, string][]
-          ).map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              aria-pressed={view === key}
-              onClick={() => setView(key)}
-              className={`border-b-2 px-3 py-2 ${
-                view === key
-                  ? 'border-gray-900 dark:border-gray-100 text-gray-900 dark:text-gray-50'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
-          {view === 'overview' ? (
-            <div className="space-y-6">
-              <section aria-label="Run outcome">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                    Outcome
-                  </h3>
-                  <span
-                    className={`rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
-                  >
-                    {pill.label}
+          <div className="space-y-6">
+            <section aria-label="Run outcome">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                  Outcome
+                </h3>
+                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}>
+                  {pill.label}
+                </span>
+              </div>
+              <RunTiming job={job} />
+              {runNote && runNote.length > 240 ? (
+                <details className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
+                  <summary className="cursor-pointer">{runNote.slice(0, 240)}…</summary>
+                  <p className="mt-2 whitespace-pre-wrap">{runNote}</p>
+                </details>
+              ) : runNote ? (
+                <p className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
+                  {runNote}
+                </p>
+              ) : job.state === 'failed' ? (
+                <p className="mt-3 text-[13px] text-gray-600 dark:text-gray-400">
+                  The run stopped before it could finish. No failure details were recorded.
+                </p>
+              ) : null}
+              <RunGuidance job={job} />
+            </section>
+            <section aria-label="Workspace changes">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                Workspace changes
+              </h3>
+              <p className="mt-2 text-sm font-medium text-gray-800 dark:text-gray-200">
+                {hasDiff
+                  ? `${job.diffFiles.length} file${job.diffFiles.length === 1 ? '' : 's'} changed`
+                  : 'Workspace changes unavailable'}
+                {hasDiff && job.diffStat ? (
+                  <span className="ml-2 whitespace-nowrap font-mono text-xs">
+                    <span className="text-emerald-600 dark:text-emerald-400">
+                      +{job.diffStat.add}
+                    </span>{' '}
+                    <span className="text-red-500 dark:text-red-400">−{job.diffStat.del}</span>
                   </span>
-                </div>
-                <RunTiming job={job} />
-                {runNote && runNote.length > 240 ? (
-                  <details className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
-                    <summary className="cursor-pointer">{runNote.slice(0, 240)}…</summary>
-                    <p className="mt-2 whitespace-pre-wrap">{runNote}</p>
-                  </details>
-                ) : runNote ? (
-                  <p className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
-                    {runNote}
-                  </p>
-                ) : job.state === 'failed' ? (
-                  <p className="mt-3 text-[13px] text-gray-600 dark:text-gray-400">
-                    The run stopped before it could finish. No failure details were recorded.
-                  </p>
                 ) : null}
-                <RunGuidance job={job} />
-              </section>
-              <section aria-label="Workspace changes">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                  Workspace changes
-                </h3>
-                <p className="mt-2 text-sm font-medium text-gray-800 dark:text-gray-200">
-                  {hasDiff
-                    ? `${job.diffFiles.length} file${job.diffFiles.length === 1 ? '' : 's'} changed`
-                    : 'Workspace changes unavailable'}
-                  {hasDiff && job.diffStat ? (
-                    <span className="ml-2 whitespace-nowrap font-mono text-xs">
-                      <span className="text-emerald-600 dark:text-emerald-400">
-                        +{job.diffStat.add}
-                      </span>{' '}
-                      <span className="text-red-500 dark:text-red-400">−{job.diffStat.del}</span>
-                    </span>
-                  ) : null}
-                </p>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Current workspace compared with the base. It may include changes from other turns
-                  {job.workspaceShared ? ' and chats sharing this workspace' : ''}.
-                </p>
-                <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
-                  <DetailStat label="Branch" value={job.branch} />
-                  <DetailStat
-                    label="Pull request"
-                    value={
-                      job.prUrl ? (
-                        <a
-                          href={job.prUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-700 underline underline-offset-2 dark:text-blue-400"
-                        >
-                          {job.prLabel ?? 'Draft PR'}
-                        </a>
-                      ) : job.workspacePublicationState === 'failed' ? (
-                        'Could not publish changes'
-                      ) : job.workspacePublicationState === 'publishing' ? (
-                        'Publishing changes…'
-                      ) : (
-                        'No pull request yet'
-                      )
-                    }
-                  />
-                </dl>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <RunActions
-                    job={job}
-                    onOpenDiff={onOpenDiff}
-                    showChanges={hasDiff || job.state !== 'queued'}
-                  />
-                </div>
-              </section>
-              <LedgerUsage job={job} />
-              <section>
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                  Environment
-                </h3>
-                <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
-                  <DetailStat label="Agent" value={job.runtime} />
-                  <DetailStat label="Model" value={job.model} />
-                  {/* Only when a depth was chosen. An absent row is the honest
+              </p>
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Current workspace compared with the base. It may include changes from other turns
+                {job.workspaceShared ? ' and chats sharing this workspace' : ''}.
+              </p>
+              <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
+                <DetailStat label="Branch" value={job.branch} />
+                <DetailStat
+                  label="Pull request"
+                  value={
+                    job.prUrl ? (
+                      <a
+                        href={job.prUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-700 underline underline-offset-2 dark:text-blue-400"
+                      >
+                        {job.prLabel ?? 'Draft PR'}
+                      </a>
+                    ) : job.workspacePublicationState === 'failed' ? (
+                      'Could not publish changes'
+                    ) : job.workspacePublicationState === 'publishing' ? (
+                      'Publishing changes…'
+                    ) : (
+                      'No pull request yet'
+                    )
+                  }
+                />
+              </dl>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <RunActions
+                  job={job}
+                  onOpenDiff={onOpenDiff}
+                  showChanges={hasDiff || job.state !== 'queued'}
+                />
+              </div>
+            </section>
+            <LedgerUsage job={job} />
+            <section>
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                Environment
+              </h3>
+              <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
+                <DetailStat label="Agent" value={job.runtime} />
+                <DetailStat label="Model" value={job.model} />
+                {/* Only when a depth was chosen. An absent row is the honest
                       rendering of Auto: nobody picked, so there is nothing to
                       report. */}
-                  {job.reasoningEffort ? (
-                    <DetailStat label="Reasoning" value={job.reasoningEffort} />
-                  ) : null}
-                  <DetailStat label="Repository" value={job.repo} />
-                  <DetailStat
-                    label="Base"
-                    value={
-                      job.baseRef && job.baseSha
-                        ? `${job.baseRef} · ${job.baseSha}`
-                        : job.baseRef || job.baseSha
-                    }
-                  />
-                  <DetailStat
-                    label="Sandbox"
-                    value={sandboxDisplayLabel(job.sandbox) || 'Not recorded'}
-                  />
-                </dl>
-                {job.egressDenials > 0 ? (
-                  <p
-                    role="note"
-                    className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
-                  >
-                    {job.egressDenials} network request{job.egressDenials === 1 ? ' was' : 's were'}{' '}
-                    blocked by the sandbox. This may have prevented part of your task from
-                    completing.
-                  </p>
+                {job.reasoningEffort ? (
+                  <DetailStat label="Reasoning" value={job.reasoningEffort} />
                 ) : null}
-              </section>
-              {job.gates.length ? (
-                <section>
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                    Publish checks
-                  </h3>
-                  <ul className="mt-2 space-y-2 text-[13px]">
-                    {job.gates.map((gate) => (
-                      <li
-                        key={gate.label}
-                        className="flex items-start gap-2 text-gray-600 dark:text-gray-400"
-                      >
-                        <span
-                          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
-                            gate.state === 'pass'
-                              ? 'bg-emerald-500'
-                              : gate.state === 'hold'
-                                ? 'bg-amber-400'
-                                : 'bg-gray-300 dark:bg-gray-600'
-                          }`}
-                        />
-                        <span>
-                          {gate.label}
-                          {gate.detail ? (
-                            <span className="ml-1 text-gray-400 dark:text-gray-500">
-                              {gate.detail}
-                            </span>
-                          ) : null}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
+                <DetailStat label="Repository" value={job.repo} />
+                <DetailStat
+                  label="Base"
+                  value={
+                    job.baseRef && job.baseSha
+                      ? `${job.baseRef} · ${job.baseSha}`
+                      : job.baseRef || job.baseSha
+                  }
+                />
+                <DetailStat
+                  label="Sandbox"
+                  value={sandboxDisplayLabel(job.sandbox) || 'Not recorded'}
+                />
+              </dl>
+              {job.egressDenials > 0 ? (
+                <p
+                  role="note"
+                  className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
+                >
+                  {job.egressDenials} network request{job.egressDenials === 1 ? ' was' : 's were'}{' '}
+                  blocked by the sandbox. This may have prevented part of your task from completing.
+                </p>
               ) : null}
-            </div>
-          ) : null}
-
-          {view === 'diff' ? (
-            job.diffLines.length ? (
-              <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
-                <div className="flex flex-wrap gap-2 border-b border-gray-100 dark:border-white/5 px-3 py-2 font-mono text-xs text-gray-500 dark:text-gray-400">
-                  {job.diffFiles.map((file) => (
-                    <span key={file}>{file}</span>
-                  ))}
-                  {job.diffStat ? (
-                    <span className="ml-auto">
-                      <span className="text-emerald-600 dark:text-emerald-400">
-                        +{job.diffStat.add}
-                      </span>{' '}
-                      <span className="text-red-500 dark:text-red-400">−{job.diffStat.del}</span>
-                    </span>
-                  ) : null}
-                </div>
-                <pre className="overflow-x-auto font-mono text-xs leading-relaxed">
-                  <code>
-                    {job.diffLines.map((line, index) => (
-                      <span key={index} className={`block px-3 ${DIFF_LINE_CLASS[line.marker]}`}>
-                        {line.text}
+            </section>
+            {job.gates.length ? (
+              <section>
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                  Publish checks
+                </h3>
+                <ul className="mt-2 space-y-2 text-[13px]">
+                  {job.gates.map((gate) => (
+                    <li
+                      key={gate.label}
+                      className="flex items-start gap-2 text-gray-600 dark:text-gray-400"
+                    >
+                      <span
+                        className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+                          gate.state === 'pass'
+                            ? 'bg-emerald-500'
+                            : gate.state === 'hold'
+                              ? 'bg-amber-400'
+                              : 'bg-gray-300 dark:bg-gray-600'
+                        }`}
+                      />
+                      <span>
+                        {gate.label}
+                        {gate.detail ? (
+                          <span className="ml-1 text-gray-400 dark:text-gray-500">
+                            {gate.detail}
+                          </span>
+                        ) : null}
                       </span>
-                    ))}
-                  </code>
-                </pre>
-              </div>
-            ) : (
-              <p className="text-sm text-gray-400 dark:text-gray-500">
-                {hasDiff ? 'No workspace changes.' : 'Workspace changes are not available.'}
-              </p>
-            )
-          ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+          </div>
         </div>
       </aside>
     </div>
@@ -1264,7 +1199,7 @@ export function JobDetail({
     // would fight the reader's own selection.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job.id]);
-  const [drawer, setDrawer] = useState<DrawerView | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('git');
@@ -1610,7 +1545,7 @@ export function JobDetail({
               <span aria-hidden="true">·</span>
               <button
                 type="button"
-                onClick={() => setDrawer('overview')}
+                onClick={() => setDetailsOpen(true)}
                 className="shrink-0 font-medium text-gray-500 dark:text-gray-400 transition-colors hover:text-crimson dark:hover:text-crimson-light hover:underline"
               >
                 Run details
@@ -2093,14 +2028,13 @@ export function JobDetail({
         </aside>
       </div>
 
-      {drawer ? (
+      {detailsOpen ? (
         <DetailsDrawer
           key={job.id}
           job={job}
-          initialView={drawer}
-          onClose={() => setDrawer(null)}
+          onClose={() => setDetailsOpen(false)}
           onOpenDiff={() => {
-            setDrawer(null);
+            setDetailsOpen(false);
             openWorkspace('git');
           }}
         />

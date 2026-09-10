@@ -194,21 +194,6 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   return { kind: 'lifecycle', text: type };
 }
 
-/** Split a unified diff into the marker-tagged lines the diff view renders. */
-export function toDiffLines(patch: string): DiffLine[] {
-  if (!patch) return [];
-  return patch
-    .split('\n')
-    .filter((line) => !line.startsWith('diff --git') && !line.startsWith('index '))
-    .map((text): DiffLine => {
-      if (text.startsWith('@@')) return { marker: 'hunk', text };
-      if (text.startsWith('+++') || text.startsWith('---')) return { marker: 'ctx', text };
-      if (text.startsWith('+')) return { marker: 'add', text };
-      if (text.startsWith('-')) return { marker: 'del', text };
-      return { marker: 'ctx', text };
-    });
-}
-
 /** Extract the file list a patch touches, for the diff header. */
 export function toDiffFiles(patch: string): string[] {
   const files = new Set<string>();
@@ -725,7 +710,6 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     workspaceDiffAvailable: typeof options.patch === 'string',
     diffFileDetails: toDiffFileDetails(patch),
     diffStat: diffStat(patch),
-    diffLines: toDiffLines(patch),
     gates: [],
     usage: {
       tokensIn: formatTokens(job.tokens_in),

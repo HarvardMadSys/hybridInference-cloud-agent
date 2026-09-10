@@ -67,20 +67,6 @@ export const AGENT_JOBS: AgentJob[] = [
     liveNote: 'Claude Code is running · turn 15 · re-running the failing test',
     diffFiles: ['middleware.py', 'test_sse_timeout.py', 'CHANGELOG.md'],
     diffStat: { add: 38, del: 9 },
-    diffLines: [
-      { marker: 'hunk', text: '@@ -142,9 +142,14 @@ def build_middleware_stack(app):' },
-      { marker: 'ctx', text: '     app.add_middleware(RequestIDMiddleware)' },
-      { marker: 'del', text: '-    app.add_middleware(TotalTimeoutMiddleware, timeout=300)' },
-      { marker: 'add', text: '+    # SSE streams are exempt from the total timeout (#865/#889):' },
-      { marker: 'add', text: '+    # a healthy long generation must not be killed at 300s.' },
-      { marker: 'add', text: '+    app.add_middleware(' },
-      {
-        marker: 'add',
-        text: '+        TotalTimeoutMiddleware, timeout=300, exempt=is_sse_request',
-      },
-      { marker: 'add', text: '+    )' },
-      { marker: 'ctx', text: '     app.add_middleware(AuthContextMiddleware)' },
-    ],
     gates: [
       { label: 'No .github/ changes', state: 'pass' },
       { label: 'Secret scan clean', state: 'pass' },
@@ -113,7 +99,6 @@ export const AGENT_JOBS: AgentJob[] = [
     ],
     diffFiles: ['.github/workflows/ci.yml', 'pyproject.toml'],
     diffStat: { add: 9, del: 4 },
-    diffLines: [],
     gates: [
       {
         label: '.github/ changes',
@@ -148,7 +133,6 @@ export const AGENT_JOBS: AgentJob[] = [
     ],
     diffFiles: ['test_anthropic_translator.py'],
     diffStat: { add: 214, del: 38 },
-    diffLines: [],
     gates: [
       { label: 'No .github/ changes', state: 'pass' },
       { label: 'Secret scan clean', state: 'pass' },
@@ -183,7 +167,6 @@ export const AGENT_JOBS: AgentJob[] = [
     ],
     diffFiles: ['test_anthropic_translator.py'],
     diffStat: { add: 198, del: 41 },
-    diffLines: [],
     gates: [
       { label: 'No .github/ changes', state: 'pass' },
       { label: 'Secret scan clean', state: 'pass' },
@@ -219,7 +202,6 @@ export const AGENT_JOBS: AgentJob[] = [
       },
     ],
     diffFiles: [],
-    diffLines: [],
     gates: [],
     usage: { tokensIn: '740k', tokensOut: '52k', cachePct: 49, turns: 41 },
     egressDenials: 1,
@@ -241,7 +223,6 @@ export const AGENT_JOBS: AgentJob[] = [
     attempts: [],
     events: [{ kind: 'lifecycle', text: 'Queued · waiting for a runner slot' }],
     diffFiles: [],
-    diffLines: [],
     gates: [],
     usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 0 },
     egressDenials: 0,

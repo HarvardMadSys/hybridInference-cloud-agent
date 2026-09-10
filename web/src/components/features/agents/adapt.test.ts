@@ -12,7 +12,6 @@ import {
   lifecyclePhaseLabel,
   toDiffFileDetails,
   toDiffFiles,
-  toDiffLines,
   toDisplayEvent,
   toDisplayJob,
   toDisplayState,
@@ -640,16 +639,6 @@ describe('patch parsing', () => {
     ]);
   });
 
-  it('tags lines by marker and drops git noise', () => {
-    const lines = toDiffLines(PATCH);
-    expect(lines.some((l) => l.text.startsWith('diff --git'))).toBe(false);
-    expect(lines.find((l) => l.text === '+new')?.marker).toBe('add');
-    expect(lines.find((l) => l.text === '-old')?.marker).toBe('del');
-    expect(lines.find((l) => l.text.startsWith('@@'))?.marker).toBe('hunk');
-    // File headers are context, not additions — otherwise every diff reads +1.
-    expect(lines.find((l) => l.text.startsWith('+++'))?.marker).toBe('ctx');
-  });
-
   it('counts added and removed lines without the headers', () => {
     expect(toDisplayJob(JOB, { patch: PATCH }).diffStat).toEqual({ add: 1, del: 1 });
   });
@@ -657,7 +646,6 @@ describe('patch parsing', () => {
   it('handles a job that produced no patch', () => {
     const job = toDisplayJob(JOB, { patch: null });
     expect(job.diffFiles).toEqual([]);
-    expect(job.diffLines).toEqual([]);
     expect(job.diffStat).toBeUndefined();
   });
 });

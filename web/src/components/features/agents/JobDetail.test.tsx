@@ -106,7 +106,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
       },
     ],
     diffStat: { add: 1, del: 0 },
-    diffLines: [{ marker: 'add', text: '+fixed' }],
     gates: [],
     usage: { tokensIn: '1.2k', tokensOut: '80', cachePct: 0, turns: 2 },
     egressDenials: 0,
@@ -503,7 +502,7 @@ describe('JobDetail', () => {
     );
   });
 
-  it('keeps changes, usage, and sandbox data in a secondary drawer without raw events', () => {
+  it('opens run details directly with a change summary, usage, and sandbox data', () => {
     render(<JobDetail job={makeJob()} />);
 
     expect(screen.queryByText('Input tokens')).not.toBeInTheDocument();
@@ -516,8 +515,11 @@ describe('JobDetail', () => {
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
 
     expect(screen.queryByRole('button', { name: /Raw events/ })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Overview' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Changes · 1' })).toBeInTheDocument();
+    const drawer = screen.getByRole('dialog', { name: 'Run details' });
+    expect(within(drawer).queryByRole('button', { name: 'Overview' })).not.toBeInTheDocument();
+    expect(within(drawer).queryByRole('button', { name: /^Changes/ })).not.toBeInTheDocument();
+    expect(within(drawer).getByRole('region', { name: 'Run outcome' })).toBeInTheDocument();
+    expect(within(drawer).getByText('1 file changed')).toBeInTheDocument();
   });
 
   it('leads run details with outcome, actual execution time and the turn number', () => {
@@ -675,7 +677,6 @@ describe('JobDetail', () => {
             state: 'needs_review',
             workspaceDiffAvailable: available,
             diffFiles: [],
-            diffLines: [],
             diffStat: undefined,
           })}
         />,

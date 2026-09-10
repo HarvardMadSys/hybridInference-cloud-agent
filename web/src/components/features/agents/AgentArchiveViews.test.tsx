@@ -79,7 +79,6 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     attempts: [],
     events: [],
     diffFiles: [],
-    diffLines: [],
     gates: [],
     usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: 0 },
     egressDenials: 0,

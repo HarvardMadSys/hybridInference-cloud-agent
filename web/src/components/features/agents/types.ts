@@ -257,7 +257,6 @@ export interface AgentJob {
   workspaceDiffAvailable?: boolean;
   diffFileDetails?: AgentDiffFile[];
   diffStat?: { add: number; del: number };
-  diffLines: DiffLine[];
   gates: AgentGate[];
   usage: { tokensIn: string; tokensOut: string; cachePct: number; turns: number | null };
   /** Attempt continuity telemetry; `replay` can occur only on historical rows. */

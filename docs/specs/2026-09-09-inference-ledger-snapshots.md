@@ -89,6 +89,10 @@ does not expose attempt selectors, query windows, or reconciliation internals.
 The API retains those fields for diagnostic clients. Raw event JSON is not
 shown in the drawer; failure reasons and recovery guidance remain visible.
 The event API and stored execution history remain available for diagnostics.
+The drawer opens directly to these details, with no nested tabs. Workspace
+changes appear as a summary and a View changes action that opens the shared
+Git workspace; the full diff is displayed there rather than duplicated in
+the drawer.
 
 Only when Gateway totals are absent does the drawer fall back to agent-reported
 tokens, with a source label and no invented cost or call count. The additive
