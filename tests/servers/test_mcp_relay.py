@@ -17,9 +17,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import mcp_relay as agent_mcp_router
-from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.mcp_registry import McpRegistry, McpServer
 from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP, SCOPE_MODEL, mint_worker_token
+from tests.support.storage_fakes import capability_overrides
 
 pytestmark = pytest.mark.asyncio
 
@@ -150,7 +150,9 @@ async def client(monkeypatch, store, upstream):
     )
     app = FastAPI()
     app.include_router(agent_mcp_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The relay takes two capabilities rather than the store it was split from,
+    # so the fixture names them. The fake answers both.
+    capability_overrides(app, store, "credentials", "mcp")
     # The proxy also accepts inference grants, which resolve through the
     # operational store. These legacy cases present ajt tokens and never
     # reach it, but the dependency still has to resolve.
@@ -221,7 +223,9 @@ async def test_a_registry_header_replaces_the_sandbox_header_rather_than_joining
     )
     app = FastAPI()
     app.include_router(agent_mcp_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The relay takes two capabilities rather than the store it was split from,
+    # so the fixture names them. The fake answers both.
+    capability_overrides(app, store, "credentials", "mcp")
     # The proxy also accepts inference grants, which resolve through the
     # operational store. These legacy cases present ajt tokens and never
     # reach it, but the dependency still has to resolve.
@@ -302,7 +306,9 @@ async def test_the_catalogue_is_filtered_on_the_way_back(monkeypatch, store, ups
     )
     app = FastAPI()
     app.include_router(agent_mcp_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The relay takes two capabilities rather than the store it was split from,
+    # so the fixture names them. The fake answers both.
+    capability_overrides(app, store, "credentials", "mcp")
     # The proxy also accepts inference grants, which resolve through the
     # operational store. These legacy cases present ajt tokens and never
     # reach it, but the dependency still has to resolve.
@@ -329,7 +335,9 @@ async def test_tools_resolve_against_the_job_owner_not_the_caller(monkeypatch, s
     )
     app = FastAPI()
     app.include_router(agent_mcp_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The relay takes two capabilities rather than the store it was split from,
+    # so the fixture names them. The fake answers both.
+    capability_overrides(app, store, "credentials", "mcp")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
         response = await api.post("/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth())
     assert response.status_code == 200
@@ -401,7 +409,9 @@ async def test_a_lost_encryption_key_is_a_503_and_not_an_unhandled_error(
     )
     app = FastAPI()
     app.include_router(agent_mcp_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The relay takes two capabilities rather than the store it was split from,
+    # so the fixture names them. The fake answers both.
+    capability_overrides(app, store, "credentials", "mcp")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
         response = await api.post("/v1/agent/mcp/github", json=_rpc("initialize"), headers=_auth())
 

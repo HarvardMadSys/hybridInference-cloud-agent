@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import hmac
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import jwt
 from fastapi import Depends, Header, HTTPException, Request
@@ -58,16 +58,165 @@ from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
+    from cloud_agent.bootstrap import Persistence
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
+    from cloud_agent.ports.attempts import AttemptCommands
+    from cloud_agent.ports.audit import AuditRepository
+    from cloud_agent.ports.conversation_queries import ConversationQueries
+    from cloud_agent.ports.conversations import ConversationCommands
+    from cloud_agent.ports.credential_queries import CredentialQueries
+    from cloud_agent.ports.execution_queries import ExecutionQueries
+    from cloud_agent.ports.grants import GrantRepository
+    from cloud_agent.ports.host_pool import HostPoolRepository
+    from cloud_agent.ports.ledger import LedgerRepository
+    from cloud_agent.ports.mcp import McpConnectionRepository
+    from cloud_agent.ports.residencies import ResidencyRepository
+    from cloud_agent.ports.sandboxes import SandboxRepository
+    from cloud_agent.ports.session_forks import SessionForkRepository
+    from cloud_agent.ports.snapshots import SnapshotRepository
+    from cloud_agent.ports.source_control import SourceControlRepository
     from cloud_agent.storage.store import AgentJobStore
 
 
 # ── Wiring this service owns ───────────────────────────────────────────
 
 
+def get_persistence(request: Request) -> Persistence | None:
+    """Dependency to obtain the constructed capabilities (if configured).
+
+    One getter rather than fifteen, because a route that needs several
+    capabilities should take them in one place and then use the ports it needs.
+    What it must not do is pass this object on: it has no behaviour, and handing
+    it to a business function recreates the container this refactor removed.
+    """
+    return getattr(request.app.state, "persistence", None)
+
+
+def _port(request: Request, attribute: str) -> Any | None:
+    """Return one capability, falling back to the store it is being split from.
+
+    The fallback is the migration, not the design. While callers are moved one
+    at a time, the modules that have not moved yet still override
+    ``get_agent_job_store`` in the test suite, and a route asking only for its
+    own port would see ``None`` under those tests. Every fallback line here is
+    deleted with ``get_agent_job_store`` when the last caller moves.
+    """
+    persistence = getattr(request.app.state, "persistence", None)
+    if persistence is not None:
+        return getattr(persistence, attribute)
+    return getattr(request.app.state, "store", None)
+
+
+def get_conversation_commands(request: Request) -> ConversationCommands | None:
+    """Dependency to obtain conversation creation, metadata and archiving."""
+    return _port(request, "conversations")
+
+
+def get_conversation_queries(request: Request) -> ConversationQueries | None:
+    """Dependency to obtain the conversation, job and project read projections."""
+    return _port(request, "conversation_queries")
+
+
+def get_attempt_commands(request: Request) -> AttemptCommands | None:
+    """Dependency to obtain claim, lease, cancellation and transition."""
+    return _port(request, "attempts")
+
+
+def get_execution_queries(request: Request) -> ExecutionQueries | None:
+    """Dependency to obtain the event, attempt and usage-input reads."""
+    return _port(request, "execution_queries")
+
+
+def get_sandbox_repository(request: Request) -> SandboxRepository | None:
+    """Dependency to obtain sandbox activation, admission and settlement."""
+    return _port(request, "sandboxes")
+
+
+def get_residency_repository(request: Request) -> ResidencyRepository | None:
+    """Dependency to obtain residency lifecycles that outlive an attempt."""
+    return _port(request, "residencies")
+
+
+def get_session_fork_repository(request: Request) -> SessionForkRepository | None:
+    """Dependency to obtain fork preparation, receipts and recovery."""
+    return _port(request, "session_forks")
+
+
+def get_snapshot_repository(request: Request) -> SnapshotRepository | None:
+    """Dependency to obtain snapshot capture, publication and base import."""
+    return _port(request, "snapshots")
+
+
+def get_host_pool(request: Request) -> HostPoolRepository | None:
+    """Dependency to obtain enrollment, heartbeat, placement and host reads."""
+    return _port(request, "hosts")
+
+
+def get_source_control_repository(request: Request) -> SourceControlRepository | None:
+    """Dependency to obtain repo grants, OAuth state and GitLab connections."""
+    return _port(request, "source_control")
+
+
+def get_mcp_connections(request: Request) -> McpConnectionRepository | None:
+    """Dependency to obtain the per-user MCP connection rows."""
+    return _port(request, "mcp")
+
+
+def get_grant_repository(request: Request) -> GrantRepository | None:
+    """Dependency to obtain grant records, links and revocation queries."""
+    return _port(request, "grants")
+
+
+def get_credential_queries(request: Request) -> CredentialQueries | None:
+    """Dependency to obtain the live credential fence the MCP relay resolves."""
+    return _port(request, "credentials")
+
+
+def get_ledger_repository(request: Request) -> LedgerRepository | None:
+    """Dependency to obtain the usage-ledger reads and refresh queueing."""
+    return _port(request, "ledger")
+
+
+def get_audit_repository(request: Request) -> AuditRepository | None:
+    """Dependency to obtain the durable admin audit trail."""
+    return _port(request, "audit")
+
+
+# ── Requiring a capability ─────────────────────────────────────────────
+
+Capability = TypeVar("Capability")
+
+
+def require_capability(capability: Capability | None, what: str) -> Capability:
+    """Return a capability, or refuse with the deployment's own 503.
+
+    An unconfigured database is a supported shape, so every getter above may
+    answer ``None``. What that means belongs to the route rather than to the
+    getter: some endpoints refuse, and some — the config page, say — simply
+    report fewer things. This is the refusal, written once so the copies it
+    replaces cannot drift apart.
+    """
+    if capability is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "type": "unavailable",
+                    "message": f"Agent {what} requires a configured database.",
+                }
+            },
+        )
+    return capability
+
+
 def get_agent_job_store(request: Request) -> AgentJobStore | None:
-    """Dependency to obtain the agent job store (if configured)."""
+    """Dependency to obtain the agent job store (if configured).
+
+    Deprecated: a caller should depend on the capability it uses. Kept while the
+    remaining routes are migrated, and deleted with them — see
+    docs/storage/method-attribution.txt.
+    """
     return getattr(request.app.state, "store", None)
 
 

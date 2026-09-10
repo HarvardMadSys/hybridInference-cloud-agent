@@ -47,6 +47,7 @@ from cloud_agent.api.deps import (
     get_gateway_client,
     get_grant_client,
     get_log_store,
+    get_mcp_connections,
     looks_like_agent_token,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
@@ -197,6 +198,7 @@ from cloud_agent_host.workspace_browser import (
 )
 
 if TYPE_CHECKING:
+    from cloud_agent.ports.mcp import McpConnectionRepository
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
@@ -552,6 +554,7 @@ async def get_agent_config(
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
+    mcp_connections: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> AgentConfigResponse:
     """What this deployment will actually accept.
 
@@ -586,7 +589,9 @@ async def get_agent_config(
         mcp_servers=[
             McpServerSummary(**entry)
             for entry in (
-                await _mcp_servers_for_user(store, user["user_id"]) if store is not None else []
+                await _mcp_servers_for_user(mcp_connections, user["user_id"])
+                if mcp_connections is not None
+                else []
             )
         ],
         mcp_runtimes=runtimes_supporting_mcp(),
@@ -1155,7 +1160,9 @@ async def _require_resolvable_model(
     )
 
 
-async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict[str, Any]]:
+async def _mcp_servers_for_user(
+    connections: McpConnectionRepository, user_id: str
+) -> list[dict[str, Any]]:
     """The MCP servers *this user* has connected, for the composer.
 
     Names and display metadata only. A server's URL and its credential never
@@ -1170,7 +1177,7 @@ async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict
     fail. ``connection_states`` decides that, and the Integrations page reports
     the reason from the same source.
     """
-    registry = await registry_for_user(store, user_id=user_id)
+    registry = await registry_for_user(connections, user_id=user_id)
     servers: list[dict[str, Any]] = []
     for name in registry.names:
         server = registry.get(name)
@@ -1188,7 +1195,11 @@ async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict
 
 
 async def _resolve_mcp_servers(
-    requested: list[str] | None, *, runtime: str, store: AgentJobStore, user_id: str
+    requested: list[str] | None,
+    *,
+    runtime: str,
+    connections: McpConnectionRepository,
+    user_id: str,
 ) -> list[str]:
     """Settle which MCP servers a new job runs with, or refuse to create it.
 
@@ -1201,7 +1212,7 @@ async def _resolve_mcp_servers(
     written around a tool the agent turns out not to have does not fail — it
     quietly produces the wrong work, having spent the budget.
     """
-    connected = await _mcp_servers_for_user(store, user_id)
+    connected = await _mcp_servers_for_user(connections, user_id)
     names = sorted(str(entry.get("name") or "") for entry in connected)
     if requested is None:
         # ``None`` means the job did not choose, and takes everything its owner
@@ -1340,6 +1351,7 @@ async def _create_job_as(
     job_store: AgentJobStore,
     app_credentials: Any | None,
     gateway: Any,
+    mcp_connections: McpConnectionRepository | None,
     reserved_metadata: dict[str, Any] | None = None,
     client_request_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1440,7 +1452,10 @@ async def _create_job_as(
     # optional per-job requirement. Job metadata therefore remains caller data
     # plus server-owned execution facts, without a hidden rollout switch.
     mcp_servers = await _resolve_mcp_servers(
-        body.mcp_servers, runtime=body.runtime, store=job_store, user_id=user["user_id"]
+        body.mcp_servers,
+        runtime=body.runtime,
+        connections=mcp_connections,
+        user_id=user["user_id"],
     )
     try:
         execution_profile = default_execution_profile().value
@@ -1485,6 +1500,7 @@ async def create_agent_job(
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
+    mcp_connections: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> AgentJobResponse:
     """Queue a new agent job for the authenticated user.
 
@@ -1500,6 +1516,7 @@ async def create_agent_job(
         app_credentials=app_credentials,
         gateway=gateway,
         client_request_id=idempotency_key,
+        mcp_connections=mcp_connections,
     )
     return _job_response(job)
 
@@ -1928,6 +1945,7 @@ async def create_agent_follow_up(
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
+    mcp_connections: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> AgentJobResponse:
     """Append a turn and queue its member in the retained shared sandbox.
 
@@ -2036,7 +2054,7 @@ async def create_agent_follow_up(
             # The runtime this turn will actually run on: an explicit echo or
             # the parent's value when omitted.
             runtime=body.runtime or parent["runtime"],
-            store=job_store,
+            connections=mcp_connections,
             user_id=user["user_id"],
         )
     job = await job_store.create_follow_up(

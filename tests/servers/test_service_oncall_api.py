@@ -24,10 +24,10 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import service_jobs
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_agent_job_store,
     get_gateway_client,
 )
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
+from tests.support.storage_fakes import capability_overrides
 
 pytestmark = pytest.mark.asyncio
 
@@ -164,7 +164,19 @@ def _build_app(store: FakeOnCallStore, *, app_credentials: Any | None = None) ->
     """Mount only the service router; auth stays real."""
     app = FastAPI()
     app.include_router(service_jobs.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    capability_overrides(
+        app,
+        store,
+        "store",
+        "conversation_commands",
+        "conversation_queries",
+        "execution_queries",
+        "ledger",
+        "mcp",
+        "credentials",
+        "hosts",
+        "grants",
+    )
     app.dependency_overrides[get_gateway_client] = _FakeGateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: app_credentials
     return app

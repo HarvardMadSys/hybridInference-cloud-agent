@@ -39,7 +39,7 @@ from cloud_agent.mcp_catalogue import get_provider
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.ports.mcp import McpConnectionRepository
 
 logger = get_logger(__name__)
 
@@ -208,7 +208,7 @@ class McpConnectionState:
 
 
 async def connection_states(
-    store: AgentJobStore,
+    connections_repo: McpConnectionRepository,
     *,
     user_id: str,
     cipher: SourceControlCipher | None = None,
@@ -226,7 +226,7 @@ async def connection_states(
     a stack trace rather than the 503 the relay documents. Handling it here
     means no call site can forget.
     """
-    connections = await store.list_mcp_connections(user_id=user_id)
+    connections = await connections_repo.list_mcp_connections(user_id=user_id)
     if not connections:
         return []
 
@@ -336,7 +336,7 @@ async def connection_states(
 
 
 async def registry_for_user(
-    store: AgentJobStore,
+    connections: McpConnectionRepository,
     *,
     user_id: str,
     cipher: SourceControlCipher | None = None,
@@ -350,7 +350,7 @@ async def registry_for_user(
     dead row cannot take out the servers beside it — :func:`connection_states`
     holds which tests those are and what each one reports.
     """
-    states = await connection_states(store, user_id=user_id, cipher=cipher)
+    states = await connection_states(connections, user_id=user_id, cipher=cipher)
     return McpRegistry(
         servers={
             state.resolved.name: state.resolved for state in states if state.resolved is not None

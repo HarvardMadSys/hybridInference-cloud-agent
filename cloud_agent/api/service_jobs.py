@@ -44,6 +44,7 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_agent_job_store,
     get_gateway_client,
+    get_mcp_connections,
     require_agent_access,
     verify_admin_access,
 )
@@ -138,6 +139,7 @@ async def create_oncall_job(
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
+    mcp_connections: Any = Depends(get_mcp_connections),
 ) -> AgentJobResponse:
     """Queue one on-call analysis job for the configured service account.
 
@@ -157,6 +159,7 @@ async def create_oncall_job(
         job_store=job_store,
         app_credentials=app_credentials,
         gateway=gateway,
+        mcp_connections=mcp_connections,
         reserved_metadata={ONCALL_METADATA_KEY: True},
     )
     logger.info(

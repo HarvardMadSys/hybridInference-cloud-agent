@@ -40,7 +40,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_credential_queries, get_mcp_connections
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
@@ -54,7 +54,8 @@ from cloud_agent.tokens import SCOPE_MCP, InvalidAgentToken, parse_worker_token
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.ports.credential_queries import CredentialQueries
+    from cloud_agent.ports.mcp import McpConnectionRepository
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/v1/agent/mcp")
@@ -109,7 +110,8 @@ def _bearer(authorization: str | None) -> str:
 async def _authorize(
     server_name: str,
     authorization: str | None,
-    store: AgentJobStore | None,
+    credentials: CredentialQueries | None,
+    connections: McpConnectionRepository | None,
 ) -> tuple[McpServer, str]:
     """Resolve the token and the named server, or raise the right HTTP error."""
     token = _bearer(authorization)
@@ -139,7 +141,7 @@ async def _authorize(
             },
         )
 
-    if store is None:
+    if credentials is None:
         raise HTTPException(
             status_code=503,
             detail={
@@ -155,7 +157,7 @@ async def _authorize(
     # with an unexpired lease. So revocation is automatic — the instant the
     # reaper supersedes the attempt or the owner cancels, the same token stops
     # buying tools, with no key to remember to revoke.
-    identity = await store.resolve_model_credential(
+    identity = await credentials.resolve_model_credential(
         job_id=claims["job_id"],
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
@@ -196,7 +198,7 @@ async def _authorize(
 
     # The owner's servers, not the caller's — see the module docstring. The
     # same fence row that authorized this call names them.
-    registry = await registry_for_user(store, user_id=identity["user_id"])
+    registry = await registry_for_user(connections, user_id=identity["user_id"])
     server = registry.get(server_name)
     if server is None:
         # Granted at creation and unreachable now: the owner disconnected the
@@ -391,10 +393,11 @@ async def mcp_post(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    credentials: CredentialQueries | None = Depends(get_credential_queries),
+    connections: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> Any:
     """Relay one MCP request, refusing tools the allowlist does not cover."""
-    server, job_id = await _authorize(server_name, authorization, store)
+    server, job_id = await _authorize(server_name, authorization, credentials, connections)
     body = await request.body()
 
     plan = plan_request(body, server)
@@ -422,10 +425,11 @@ async def mcp_get(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    credentials: CredentialQueries | None = Depends(get_credential_queries),
+    connections: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> Any:
     """Open the server-to-client stream for an established session."""
-    server, job_id = await _authorize(server_name, authorization, store)
+    server, job_id = await _authorize(server_name, authorization, credentials, connections)
     return await _proxy(request, server=server, job_id=job_id, method="GET")
 
 
@@ -434,10 +438,11 @@ async def mcp_delete(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    credentials: CredentialQueries | None = Depends(get_credential_queries),
+    connections: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> Any:
     """Terminate an MCP session."""
-    server, job_id = await _authorize(server_name, authorization, store)
+    server, job_id = await _authorize(server_name, authorization, credentials, connections)
     return await _proxy(request, server=server, job_id=job_id, method="DELETE")
 
 

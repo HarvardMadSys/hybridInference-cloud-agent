@@ -40,10 +40,10 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import broker_routing, mcp_catalogue
 from cloud_agent.api import routes as agent_jobs_router
-from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.mcp_catalogue import McpProvider
 from cloud_agent.mcp_registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
+from tests.support.storage_fakes import capability_overrides
 
 pytestmark = pytest.mark.asyncio
 
@@ -1112,7 +1112,22 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The routes now depend on the capability they use rather than on the store.
+    # This fake still answers all of them; naming them here is what makes
+    # splitting it per boundary mechanical later.
+    capability_overrides(
+        app,
+        store,
+        "store",
+        "conversation_commands",
+        "conversation_queries",
+        "execution_queries",
+        "ledger",
+        "mcp",
+        "credentials",
+        "hosts",
+        "grants",
+    )
     # The create endpoints fail fast on models the deployment cannot serve, so
     # the gateway the test answers with must contain what the tests submit.
     app.dependency_overrides[get_gateway_client] = _FakeGateway
