@@ -346,12 +346,22 @@ Compose deployments must set it explicitly. Runners send it at registration and
 on each heartbeat, stored as `labels.physical_host`. Older runners can omit it
 without erasing existing metadata. No database migration is required.
 
-The Servers table groups environments by this reported value. Each environment
-keeps its own runtime, status, slots and Pin/Drain/Remove controls. Slots are
-execution concurrency limits per environment, not physical GPU counts or an
-additive hardware capacity. Grouping never changes scheduling, isolation,
-credentials, broker routing, or retained sandbox ownership. Unreported servers
-remain separate under their existing IDs; runtime suffixes are never guessed.
+The Servers table shows the executor matching the new-chat execution policy
+on each physical server. Production Compose defaults to `untrusted-kata-v1`;
+the local Compose overlay explicitly keeps `trusted-v1`. Legacy executors remain
+in the API for retained-session ownership but are not offered for new chats.
+Keep one placement executor per physical server; extra old deployments must be
+retired after their retained conversations are no longer needed.
+
+With one available server there is no placement selector. With multiple servers,
+the persistent New chats selector shows Automatic or the selected server; its
+value does not disappear after changing it. An unavailable saved selection is
+always shown with a recovery action, even if only one server remains available.
+Disabled servers are listed in a collapsed Unavailable servers section, not
+counted as choices. Slots are the displayed executor's concurrency limit, not
+GPU counts or a sum of old and current deployments. Grouping never changes
+credentials, broker routing, or retained sandbox ownership. Server names are
+reported metadata; runtime suffixes are never guessed.
 
 For an existing deployment, update the control plane and web first, then set
 `AGENT_PHYSICAL_HOST` and roll each runner environment when its active turns

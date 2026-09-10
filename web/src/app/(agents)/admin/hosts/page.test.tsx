@@ -4,20 +4,25 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const auth = vi.hoisted(() => ({ role: 'admin' }));
+import type { AgentAccessApi } from '@/lib/api/session';
+
+const auth = vi.hoisted(() => ({ role: 'admin', access: undefined as AgentAccessApi | undefined }));
+beforeEach(() => {
+  auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
+});
 
 vi.mock('@/components/providers', () => ({
-  useAuth: () => ({ state: { user: { user_name: 'Ada', role: auth.role } } }),
+  useAuth: () => ({
+    state: { user: { user_name: 'Ada', role: auth.role, agent_access: auth.access } },
+  }),
 }));
 
-// The real ranking, not a stub that always says yes: the point of two of these
-// cases is that a non-admin is refused, and a `hasRole` mocked to true would
-// pass them while the page was wide open.
+// Use the real permission check so denied cases cannot pass through a stub.
 vi.mock('@/components/providers/AuthProvider', async () => {
   const actual = await vi.importActual<typeof import('@/components/providers/AuthProvider')>(
     '@/components/providers/AuthProvider',
   );
-  return { hasRole: actual.hasRole };
+  return { hasAgentPermission: actual.hasAgentPermission };
 });
 
 vi.mock('@/lib/api/admin', () => ({
@@ -66,7 +71,7 @@ function host(over: Partial<Record<string, unknown>> = {}) {
     runner_version: '1.2.3',
     broker_url: 'http://runner-a:8092',
     last_heartbeat_at: '2026-08-05T00:00:00Z',
-    sandbox_runtime: '',
+    sandbox_runtime: 'io.containerd.kata.v2',
     sandbox_image_digest: 'freeinference-cloud-agent-job@sha256:abcdef0123456789',
     runtime_versions: { 'claude-code': '2.1.220' },
     runtime_versions_available: { 'claude-code': ['2.1.220', '2.1.235'] },
@@ -79,7 +84,12 @@ function pool(
   active: string | null = null,
   runtimeVersions: Record<string, string> = {},
 ) {
-  return { hosts, active_host: active, runtime_versions: runtimeVersions };
+  return {
+    hosts,
+    active_host: active,
+    runtime_versions: runtimeVersions,
+    execution_profile: 'untrusted-kata-v1',
+  };
 }
 
 describe('AdminHostsPage', () => {
@@ -94,13 +104,27 @@ describe('AdminHostsPage', () => {
     vi.unstubAllGlobals();
   });
 
-  it('refuses a non-admin without asking the control plane', async () => {
-    auth.role = 'internal';
+  it('refuses an admin with only agent.use without asking the control plane', async () => {
+    auth.access = { allowed: true, permissions: ['agent.use'] };
     render(<AdminHostsPage />);
 
     expect(await screen.findByText('Admin access required')).toBeInTheDocument();
     // Not merely hidden: a page that renders the refusal *and* fetches has told
     // the operator no while doing the thing anyway.
+    expect(mocked.list).not.toHaveBeenCalled();
+  });
+
+  it('admits a free account granted Agent administration', async () => {
+    auth.role = 'free';
+    render(<AdminHostsPage />);
+    expect(await screen.findByText('runner-a')).toBeInTheDocument();
+    expect(mocked.list).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an old admin profile without an explicit decision', async () => {
+    auth.access = undefined;
+    render(<AdminHostsPage />);
+    expect(await screen.findByText('Admin access required')).toBeInTheDocument();
     expect(mocked.list).not.toHaveBeenCalled();
   });
 
@@ -126,63 +150,108 @@ describe('AdminHostsPage', () => {
     expect(screen.getByText('0')).toBeInTheDocument();
   });
 
-  it('groups deployments on one server while keeping actions scoped to their identity', async () => {
-    const rows = [
-      host({ host: 'gpu-box', labels: { physical_host: 'gpu-box' }, sandbox_runtime: 'runc' }),
-      host({
-        host: 'gpu-box-kata',
-        labels: { physical_host: 'gpu-box' },
-        sandbox_runtime: 'io.containerd.kata.v2',
-      }),
-    ];
-    mocked.list.mockResolvedValue(pool(rows));
-    mocked.pin.mockResolvedValue(pool(rows));
-    mocked.drain.mockResolvedValue(pool(rows));
-    render(<AdminHostsPage />);
-
-    const server = await screen.findByRole('rowgroup', { name: 'gpu-box' });
-    expect(within(server).getAllByRole('row')).toHaveLength(2);
-    expect(within(server).getByRole('rowheader', { name: 'gpu-box' })).toHaveAttribute(
-      'rowspan',
-      '2',
+  it('shows one server and only its Kata capacity without placement controls', async () => {
+    mocked.list.mockResolvedValue(
+      pool(
+        [
+          host({
+            host: 'gpu-box',
+            labels: { physical_host: 'gpu-box' },
+            sandbox_runtime: 'runc',
+            slots_total: 3,
+          }),
+          host({
+            host: 'gpu-box-kata',
+            labels: { physical_host: 'gpu-box' },
+            active: true,
+            slots_total: 3,
+          }),
+          host({ host: 'spark2', status: 'disabled', sandbox_runtime: null }),
+        ],
+        'gpu-box-kata',
+      ),
     );
-    const kata = within(server).getByText('Kata').closest('tr')!;
-    fireEvent.click(within(kata).getByRole('button', { name: 'Pin' }));
-    await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('gpu-box-kata'));
-    await waitFor(() => expect(within(kata).getByRole('button', { name: 'Drain' })).toBeEnabled());
-    fireEvent.click(within(kata).getByRole('button', { name: 'Drain' }));
+    render(<AdminHostsPage />);
+    const row = (await screen.findByRole('rowheader', { name: 'gpu-box' })).closest('tr')!;
+    expect(within(row).getByText('0 / 3')).toBeInTheDocument();
+    expect(screen.queryByText('Execution environment')).not.toBeInTheDocument();
+    expect(screen.queryByText('Standard (runc)')).not.toBeInTheDocument();
+    expect(screen.queryByText('pinned')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Any host' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Pin' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('New chats')).not.toBeInTheDocument();
+    mocked.drain.mockResolvedValue(
+      pool([
+        host({ host: 'gpu-box-kata', labels: { physical_host: 'gpu-box' }, status: 'draining' }),
+      ]),
+    );
+    fireEvent.click(within(row).getByRole('button', { name: 'Drain' }));
     await waitFor(() => expect(mocked.drain).toHaveBeenCalledWith('gpu-box-kata'));
   });
 
-  it('does not infer physical servers from deployment name suffixes', async () => {
-    mocked.list.mockResolvedValue(
-      pool([host({ host: 'gpu-box' }), host({ host: 'gpu-box-kata' })]),
-    );
+  it('keeps the multi-server selector visible after choosing Automatic', async () => {
+    const rows = [host({ active: true }), host({ host: 'runner-b' })];
+    mocked.list.mockResolvedValue(pool(rows, 'runner-a'));
+    mocked.pin.mockResolvedValue(pool([host(), host({ host: 'runner-b' })]));
     render(<AdminHostsPage />);
-    expect(await screen.findByRole('rowgroup', { name: 'gpu-box' })).toBeInTheDocument();
-    expect(screen.getByRole('rowgroup', { name: 'gpu-box-kata' })).toBeInTheDocument();
-  });
-
-  it('pins new chats and reports that retained chats stay on their owning hosts', async () => {
-    mocked.pin.mockResolvedValue(pool([host({ active: true })], 'runner-a'));
-    render(<AdminHostsPage />);
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Pin' }));
-
-    await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('runner-a'));
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      /Existing retained chats stay on their owning hosts/,
-    );
-  });
-
-  it('unpins through the null the API expects, not a sentinel string', async () => {
-    mocked.list.mockResolvedValue(pool([host({ active: true })], 'runner-a'));
-    mocked.pin.mockResolvedValue(pool([host()], null));
-    render(<AdminHostsPage />);
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Any host' }));
-
+    const select = await screen.findByLabelText('New chats');
+    expect(select).toHaveValue('runner-a');
+    fireEvent.change(select, { target: { value: '' } });
     await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith(null));
+    expect(screen.getByLabelText('New chats')).toHaveValue('');
+    expect(await screen.findByRole('status')).toHaveTextContent('assigned automatically');
+  });
+
+  it('selects a physical server using its enrolled executor identity', async () => {
+    const rows = [host(), host({ host: 'gpu-box-kata', labels: { physical_host: 'gpu-box' } })];
+    mocked.list.mockResolvedValue(pool(rows));
+    mocked.pin.mockResolvedValue(pool(rows, 'gpu-box-kata'));
+    render(<AdminHostsPage />);
+    fireEvent.change(await screen.findByLabelText('New chats'), { target: { value: 'gpu-box' } });
+    await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('gpu-box-kata'));
+    expect(await screen.findByRole('status')).toHaveTextContent('Existing retained chats stay');
+  });
+
+  it('allows clearing a stale selection even with only one available server', async () => {
+    mocked.list.mockResolvedValue(
+      pool([host(), host({ host: 'old', status: 'disabled', active: true })], 'old'),
+    );
+    mocked.pin.mockResolvedValue(pool([host()]));
+    render(<AdminHostsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear unavailable selection' }));
+    await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith(null));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(screen.queryByLabelText('New chats')).not.toBeInTheDocument();
+  });
+
+  it('keeps a fixed server visible if it becomes unavailable', async () => {
+    mocked.list.mockResolvedValue(
+      pool(
+        [
+          host({ status: 'offline', active: true }),
+          host({ host: 'runner-b' }),
+          host({ host: 'runner-c' }),
+        ],
+        'runner-a',
+      ),
+    );
+    render(<AdminHostsPage />);
+    expect(await screen.findByLabelText('New chats')).toHaveValue('__unavailable__');
+    expect(screen.getByRole('option', { name: 'Selected server unavailable' })).toBeDisabled();
+  });
+
+  it('counts busy servers as placement choices and excludes disabled servers', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({ slots_used: 4 }),
+        host({ host: 'runner-b', slots_used: 4 }),
+        host({ host: 'disabled', status: 'disabled' }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+    const select = await screen.findByLabelText('New chats');
+    expect(within(select).getAllByRole('option')).toHaveLength(3);
+    expect(within(select).queryByRole('option', { name: 'disabled' })).not.toBeInTheDocument();
   });
 
   it('drains without touching the pin', async () => {
@@ -231,9 +300,7 @@ describe('AdminHostsPage', () => {
     );
     render(<AdminHostsPage />);
 
-    expect(
-      await screen.findByText(/New chats are pinned to it, so they will wait/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/may be unavailable/)).toBeInTheDocument();
   });
 
   it('does not warn when an unpinned host is quiet — nothing depends on it', async () => {

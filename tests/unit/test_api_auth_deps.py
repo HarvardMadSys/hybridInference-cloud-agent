@@ -6,13 +6,10 @@ regressing into something permissive: nearly every case here asserts a
 *refusal*, because the failure mode that matters is a dependency that says yes
 when it cannot know.
 
-The three that would be quietest if they broke:
+The credential boundaries that would be quietest if they broke:
 
 - an **unset** ``ADMIN_TOKEN`` must open nothing, rather than matching the
   empty string a caller can trivially present;
-- a **role** that outranks nothing must still not satisfy an unknown
-  requirement, so that a typo in a route's gate is a closed door, not an open
-  one;
 - ``X-Forwarded-For`` must be **ignored by default**, or the audit trail
   records whatever the caller typed.
 """
@@ -34,7 +31,6 @@ from cloud_agent.api.deps import (
     AGENT_TOKEN_PREFIX,
     get_client_ip,
     get_current_user,
-    has_role,
     log_admin_action,
     looks_like_agent_token,
     verify_admin_access,
@@ -69,6 +65,16 @@ async def client():
     """An app exposing the two request-scoped dependencies directly."""
     app = FastAPI()
 
+    class Gateway:
+        async def agent_access(self, user_id):
+            return {
+                "user_id": user_id,
+                "allowed": True,
+                "permissions": ["agent.use", "agent.admin"],
+            }
+
+    app.state.gateway = Gateway()
+
     @app.get("/who")
     async def who(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
         return user
@@ -86,35 +92,7 @@ async def client():
         yield async_client
 
 
-# ── Roles and namespaces ───────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("user_role", "required", "expected"),
-    [
-        ("admin", "internal", True),
-        ("internal", "internal", True),
-        ("pro", "internal", False),
-        ("free", "free", True),
-        ("admin", "admin", True),
-        ("internal", "admin", False),
-        # An unknown *user* role ranks as free.
-        ("whatever", "free", True),
-        ("whatever", "pro", False),
-    ],
-)
-async def test_the_role_hierarchy(user_role: str, required: str, expected: bool) -> None:
-    assert has_role(user_role, required) is expected
-
-
-async def test_an_unknown_required_role_is_never_satisfied() -> None:
-    """A typo in a route's gate must close the door, not open it.
-
-    ``admin`` outranks everything that exists, so a permissive implementation
-    would let it through a requirement nobody defined.
-    """
-    assert has_role("admin", "superadmin") is False
-    assert has_role("free", "") is False
+# ── Credential namespaces ───────────────────────────────────────────────
 
 
 async def test_a_worker_token_is_recognized_as_one() -> None:
@@ -158,7 +136,6 @@ async def test_the_session_cookie_authenticates(client: AsyncClient) -> None:
         # session at all.
         "user_name": None,
         "role": "internal",
-        "is_admin": False,
         "authenticated": True,
     }
 
@@ -270,8 +247,7 @@ async def test_a_wrong_admin_token_is_refused(client: AsyncClient, monkeypatch) 
 
 
 async def test_an_admin_session_opens_the_admin_door(client: AsyncClient) -> None:
-    """How the dashboard authenticates. The role comes from the gateway's own
-    answer at login, not from anything the browser can edit."""
+    """The dashboard uses a session and the Gateway's current agent.admin grant."""
     client.cookies.set(identity.SESSION_COOKIE, _session(role="admin"))
 
     response = await client.get("/admin")
@@ -281,12 +257,14 @@ async def test_an_admin_session_opens_the_admin_door(client: AsyncClient) -> Non
 
 
 @pytest.mark.parametrize("role", ["free", "pro", "internal"])
-async def test_a_non_admin_session_does_not(client: AsyncClient, role: str) -> None:
+async def test_an_agent_admin_permission_works_for_every_profile_role(
+    client: AsyncClient, role: str
+) -> None:
     client.cookies.set(identity.SESSION_COOKIE, _session(role=role))
 
     response = await client.get("/admin")
 
-    assert response.status_code == 401
+    assert response.status_code == 200
 
 
 async def test_the_admin_door_diagnoses_a_missing_secret_the_same_way(

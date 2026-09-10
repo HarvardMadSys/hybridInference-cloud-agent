@@ -128,7 +128,7 @@ export function useAgentJobList(
   useEffect(
     () =>
       onAgentSessionsChanged((change) => {
-        if (change.deleted || change.archived !== archived) {
+        if (change.deleted || (change.archived !== undefined && change.archived !== archived)) {
           const changed = new Set(change.threadIds);
           setJobs((current) => current.filter((job) => !changed.has(job.threadId ?? job.id)));
         }
@@ -380,7 +380,8 @@ export function useAgentJob(jobId: string): {
 
   // Diff state belongs to the retained group workspace, not to a per-turn
   // artifact uploaded by the runner. Fork siblings therefore see the same
-  // current workspace diff, matching the Git panel below.
+  // current workspace diff, matching the Git panel below. Metadata reloads
+  // clear the cached patch, so refetch even when the job state stays settled.
   const state = api?.state;
   useEffect(() => {
     if (!jobId || !state) return undefined;
@@ -395,7 +396,7 @@ export function useAgentJob(jobId: string): {
     return () => {
       cancelled = true;
     };
-  }, [jobId, state]);
+  }, [jobId, state, tick]);
 
   // Live events. Terminal jobs have nothing more to say, so no stream is
   // opened for them at all.

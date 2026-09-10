@@ -10,6 +10,19 @@
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  'taskActions.options': 'Task actions',
+  'taskActions.rename': 'Rename',
+  'taskActions.renameTitle': 'Rename task',
+  'taskActions.title': 'Task name',
+  'taskActions.pin': 'Pin',
+  'taskActions.unpin': 'Unpin',
+  'taskActions.fork': 'Fork',
+  'taskActions.details': 'Run details',
+  'taskActions.cancel': 'Cancel',
+  'taskActions.save': 'Save',
+  'taskActions.saving': 'Saving…',
+  'taskActions.renameFailed': 'Could not rename this task',
+  'taskActions.pinFailed': 'Could not update this pin',
   // ── Shell chrome ────────────────────────────────────────────────────────
   'nav.aria': 'Product navigation',
   'nav.status': 'Status',
@@ -21,10 +34,9 @@ export const en = {
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
-  'shell.internalRequired.title': 'Administrator access required',
-  'shell.internalRequired.body':
-    "The agent sandbox runs code under this deployment's own credentials, so it is limited to administrators.",
-  'shell.internalRequired.back': 'Back to Dashboard',
+  'shell.accessRequired.title': 'Agent access required',
+  'shell.accessRequired.body': 'This account has not been granted access to this Agent deployment.',
+  'shell.accessRequired.back': 'Back to Dashboard',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.pinned': 'Pinned',

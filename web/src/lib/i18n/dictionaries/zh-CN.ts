@@ -12,6 +12,19 @@ import type { TranslationKey } from './en';
  * easier to read.
  */
 export const zhCN: Record<TranslationKey, string> = {
+  'taskActions.options': '任务操作',
+  'taskActions.rename': '重命名',
+  'taskActions.renameTitle': '重命名任务',
+  'taskActions.title': '任务名称',
+  'taskActions.pin': '置顶',
+  'taskActions.unpin': '取消置顶',
+  'taskActions.fork': 'Fork',
+  'taskActions.details': '运行详情',
+  'taskActions.cancel': '取消',
+  'taskActions.save': '保存',
+  'taskActions.saving': '保存中…',
+  'taskActions.renameFailed': '无法重命名任务',
+  'taskActions.pinFailed': '无法更新置顶状态',
   // ── Shell chrome ────────────────────────────────────────────────────────
   'nav.aria': '产品导航',
   'nav.status': '服务状态',
@@ -23,9 +36,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'nav.expandTaskList': '展开任务列表',
   'nav.collapseTaskList': '收起任务列表',
 
-  'shell.internalRequired.title': '需要管理员权限',
-  'shell.internalRequired.body': 'Agent 沙箱会用本部署自己的凭据运行代码,因此仅限管理员使用。',
-  'shell.internalRequired.back': '返回控制台',
+  'shell.accessRequired.title': '需要 Agent 使用权限',
+  'shell.accessRequired.body': '当前账户尚未获得此 Agent 部署的使用权限。',
+  'shell.accessRequired.back': '返回控制台',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.pinned': '已置顶',

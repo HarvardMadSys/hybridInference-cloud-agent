@@ -121,6 +121,9 @@ class _FakeGateway:
     async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
         return list(_TEST_MODELS), {}
 
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
+
     async def user_status(self, user_id: str) -> dict[str, Any]:
         """What `require_agent_owner` re-reads before it allows a write."""
         return {"exists": True, "active": True, "role": "internal"}
@@ -381,3 +384,62 @@ async def test_cancel_flags_job_and_fences(client, store):
     response = await client.post(f"/v1/agent/service/oncall/jobs/{foreign}/cancel", headers=_auth())
     assert response.status_code == 404
     assert store.jobs[foreign]["cancel_requested"] is False
+
+
+async def test_oncall_token_cannot_create_for_a_service_user_without_agent_access(store):
+    class DeniedGateway(_FakeGateway):
+        async def agent_access(self, user_id):
+            assert user_id == _SERVICE_USER
+            return {"user_id": user_id, "allowed": False, "permissions": []}
+
+    app = _build_app(store)
+    app.dependency_overrides[get_gateway_client] = DeniedGateway
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/agent/service/oncall/jobs", json=_create_body(), headers=_auth()
+        )
+    assert response.status_code == 403
+    assert not store.jobs
+
+
+async def test_oncall_polling_and_cancel_remain_available_during_policy_outage(store):
+    class UnavailableGateway(_FakeGateway):
+        async def agent_access(self, user_id):
+            raise AssertionError("token-authorized cleanup must not query user admission")
+
+    job_id = await _seed_job(store)
+    app = _build_app(store)
+    app.dependency_overrides[get_gateway_client] = UnavailableGateway
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (
+            await client.get(f"/v1/agent/service/oncall/jobs/{job_id}", headers=_auth())
+        ).status_code == 200
+        assert (
+            await client.post(f"/v1/agent/service/oncall/jobs/{job_id}/cancel", headers=_auth())
+        ).status_code == 200
+
+
+async def test_oncall_session_admin_uses_resolved_gateway_and_checks_service_user(store):
+    from cloud_agent import identity
+
+    asked = []
+
+    class Gateway(_FakeGateway):
+        async def agent_access(self, user_id):
+            asked.append(user_id)
+            return {
+                "user_id": user_id,
+                "allowed": True,
+                "permissions": ["agent.use", "agent.admin"],
+            }
+
+    app = _build_app(store)
+    app.dependency_overrides[get_gateway_client] = Gateway
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        client.cookies.set(
+            identity.SESSION_COOKIE,
+            identity.mint_session(user_id="operator", email=None, role="free"),
+        )
+        response = await client.post("/v1/agent/service/oncall/jobs", json=_create_body())
+    assert response.status_code == 201
+    assert asked == ["operator", _SERVICE_USER]

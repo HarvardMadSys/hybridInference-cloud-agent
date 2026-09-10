@@ -37,14 +37,15 @@ CATALOG_READS = {
 }
 
 STATUS_READS = {
-    "exists": "deps.may_sign_in",
-    "active": "deps.may_sign_in",
-    "status": "deps.may_sign_in (the named-status fallback)",
-    "role": (
-        "session._establish_session — the role the session is minted with; and "
-        "routes.require_agent_owner, which re-reads it on every write"
-    ),
+    "role": "session._establish_session — profile metadata, never Agent authorization",
     "email": "session._establish_session — preferred over the identity token's",
+}
+
+
+ACCESS_READS = {
+    "user_id": "GatewayClient.agent_access — exact subject binding",
+    "allowed": "GatewayClient.agent_access — explicit current decision",
+    "permissions": "owner/admin dependencies and session.me — Agent capabilities",
 }
 
 
@@ -61,6 +62,7 @@ def _declared(path: str) -> set[str]:
     [
         ("/internal/model-catalog", CATALOG_READS),
         ("/internal/users/{user_id}/status", STATUS_READS),
+        ("/internal/users/{user_id}/agent-access", ACCESS_READS),
     ],
 )
 def test_every_field_this_service_reads_is_declared(path: str, reads: dict[str, str]) -> None:

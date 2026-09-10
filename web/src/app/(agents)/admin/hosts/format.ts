@@ -60,8 +60,26 @@ export function groupHosts(hosts: AgentRunnerHost[]): [string, AgentRunnerHost[]
   return [...groups.entries()];
 }
 
-export function executionEnvironment(host: AgentRunnerHost): string {
-  if (host.sandbox_runtime === 'io.containerd.kata.v2') return 'Kata';
-  if (host.sandbox_runtime === '' || host.sandbox_runtime === 'runc') return 'Standard (runc)';
-  return host.sandbox_runtime ?? 'Runtime unreported';
+/** A server exposes one executor for new chats; legacy owners stay in the API. */
+export function serverInventory(hosts: AgentRunnerHost[], profile: string) {
+  return groupHosts(hosts).map(([name, members]) => {
+    const compatible = members.filter(
+      (host) => profile === 'trusted-v1' || host.sandbox_runtime === 'io.containerd.kata.v2',
+    );
+    // Stable across heartbeat ordering. Preserve a current selection on this
+    // server, otherwise use an online executor before an unavailable one.
+    const ranked = [...compatible].sort(
+      (a, b) =>
+        Number(b.status === 'online') - Number(a.status === 'online') ||
+        Number(b.active) - Number(a.active) ||
+        a.host.localeCompare(b.host),
+    );
+    const host = ranked[0];
+    return {
+      name,
+      host,
+      available: Boolean(host?.enrolled && host.status === 'online'),
+      selected: members.some((member) => member.active),
+    };
+  });
 }

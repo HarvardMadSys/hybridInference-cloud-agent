@@ -30,6 +30,7 @@ from cloud_agent.api.deps import (
     log_admin_action,
     verify_admin_access,
 )
+from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.host_pool import (
     HOST_DRAINING,
     HOST_ONLINE,
@@ -107,6 +108,7 @@ async def _snapshot(store: AgentJobStore) -> ListAgentRunnerHostsResponse:
     """
     rows, active, selected_versions = await store.runner_pool()
     return ListAgentRunnerHostsResponse(
+        execution_profile=default_execution_profile().value,
         hosts=[_to_item(row) for row in rows],
         active_host=active,
         runtime_versions=selected_versions,

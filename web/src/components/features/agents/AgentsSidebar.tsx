@@ -143,17 +143,21 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       onAgentSessionsChanged((change) => {
         sessionGeneration.current += 1;
         setSessionRefresh(sessionGeneration.current);
-        for (const id of change.threadIds) knownRows.delete(id);
+        for (const id of change.threadIds) {
+          knownRows.delete(id);
+          pinUpdates.delete(id);
+        }
+        reload();
         setHiddenThreads((current) => {
           const next = new Set(current);
           for (const id of change.threadIds) {
             if (change.archived === false && !change.deleted) next.delete(id);
-            else next.add(id);
+            else if (change.archived || change.deleted) next.add(id);
           }
           return next;
         });
       }),
-    [knownRows],
+    [knownRows, pinUpdates, reload],
   );
   useEffect(() => {
     const restored = (event: Event) => {
@@ -187,7 +191,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
           thread?.jobs.reduce((a, b) => ((b.turn_no ?? 1) > (a.turn_no ?? 1) ? b : a), job) ?? job;
         const row = conversationRow({
           job: latest,
-          title: thread?.title ?? job.task_prompt.split('\n')[0],
+          title: thread?.title ?? job.title ?? job.task_prompt.split('\n')[0],
           archived: Boolean(thread?.archived_at),
           last_activity_at: thread?.updated_at ?? latest.created_at ?? null,
         });

@@ -1,6 +1,7 @@
 services:
   control-plane:
     environment:
+      AGENT_DEFAULT_EXECUTION_PROFILE: trusted-v1
       AGENT_EGRESS_SETUP_TIER: platform_only
       AGENT_EGRESS_AGENT_TIER: platform_only
       # The production compose has an optional host-file mount for a GitHub

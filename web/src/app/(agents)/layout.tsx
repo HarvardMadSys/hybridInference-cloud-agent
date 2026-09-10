@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAuth, useT } from '@/components/providers';
-import { hasRole } from '@/components/providers/AuthProvider';
+import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
@@ -128,7 +128,7 @@ function AgentsHeader({
             link back to the gateway. Admin-only, matching the endpoints it
             calls — the guard on the page is the one that counts; hiding the
             link only keeps it out of the way of everyone else. */}
-        {hasRole(state.user?.role, 'admin') && (
+        {hasAgentPermission(state.user?.agent_access, 'agent.admin') && (
           <Link
             href="/admin/hosts"
             className={onHosts ? NAV_ITEM_CURRENT : NAV_ITEM}
@@ -161,24 +161,20 @@ function AgentsShell({
   const { branding } = useSiteConfig();
   const t = useT();
 
-  // Admin-only: the same bar `require_agent_owner` enforces server-side. The
-  // two must agree — a UI that lets someone in only to 403 every request they
-  // make is worse than a clear refusal. Raised from 'internal' on 2026-09-04.
-  if (!hasRole(state.user?.role, 'admin')) {
+  // The Gateway decides admission; account role is only profile metadata.
+  if (!hasAgentPermission(state.user?.agent_access, 'agent.use')) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-          {t('shell.internalRequired.title')}
+          {t('shell.accessRequired.title')}
         </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">
-          {t('shell.internalRequired.body')}
-        </p>
+        <p className="text-sm text-gray-500 dark:text-gray-400">{t('shell.accessRequired.body')}</p>
         {branding.gatewayUrl && (
           <a
             href={`${branding.gatewayUrl}/dashboard`}
             className="text-sm font-medium text-crimson hover:underline dark:text-crimson-light"
           >
-            {t('shell.internalRequired.back')}
+            {t('shell.accessRequired.back')}
           </a>
         )}
       </div>

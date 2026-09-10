@@ -2,16 +2,17 @@ openapi: 3.1.0
 
 info:
   title: HybridInference gateway — internal lookups
-  version: "1.0.0"
+  version: "1.1.0"
   x-source:
     repo: HarvardMadSys/hybridInference
-    branch: murphy/claude/c9-internal-lookups
+    branch: murphy/codex/gateway-agent-access-policy
     files:
       - apps/backend/serving/servers/routers/internal_lookups.py
       - apps/backend/serving/servers/routers/internal_auth.py
+      - apps/backend/serving/agent_access.py
     tasks: [C9]
   description: |
-    The two questions the control plane can no longer answer by importing.
+    Gateway lookups used by the standalone control plane.
 
     Before the split, cloud agent code ran inside the gateway process and read
     the model registry, the MCP registry and the users table directly. Each of
@@ -22,12 +23,13 @@ info:
     The MCP registry endpoint was later retired when server ownership moved
     to the user. The control plane now resolves servers from that user's own
     connections, so there is no deployment-wide registry for the gateway to
-    answer for. Two lookup endpoints remain.
+    answer for. Agent admission is supplied by the deployment policy.
 
     | Endpoint | Replaces |
     |---|---|
     | `GET /internal/model-catalog` | the `visible_models` catalog read |
-    | `GET /internal/users/{id}/status` | the gateway `users` row read |
+    | `GET /internal/users/{id}/status` | account profile and status |
+    | `GET /internal/users/{id}/agent-access` | Agent admission and administration policy |
 
     **Every consumer of this document must fail closed.** An unreachable
     catalog resolves to *no* models, not every model; an unreadable user status
@@ -191,6 +193,75 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /internal/users/{user_id}/agent-access:
+    get:
+      tags: [internal]
+      operationId: agentAccess
+      summary: Current Agent permissions for an active account
+      description: |
+        The gateway verifies that the account exists and is active, then calls
+        the deployment's Agent access policy. With no policy, it denies access.
+        The standalone Agent must use this decision rather than the account
+        role, including for previously issued sessions. It must fail closed
+        when this endpoint is unavailable or the response is malformed.
+
+        `allowed` is true exactly when permissions contains `agent.use`.
+        `agent.admin` requires `agent.use`. Permissions are unique and appear
+        in canonical order (use, then admin). No account profile is returned.
+      security:
+        - dispatchToken: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The current policy decision, including explicit denial.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_id, allowed, permissions]
+                properties:
+                  user_id: { type: string }
+                  allowed: { type: boolean }
+                  permissions:
+                    type: array
+                    uniqueItems: true
+                    maxItems: 2
+                    items:
+                      type: string
+                      enum: [agent.use, agent.admin]
+              examples:
+                denied:
+                  value: { user_id: usr_123, allowed: false, permissions: [] }
+                administrator:
+                  value:
+                    user_id: usr_123
+                    allowed: true
+                    permissions: [agent.use, agent.admin]
+        "401":
+          description: Wrong or missing dispatch token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: The account is unknown or not active (subject_unavailable).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Internal endpoints or the user database are not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: The policy failed or returned an invalid decision (agent_access_unavailable).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
 components:
   securitySchemes:
     dispatchToken:
@@ -217,4 +288,5 @@ x-pinned-by:
     - tests/unit/test_internal_lookups.py
   consumer:
     - tests/unit/test_gateway_client.py
+    - tests/unit/test_lookup_contract_agreement.py
     - tests/unit/test_agent_visible_models.py

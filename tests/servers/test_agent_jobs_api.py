@@ -132,6 +132,7 @@ class FakeAgentJobStore:
             **kwargs,
         }
         job.setdefault("base_sha", None)
+        job.setdefault("title", job["task_prompt"].splitlines()[0][:160])
         job.setdefault("metadata", None)
         job.setdefault("execution_profile", "trusted-v1")
         job.setdefault("reasoning_effort", None)
@@ -498,7 +499,7 @@ class FakeAgentJobStore:
         return {
             "id": thread_id,
             "repo": job["repo"],
-            "title": jobs[0]["task_prompt"].splitlines()[0],
+            "title": jobs[0].get("title") or jobs[0]["task_prompt"].splitlines()[0],
             "archived_at": self.archived_threads.get(thread_id),
             "created_at": None,
             "updated_at": None,
@@ -698,6 +699,17 @@ class FakeAgentJobStore:
             self.archived_threads.pop(thread_id, None)
             archived_at = None
         return {"thread_id": thread_id, "archived_at": archived_at}
+
+    async def set_thread_title(
+        self, *, job_id: str, user_id: str, title: str
+    ) -> dict[str, Any] | None:
+        job = self.jobs.get(job_id)
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
+            return None
+        for item in self.jobs.values():
+            if item["thread_id"] == job["thread_id"]:
+                item["title"] = title
+        return {"thread_id": job["thread_id"], "title": title}
 
     async def set_thread_pinned(
         self, *, job_id: str, user_id: str, pinned: bool
@@ -995,11 +1007,11 @@ class _FakeGateway:
     async def model_catalog(self, user_id: str) -> list[str]:
         return list(_TEST_MODELS)
 
-    #: What the gateway says about the account. Read by ``require_agent_owner``
-    #: on every write, so a fake without it sends every mutating route down an
-    #: ``AttributeError`` — the same trap ``model_catalog_with_aliases``
-    #: documents below. Overridden per-test to exercise a refusal.
+    #: Profile metadata remains separate from the explicit admission decision.
     status: ClassVar[dict[str, Any]] = {"exists": True, "active": True, "role": "admin"}
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 
     async def user_status(self, user_id: str) -> dict[str, Any]:
         return dict(self.status)
@@ -1084,8 +1096,7 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     # than reported as a fabricated zero.
     app.dependency_overrides[get_log_store] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
-    # Override the credential resolver, not the role gate, so the normal test
-    # client still exercises the admin-only entitlement.
+    # Override identity only; every request still exercises Gateway admission.
     app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: identity
     if claim_auth:
         app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
@@ -1518,6 +1529,72 @@ async def test_archive_and_restore_filter_the_entire_thread_without_cancelling(
     assert thread["archived_at"] is None
     active_jobs = (await client.get("/v1/agent/jobs")).json()["jobs"]
     assert {job["id"] for job in active_jobs} == {parent_id, child_id}
+
+
+async def test_rename_from_a_follow_up_updates_the_conversation_and_preserves_prompts(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Any turn renames all owner-facing views while keeping execution inputs intact."""
+    parent_id = await _create_job(client)
+    follow_up = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups", json={"prompt": "also update the docs"}
+    )
+    child_id = follow_up.json()["id"]
+    prompts = {job_id: store.jobs[job_id]["task_prompt"] for job_id in (parent_id, child_id)}
+    response = await client.patch(
+        f"/v1/agent/jobs/{child_id}/title", json={"title": "  Export CSV 导出  "}
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "thread_id": follow_up.json()["thread_id"],
+        "title": "Export CSV 导出",
+    }
+    for job_id in (parent_id, child_id):
+        thread = (await client.get(f"/v1/agent/jobs/{job_id}/thread")).json()
+        assert thread["title"] == "Export CSV 导出"
+        assert all(job["title"] == "Export CSV 导出" for job in thread["jobs"])
+        assert (await client.get(f"/v1/agent/jobs/{job_id}")).json()["title"] == "Export CSV 导出"
+        assert store.jobs[job_id]["task_prompt"] == prompts[job_id]
+    assert all(
+        job["title"] == "Export CSV 导出"
+        for job in (await client.get("/v1/agent/jobs")).json()["jobs"]
+    )
+    next_turn = await client.post(
+        f"/v1/agent/jobs/{child_id}/follow-ups", json={"prompt": "one more change"}
+    )
+    assert next_turn.json()["title"] == "Export CSV 导出"
+
+
+@pytest.mark.parametrize("title", ["", " \n\t ", "x" * 161, None, 123])
+async def test_rename_rejects_invalid_titles(client: AsyncClient, title):
+    """Blank and oversized titles cannot overwrite a conversation's name."""
+    job_id = await _create_job(client)
+    response = await client.patch(f"/v1/agent/jobs/{job_id}/title", json={"title": title})
+    assert response.status_code == 422
+
+
+async def test_rename_accepts_trimmed_title_limit(client: AsyncClient):
+    """Surrounding whitespace does not consume the canonical title limit."""
+    job_id = await _create_job(client)
+    response = await client.patch(
+        f"/v1/agent/jobs/{job_id}/title", json={"title": " " + "名" * 160 + " "}
+    )
+    assert response.status_code == 200
+    assert response.json()["title"] == "名" * 160
+
+
+async def test_rename_hides_foreign_missing_and_deleted_jobs(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Renaming exposes no other owner's jobs and cannot restore deleted history."""
+    foreign_id = await _create_job(client)
+    store.jobs[foreign_id]["user_id"] = _OTHER
+    deleted_id = await _create_job(client)
+    store.jobs[deleted_id]["deleted_at"] = datetime.now(timezone.utc)
+    for job_id in (foreign_id, deleted_id, "ajob_missing"):
+        response = await client.patch(f"/v1/agent/jobs/{job_id}/title", json={"title": "New title"})
+        assert response.status_code == 404
+        assert response.json()["detail"]["error"]["type"] == "not_found"
 
 
 async def test_pin_and_unpin_are_thread_scoped_idempotent_and_reorder_lists(
@@ -2268,20 +2345,13 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeAgentJobStore)
 
 
 @pytest.mark.parametrize("role", ["free", "pro", "internal"])
-async def test_a_non_admin_owner_is_denied_server_side(store: FakeAgentJobStore, role: str):
-    """The gate must not be bypassable via the API.
-
-    ``internal`` is in the list on purpose. It used to be the bar, and it is
-    handed out for model access — a different question from who may run code
-    in this deployment's sandboxes under its GitHub App.
-    """
+async def test_a_gateway_allowed_non_admin_owner_can_read(store: FakeAgentJobStore, role: str):
+    """The explicit policy, rather than a profile role, admits the owner."""
     app = _build_app(store, role=role)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as denied_client:
-        response = await denied_client.get("/v1/agent/jobs")
-
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Agent access requires role 'admin'."
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/agent/jobs")
+    assert response.status_code == 200
 
 
 async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: FakeAgentJobStore):

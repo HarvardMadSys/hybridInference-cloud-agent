@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cloud_agent.agent_access import AgentAccess  # noqa: TC001 — Pydantic resolves this at runtime.
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
@@ -289,6 +290,7 @@ class AgentJobResponse(BaseModel):
     turn_no: int = 1
     repo: str
     task_prompt: str
+    title: str | None = None
     runtime: str
     model: str
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1
@@ -535,6 +537,25 @@ class AgentSessionArchiveResponse(BaseModel):
     """Archive state for the complete selected conversation snapshot."""
 
     sessions: list[AgentThreadArchiveResponse]
+
+
+class AgentThreadRenameRequest(BaseModel):
+    """An owner-selected title for the entire conversation."""
+
+    title: str = Field(..., min_length=1, max_length=160)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def trim_title(cls, value: Any) -> Any:
+        """Validate the length of the trimmed title, including blank titles."""
+        return value.strip() if isinstance(value, str) else value
+
+
+class AgentThreadRenameResponse(BaseModel):
+    """The persisted title for the thread containing a requested job."""
+
+    thread_id: str
+    title: str
 
 
 class AgentThreadPinResponse(BaseModel):
@@ -1632,6 +1653,10 @@ class AgentRunnerHost(BaseModel):  # type: ignore[no-any-unimported]
 class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported]
     """Runner pool, new-chat placement, and selected CLI versions."""
 
+    execution_profile: str = Field(
+        "untrusted-kata-v1",
+        description="Server-owned policy for new chats; used to show eligible servers in admin.",
+    )
     hosts: list[AgentRunnerHost]
     active_host: str | None = Field(
         None,
@@ -2001,3 +2026,4 @@ class SessionUserResponse(BaseModel):  # type: ignore[no-any-unimported]
     email: str | None = None
     role: str
     user_name: str | None = None
+    agent_access: AgentAccess

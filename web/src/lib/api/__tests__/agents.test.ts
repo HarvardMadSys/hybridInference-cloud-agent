@@ -27,6 +27,7 @@ import {
   listAgentTerminals,
   listAgentJobs,
   pinAgentJob,
+  renameAgentJob,
   resizeAgentTerminal,
   refreshAgentJobUsage,
   restoreAgentJob,
@@ -86,6 +87,19 @@ describe('agents api', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('renames a conversation via its job without modifying the prompt', async () => {
+    fetchWithAuth.mockResolvedValue(jsonResponse({ thread_id: 'thread-1', title: 'New title' }));
+    await expect(renameAgentJob('job/1', 'New title')).resolves.toEqual({
+      thread_id: 'thread-1',
+      title: 'New title',
+    });
+    expect(fetchWithAuth).toHaveBeenCalledWith(expect.any(String), '/v1/agent/jobs/job%2F1/title', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'New title' }),
+    });
   });
 
   it.each([true, false, undefined])(

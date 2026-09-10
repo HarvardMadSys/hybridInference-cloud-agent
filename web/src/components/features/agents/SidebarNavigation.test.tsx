@@ -97,6 +97,48 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('keeps renamed and pinned conversations visible after metadata updates', async () => {
+    localStorage.setItem(
+      sidebarPreferencesKey('alice'),
+      JSON.stringify({ ...DEFAULT_PREFERENCES, group: 'flat' }),
+    );
+    api.pathname = '/a';
+    let row = conversation('a');
+    api.get.mockImplementation(async () => row.job);
+    api.thread.mockImplementation(async () => ({
+      id: 'thread-a',
+      title: row.title,
+      jobs: [row.job],
+    }));
+    api.list.mockImplementation(async ({ pinned }: { pinned?: boolean }) => ({
+      conversations: Boolean(row.job.pinned_at) === Boolean(pinned) ? [row] : [],
+      next_cursor: null,
+    }));
+    render(<AgentsSidebar />);
+    await screen.findByRole('link', { name: 'Task a · owner/repo' });
+    row = { ...row, title: 'Renamed task' };
+    act(() => announceAgentSessionsChanged({ threadIds: ['thread-a'], title: row.title }));
+    expect(
+      await screen.findByRole('link', { name: 'Renamed task · owner/repo' }),
+    ).toBeInTheDocument();
+    row = { ...row, job: { ...row.job, pinned_at: '2026-09-10T00:00:00Z' } };
+    act(() =>
+      announceAgentSessionsChanged({ threadIds: ['thread-a'], pinnedAt: row.job.pinned_at }),
+    );
+    const pinned = await screen.findByRole('region', { name: 'Pinned' });
+    await waitFor(() =>
+      expect(
+        within(pinned).getByRole('link', { name: 'Renamed task · owner/repo' }),
+      ).toBeInTheDocument(),
+    );
+    row = { ...row, job: { ...row.job, pinned_at: null } };
+    act(() => announceAgentSessionsChanged({ threadIds: ['thread-a'], pinnedAt: null }));
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: 'Pinned' })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('link', { name: 'Renamed task · owner/repo' })).toBeInTheDocument();
+  });
+
   it('adds an empty authorized workspace, exits flat search and restores it without duplicates', async () => {
     localStorage.setItem(
       sidebarPreferencesKey('alice'),

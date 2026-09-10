@@ -19,7 +19,7 @@ dependencies they asked for there. Three kinds arrive at this module:
   both. So the browser credential is the session token
   :mod:`cloud_agent.identity` mints — carried in an ``HttpOnly`` cookie, or as a
   bearer for programmatic callers holding one — and the admin door is the
-  deployment's ``ADMIN_TOKEN`` or a session whose role claim says ``admin``.
+  deployment's ``ADMIN_TOKEN`` or a session with current Gateway agent.admin permission.
   Nothing here consults a user table, because there is none to consult.
 
   There used to be a third: ``verify_api_key``, resolving an ``hyi-*`` key
@@ -52,6 +52,9 @@ import jwt
 from fastapi import Depends, Header, HTTPException, Request
 
 from cloud_agent import identity
+from cloud_agent.agent_access import AgentAccessDecision
+from cloud_agent.gateway import GatewayError
+from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
     from cloud_agent.gateway import GatewayClient
@@ -128,86 +131,45 @@ def get_log_store(request: Request) -> Any | None:
     return getattr(request.app.state, "log_store", None)
 
 
-# ── Roles and credential namespaces ────────────────────────────────────
-
-#: Verbatim from the source's ``serving/config/settings.py``. Fail-closed on an
-#: unknown *required* role; an unknown *user* role ranks as ``free``.
-ROLE_RANK: dict[str, int] = {"free": 0, "pro": 1, "internal": 2, "admin": 3}
+# ── Agent permissions and credential namespaces ────────────────────────
 
 
-#: The statuses the gateway may report that still mean "may use this service".
-#: Anything else — suspended, banned, deleted, unknown — is refused, because an
-#: allowlist is the only version of this check that fails closed when the
-#: gateway grows a new status nobody here has heard of.
-ACTIVE_STATUSES = frozenset({"active", "ok", "enabled"})
-
-
-#: Methods that only read. Everything else is a privileged action, and
-#: revalidates the account that is about to perform it.
-SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-
-
-async def assert_still_admin(gateway: Any, user_id: str) -> None:
-    """Refuse a session admin the gateway no longer vouches for.
-
-    Args:
-        gateway: The gateway's contracts.
-        user_id: The account the session names.
-
-    Raises:
-        HTTPException: 403 if the account is inactive or no longer an admin,
-            503 if the gateway could not be asked — fail closed, because an
-            authority that cannot be reached has not granted anything.
-    """
-    from cloud_agent.gateway import GatewayError
-    from cloud_agent.logging_utils import get_logger
-
+async def resolve_agent_access(gateway: Any, user_id: str) -> AgentAccessDecision:
+    """Read current Agent permissions, with no session or role fallback."""
     try:
-        status = await gateway.user_status(user_id)
+        decision = AgentAccessDecision.model_validate(await gateway.agent_access(user_id))
+        if decision.user_id != user_id:
+            raise ValueError("Agent access subject mismatch")
+        return decision
     except GatewayError as exc:
-        get_logger(__name__).warning(
-            "agent_admin_revalidation_unavailable",
-            exc_info=True,
-            extra={"event": "agent_admin_revalidation_unavailable", "user_id": user_id},
-        )
+        if exc.status_code == 403:
+            return AgentAccessDecision(user_id=user_id, allowed=False, permissions=[])
+    except ValueError:
+        pass
+    get_logger(__name__).warning(
+        "agent_access_unavailable", extra={"event": "agent_access_unavailable", "user_id": user_id}
+    )
+    raise HTTPException(
+        status_code=503,
+        detail="Cannot confirm Agent access with the gateway; try again shortly.",
+    )
+
+
+async def require_agent_access(
+    gateway: Any, user_id: str, permission: str = "agent.use"
+) -> AgentAccessDecision:
+    """Require an explicit current Gateway permission before accessing Agent data."""
+    decision = await resolve_agent_access(gateway, user_id)
+    if not decision.permits(permission):
         raise HTTPException(
-            status_code=503,
-            detail="Cannot confirm this account with the gateway; try again shortly.",
-        ) from exc
-
-    if not may_sign_in(status) or str(status.get("role") or "") != "admin":
-        raise HTTPException(status_code=403, detail="This account is not an administrator.")
-
-
-def may_sign_in(status: dict[str, Any]) -> bool:
-    """Read the gateway's status record as a yes or a no.
-
-    One reader, used at sign-in and again when a privileged action
-    revalidates, so the two cannot come to disagree about what the gateway's
-    answer means.
-
-    Written against the shape the client's own tests pin —
-    ``{"user_id", "exists", "active", "role"}`` — and tolerant of a record that
-    says the same thing with a ``status`` string instead.
-
-    Args:
-        status: The gateway's status record.
-
-    Returns:
-        Whether the account may use this service. Every branch that cannot find
-        an affirmative answer returns ``False``.
-    """
-    if status.get("exists") is False:
-        return False
-    active = status.get("active")
-    if isinstance(active, bool):
-        return active
-    named = status.get("status")
-    if isinstance(named, str):
-        return named.lower() in ACTIVE_STATUSES
-    # No recognizable statement either way. Refuse: a record this service
-    # cannot read is not a record that granted anything.
-    return False
+            status_code=403,
+            detail=(
+                "Agent administration has not been granted for this account."
+                if permission == "agent.admin"
+                else "Agent access has not been granted for this account."
+            ),
+        )
+    return decision
 
 
 #: The namespace :func:`cloud_agent.tokens.mint_worker_token` mints into. Kept
@@ -225,23 +187,6 @@ ENV_ADMIN_TOKEN = "ADMIN_TOKEN"
 #: unless a proxy this deployment trusts overwrote it, so believing it without
 #: being told to would let anyone write any address into the audit trail.
 ENV_TRUST_PROXY_HEADERS = "AGENT_TRUST_PROXY_HEADERS"
-
-
-def has_role(user_role: str, required: str) -> bool:
-    """Whether ``user_role`` meets or exceeds the required role level.
-
-    Args:
-        user_role: The role the caller presented.
-        required: The role the route demands.
-
-    Returns:
-        Whether the caller ranks at or above ``required``. An unknown
-        *required* role is never satisfied (a typo must not open a door), and an
-        unknown *user* role ranks as ``free``.
-    """
-    if required not in ROLE_RANK:
-        return False
-    return ROLE_RANK.get(user_role, 0) >= ROLE_RANK[required]
 
 
 def looks_like_agent_token(api_key: str | None) -> bool:
@@ -287,34 +232,10 @@ async def get_current_user(
     request: Request,
     authorization: str | None = Header(None),
 ) -> dict[str, Any]:
-    """Verify this service's session and return the current user context.
+    """Verify session identity and read its non-authoritative profile claims.
 
-    The gateway verified its own access JWT here against its ``users`` table.
-    There is no users table on this side, so the session token *is* the
-    context: it was minted at ``/v1/session/login`` from a gateway identity
-    token, after the gateway was asked whether that user may sign in at all.
-
-    Deliberately **not** re-asking the gateway on every request. A per-request
-    status call would put the whole owner surface behind the gateway's
-    availability and fail closed on every page load during an outage; the
-    account check happens once, at login, and the cookie's own expiry bounds
-    how long a stale answer can survive.
-
-    Args:
-        request: The incoming request, for its cookies.
-        authorization: The ``Authorization`` header, if the caller sent one.
-
-    Returns:
-        ``{"user_id", "email", "user_name", "role", "is_admin",
-        "authenticated"}`` — the keys ``routes.py`` and ``/v1/session/me``
-        read. Everything in it comes from the session's own claims, which is
-        the only thing this dependency can prove: ``/me`` and ``/login``
-        therefore answer with the same values for the same session, rather than
-        login reporting a name that ``/me`` could only ever report as null.
-
-    Raises:
-        HTTPException: 401 when no valid session is presented, 503 when this
-            deployment cannot verify sessions at all.
+    Agent permissions are resolved separately at the Gateway on every
+    protected request. A role in an old session never grants Agent access.
     """
     token = session_token(request, authorization)
     if not token:
@@ -356,7 +277,6 @@ async def get_current_user(
         # at login alike.
         "user_name": claims.get("user_name"),
         "role": role,
-        "is_admin": role == "admin",
         "authenticated": True,
     }
 
@@ -366,50 +286,11 @@ async def verify_admin_access(
     authorization: str | None = Header(None),
     gateway: Any = Depends(get_gateway_client),
 ) -> str:
-    """Authenticate an admin caller, returning an identifier for the audit log.
+    """Authenticate an infrastructure token or a current Agent administrator.
 
-    Two doors, and both of them are this service's own:
-
-    - ``ADMIN_TOKEN``, the machine-to-machine credential. Compared in constant
-      time, and an **unset** value opens nothing — otherwise a deployment that
-      forgot to configure it would be an open admin surface, which is the
-      failure mode this whole file is written against.
-    - A session whose role claim is ``admin``. That is how the dashboard
-      authenticates, and the role comes from the gateway's own answer at login
-      rather than from anything the browser can edit.
-
-    **A session admin is re-checked at the gateway before it may change
-    anything**, the same way ``require_agent_owner`` re-checks an owner. The
-    role in the session was true when it was minted and says nothing about a
-    demotion since; without this, an administrator the gateway suspends or
-    downgrades keeps the power to drain hosts and pin runtime versions for the
-    rest of the session's life. The ``ADMIN_TOKEN`` door is deliberately left
-    alone: it is a machine credential with no user behind it to go stale, and
-    it must keep working on a deployment that has no gateway configured.
-
-    Reads are not re-checked, for the reason they are not on the owner surface:
-    an outage would otherwise close every admin page, and the session's own
-    expiry already bounds how stale a read can be.
-
-    **A missing ``AGENT_SESSION_SECRET`` is answered the same way here as at
-    :func:`get_current_user`: 503.** It used to be a 401, because the broader
-    ``IdentityError`` was caught and an unverifiable session simply did not
-    open the door — which sent an operator looking for a credential problem
-    that did not exist, while the same misconfiguration was diagnosed correctly
-    one function away. The admin *token* is checked first and is unaffected: a
-    deployment that authenticates machines only keeps working with no session
-    secret at all, because that path returns before this one is reached.
-
-    Args:
-        request: The incoming request, for its cookies.
-        authorization: The ``Authorization`` header, if the caller sent one.
-
-    Returns:
-        ``"admin-token"`` or ``"admin:<user_id>"``, for the audit trail.
-
-    Raises:
-        HTTPException: 401 when neither door opens, 503 when this deployment
-            cannot verify sessions at all.
+    ADMIN_TOKEN remains independent of the Gateway for local operations.
+    Browser sessions require a fresh agent.admin decision for reads and writes;
+    their identity/profile claims confer no administrative authority.
     """
     presented = bearer_token(authorization)
     configured = (os.environ.get(ENV_ADMIN_TOKEN) or "").strip()
@@ -424,11 +305,11 @@ async def verify_admin_access(
             raise HTTPException(status_code=503, detail=str(exc)) from None
         except identity.IdentityError:
             claims = None
-        if claims is not None and str(claims.get("role") or "") == "admin":
+        if claims is not None:
             user_id = str(claims.get("sub") or "")
-            if request.method.upper() not in SAFE_METHODS:
-                await assert_still_admin(gateway, user_id)
-            return f"admin:{user_id}"
+            if user_id:
+                await require_agent_access(gateway, user_id, "agent.admin")
+                return f"admin:{user_id}"
 
     if not presented and token is None:
         raise HTTPException(
