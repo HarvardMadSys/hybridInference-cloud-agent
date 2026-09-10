@@ -25,15 +25,23 @@ to the other three contract families:
   abandons every running attempt in the fleet over one unset environment
   variable.
 
+**A response may not carry a field the document does not declare.** Schema
+validation cannot see that: JSON Schema ignores properties it does not know, so
+a response that grew a field passes while the document and the client stay silent
+about the addition. `_assert_only_declared_keys` is what makes that an error,
+and it is the check that would have caught `reasoning_efforts` reaching the
+catalog — read by the client, never declared, every test on both sides green.
+
 Set `AGENT_CONTRACT_GATEWAY_URL` and `AGENT_CONTRACT_DISPATCH_TOKEN`, then run
 with ``pytest -m external``.
 
 **What writes.** Every case is read-only except
 `test_grant_lifecycle_mint_renew_revoke`, which mints a grant — a row at the
-gateway — and revokes it before returning. That one is opt-in: it needs
-`AGENT_CONTRACT_SUBJECT` to name an account an operator is willing to see this
-happen to, and it skips without it. The read-only cases use a randomly named
-subject that cannot exist, so they can run against any deployment at any time.
+gateway — and revokes it before returning, including when an assertion fails.
+That one is opt-in: it needs `AGENT_CONTRACT_SUBJECT` to name an account an
+operator is willing to see this happen to, and it skips without it. The
+read-only cases use a randomly named subject that cannot exist, so they can run
+against any deployment at any time.
 """
 
 from __future__ import annotations
@@ -58,6 +66,7 @@ CONTRACTS = Path(__file__).resolve().parents[2] / "contracts"
 GRANTS_CONTRACT = "inference-grants.openapi.yaml"
 LOOKUPS_CONTRACT = "internal-lookups.openapi.yaml"
 
+_MINT_PATH = "/internal/agent-grants"
 _RENEW_PATH = "/internal/agent-grants/{grant_id}/renew"
 
 
@@ -98,8 +107,8 @@ def _document(name: str) -> dict:
     return yaml.safe_load((CONTRACTS / name).read_text())
 
 
-def _validate(document: dict, path: str, method: str, status: str, body: object) -> None:
-    """Validate one response against the schema the document declares for it.
+def _response_schema(document: dict, path: str, method: str, status: str) -> dict:
+    """One declared response schema, with its components reachable.
 
     The documents keep their schemas under ``components`` and reference them with
     a local ``#/components/...`` pointer, so validating a single response means
@@ -107,7 +116,41 @@ def _validate(document: dict, path: str, method: str, status: str, body: object)
     """
     declared = document["paths"][path][method]["responses"][status]
     schema = declared["content"]["application/json"]["schema"]
-    Draft202012Validator({**schema, "components": document["components"]}).validate(body)
+    return {**schema, "components": document["components"]}
+
+
+def _validate(document: dict, path: str, method: str, status: str, body: object) -> None:
+    """Validate one response against the schema the document declares for it."""
+    Draft202012Validator(_response_schema(document, path, method, status)).validate(body)
+
+
+def _declared_keys(schema: dict, document: dict) -> set[str]:
+    """Every property name a schema allows, following ``$ref`` and ``allOf``."""
+    if "$ref" in schema:
+        name = schema["$ref"].rsplit("/", 1)[-1]
+        return _declared_keys(document["components"]["schemas"][name], document)
+    keys = set(schema.get("properties", {}))
+    for part in schema.get("allOf", []):
+        keys |= _declared_keys(part, document)
+    return keys
+
+
+def _assert_only_declared_keys(
+    document: dict, path: str, method: str, status: str, body: dict
+) -> None:
+    """A response may not carry a field the document does not declare.
+
+    The check ``_validate`` cannot make. JSON Schema ignores properties it does
+    not know, so a response that grew a field validates cleanly while the
+    document and the client stay silent about the addition — which is how
+    ``reasoning_efforts`` reached the catalog. The client reads it, the document
+    never declared it, and every test on both sides passed.
+    """
+    declared = _declared_keys(_response_schema(document, path, method, status), document)
+    undeclared = sorted(set(body) - declared)
+    assert not undeclared, (
+        f"{path} {method} {status} returned fields the document does not declare: {undeclared}"
+    )
 
 
 async def test_identity_jwks_publishes_a_usable_key() -> None:
@@ -124,12 +167,20 @@ async def test_identity_jwks_publishes_a_usable_key() -> None:
     async with httpx.AsyncClient(timeout=10) as http:
         response = await http.get(f"{base}/v1/identity/jwks")
 
-        # The contract calls this a valid deployment rather than a failure:
-        # identity switched off has to be distinguishable from identity broken.
         if response.status_code == 404:
+            # "Identity is switched off here" is a valid deployment and the
+            # document says so — but only that one reason may be skipped. A base
+            # URL pointing at the wrong host, or a proxy that does not forward
+            # `/v1/identity`, answers 404 too, and skipping on any of them would
+            # turn a broken setup into a passing suite.
+            body = response.json()
+            _validate(document, "/v1/identity/jwks", "get", "404", body)
+            assert body["error"]["type"] == "identity_not_configured", (
+                "a 404 from this route must be the documented 'not offered here'"
+            )
             pytest.skip("this gateway has cross-service identity switched off")
-        assert response.status_code == 200, response.text
 
+        assert response.status_code == 200, response.text
         body = response.json()
         _validate(document, "/v1/identity/jwks", "get", "200", body)
 
@@ -178,10 +229,11 @@ async def test_model_catalog_refusal_is_typed_and_reaches_the_client() -> None:
 async def test_model_catalog_answers_the_declared_shape_for_a_real_account() -> None:
     """The 200 path, for an operator willing to name an account to read.
 
-    The invariant worth having is the document's own: every alias resolves to a
-    model in the list, and no alias shadows one. This service drops the entries
+    Two things are checked that local tests cannot. Every alias must resolve to a
+    model in the list and none may shadow one — this service drops the entries
     that break it, so a violation narrows a user's catalog silently instead of
-    failing.
+    failing. And the response may carry no field the document does not declare,
+    which is the check that catches the document falling behind the gateway.
     """
     subject = _subject()
     base = _base_url()
@@ -197,6 +249,7 @@ async def test_model_catalog_answers_the_declared_shape_for_a_real_account() -> 
         assert response.status_code == 200, response.text
         body = response.json()
         _validate(document, "/internal/model-catalog", "get", "200", body)
+        _assert_only_declared_keys(document, "/internal/model-catalog", "get", "200", body)
 
         models = set(body["models"])
         aliases = body["aliases"]
@@ -233,9 +286,15 @@ async def test_grant_renewal_refusal_is_a_verdict_on_the_grant() -> None:
         body = response.json()
         _validate(document, _RENEW_PATH, "post", "404", body)
 
+        # A dispatch token was supplied above, so "not configured" is a mismatch
+        # between this run and the deployment rather than a case that does not
+        # apply. Failing here is the same call the catalog case makes when a
+        # refusal arrives as a status it did not expect.
         error_type = body["error"]["type"]
-        if error_type == "internal_api_not_configured":
-            pytest.skip("this gateway does not expose the internal grant endpoints")
+        assert error_type != "internal_api_not_configured", (
+            "a dispatch token was supplied, but the gateway reports its internal API "
+            "is not configured: this deployment cannot answer the contract"
+        )
 
         client = GrantClient(base, token, client=http)
         with pytest.raises(GatewayError) as raised:
@@ -263,8 +322,9 @@ async def test_grant_lifecycle_mint_renew_revoke() -> None:
     """The whole lifecycle against a real gateway, for a willing subject.
 
     **This one writes.** Minting creates a grant row at the gateway; the case
-    revokes it before returning, so what it leaves behind is a revoked grant. It
-    is opt-in for that reason, and it is the only case here that is.
+    revokes it before returning, including when an assertion fails, so what it
+    leaves behind is a revoked grant. It is opt-in for that reason, and it is the
+    only case here that is.
 
     The last assertion is the point of the case: a revoked grant must be refused
     on renew with a type the control plane reads as a verdict on the grant. That
@@ -275,6 +335,7 @@ async def test_grant_lifecycle_mint_renew_revoke() -> None:
     base = _base_url()
     token = _dispatch_token()
     document = _document(GRANTS_CONTRACT)
+    token_prefix = document["x-constants"]["token_prefix"]
     attempt = f"contract-{uuid4().hex}"
 
     async with httpx.AsyncClient(timeout=10) as http:
@@ -285,14 +346,23 @@ async def test_grant_lifecycle_mint_renew_revoke() -> None:
             job_id=f"contract-job-{attempt}",
             attempt_id=attempt,
         )
-        _validate(document, "/internal/agent-grants", "post", "200", minted)
-        grant_id = minted["grant_id"]
-        assert minted["user_id"] == subject
-        assert minted["token"].startswith("agr."), "the contract declares the prefix"
+
+        # Read the id before validating anything. A response that fails the
+        # document's schema still created a grant, and this is the only handle on
+        # it — validating first would leave that grant live until its TTL.
+        grant_id = minted.get("grant_id")
+        if not isinstance(grant_id, str) or not grant_id:
+            pytest.fail("mint returned no grant_id, so the grant it created cannot be revoked")
 
         try:
+            _validate(document, _MINT_PATH, "post", "200", minted)
+            _assert_only_declared_keys(document, _MINT_PATH, "post", "200", minted)
+            assert minted["user_id"] == subject
+            assert minted["token"].startswith(token_prefix)
+
             renewed = await client.renew(grant_id)
             _validate(document, _RENEW_PATH, "post", "200", renewed)
+            _assert_only_declared_keys(document, _RENEW_PATH, "post", "200", renewed)
             assert renewed["grant_id"] == grant_id
             assert renewed["revoked_at"] is None
         finally:

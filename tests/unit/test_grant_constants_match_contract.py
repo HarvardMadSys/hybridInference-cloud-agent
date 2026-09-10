@@ -3,9 +3,9 @@
 `cloud_agent/grants.py` cannot read these numbers off the wire — neither appears
 in a response body — so it copies them.
 `contracts/inference-grants.openapi.yaml` declares them under `x-constants`, and
-**nothing read that field**: the same number lived in three places (the gateway's
-`serving/grants.py`, the document, and this client) with nothing comparing any
-two of them. This compares the client to the document.
+**nothing read that field** before this file: the same number lived in three
+places (the gateway's `serving/grants.py`, the document, and this client) with
+nothing comparing any two of them. This compares the client to the document.
 
 It cannot reach the gateway, and that is the half left over. The gateway's own
 copy is observable only by asking for a TTL and reading `expires_at` back, which
@@ -50,3 +50,13 @@ def test_the_maximum_ttl_is_the_one_the_document_declares(declared_constants: di
 def test_the_renewal_step_is_the_one_the_document_declares(declared_constants: dict) -> None:
     """The number a running attempt's renewal cadence has to stay inside."""
     assert declared_constants["DEFAULT_GRANT_TTL_S"] == grants.GATEWAY_RENEWAL_STEP_S
+
+
+def test_the_token_prefix_is_the_one_the_document_declares(declared_constants: dict) -> None:
+    """This service never mints a grant token, so it cannot check the prefix by use.
+
+    What it can do is pin the value the external lifecycle case asserts a live
+    gateway honours, so a silent edit here fails rather than quietly changing what
+    both records mean by a grant token.
+    """
+    assert declared_constants["token_prefix"] == "agr."
