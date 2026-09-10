@@ -135,9 +135,22 @@ class GatewayClient:
             raise GatewayError(f"gateway unreachable: {exc}") from exc
 
         if response.status_code != 200:
+            error_type = None
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                # Support both the Gateway envelope and FastAPI's detail wrapper.
+                error = payload.get("error")
+                if not isinstance(error, dict) and isinstance(payload.get("detail"), dict):
+                    error = payload["detail"].get("error")
+                if isinstance(error, dict) and isinstance(error.get("type"), str):
+                    error_type = error["type"]
             raise GatewayError(
                 f"gateway answered {response.status_code} for {path}",
                 status_code=response.status_code,
+                error_type=error_type,
             )
         try:
             body = response.json()

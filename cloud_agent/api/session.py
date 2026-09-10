@@ -42,11 +42,9 @@ to sign in and a much better one for everybody else, and it is the whole point
 of AGENTS.md rule 4 — an unreachable authority means no permission, never
 assumed permission.
 
-**A 401 from ``/me`` is not an error.** It is the answer "not signed in", which
-is what the browser asks on every load. ``ProtectedRoute`` loops if that ever
-arrives as a 500, so the failure taxonomy here is deliberately narrow: 401 for
-"no or bad session", and 503 when identity verification or current Agent
-admission cannot be resolved.
+**A 401 from ``/me`` means "not signed in".** A 503 means identity verification
+or current Agent admission cannot be resolved. The browser shows a retry page
+for that temporary failure instead of redirecting to sign-in.
 """
 
 from __future__ import annotations
@@ -62,7 +60,6 @@ from cloud_agent import identity
 from cloud_agent.api.deps import (
     get_current_user,
     get_gateway_client,
-    require_agent_access,
     resolve_agent_access,
 )
 from cloud_agent.gateway import GatewayError
@@ -194,6 +191,23 @@ def _unavailable_response(reason: str) -> RedirectResponse:
     )
 
 
+def _callback_error_response(error: HTTPException, return_to: str) -> RedirectResponse:
+    """Render account denial or temporary failure in the public login page."""
+    if error.status_code not in (403, 503) or not _env(ENV_WEB_BASE_URL):
+        raise error
+    reason = "account_unavailable" if error.status_code == 403 else "temporary"
+    query = urlencode({SIGN_IN_ERROR_PARAM: reason, "return_to": safe_return_to(return_to)})
+    response = RedirectResponse(f"{_web_destination('/login')}?{query}", status_code=303)
+    response.delete_cookie(
+        identity.LOGIN_FLOW_COOKIE,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_is_secure(),
+    )
+    return response
+
+
 @router.get("/login")
 async def session_login(
     return_to: str = Query(default="/"),
@@ -271,7 +285,8 @@ async def session_callback(
         gateway: The gateway's contracts.
 
     Returns:
-        A redirect into the app, carrying the session cookie.
+        A redirect into the app with a session, or to the public login page
+        explaining account denial or temporary failure when a web URL is set.
 
     Raises:
         HTTPException: 400 if the flow is missing, mismatched, replayed or
@@ -323,18 +338,25 @@ async def session_callback(
         # (stale, replayed, mismatched), and starting again is the fix. An
         # unreachable gateway is this deployment's problem, not theirs.
         if exc.status_code == 403:
-            raise HTTPException(status_code=403, detail="This account cannot sign in.") from exc
+            return _callback_error_response(
+                HTTPException(status_code=403, detail="This account cannot sign in."),
+                str(flow.get("return_to") or "/"),
+            )
         status_code = 400 if exc.definitive else 503
-        raise HTTPException(
+        error = HTTPException(
             status_code=status_code,
             detail=(
                 "This sign-in could not be completed. Please start again."
                 if status_code == 400
                 else "Cannot reach the gateway to complete sign-in; try again shortly."
             ),
-        ) from exc
+        )
+        return _callback_error_response(error, str(flow.get("return_to") or "/"))
 
-    session, user = await _establish_session(identity_token, gateway)
+    try:
+        session, user = await _establish_session(identity_token, gateway)
+    except HTTPException as exc:
+        return _callback_error_response(exc, str(flow.get("return_to") or "/"))
 
     response = RedirectResponse(
         _web_destination(safe_return_to(str(flow.get("return_to") or "/"))), status_code=303
@@ -385,7 +407,7 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid identity token.")
 
-    decision = await require_agent_access(gateway, user_id)
+    decision = await resolve_agent_access(gateway, user_id)
     try:
         status = await gateway.user_status(user_id)
     except GatewayError as exc:
@@ -398,6 +420,11 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
             status_code=503,
             detail="Cannot confirm this account with the gateway; try again shortly.",
         ) from exc
+
+    # A valid identity without Agent admission may still see the access-required
+    # page, but a missing or suspended account must never receive a session.
+    if status.get("exists") is not True or status.get("active") is not True:
+        raise HTTPException(status_code=403, detail="This account cannot sign in.")
 
     # Retain the existing profile fields for compatibility. They never grant
     # Agent permissions; only the access decision above can do that.

@@ -8,7 +8,7 @@ import '@testing-library/jest-dom/vitest';
 // browser's half of the contract, and a real control plane would only add a
 // second thing that can be wrong.
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Spread the real module and override only what this test decides. A factory
@@ -56,6 +56,20 @@ describe('ProtectedRoute', () => {
     stubLocation();
   });
   afterEach(() => cleanup());
+
+  it('offers retry after an outage without redirecting or rendering protected content', async () => {
+    vi.mocked(getSessionUser).mockRejectedValueOnce(new Error('Gateway unavailable'));
+    renderApp();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('cannot confirm your access');
+    expect(assign).not.toHaveBeenCalled();
+    expect(screen.queryByText('task list')).not.toBeInTheDocument();
+
+    vi.mocked(getSessionUser).mockResolvedValue({ id: 'u1', email: null, role: 'free' });
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('task list')).toBeInTheDocument();
+    expect(assign).not.toHaveBeenCalled();
+  });
 
   it("sends an unauthenticated visitor to this app's own login page", async () => {
     // Not straight at the control plane. Somebody who has never seen this

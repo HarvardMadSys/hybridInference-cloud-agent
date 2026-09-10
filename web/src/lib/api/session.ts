@@ -32,7 +32,7 @@ export async function getSessionUser(): Promise<SessionUserApi | null> {
     credentials: 'include',
     cache: 'no-store',
   });
-  if (resp.status === 401 || resp.status === 403) return null;
+  if (resp.status === 401) return null;
   return jsonOrThrow<SessionUserApi>(resp);
 }
 

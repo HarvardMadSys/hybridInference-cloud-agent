@@ -13,12 +13,23 @@ requires `agent.use`. Session `role` remains profile metadata and is never a
 substitute for either permission. The Agent database needs no account table or
 schema migration for this change.
 
-Login checks the current decision before issuing a session. Existing sessions
+Login checks the current decision and verifies that the account still exists
+and is active before issuing a session. An active account with no Agent permission
+can sign in to see the access-required page; its session grants no protected
+owner or admin access. Missing and inactive accounts receive no new session.
+Existing sessions
 are checked again on each protected owner/admin request and on `/v1/session/me`.
 The session response includes `agent_access: {allowed, permissions}` so the web
 app can render the same decision. Missing, malformed, unavailable or contradictory
 decisions never grant access. The frontend must also deny when an older `/me`
 response lacks `agent_access`.
+
+When current access cannot be checked, `/me` returns 503 and the web app hides
+protected content and offers a retry without sending the user through sign-in.
+Callback outages redirect to the public login page with a retry action and the
+original destination, clearing the consumed login-flow cookie. An account refusal
+uses a separate explanation. Only a 403 explicitly typed `subject_unavailable`
+is an account denial; an untyped or proxy-generated 403 is an operational failure.
 
 The local `ADMIN_TOKEN` remains an infrastructure credential independent of
 Gateway availability. The dedicated on-call token must additionally pass the
@@ -72,3 +83,12 @@ endpoint, and local infrastructure-token access in each mode.
 This run checks local HTTP authorization and database separation. It does not
 claim a staging deployment, a browser login redirect round trip, or execution of
 a sandbox job. No deployment lock or published image was changed.
+
+The login follow-up was also checked in an actual browser against the production
+Next.js build and Agent application, using a local HTTP Gateway fixture with
+PKCE code exchange and signed identity tokens. An active account without Agent
+permissions reached the access-required page. An existing session stayed on a
+retry page during a Gateway outage and recovered without signing in again.
+An outage during the callback returned a retry link that started a fresh login;
+an HTML proxy 403 showed the temporary-failure page. This fixture-based browser
+run does not claim staging deployment or sandbox execution.

@@ -142,7 +142,7 @@ async def resolve_agent_access(gateway: Any, user_id: str) -> AgentAccessDecisio
             raise ValueError("Agent access subject mismatch")
         return decision
     except GatewayError as exc:
-        if exc.status_code == 403:
+        if exc.status_code == 403 and exc.error_type == "subject_unavailable":
             return AgentAccessDecision(user_id=user_id, allowed=False, permissions=[])
     except ValueError:
         pass
