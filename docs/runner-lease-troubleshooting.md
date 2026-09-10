@@ -7,18 +7,20 @@ of adding another 30-second sleep to the HTTP request's timeout. A successful
 renewal restores the normal interval. A rejected lease (HTTP 409) always stops
 renewal and execution; retries do not resurrect an expired owner.
 
-Two dropped heartbeat requests can each consume their 30-second read timeout.
-With normal sleeps between failures, the next request would start 150 seconds
-after claim, too late for an unrenewed lease even if connectivity returned at
-100 seconds. The shorter retry interval allows that case to renew at 100 seconds.
-It cannot preserve a lease through an outage longer than the remaining lease.
+Heartbeats now have a separate 10-second HTTP timeout. Ordinary control RPCs
+retain their 30-second default. With a 30-second first heartbeat and repeated
+10-second read failures, retry requests start at 30, 45, 60, 75, 90 and 105
+seconds after claim. This leaves more chances to reconnect inside the original
+120-second lease. These are read-timeout examples, not a wall-clock guarantee:
+HTTP timeouts apply separately to connection, pool, write and read operations.
+An outage longer than the remaining lease still cannot be hidden.
 
 The lease is not the agent's execution timeout (default 3,600 seconds). A quiet
 tool or model call may span many lease periods: renewal runs on a separate
 thread and does not depend on message/progress events. The regression suite
 exercises a silent six-minute turn with the real heartbeat thread, stream loop
 and HTTP client against a simulated lease endpoint. It succeeds both with a
-healthy connection and with two timed-out reads followed by recovery at 100
+healthy connection and with timed-out reads followed by recovery at 100 or 105
 seconds; the original retry cadence loses the latter turn's lease. This is a
 controlled reproduction, not proof of the cause of a historical incident.
 
@@ -38,6 +40,17 @@ upload the final `shared_workspace_settled` notice also must not fail the turn:
 the worker still submits its successful terminal state. Lease rejection is
 handled separately and prevents that write. Earlier settlement failures are
 not treated as successful completion.
+
+Admission and settlement acknowledgement loss is also recoverable. The runner
+retries those receipts up to three times, with 10-second HTTP timeouts and
+5-second delays, only for transport failures and HTTP 408/502/503/504. A prompt
+is sent exactly once, after its admission receipt succeeds. Supervisor
+settlement remembers the last token's receipt until another activation takes
+ownership. Control-plane settlement returns the recorded boundary only for the
+same still-live attempt and activation; it does not increment the workspace
+epoch, append another snapshot, or change the native turn ordinal. A 409/410
+is definitive and never retried. A broker restart loses its in-memory receipt,
+so an uncertain completion across that restart remains fail-closed.
 
 Post-claim preparation outside the shared execution handler (for example,
 image inspection or manifest validation) also has an outer failure handler.
@@ -68,3 +81,22 @@ activation ownership during preparation. The UI only announces another
 attempt when its events actually exist. Do not clear a lost flag or replay
 an admitted prompt to repair this display state; native-session recovery
 still requires proof of a safe execution boundary.
+
+Before prompt admission, a reported preparation failure can leave an existing
+conversation usable: the runner abandons the activation and reports a failed
+turn, allowing the next message to resume the retained native session. This
+requires a known retained container; failure before its identity was recorded
+is not equivalent proof. Error-event availability must not gate this report.
+
+The owner UI describes interrupted responses and unavailable conversations in
+plain language. Original infrastructure details remain in API records and
+operator logs. Task errors and assistant messages are not rewritten. Historical
+LOST memberships remain disabled; changed wording does not repair their state.
+
+Recovery after an expired activation or killed runner needs an additional
+protocol: durably quarantine the member, fence the old runner's preparation
+commands as well as its broker token, verify the exact retained container and
+native turn boundary, then either resume the same session or report that it
+cannot be recovered. A broker `busy=false` observation alone is insufficient:
+workspace setup commands run outside the broker's agent-turn transport. Never
+requeue a pre-admission turn solely because its admission field is empty.

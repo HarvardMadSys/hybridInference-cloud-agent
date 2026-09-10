@@ -195,6 +195,8 @@ class _Member:
     last_settled_job_id: str | None = None
     lease_token: str | None = None
     lease_owner: str | None = None
+    # Only the last completed activation can replay its acknowledgement.
+    settlement_receipt: tuple[str, SharedSessionDescriptor] | None = field(default=None, repr=False)
     transport: ResidentTransport | None = None
     current_turn: ResidentTurn | None = None
     activation_processes: tuple[tuple[int, int], ...] | None = None
@@ -521,6 +523,7 @@ class SharedChatSessionSupervisor:
                 network_phase="agent" if has_settled_context else "setup",
             )
             member.activation_generation = activation_generation
+            member.settlement_receipt = None
             member.lease_token = secrets.token_urlsafe(32)
             member.lease_owner = owner
             hot_transport = member.transport is not None and member.transport.alive
@@ -829,6 +832,22 @@ class SharedChatSessionSupervisor:
     ) -> SharedSessionDescriptor:
         """Settle one member while retaining its healthy live process."""
         with self._lock:
+            group, member = self._member(thread_id)
+            receipt = member.settlement_receipt
+            if (
+                receipt is not None
+                and secrets.compare_digest(receipt[0], token)
+                and receipt[1].last_settled_job_id == job_id
+                and receipt[1].context_status == context_status
+                and member.lease_token is None
+                and member.current_turn is None
+                and member.context_status != "lost"
+                and member.last_settled_job_id == job_id
+                and member.activation_generation == receipt[1].activation_generation
+                and member.native_session_id == receipt[1].native_session_id
+                and (native_session_id is None or native_session_id == receipt[1].native_session_id)
+            ):
+                return receipt[1]
             group, member = self._leased_member(thread_id, token)
             if member.current_turn is not None:
                 raise SessionBusy("cannot settle a member while its turn is running")
@@ -879,7 +898,9 @@ class SharedChatSessionSupervisor:
             member.lease_token = None
             member.lease_owner = None
             self._arm_idle_if_quiescent(group)
-            return self._descriptor(group, member)
+            descriptor = self._descriptor(group, member)
+            member.settlement_receipt = (token, descriptor)
+            return descriptor
 
     def abandon(self, thread_id: str, token: str, *, lost: bool) -> SharedSessionDescriptor:
         """Release one failed member; restart/lose it without killing siblings."""

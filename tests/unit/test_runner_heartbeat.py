@@ -101,7 +101,7 @@ def test_stopped_heartbeat_makes_no_request():
     control.heartbeat.assert_not_called()
 
 
-@pytest.mark.parametrize("network_recovers_at", [0, 100])
+@pytest.mark.parametrize("network_recovers_at", [0, 100, 105])
 def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_recovers_at):
     """A silent agent stream does not gate background renewal or successful finish.
 
@@ -136,7 +136,9 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
             return httpx.Response(409, json={"detail": "lease expired"})
         if operation == "heartbeat":
             if clock.now < network_recovers_at:
-                clock.now += 30
+                # Model the configured timeout, not the client's unrelated
+                # default for events and other control requests.
+                clock.now += request.extensions["timeout"]["read"]
                 raise httpx.ReadTimeout("temporary outage", request=request)
             clock.expires_at = clock.now + 120
             return httpx.Response(200, json={"cancel_requested": False})
@@ -159,7 +161,7 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
     monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
     control = runner.ControlPlane("https://control.test", "test-token")
     control.close()
-    control._client = httpx.Client(transport=httpx.MockTransport(endpoint))
+    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
     control.job_id = "ajob_silent"
     heart = runner.Heartbeater(control, ttl=120, interval=30)
     heart._stop = Stop()
@@ -201,3 +203,24 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
     finally:
         heart.stop()
         control.close()
+
+
+def test_heartbeat_has_a_short_timeout_without_changing_other_control_requests():
+    timeouts = {}
+
+    def endpoint(request):
+        timeouts[request.url.path.rsplit("/", 1)[-1]] = request.extensions["timeout"]
+        return httpx.Response(200, json={})
+
+    control = runner.ControlPlane("https://control.test", "test-token")
+    control.close()
+    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
+    control.job_id = "ajob_timeouts"
+    try:
+        control.heartbeat(120)
+        control.finish("succeeded")
+    finally:
+        control.close()
+
+    assert timeouts["heartbeat"] == dict.fromkeys(("connect", "read", "write", "pool"), 10)
+    assert timeouts["finish"] == dict.fromkeys(("connect", "read", "write", "pool"), 30)

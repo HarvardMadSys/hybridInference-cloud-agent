@@ -68,6 +68,7 @@ class SessionSupervisorClient:
         suffix: str = "",
         *,
         payload: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         path = f"/shared-sandboxes/{quote(thread_id, safe='')}"
         if suffix:
@@ -77,6 +78,7 @@ class SessionSupervisorClient:
                 method,
                 f"{self._base_url}{path}",
                 json=payload,
+                timeout=self._client.timeout if timeout is None else timeout,
             )
         except httpx.HTTPError as exc:
             raise SessionSupervisorError(503, "shared Session Supervisor is unavailable") from exc
@@ -230,6 +232,7 @@ class SessionSupervisorClient:
             "POST",
             thread_id,
             "settle",
+            timeout=10.0,
             payload={
                 "token": token,
                 "job_id": job_id,

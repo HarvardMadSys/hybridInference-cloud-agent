@@ -164,12 +164,14 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
           : 1;
       return { kind: 'egress_denied', host, attempts };
     }
-    return { kind: 'lifecycle', text: asText(payload, 'detail', 'text') || 'error' };
+    return {
+      kind: 'lifecycle',
+      text: ownerFailureMessage(asText(payload, 'detail', 'text') || 'An error occurred'),
+    };
   }
 
   if (type === 'attempt_superseded') {
-    const reason = asText(payload, 'reason') || 'lease expired';
-    return { kind: 'lifecycle', text: `attempt superseded (${reason})` };
+    return { kind: 'lifecycle', text: 'attempt_superseded' };
   }
   if (type === 'lifecycle') {
     const phase = asText(payload, 'phase', 'text') || 'lifecycle';
@@ -359,9 +361,32 @@ export function lifecyclePhaseLabel(value: string): { text: string; milestone: b
   const known = LIFECYCLE_LABELS[phase];
   if (known) return { text: known, milestone: true };
   if (phase.includes('superseded')) {
-    return { text: 'Attempt ended', milestone: true };
+    return { text: 'Run interrupted', milestone: true };
   }
   return { text: value.replaceAll('_', ' '), milestone: false };
+}
+
+/** Translate infrastructure failures only; keep task errors and transcripts intact.
+ * The original detail remains in the API and operator logs for diagnosis.
+ */
+export function ownerFailureMessage(detail: string): string {
+  if (/^shared Agent CLI turn exceeded its execution timeout/i.test(detail)) {
+    return 'This response took too long and was stopped.';
+  }
+  if (/^cancelled (?:after|by owner)/i.test(detail)) {
+    return 'This response was stopped at your request.';
+  }
+  if (/context settled, but job finalization expired/i.test(detail)) {
+    return 'The response finished, but its completion could not be confirmed. Review the response before continuing.';
+  }
+  if (
+    /lease[ _](expired|lost)|lease[^.\n]*expir|indeterminate.*(?:turn|admission)|turn.*indeterminate|context[ _](?:lost|marked lost)|native(?: Agent CLI)?[ _](?:context|session|state)|Session Supervisor|shared (?:live|chat|supervisor|Agent CLI)/i.test(
+      detail,
+    )
+  ) {
+    return 'The connection was interrupted before this response could be confirmed.';
+  }
+  return detail;
 }
 
 /** Preserve attempt boundaries and attach each result to its tool activity. */
@@ -608,8 +633,8 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
           : 'finished',
       note: supersededIds.has(id)
         ? index < attemptIds.length - 1
-          ? 'Worker lease expired; a new attempt started.'
-          : 'Worker lease expired; this attempt ended.'
+          ? 'This run was interrupted. Another run started.'
+          : 'This run was interrupted.'
         : undefined,
       ...(telemetry ? { telemetry } : {}),
     };
@@ -690,7 +715,11 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     title: job.title ?? options.thread?.title ?? job.task_prompt.split('\n')[0].slice(0, 80),
     prompt: job.task_prompt,
     state: toDisplayState(job),
-    stateNote: job.detail ?? (job.state === 'waiting' ? 'Queued after the current run' : undefined),
+    stateNote: job.detail
+      ? ownerFailureMessage(job.detail)
+      : job.state === 'waiting'
+        ? 'Queued after the current run'
+        : undefined,
     repo: job.repo,
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),

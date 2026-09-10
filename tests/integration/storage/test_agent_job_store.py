@@ -2470,6 +2470,66 @@ async def test_zombie_worker_is_fenced_out_after_reap(store: AgentJobStore):
     )
 
 
+async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_fences(
+    store: AgentJobStore,
+):
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-retained-one",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    request = dict(
+        **fence,
+        job_id=job["id"],
+        context_status="new",
+        native_session_id="claude-session-one",
+        idle_timeout_seconds=1800,
+    )
+    original = await store.settle_thread_sandbox(**request)
+    assert original is not None
+
+    async def snapshot_state():
+        async with store._pool.acquire() as conn:
+            return (
+                await conn.fetchrow(
+                    "SELECT workspace_epoch, idle_deadline FROM agent_sandboxes WHERE id = $1",
+                    sandbox["sandbox_id"],
+                ),
+                await conn.fetch(
+                    "SELECT * FROM agent_sandbox_snapshots WHERE sandbox_id = $1 ORDER BY id",
+                    sandbox["sandbox_id"],
+                ),
+                await conn.fetchval(
+                    "SELECT native_turn_no FROM agent_jobs WHERE id = $1", job["id"]
+                ),
+            )
+
+    before = await snapshot_state()
+    replay = await store.settle_thread_sandbox(**request)
+    assert replay is not None
+    assert replay["native_session_id"] == original["native_session_id"]
+    assert await snapshot_state() == before
+    for change in [
+        {"activation_generation": fence["activation_generation"] + 1},
+        {"lease_generation": fence["lease_generation"] + 1},
+        {"native_session_id": "a-different-session"},
+        {"context_status": "restored"},
+    ]:
+        assert await store.settle_thread_sandbox(**(request | change)) is None
+    await _expire_attempt(store, claim["attempt_id"])
+    assert await store.settle_thread_sandbox(**request) is None
+    assert await snapshot_state() == before
+
+
 async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
     store: AgentJobStore,
 ):

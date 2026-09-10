@@ -26,7 +26,7 @@ export const AGENT_JOBS: AgentJob[] = [
       {
         no: 1,
         status: 'superseded',
-        note: 'Attempt 1 was superseded at 14:32 — worker lease expired after heartbeat loss; a new attempt took over. Events are read-only, preserved for audit.',
+        note: 'This run was interrupted at 14:32. Another run started.',
       },
       { no: 2, status: 'live' },
     ],

@@ -382,7 +382,7 @@ describe('JobDetail', () => {
     });
     const { rerender } = render(<JobDetail job={archived} />);
     expect(screen.getByRole('button', { name: 'Unarchive' })).toBeInTheDocument();
-    expect(screen.getByText(/native context is unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/we couldn’t reconnect it/)).toBeInTheDocument();
     rerender(<JobDetail job={{ ...archived, archivedAt: null }} />);
     expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeDisabled();
   });
@@ -726,7 +726,7 @@ describe('JobDetail', () => {
     expect(within(task).queryByRole('note')).not.toBeInTheDocument();
     rerender(<JobDetail job={makeJob({ egressDenials: 3 })} />);
     expect(within(task).getByRole('note')).toHaveTextContent(
-      '3 network requests were blocked by the sandbox.',
+      '3 network requests were blocked by this workspace’s network settings.',
     );
     rerender(
       <JobDetail
@@ -789,7 +789,7 @@ describe('JobDetail', () => {
     expect(within(outcome).getByText(/Send a follow-up to continue/)).toBeInTheDocument();
     expect(within(outcome).queryByRole('link', { name: 'New chat' })).not.toBeInTheDocument();
     rerender(<JobDetail job={{ ...job, nativeState: 'lost' }} />);
-    expect(within(outcome).getByText(/This chat can no longer be resumed/)).toBeInTheDocument();
+    expect(within(outcome).getByText(/We couldn’t reconnect this chat/)).toBeInTheDocument();
     expect(within(outcome).getByRole('link', { name: 'New chat' })).toHaveAttribute('href', '/');
     expect(within(outcome).queryByText(/Send a follow-up to continue/)).not.toBeInTheDocument();
   });
@@ -1506,7 +1506,7 @@ describe('JobDetail', () => {
   it('does not offer a follow-up after an admitted turn lost native context', () => {
     render(<JobDetail job={makeJob({ state: 'cancelled', contextStatus: 'lost' })} />);
 
-    expect(screen.getByText(/This chat can no longer be resumed/i)).toBeInTheDocument();
+    expect(screen.getByText(/We couldn’t reconnect this chat/i)).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
     expect(screen.queryByText(/restores any saved changes/i)).toBeNull();
@@ -1518,7 +1518,7 @@ describe('JobDetail', () => {
     );
 
     expect(screen.getByLabelText('Add a follow-up')).toBeDisabled();
-    expect(screen.getByText(/This chat can no longer be resumed/)).toBeInTheDocument();
+    expect(screen.getByText(/We couldn’t reconnect this chat/)).toBeInTheDocument();
     expect(screen.getByText(/Start a new chat ·/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'New chat' })).toHaveAttribute('href', '/');
   });

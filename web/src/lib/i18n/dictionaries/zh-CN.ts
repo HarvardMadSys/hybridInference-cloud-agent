@@ -112,7 +112,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'sessionArchive.title': '此会话已归档',
   'sessionArchive.body': '可以查看对话和浏览文件。恢复会话后即可继续工作。',
   'sessionArchive.running': '任务仍在运行，归档不会停止执行。恢复会话后可发送新消息。',
-  'sessionArchive.contextLost': '可以恢复此会话，但原生上下文已不可用。请新建会话继续工作。',
+  'sessionArchive.contextLost':
+    '可以取消归档并查看对话，但我们未能重新连接此会话。请新建会话继续工作。',
   'sessionArchive.restore': '恢复会话',
   'sessionArchive.continue': '恢复并继续',
   'sessionArchive.restoring': '正在恢复…',

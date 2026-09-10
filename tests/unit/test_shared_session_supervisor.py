@@ -1088,6 +1088,73 @@ def test_new_activation_waits_for_an_inflight_idle_stop_then_restarts_exact_cont
     assert manager.items[_spec().container_name].running is True
 
 
+def test_settlement_ack_replays_only_for_the_same_completed_activation():
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    original = supervisor.settle(
+        "athr_source",
+        lease.token,
+        job_id="ajob_source",
+        context_status="live",
+    )
+    assert (
+        supervisor.settle(
+            "athr_source",
+            lease.token,
+            job_id="ajob_source",
+            context_status="live",
+        )
+        == original
+    )
+    assert len(factory.transports) == 1
+    for token, job_id, status in [
+        ("wrong-token", "ajob_source", "live"),
+        (lease.token, "ajob_other", "live"),
+        (lease.token, "ajob_source", "restored"),
+    ]:
+        with pytest.raises(SessionLeaseLost):
+            supervisor.settle("athr_source", token, job_id=job_id, context_status=status)
+
+    successor = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    with pytest.raises(SessionLeaseLost):
+        supervisor.settle(
+            "athr_source",
+            lease.token,
+            job_id="ajob_source",
+            context_status="live",
+        )
+    assert supervisor.status("athr_source").busy
+    supervisor.abandon("athr_source", successor.token, lost=False)
+    with pytest.raises(SessionLeaseLost):
+        supervisor.settle(
+            "athr_source",
+            lease.token,
+            job_id="ajob_source",
+            context_status="live",
+        )
+
+
 def test_status_downgrades_a_dead_resident_process_without_losing_native_context():
     manager = _Manager()
     factory = _TransportFactory()

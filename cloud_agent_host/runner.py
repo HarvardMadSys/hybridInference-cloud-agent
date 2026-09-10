@@ -38,7 +38,10 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import httpx
 
@@ -89,9 +92,10 @@ from cloud_agent_host.source_archive import build_base_bundle, build_source_arch
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
-# A failed 30-second HTTP read already consumed a normal heartbeat interval.
-# Re-enter quickly enough to renew during the remaining lease window.
+# Heartbeats use a short per-request timeout and retry promptly, so a slow
+# control request cannot consume the remaining lease in normal cadence sleeps.
 _HEARTBEAT_RETRY_INTERVAL_S = 5.0
+_HEARTBEAT_TIMEOUT_S = 10.0
 DEFAULT_AGENT_TIMEOUT_S = 3600.0
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
@@ -115,6 +119,26 @@ def _log_control_failure(operation: str, job_id: str, exc: Exception) -> None:
         type(exc).__name__,
         status,
     )
+
+
+def _retry_lifecycle_receipt(operation: str, job_id: str, call: Callable[[], Any]) -> Any:
+    """Retry only idempotent lifecycle receipts, never prompt delivery."""
+    for attempt in range(3):
+        try:
+            return call()
+        except (httpx.TransportError, httpx.HTTPStatusError, SessionSupervisorError) as exc:
+            status = (
+                exc.response.status_code
+                if isinstance(exc, httpx.HTTPStatusError)
+                else exc.status_code
+                if isinstance(exc, SessionSupervisorError)
+                else None
+            )
+            if attempt == 2 or (status is not None and status not in {408, 502, 503, 504}):
+                raise
+            _log_control_failure(operation, job_id, exc)
+            time.sleep(5.0)
+    raise AssertionError("lifecycle retry exhausted without a result")
 
 
 # Both are interpolated into a URL and handed to git, which reads a leading
@@ -307,8 +331,18 @@ class ControlPlane:
         """Release the HTTP connection pool."""
         self._client.close()
 
-    def _post(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self._client.post(f"{self._base}{path}", json=payload or {})
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        response = self._client.post(
+            f"{self._base}{path}",
+            json=payload or {},
+            timeout=self._client.timeout if timeout is None else timeout,
+        )
         if response.status_code == 409:
             raise LeaseLost(response.text[:200])
         response.raise_for_status()
@@ -338,7 +372,9 @@ class ControlPlane:
     def heartbeat(self, ttl: float) -> dict[str, Any]:
         """Renew the lease and learn whether cancellation is pending."""
         return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/heartbeat", {"lease_ttl_seconds": ttl}
+            f"/v1/agent/worker/jobs/{self.job_id}/heartbeat",
+            {"lease_ttl_seconds": ttl},
+            timeout=_HEARTBEAT_TIMEOUT_S,
         )
 
     def report_continuity(self, mode: str, *, context_status: str | None = None) -> None:
@@ -451,6 +487,7 @@ class ControlPlane:
                 "sandbox_generation": sandbox_generation,
                 "activation_generation": activation_generation,
             },
+            timeout=10.0,
         )
 
     def settle_chat_sandbox(
@@ -474,6 +511,7 @@ class ControlPlane:
                 "base_sha": base_sha,
                 "idle_timeout_seconds": idle_timeout_seconds,
             },
+            timeout=10.0,
         )
 
     def abandon_chat_sandbox(
@@ -1762,9 +1800,13 @@ def _run_shared_live_attempt(
             control.report_context_status("new")
 
         stage = "prompt_admission"
-        control.admit_chat_turn(
-            sandbox_generation=spec.generation,
-            activation_generation=activation_generation,
+        _retry_lifecycle_receipt(
+            "prompt_admission_retry",
+            job.job_id,
+            lambda: control.admit_chat_turn(
+                sandbox_generation=spec.generation,
+                activation_generation=activation_generation,
+            ),
         )
         turn_admitted = True
         result_frame: dict[str, Any] | None = None
@@ -1826,24 +1868,32 @@ def _run_shared_live_attempt(
             )
 
         stage = "settlement"
-        local_settle = supervisor.settle_shared(
-            job.thread_id,
-            token=lease_token,
-            job_id=job.job_id,
-            context_status=context_status,
+        local_settle = _retry_lifecycle_receipt(
+            "supervisor_settlement_retry",
+            job.job_id,
+            lambda: supervisor.settle_shared(
+                job.thread_id,
+                token=lease_token,
+                job_id=job.job_id,
+                context_status=context_status,
+            ),
         )
         settled_session_id = _verified_native_session_id(
             previous_session_id=native_session_id,
             observed_session_id=local_settle.get("native_session_id"),
             has_context=has_context,
         )
-        control.settle_chat_sandbox(
-            sandbox_generation=spec.generation,
-            activation_generation=activation_generation,
-            context_status=context_status,
-            native_session_id=settled_session_id,
-            base_sha=base_sha,
-            idle_timeout_seconds=idle_timeout_s,
+        _retry_lifecycle_receipt(
+            "control_settlement_retry",
+            job.job_id,
+            lambda: control.settle_chat_sandbox(
+                sandbox_generation=spec.generation,
+                activation_generation=activation_generation,
+                context_status=context_status,
+                native_session_id=settled_session_id,
+                base_sha=base_sha,
+                idle_timeout_seconds=idle_timeout_s,
+            ),
         )
         settled = True
         if settled_failure:

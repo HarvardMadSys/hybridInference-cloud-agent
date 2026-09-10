@@ -113,7 +113,7 @@ export const en = {
   'sessionArchive.running':
     'This run is still active. Archiving does not stop it. Unarchive to send another message.',
   'sessionArchive.contextLost':
-    'You can unarchive this session, but its native context is unavailable. Start a new session to continue working.',
+    'You can unarchive and review this conversation, but we couldn’t reconnect it. Start a new chat to continue working.',
   'sessionArchive.restore': 'Unarchive',
   'sessionArchive.continue': 'Unarchive and continue',
   'sessionArchive.restoring': 'Unarchiving…',

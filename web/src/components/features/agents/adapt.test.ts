@@ -10,12 +10,56 @@ import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
 
 import {
   lifecyclePhaseLabel,
+  ownerFailureMessage,
   toDiffFileDetails,
   toDiffFiles,
   toDisplayEvent,
   toDisplayJob,
   toDisplayState,
 } from './adapt';
+
+describe('owner failure wording', () => {
+  it.each([
+    'retained sandbox activation lease expired; context marked lost',
+    'retained Agent CLI turn became indeterminate after prompt admission',
+    'attempt lease lost during shared live execution',
+    'native context unavailable',
+    'shared Session Supervisor is unavailable',
+  ])('explains infrastructure failure without exposing internal terms: %s', (detail) => {
+    const expected = 'The connection was interrupted before this response could be confirmed.';
+    expect(ownerFailureMessage(detail)).toBe(expected);
+    expect(toDisplayEvent(event(1, 'error', { text: detail }))).toEqual({
+      kind: 'lifecycle',
+      text: expected,
+    });
+    expect(toDisplayJob({ ...JOB, state: 'failed', detail }, {}).stateNote).toBe(expected);
+  });
+
+  it('keeps actionable task errors and assistant content unchanged', () => {
+    const detail = 'setup failed (1): missing package example';
+    expect(ownerFailureMessage(detail)).toBe(detail);
+    expect(
+      toDisplayEvent(event(1, 'message', { text: 'Investigate why the lease expired.' })),
+    ).toEqual({ kind: 'message', text: 'Investigate why the lease expired.' });
+  });
+
+  it('distinguishes a finished response from an interrupted response', () => {
+    expect(
+      ownerFailureMessage(
+        'Agent CLI context settled, but job finalization expired; the prompt was not replayed',
+      ),
+    ).toContain('The response finished');
+  });
+
+  it('distinguishes execution timeout and cancellation from connection failure', () => {
+    expect(ownerFailureMessage('shared Agent CLI turn exceeded its execution timeout')).toBe(
+      'This response took too long and was stopped.',
+    );
+    expect(ownerFailureMessage('cancelled after an indeterminate retained Agent CLI turn')).toBe(
+      'This response was stopped at your request.',
+    );
+  });
+});
 
 const JOB: AgentJobApi = {
   id: 'ajob_1',
@@ -100,9 +144,9 @@ describe('toDisplayEvent', () => {
     });
   });
 
-  it('renders a supersede with its reason', () => {
+  it('renders an interruption without its internal reason', () => {
     const row = toDisplayEvent(event(1, 'attempt_superseded', { reason: 'lease_expired' }));
-    expect(row).toEqual({ kind: 'lifecycle', text: 'attempt superseded (lease_expired)' });
+    expect(row).toEqual({ kind: 'lifecycle', text: 'attempt_superseded' });
   });
 
   it('keeps rate-limit warnings while hiding normal allowance events', () => {
@@ -298,8 +342,8 @@ describe('toDisplayJob', () => {
     const job = toDisplayJob(JOB, { events });
     expect(job.attempts).toHaveLength(2);
     expect(job.attempts[0].status).toBe('superseded');
-    expect(job.attempts[0].note).toContain('lease expired');
-    expect(job.attempts[0].note).toContain('a new attempt started');
+    expect(job.attempts[0].note).toContain('This run was interrupted.');
+    expect(job.attempts[0].note).toContain('Another run started.');
     expect(job.attempts[1].status).toBe('live');
   });
 
@@ -314,8 +358,8 @@ describe('toDisplayJob', () => {
       },
     );
     expect(job.attempts).toHaveLength(1);
-    expect(job.attempts[0].note).toBe('Worker lease expired; this attempt ended.');
-    expect(lifecyclePhaseLabel('attempt superseded (lease_expired)').text).toBe('Attempt ended');
+    expect(job.attempts[0].note).toBe('This run was interrupted.');
+    expect(lifecyclePhaseLabel('attempt superseded (lease_expired)').text).toBe('Run interrupted');
   });
 
   it('identifies the server-authoritative current attempt for readiness checks', () => {

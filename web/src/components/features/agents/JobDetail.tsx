@@ -27,7 +27,7 @@ import {
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
 
-import { lifecyclePhaseLabel, toDiffFileDetails } from './adapt';
+import { lifecyclePhaseLabel, ownerFailureMessage, toDiffFileDetails } from './adapt';
 import { isComposerSubmit } from './composerKeys';
 import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
@@ -555,7 +555,7 @@ function ownerRunNote(job: AgentJob): string | undefined {
   // The transcript carries the result; publication has its own status row.
   if (job.state === 'done' || job.state === 'needs_review') return undefined;
   return (
-    job.stateNote ||
+    (job.stateNote ? ownerFailureMessage(job.stateNote) : undefined) ||
     (job.state === 'failed'
       ? 'The run stopped before it could finish. No failure details were recorded.'
       : undefined)
@@ -567,8 +567,8 @@ function RunGuidance({ job }: { job: AgentJob }) {
     return (
       <div className="mt-2 space-y-2 text-xs text-gray-600 dark:text-gray-400">
         <p>
-          This chat can no longer be resumed. Files already written remain in the workspace. Start a
-          new chat to continue.
+          We couldn’t reconnect this chat. You can still review the conversation and any available
+          workspace files. Start a new chat to continue.
         </p>
         <Link
           href="/"
@@ -648,7 +648,8 @@ function RunNotices({ job, showNetworkWarning }: { job: AgentJob; showNetworkWar
           className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
         >
           {job.egressDenials} network request{job.egressDenials === 1 ? ' was' : 's were'} blocked
-          by the sandbox. This may have prevented part of your task from completing.
+          by this workspace’s network settings. This may have prevented part of your task from
+          completing.
         </p>
       ) : null}
     </>
@@ -1215,7 +1216,7 @@ export function JobDetail({
       job.workspaceShared &&
       typeof globalThis.confirm === 'function' &&
       !globalThis.confirm(
-        'This creates another live Agent CLI in the same sandbox and workspace. Concurrent edits can conflict or overwrite each other. Continue?',
+        'This creates another chat sharing the same workspace. Concurrent edits can conflict or overwrite each other. Continue?',
       )
     ) {
       return;
@@ -1582,7 +1583,7 @@ export function JobDetail({
                   {job.state === 'queued' && visibleEvents.length === 0 ? (
                     <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
                       <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
-                      {job.parentJobId ? 'Queued after the current run' : 'Waiting for a runner'}
+                      {job.parentJobId ? 'Queued after the current run' : 'Waiting to start'}
                     </div>
                   ) : null}
                 </div>
@@ -1653,7 +1654,7 @@ export function JobDetail({
                       // same path and cannot drift apart.
                       event.currentTarget.form?.requestSubmit();
                     }}
-                    placeholder={contextLost ? 'Native context unavailable' : 'Add a follow-up'}
+                    placeholder={contextLost ? 'Unable to reconnect this chat' : 'Add a follow-up'}
                     aria-label="Add a follow-up"
                     className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
                   />

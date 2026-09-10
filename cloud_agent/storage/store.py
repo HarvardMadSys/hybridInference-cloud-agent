@@ -5271,6 +5271,43 @@ class AgentJobStore:
             )
             if locked_job is None:
                 return None
+            # A committed settlement can lose only its HTTP acknowledgement.
+            # Return that same boundary without incrementing workspace_epoch or
+            # creating another snapshot. The original attempt must still own
+            # a live fence; a retry cannot resurrect a superseded activation.
+            replay = await conn.fetchval(
+                """
+                SELECT m.thread_id
+                FROM agent_thread_sandbox_memberships m
+                JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                JOIN agent_attempts a ON a.id = $2
+                JOIN agent_jobs j ON j.id = a.job_id
+                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                  AND g.generation = $4 AND m.activation_generation = $5
+                  AND m.active_attempt_id IS NULL
+                  AND m.admitted_job_id = $6 AND m.last_settled_job_id = $6
+                  AND m.native_state = 'ready' AND m.context_status = $7
+                  AND ($8::text IS NULL OR m.native_session_id = $8)
+                  AND a.lease_generation = $3 AND a.job_id = $6
+                  AND a.status = 'running' AND a.lease_expires_at > NOW()
+                  AND j.thread_id = m.thread_id AND j.current_attempt_id = a.id
+                  AND j.state = 'running'
+                """,
+                thread_id,
+                attempt_id,
+                lease_generation,
+                sandbox_generation,
+                activation_generation,
+                job_id,
+                context_status,
+                native_session_id,
+            )
+            if replay is not None:
+                row = await conn.fetchrow(
+                    f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+                    thread_id,
+                )
+                return _sandbox_row_to_dict(row)
             shared = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandbox_memberships m

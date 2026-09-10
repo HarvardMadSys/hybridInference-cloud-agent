@@ -523,6 +523,62 @@ def test_settled_success_survives_a_failed_completion_event_upload(
         finish.assert_not_called()
 
 
+@pytest.mark.parametrize("stage", ["admission", "supervisor_settle", "control_settle"])
+def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatch, stage):
+    from cloud_agent_host import runner as runner_mod
+
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    stream = Mock(return_value=(0, "", [], {"kind": "result", "status": "completed"}))
+
+    def configure(control, supervisor, finish):
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        if stage == "admission":
+            control.admit_chat_turn.side_effect = [httpx.ReadTimeout("ack lost"), None]
+        elif stage == "supervisor_settle":
+            supervisor.settle_shared.side_effect = [
+                runner_mod.SessionSupervisorError(503, "ack lost"),
+                {"native_session_id": "native-existing"},
+            ]
+        else:
+            control.settle_chat_sandbox.side_effect = [httpx.ReadTimeout("ack lost"), {}]
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+    assert result == 0
+    stream.assert_called_once()
+    assert control.admit_chat_turn.call_count == (2 if stage == "admission" else 1)
+    assert supervisor.settle_shared.call_count == (2 if stage == "supervisor_settle" else 1)
+    assert control.settle_chat_sandbox.call_count == (2 if stage == "control_settle" else 1)
+    supervisor.abandon_shared.assert_not_called()
+    control.abandon_chat_sandbox.assert_not_called()
+    finish.assert_called_once()
+    assert finish.call_args.args[0] == "succeeded"
+
+
+@pytest.mark.parametrize("status", [409, 410, 422, 503])
+def test_receipt_retry_is_bounded_and_does_not_retry_rejected_fences(monkeypatch, status):
+    from cloud_agent_host import runner as runner_mod
+
+    sleep = Mock()
+    monkeypatch.setattr(runner_mod.time, "sleep", sleep)
+    error = runner_mod.SessionSupervisorError(status, "rejected")
+    request = Mock(side_effect=error)
+    with pytest.raises(runner_mod.SessionSupervisorError):
+        runner_mod._retry_lifecycle_receipt("settle", "ajob_test", request)
+    assert request.call_count == (3 if status == 503 else 1)
+    assert sleep.call_count == (2 if status == 503 else 0)
+
+
+def test_control_lease_rejection_never_retries_settlement(monkeypatch):
+    from cloud_agent_host import runner as runner_mod
+
+    request = Mock(side_effect=LeaseLost("superseded"))
+    with pytest.raises(LeaseLost):
+        runner_mod._retry_lifecycle_receipt("settle", "ajob_test", request)
+    request.assert_called_once()
+
+
 @pytest.mark.parametrize(
     ("code", "frame", "preserved"),
     [
