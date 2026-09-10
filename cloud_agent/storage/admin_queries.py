@@ -38,10 +38,10 @@ _RUN_COLUMNS = """
     CASE WHEN t.title_source IN ('generated', 'manual')
          THEN LEFT(t.title, 160) END AS title,
     j.turn_no,
-    LEFT(j.user_id, 256) AS user_id, LEFT(j.repo, 256) AS repo,
+    LEFT(j.user_id, 256) AS user_id, LEFT(t.repo, 256) AS repo,
     LEFT(j.runtime, 128) AS runtime, LEFT(j.model, 256) AS model,
     LEFT(j.reasoning_effort, 64) AS reasoning_effort,
-    j.execution_profile, j.state, j.created_at, j.updated_at,
+    t.execution_profile, j.state, j.created_at, j.updated_at,
     ARRAY(SELECT DISTINCT LEFT(a.host_id, 256) FROM agent_attempts a
           WHERE a.job_id = j.id AND a.host_id IS NOT NULL
           ORDER BY 1) AS hosts,
@@ -125,7 +125,7 @@ class AdminRunQueries:
                 FROM agent_jobs j LEFT JOIN agent_threads t ON t.id = j.thread_id
                 WHERE j.created_at >= $1 AND j.created_at < $2
                   AND ($3::text IS NULL OR j.user_id = $3)
-                  AND ($4::text IS NULL OR j.repo = $4)
+                  AND ($4::text IS NULL OR t.repo = $4)
                   AND ($5::text IS NULL OR j.state = $5)
                   AND ($6::text IS NULL OR j.runtime = $6)
                   AND ($7::text IS NULL OR j.model = $7)
