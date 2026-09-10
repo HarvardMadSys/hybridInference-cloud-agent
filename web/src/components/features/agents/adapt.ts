@@ -178,7 +178,22 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     if (phase === 'checked_out' && payload.reused === true) {
       return { kind: 'lifecycle', text: 'workspace_reused' };
     }
-    return { kind: 'lifecycle', text: phase };
+    if (phase === 'rate_limit') {
+      const info = payload.info;
+      const status =
+        info && typeof info === 'object' ? (info as Record<string, unknown>).status : null;
+      if (status === 'rejected') {
+        return { kind: 'lifecycle', text: 'Model usage limit reached' };
+      }
+      if (status === 'allowed_warning') {
+        return { kind: 'lifecycle', text: 'Approaching model usage limit' };
+      }
+      return null;
+    }
+    if (phase === 'shared_tool_errors_observed') {
+      return { kind: 'lifecycle', text: 'Some tools encountered errors' };
+    }
+    return Object.hasOwn(LIFECYCLE_LABELS, phase) ? { kind: 'lifecycle', text: phase } : null;
   }
   if (type === 'raw') {
     // Raw records are unclassified runtime protocol data. They remain available
@@ -190,8 +205,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   // that only says whether files changed.
   if (type === 'diff') return null;
 
-  // An unrecognized kind still appears, rather than silently disappearing.
-  return { kind: 'lifecycle', text: type };
+  return null;
 }
 
 /** Extract the file list a patch touches, for the diff header. */
@@ -325,6 +339,8 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   result: 'Agent finished',
   publishing: 'Opening draft pull request',
   published: 'Draft pull request ready',
+  shared_snapshot_publishing: 'Opening draft pull request',
+  shared_snapshot_published: 'Draft pull request ready',
   cancelled_by_owner: 'Stopped by you',
 };
 

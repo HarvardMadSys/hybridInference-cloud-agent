@@ -159,18 +159,25 @@ function resourceStats(resources: TurnResources): { label: string; value: string
   // time. It is still recorded; it is no longer presented as a measurement.
   return [
     { label: 'CPU', value: formatCpu(resources.cpuUsec) },
-    { label: 'peak mem', value: formatBytes(resources.memPeakBytes) },
-    { label: 'net', value: net },
+    { label: 'peak memory', value: formatBytes(resources.memPeakBytes) },
+    { label: 'network', value: net },
   ].filter((stat): stat is { label: string; value: string } => Boolean(stat.value));
 }
 
 /** A measured cell, or the dash that says nothing was measured here. */
 function MeasuredCell({ value, shared }: { value: string | null; shared: boolean }) {
   if (value === null) {
-    return <span className="text-gray-400 dark:text-gray-600">—</span>;
+    return (
+      <span title="Not available" className="text-gray-400 dark:text-gray-600">
+        —
+      </span>
+    );
   }
   return (
-    <span className={shared ? 'text-gray-500 dark:text-gray-400' : undefined}>
+    <span
+      title={shared ? 'Includes other calls running at the same time; an upper bound.' : undefined}
+      className={shared ? 'text-gray-500 dark:text-gray-400' : undefined}
+    >
       {value}
       {shared ? <span className="ml-0.5">*</span> : null}
     </span>
@@ -205,7 +212,9 @@ function ConsumptionCell({
     return <MeasuredCell value={null} shared={false} />;
   }
   return (
-    <span>
+    <span
+      title={`${partial ? 'At least this much; some usage is missing. ' : ''}Child processes only; peak memory is the largest single process.`}
+    >
       {partial ? '≥' : ''}
       {accounted}
       <span className="ml-0.5 text-gray-400 dark:text-gray-500">ᵖ</span>
@@ -271,35 +280,8 @@ function TimeSplit({
       <span className="tabular-nums text-gray-800 dark:text-gray-200">
         {formatDuration(toolTimeMs)}
       </span>{' '}
-      in tools, <span className="tabular-nums">{formatDuration(rest)}</span> outside tools (model +
-      platform overhead).
+      using tools, <span className="tabular-nums">{formatDuration(rest)}</span> on other work.
     </p>
-  );
-}
-
-/**
- * One sentence saying what the durations in the table actually measure.
- *
- * Two different things can be in one table: a call the sandbox's own hooks
- * bracketed, and a call timed from when the platform parsed its events. The
- * second is wider than the execution by however long parsing took, and its
- * windows overlap far more readily — which is why a third of production's
- * calls could only be reported as sharing a measurement.
- */
-export function timingSourceNote(calls: ToolCallResources[], rows: number): string {
-  const exact = calls.filter((call) => call.timingSource === 'exact').length;
-  if (exact === 0) {
-    return (
-      'Durations are measured from when each call\u2019s events were parsed, which brackets the ' +
-      'execution from outside rather than timing it.'
-    );
-  }
-  if (exact >= rows) {
-    return 'Durations are the sandbox\u2019s own tool boundaries, recorded as each call ran.';
-  }
-  return (
-    `${exact} of ${rows} durations are the sandbox\u2019s own tool boundaries; the rest are ` +
-    'bracketed from outside, from when each call\u2019s events were parsed.'
   );
 }
 
@@ -308,13 +290,11 @@ function ToolTimingTable({
   calls,
   truncated,
   processObservationComplete,
-  sharedMemberAccounting,
 }: {
   timings: ToolTiming[];
   calls: ToolCallResources[];
   truncated: boolean;
   processObservationComplete: boolean;
-  sharedMemberAccounting: boolean;
 }) {
   const byId = useMemo(() => {
     const index = new Map<string, ToolCallResources[]>();
@@ -349,19 +329,6 @@ function ToolTimingTable({
     };
   });
   const longest = longestCall(rows.map((row) => row.timing));
-  const anyAccounted = rows.some(
-    (row) =>
-      row.measurement === null &&
-      (row.accountedCpuUsec !== null || row.accountedMemPeakBytes !== null),
-  );
-  const anyAccountedPartial = rows.some((row) => row.measurement === null && row.accountedPartial);
-  const anyUnmeasured = rows.some(
-    (row) =>
-      row.measurement === null &&
-      row.accountedCpuUsec === null &&
-      row.accountedMemPeakBytes === null,
-  );
-  const anyShared = rows.some((row) => row.measurement !== null && !row.measurement.exclusive);
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -378,9 +345,9 @@ function ToolTimingTable({
             <th className="py-1 font-medium">Tool</th>
             <th className="py-1 font-medium">Detail</th>
             <th className="py-1 text-right font-medium">Duration</th>
-            <th className="py-1 text-right font-medium">Process starts</th>
+            <th className="py-1 text-right font-medium">Processes</th>
             <th className="py-1 text-right font-medium">CPU</th>
-            <th className="py-1 text-right font-medium">Peak mem</th>
+            <th className="py-1 text-right font-medium">Peak memory</th>
           </tr>
         </thead>
         <tbody>
@@ -408,13 +375,24 @@ function ToolTimingTable({
                 <td className="max-w-0 truncate py-1 pr-3 align-top font-mono text-gray-500 dark:text-gray-400">
                   {timing.detail}
                 </td>
-                <td className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                <td
+                  className="py-1 text-right align-top tabular-nums text-gray-700 dark:text-gray-300"
+                  title={
+                    timing.ms !== null && timingSource !== 'exact'
+                      ? 'Approximate duration'
+                      : undefined
+                  }
+                >
                   {formatDuration(timing.ms) ?? 'unfinished'}
-                  <span className="block text-[10px] text-gray-400 dark:text-gray-500">
-                    {timingSource === 'exact' ? 'sandbox timing' : 'outside bracket'}
-                  </span>
                 </td>
-                <td className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300">
+                <td
+                  className="py-1 pl-3 text-right align-top tabular-nums text-gray-700 dark:text-gray-300"
+                  title={
+                    !processObservationComplete && processCount > 0
+                      ? 'At least this many processes; some data is missing.'
+                      : undefined
+                  }
+                >
                   {processObservationComplete
                     ? processCount
                     : processCount > 0
@@ -442,36 +420,6 @@ function ToolTimingTable({
           })}
         </tbody>
       </table>
-      {anyAccounted ? (
-        <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          ᵖ CPU and peak memory accounted by the guest kernel as the call&apos;s own processes
-          exited, exact for a call of any length. They cover child processes only, not work done
-          inside the agent&apos;s own process; peak memory is the largest single process.
-        </p>
-      ) : null}
-      {anyAccountedPartial ? (
-        <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          ≥ marks a call whose numbers leave out a process it may own: one shared with an
-          overlapping call, or one still running when the turn ended.
-        </p>
-      ) : null}
-      {anyUnmeasured ? (
-        <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          {sharedMemberAccounting
-            ? '— in CPU or memory means no exited child process was accounted to this call alone. ' +
-              'Shared turns never assign a container total to one member. Process-start counts ' +
-              'come from guest-kernel lifecycle events.'
-            : '— in CPU or memory means the historical periodic sampler did not span the call ' +
-              'and no exited child process was accounted to it alone. Process-start counts come ' +
-              'from guest-kernel lifecycle events.'}
-        </p>
-      ) : null}
-      {anyShared ? (
-        <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          * ran alongside other calls, which share the same reading. Those numbers cover all of
-          them, so each is an upper bound.
-        </p>
-      ) : null}
       {truncated ? (
         <p className="text-[11px] text-gray-500 dark:text-gray-400">
           This turn made more calls than are listed here.
@@ -484,19 +432,13 @@ function ToolTimingTable({
 function ProcessObservationTable({
   processes,
   complete,
-  truncated,
-  lost,
 }: {
   processes: ProcessObservation[];
   complete: boolean;
-  truncated: boolean;
-  lost: number;
 }) {
   return (
     <div className="mt-3">
-      <p className="mb-1 text-[11px] font-medium text-gray-600 dark:text-gray-300">
-        Guest process starts
-      </p>
+      <p className="mb-1 text-[11px] font-medium text-gray-600 dark:text-gray-300">Processes</p>
       {processes.length > 0 ? (
         <div className="overflow-x-auto">
           <table className="w-full text-[11px]">
@@ -507,10 +449,17 @@ function ProcessObservationTable({
                 <th className="py-1 text-right font-medium">Started</th>
                 <th className="py-1 text-right font-medium">Lifetime</th>
                 <th className="py-1 text-right font-medium">CPU</th>
-                <th className="py-1 text-right font-medium">Peak RSS</th>
-                <th className="py-1 text-right font-medium">I/O</th>
+                <th className="py-1 text-right font-medium">Peak memory</th>
+                <th
+                  className="py-1 text-right font-medium"
+                  title="Storage reads and writes, recorded when the process exits. Cached reads are excluded."
+                >
+                  I/O
+                </th>
                 <th className="py-1 text-right font-medium">Exit</th>
-                <th className="py-1 text-right font-medium">Tool rows</th>
+                <th className="py-1 text-right font-medium" title="Related tool call numbers">
+                  Tool calls
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -549,35 +498,20 @@ function ProcessObservationTable({
               ))}
             </tbody>
           </table>
-          <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-            CPU, peak RSS and I/O are the guest kernel&apos;s accounting of each process at exit, so
-            a process still running shows none. I/O is bytes the process itself read from and
-            dirtied to storage, so a write served from cache can still count and a read hit in cache
-            does not.
-          </p>
         </div>
-      ) : complete ? (
-        <p className="text-[11px] text-gray-500 dark:text-gray-400">
-          The guest kernel observed no child-process start during this turn.
-        </p>
       ) : null}
       {!complete ? (
         <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
-          Process observation is partial
-          {lost > 0 ? ` (${lost} process lifecycle event${lost === 1 ? '' : 's'} lost)` : ''}
-          {truncated ? '; bounded observer data was incomplete' : ''}.
+          Process data is incomplete.
         </p>
       ) : null}
     </div>
   );
 }
 
-type Explained = 'partial' | 'unmeasured' | null;
-
 export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: number }) {
   const [open, setOpen] = useState(false);
-  // Resource explanations can be opened with a click or tap.
-  const [explained, setExplained] = useState<Explained>(null);
+  const [showPartialDetails, setShowPartialDetails] = useState(false);
   const selectedTelemetry =
     attemptNo !== undefined && attemptNo > 0
       ? job.attempts.find((attempt) => attempt.no === attemptNo)?.telemetry
@@ -588,10 +522,12 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   const timings = useMemo(() => toolTimings(job.events, attemptNo), [job.events, attemptNo]);
   const duration = formatDuration(selectedTelemetry?.durationMs);
   const resources = selectedTelemetry?.resources;
-  const sharedMemberAccounting = resources?.samplerVersion === 'shared-member-v1';
   const stats = resources ? resourceStats(resources) : [];
   const processes = resources?.processes ?? [];
-  const hasProcessObservation = Boolean(resources?.processObserver);
+  const hasProcessObservation = Boolean(
+    resources?.processObserver &&
+    (processes.length > 0 || resources.processObservationComplete !== true),
+  );
   const hasDetails = timings.length > 0 || hasProcessObservation;
   // A sampler that reported at all but covered only part of the window makes
   // every number below a floor. Saying so is the difference between a partial
@@ -602,38 +538,7 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // healthy turn — and a warning that always fires is one nobody reads.
   // Missing a tenth of a turn is worth saying; missing two percent is not.
   const partial = Boolean(resources && resources.coverage < 0.9 && stats.length > 0);
-  const explanation =
-    explained === 'partial'
-      ? `Only ${Math.round((resources?.coverage ?? 0) * 100)}% of this turn was sampled, so the ` +
-        'numbers above are lower bounds rather than totals. This happens when the sandbox ' +
-        'took a while to appear, or ended before the turn did.'
-      : explained === 'unmeasured'
-        ? sharedMemberAccounting
-          ? hasProcessObservation
-            ? 'Whole-container totals are not assigned to one chat in a shared workspace. ' +
-              'The guest process lifecycle events below are separate, member-scoped measurements.'
-            : 'Whole-container totals are not assigned to one chat because fork siblings can ' +
-              'run concurrently. Unavailable data is not the same as a turn that consumed nothing.'
-          : hasProcessObservation
-            ? 'The historical periodic sandbox counters were unavailable. The guest process ' +
-              'events below are a separate measurement.'
-            : 'The historical sampler could not read this turn\u2019s sandbox counters. ' +
-              'Unavailable data is not the same as a turn that consumed nothing.'
-        : null;
-  const unmeasured = Boolean(resources && stats.length === 0);
-
-  // `unmeasured` counts as something to say: current shared turns intentionally
-  // omit group-wide totals, while old rows with no resource object predate the
-  // reporting contract entirely.
-  if (
-    !duration &&
-    stats.length === 0 &&
-    timings.length === 0 &&
-    !hasProcessObservation &&
-    !unmeasured
-  ) {
-    return null;
-  }
+  if (!duration && stats.length === 0 && !hasDetails) return null;
 
   return (
     <section className="mt-3 rounded-lg border border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-gray-900/60 px-3 py-2 text-[12px]">
@@ -648,21 +553,11 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
         {partial ? (
           <button
             type="button"
-            onClick={() => setExplained(explained === 'partial' ? null : 'partial')}
-            aria-expanded={explained === 'partial'}
+            onClick={() => setShowPartialDetails((value) => !value)}
+            aria-expanded={showPartialDetails}
             className="text-amber-700 dark:text-amber-400 underline-offset-2 hover:underline"
           >
-            partial
-          </button>
-        ) : null}
-        {unmeasured ? (
-          <button
-            type="button"
-            onClick={() => setExplained(explained === 'unmeasured' ? null : 'unmeasured')}
-            aria-expanded={explained === 'unmeasured'}
-            className="text-gray-400 dark:text-gray-500 underline-offset-2 hover:underline"
-          >
-            {sharedMemberAccounting ? 'turn totals unavailable' : 'resource data unavailable'}
+            Partial usage
           </button>
         ) : null}
         {hasDetails ? (
@@ -679,9 +574,10 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
           </button>
         ) : null}
       </div>
-      {explanation ? (
+      {partial && showPartialDetails ? (
         <p className="mt-2 border-t border-gray-200 dark:border-white/10 pt-2 text-[12px] leading-relaxed text-gray-600 dark:text-gray-400">
-          {explanation}
+          Usage is available for {Math.round((resources?.coverage ?? 0) * 100)}% of this turn.
+          Actual usage may be higher.
         </p>
       ) : null}
       {open && hasDetails ? (
@@ -697,22 +593,14 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
                 calls={resources?.toolCalls ?? []}
                 truncated={resources?.toolCallsTruncated === true}
                 processObservationComplete={resources?.processObservationComplete === true}
-                sharedMemberAccounting={sharedMemberAccounting}
               />
             </>
           ) : null}
-          {resources?.processObserver ? (
+          {hasProcessObservation && resources ? (
             <ProcessObservationTable
               processes={processes}
               complete={resources.processObservationComplete === true}
-              truncated={resources.processesTruncated === true}
-              lost={resources.processEventsLost ?? 0}
             />
-          ) : null}
-          {timings.length > 0 ? (
-            <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-              {timingSourceNote(resources?.toolCalls ?? [], timings.length)}
-            </p>
           ) : null}
         </div>
       ) : null}
