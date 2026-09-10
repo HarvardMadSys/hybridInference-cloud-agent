@@ -84,7 +84,7 @@ def _claim_body(worker_id: str) -> dict[str, Any]:
 
 
 class _FakeGateway:
-    """The model catalog, which the create endpoint fails fast against."""
+    """Explicit Agent access and the catalog used by job creation."""
 
     async def model_catalog(self, user_id: str) -> list[str]:
         return [_TEST_MODEL]
@@ -94,11 +94,8 @@ class _FakeGateway:
         # is exactly what an older gateway answers.
         return [_TEST_MODEL], {}
 
-    async def user_status(self, user_id: str) -> dict[str, Any]:
-        # Read by `require_agent_owner` on every write. A fake missing it fails
-        # the whole mutating surface with an AttributeError rather than a
-        # refusal — which is how it was found.
-        return {"exists": True, "active": True, "role": "admin"}
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 
     # No `mcp_registry` here any more. A fake that answers a question the real
     # client cannot ask is a test passing against an interface nothing has —
@@ -185,14 +182,14 @@ async def api(monkeypatch):
     # so FastAPI could not intercept it, and the real one answered with an
     # anonymous *admin* context because user auth was disabled in that test
     # environment. Overriding the credential resolver is the override the
-    # source meant; ``admin`` is the least privilege the router's own gate
-    # accepts, so the lifecycle stays the subject of the test.
+    # source meant. The gateway fake explicitly grants only ``agent.use``;
+    # the profile role has no authority over the lifecycle endpoints.
     # (``verify_api_key`` no longer exists here — the API-key branch was deleted
     # on 2026-08-04 — so this paragraph is about the source, not about a
     # dependency a reader will find.)
     app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
-        "role": "admin",
+        "role": "free",
         "authenticated": True,
     }
     # /worker/claim is machine-to-machine; stand in for an enrolled host credential.
