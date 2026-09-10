@@ -91,6 +91,12 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.pinFailed': '置顶失败。',
   'sidebar.unpinFailed': '取消置顶失败。',
   'sidebar.openSettings': '打开设置',
+  'sidebar.justNow': '刚刚',
+  'sidebar.minutesAgo': '{count}分钟',
+  'sidebar.hoursAgo': '{count}小时',
+  'sidebar.daysAgo': '{count}天',
+  'sidebar.dateThisYear': '{month}/{day}',
+  'sidebar.dateOtherYear': '{year}/{month}/{day}',
 
   // ── Settings ────────────────────────────────────────────────────────────
   'settings.title': '设置',

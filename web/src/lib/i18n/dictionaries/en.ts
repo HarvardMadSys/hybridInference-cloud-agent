@@ -89,6 +89,12 @@ export const en = {
   'sidebar.pinFailed': 'Could not pin the task.',
   'sidebar.unpinFailed': 'Could not unpin the task.',
   'sidebar.openSettings': 'Open settings',
+  'sidebar.justNow': 'now',
+  'sidebar.minutesAgo': '{count}m',
+  'sidebar.hoursAgo': '{count}h',
+  'sidebar.daysAgo': '{count}d',
+  'sidebar.dateThisYear': '{month}/{day}',
+  'sidebar.dateOtherYear': '{month}/{day}/{year}',
 
   // ── Settings ────────────────────────────────────────────────────────────
   'settings.title': 'Settings',
