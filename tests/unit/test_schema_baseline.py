@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "agent_attempts",
     "agent_gitlab_connections",
     "agent_host_enroll_tokens",
+    "agent_identity_namespace",
     "agent_job_events",
     "agent_jobs",
     "agent_mcp_connections",

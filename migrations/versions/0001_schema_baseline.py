@@ -667,6 +667,14 @@ _STATEMENTS: tuple[str, ...] = (
         CONSTRAINT ck_agent_process_observations_pids CHECK (pid > 0 AND tgid > 0)
     )
     """,
+    # ── Identity ──────────────────────────────────────────────────────
+    """
+    CREATE TABLE agent_identity_namespace (
+        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+        gateway_issuer TEXT NOT NULL CHECK (length(gateway_issuer) > 0),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
     # ── Integrations and administration ───────────────────────────────
     """
     CREATE TABLE agent_repo_grants (
@@ -737,6 +745,7 @@ _STATEMENTS: tuple[str, ...] = (
 # Reverse dependency order, for the downgrade. CASCADE covers the circular
 # references, whose ALTERs have no natural place in a linear order.
 _TABLES: tuple[str, ...] = (
+    "agent_identity_namespace",
     "agent_admin_audit_log",
     "agent_mcp_connections",
     "agent_gitlab_connections",
