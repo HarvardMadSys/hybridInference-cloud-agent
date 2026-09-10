@@ -31,11 +31,16 @@ def _alembic_config(db_config: dict[str, Any]):
     return config
 
 
-def apply_migrations(db_config: dict[str, Any]) -> None:
-    """Run ``alembic upgrade head`` against the test database."""
+def apply_migrations(db_config: dict[str, Any], revision: str = "head") -> None:
+    """Run ``alembic upgrade <revision>`` against the test database.
+
+    ``head`` is what a deploy does. A named revision exists for upgrade tests:
+    the only way to know a revision copes with the data the *previous* release
+    wrote is to build that shape and then upgrade over it.
+    """
     from alembic import command
 
-    command.upgrade(_alembic_config(db_config), "head")
+    command.upgrade(_alembic_config(db_config), revision)
 
 
 def downgrade_to(db_config: dict[str, Any], revision: str) -> None:

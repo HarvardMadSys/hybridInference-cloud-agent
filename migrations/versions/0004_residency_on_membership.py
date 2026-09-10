@@ -23,6 +23,14 @@ beat or release names the generation it holds, and a credential minted under
 one generation stays dead after the next. What changes is that there is one
 row per chat to say so.
 
+A database that has run 0003 may already carry failed fork operations, which
+named a target thread the old model never created -- it materialized the
+target only on success. Those are reconciled here, before the new foreign key
+is added: a settled failure leaves the tombstone the new model leaves, and an
+operation still in flight refuses the migration instead of being tombstoned by
+it, because settling one is the reaper's decision and finalization creates its
+target thread itself.
+
 Revision ID: 0004_residency_on_membership
 Revises: 0003_thread_level_config
 """
@@ -77,6 +85,76 @@ def upgrade() -> None:
         CREATE INDEX idx_agent_memberships_hot_residency
             ON agent_thread_sandbox_memberships (residency_lease_expires_at)
             WHERE residency_status = 'hot'
+        """
+    )
+    # An operation prepared under 0003 named a target thread it had not created
+    # yet -- the old model materialized the target only once the fork
+    # succeeded -- so a fork that failed left its row pointing at a thread that
+    # does not exist, and the foreign key below cannot be added over that. Give
+    # every such target the tombstone the new model leaves behind: a
+    # soft-deleted thread and a membership whose slot was released.
+    #
+    # Only a settled failure is tombstoned. An operation still `preparing` or
+    # `materialized` is one whose coordinator has not finished, and stopping it
+    # mid-fork is the reaper's decision, not a migration's: the reaper fails a
+    # stale `preparing` and finalizes a `materialized`, and finalization creates
+    # the target itself. Refusing here rather than guessing means a cutover that
+    # began with a fork in flight is stopped while the old writer can still
+    # settle it -- see "Applying migrations that are not backwards-compatible"
+    # in `docs/operations.md`.
+    # No ``%`` anywhere in this block: a migration is executed through a
+    # driver that treats ``%`` as a placeholder marker, and a bare one in a
+    # message is not worth the escaping.
+    op.execute(
+        """
+        DO $$
+        DECLARE
+            inflight integer;
+        BEGIN
+            SELECT count(*) INTO inflight FROM agent_session_forks
+            WHERE state IN ('preparing', 'materialized');
+            IF inflight > 0 THEN
+                RAISE EXCEPTION
+                    'agent_session_forks still has an operation preparing or '
+                    'materialized; let the fork coordinator settle it before '
+                    'applying 0004_residency_on_membership';
+            END IF;
+        END
+        $$
+        """
+    )
+    op.execute(
+        """
+        INSERT INTO agent_threads
+            (id, user_id, repo, title, title_source,
+             setup_script, execution_profile, mcp_servers,
+             deleted_at, created_at, updated_at)
+        SELECT f.target_thread_id, f.user_id, s.repo,
+               left(s.title || ' (fork)', 160), 'inherited',
+               s.setup_script, s.execution_profile, s.mcp_servers,
+               COALESCE(f.completed_at, f.updated_at), f.created_at, f.updated_at
+        FROM agent_session_forks f
+        JOIN agent_threads s ON s.id = f.source_thread_id
+        WHERE f.state = 'failed'
+          AND NOT EXISTS (SELECT 1 FROM agent_threads t WHERE t.id = f.target_thread_id)
+        """
+    )
+    op.execute(
+        """
+        INSERT INTO agent_thread_sandbox_memberships
+            (thread_id, user_id, sandbox_id, native_state, context_status,
+             resident_state, forked_from_thread_id, fork_anchor_job_id,
+             last_error, created_at, updated_at)
+        SELECT f.target_thread_id, f.user_id, f.sandbox_id, 'lost', 'lost',
+               'lost', f.source_thread_id, f.source_job_id,
+               f.last_error, f.created_at, f.updated_at
+        FROM agent_session_forks f
+        WHERE f.state = 'failed'
+          AND EXISTS (SELECT 1 FROM agent_threads t WHERE t.id = f.target_thread_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_thread_sandbox_memberships m
+              WHERE m.thread_id = f.target_thread_id
+          )
         """
     )
     op.execute("DROP TABLE agent_thread_residencies")
