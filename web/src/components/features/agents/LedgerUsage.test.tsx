@@ -157,6 +157,8 @@ describe('LedgerUsage', () => {
       'datetime',
       '2026-09-09T10:10:00Z',
     );
+    expect(screen.getByText(/Updated at/)).not.toBeVisible();
+    expect(screen.getByText('Estimated inference cost')).not.toBeVisible();
   });
 
   it('includes the local date for older updates and the year when it differs', async () => {
@@ -215,7 +217,9 @@ describe('LedgerUsage', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(data);
     await mount();
     expect(screen.getByText('Some usage is unavailable.')).toBeInTheDocument();
-    expect(screen.getByText('Input tokens').parentElement).toHaveTextContent('1,200 (incomplete)');
+    expect(screen.getByText('Input tokens').parentElement).toHaveTextContent(
+      '1,200 (some usage missing)',
+    );
     expect(screen.getByText('Some token counts are estimated.')).toBeInTheDocument();
     expect(screen.queryByText(/attempt|missing this value/i)).not.toBeInTheDocument();
   });
@@ -279,7 +283,9 @@ describe('LedgerUsage', () => {
     };
     vi.mocked(getAgentJobUsage).mockResolvedValue(data);
     await mount();
-    expect(screen.getByText('Conversation total (incomplete)')).toBeInTheDocument();
+    expect(screen.getByText('Conversation total')).not.toBeVisible();
+    expect(screen.getByText('Some conversation usage is unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText(/\(incomplete\)/)).not.toBeInTheDocument();
     expect(screen.getByLabelText('Conversation usage')).toHaveTextContent(
       '6 model calls · 2.8k input tokens · 80 output tokens',
     );
@@ -320,9 +326,11 @@ describe('LedgerUsage', () => {
   it('requests fresh source usage throughout active runs, including after five minutes', async () => {
     const view = await mount({ ...job, state: 'running' });
     expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Counting usage…')).toBeVisible();
     await advance(360_000);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(25);
     expect(refreshAgentJobUsage).toHaveBeenCalledTimes(25);
+    expect(screen.getByText('Counting usage…')).toBeVisible();
     expect(refreshAgentJobUsage).toHaveBeenLastCalledWith('ajob_1', expect.any(AbortSignal));
     view.unmount();
     await advance(60_000);

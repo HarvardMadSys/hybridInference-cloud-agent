@@ -645,38 +645,50 @@ function RunTiming({ job }: { job: AgentJob }) {
             Number.isFinite(job.durationMs)
           ? job.durationMs
           : null;
+  const started = start === null ? null : new Date(start);
+  const today = new Date(now);
+  const sameDay = started?.toDateString() === today.toDateString();
   return (
-    <dl className="mt-3 divide-y divide-gray-100 dark:divide-white/5">
-      {job.turnNo !== undefined ? <DetailStat label="Turn" value={job.turnNo} /> : null}
-      <DetailStat
-        label="Started"
-        value={
-          start !== null ? (
-            <time dateTime={job.startedAt!}>
-              {new Date(start).toLocaleString(undefined, {
-                month: 'short',
-                day: 'numeric',
-                year: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                timeZoneName: 'short',
-              })}
-            </time>
-          ) : job.state === 'queued' ? (
-            'Not started'
-          ) : (
-            'Not recorded'
-          )
-        }
-      />
-      {job.state !== 'queued' ? (
-        <DetailStat
-          label="Elapsed"
-          value={duration !== null ? elapsedTime(duration) : 'Not recorded'}
-        />
-      ) : null}
-    </dl>
+    <div>
+      <dl className="flex flex-wrap gap-x-6 gap-y-2 text-[13px]">
+        {job.turnNo !== undefined ? (
+          <div className="flex items-baseline gap-2">
+            <dt className="text-gray-500 dark:text-gray-400">Turn</dt>
+            <dd className="font-medium tabular-nums text-gray-900 dark:text-gray-100">
+              {job.turnNo}
+            </dd>
+          </div>
+        ) : null}
+        {job.state !== 'queued' ? (
+          <div className="flex items-baseline gap-2">
+            <dt className="text-gray-500 dark:text-gray-400">Elapsed</dt>
+            <dd className="font-medium tabular-nums text-gray-900 dark:text-gray-100">
+              {duration !== null ? elapsedTime(duration) : 'Not recorded'}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+        <span>Started</span>{' '}
+        {started ? (
+          <time
+            dateTime={job.startedAt!}
+            title={started.toLocaleString('en-US', { timeZoneName: 'short' })}
+          >
+            {sameDay ? 'Today, ' : ''}
+            {started.toLocaleString('en-US', {
+              ...(sameDay ? {} : { month: 'short', day: 'numeric' }),
+              ...(started.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
+              hour: '2-digit',
+              minute: '2-digit',
+              hourCycle: 'h23',
+            })}
+          </time>
+        ) : (
+          <span>{job.state === 'queued' ? 'Not started' : 'Not recorded'}</span>
+        )}
+      </p>
+    </div>
   );
 }
 
@@ -689,9 +701,16 @@ function DetailsDrawer({
   onClose: () => void;
   onOpenDiff: () => void;
 }) {
-  const pill = STATE_PILL[job.state];
   const runNote = ownerRunNote(job);
   const hasDiff = job.workspaceDiffAvailable ?? job.diffFiles.length > 0;
+  const hasChanges = hasDiff && job.diffFiles.length > 0;
+  const needsAttention = job.state === 'failed' || job.state === 'cancelled' || hasLostContext(job);
+  const publicationNote =
+    job.workspacePublicationState === 'failed'
+      ? 'Could not publish changes'
+      : job.workspacePublicationState === 'publishing'
+        ? 'Publishing changes…'
+        : null;
   return (
     <div className="fixed inset-0 z-[70] flex justify-end" role="dialog" aria-label="Run details">
       <button
@@ -700,7 +719,7 @@ function DetailsDrawer({
         onClick={onClose}
         className="absolute inset-0 bg-gray-950/15 dark:bg-black/50"
       />
-      <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-2xl">
+      <aside className="relative flex h-full w-full max-w-lg flex-col border-l border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-2xl">
         <div className="flex items-center border-b border-gray-200 dark:border-white/10 px-5 py-4">
           <h2 className="font-semibold text-gray-900 dark:text-gray-50">Run details</h2>
           <button
@@ -725,15 +744,16 @@ function DetailsDrawer({
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           <div className="space-y-6">
             <section aria-label="Run outcome">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                  Outcome
-                </h3>
-                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}>
-                  {pill.label}
-                </span>
-              </div>
               <RunTiming job={job} />
+              {needsAttention ? (
+                <h3 className="mt-4 text-[13px] font-medium text-gray-900 dark:text-gray-100">
+                  {job.state === 'failed'
+                    ? 'Run failed'
+                    : job.state === 'cancelled'
+                      ? 'Run stopped'
+                      : 'Chat unavailable'}
+                </h3>
+              ) : null}
               {runNote && runNote.length > 240 ? (
                 <details className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
                   <summary className="cursor-pointer">{runNote.slice(0, 240)}…</summary>
@@ -750,15 +770,18 @@ function DetailsDrawer({
               ) : null}
               <RunGuidance job={job} />
             </section>
+            <LedgerUsage job={job} />
             <section aria-label="Workspace changes">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                Workspace changes
+              <h3 className="text-[13px] font-medium text-gray-900 dark:text-gray-100">
+                Workspace
               </h3>
               <p className="mt-2 text-sm font-medium text-gray-800 dark:text-gray-200">
-                {hasDiff
+                {hasChanges
                   ? `${job.diffFiles.length} file${job.diffFiles.length === 1 ? '' : 's'} changed`
-                  : 'Workspace changes unavailable'}
-                {hasDiff && job.diffStat ? (
+                  : hasDiff
+                    ? 'No workspace changes'
+                    : 'Workspace changes unavailable'}
+                {hasChanges && job.diffStat ? (
                   <span className="ml-2 whitespace-nowrap font-mono text-xs">
                     <span className="text-emerald-600 dark:text-emerald-400">
                       +{job.diffStat.add}
@@ -767,70 +790,59 @@ function DetailsDrawer({
                   </span>
                 ) : null}
               </p>
-              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Current workspace compared with the base. It may include changes from other turns
-                {job.workspaceShared ? ' and chats sharing this workspace' : ''}.
-              </p>
-              <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
-                <DetailStat label="Branch" value={job.branch} />
-                <DetailStat
-                  label="Pull request"
-                  value={
-                    job.prUrl ? (
-                      <a
-                        href={job.prUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-700 underline underline-offset-2 dark:text-blue-400"
-                      >
-                        {job.prLabel ?? 'Draft PR'}
-                      </a>
-                    ) : job.workspacePublicationState === 'failed' ? (
-                      'Could not publish changes'
-                    ) : job.workspacePublicationState === 'publishing' ? (
-                      'Publishing changes…'
-                    ) : (
-                      'No pull request yet'
-                    )
-                  }
-                />
-              </dl>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <RunActions
-                  job={job}
-                  onOpenDiff={onOpenDiff}
-                  showChanges={hasDiff || job.state !== 'queued'}
-                />
-              </div>
+              {hasChanges ? (
+                <p className="mt-1 break-words text-xs text-gray-500 dark:text-gray-400">
+                  Current {job.workspaceShared ? 'shared ' : ''}workspace compared with{' '}
+                  {job.baseRef || 'the base'}.
+                </p>
+              ) : null}
+              {!job.prUrl && publicationNote ? (
+                <p className="mt-2 text-xs text-gray-600 dark:text-gray-400">{publicationNote}</p>
+              ) : null}
+              {hasChanges || job.prUrl ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <RunActions job={job} onOpenDiff={onOpenDiff} showChanges={hasChanges} />
+                </div>
+              ) : null}
             </section>
-            <LedgerUsage job={job} />
             <section>
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+              <h3 className="text-[13px] font-medium text-gray-900 dark:text-gray-100">
                 Environment
               </h3>
-              <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
-                <DetailStat label="Agent" value={job.runtime} />
-                <DetailStat label="Model" value={job.model} />
-                {/* Only when a depth was chosen. An absent row is the honest
+              <p className="mt-2 break-words text-[13px] text-gray-800 dark:text-gray-200">
+                {job.runtime} <span className="text-gray-400 dark:text-gray-500">·</span>{' '}
+                {job.model}
+              </p>
+              <p className="mt-1 break-words text-xs text-gray-500 dark:text-gray-400">
+                {job.repo}
+                {job.baseRef ? ` · ${job.baseRef}` : ''}
+              </p>
+              <details className="mt-3">
+                <summary className="cursor-pointer text-xs font-medium text-gray-600 dark:text-gray-400">
+                  Configuration details
+                </summary>
+                <dl className="mt-2">
+                  {/* Only when a depth was chosen. An absent row is the honest
                       rendering of Auto: nobody picked, so there is nothing to
                       report. */}
-                {job.reasoningEffort ? (
-                  <DetailStat label="Reasoning" value={job.reasoningEffort} />
-                ) : null}
-                <DetailStat label="Repository" value={job.repo} />
-                <DetailStat
-                  label="Base"
-                  value={
-                    job.baseRef && job.baseSha
-                      ? `${job.baseRef} · ${job.baseSha}`
-                      : job.baseRef || job.baseSha
-                  }
-                />
-                <DetailStat
-                  label="Sandbox"
-                  value={sandboxDisplayLabel(job.sandbox) || 'Not recorded'}
-                />
-              </dl>
+                  {job.reasoningEffort ? (
+                    <DetailStat label="Reasoning" value={job.reasoningEffort} />
+                  ) : null}
+                  <DetailStat label="Branch" value={job.branch} />
+                  <DetailStat
+                    label="Base"
+                    value={
+                      job.baseRef && job.baseSha
+                        ? `${job.baseRef} · ${job.baseSha}`
+                        : job.baseRef || job.baseSha
+                    }
+                  />
+                  <DetailStat
+                    label="Sandbox"
+                    value={sandboxDisplayLabel(job.sandbox) || 'Not recorded'}
+                  />
+                </dl>
+              </details>
               {job.egressDenials > 0 ? (
                 <p
                   role="note"

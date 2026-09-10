@@ -81,10 +81,15 @@ the resulting cache and follows delayed terminal refreshes; it does not
 equate five elapsed minutes with final settlement. No usage work blocks task
 completion. Repeated requests reuse in-flight work.
 
-Run details serves the task owner: outcome, workspace changes, concise usage,
-and environment. The primary usage summary shows model calls and input/output
-tokens from Gateway snapshots. Cost estimates and known token details are
-collapsed; missing reasoning alone does not produce a warning. The drawer
+Run details serves the task owner: compact turn and elapsed time, concise usage,
+workspace changes, and environment. Successful runs have no redundant completion
+badge or Outcome heading; failures and context loss keep their recovery guidance.
+The primary usage summary shows model calls and input/output tokens from Gateway
+snapshots. Conversation totals, cost estimates, known token details, and update
+timestamps are collapsed under Usage details. Active or scheduled refreshes are
+labelled using their actual state; incomplete coverage uses a missing-usage
+message, without guessing how many turns are missing. Missing reasoning alone
+does not produce a warning. The drawer
 does not expose attempt selectors, query windows, or reconciliation internals.
 The API retains those fields for diagnostic clients. Raw event JSON is not
 shown in the drawer; failure reasons and recovery guidance remain visible.
@@ -92,7 +97,12 @@ The event API and stored execution history remain available for diagnostics.
 The drawer opens directly to these details, with no nested tabs. Workspace
 changes appear as a summary and a View changes action that opens the shared
 Git workspace; the full diff is displayed there rather than duplicated in
-the drawer.
+the drawer. A confirmed empty workspace has no View changes button or absent-PR
+placeholder, but existing PR links and publishing/failure states remain visible.
+Missing diff data is distinguished from no changes. Environment shows the agent,
+model, repository and base ref; branch, revision, sandbox and reasoning settings
+are collapsed under Configuration details. Positive network-denial warnings
+remain visible outside that disclosure.
 
 Only when Gateway totals are absent does the drawer fall back to agent-reported
 tokens, with a source label and no invented cost or call count. The additive

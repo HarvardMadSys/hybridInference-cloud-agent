@@ -177,7 +177,10 @@ function UsageRow({
       <dd className="text-right text-gray-800 dark:text-gray-200">
         <span className="break-all tabular-nums">{value}</span>
         {incomplete ? (
-          <span className="ml-1 text-xs text-gray-500 dark:text-gray-400"> (incomplete)</span>
+          <span className="ml-1 text-xs text-gray-500 dark:text-gray-400">
+            {' '}
+            (some usage missing)
+          </span>
         ) : null}
       </dd>
     </div>
@@ -320,8 +323,12 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
   const failed = Boolean(result?.failed || result?.unsupported || (data && hasRefreshError(data)));
   const counting = Boolean(
     !failed &&
-    !hasValues &&
-    (ledger?.status === 'pending' || ledger?.refreshing || job.state === 'queued'),
+    ledger?.status !== 'unavailable' &&
+    (ledger?.status === 'pending' ||
+      ledger?.refreshing ||
+      result?.requesting ||
+      job.state === 'queued' ||
+      job.state === 'running'),
   );
   const incomplete = Boolean(
     gatewayTotals &&
@@ -340,12 +347,13 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
     ? (ledger?.unknown_rows ?? null)
     : null;
   const conversation = data?.conversation;
+  const countingConversation = Boolean(
+    conversation?.active || conversation?.refreshing || conversation?.next_refresh_at,
+  );
 
   return (
     <section aria-label="Usage">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-        Usage
-      </h3>
+      <h3 className="text-[13px] font-medium text-gray-900 dark:text-gray-100">Usage</h3>
       {loading ? (
         <div role="status" aria-label="Loading usage" className="mt-3">
           <span className="sr-only">Loading usage…</span>
@@ -372,70 +380,75 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
               Some usage is unavailable.
             </p>
           ) : null}
-          {gatewayTotals && ledger?.queried_at ? (
+          {hasValues && gatewayTotals && (failed || counting || ledger?.next_refresh_at) ? (
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Updated at{' '}
-              <time dateTime={ledger.queried_at} title={ledger.queried_at}>
-                {timestamp(ledger.queried_at)}
-              </time>
               {failed
-                ? ' · Update temporarily unavailable.'
-                : result?.requesting || ledger.refreshing
-                  ? ' · Updating…'
-                  : ledger.next_refresh_at
-                    ? ' · Usage may change.'
-                    : ''}
+                ? 'Update temporarily unavailable.'
+                : counting
+                  ? 'Counting usage…'
+                  : 'Usage may change.'}
             </p>
           ) : null}
-          {conversation && conversation.turn_count > 1 ? (
-            <div className="mt-3 text-xs leading-5 text-gray-500 dark:text-gray-400">
-              <p>
-                Conversation total
-                {conversation.incomplete ? ' (incomplete)' : ''}
-              </p>
-              {conversation.totals ? (
-                <UsageSummary totals={conversation.totals} label="Conversation usage" />
-              ) : (
-                <p>Usage temporarily unavailable.</p>
-              )}
-              {conversation.queried_at ? (
-                <p>
-                  Updated at{' '}
-                  <time dateTime={conversation.queried_at} title={conversation.queried_at}>
-                    {timestamp(conversation.queried_at)}
-                  </time>
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-          {totals && hasValues ? (
+          {(totals && hasValues) || (conversation && conversation.turn_count > 1) ? (
             <details className="mt-3">
               <summary className="cursor-pointer text-xs font-medium text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200">
                 Usage details
               </summary>
-              <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
-                {metrics.map(([key, label]) =>
-                  known(totals[key]) ? (
+              {totals && hasValues ? (
+                <dl className="mt-2">
+                  {metrics.map(([key, label]) =>
+                    known(totals[key]) ? (
+                      <UsageRow
+                        key={key}
+                        label={label}
+                        value={count(totals[key])}
+                        incomplete={(unknown?.[key] ?? 0) > 0}
+                      />
+                    ) : null,
+                  )}
+                  {totals.spent_usd != null ? (
                     <UsageRow
-                      key={key}
-                      label={label}
-                      value={count(totals[key])}
-                      incomplete={(unknown?.[key] ?? 0) > 0}
+                      label="Estimated inference cost"
+                      value={`$${totals.spent_usd}`}
+                      incomplete={(unknown?.spent_usd ?? 0) > 0}
                     />
-                  ) : null,
-                )}
-                {totals.spent_usd != null ? (
-                  <UsageRow
-                    label="Estimated inference cost"
-                    value={`$${totals.spent_usd}`}
-                    incomplete={(unknown?.spent_usd ?? 0) > 0}
-                  />
-                ) : null}
-              </dl>
+                  ) : null}
+                </dl>
+              ) : null}
               {gatewayTotals && (ledger?.estimated_calls ?? 0) > 0 ? (
                 <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                   Some token counts are estimated.
                 </p>
+              ) : null}
+              {gatewayTotals && ledger?.queried_at ? (
+                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  Updated at{' '}
+                  <time dateTime={ledger.queried_at} title={ledger.queried_at}>
+                    {timestamp(ledger.queried_at)}
+                  </time>
+                </p>
+              ) : null}
+              {conversation && conversation.turn_count > 1 ? (
+                <div className="mt-4 border-t border-gray-100 pt-3 text-xs leading-5 text-gray-500 dark:border-white/5 dark:text-gray-400">
+                  <p className="font-medium text-gray-700 dark:text-gray-300">Conversation total</p>
+                  {conversation.totals ? (
+                    <UsageSummary totals={conversation.totals} label="Conversation usage" />
+                  ) : (
+                    <p>Usage temporarily unavailable.</p>
+                  )}
+                  {conversation.incomplete && conversation.totals ? (
+                    <p>Some conversation usage is unavailable.</p>
+                  ) : null}
+                  {countingConversation ? <p>Counting conversation usage…</p> : null}
+                  {conversation.queried_at ? (
+                    <p>
+                      Updated at{' '}
+                      <time dateTime={conversation.queried_at} title={conversation.queried_at}>
+                        {timestamp(conversation.queried_at)}
+                      </time>
+                    </p>
+                  ) : null}
+                </div>
               ) : null}
             </details>
           ) : null}

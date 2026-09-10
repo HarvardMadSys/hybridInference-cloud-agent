@@ -630,6 +630,10 @@ describe('JobDetail', () => {
     expect(screen.getByRole('dialog', { name: 'Run details' })).toBeInTheDocument();
     expect(screen.getByRole('status', { name: 'Loading usage' })).toBeInTheDocument();
     expect(screen.getByText('Sandbox')).toBeInTheDocument();
+    expect(screen.getByText('Sandbox')).not.toBeVisible();
+    expect(screen.getByText('Configuration details').closest('details')).not.toHaveAttribute(
+      'open',
+    );
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
 
     expect(screen.queryByRole('button', { name: /Raw events/ })).not.toBeInTheDocument();
@@ -640,7 +644,7 @@ describe('JobDetail', () => {
     expect(within(drawer).getByText('1 file changed')).toBeInTheDocument();
   });
 
-  it('leads run details with outcome, actual execution time and the turn number', () => {
+  it('leads run details with execution time and turn number without a completion badge', () => {
     render(
       <JobDetail
         job={makeJob({
@@ -656,7 +660,7 @@ describe('JobDetail', () => {
     openRunDetails();
     const drawer = screen.getByRole('dialog', { name: 'Run details' });
     const outcome = within(drawer).getByRole('region', { name: 'Run outcome' });
-    expect(within(outcome).getByText('Done')).toBeInTheDocument();
+    expect(within(outcome).queryByText(/^(Done|Completed|Outcome)$/)).not.toBeInTheDocument();
     expect(within(outcome).getByText('3')).toBeInTheDocument();
     expect(within(outcome).getByText('1m 5s')).toBeInTheDocument();
     expect(outcome.querySelector('time')).toHaveAttribute('dateTime', '2026-09-10T10:05:00Z');
@@ -667,7 +671,7 @@ describe('JobDetail', () => {
   });
 
   it.each(['done', 'needs_review'] as const)(
-    'keeps %s completion in run details without redundant conversation status',
+    'keeps %s free of redundant completion labels in both the conversation and run details',
     (state) => {
       const stateNote = 'agent completed (shared workspace; publication snapshot pending)';
       render(
@@ -687,9 +691,7 @@ describe('JobDetail', () => {
       expect(screen.queryByText('Run complete')).not.toBeInTheDocument();
       openRunDetails();
       const outcome = screen.getByRole('region', { name: 'Run outcome' });
-      expect(
-        within(outcome).getByText(state === 'needs_review' ? 'Completed' : 'Done'),
-      ).toBeInTheDocument();
+      expect(within(outcome).queryByText(/^(Done|Completed|Outcome)$/)).not.toBeInTheDocument();
       expect(screen.getByText('Isolated VM')).toBeInTheDocument();
       expect(screen.queryByText('io.containerd.kata.v2')).not.toBeInTheDocument();
       expect(screen.queryByText(stateNote)).not.toBeInTheDocument();
@@ -733,6 +735,9 @@ describe('JobDetail', () => {
       const { rerender, unmount } = render(<JobDetail job={job} />);
       openRunDetails();
       expect(screen.getByText('10s')).toBeInTheDocument();
+      const runTime = screen.getByRole('region', { name: 'Run outcome' }).querySelector('time');
+      expect(runTime).toHaveTextContent(/^Today,/);
+      expect(runTime).not.toHaveTextContent(/GMT|UTC/);
       act(() => vi.advanceTimersByTime(2000));
       expect(screen.getByText('12s')).toBeInTheDocument();
       rerender(<JobDetail job={{ ...job, state: 'done', finishedAt: '2026-09-10T10:00:11Z' }} />);
@@ -770,7 +775,9 @@ describe('JobDetail', () => {
     expect(within(artifacts).getByText('1 file changed')).toBeInTheDocument();
     expect(within(artifacts).getByText('+1')).toBeInTheDocument();
     expect(within(artifacts).getByText('−0')).toBeInTheDocument();
-    expect(within(artifacts).getByText(/other turns and chats sharing/)).toBeInTheDocument();
+    expect(
+      within(artifacts).getByText(/Current shared workspace compared with/),
+    ).toBeInTheDocument();
     expect(within(artifacts).getByRole('link', { name: 'Open draft PR' })).toHaveAttribute(
       'href',
       prUrl,
@@ -803,10 +810,13 @@ describe('JobDetail', () => {
       const artifacts = screen.getByRole('region', { name: 'Workspace changes' });
       expect(
         within(artifacts).getByText(
-          available ? '0 files changed' : 'Workspace changes unavailable',
+          available ? 'No workspace changes' : 'Workspace changes unavailable',
         ),
       ).toBeInTheDocument();
-      expect(within(artifacts).getByRole('button', { name: 'View changes' })).toBeInTheDocument();
+      expect(
+        within(artifacts).queryByRole('button', { name: 'View changes' }),
+      ).not.toBeInTheDocument();
+      expect(within(artifacts).queryByText('No pull request yet')).not.toBeInTheDocument();
       expect(within(artifacts).queryByRole('button', { name: /Publish/ })).not.toBeInTheDocument();
       expect(
         within(artifacts).queryByRole('link', { name: 'Open draft PR' }),
@@ -823,6 +833,51 @@ describe('JobDetail', () => {
     expect(within(drawer).getByRole('note')).toHaveTextContent(
       '3 network requests were blocked by the sandbox.',
     );
+  });
+
+  it('keeps an existing PR accessible when the workspace has no remaining changes', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          workspaceDiffAvailable: true,
+          diffFiles: [],
+          prUrl: 'https://github.com/owner/repository/pull/7',
+        })}
+      />,
+    );
+    openRunDetails();
+    const workspace = screen.getByRole('region', { name: 'Workspace changes' });
+    expect(within(workspace).getByText('No workspace changes')).toBeVisible();
+    expect(within(workspace).getByRole('link', { name: 'Open draft PR' })).toHaveAttribute(
+      'href',
+      'https://github.com/owner/repository/pull/7',
+    );
+    expect(
+      within(workspace).queryByRole('button', { name: 'View changes' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['publishing', 'Publishing changes…'],
+    ['failed', 'Could not publish changes'],
+  ] as const)('preserves a %s publication status without a diff', (state, message) => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          workspaceDiffAvailable: true,
+          diffFiles: [],
+          workspacePublicationState: state,
+        })}
+      />,
+    );
+    openRunDetails();
+    const workspace = screen.getByRole('region', { name: 'Workspace changes' });
+    expect(within(workspace).getByText(message)).toBeVisible();
+    expect(
+      within(workspace).queryByRole('button', { name: 'View changes' }),
+    ).not.toBeInTheDocument();
   });
 
   it('requires a new chat only when context loss is confirmed', () => {
