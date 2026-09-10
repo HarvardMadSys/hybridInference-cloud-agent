@@ -37,6 +37,7 @@ PATHS = [
 def setup(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "admin-observations-test")
     monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-observations-session-test-long-secret")
+    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
     run = {
         "id": "ajob_other",
         "thread_id": "athr_other",
@@ -144,7 +145,7 @@ async def test_every_read_and_reveal_requires_current_admin_permission(setup, me
         elif auth == "revoked":
             client.cookies.set(
                 identity.SESSION_COOKIE,
-                identity.mint_session(user_id="admin-person", email=None, role="admin"),
+                identity.mint_session(user_id="admin-person"),
             )
         response = await client.request(method, path, headers=headers)
     assert response.status_code == (403 if auth == "revoked" else 401)
@@ -212,7 +213,7 @@ async def test_explicit_reveal_records_actor_owner_and_event_before_return(setup
         if browser:
             client.cookies.set(
                 identity.SESSION_COOKIE,
-                identity.mint_session(user_id="admin-person", email=None, role="free"),
+                identity.mint_session(user_id="admin-person"),
             )
         response = await client.post(
             PREFIX + "/ajob_other/events/20/content", headers={} if browser else ADMIN
