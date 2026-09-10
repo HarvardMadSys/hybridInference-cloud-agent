@@ -13,4 +13,32 @@ describe('session failure classification', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Unavailable', { status })));
     await expect(getSessionUser()).rejects.toMatchObject({ statusCode: status });
   });
+
+  it('preserves a typed configuration failure for the auth provider', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: {
+              error: { type: 'agent_configuration_error', message: 'Needs configuration' },
+            },
+          }),
+          { status: 503 },
+        ),
+      ),
+    );
+    await expect(getSessionUser()).rejects.toMatchObject({
+      code: 'agent_configuration_error',
+      statusCode: 503,
+    });
+  });
+
+  it.each(['<html>Wrong service</html>', 'null', '{}', '{"id":123}', '{"id":""}'])(
+    'rejects an invalid successful response: %s',
+    async (body) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body)));
+      await expect(getSessionUser()).rejects.toMatchObject({ code: 'invalid_session_response' });
+    },
+  );
 });

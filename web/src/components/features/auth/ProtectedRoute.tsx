@@ -50,22 +50,28 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     window.location.assign(`${basePath}/login?${query.toString()}`);
   }, [state.loading, state.error, state.isAuthenticated]);
 
-  if (state.error === 'unavailable') {
+  if (state.error) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-3 px-6 text-center">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
-          Agent temporarily unavailable
+          {state.error === 'unavailable' ? 'Agent temporarily unavailable' : 'Agent unavailable'}
         </h1>
         <p className="text-sm text-gray-500 dark:text-gray-400" role="alert">
-          We cannot confirm your access right now. Please try again shortly.
+          {state.error === 'configuration'
+            ? 'Agent sign-in is not configured correctly. Contact the service administrator.'
+            : state.error === 'invalid_response'
+              ? 'Agent returned an unexpected response. Contact the service administrator.'
+              : 'We cannot confirm your access right now. Please try again shortly.'}
         </p>
-        <button
-          type="button"
-          onClick={() => void refreshUser()}
-          className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white dark:bg-gray-100 dark:text-gray-900"
-        >
-          Try again
-        </button>
+        {state.error === 'unavailable' && (
+          <button
+            type="button"
+            onClick={() => void refreshUser()}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white dark:bg-gray-100 dark:text-gray-900"
+          >
+            Try again
+          </button>
+        )}
       </div>
     );
   }

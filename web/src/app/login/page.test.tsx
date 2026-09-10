@@ -72,7 +72,7 @@ describe('the login page', () => {
     render(<LoginPage />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Sign-in is not configured for this deployment.',
+      'Sign-in is not configured correctly for this deployment.',
     );
     expect(screen.queryByRole('link', { name: /sign in/i })).not.toBeInTheDocument();
   });
@@ -93,5 +93,17 @@ describe('the login page', () => {
     render(<LoginPage />);
     expect(await screen.findByRole('alert')).toHaveTextContent('This account cannot sign in');
     expect(screen.queryByRole('link', { name: /sign in|try again/i })).not.toBeInTheDocument();
+  });
+
+  it('starts a fresh flow for expired login without carrying the old code', async () => {
+    search = 'sign_in_error=expired&return_to=%2Fajob_123&code=spent&state=old';
+    render(<LoginPage />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('expired or is no longer valid');
+    const target = new URL(
+      screen.getByRole('link', { name: 'Start again' }).getAttribute('href') ?? '',
+      'https://agents.example.org',
+    );
+    expect(target.pathname).toBe('/api/v1/session/login');
+    expect([...target.searchParams.entries()]).toEqual([['return_to', '/ajob_123']]);
   });
 });

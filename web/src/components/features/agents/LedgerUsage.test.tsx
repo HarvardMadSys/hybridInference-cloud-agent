@@ -11,8 +11,13 @@ import {
   type AgentLedgerTotalsApi,
 } from '@/lib/api/agents';
 
-import { LedgerUsage } from './LedgerUsage';
+import { LedgerUsage as UsageView, useLedgerUsage } from './LedgerUsage';
 import type { AgentJob } from './types';
+
+function LedgerUsage({ job: currentJob }: { job: AgentJob }) {
+  const data = useLedgerUsage(currentJob);
+  return <UsageView job={currentJob} usage={data} />;
+}
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentJobUsage: vi.fn(),
@@ -124,7 +129,7 @@ afterEach(() => {
 });
 
 describe('LedgerUsage', () => {
-  it('uses one loading skeleton, then a compact summary with costs behind details', async () => {
+  it('uses one loading skeleton, then only the current run summary', async () => {
     let finish!: (value: AgentJobUsageApi) => void;
     vi.mocked(getAgentJobUsage).mockImplementation(
       () => new Promise((resolve) => (finish = resolve)),
@@ -139,13 +144,9 @@ describe('LedgerUsage', () => {
     expect(screen.getByLabelText('Run usage')).toHaveTextContent(
       '3 model calls · 1.2k input tokens · 80 output tokens',
     );
-    const details = screen.getByText('Usage details').closest('details');
-    expect(details).not.toHaveAttribute('open');
-    expect(screen.getByText('Estimated inference cost').parentElement).toHaveTextContent(
-      '$0.12345678',
-    );
-    expect(screen.getByText('Input tokens').parentElement).toHaveTextContent('1,200');
-    expect(screen.getByText('Cache write tokens').parentElement).toHaveTextContent('0');
+    expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
+    expect(screen.queryByText('Estimated inference cost')).not.toBeInTheDocument();
+    expect(screen.getByTitle('1,200 input tokens')).toHaveTextContent('1.2k input tokens');
     expect(screen.queryByText('Reasoning tokens')).not.toBeInTheDocument();
     expect(screen.queryByText(/Some usage is/)).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
@@ -153,35 +154,7 @@ describe('LedgerUsage', () => {
     expect(
       screen.queryByText(/gateway|runtime|attempt|retr(y|ies)|snapshot/i),
     ).not.toBeInTheDocument();
-    expect(screen.getByText(/Updated at/).querySelector('time')).toHaveAttribute(
-      'datetime',
-      '2026-09-09T10:10:00Z',
-    );
-  });
-
-  it('includes the local date for older updates and the year when it differs', async () => {
-    vi.setSystemTime(new Date(2026, 8, 9, 12, 0));
-    const data = usage();
-    data.ledger.queried_at = new Date(2025, 8, 8, 10, 10).toISOString();
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    await mount();
-    const time = screen.getByText(/Updated at/).querySelector('time');
-    expect(time).toHaveTextContent('8');
-    expect(time).toHaveTextContent('2025');
-    expect(time).toHaveAttribute('datetime', data.ledger.queried_at);
-  });
-
-  it('shows only the clock for an update from today in the viewer’s timezone', async () => {
-    vi.setSystemTime(new Date(2026, 8, 9, 12, 0));
-    const data = usage();
-    const updatedAt = new Date(2026, 8, 9, 10, 10);
-    data.ledger.queried_at = updatedAt.toISOString();
-    vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    await mount();
-    const time = screen.getByText(/Updated at/).querySelector('time');
-    expect(time?.textContent).toBe(
-      updatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    );
+    expect(screen.queryByText(/Updated at/)).not.toBeInTheDocument();
   });
 
   it('keeps measured zeros and hides unknown detail values without inventing costs', async () => {
@@ -200,7 +173,7 @@ describe('LedgerUsage', () => {
     expect(screen.getByLabelText('Run usage')).toHaveTextContent(
       '0 model calls · 0 input tokens · 0 output tokens',
     );
-    expect(screen.getByText('Reasoning tokens').parentElement).toHaveTextContent('0');
+    expect(screen.queryByText('Reasoning tokens')).not.toBeInTheDocument();
     expect(screen.queryByText('Cache read tokens')).not.toBeInTheDocument();
     expect(screen.queryByText('Cache write tokens')).not.toBeInTheDocument();
     expect(screen.queryByText('Estimated inference cost')).not.toBeInTheDocument();
@@ -215,7 +188,7 @@ describe('LedgerUsage', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(data);
     await mount();
     expect(screen.getByText('Some usage is unavailable.')).toBeInTheDocument();
-    expect(screen.getByText('Input tokens').parentElement).toHaveTextContent('1,200 (incomplete)');
+    expect(screen.getByTitle('1,200 input tokens')).toBeInTheDocument();
     expect(screen.getByText('Some token counts are estimated.')).toBeInTheDocument();
     expect(screen.queryByText(/attempt|missing this value/i)).not.toBeInTheDocument();
   });
@@ -227,7 +200,7 @@ describe('LedgerUsage', () => {
       '1.2k input tokens · 80 output tokens',
     );
     expect(screen.getByText('Reported by agent.')).toBeInTheDocument();
-    expect(screen.getByText('Input tokens').parentElement).toHaveTextContent('1,200');
+    expect(screen.getByTitle('1,200 input tokens')).toBeInTheDocument();
     expect(screen.queryByText(/model call/)).not.toBeInTheDocument();
     expect(screen.queryByText('Estimated inference cost')).not.toBeInTheDocument();
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
@@ -244,14 +217,14 @@ describe('LedgerUsage', () => {
     expect(screen.queryByText('200')).not.toBeInTheDocument();
   });
 
-  it('keeps a cache-only legacy report readable without inventing token totals', async () => {
+  it('does not mistake a cache-only legacy report for total input tokens', async () => {
     const data = unavailable();
     data.runtime.normalized_input_tokens = null;
     data.runtime.output_tokens = null;
     vi.mocked(getAgentJobUsage).mockResolvedValue(data);
     await mount();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('Token totals are unavailable.');
-    expect(screen.getByText('Cache read tokens').parentElement).toHaveTextContent('1,000');
+    expect(screen.getByText('Usage temporarily unavailable.')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Run usage')).not.toBeInTheDocument();
     expect(screen.queryByText('Input tokens')).not.toBeInTheDocument();
     expect(screen.queryByText('Output tokens')).not.toBeInTheDocument();
   });
@@ -266,7 +239,7 @@ describe('LedgerUsage', () => {
     expect(screen.queryByText(/9k/)).not.toBeInTheDocument();
   });
 
-  it('displays only measured conversation totals and marks missing turns', async () => {
+  it('never substitutes conversation totals for the current run', async () => {
     const data = unavailable();
     data.conversation = {
       turn_count: 3,
@@ -279,18 +252,13 @@ describe('LedgerUsage', () => {
     };
     vi.mocked(getAgentJobUsage).mockResolvedValue(data);
     await mount();
-    expect(screen.getByText('Conversation total (incomplete)')).toBeInTheDocument();
-    expect(screen.getByLabelText('Conversation usage')).toHaveTextContent(
-      '6 model calls · 2.8k input tokens · 80 output tokens',
-    );
+    expect(screen.queryByText('Conversation total')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Conversation usage')).not.toBeInTheDocument();
+    expect(screen.queryByText(/6 model calls|2.8k/)).not.toBeInTheDocument();
     expect(screen.getByLabelText('Run usage')).toHaveTextContent('1.2k input tokens');
-    expect(screen.getByText(/Updated at/).querySelector('time')).toHaveAttribute(
-      'datetime',
-      '2026-09-09T10:09:00Z',
-    );
   });
 
-  it('does not substitute runtime usage for an unavailable conversation total', async () => {
+  it('ignores unavailable conversation totals when this run has usage', async () => {
     const data = unavailable();
     data.conversation = {
       turn_count: 3,
@@ -304,7 +272,8 @@ describe('LedgerUsage', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(data);
     await mount();
     expect(screen.queryByLabelText('Conversation usage')).not.toBeInTheDocument();
-    expect(screen.getByText('Usage temporarily unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText('Usage temporarily unavailable.')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('1.2k input tokens');
   });
 
   it('treats an unsupported deployment as unavailable without displaying old placeholder counts', async () => {
@@ -320,9 +289,11 @@ describe('LedgerUsage', () => {
   it('requests fresh source usage throughout active runs, including after five minutes', async () => {
     const view = await mount({ ...job, state: 'running' });
     expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Counting usage…')).toBeVisible();
     await advance(360_000);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(25);
     expect(refreshAgentJobUsage).toHaveBeenCalledTimes(25);
+    expect(screen.getByText('Counting usage…')).toBeVisible();
     expect(refreshAgentJobUsage).toHaveBeenLastCalledWith('ajob_1', expect.any(AbortSignal));
     view.unmount();
     await advance(60_000);
@@ -369,69 +340,30 @@ describe('LedgerUsage', () => {
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
   });
 
-  it('keeps reading an older turn while another conversation turn has a delayed check', async () => {
-    const scheduled = usage();
-    scheduled.conversation = {
-      turn_count: 2,
-      totals: { ...totals, calls: 5 },
-      unknown_rows: { ...scheduled.ledger.unknown_rows! },
-      estimated_calls: 0,
-      queried_at: '2026-09-09T10:09:00Z',
-      incomplete: false,
-      refreshing: false,
-      next_refresh_at: new Date(Date.now() + 30_000).toISOString(),
-    };
-    const updated = structuredClone(scheduled);
-    updated.conversation!.next_refresh_at = null;
-    updated.conversation!.totals!.calls = 6;
-    vi.mocked(getAgentJobUsage)
-      .mockResolvedValueOnce(scheduled)
-      .mockResolvedValueOnce(scheduled)
-      .mockResolvedValue(updated);
-    await mount();
-    expect(screen.getByLabelText('Conversation usage')).toHaveTextContent('5 model calls');
-    await advance(30_000);
-    expect(screen.getByLabelText('Conversation usage')).toHaveTextContent('6 model calls');
-    await advance(300_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
-
-  it('observes an active sibling through its terminal check without refreshing the older turn', async () => {
-    const active = usage();
-    active.conversation = {
-      turn_count: 2,
-      totals: { ...totals, calls: 4 },
-      unknown_rows: { ...active.ledger.unknown_rows! },
-      estimated_calls: 0,
-      queried_at: '2026-09-09T10:09:00Z',
-      incomplete: false,
-      active: true,
-      refreshing: false,
-      next_refresh_at: null,
-    };
-    const scheduled = structuredClone(active);
-    scheduled.conversation!.active = false;
-    scheduled.conversation!.next_refresh_at = new Date(Date.now() + 60_000).toISOString();
-    scheduled.conversation!.totals!.calls = 5;
-    const updated = structuredClone(scheduled);
-    updated.conversation!.next_refresh_at = null;
-    updated.conversation!.totals!.calls = 6;
-    vi.mocked(getAgentJobUsage)
-      .mockResolvedValueOnce(active)
-      .mockResolvedValueOnce(active)
-      .mockResolvedValueOnce(scheduled)
-      .mockResolvedValueOnce(scheduled)
-      .mockResolvedValue(updated);
-    await mount();
-    await advance(30_000);
-    expect(screen.getByLabelText('Conversation usage')).toHaveTextContent('5 model calls');
-    await advance(30_000);
-    expect(screen.getByLabelText('Conversation usage')).toHaveTextContent('6 model calls');
-    await advance(300_000);
-    expect(getAgentJobUsage).toHaveBeenCalledTimes(5);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
-  });
+  it.each(['active', 'refreshing', 'scheduled'])(
+    'does not poll a settled run for a sibling that is %s',
+    async (state) => {
+      const data = usage();
+      data.conversation = {
+        turn_count: 2,
+        totals: { ...totals, calls: 5 },
+        unknown_rows: data.ledger.unknown_rows,
+        estimated_calls: 0,
+        queried_at: data.ledger.queried_at,
+        incomplete: false,
+        active: state === 'active',
+        refreshing: state === 'refreshing',
+        next_refresh_at: state === 'scheduled' ? new Date(Date.now() + 30_000).toISOString() : null,
+      };
+      vi.mocked(getAgentJobUsage).mockResolvedValue(data);
+      await mount();
+      await advance(360_000);
+      expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+      expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+      expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
+      expect(screen.queryByLabelText('Conversation usage')).not.toBeInTheDocument();
+    },
+  );
 
   it('keeps cached values when a request fails, then recovers automatically', async () => {
     vi.mocked(refreshAgentJobUsage).mockRejectedValueOnce(new Error('secret upstream details'));
@@ -454,9 +386,7 @@ describe('LedgerUsage', () => {
     expect(screen.getByLabelText('Run usage')).toHaveTextContent('3 model calls');
     expect(screen.getByText(/Update temporarily unavailable/)).toBeInTheDocument();
     expect(screen.queryByText('Reported by agent.')).not.toBeInTheDocument();
-    expect(screen.getByText('Estimated inference cost').parentElement).toHaveTextContent(
-      '$0.12345678',
-    );
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('1.2k input tokens');
   });
 
   it('backs off transient terminal source failures and recovers without manual refresh', async () => {

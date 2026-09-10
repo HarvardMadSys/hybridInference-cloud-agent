@@ -19,7 +19,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'taskActions.pin': '置顶',
   'taskActions.unpin': '取消置顶',
   'taskActions.fork': 'Fork',
-  'taskActions.details': '运行详情',
   'taskActions.cancel': '取消',
   'taskActions.save': '保存',
   'taskActions.saving': '保存中…',

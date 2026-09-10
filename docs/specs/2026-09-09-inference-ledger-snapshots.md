@@ -75,26 +75,38 @@ Owner endpoints are:
   return cached data immediately. It never waits for the Gateway.
 
 Both check job ownership before reading or queueing anything. The MCP listener
-does not mount these routes. While the drawer is open, active runs request
+does not mount these routes. While the job is displayed, active runs request
 fresh usage periodically, with backoff on transient failures. Polling reads
 the resulting cache and follows delayed terminal refreshes; it does not
 equate five elapsed minutes with final settlement. No usage work blocks task
 completion. Repeated requests reuse in-flight work.
 
-Run details serves the task owner: outcome, workspace changes, concise usage,
-and environment. The primary usage summary shows model calls and input/output
-tokens from Gateway snapshots. Cost estimates and known token details are
-collapsed; missing reasoning alone does not produce a warning. The drawer
-does not expose attempt selectors, query windows, or reconciliation internals.
-The API retains those fields for diagnostic clients. Raw event JSON is not
-shown in the drawer; failure reasons and recovery guidance remain visible.
-The event API and stored execution history remain available for diagnostics.
-The drawer opens directly to these details, with no nested tabs. Workspace
-changes appear as a summary and a View changes action that opens the shared
-Git workspace; the full diff is displayed there rather than duplicated in
-the drawer.
+The owner chat has no Run details entry or drawer. A small usage summary below
+the current assistant reply shows this job's model calls and input/output tokens
+from Gateway snapshots. If there is no event reply, it uses the current job's
+durable reply, or appears at the end of the run when neither is available.
+One job-level hook owns fetching and polling, so new streaming messages do not
+restart accounting requests. The current aggregate is never attached to an
+unrelated historical reply or a superseded attempt. Historical rows do not
+issue additional usage requests, and a sibling's conversation refresh does not
+keep a settled job polling.
 
-Only when Gateway totals are absent does the drawer fall back to agent-reported
+Active or scheduled refreshes are labelled using their actual state; incomplete
+coverage uses a missing-usage message, without guessing how many turns are
+missing. Missing reasoning alone does not produce a warning. Conversation
+totals, cost estimates, token breakdowns, update timestamps, configuration tables,
+and diagnostic disclosures are not shown in the owner chat. The API retains
+those fields for diagnostic clients. The event API and stored execution history
+also remain available.
+
+Successful replies have no redundant completion badge or Outcome heading.
+Existing View changes and PR actions remain in chat, with the full diff in the
+Git workspace. Empty workspaces have no View changes button or absent-PR
+placeholder. Failure reasons, recovery guidance, publication status, and blocked
+network warnings remain visible in chat; existing denial events do not acquire a
+duplicate aggregate warning.
+
+Only when Gateway totals are absent does the summary fall back to agent-reported
 tokens, with a source label and no invented cost or call count. The additive
 `runtime.normalized_input_tokens` projection includes cache reads and writes
 for Claude and pi, whose raw input excludes both. Codex input already includes

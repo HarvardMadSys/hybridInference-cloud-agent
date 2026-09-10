@@ -121,7 +121,7 @@ prefer a compatible fix or stop Agent while leaving the Gateway running.
 ## Local verification (2026-09-10)
 
 Gateway `make all` passed (5,254 tests; 48 skipped). Agent `make check` passed
-(2,147 tests), as did its 710 web tests, lint, type checking and production build.
+(2,161 tests), as did its 719 web tests, lint, type checking and production build.
 Fifteen additional PostgreSQL integration cases exercised initial binding,
 explicit adoption, preservation of existing owners, concurrent startup and
 the actual deployment-check/adoption CLI.
