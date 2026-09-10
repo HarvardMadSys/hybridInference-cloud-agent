@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -1395,3 +1396,71 @@ async def test_stopped_shared_group_releases_and_revokes_each_member_residency(r
     assert grants.renewed == []
     assert grants.revoked == ["agr-stopped", "agr-stopped"]
     assert response.json()["residencies_lost"] == []
+
+
+# ── residency grant minting ────────────────────────────────────────────
+#
+# ``_mint_residency_grant`` is the only caller of ``link_residency_grant`` and
+# the only place a residency credential is minted. The heartbeat cases above
+# exercise the endpoint choreography around it; these pin what the mint does
+# with the gateway's answer itself, which no HTTP case can reach.
+
+
+def _residency_row() -> dict[str, Any]:
+    """The residency row ``establish_residency`` hands the mint."""
+    return {
+        "thread_id": "athr_1",
+        "generation": 4,
+        "establishing_attempt_id": "aatt_9",
+        "user_id": "user-1",
+        "model": "claude-sonnet-4",
+    }
+
+
+async def test_a_grant_with_no_token_is_revoked_rather_than_abandoned() -> None:
+    """A named grant with no credential is dead weight until its TTL expires.
+
+    The gateway answering with a ``grant_id`` but no ``token`` is not a shape
+    anything can use, so the mint hands the grant back rather than leaving it
+    live with no owner. The caller reads ``None`` as "no credential" and
+    releases the residency it just established.
+    """
+    store = FakeHostPoolStore()
+    grants = RecordingGrants()
+    grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
+
+    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+
+    assert credential is None
+    assert grants.revoked == ["agr-orphan"]
+    assert store.linked == []
+
+
+async def test_a_refused_revoke_still_reports_no_credential() -> None:
+    """The cleanup is best-effort, not a new way for the mint to fail.
+
+    Before the revoke existed this path made no network call at all, so a
+    gateway that refuses the revoke must not turn "there is no credential"
+    into a 500.
+    """
+    store = FakeHostPoolStore()
+    grants = RecordingGrants()
+    grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
+    grants.revoke = AsyncMock(side_effect=RuntimeError("gateway is down"))
+
+    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+
+    assert credential is None
+
+
+async def test_an_answer_without_a_grant_id_has_nothing_to_revoke() -> None:
+    """An empty ``grant_id`` names nothing, so nothing is handed to revoke."""
+    store = FakeHostPoolStore()
+    grants = RecordingGrants()
+    grants.mint = AsyncMock(return_value={"grant_id": "", "token": "tok-1"})
+
+    credential = await hosts._mint_residency_grant(store, grants, row=_residency_row())
+
+    assert credential is None
+    assert grants.revoked == []
+    assert store.linked == []

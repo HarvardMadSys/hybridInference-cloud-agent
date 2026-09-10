@@ -372,7 +372,16 @@ async def _mint_residency_grant(
         return None
     grant_id = str(grant.get("grant_id") or "")
     token = str(grant.get("token") or "")
-    if not grant_id or not token:
+    if not grant_id:
+        return None
+    if not token:
+        # The gateway named a grant but handed no credential for it. Nothing
+        # can spend it, so returning here would leave a live capability with no
+        # owner until its own TTL ran out. Revoke it, best-effort: this path
+        # makes no other network call, and a gateway that refuses the revoke
+        # must not turn a clean "no credential" into a 500.
+        with contextlib.suppress(Exception):
+            await grants.revoke(grant_id)
         return None
     binding_id = getattr(grants, "binding_id", None)
     binding = {"binding_id": binding_id} if isinstance(binding_id, str) and binding_id else {}
