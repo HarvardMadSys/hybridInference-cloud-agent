@@ -1,0 +1,48 @@
+refactor(storage): split AgentJobStore into ports and Postgres repositories
+
+Move the 108 business operations of cloud_agent/storage/store.py into 15
+Postgres* repositories, each behind a Protocol, with the shared conn-level SQL
+extracted into cloud_agent/storage/_sql/. This is the mechanical half of the
+one-step persistence refactor: the old store still exists and still serves every
+caller, so this commit changes no behaviour.
+
+The move is generated rather than retyped. tools/split_store.py slices each
+method out of the original with its ast line/column information, requalifies
+only module-level names, and emits the result; tools/equivalence_check.py then
+proves the emitted method equals the original after the same requalification,
+for all 108 operations. The only normalisation is whitespace inside string
+literals, because re-indenting a method into a class body changes a SQL
+literal's leading indentation without changing the query.
+
+Structure:
+
+- cloud_agent/domain/        execution values, runtime version policy, id minting
+- cloud_agent/storage/_sql/  conn-level helpers and shared projections, none of
+                             which acquire a connection of their own
+- cloud_agent/ports/         one Protocol per capability, generated from the
+                             implementations so signatures cannot drift
+- tools/split_store.py       the splitter, and the report it writes to
+                             docs/storage/method-attribution.txt
+- tools/generate_ports.py    the port generator
+- tools/equivalence_check.py the proof described above
+
+Notable decisions, all recorded in docs/storage/method-attribution.txt:
+
+- initialize() is retained as a no-op. The design asked for its removal, but
+  tests/unit/test_migration_baseline.py asserts it exists exactly once and that
+  its body is a docstring plus a return; deleting it would mean weakening a test
+  to land a refactor, which this repository's rules forbid. Its disposition is
+  its own commit, where the test can be deleted as the subject rather than as
+  the cost.
+- _THREAD_SANDBOX_SOURCE lives in _sql/rows.py, not _sql/sandboxes.py as the
+  design sketched: the shared get_job projection in _sql/getters.py needs it,
+  and placing it with the sandbox writes would make the two modules import each
+  other.
+- get_job becomes _sql/getters.py:get_job_projection(conn, job_id). The
+  conversation read path calls it inside its own transaction and
+  finalize_session_fork calls it from a fresh connection after its commit, so a
+  function taking the caller's connection serves both without either repository
+  depending on the other.
+
+Gates on the new code: ruff format, ruff check and pydocstyle pass; all 45 new
+modules import; 108/108 operations verify as unchanged.

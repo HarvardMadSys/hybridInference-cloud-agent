@@ -1,0 +1,70 @@
+== module-level names requalified ==
+  QUEUED                           -> _execution             used by  3 methods
+  WAITING                          -> _execution             used by  2 methods
+  RUNNING                          -> _execution             used by  2 methods
+  PUBLISHING                       -> _execution             used by  2 methods
+  SUCCEEDED                        -> _execution             used by  2 methods
+  FAILED                           -> _execution             used by  2 methods
+  CANCELLED                        -> _execution             used by  4 methods
+  TERMINAL_STATES                  -> _execution             used by  6 methods
+  ATTEMPT_RUNNING                  -> _execution             used by  1 methods
+  ATTEMPT_SUPERSEDED               -> _execution             used by  0 methods
+  ATTEMPT_FINISHED                 -> _execution             used by  0 methods
+  EVENT_ATTEMPT_SUPERSEDED         -> _execution             used by  1 methods
+  EVENT_ATTEMPT_ABORTED            -> _execution             used by  1 methods
+  ATTEMPT_ABORTED                  -> _execution             used by  2 methods
+  _HOST_COLUMN_NAMES               -> _hosts                 used by  0 methods
+  _HOST_COLUMNS                    -> _hosts                 used by  6 methods
+  _QUALIFIED_HOST_COLUMNS          -> _hosts                 used by  2 methods
+  _new_job_id                      -> _ids                   used by  3 methods
+  _new_thread_id                   -> _ids                   used by  2 methods
+  _new_sandbox_id                  -> _ids                   used by  0 methods
+  _new_session_fork_id             -> _ids                   used by  1 methods
+  _LEDGER_WINDOW_UNTIL_SQL         -> _ledger                used by  2 methods
+  _load_json                       -> _rows                  used by 20 methods
+  _sandbox_row_to_dict             -> _rows                  used by  6 methods
+  _job_row_to_dict                 -> _rows                  used by  9 methods
+  _JOB_COLUMNS                     -> _rows                  used by  6 methods
+  _QUALIFIED_JOB_COLUMNS           -> _rows                  used by  4 methods
+  _THREAD_SANDBOX_SOURCE           -> _rows                  used by 10 methods
+  resolve_runtime_version          -> _runtime_policy        used by  1 methods
+  _NATIVE_FORK_CAPABILITY_JSON     -> _session_forks         used by  1 methods
+  _session_query                   -> _sessions              used by  1 methods
+  _session_cursor_scope            -> _sessions              used by  1 methods
+  _decode_session_cursor           -> _sessions              used by  1 methods
+  _encode_session_cursor           -> _sessions              used by  1 methods
+  _decode_conversation_cursor      -> _sessions              used by  1 methods
+  _SESSION_DELETE_BLOCK_SQL        -> _sessions              used by  2 methods
+
+== helpers becoming module-level functions ==
+  _advance_waiting_follow_ups        -> _followups             callers: 4
+  _attempts_spent                    -> _attempts              callers: 1
+  _capture_attempt_ledger            -> _ledger                callers: 2
+  _fail_unrunnable_follow_ups        -> _followups             callers: 3
+  _host_row_to_dict                  -> _hosts                 callers: 8
+  _insert_event                      -> _events                callers: 6
+  _reconcile_shared_sandbox_observation -> stays a method of its repository callers: 1
+  _release_host_slot                 -> _host_slots            callers: 3
+  _reserve_shared_thread_sandbox     -> _sandboxes             callers: 1
+  _session_fork_details              -> _session_forks         callers: 2
+
+== cross-port reads moved into _sql ==
+  get_job                            -> _getters.get_job_projection
+
+== per-repository method counts ==
+  attempts                     9
+  audit                        1
+  conversation_queries         6
+  conversations                8
+  credential_queries           1
+  execution_queries            6
+  grants                       4
+  host_pool                   18
+  ledger                       5
+  mcp                          3
+  residencies                  6
+  sandboxes                   14
+  session_forks                7
+  snapshots                   11
+  source_control               9
+  TOTAL                      108
