@@ -1048,13 +1048,17 @@ leaves the database with no writer.
      run --rm --no-deps migrate
    ```
 
-4. Undrain the hosts recorded in step 1, then deploy the target commit as usual.
-   Its migration is a no-op, and readiness can now see a host that is allowed to
-   claim:
+4. Undrain the hosts recorded in step 1, then deploy the target commit the way
+   every commit is deployed: dispatch the Deploy Staging workflow on `dev`, so
+   that both of its jobs release the same SHA and the host fence is satisfied.
+   Do not call `deploy/control-plane/deploy.sh` by hand here — it needs the
+   `SOURCE_REPO` checkout and the matching host release that only the workflow
+   provides. Its migration is a no-op, and readiness can now see a host that is
+   allowed to claim:
 
    ```bash
    docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-undrain-$(date +%F).sql
-   deploy/control-plane/deploy.sh "${AGENT_DEPLOYMENT_SHA}"
+   gh workflow run deploy-staging.yml --repo HarvardMadSys/hybridInference-cloud-agent --ref dev -f sha="${AGENT_DEPLOYMENT_SHA}"
    ```
 
 5. Run the acceptance sweep in step 7 of the rebuild above.

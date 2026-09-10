@@ -17,7 +17,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 VERSIONS = REPO / "migrations/versions"
 BASELINE = VERSIONS / "0001_schema_baseline.py"
-STORE = REPO / "cloud_agent/storage/store.py"
+STORAGE = REPO / "cloud_agent/storage"
 
 EXPECTED_TABLES = {
     "agent_admin_audit_log",
@@ -81,6 +81,23 @@ def _revision_pair(path: Path) -> tuple[str, str | None]:
     return str(values["revision"]), values.get("down_revision")  # type: ignore[return-value]
 
 
+def _storage_sources() -> list[Path]:
+    """Every module of the storage package: the only place SQL text may live.
+
+    The store was one file when the baseline was rewritten. The split behind
+    ports (#155) moves its SQL into siblings under this package, and a guard
+    that read ``store.py`` alone would go blind exactly when the residue it
+    exists to catch was carried next door.
+    """
+    sources = sorted(STORAGE.rglob("*.py"))
+    assert STORAGE / "store.py" in sources
+    return sources
+
+
+def _storage_text() -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in _storage_sources())
+
+
 def test_the_chain_is_linear_and_rooted_at_the_rewritten_baseline() -> None:
     """One root, one head, and every revision revises the one before it."""
     pairs = dict(map(_revision_pair, VERSIONS.glob("*.py")))
@@ -108,13 +125,13 @@ def test_the_baseline_creates_every_table_the_store_names() -> None:
         if match:
             created.add(match.group(1))
     assert created == EXPECTED_TABLES
-    named_by_store = set(re.findall(r"\b(agent_[a-z_]+)\b", STORE.read_text(encoding="utf-8")))
+    storage = _storage_text()
+    named_by_store = set(re.findall(r"\b(agent_[a-z_]+)\b", storage))
     tables_in_store = {name for name in named_by_store if name in created or name.endswith("s")}
     missing = {
         name
         for name in tables_in_store
-        if name not in created
-        and re.search(rf"(FROM|INTO|UPDATE|JOIN) {name}\b", STORE.read_text(encoding="utf-8"))
+        if name not in created and re.search(rf"(FROM|INTO|UPDATE|JOIN) {name}\b", storage)
     }
     assert not missing, f"the store names tables the baseline does not create: {sorted(missing)}"
 
@@ -152,31 +169,35 @@ def test_the_legacy_shapes_are_gone() -> None:
             assert residue not in jobs_ddl
             continue
         assert residue not in joined, residue
-    store = STORE.read_text(encoding="utf-8")
-    for residue in (
-        "agent_thread_sandboxes",
-        "agent_job_artifacts",
-        "included_job_ids ",
-        "retained_followup_eligible",
-    ):
-        assert residue not in store, residue
-    # The sandbox ``mode`` column went with the topology it selected, and no
-    # table in the rewritten schema has a bare ``mode`` column, so an
-    # alias-qualified one in the store's SQL can only be a leftover. This is
-    # the class the Postgres tier caught and this tier did not: a query that
-    # arrived from a branch landing after the rewrite, still naming a column
-    # the rewrite deleted. (``routes.py``'s ``body.mode`` is a request field,
-    # not SQL, which is why this reads the store alone.)
-    leftover = re.search(r"\b\w+\.mode\b", store)
-    assert leftover is None, f"the store names a dropped column: {leftover.group(0)}"
+    for path in _storage_sources():
+        source = path.read_text(encoding="utf-8")
+        where = path.relative_to(REPO)
+        for residue in (
+            "agent_thread_sandboxes",
+            "agent_job_artifacts",
+            "included_job_ids ",
+            "retained_followup_eligible",
+            # Dropped by 0004: residency lives on the membership row now.
+            "agent_thread_residencies",
+        ):
+            assert residue not in source, f"{where} names {residue}"
+        # The sandbox ``mode`` column went with the topology it selected, and
+        # no table in the rewritten schema has a bare ``mode`` column, so an
+        # alias-qualified one in SQL can only be a leftover. This is the class
+        # the Postgres tier caught and this tier did not: a query that arrived
+        # from a branch landing after the rewrite, still naming a column the
+        # rewrite deleted. (``routes.py``'s ``body.mode`` is a request field,
+        # not SQL, which is why this reads the storage package alone.)
+        leftover = re.search(r"\b\w+\.mode\b", source)
+        assert leftover is None, f"{where} names a dropped column: {leftover.group(0)}"
 
 
 def test_the_store_executes_no_ddl() -> None:
     """The schema has one owner. A store that creates tables is two owners."""
-    source = STORE.read_text(encoding="utf-8")
     offenders = [
-        line.strip()
-        for line in source.splitlines()
+        f"{path.relative_to(REPO)}: {line.strip()}"
+        for path in _storage_sources()
+        for line in path.read_text(encoding="utf-8").splitlines()
         if re.search(r"\b(CREATE TABLE|ALTER TABLE|CREATE INDEX|DROP TABLE)\b", line)
         and not line.strip().startswith("#")
     ]
@@ -185,7 +206,8 @@ def test_the_store_executes_no_ddl() -> None:
 
 def test_the_store_imports_no_gateway_module() -> None:
     """The gateway is reached over HTTP only (AGENTS.md rule 5)."""
-    assert "serving." not in STORE.read_text(encoding="utf-8")
+    for path in _storage_sources():
+        assert "serving." not in path.read_text(encoding="utf-8"), path.relative_to(REPO)
 
 
 @pytest.mark.parametrize("path", sorted(VERSIONS.glob("*.py")), ids=lambda p: p.name)
