@@ -61,8 +61,9 @@ them:
   request for more than the maximum is clamped *down* silently, and every
   renewal re-times the grant to the gateway's step — so either one would shorten
   a live grant without any call failing. The document declares both under
-  `x-constants`, but nothing reads that field: the number exists in three places
-  (the gateway, this document, `grants.py`) and nothing compares them.
+  `x-constants`, but that is a declaration rather than a check: the number also
+  lives in the gateway and in `grants.py`, and comparing the copies is left to
+  tests rather than to anything in this directory.
 - **Which refusals mean "this grant is dead".** `DEAD_GRANT_REFUSALS`
   (`unknown_grant`, `grant_not_live`, `subject_unavailable`) mirrors the
   gateway's error *types*. The status code alone is not enough: the gateway
