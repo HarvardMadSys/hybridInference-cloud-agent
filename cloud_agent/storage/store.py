@@ -5506,6 +5506,9 @@ class AgentJobStore:
             # Return that same boundary without incrementing workspace_epoch or
             # creating another snapshot. The original attempt must still own
             # a live fence; a retry cannot resurrect a superseded activation.
+            # No sandbox-mode predicate: the rewritten schema has no ``mode``
+            # column, and the retained shared-session topology is unconditional,
+            # so every sandbox row is a shared-live one.
             replay = await conn.fetchval(
                 """
                 SELECT m.thread_id
@@ -5513,7 +5516,7 @@ class AgentJobStore:
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 JOIN agent_attempts a ON a.id = $2
                 JOIN agent_jobs j ON j.id = a.job_id
-                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                WHERE m.thread_id = $1
                   AND g.generation = $4 AND m.activation_generation = $5
                   AND m.active_attempt_id IS NULL
                   AND m.admitted_job_id = $6 AND m.last_settled_job_id = $6

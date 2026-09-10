@@ -160,6 +160,15 @@ def test_the_legacy_shapes_are_gone() -> None:
         "retained_followup_eligible",
     ):
         assert residue not in store, residue
+    # The sandbox ``mode`` column went with the topology it selected, and no
+    # table in the rewritten schema has a bare ``mode`` column, so an
+    # alias-qualified one in the store's SQL can only be a leftover. This is
+    # the class the Postgres tier caught and this tier did not: a query that
+    # arrived from a branch landing after the rewrite, still naming a column
+    # the rewrite deleted. (``routes.py``'s ``body.mode`` is a request field,
+    # not SQL, which is why this reads the store alone.)
+    leftover = re.search(r"\b\w+\.mode\b", store)
+    assert leftover is None, f"the store names a dropped column: {leftover.group(0)}"
 
 
 def test_the_store_executes_no_ddl() -> None:
