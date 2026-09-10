@@ -182,7 +182,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   }
   if (type === 'raw') {
     // Raw records are unclassified runtime protocol data. They remain available
-    // in the diagnostic Raw events drawer, but are not terminal commands or output.
+    // through the events API, but are not terminal commands or output.
     return null;
   }
 
@@ -308,14 +308,6 @@ function formatTokens(value: number | null): string {
   if (value === null || value === undefined) return '';
   if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
   return String(value);
-}
-
-function rawEventLine(event: AgentJobEventApi): string {
-  if (event.event_type !== 'thinking') return JSON.stringify(event);
-  return JSON.stringify({
-    ...event,
-    payload: { ...(event.payload ?? {}), text: '[reasoning hidden]' },
-  });
 }
 
 export interface AdaptOptions {
@@ -729,13 +721,11 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     currentAttemptNo: currentAttemptIndex >= 0 ? currentAttemptIndex + 1 : undefined,
     telemetryAttemptNo: telemetryAttemptIndex >= 0 ? telemetryAttemptIndex + 1 : undefined,
     events: renderedEvents,
-    eventCount: events.length,
     diffFiles: toDiffFiles(patch),
     workspaceDiffAvailable: typeof options.patch === 'string',
     diffFileDetails: toDiffFileDetails(patch),
     diffStat: diffStat(patch),
     diffLines: toDiffLines(patch),
-    rawLines: events.map(rawEventLine),
     gates: [],
     usage: {
       tokensIn: formatTokens(job.tokens_in),

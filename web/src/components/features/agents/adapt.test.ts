@@ -195,7 +195,6 @@ describe('toDisplayJob', () => {
     const job = toDisplayJob({ ...JOB, current_attempt_id: 11 }, { events });
 
     expect(job.sandbox).toBe('Isolated VM');
-    expect(job.rawLines[1]).toContain('registry.example/agent:1');
   });
 
   it.each([
@@ -346,10 +345,9 @@ describe('toDisplayJob', () => {
     expect(job.attempts[0].telemetry).toBeUndefined();
   });
 
-  it('counts every stored event and retains unmatched tool results', () => {
+  it('retains unmatched tool results', () => {
     const events = [event(1, 'message'), event(2, 'tool_result', { content: 'done' })];
     const job = toDisplayJob(JOB, { events });
-    expect(job.eventCount).toBe(2);
     expect(job.events).toHaveLength(2);
   });
 
@@ -358,7 +356,6 @@ describe('toDisplayJob', () => {
     // than a blank one.
     const job = toDisplayJob(JOB);
     expect(job.gates).toEqual([]);
-    expect(job.rawLines).toEqual([]);
     expect(job.spentUsd).toBe(0);
   });
 
@@ -378,16 +375,6 @@ describe('toDisplayJob', () => {
         attemptNo: 1,
       }),
     ]);
-    expect(job.rawLines).toHaveLength(2);
-  });
-
-  it('does not expose raw model reasoning in the operational log', () => {
-    const job = toDisplayJob(JOB, {
-      events: [event(1, 'thinking', { text: 'private chain of thought' })],
-    });
-
-    expect(job.rawLines[0]).not.toContain('private chain of thought');
-    expect(job.rawLines[0]).toContain('[reasoning hidden]');
   });
 
   it('renders earlier thread messages without duplicating the current turn', () => {

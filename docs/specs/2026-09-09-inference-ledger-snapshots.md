@@ -86,7 +86,9 @@ and environment. The primary usage summary shows model calls and input/output
 tokens from Gateway snapshots. Cost estimates and known token details are
 collapsed; missing reasoning alone does not produce a warning. The drawer
 does not expose attempt selectors, query windows, or reconciliation internals.
-The API retains those fields for diagnostic clients.
+The API retains those fields for diagnostic clients. Raw event JSON is not
+shown in the drawer; failure reasons and recovery guidance remain visible.
+The event API and stored execution history remain available for diagnostics.
 
 Only when Gateway totals are absent does the drawer fall back to agent-reported
 tokens, with a source label and no invented cost or call count. The additive

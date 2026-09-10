@@ -42,7 +42,7 @@ import { TrajectoryView } from './TrajectoryView';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
-type DrawerView = 'overview' | 'diff' | 'raw';
+type DrawerView = 'overview' | 'diff';
 type WorkspaceTab = 'git' | 'terminal' | 'files';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
@@ -680,24 +680,6 @@ function RunTiming({ job }: { job: AgentJob }) {
   );
 }
 
-/** Link a failure only to its matching error, never a transient tool failure. */
-function failureRawIndex(job: AgentJob): number | null {
-  if (job.state !== 'failed' || !job.stateNote?.trim()) return null;
-  const currentAttemptId = job.attempts.find((attempt) => attempt.no === job.currentAttemptNo)?.id;
-  for (let index = job.rawLines.length - 1; index >= 0; index -= 1) {
-    try {
-      const event = JSON.parse(job.rawLines[index]) as AgentJobEventApi;
-      if (currentAttemptId !== undefined && event.attempt_id !== currentAttemptId) continue;
-      if (event.event_type !== 'error' || event.payload?.host) continue;
-      const detail = event.payload?.detail ?? event.payload?.text ?? event.payload?.message;
-      if (typeof detail === 'string' && detail.trim() === job.stateNote.trim()) return index;
-    } catch {
-      // Older fixtures and unavailable raw records do not provide an anchor.
-    }
-  }
-  return null;
-}
-
 function DetailsDrawer({
   job,
   initialView,
@@ -710,17 +692,9 @@ function DetailsDrawer({
   onOpenDiff: () => void;
 }) {
   const [view, setView] = useState(initialView);
-  const [highlightedRawIndex, setHighlightedRawIndex] = useState<number | null>(null);
-  const highlightedRawRef = useRef<HTMLSpanElement | null>(null);
-  const failureIndex = useMemo(() => failureRawIndex(job), [job]);
   const pill = STATE_PILL[job.state];
   const runNote = ownerRunNote(job);
   const hasDiff = job.workspaceDiffAvailable ?? job.diffFiles.length > 0;
-  useEffect(() => {
-    if (view !== 'raw' || highlightedRawIndex === null) return;
-    highlightedRawRef.current?.scrollIntoView?.({ block: 'center' });
-    highlightedRawRef.current?.focus({ preventScroll: true });
-  }, [view, highlightedRawIndex]);
   return (
     <div className="fixed inset-0 z-[70] flex justify-end" role="dialog" aria-label="Run details">
       <button
@@ -756,7 +730,6 @@ function DetailsDrawer({
             [
               ['overview', 'Overview'],
               ['diff', `Changes${job.diffFiles.length ? ` · ${job.diffFiles.length}` : ''}`],
-              ['raw', `Raw events · ${job.eventCount}`],
             ] as [DrawerView, string][]
           ).map(([key, label]) => (
             <button
@@ -805,18 +778,6 @@ function DetailsDrawer({
                   </p>
                 ) : null}
                 <RunGuidance job={job} />
-                {job.state === 'failed' && job.rawLines.length > 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHighlightedRawIndex(failureIndex);
-                      setView('raw');
-                    }}
-                    className="mt-2 text-xs font-medium text-blue-700 underline underline-offset-2 dark:text-blue-400"
-                  >
-                    {failureIndex !== null ? 'View failure event' : 'Inspect raw events'}
-                  </button>
-                ) : null}
               </section>
               <section aria-label="Workspace changes">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
@@ -976,30 +937,6 @@ function DetailsDrawer({
               <p className="text-sm text-gray-400 dark:text-gray-500">
                 {hasDiff ? 'No workspace changes.' : 'Workspace changes are not available.'}
               </p>
-            )
-          ) : null}
-
-          {view === 'raw' ? (
-            job.rawLines.length ? (
-              <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg bg-gray-950 p-4 font-mono text-[11px] leading-relaxed text-gray-300">
-                {job.rawLines.map((line, index) => (
-                  <span
-                    key={index}
-                    ref={index === highlightedRawIndex ? highlightedRawRef : undefined}
-                    tabIndex={index === highlightedRawIndex ? -1 : undefined}
-                    aria-label={index === highlightedRawIndex ? 'Failure event' : undefined}
-                    className={
-                      index === highlightedRawIndex
-                        ? 'block rounded bg-red-500/20 px-1 text-red-100 dark:text-red-100 ring-1 ring-red-400/60'
-                        : 'block'
-                    }
-                  >
-                    {line}
-                  </span>
-                ))}
-              </pre>
-            ) : (
-              <p className="text-sm text-gray-400 dark:text-gray-500">No raw events yet.</p>
             )
           ) : null}
         </div>

@@ -252,14 +252,12 @@ export interface AgentJob {
   events: AgentEvent[];
   /** Bottom-of-stream live line while running, e.g. "turn 15 · …". */
   liveNote?: string;
-  eventCount: number;
   diffFiles: string[];
   /** Whether the current shared workspace diff was actually readable. */
   workspaceDiffAvailable?: boolean;
   diffFileDetails?: AgentDiffFile[];
   diffStat?: { add: number; del: number };
   diffLines: DiffLine[];
-  rawLines: string[];
   gates: AgentGate[];
   usage: { tokensIn: string; tokensOut: string; cachePct: number; turns: number | null };
   /** Attempt continuity telemetry; `replay` can occur only on historical rows. */
