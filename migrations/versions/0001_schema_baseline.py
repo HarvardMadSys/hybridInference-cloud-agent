@@ -65,7 +65,8 @@ housekeeping and must not fail because a stopped container still names it
 keep ``ON DELETE SET NULL`` to hosts for the same reason. And ``repo``,
 ``setup_script``, ``execution_profile`` and ``mcp_servers`` remain on every
 job although they are written once per thread and inherited turn by turn:
-moving them is a store refactor with its own review, not a baseline decision.
+moving them is a store refactor with its own review, not a baseline decision
+(revision ``0003_thread_level_config`` is that review).
 
 Revision ID: 0001_schema_baseline
 Revises:

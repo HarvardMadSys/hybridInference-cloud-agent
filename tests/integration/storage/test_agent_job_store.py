@@ -3131,6 +3131,10 @@ async def test_model_credential_uses_only_agent_owned_metadata(
                 "CREATE TEMP VIEW agent_attempts AS SELECT * FROM public.agent_attempts"
             )
             await conn.execute("CREATE TEMP VIEW agent_jobs AS SELECT * FROM public.agent_jobs")
+            # The thread carries the tool servers now; still agent-owned.
+            await conn.execute(
+                "CREATE TEMP VIEW agent_threads AS SELECT * FROM public.agent_threads"
+            )
             await conn.execute("SET LOCAL search_path = pg_temp, pg_catalog")
             if users_surface == "unrelated":
                 await conn.execute("CREATE TEMP TABLE users (account_name TEXT)")

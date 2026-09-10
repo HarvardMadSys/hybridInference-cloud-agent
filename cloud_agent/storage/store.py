@@ -321,15 +321,27 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
     }
 
 
-_JOB_COLUMNS = (
-    "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, repo, base_sha, task_prompt, "
-    "setup_script, runtime, model, execution_profile, reasoning_effort, state, "
+# A job's own columns. What a job shares with every other turn of its
+# conversation — repo, setup script, execution profile, tool servers — lives on
+# the thread, so every read of a job joins ``agent_threads t`` and reports the
+# thread's values under the job's keys.
+_JOB_OWN_COLUMNS = (
+    "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, base_sha, task_prompt, "
+    "runtime, model, reasoning_effort, state, "
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
-    "metadata, fork_source_job_id, mcp_servers, "
+    "metadata, fork_source_job_id, "
     "created_at, updated_at"
 )
-_QUALIFIED_JOB_COLUMNS = ", ".join(f"j.{column.strip()}" for column in _JOB_COLUMNS.split(","))
+_THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile, t.mcp_servers"
+_QUALIFIED_JOB_COLUMNS = (
+    ", ".join(f"j.{column.strip()}" for column in _JOB_OWN_COLUMNS.split(","))
+    + ", "
+    + _THREAD_CONFIG_COLUMNS
+)
+_JOB_SELECT = (
+    f"SELECT {_QUALIFIED_JOB_COLUMNS} FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id"
+)
 
 
 def _session_query(*, filter_repo: bool = False) -> str:
@@ -958,42 +970,44 @@ class AgentJobStore:
         thread_id = _new_thread_id()
         try:
             async with self._pool.acquire() as conn, conn.transaction():
+                # What every turn of this conversation shares is written once,
+                # here, on the thread; the turns below carry only their own.
                 await conn.execute(
                     """
-                    INSERT INTO agent_threads (id, user_id, repo, title, title_source)
-                    VALUES ($1, $2, $3, $4, 'fallback')
+                    INSERT INTO agent_threads
+                        (id, user_id, repo, title, title_source,
+                         setup_script, execution_profile, mcp_servers)
+                    VALUES ($1, $2, $3, $4, 'fallback', $5, $6, $7)
                     """,
                     thread_id,
                     user_id,
                     repo,
                     fallback_title(task_prompt),
+                    setup_script,
+                    execution_profile,
+                    list(mcp_servers or []),
                 )
-                row = await conn.fetchrow(
-                    f"""
+                await conn.execute(
+                    """
                     INSERT INTO agent_jobs
-                        (id, thread_id, turn_no, user_id, repo, base_sha, task_prompt,
-                         setup_script, runtime, model, execution_profile, reasoning_effort,
-                         metadata, mcp_servers, client_request_id, client_request_fingerprint)
-                    VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                            $12::jsonb, $13, $14, $15)
-                    RETURNING {_JOB_COLUMNS}
+                        (id, thread_id, turn_no, user_id, base_sha, task_prompt,
+                         runtime, model, reasoning_effort, metadata,
+                         client_request_id, client_request_fingerprint)
+                    VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
                     """,
                     job_id,
                     thread_id,
                     user_id,
-                    repo,
                     base_sha,
                     task_prompt,
-                    setup_script,
                     runtime,
                     model,
-                    execution_profile,
                     reasoning_effort,
                     json.dumps(metadata) if metadata is not None else None,
-                    list(mcp_servers or []),
                     client_request_id,
                     client_request_fingerprint,
                 )
+                row = await conn.fetchrow(f"{_JOB_SELECT} WHERE j.id = $1", job_id)
                 await conn.execute(
                     """
                     INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
@@ -1144,8 +1158,8 @@ class AgentJobStore:
                 return {"error": "session_archived"}
             thread_id = thread["id"]
             parent = await conn.fetchrow(
-                f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE thread_id = $1 "
-                "ORDER BY turn_no DESC LIMIT 1 FOR UPDATE",
+                f"{_JOB_SELECT} WHERE j.thread_id = $1 "
+                "ORDER BY j.turn_no DESC LIMIT 1 FOR UPDATE OF j",
                 thread_id,
             )
             if parent is None:  # Defensive: every thread is created with turn one.
@@ -1193,29 +1207,27 @@ class AgentJobStore:
                 parent["state"] == SUCCEEDED and sandbox is not None
             )
             state = QUEUED if parent_ready else WAITING
-            row = await conn.fetchrow(
-                f"""
+            # Repo, setup script, execution profile and tool servers are the
+            # thread's, not copied per turn: the next turn of a conversation
+            # runs with the surface the thread has been running with, and a
+            # follow-up cannot quietly gain a server the owner never chose.
+            await conn.execute(
+                """
                 INSERT INTO agent_jobs
-                    (id, thread_id, parent_job_id, turn_no, user_id, repo, base_sha,
-                     task_prompt, setup_script, runtime, model, execution_profile,
-                     reasoning_effort, state, metadata, mcp_servers,
+                    (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
+                     task_prompt, runtime, model, reasoning_effort, state, metadata,
                      client_request_id, client_request_fingerprint)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                        $14, $15::jsonb, $16, $17, $18)
-                RETURNING {_JOB_COLUMNS}
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14)
                 """,
                 job_id,
                 thread_id,
                 parent["id"],
                 turn_no,
                 user_id,
-                parent["repo"],
                 parent["published_commit_sha"] or parent["base_sha"],
                 prompt,
-                parent["setup_script"],
                 runtime or parent["runtime"],
                 model or parent["model"],
-                parent["execution_profile"],
                 None
                 if reset_reasoning_effort
                 else (reasoning_effort or parent["reasoning_effort"]),
@@ -1223,13 +1235,10 @@ class AgentJobStore:
                 json.dumps(_load_json(parent["metadata"]))
                 if parent["metadata"] is not None
                 else None,
-                # Inherited, not re-resolved: the next turn of a conversation
-                # gets the tool surface the thread has been running with, so a
-                # follow-up cannot quietly gain a server the owner never chose.
-                list(parent["mcp_servers"] or []),
                 client_request_id,
                 client_request_fingerprint,
             )
+            row = await conn.fetchrow(f"{_JOB_SELECT} WHERE j.id = $1", job_id)
             await conn.execute(
                 """
                 INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
@@ -1261,7 +1270,7 @@ class AgentJobStore:
             operation["source_thread_id"],
         )
         source = await conn.fetchrow(
-            f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE id = $1",
+            f"{_JOB_SELECT} WHERE j.id = $1",
             operation["source_job_id"],
         )
         result = dict(operation)
@@ -1331,7 +1340,7 @@ class AgentJobStore:
                 return result
 
             source = await conn.fetchrow(
-                f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE id = $1 AND user_id = $2 FOR UPDATE",
+                f"{_JOB_SELECT} WHERE j.id = $1 AND j.user_id = $2 FOR UPDATE OF j",
                 source_job_id,
                 user_id,
             )
@@ -1817,13 +1826,14 @@ class AgentJobStore:
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).
                 thread = await conn.fetchrow(
-                    "SELECT repo, title FROM agent_threads WHERE id = $1 FOR UPDATE",
+                    "SELECT repo, title, setup_script, execution_profile, mcp_servers "
+                    "FROM agent_threads WHERE id = $1 FOR UPDATE",
                     operation["source_thread_id"],
                 )
                 if thread is None:
                     return None
                 source = await conn.fetchrow(
-                    f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE id = $1 FOR UPDATE",
+                    f"{_JOB_SELECT} WHERE j.id = $1 FOR UPDATE OF j",
                     operation["source_job_id"],
                 )
                 membership = await conn.fetchrow(
@@ -1842,8 +1852,7 @@ class AgentJobStore:
                 ):
                     return None
                 turns = await conn.fetch(
-                    f"SELECT {_JOB_COLUMNS} FROM agent_jobs "
-                    "WHERE thread_id = $1 AND turn_no <= $2 ORDER BY turn_no",
+                    f"{_JOB_SELECT} WHERE j.thread_id = $1 AND j.turn_no <= $2 ORDER BY j.turn_no",
                     operation["source_thread_id"],
                     source["turn_no"],
                 )
@@ -1861,13 +1870,18 @@ class AgentJobStore:
                 )
                 await conn.execute(
                     """
-                    INSERT INTO agent_threads (id, user_id, repo, title, title_source)
-                    VALUES ($1, $2, $3, $4, 'inherited')
+                    INSERT INTO agent_threads
+                        (id, user_id, repo, title, title_source,
+                         setup_script, execution_profile, mcp_servers)
+                    VALUES ($1, $2, $3, $4, 'inherited', $5, $6, $7)
                     """,
                     operation["target_thread_id"],
                     operation["user_id"],
                     thread["repo"],
                     f"{thread['title']} (fork)"[:160],
+                    thread["setup_script"],
+                    thread["execution_profile"],
+                    list(thread["mcp_servers"] or []),
                 )
                 copied: dict[str, str] = {}
                 previous_copy: str | None = None
@@ -1877,15 +1891,13 @@ class AgentJobStore:
                     await conn.execute(
                         """
                         INSERT INTO agent_jobs (
-                            id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, repo,
-                            base_sha, task_prompt, setup_script, runtime, model,
-                            execution_profile, reasoning_effort, state,
+                            id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
+                            base_sha, task_prompt, runtime, model, reasoning_effort, state,
                             published_pr_url, published_commit_sha, detail, metadata,
-                            fork_source_job_id, mcp_servers,
-                            created_at, updated_at
+                            fork_source_job_id, created_at, updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                            $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21,
+                            $13, $14, $15, $16::jsonb, $17,
                             clock_timestamp(), clock_timestamp()
                         )
                         """,
@@ -1895,13 +1907,10 @@ class AgentJobStore:
                         turn["turn_no"],
                         turn["native_turn_no"],
                         operation["user_id"],
-                        turn["repo"],
                         turn["base_sha"],
                         turn["task_prompt"],
-                        turn["setup_script"],
                         turn["runtime"],
                         turn["model"],
-                        turn["execution_profile"],
                         turn["reasoning_effort"],
                         turn["state"] if turn["state"] in TERMINAL_STATES else CANCELLED,
                         turn["published_pr_url"],
@@ -1911,7 +1920,6 @@ class AgentJobStore:
                         if turn["metadata"] is not None
                         else None,
                         turn["id"],
-                        list(turn["mcp_servers"] or []),
                     )
                     previous_copy = copy_id
                 await conn.executemany(
@@ -2173,7 +2181,7 @@ class AgentJobStore:
                 thread["id"],
             )
             jobs = await conn.fetch(
-                f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE thread_id = $1 ORDER BY turn_no",
+                f"{_JOB_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no",
                 thread["id"],
             )
             sandbox = await conn.fetchrow(
@@ -2579,9 +2587,10 @@ class AgentJobStore:
             row = await conn.fetchrow(
                 """
                 SELECT j.user_id, j.id AS job_id, j.model, j.state,
-                       j.mcp_servers
+                       t.mcp_servers
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
+                JOIN agent_threads t ON t.id = j.thread_id
                 WHERE a.id = $1
                   AND a.lease_generation = $2
                   AND a.status = 'running'
@@ -2641,7 +2650,7 @@ class AgentJobStore:
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
                   AND t.deleted_at IS NULL
-                  AND ($4::text IS NULL OR j.repo = $4)
+                  AND ($4::text IS NULL OR t.repo = $4)
                   AND (($3 AND t.archived_at IS NOT NULL)
                        OR (NOT $3 AND t.archived_at IS NULL))
                 ORDER BY t.pinned_at DESC NULLS LAST, j.created_at DESC
@@ -2729,6 +2738,7 @@ class AgentJobStore:
                 SELECT {_QUALIFIED_JOB_COLUMNS}, page.title, page.pinned_at,
                        page.archived, page.last_activity_at
                 FROM page
+                JOIN agent_threads t ON t.id = page.thread_id
                 JOIN LATERAL (
                     SELECT * FROM agent_jobs latest
                     WHERE latest.thread_id = page.thread_id AND latest.user_id = $1
@@ -2784,7 +2794,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT j.repo,
+                SELECT t.repo,
                        COUNT(DISTINCT j.thread_id) AS task_count,
                        COUNT(*) FILTER (
                            WHERE j.state IN ('queued', 'waiting', 'running')
@@ -2800,7 +2810,7 @@ class AgentJobStore:
                   AND t.deleted_at IS NULL
                   AND (($2 AND t.archived_at IS NOT NULL)
                        OR (NOT $2 AND t.archived_at IS NULL))
-                GROUP BY j.repo
+                GROUP BY t.repo
                 ORDER BY pinned_at DESC NULLS LAST, last_activity_at DESC
                 """,
                 user_id,
@@ -3829,9 +3839,9 @@ class AgentJobStore:
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
                   AND (
-                        j.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
+                        t.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
                         OR (
-                            j.execution_profile = '{ExecutionProfile.UNTRUSTED_KATA_V1.value}'
+                            t.execution_profile = '{ExecutionProfile.UNTRUSTED_KATA_V1.value}'
                             AND $3::boolean
                         )
                   )
@@ -6669,12 +6679,13 @@ class AgentJobStore:
                            FROM agent_thread_sandbox_memberships member
                            WHERE member.sandbox_id = g.id
                        ), '[]'::jsonb) AS members,
-                       j.thread_id, j.parent_job_id, j.user_id, j.repo,
+                       j.thread_id, j.parent_job_id, j.user_id, t.repo,
                        j.task_prompt, j.metadata,
                        prior.published_pr_url AS parent_pr_url
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
                 JOIN agent_jobs j ON j.id = s.anchor_job_id
+                JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN LATERAL (
                     SELECT previous.published_pr_url
                     FROM agent_sandbox_snapshots previous
@@ -6897,7 +6908,7 @@ class AgentJobStore:
                        g.origin_thread_id, g.generation, g.container_id,
                        g.runtime_id, g.runtime_version, g.sandbox_image_digest,
                        g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
-                       g.resident_slot_capacity, j.repo, j.user_id,
+                       g.resident_slot_capacity, t.repo, j.user_id,
                        COALESCE((
                            SELECT jsonb_agg(
                                jsonb_build_object(
@@ -6926,6 +6937,7 @@ class AgentJobStore:
                     LIMIT 1
                 ) latest ON TRUE
                 JOIN agent_jobs j ON j.id = latest.anchor_job_id
+                JOIN agent_threads t ON t.id = j.thread_id
                 WHERE g.snapshot_state = 'importing'
                 ORDER BY g.updated_at
                 LIMIT 1
