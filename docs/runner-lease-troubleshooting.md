@@ -33,6 +33,12 @@ independent. Failure of the event endpoint must not skip the terminal request
 and leave the database recording a running attempt. If both control requests
 remain unavailable, the reaper is still the final backstop.
 
+Once both supervisor and control-plane settlement have succeeded, failure to
+upload the final `shared_workspace_settled` notice also must not fail the turn:
+the worker still submits its successful terminal state. Lease rejection is
+handled separately and prevents that write. Earlier settlement failures are
+not treated as successful completion.
+
 Post-claim preparation outside the shared execution handler (for example,
 image inspection or manifest validation) also has an outer failure handler.
 It attempts a terminal failure before stopping heartbeat renewal, and records

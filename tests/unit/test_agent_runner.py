@@ -493,6 +493,37 @@ def test_error_upload_failure_does_not_skip_terminal_transition(monkeypatch, fai
 
 
 @pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [(httpx.ReadTimeout("completion notice unavailable"), 0), (LeaseLost("expired"), 3)],
+)
+def test_settled_success_survives_a_failed_completion_event_upload(
+    monkeypatch, error, expected_code
+):
+    """A completed native turn must not fail because its final notice is unavailable."""
+
+    def configure(control, supervisor, finish):
+        def append(event):
+            if event.payload.get("phase") == "shared_workspace_settled":
+                raise error
+
+        control.append_event.side_effect = append
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+
+    assert result == expected_code
+    supervisor.settle_shared.assert_called_once()
+    control.settle_chat_sandbox.assert_called_once()
+    control.abandon_chat_sandbox.assert_not_called()
+    if expected_code == 0:
+        finish.assert_called_once()
+        assert finish.call_args.args[0] == "succeeded"
+    else:
+        finish.assert_not_called()
+
+
+@pytest.mark.parametrize(
     ("code", "frame", "preserved"),
     [
         (1, {"kind": "result", "status": "failed", "native_turn_settled": True}, True),

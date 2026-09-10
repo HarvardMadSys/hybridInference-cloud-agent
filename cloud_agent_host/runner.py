@@ -1853,16 +1853,23 @@ def _run_shared_live_attempt(
                 "failed", f"agent failed at native turn boundary: {tail[-500:]}", base_sha=base_sha
             )
             return 1
-        control.append_event(
-            NormalizedEvent(
-                "lifecycle",
-                {
-                    "phase": "shared_workspace_settled",
-                    "workspace_shared": True,
-                    "publication": "pending_snapshot",
-                },
+        try:
+            control.append_event(
+                NormalizedEvent(
+                    "lifecycle",
+                    {
+                        "phase": "shared_workspace_settled",
+                        "workspace_shared": True,
+                        "publication": "pending_snapshot",
+                    },
+                )
             )
-        )
+        except LeaseLost:
+            raise
+        except Exception as exc:
+            # Both authoritative settlements succeeded. A missing UI notice
+            # must not turn that success into a failed terminal transition.
+            _log_control_failure("completion_event", job.job_id, exc)
         finish_attempt(
             "succeeded",
             "agent completed (shared workspace; publication snapshot pending)",
