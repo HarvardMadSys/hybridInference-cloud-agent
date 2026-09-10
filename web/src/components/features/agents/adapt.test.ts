@@ -105,6 +105,20 @@ describe('toDisplayEvent', () => {
     expect(row).toEqual({ kind: 'lifecycle', text: 'attempt superseded (lease_expired)' });
   });
 
+  it('keeps rate-limit warnings while hiding normal allowance events', () => {
+    expect(
+      toDisplayEvent(event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'allowed' } })),
+    ).toBeNull();
+    expect(
+      toDisplayEvent(event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'rejected' } })),
+    ).toEqual({ kind: 'lifecycle', text: 'Model usage limit reached' });
+    expect(
+      toDisplayEvent(
+        event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'allowed_warning' } }),
+      ),
+    ).toEqual({ kind: 'lifecycle', text: 'Approaching model usage limit' });
+  });
+
   it('keeps an unfamiliar tool visible by its actual name', () => {
     expect(toDisplayEvent(event(1, 'tool_use', { name: 'WebFetch', detail: 'x' }))).toEqual({
       kind: 'tool_use',
@@ -151,11 +165,40 @@ describe('toDisplayEvent', () => {
     });
   });
 
-  it('surfaces an unknown event kind instead of dropping it', () => {
-    expect(toDisplayEvent(event(1, 'something_new'))).toEqual({
-      kind: 'lifecycle',
-      text: 'something_new',
-    });
+  it('keeps internal event kinds out of the conversation', () => {
+    expect(toDisplayEvent(event(1, 'something_new'))).toBeNull();
+  });
+
+  it('hides internal lifecycle phases while preserving task outcomes and errors', () => {
+    for (const phase of ['shared_workspace_settled', 'thinking_tokens', 'base_imported']) {
+      expect(toDisplayEvent(event(1, 'lifecycle', { phase }))).toBeNull();
+    }
+    expect(toDisplayEvent(event(1, 'lifecycle', { phase: 'shared_tool_errors_observed' }))).toEqual(
+      {
+        kind: 'lifecycle',
+        text: 'Some tools encountered errors',
+      },
+    );
+    expect(
+      toDisplayEvent(
+        event(1, 'error', {
+          phase: 'shared_snapshot_publish_rejected',
+          detail: 'Could not open pull request',
+        }),
+      ),
+    ).toEqual({ kind: 'lifecycle', text: 'Could not open pull request' });
+    for (const phase of [
+      'result',
+      'shared_snapshot_publishing',
+      'shared_snapshot_published',
+      'cancelled_by_owner',
+    ]) {
+      expect(toDisplayEvent(event(1, 'lifecycle', { phase }))).toEqual({
+        kind: 'lifecycle',
+        text: phase,
+      });
+      expect(lifecyclePhaseLabel(phase).milestone).toBe(true);
+    }
   });
 });
 

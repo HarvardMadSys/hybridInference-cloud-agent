@@ -297,6 +297,7 @@ async def _reserve_shared_chat(
     store: AgentJobStore,
     *,
     metadata: dict | None = None,
+    task_prompt: str = "fix the flaky test",
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
     await store.register_host(
@@ -311,7 +312,7 @@ async def _reserve_shared_chat(
         sandbox_image_digest="sha256:shared-image",
     )
     assert online is not None and online["status"] == "online"
-    job = await _create_job(store, base_sha="a" * 40, metadata=metadata)
+    job = await _create_job(store, base_sha="a" * 40, metadata=metadata, task_prompt=task_prompt)
     claim = await _claim(
         store,
         worker_id="shared-worker",
@@ -999,6 +1000,8 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child is not None
     assert child["thread_id"] == operation["target_thread_id"]
     assert child["fork_source_job_id"] == job["id"]
+    assert child["title_source"] == "inherited"
+    assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]
     child_sandbox = await store.thread_sandbox(thread_id=child["thread_id"])
     source_sandbox = await store.thread_sandbox(thread_id=job["thread_id"])
@@ -4437,3 +4440,234 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
         )
         == "grant-history"
     )
+
+
+async def test_generated_title_is_canonical_and_stable_across_turns(store: AgentJobStore):
+    """The prompt remains intact while each turn reads the same short summary."""
+    prompt = "Please implement the CSV export for SPRUCE_8462 with detailed validation."
+    job, claim, sandbox = await _reserve_shared_chat(store, task_prompt=prompt)
+    assert len(job["title"]) <= 36
+    assert job["title_source"] == "fallback"
+    assert claim is not None and claim["title_generation_pending"]
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    assert await store.set_generated_thread_title(**fence, title="SPRUCE_8462 CSV export")
+    assert not await store.set_generated_thread_title(**fence, title="Second summary")
+    saved = await store.get_job(job["id"])
+    assert saved is not None
+    assert saved["title"] == "SPRUCE_8462 CSV export"
+    assert saved["title_source"] == "generated"
+    assert saved["task_prompt"] == prompt
+    sandbox_fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **sandbox_fence, container_id="title-container", context_status="new"
+    )
+    assert await store.admit_thread_sandbox_turn(**sandbox_fence, job_id=job["id"])
+    assert await store.settle_thread_sandbox(
+        **sandbox_fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="title-session",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.transition(**fence, from_states=("running",), to_state="succeeded")
+    child = await store.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
+    )
+    assert child is not None and child.get("error") is None
+    assert child["title"] == saved["title"]
+    assert child["title_source"] == "generated"
+    followup_claim = await _claim(
+        store,
+        worker_id="title-worker",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+    )
+    assert followup_claim is not None and not followup_claim["title_generation_pending"]
+    assert not await store.set_generated_thread_title(
+        job_id=child["id"],
+        attempt_id=followup_claim["attempt_id"],
+        lease_generation=followup_claim["lease_generation"],
+        title="JSON export",
+    )
+
+
+async def test_manual_same_title_wins_in_flight_generation(store: AgentJobStore):
+    """A manual save claims ownership even if the user keeps the fallback text."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
+    assert claim is not None and claim["title_generation_pending"]
+    # Hold the user edit uncommitted so generation really races the row lock.
+    async with store._pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE agent_threads SET title_source = 'manual' WHERE id = $1",
+            job["thread_id"],
+        )
+        generation = asyncio.create_task(
+            store.set_generated_thread_title(
+                job_id=job["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                title="Unwanted automatic title",
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert not generation.done()
+    assert not await asyncio.wait_for(generation, timeout=3)
+    saved = await store.get_job(job["id"])
+    assert saved is not None and saved["title"] == job["title"]
+    assert saved["title_source"] == "manual"
+
+
+async def test_manual_same_title_sets_provenance(store: AgentJobStore):
+    """Saving the visible fallback without edits still blocks later generation."""
+    job = await _create_job(store)
+    assert await store.set_thread_title(
+        job_id=job["id"], user_id=job["user_id"], title=job["title"]
+    )
+    claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
+    assert claim is not None and not claim["title_generation_pending"]
+    saved = await store.get_job(job["id"])
+    assert saved is not None and saved["title_source"] == "manual"
+    assert not await store.set_generated_thread_title(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        title="Unwanted title",
+    )
+
+
+@pytest.mark.parametrize(
+    "fence_break", ["generation", "job", "expired", "failed", "cancelled", "deleted"]
+)
+async def test_generated_title_rejects_stale_or_deleted_work(
+    store: AgentJobStore, fence_break: str
+):
+    """Expired/superseded work cannot mutate the canonical conversation title."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
+    assert claim is not None
+    generation = claim["lease_generation"]
+    job_id = job["id"]
+    if fence_break == "generation":
+        generation += 1
+    elif fence_break == "job":
+        job_id = (await _create_job(store, user_id="other-owner"))["id"]
+    elif fence_break in {"failed", "cancelled"}:
+        assert await store.transition(
+            job_id=job_id,
+            attempt_id=claim["attempt_id"],
+            lease_generation=generation,
+            from_states=("running",),
+            to_state=fence_break,
+        )
+    else:
+        async with store._pool.acquire() as conn:
+            if fence_break == "expired":
+                await conn.execute(
+                    "UPDATE agent_attempts SET lease_expires_at = NOW() - INTERVAL '1 second' "
+                    "WHERE id = $1",
+                    claim["attempt_id"],
+                )
+            else:
+                await conn.execute(
+                    "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1",
+                    job["thread_id"],
+                )
+    assert not await store.set_generated_thread_title(
+        job_id=job_id,
+        attempt_id=claim["attempt_id"],
+        lease_generation=generation,
+        title="Stale result",
+    )
+    saved = await store.get_job(job["id"])
+    assert saved is not None and saved["title"] == job["title"]
+
+
+async def test_title_generation_is_not_repeated_on_retry(store: AgentJobStore):
+    """Failed first-claim generation keeps the short fallback on a later attempt."""
+    job = await _create_job(store)
+    first = await _claim(store, worker_id="first-worker", lease_ttl_seconds=60)
+    assert first is not None and first["title_generation_pending"]
+    assert await store.release_claim(
+        job_id=job["id"],
+        attempt_id=first["attempt_id"],
+        lease_generation=first["lease_generation"],
+    )
+    second = await _claim(store, worker_id="second-worker", lease_ttl_seconds=60)
+    assert second is not None and not second["title_generation_pending"]
+    for claim in [first, second]:
+        assert not await store.set_generated_thread_title(
+            job_id=job["id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            title="Late summary",
+        )
+
+
+async def test_title_migration_preserves_existing_names(store: AgentJobStore):
+    """Upgrade protects existing names and names inserted by an older control plane."""
+    from tests.support.migrations import apply_migrations, downgrade_to
+
+    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    db_config = {
+        "host": os.getenv("TEST_DB_HOST", "localhost"),
+        "port": int(os.getenv("TEST_DB_PORT", "5432")),
+        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
+        "user": os.getenv("TEST_DB_USER", "postgres"),
+        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
+    }
+    try:
+        downgrade_to(db_config, "0027_session_history")
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO agent_threads (id, user_id, repo, title) "
+                "VALUES ('athr_old_title', 'user-1', 'owner/repo', 'My carefully chosen title')"
+            )
+        apply_migrations(db_config)
+        async with store._pool.acquire() as conn:
+            old = await conn.fetchrow(
+                "SELECT title, title_source FROM agent_threads WHERE id = 'athr_old_title'"
+            )
+            assert dict(old) == {
+                "title": "My carefully chosen title",
+                "title_source": "manual",
+            }
+            # Rolling-deploy old writers omit the new column and must also be safe.
+            source = await conn.fetchval(
+                "INSERT INTO agent_threads (id, user_id, repo, title) "
+                "VALUES ('athr_rolling_title', 'user-1', 'owner/repo', 'Rolling title') "
+                "RETURNING title_source"
+            )
+            assert source == "manual"
+    finally:
+        apply_migrations(db_config)
+
+
+async def test_successful_short_task_accepts_delayed_title(store: AgentJobStore):
+    """A fast task can finish before its independent title request returns."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
+    assert claim is not None
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    assert await store.transition(**fence, from_states=("running",), to_state="succeeded")
+    assert await store.set_generated_thread_title(**fence, title="Fix flaky test")
+    saved = await store.get_job(job["id"])
+    assert saved is not None and saved["title"] == "Fix flaky test"
+    assert saved["title_source"] == "generated"

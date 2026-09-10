@@ -12,11 +12,60 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
+from cloud_agent.api.deps import resolve_agent_access
 from cloud_agent.gateway import ENV_BASE_URL, ENV_DISPATCH_TOKEN, GatewayClient, GatewayError
 
 BASE = "https://gateway.example"
 TOKEN = "dispatch-token"
+
+
+@pytest.mark.parametrize("body", [{}, {"error": {"type": "browser_check"}}, "Forbidden"])
+async def test_proxy_403_is_unavailable_rather_than_a_policy_denial(body):
+    with pytest.raises(HTTPException) as raised:
+        await resolve_agent_access(_client(_serves(body, 403)), "user_1")
+    assert raised.value.status_code == 503
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"type": "subject_unavailable"}},
+        {"detail": {"error": {"type": "subject_unavailable"}}},
+    ],
+)
+async def test_only_an_explicit_subject_refusal_is_an_access_denial(body):
+    client = _client(_serves(body, 403))
+    with pytest.raises(GatewayError) as raised:
+        await client.agent_access("user_1")
+    assert raised.value.error_type == "subject_unavailable"
+    decision = await resolve_agent_access(client, "user_1")
+    assert decision.allowed is False
+    assert decision.permissions == []
+
+
+async def test_an_html_proxy_403_is_unavailable():
+    client = _client(lambda _: httpx.Response(403, text="<html>Forbidden</html>"))
+    with pytest.raises(HTTPException) as raised:
+        await resolve_agent_access(client, "user_1")
+    assert raised.value.status_code == 503
+
+
+@pytest.mark.parametrize("status", [401, 404])
+async def test_incompatible_or_misconfigured_gateway_is_reported_as_configuration(status):
+    with pytest.raises(HTTPException) as raised:
+        await resolve_agent_access(_client(_serves({}, status)), "user_1")
+    assert raised.value.status_code == 503
+    assert raised.value.detail["error"]["type"] == "agent_configuration_error"
+
+
+async def test_missing_gateway_configuration_is_not_a_temporary_failure(monkeypatch):
+    monkeypatch.delenv(ENV_BASE_URL, raising=False)
+    monkeypatch.delenv(ENV_DISPATCH_TOKEN, raising=False)
+    with pytest.raises(HTTPException) as raised:
+        await resolve_agent_access(GatewayClient(), "user_1")
+    assert raised.value.detail["error"]["type"] == "agent_configuration_error"
 
 
 def _client(handler) -> GatewayClient:

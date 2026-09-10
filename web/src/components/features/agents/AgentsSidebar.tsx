@@ -548,13 +548,13 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         style={{ width: pane.width }}
         className="flex shrink-0 flex-col border-r border-gray-200/70 bg-gray-50/80 dark:border-white/10 dark:bg-gray-900/60"
       >
-        <div className="flex-1 overflow-y-auto px-3.5 py-4">
+        <div className="flex-1 overflow-y-auto px-3 py-3">
           <Link
             href="/"
-            className={`flex w-full items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-[13px] font-medium transition-colors ${
+            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
               pathname === '/'
-                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark dark:border-crimson/25 dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-700 hover:bg-white/80 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
+                : 'text-gray-700 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/5 dark:hover:text-gray-100'
             }`}
           >
             <svg
@@ -574,10 +574,10 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
           </Link>
 
           {!searching && (pinnedRows.length > 0 || pinnedList.error) && (
-            <section aria-labelledby="sidebar-pinned-heading" className="mt-5">
+            <section aria-labelledby="sidebar-pinned-heading" className="mt-4">
               <h2
                 id="sidebar-pinned-heading"
-                className="mb-2 px-2 text-[13px] font-normal text-gray-500 dark:text-gray-400"
+                className="mb-1 px-2 text-[11px] font-medium uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500"
               >
                 {t('sidebar.pinned')}
               </h2>
@@ -606,16 +606,18 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
             </section>
           )}
 
-          <div className="mb-2 mt-5 flex items-center justify-between px-2 text-[13px] text-gray-500 dark:text-gray-400">
-            <span>{t('sidebar.projects')}</span>
-            <div className="flex items-center gap-1">
+          <div className="mb-1 mt-4 flex items-center justify-between pl-2 pr-0.5">
+            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500">
+              {t('sidebar.projects')}
+            </span>
+            <div className="flex items-center gap-0.5">
               <button
                 ref={searchButton}
                 type="button"
                 aria-label={t('sidebar.search')}
                 title={`${t('sidebar.search')} (⌘K / Ctrl K)`}
                 aria-expanded={searchOpen}
-                className="rounded-md p-1.5 hover:bg-gray-200/60 dark:hover:bg-white/10"
+                className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-200/60 hover:text-gray-700 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
                 onClick={() => {
                   if (searchOpen) closeSearch();
                   else {
@@ -625,8 +627,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                 }}
               >
                 <svg
-                  width="18"
-                  height="18"
+                  width="16"
+                  height="16"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -823,10 +825,10 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
           </span>
           <Link
             href="/archived"
-            className={`mt-4 flex items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-[13px] font-medium transition-colors ${
+            className={`mt-4 flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
               pathname === '/archived'
-                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark dark:border-crimson/25 dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-600 hover:bg-white/80 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
+                : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
             }`}
           >
             <svg
@@ -848,10 +850,10 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
 
           <Link
             href="/integrations"
-            className={`mt-0.5 flex items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-[13px] font-medium transition-colors ${
+            className={`mt-0.5 flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors ${
               pathname === '/integrations'
-                ? 'border-crimson/10 bg-crimson/[0.06] text-crimson-dark dark:border-crimson/25 dark:bg-crimson/15 dark:text-crimson-light'
-                : 'text-gray-600 hover:bg-white/80 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+                ? 'bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-crimson-light'
+                : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
             }`}
           >
             <svg

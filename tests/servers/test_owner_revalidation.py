@@ -19,15 +19,21 @@ _OWNER = "user_1"
 
 
 class _AccessGateway:
-    def __init__(self, permissions: list[str] | None = None, error: int | None = None):
+    def __init__(
+        self,
+        permissions: list[str] | None = None,
+        error: int | None = None,
+        error_type: str | None = None,
+    ):
         self.permissions = permissions if permissions is not None else ["agent.use"]
         self.error = error
+        self.error_type = error_type
         self.asked: list[str] = []
 
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         self.asked.append(user_id)
         if self.error is not None:
-            raise GatewayError("unavailable", status_code=self.error)
+            raise GatewayError("unavailable", status_code=self.error, error_type=self.error_type)
         return {
             "user_id": user_id,
             "allowed": "agent.use" in self.permissions,
@@ -83,10 +89,22 @@ async def test_an_old_admin_session_cannot_bypass_a_denial(method):
     assert gateway.asked == [_OWNER]
 
 
-@pytest.mark.parametrize("status, expected", [(401, 503), (403, 403), (404, 503), (503, 503)])
+@pytest.mark.parametrize(
+    "status, error_type, expected",
+    [
+        (401, None, 503),
+        (403, None, 503),
+        (403, "browser_check", 503),
+        (403, "subject_unavailable", 403),
+        (404, None, 503),
+        (503, None, 503),
+    ],
+)
 @pytest.mark.parametrize("method", ["GET", "POST"])
-async def test_unavailable_policy_never_falls_back_to_session_role(status, expected, method):
-    gateway = _AccessGateway(error=status)
+async def test_unavailable_policy_never_falls_back_to_session_role(
+    status, error_type, expected, method
+):
+    gateway = _AccessGateway(error=status, error_type=error_type)
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="https://test"
     ) as client:

@@ -126,5 +126,6 @@ describe('AuthProvider current decision', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(current().isAuthenticated).toBe(false));
     expect(current().user).toBeNull();
+    expect(current().error).toBe('unavailable');
   });
 });

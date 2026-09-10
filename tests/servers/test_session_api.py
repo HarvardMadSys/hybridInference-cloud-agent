@@ -22,8 +22,8 @@ The properties worth more than the rest, each with its own case:
   a status call that cannot be made is not a status call that said yes.
 - **The session is hours, not days.** It bounds the identity credential's
   lifetime; admission is checked separately on every protected request.
-- **A 401 from ``/me`` is the ordinary answer**, not a server error. The web
-  app's ``ProtectedRoute`` loops if it ever arrives as a 5xx.
+- **A 401 from ``/me`` means no session; a 503 means access cannot be checked**.
+  Configuration failures carry a type distinct from temporary outages.
 - **Sign-in and ``/me`` answer the same thing about the same person.** They are
   one contract — ``SessionUserResponse`` — and the session sign-in mints is
   exactly what ``/me`` reads.
@@ -364,7 +364,9 @@ async def test_a_callback_with_a_mismatched_state_is_refused_before_the_exchange
         "/v1/session/callback", params={"code": "the-code", "state": "not-the-parked-one"}
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 303
+    assert "sign_in_error=expired" in response.headers["location"]
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
     assert gateway.exchanged == [], "a state that did not match must not spend a code"
     assert not client.cookies.get(identity.SESSION_COOKIE)
 
@@ -377,7 +379,8 @@ async def test_a_callback_with_no_parked_flow_is_refused(client_and_gateway):
         "/v1/session/callback", params={"code": "the-code", "state": "anything"}
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 303
+    assert "sign_in_error=expired" in response.headers["location"]
     assert gateway.exchanged == []
 
 
@@ -391,7 +394,8 @@ async def test_a_replayed_callback_finds_nothing_parked(client_and_gateway):
 
     replay = await client.get("/v1/session/callback", params={"code": "the-code", "state": state})
 
-    assert replay.status_code == 400
+    assert replay.status_code == 303
+    assert "sign_in_error=expired" in replay.headers["location"]
     assert len(gateway.exchanged) == 1, "the replay must not reach the gateway"
 
 
@@ -428,16 +432,17 @@ async def test_an_account_the_gateway_refuses_at_exchange_is_told_so(key):
     ) as client:
         response = await _sign_in(client)
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "This account cannot sign in."
+    assert response.status_code == 303
+    assert "sign_in_error=account_unavailable" in response.headers["location"]
     assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
 
 
-async def test_a_refused_exchange_is_a_400_and_an_unreachable_gateway_a_503(key):
+async def test_refused_exchange_and_outage_offer_the_right_recovery(key):
     """A stale code is the caller's problem; an outage is the deployment's."""
     for error, expected in (
-        (GatewayError("gateway answered 400 for /v1/identity/token", status_code=400), 400),
-        (GatewayError("gateway unreachable: nope"), 503),
+        (GatewayError("gateway answered 400 for /v1/identity/token", status_code=400), "expired"),
+        (GatewayError("gateway unreachable: nope"), "temporary"),
     ):
         gateway = _FakeGateway(
             {"exists": True, "active": True, "role": "internal"},
@@ -450,8 +455,10 @@ async def test_a_refused_exchange_is_a_400_and_an_unreachable_gateway_a_503(key)
         ) as client:
             response = await _sign_in(client)
 
-        assert response.status_code == expected
+        assert response.status_code == 303
+        assert f"sign_in_error={expected}" in response.headers["location"]
         assert not client.cookies.get(identity.SESSION_COOKIE)
+        assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
 
 
 # ── What the gateway says about the account ───────────────────────────────
@@ -481,22 +488,27 @@ async def test_the_gateways_role_wins_over_the_tokens_claim(key):
         ({"user_id": _USER, "plan": "whatever-comes-next"}, "unreadable"),
     ],
 )
-async def test_an_account_the_gateway_will_not_vouch_for_gets_no_cookie(record, why, key):
+@pytest.mark.parametrize("permissions", [[], ["agent.use"]])
+async def test_an_account_the_gateway_will_not_vouch_for_gets_no_cookie(
+    record, why, key, permissions
+):
     """The whole reason the callback asks the gateway at all.
 
     The identity token is valid — it was minted when this person authenticated
     — and says nothing about a suspension that happened afterwards. An answer
     with no recognizable verdict is not a yes either.
     """
-    gateway = _FakeGateway(record, permissions=[], identity_token=_identity_token(key))
+    gateway = _FakeGateway(record, permissions=permissions, identity_token=_identity_token(key))
     transport = ASGITransport(app=_app(gateway))
     async with AsyncClient(
         transport=transport, base_url="https://test", follow_redirects=False
     ) as client:
         response = await _sign_in(client)
 
-    assert response.status_code == 403, why
+    assert response.status_code == 303, why
+    assert "sign_in_error=account_unavailable" in response.headers["location"]
     assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
 
 
 async def test_an_unreachable_gateway_mints_no_session(key):
@@ -506,10 +518,17 @@ async def test_an_unreachable_gateway_mints_no_session(key):
     async with AsyncClient(
         transport=transport, base_url="https://test", follow_redirects=False
     ) as client:
-        response = await _sign_in(client)
+        response = await _sign_in(client, return_to="/jobs/42?tab=diff")
 
-    assert response.status_code == 503
+    assert response.status_code == 303
+    target = urlparse(response.headers["location"])
+    assert target.path == "/login"
+    assert parse_qs(target.query) == {
+        "sign_in_error": ["temporary"],
+        "return_to": ["/jobs/42?tab=diff"],
+    }
     assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
 
 
 async def test_a_token_for_another_audience_is_refused(key):
@@ -649,7 +668,7 @@ async def test_logout_clears_the_cookie(client_and_gateway):
     assert (await client.post("/v1/session/logout")).status_code == 200
 
 
-async def test_a_deployment_that_cannot_verify_sessions_says_503(monkeypatch, key):
+async def test_a_deployment_without_a_session_secret_explains_configuration(monkeypatch, key):
     """Unset secret is an operator problem, reported as one — never a pass."""
     gateway = _FakeGateway(
         {"exists": True, "active": True, "role": "internal"},
@@ -662,7 +681,9 @@ async def test_a_deployment_that_cannot_verify_sessions_says_503(monkeypatch, ke
     ) as client:
         response = await _begin(client)
 
-    assert response.status_code == 503
+    assert response.status_code == 303
+    assert "sign_in_error=unavailable" in response.headers["location"]
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
 
 
 async def test_secure_can_be_turned_off_only_deliberately(monkeypatch, key):
@@ -681,20 +702,27 @@ async def test_secure_can_be_turned_off_only_deliberately(monkeypatch, key):
     assert "secure" not in response.headers["set-cookie"].lower()
 
 
-async def test_login_denies_an_admin_profile_without_agent_access(key):
+@pytest.mark.parametrize("role", ["free", "admin"])
+async def test_login_preserves_identity_without_granting_agent_access(key, role):
     gateway = _FakeGateway(
-        {"exists": True, "active": True, "role": "admin"},
+        {"exists": True, "active": True, "role": role},
         permissions=[],
-        identity_token=_identity_token(key, role="admin"),
+        identity_token=_identity_token(key, role=role),
     )
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="https://test", follow_redirects=False
     ) as client:
-        response = await _sign_in(client)
-        assert response.status_code == 403
-        assert not client.cookies.get(identity.SESSION_COOKIE)
-    assert gateway.access_asked == [_USER]
-    assert gateway.asked == [], "profile metadata must not substitute for denied admission"
+        response = await _sign_in(client, return_to="/jobs/42")
+        assert response.status_code == 303
+        assert response.headers["location"] == f"{_WEB_BASE_URL}/jobs/42"
+        assert client.cookies.get(identity.SESSION_COOKIE)
+        assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+        me = await client.get("/v1/session/me")
+        assert me.status_code == 200
+        assert me.json()["id"] == _USER
+        assert me.json()["agent_access"] == {"allowed": False, "permissions": []}
+    assert gateway.access_asked == [_USER, _USER]
+    assert gateway.asked == [_USER]
 
 
 async def test_login_accepts_a_free_profile_with_explicit_agent_access(key):
@@ -736,3 +764,117 @@ async def test_me_fails_closed_after_an_earlier_allow_when_gateway_is_unavailabl
     response = await client.get("/v1/session/me")
     assert response.status_code == 503
     assert "agent_access" not in response.json()
+
+
+async def test_failed_callback_can_start_a_fresh_flow_and_recover(client_and_gateway):
+    client, gateway = client_and_gateway
+    gateway.error = True
+    started = await _begin(client, return_to="/jobs/42")
+    params = {"code": "first-code", "state": _state_from(started)}
+    failed = await client.get("/v1/session/callback", params=params)
+    assert failed.status_code == 303
+    assert "sign_in_error=temporary" in failed.headers["location"]
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    replay = await client.get("/v1/session/callback", params=params)
+    assert replay.status_code == 303
+    assert "sign_in_error=expired" in replay.headers["location"]
+    assert len(gateway.exchanged) == 1
+
+    gateway.error = False
+    recovered = await _sign_in(client, return_to="/jobs/42", code="fresh-code")
+    assert recovered.headers["location"] == f"{_WEB_BASE_URL}/jobs/42"
+    assert (await client.get("/v1/session/me")).status_code == 200
+
+
+async def test_callback_without_a_web_url_keeps_the_service_error(monkeypatch, key):
+    monkeypatch.delenv(session_router.ENV_WEB_BASE_URL, raising=False)
+    gateway = _FakeGateway(error=True, identity_token=_identity_token(key))
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(gateway)), base_url="https://test", follow_redirects=False
+    ) as client:
+        response = await _sign_in(client)
+    assert response.status_code == 503
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+
+
+async def test_callback_missing_jwks_is_configuration_failure(client_and_gateway, monkeypatch):
+    client, _ = client_and_gateway
+    started = await _begin(client)
+    monkeypatch.delenv(identity.ENV_JWKS_URL)
+    response = await client.get(
+        "/v1/session/callback", params={"code": "code", "state": _state_from(started)}
+    )
+    assert response.status_code == 303
+    assert "sign_in_error=unavailable" in response.headers["location"]
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+
+
+async def test_me_reports_configuration_error_when_session_secret_is_missing(
+    client_and_gateway, monkeypatch
+):
+    client, _ = client_and_gateway
+    await _sign_in(client)
+    monkeypatch.delenv(identity.ENV_SESSION_SECRET)
+    response = await client.get("/v1/session/me")
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["type"] == "agent_configuration_error"
+
+
+@pytest.mark.parametrize("name", [session_router.ENV_REDIRECT_URI, identity.ENV_SESSION_SECRET])
+async def test_configuration_lost_during_callback_has_no_retry(
+    client_and_gateway, monkeypatch, name
+):
+    client, gateway = client_and_gateway
+    started = await _begin(client)
+    monkeypatch.delenv(name)
+    response = await client.get(
+        "/v1/session/callback", params={"code": "code", "state": _state_from(started)}
+    )
+    assert response.status_code == 303
+    assert "sign_in_error=unavailable" in response.headers["location"]
+    assert gateway.exchanged == []
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+
+
+async def test_missing_jwks_is_reported_before_starting_login(client_and_gateway, monkeypatch):
+    client, _ = client_and_gateway
+    monkeypatch.delenv(identity.ENV_JWKS_URL)
+    response = await _begin(client)
+    assert response.status_code == 303
+    assert "sign_in_error=unavailable" in response.headers["location"]
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+
+
+async def test_expired_flow_can_start_again_without_reusing_a_code(client_and_gateway):
+    client, gateway = client_and_gateway
+    started = await _begin(client, return_to="/jobs/42")
+    gateway.exchange_error = GatewayError("expired code", status_code=400)
+    failed = await client.get(
+        "/v1/session/callback", params={"code": "spent", "state": _state_from(started)}
+    )
+    assert failed.status_code == 303
+    assert parse_qs(urlparse(failed.headers["location"]).query) == {
+        "sign_in_error": ["expired"],
+        "return_to": ["/jobs/42"],
+    }
+    assert not client.cookies.get(identity.LOGIN_FLOW_COOKIE)
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    gateway.exchange_error = None
+    response = await _sign_in(client, return_to="/jobs/42", code="fresh")
+    assert response.headers["location"] == f"{_WEB_BASE_URL}/jobs/42"
+    assert client.cookies.get(identity.SESSION_COOKIE)
+
+
+async def test_expired_callback_without_web_url_still_rejects_as_400(
+    client_and_gateway, monkeypatch
+):
+    client, gateway = client_and_gateway
+    monkeypatch.delenv(session_router.ENV_WEB_BASE_URL)
+    response = await client.get(
+        "/v1/session/callback", params={"code": "spent", "state": "untrusted"}
+    )
+    assert response.status_code == 400
+    assert gateway.exchanged == []

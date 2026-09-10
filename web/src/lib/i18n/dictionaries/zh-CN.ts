@@ -19,7 +19,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'taskActions.pin': '置顶',
   'taskActions.unpin': '取消置顶',
   'taskActions.fork': 'Fork',
-  'taskActions.details': '运行详情',
   'taskActions.cancel': '取消',
   'taskActions.save': '保存',
   'taskActions.saving': '保存中…',
@@ -91,6 +90,12 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.pinFailed': '置顶失败。',
   'sidebar.unpinFailed': '取消置顶失败。',
   'sidebar.openSettings': '打开设置',
+  'sidebar.justNow': '刚刚',
+  'sidebar.minutesAgo': '{count}分钟',
+  'sidebar.hoursAgo': '{count}小时',
+  'sidebar.daysAgo': '{count}天',
+  'sidebar.dateThisYear': '{month}/{day}',
+  'sidebar.dateOtherYear': '{year}/{month}/{day}',
 
   // ── Settings ────────────────────────────────────────────────────────────
   'settings.title': '设置',

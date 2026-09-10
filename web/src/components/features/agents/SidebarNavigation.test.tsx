@@ -202,11 +202,13 @@ describe('sidebar navigation interactions', () => {
       id === 'a' ? Promise.resolve(base[0].job) : new Promise(() => {}),
     );
     const { rerender } = render(<AgentsSidebar />);
-    await waitFor(() => expect(screen.getByTitle('owner/repo')).toHaveClass('border-crimson'));
+    await waitFor(() =>
+      expect(screen.getByTitle('owner/repo')).toHaveAttribute('aria-current', 'true'),
+    );
     await screen.findByRole('link', { name: 'Task b' });
     api.pathname = '/b';
     rerender(<AgentsSidebar />);
-    expect(screen.getByTitle('owner/repo')).toHaveClass('border-crimson');
+    expect(screen.getByTitle('owner/repo')).toHaveAttribute('aria-current', 'true');
     expect(screen.getByRole('link', { name: 'Task b' })).toHaveAttribute('aria-current', 'page');
   });
 

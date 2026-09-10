@@ -7,7 +7,6 @@ import {
   refreshAgentJobUsage,
   type AgentJobUsageApi,
   type AgentLedgerTotalsApi,
-  type AgentLedgerUnknownRowsApi,
 } from '@/lib/api/agents';
 
 import type { AgentJob } from './types';
@@ -48,22 +47,6 @@ function compactCount(value: number): string {
   return value
     .toLocaleString('en-US', { notation: 'compact', maximumFractionDigits: 1 })
     .toLowerCase();
-}
-
-function timestamp(value: string): string {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return 'unknown time';
-  const today = new Date();
-  const sameDay =
-    date.getFullYear() === today.getFullYear() &&
-    date.getMonth() === today.getMonth() &&
-    date.getDate() === today.getDate();
-  return date.toLocaleString([], {
-    ...(sameDay ? {} : { month: 'short', day: 'numeric' }),
-    ...(date.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
-    hour: '2-digit',
-    minute: '2-digit',
-  });
 }
 
 function retryInterval(failures: number): number {
@@ -162,30 +145,8 @@ function UsageSummary({
   );
 }
 
-function UsageRow({
-  label,
-  value,
-  incomplete = false,
-}: {
-  label: string;
-  value: string;
-  incomplete?: boolean;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4 py-1.5 text-[13px]">
-      <dt className="text-gray-500 dark:text-gray-400">{label}</dt>
-      <dd className="text-right text-gray-800 dark:text-gray-200">
-        <span className="break-all tabular-nums">{value}</span>
-        {incomplete ? (
-          <span className="ml-1 text-xs text-gray-500 dark:text-gray-400"> (incomplete)</span>
-        ) : null}
-      </dd>
-    </div>
-  );
-}
-
-/** A user's usage summary; accounting diagnostics remain in the owner API. */
-export function LedgerUsage({ job }: { job: AgentJob }) {
+// Owned by the job view, independently of which message holds the summary.
+export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
   const [loaded, setLoaded] = useState<LoadedUsage | null>(null);
 
   useEffect(() => {
@@ -261,15 +222,7 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
           void load(true);
           return;
         }
-        if (
-          refresh ||
-          active ||
-          scheduled ||
-          data.conversation?.active ||
-          data.conversation?.refreshing ||
-          data.conversation?.next_refresh_at ||
-          (eligible && needsSourceRefresh)
-        ) {
+        if (refresh || active || scheduled || (eligible && needsSourceRefresh)) {
           const remainingBackoff = retryInterval(sourceFailures) - (Date.now() - lastRefreshAt);
           schedule(
             sourceHasFailed && !scheduled && !refresh
@@ -288,7 +241,7 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
           unsupported: false,
         }));
         // Network errors may clear without user action. Retry reads with a
-        // capped rate while the drawer is open, including for completed runs.
+        // capped rate while the job is displayed, including for completed runs.
         readFailures = Math.min(readFailures + 1, 3);
         schedule(retryInterval(readFailures));
       }
@@ -303,7 +256,12 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
   }, [job.id, job.state]);
 
   // Effects run after render; never expose the previous job in that first frame.
-  const result = loaded?.jobId === job.id ? loaded : null;
+  return loaded?.jobId === job.id ? loaded : null;
+}
+
+/** Only the current run's model calls and tokens; diagnostics stay in the API. */
+export function LedgerUsage({ job, usage }: { job: AgentJob; usage: LoadedUsage | null }) {
+  const result = usage?.jobId === job.id ? usage : null;
   const data = result?.data;
   const ledger = data?.ledger;
   const loading = !result || result.loading;
@@ -312,16 +270,16 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
   const fallback = !gatewayTotals && runtime;
   const totals = gatewayTotals ?? runtimeTotals(runtime);
   const hasValues =
-    totals &&
-    (known(totals.calls) ||
-      known(totals.tokens_in) ||
-      known(totals.tokens_out) ||
-      known(totals.cache_read));
+    totals && (known(totals.calls) || known(totals.tokens_in) || known(totals.tokens_out));
   const failed = Boolean(result?.failed || result?.unsupported || (data && hasRefreshError(data)));
   const counting = Boolean(
     !failed &&
-    !hasValues &&
-    (ledger?.status === 'pending' || ledger?.refreshing || job.state === 'queued'),
+    ledger?.status !== 'unavailable' &&
+    (ledger?.status === 'pending' ||
+      ledger?.refreshing ||
+      result?.requesting ||
+      job.state === 'queued' ||
+      job.state === 'running'),
   );
   const incomplete = Boolean(
     gatewayTotals &&
@@ -329,117 +287,39 @@ export function LedgerUsage({ job }: { job: AgentJob }) {
       (ledger?.unknown_rows?.tokens_in ?? 0) > 0 ||
       (ledger?.unknown_rows?.tokens_out ?? 0) > 0),
   );
-  const metrics: Array<[Exclude<keyof AgentLedgerTotalsApi, 'calls' | 'spent_usd'>, string]> = [
-    ['tokens_in', 'Input tokens'],
-    ['tokens_out', 'Output tokens'],
-    ['cache_read', 'Cache read tokens'],
-    ['cache_write', 'Cache write tokens'],
-    ['reasoning', 'Reasoning tokens'],
-  ];
-  const unknown: AgentLedgerUnknownRowsApi | null = gatewayTotals
-    ? (ledger?.unknown_rows ?? null)
-    : null;
-  const conversation = data?.conversation;
+  const status = failed
+    ? 'Update temporarily unavailable.'
+    : counting
+      ? 'Counting usage…'
+      : ledger?.next_refresh_at
+        ? 'Usage may change.'
+        : null;
 
   return (
-    <section aria-label="Usage">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-        Usage
-      </h3>
+    <section
+      aria-label="Usage"
+      className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs leading-5 text-gray-500 dark:text-gray-400"
+    >
       {loading ? (
-        <div role="status" aria-label="Loading usage" className="mt-3">
+        <span role="status" aria-label="Loading usage">
           <span className="sr-only">Loading usage…</span>
-          <div className="h-4 w-4/5 animate-pulse rounded bg-gray-100 dark:bg-white/5" />
-        </div>
-      ) : (
+          <span
+            aria-hidden="true"
+            className="inline-block h-3 w-52 max-w-full animate-pulse rounded bg-gray-100 dark:bg-white/5"
+          />
+        </span>
+      ) : totals && hasValues ? (
         <>
-          {hasValues && totals ? (
-            <UsageSummary
-              totals={totals}
-              label="Run usage"
-              className="mt-2 text-[13px] font-medium leading-6 text-gray-800 dark:text-gray-200"
-            />
-          ) : (
-            <p role="status" className="mt-2 text-[13px] text-gray-500 dark:text-gray-400">
-              {counting ? 'Counting usage…' : 'Usage temporarily unavailable.'}
-            </p>
-          )}
-          {fallback && hasValues ? (
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Reported by agent.</p>
+          <UsageSummary totals={totals} label="Run usage" />
+          {fallback ? <span>Reported by agent.</span> : null}
+          {incomplete ? <span>Some usage is unavailable.</span> : null}
+          {gatewayTotals && (ledger?.estimated_calls ?? 0) > 0 ? (
+            <span>Some token counts are estimated.</span>
           ) : null}
-          {incomplete ? (
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Some usage is unavailable.
-            </p>
-          ) : null}
-          {gatewayTotals && ledger?.queried_at ? (
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Updated at{' '}
-              <time dateTime={ledger.queried_at} title={ledger.queried_at}>
-                {timestamp(ledger.queried_at)}
-              </time>
-              {failed
-                ? ' · Update temporarily unavailable.'
-                : result?.requesting || ledger.refreshing
-                  ? ' · Updating…'
-                  : ledger.next_refresh_at
-                    ? ' · Usage may change.'
-                    : ''}
-            </p>
-          ) : null}
-          {conversation && conversation.turn_count > 1 ? (
-            <div className="mt-3 text-xs leading-5 text-gray-500 dark:text-gray-400">
-              <p>
-                Conversation total
-                {conversation.incomplete ? ' (incomplete)' : ''}
-              </p>
-              {conversation.totals ? (
-                <UsageSummary totals={conversation.totals} label="Conversation usage" />
-              ) : (
-                <p>Usage temporarily unavailable.</p>
-              )}
-              {conversation.queried_at ? (
-                <p>
-                  Updated at{' '}
-                  <time dateTime={conversation.queried_at} title={conversation.queried_at}>
-                    {timestamp(conversation.queried_at)}
-                  </time>
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-          {totals && hasValues ? (
-            <details className="mt-3">
-              <summary className="cursor-pointer text-xs font-medium text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200">
-                Usage details
-              </summary>
-              <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
-                {metrics.map(([key, label]) =>
-                  known(totals[key]) ? (
-                    <UsageRow
-                      key={key}
-                      label={label}
-                      value={count(totals[key])}
-                      incomplete={(unknown?.[key] ?? 0) > 0}
-                    />
-                  ) : null,
-                )}
-                {totals.spent_usd != null ? (
-                  <UsageRow
-                    label="Estimated inference cost"
-                    value={`$${totals.spent_usd}`}
-                    incomplete={(unknown?.spent_usd ?? 0) > 0}
-                  />
-                ) : null}
-              </dl>
-              {gatewayTotals && (ledger?.estimated_calls ?? 0) > 0 ? (
-                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  Some token counts are estimated.
-                </p>
-              ) : null}
-            </details>
-          ) : null}
+          {gatewayTotals && status ? <span>{status}</span> : null}
         </>
+      ) : (
+        <span role="status">{counting ? 'Counting usage…' : 'Usage temporarily unavailable.'}</span>
       )}
     </section>
   );

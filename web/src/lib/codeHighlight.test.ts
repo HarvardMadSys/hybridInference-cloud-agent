@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { highlightCode, type CodeToken } from './codeHighlight';
+import { highlightCode, highlightFence, type CodeToken } from './codeHighlight';
 
 const text = (tokens: CodeToken[]): string => tokens.map((token) => token.text).join('');
 const kinds = (tokens: CodeToken[], kind: CodeToken['kind']): string[] =>
@@ -57,5 +57,22 @@ describe('highlightCode', () => {
     const [line] = highlightCode('# base image\nFROM x', 'ops/Dockerfile');
 
     expect(kinds(line, 'comment')).toEqual(['# base image']);
+  });
+});
+
+describe('highlightFence', () => {
+  it('resolves the names fences use, not only file extensions', () => {
+    const kinds = (lines: CodeToken[][]) => lines.flat().map((token) => token.kind);
+    expect(kinds(highlightFence('def f(): pass', 'python'))).toContain('keyword');
+    expect(kinds(highlightFence('def f(): pass', 'py'))).toContain('keyword');
+    expect(kinds(highlightFence('SELECT 1', 'PostgreSQL'))).toContain('keyword');
+    expect(kinds(highlightFence('export FOO=1', 'console'))).toContain('keyword');
+  });
+
+  it('leaves an unknown language plain, line by line', () => {
+    expect(highlightFence('a\nb', 'brainfuck')).toEqual([
+      [{ text: 'a', kind: 'plain' }],
+      [{ text: 'b', kind: 'plain' }],
+    ]);
   });
 });
