@@ -47,6 +47,7 @@ from cloud_agent.schemas import (
 )
 
 if TYPE_CHECKING:
+    from cloud_agent.ports import HostPoolRepository
     from cloud_agent.storage.store import AgentJobStore
 
 router = APIRouter(prefix="/admin")
@@ -96,7 +97,7 @@ def _to_item(row: dict) -> AgentRunnerHost:
     )
 
 
-async def _snapshot(store: AgentJobStore) -> ListAgentRunnerHostsResponse:
+async def _snapshot(store: HostPoolRepository) -> ListAgentRunnerHostsResponse:
     """The pool as it stands — the response every endpoint here returns.
 
     Every part comes from one read. ``active_host`` is the policy's own value
@@ -320,7 +321,7 @@ async def _set_status(
     host: str,
     status: str,
     action: str,
-    job_store: AgentJobStore,
+    job_store: HostPoolRepository,
 ) -> ListAgentRunnerHostsResponse:
     """Apply one table-driven status change, or say why it was refused."""
     outcome = await job_store.set_host_status(host=host, status=status)

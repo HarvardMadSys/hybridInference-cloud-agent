@@ -44,6 +44,7 @@ from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_tok
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from cloud_agent.ports import GrantRepository
     from cloud_agent.storage.store import AgentJobStore
 
 router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
@@ -347,7 +348,7 @@ async def heartbeat_host(
 
 
 async def _mint_residency_grant(
-    job_store: AgentJobStore, grants: Any, *, row: dict[str, Any]
+    job_store: GrantRepository, grants: Any, *, row: dict[str, Any]
 ) -> str | None:
     """Mint the worker-fenced grant for one supervisor-owned member process."""
     if grants is None:
