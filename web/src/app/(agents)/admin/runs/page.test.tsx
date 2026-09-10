@@ -269,13 +269,23 @@ describe('admin runs list', () => {
 
   it('defaults to an anchored seven-day window and exposes only working admin sections', async () => {
     render(<AdminRunsPageComponent />);
-    expect(await screen.findByRole('link', { name: 'Inspect parser' })).toHaveAttribute(
+    expect(await screen.findByRole('link', { name: 'job-1' })).toHaveAttribute(
       'href',
       '/admin/runs/job-1',
     );
+    expect(screen.queryByText('Inspect parser')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Inspect parser')).not.toBeInTheDocument();
     const filters = vi.mocked(getAdminRuns).mock.calls[0][0];
     expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86_400_000);
     expect(screen.getByLabelText('Created')).toHaveValue('7');
+    expect(screen.getByLabelText('Status')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'More filters' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    for (const label of ['User ID', 'Repository', 'Agent', 'Model', 'Host']) {
+      expect(screen.queryByLabelText(label)).not.toBeInTheDocument();
+    }
     const nav = screen.getByRole('navigation', { name: 'Admin sections' });
     expect(within(nav).getByRole('link', { name: 'Runs' })).toHaveAttribute('aria-current', 'page');
     expect(within(nav).getByRole('link', { name: 'Servers' })).toHaveAttribute(
@@ -287,42 +297,200 @@ describe('admin runs list', () => {
 
   it('applies filters and paginates with the same window and filter scope', async () => {
     render(<AdminRunsPageComponent />);
-    await screen.findByRole('link', { name: 'Inspect parser' });
+    await screen.findByRole('link', { name: 'job-1' });
     vi.mocked(getAdminRuns)
       .mockResolvedValueOnce(page([run()], 'cursor-2'))
       .mockResolvedValueOnce(page([run({ id: 'job-2', title: 'Second run' })]));
+    fireEvent.click(screen.getByRole('button', { name: 'More filters' }));
     fireEvent.change(screen.getByLabelText('User ID'), { target: { value: 'person-2' } });
     fireEvent.change(screen.getByLabelText('Repository'), { target: { value: 'org/other' } });
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
     fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    const extraFilters = screen.getByRole('button', { name: 'More filters (2 active)' });
+    expect(extraFilters).toHaveAttribute('aria-expanded', 'false');
+    expect(extraFilters).toHaveFocus();
+    expect(screen.queryByLabelText('User ID')).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
-    await screen.findByRole('link', { name: 'Second run' });
+    await screen.findByRole('link', { name: 'job-2' });
     expect(getAdminRuns).toHaveBeenLastCalledWith(
       expect.objectContaining({
         user_id: 'person-2',
         repo: 'org/other',
-        state: 'failed',
         cursor: 'cursor-2',
         since: page().since,
         until: page().until,
       }),
       expect.any(AbortSignal),
     );
-    expect(screen.getByRole('link', { name: 'Inspect parser' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'job-1' })).toBeInTheDocument();
+    expect(screen.queryByText('Second run')).not.toBeInTheDocument();
+  });
+
+  it('applies Created and Status immediately and replaces previously paged rows', async () => {
+    vi.mocked(getAdminRuns)
+      .mockResolvedValueOnce(page([run()], 'cursor-2'))
+      .mockResolvedValueOnce(page([run({ id: 'job-2' })]))
+      .mockResolvedValueOnce(page([run({ id: 'job-30-days' })]))
+      .mockResolvedValueOnce(page([run({ id: 'job-failed', state: 'failed' })]));
+    render(<AdminRunsPageComponent />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
+    await screen.findByRole('link', { name: 'job-2' });
+
+    fireEvent.change(screen.getByLabelText('Created'), { target: { value: '30' } });
+    await screen.findByRole('link', { name: 'job-30-days' });
+    const timeFilters = vi.mocked(getAdminRuns).mock.lastCall![0];
+    expect(Date.parse(timeFilters.until!) - Date.parse(timeFilters.since!)).toBe(30 * 86_400_000);
+    expect(timeFilters.cursor).toBeUndefined();
+    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'job-2' })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
+    await screen.findByRole('link', { name: 'job-failed' });
+    const statusFilters = vi.mocked(getAdminRuns).mock.lastCall![0];
+    expect(statusFilters.state).toBe('failed');
+    expect(Date.parse(statusFilters.until!) - Date.parse(statusFilters.since!)).toBe(
+      30 * 86_400_000,
+    );
+    expect(statusFilters.cursor).toBeUndefined();
+    expect(screen.queryByRole('link', { name: 'job-30-days' })).not.toBeInTheDocument();
+    expect(getAdminRuns).toHaveBeenCalledTimes(4);
+  });
+
+  it('counts only applied extra filters and clears them while preserving Created and Status', async () => {
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    fireEvent.change(screen.getByLabelText('Created'), { target: { value: '30' } });
+    await screen.findByRole('link', { name: 'job-1' });
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
+    await screen.findByRole('link', { name: 'job-1' });
+    fireEvent.click(screen.getByRole('button', { name: 'More filters' }));
+    for (const [label, value] of [
+      ['User ID', 'person-2'],
+      ['Repository', 'org/other'],
+      ['Agent', 'codex'],
+      ['Model', 'model-b'],
+      ['Host', 'host-b'],
+    ]) {
+      fireEvent.change(screen.getByLabelText(label), { target: { value: ` ${value} ` } });
+    }
+    expect(getAdminRuns).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole('button', { name: 'More filters' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    await screen.findByRole('link', { name: 'job-1' });
+    expect(getAdminRuns).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        user_id: 'person-2',
+        repo: 'org/other',
+        runtime: 'codex',
+        model: 'model-b',
+        host: 'host-b',
+        state: 'failed',
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(screen.getByRole('button', { name: 'More filters (5 active)' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'More filters (5 active)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    await screen.findByRole('link', { name: 'job-1' });
+    const cleared = vi.mocked(getAdminRuns).mock.lastCall![0];
+    for (const key of ['user_id', 'repo', 'runtime', 'model', 'host'] as const) {
+      expect(cleared[key]).toBeUndefined();
+    }
+    expect(cleared.state).toBe('failed');
+    expect(Date.parse(cleared.until!) - Date.parse(cleared.since!)).toBe(30 * 86_400_000);
+    expect(screen.getByLabelText('Created')).toHaveValue('30');
+    expect(screen.getByLabelText('Status')).toHaveValue('failed');
+    expect(screen.getByRole('button', { name: 'More filters' })).toBeInTheDocument();
+    for (const label of ['User ID', 'Repository', 'Agent', 'Model', 'Host']) {
+      expect(screen.getByLabelText(label)).toHaveValue('');
+    }
+    expect(getAdminRuns).toHaveBeenCalledTimes(5);
+  });
+
+  it.each(['Refresh', 'Created', 'Status'])(
+    'preserves applied extra filters without submitting edited drafts when %s changes the query',
+    async (action) => {
+      render(<AdminRunsPageComponent />);
+      await screen.findByRole('link', { name: 'job-1' });
+      fireEvent.click(screen.getByRole('button', { name: 'More filters' }));
+      fireEvent.change(screen.getByLabelText('User ID'), { target: { value: 'applied-user' } });
+      fireEvent.change(screen.getByLabelText('Repository'), { target: { value: 'org/applied' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+      await screen.findByRole('link', { name: 'job-1' });
+
+      fireEvent.click(screen.getByRole('button', { name: 'More filters (2 active)' }));
+      fireEvent.change(screen.getByLabelText('User ID'), { target: { value: 'draft-user' } });
+      fireEvent.change(screen.getByLabelText('Repository'), { target: { value: 'org/draft' } });
+      fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'draft-model' } });
+      expect(getAdminRuns).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole('button', { name: 'More filters (2 active)' })).toBeInTheDocument();
+
+      if (action === 'Refresh') fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      if (action === 'Created')
+        fireEvent.change(screen.getByLabelText('Created'), { target: { value: '30' } });
+      if (action === 'Status')
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
+      await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(3));
+      await screen.findByRole('link', { name: 'job-1' });
+      const filters = vi.mocked(getAdminRuns).mock.lastCall![0];
+      expect(filters.user_id).toBe('applied-user');
+      expect(filters.repo).toBe('org/applied');
+      expect(filters.model).toBeUndefined();
+      expect(screen.getByRole('button', { name: 'More filters (2 active)' })).toBeInTheDocument();
+      expect(screen.getByLabelText('User ID')).toHaveValue('draft-user');
+      expect(screen.getByLabelText('Model')).toHaveValue('draft-model');
+    },
+  );
+
+  it('does not count whitespace-only extra filters as active', async () => {
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    fireEvent.click(screen.getByRole('button', { name: 'More filters' }));
+    fireEvent.change(screen.getByLabelText('User ID'), { target: { value: '   ' } });
+    fireEvent.change(screen.getByLabelText('Repository'), { target: { value: ' org/other ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    await screen.findByRole('link', { name: 'job-1' });
+    expect(vi.mocked(getAdminRuns).mock.lastCall![0].user_id).toBeUndefined();
+    expect(vi.mocked(getAdminRuns).mock.lastCall![0].repo).toBe('org/other');
+    expect(screen.getByRole('button', { name: 'More filters (1 active)' })).toBeInTheDocument();
   });
 
   it('ignores an old response when the filters change', async () => {
     const pending = deferred<AdminRunsPage>();
     vi.mocked(getAdminRuns)
       .mockReturnValueOnce(pending.promise)
-      .mockResolvedValueOnce(page([run({ title: 'Current match' })]));
+      .mockResolvedValueOnce(page([run({ id: 'current-match' })]));
     render(<AdminRunsPageComponent />);
+    fireEvent.click(screen.getByRole('button', { name: 'More filters' }));
     fireEvent.change(screen.getByLabelText('User ID'), { target: { value: 'new-user' } });
     fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
-    await screen.findByRole('link', { name: 'Current match' });
-    await act(async () => pending.resolve(page([run({ title: 'Stale match' })])));
-    expect(screen.queryByText('Stale match')).not.toBeInTheDocument();
+    await screen.findByRole('link', { name: 'current-match' });
+    await act(async () => pending.resolve(page([run({ id: 'stale-match' })])));
+    expect(screen.queryByRole('link', { name: 'stale-match' })).not.toBeInTheDocument();
     expect(vi.mocked(getAdminRuns).mock.calls[0][1]?.aborted).toBe(true);
+  });
+
+  it('ignores a late pagination response after Status changes the filter scope', async () => {
+    const pending = deferred<AdminRunsPage>();
+    vi.mocked(getAdminRuns)
+      .mockResolvedValueOnce(page([run()], 'old-cursor'))
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(page([run({ id: 'current-match', state: 'failed' })]));
+    render(<AdminRunsPageComponent />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
+    await screen.findByRole('link', { name: 'current-match' });
+    expect(vi.mocked(getAdminRuns).mock.calls[1][1]?.aborted).toBe(true);
+    expect(vi.mocked(getAdminRuns).mock.lastCall![0].cursor).toBeUndefined();
+
+    await act(async () =>
+      pending.resolve(page([run({ id: 'stale-match' })], 'another-old-cursor')),
+    );
+    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'stale-match' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Load more runs' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'current-match' })).toBeInTheDocument();
   });
 
   it('clears retained cross-user rows when a later page rejects revoked access', async () => {
@@ -332,7 +500,7 @@ describe('admin runs list', () => {
     render(<AdminRunsPageComponent />);
     fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
     await screen.findByText('Admin access required');
-    expect(screen.queryByRole('link', { name: 'Inspect parser' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'job-1' })).not.toBeInTheDocument();
   });
 });
 
