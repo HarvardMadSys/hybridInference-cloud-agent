@@ -31,6 +31,7 @@ The properties worth more than the rest, each with its own case:
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -878,3 +879,101 @@ async def test_expired_callback_without_web_url_still_rejects_as_400(
     )
     assert response.status_code == 400
     assert gateway.exchanged == []
+
+
+@pytest.mark.parametrize("web_configured", [True, False])
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        ("missing_flow", "invalid_flow"),
+        ("tampered_flow", "invalid_flow"),
+        ("state_mismatch", "state_mismatch"),
+        ("missing_code", "missing_code"),
+    ],
+)
+async def test_callback_validation_logs_the_reason_without_credentials(
+    client_and_gateway, monkeypatch, caplog, failure, reason, web_configured
+):
+    client, gateway = client_and_gateway
+    started = await _begin(client, return_to="/jobs/private-return-target")
+    state = _state_from(started)
+    cookie = client.cookies[identity.LOGIN_FLOW_COOKIE]
+    verifier = identity.verify_login_flow(cookie)["verifier"]
+    code = "private-authorization-code"
+    if failure == "missing_flow":
+        client.cookies.clear()
+    elif failure == "tampered_flow":
+        client.cookies.clear()
+        client.cookies.set(identity.LOGIN_FLOW_COOKIE, "private-tampered-cookie")
+    elif failure == "state_mismatch":
+        state = "private-mismatched-state"
+    else:
+        code = ""
+    if not web_configured:
+        monkeypatch.delenv(session_router.ENV_WEB_BASE_URL)
+
+    caplog.set_level(logging.WARNING, logger=session_router.__name__)
+    response = await client.get("/v1/session/callback", params={"code": code, "state": state})
+
+    assert response.status_code == (303 if web_configured else 400)
+    assert gateway.exchanged == []
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    records = [record for record in caplog.records if record.name == session_router.__name__]
+    assert len(records) == 1
+    record = records[0]
+    assert record.event == "agent_sign_in_rejected"
+    assert record.reason == reason
+    assert record.status_code == 400
+    # The process's plain-text formatter must expose these fields too.
+    assert f"reason={reason}" in record.getMessage()
+    assert "status_code=400" in record.getMessage()
+    assert record.exc_info is None
+    for secret in (
+        state,
+        cookie,
+        verifier,
+        "private-authorization-code",
+        "private-tampered-cookie",
+        "private-return-target",
+        _SESSION_SECRET,
+    ):
+        assert secret not in str(record.__dict__)
+
+
+@pytest.mark.parametrize(
+    ("upstream_status", "reason", "status_code"),
+    [
+        (400, "code_rejected", 400),
+        (401, "configuration", 503),
+        (403, "account_unavailable", 403),
+        (404, "configuration", 503),
+        (503, "upstream_unavailable", 503),
+        (None, "upstream_unavailable", 503),
+    ],
+)
+async def test_callback_exchange_logs_the_refusal_before_redirecting(
+    client_and_gateway, caplog, upstream_status, reason, status_code
+):
+    client, gateway = client_and_gateway
+    gateway.exchange_error = GatewayError("exchange failed", status_code=upstream_status)
+    response = await _sign_in(client)
+    assert response.status_code == 303
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_sign_in_rejected"
+    ]
+    assert len(records) == 1
+    assert records[0].reason == reason
+    assert records[0].status_code == status_code
+
+
+async def test_successful_sign_in_has_no_rejection_log(client_and_gateway, caplog):
+    client, _ = client_and_gateway
+    caplog.set_level(logging.INFO, logger=session_router.__name__)
+    response = await _sign_in(client)
+    assert response.status_code == 303
+    events = [getattr(record, "event", None) for record in caplog.records]
+    assert "agent_session_established" in events
+    assert "agent_sign_in_rejected" not in events

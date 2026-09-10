@@ -14,14 +14,18 @@ describe('session failure classification', () => {
     await expect(getSessionUser()).rejects.toMatchObject({ statusCode: status });
   });
 
-  it('preserves a typed configuration failure for the auth provider', async () => {
+  it.each([
+    'Agent sign-in is not configured correctly. Contact the service administrator.',
+    'The deployment credential has expired. Contact the service administrator.',
+    'An invalid token is configured. Contact the service administrator.',
+  ])('preserves a typed configuration failure regardless of its message: %s', async (message) => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
         new Response(
           JSON.stringify({
             detail: {
-              error: { type: 'agent_configuration_error', message: 'Needs configuration' },
+              error: { type: 'agent_configuration_error', message },
             },
           }),
           { status: 503 },

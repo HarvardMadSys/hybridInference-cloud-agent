@@ -125,8 +125,11 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
       errorMessage = (error.message as string) || errorMessage;
       const lowerMessage = errorMessage.toLowerCase();
 
-      // Extract error patterns from message
-      if (
+      // Configuration is an explicit recovery decision. Its wording must not
+      // turn an operator error into a retryable expired/invalid-token error.
+      if (error.type === 'agent_configuration_error') {
+        errorCode = error.type;
+      } else if (
         lowerMessage.includes('reset link has already been used') ||
         (lowerMessage.includes('reset token') && lowerMessage.includes('used'))
       ) {

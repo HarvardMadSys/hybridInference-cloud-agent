@@ -56,7 +56,39 @@ describe('ProtectedRoute', () => {
     localStorage.clear();
     stubLocation();
   });
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(['direct', 'detail'])(
+    'keeps configuration failures non-retryable through the real %s response parser',
+    async (envelope) => {
+      const sessionApi =
+        await vi.importActual<typeof import('@/lib/api/session')>('@/lib/api/session');
+      vi.mocked(getSessionUser).mockImplementation(sessionApi.getSessionUser);
+      const body = {
+        error: {
+          type: 'agent_configuration_error',
+          message: 'An invalid token is configured; the deployment credential has expired.',
+        },
+      };
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(envelope === 'detail' ? { detail: body } : body), {
+          status: 503,
+        }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      renderApp();
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('not configured correctly');
+      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+      expect(screen.queryByText('task list')).not.toBeInTheDocument();
+      expect(assign).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     [

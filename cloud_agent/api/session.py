@@ -50,7 +50,7 @@ require operator action; temporary failures offer retry without signing in again
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -176,9 +176,35 @@ def _unavailable_response(reason: str) -> RedirectResponse:
 
 
 def _callback_error_response(
-    error: HTTPException, return_to: str | None = None
+    error: HTTPException,
+    return_to: str | None = None,
+    *,
+    rejection_reason: Literal["invalid_flow", "state_mismatch", "missing_code"] | None = None,
 ) -> RedirectResponse:
     """Render a refused sign-in with the appropriate recovery action."""
+    reason = rejection_reason or (
+        "configuration"
+        if isinstance(error, AgentConfigurationError)
+        else {
+            400: "code_rejected",
+            401: "invalid_identity",
+            403: "account_unavailable",
+            503: "upstream_unavailable",
+        }.get(error.status_code, "unexpected_error")
+    )
+    # Record the refusal before a redirect replaces its HTTP status. Only
+    # fixed categories belong here, never callback inputs or error details.
+    # Include them in the message for the default plain-text log formatter.
+    logger.warning(
+        "agent_sign_in_rejected reason=%s status_code=%s",
+        reason,
+        error.status_code,
+        extra={
+            "event": "agent_sign_in_rejected",
+            "reason": reason,
+            "status_code": error.status_code,
+        },
+    )
     if error.status_code not in (400, 403, 503) or not _env(ENV_WEB_BASE_URL):
         raise error
     reason = (
@@ -298,7 +324,8 @@ async def session_callback(
         return _unavailable_response(str(exc))
     except identity.IdentityError:
         return _callback_error_response(
-            HTTPException(status_code=400, detail="This sign-in has expired. Please start again.")
+            HTTPException(status_code=400, detail="This sign-in has expired. Please start again."),
+            rejection_reason="invalid_flow",
         )
 
     # Checked before the code is spent: a callback naming a state this service
@@ -308,12 +335,14 @@ async def session_callback(
             HTTPException(
                 status_code=400,
                 detail="This sign-in response did not match the request that started it.",
-            )
+            ),
+            rejection_reason="state_mismatch",
         )
     if not code:
         return _callback_error_response(
             HTTPException(status_code=400, detail="The gateway returned no authorization code."),
             str(flow.get("return_to") or "/"),
+            rejection_reason="missing_code",
         )
 
     try:
@@ -329,6 +358,10 @@ async def session_callback(
             exc_info=True,
             extra={"event": "agent_session_code_exchange_failed"},
         )
+        # identity.openapi.yaml defines 404 as identity not configured. The
+        # PKCE token endpoint requires no client authentication, so an
+        # unexpected 401 indicates an integration/configuration problem,
+        # not an expired code (the contract specifies 400 for that).
         if exc.status_code in (401, 404) or exc.error_type == "gateway_not_configured":
             return _callback_error_response(
                 AgentConfigurationError(), str(flow.get("return_to") or "/")

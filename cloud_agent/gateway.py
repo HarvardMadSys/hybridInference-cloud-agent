@@ -305,6 +305,14 @@ class GatewayClient:
         away from handing it to somebody else, along with the verifier it was
         redeemed with.
 
+        ``contracts/identity.openapi.yaml`` specifies 400 for an unusable code,
+        403 for an unavailable account, and 404 when identity is not configured.
+        These statuses are preserved in ``GatewayError`` for the session
+        callback. A 401 is outside that contract: this PKCE endpoint requires
+        no client authentication. The callback treats an unexpected 401 as an
+        integration/configuration failure requiring operator action, rather
+        than asking the user to retry an expired code.
+
         Args:
             code: The one-time code the gateway sent back through the browser.
             verifier: The PKCE verifier parked when the flow started.
