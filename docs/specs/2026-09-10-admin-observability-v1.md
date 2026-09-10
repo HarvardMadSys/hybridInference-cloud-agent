@@ -129,7 +129,9 @@ requests. There is no inactive Usage navigation item before that page exists.
 ## Later work
 
 Cross-task usage aggregation and additional host capacity columns are the next
-reading surfaces. Complete LLM request tracing and shared-member whole-run
+reading surfaces. The [Usage aggregation implementation design](2026-09-10-admin-usage-aggregation-design.zh.md)
+defines the next page's cohort, accounting, API, UI and acceptance criteria.
+Complete LLM request tracing and shared-member whole-run
 resource measurements require additional data collection or integration. They
 remain part of the broader observability objective, not claims of this release.
 Alerting and research export can follow after those foundations are stable.
