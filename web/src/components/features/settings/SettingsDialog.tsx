@@ -28,13 +28,7 @@ const FIELD_HINT = 'mt-1.5 text-[12px] leading-relaxed text-gray-500 dark:text-g
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-export function SettingsDialog({
-  onClose,
-  initialSection,
-}: {
-  onClose: () => void;
-  initialSection?: 'appearance' | 'language';
-}) {
+export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const { t, locale, setLocale } = useLocale();
   const { preference, setPreference } = useTheme();
   const { state } = useAuth();
@@ -46,14 +40,8 @@ export function SettingsDialog({
   // continues through the page behind it — which is still rendered, just
   // covered.
   useEffect(() => {
-    const selector =
-      initialSection === 'language'
-        ? '#settings-language + div select'
-        : initialSection === 'appearance'
-          ? 'input[name="theme-preference"]:checked'
-          : FOCUSABLE;
-    panel.current?.querySelector<HTMLElement>(selector)?.focus();
-  }, [initialSection]);
+    panel.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+  }, []);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {

@@ -192,16 +192,19 @@ describe('AgentsLayout product navigation', () => {
     expect(agents).toHaveAttribute('href', '/');
   });
 
-  it('gives the archive page settings navigation and a way back to the workspace', () => {
-    pathname = '/archived';
-    renderLayout();
-    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Archived sessions' })).toHaveAttribute(
-      'aria-current',
-      'page',
-    );
-    expect(screen.getByRole('link', { name: 'Back to workspace' })).toHaveAttribute('href', '/');
-    expect(screen.getByRole('button', { name: 'Appearance' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Language' })).toBeInTheDocument();
-  });
+  it.each(['/archived', '/integrations'])(
+    'keeps the workspace sidebar on %s and only changes the main content',
+    (route) => {
+      pathname = route;
+      renderLayout();
+      expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Appearance' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Language' })).not.toBeInTheDocument();
+
+      fireEvent.click(toggle());
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      fireEvent.click(toggle());
+      expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+    },
+  );
 });
