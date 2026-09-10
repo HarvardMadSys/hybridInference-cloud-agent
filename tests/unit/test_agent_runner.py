@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from cloud_agent_host import runner as runner_mod
@@ -325,7 +326,7 @@ def test_historical_one_to_one_sandbox_fails_closed():
 
 
 def _run_shared_boundary_case(
-    monkeypatch, code, frame, runtime_id, observed_session_id="native-existing"
+    monkeypatch, code, frame, runtime_id, observed_session_id="native-existing", configure=None
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -366,6 +367,8 @@ def _run_shared_boundary_case(
         runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (code, "API error", [], frame)
     )
     finish = Mock()
+    if configure is not None:
+        configure(control, supervisor, finish)
 
     result = runner_mod._run_shared_live_attempt(
         runtime=get_runtime(runtime_id),
@@ -384,6 +387,33 @@ def _run_shared_boundary_case(
     )
 
     return result, control, supervisor, finish
+
+
+@pytest.mark.parametrize(
+    "failure", [SandboxError("setup failed"), httpx.ReadTimeout("setup stalled")]
+)
+def test_error_upload_failure_does_not_skip_terminal_transition(monkeypatch, failure):
+    """An unavailable event endpoint must not strand a failed attempt as running."""
+
+    def configure(control, supervisor, finish):
+        control.suspend_terminals.side_effect = failure
+
+        def append(event):
+            if event.event_type == "error":
+                raise httpx.ReadTimeout("error upload failed")
+
+        control.append_event.side_effect = append
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+
+    assert result == 2
+    finish.assert_called_once()
+    assert finish.call_args.args[0] == "failed"
+    assert str(failure) in finish.call_args.args[1]
+    control.admit_chat_turn.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
 
 
 @pytest.mark.parametrize(

@@ -256,7 +256,23 @@ describe('toDisplayJob', () => {
     expect(job.attempts).toHaveLength(2);
     expect(job.attempts[0].status).toBe('superseded');
     expect(job.attempts[0].note).toContain('lease expired');
+    expect(job.attempts[0].note).toContain('a new attempt started');
     expect(job.attempts[1].status).toBe('live');
+  });
+
+  it('does not invent a replacement when lease loss terminates the only attempt', () => {
+    const job = toDisplayJob(
+      { ...JOB, state: 'failed', current_attempt_id: 10 },
+      {
+        events: [
+          event(1, 'lifecycle', { phase: 'workspace_preparing' }, 10),
+          event(2, 'attempt_superseded', { reason: 'lease_expired' }, 10),
+        ],
+      },
+    );
+    expect(job.attempts).toHaveLength(1);
+    expect(job.attempts[0].note).toBe('Worker lease expired; this attempt ended.');
+    expect(lifecyclePhaseLabel('attempt superseded (lease_expired)').text).toBe('Attempt ended');
   });
 
   it('identifies the server-authoritative current attempt for readiness checks', () => {

@@ -343,7 +343,7 @@ export function lifecyclePhaseLabel(value: string): { text: string; milestone: b
   const known = LIFECYCLE_LABELS[phase];
   if (known) return { text: known, milestone: true };
   if (phase.includes('superseded')) {
-    return { text: 'Run restarted after losing its worker', milestone: true };
+    return { text: 'Attempt ended', milestone: true };
   }
   return { text: value.replaceAll('_', ' '), milestone: false };
 }
@@ -548,8 +548,8 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
   const renderedEvents = displayEvents(events);
 
   // Attempts are inferred from the event log rather than fetched: an attempt
-  // exists precisely because it wrote events, and a superseded control event
-  // is what marks the takeover.
+  // is visible once it writes events. Supersession alone does not prove a
+  // retry exists: lost retained sessions can fail without a replacement.
   const attemptIds = [...new Set(events.map((event) => event.attempt_id))].sort((a, b) => a - b);
   const currentAttemptIndex =
     job.current_attempt_id === null ? -1 : attemptIds.indexOf(job.current_attempt_id);
@@ -590,7 +590,11 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
         : job.state === 'running' || job.state === 'publishing'
           ? 'live'
           : 'finished',
-      note: supersededIds.has(id) ? 'lease expired; a new attempt took over' : undefined,
+      note: supersededIds.has(id)
+        ? index < attemptIds.length - 1
+          ? 'Worker lease expired; a new attempt started.'
+          : 'Worker lease expired; this attempt ended.'
+        : undefined,
       ...(telemetry ? { telemetry } : {}),
     };
   });
