@@ -70,6 +70,7 @@ def test_a_deployment_with_no_pool_is_left_alone(credential_file) -> None:
 
 def test_a_token_is_spent_for_a_credential(credential_file, monkeypatch) -> None:
     monkeypatch.setenv(enrollment.ENV_ENROLL_TOKEN, "enroll-once")
+    monkeypatch.setenv("AGENT_PHYSICAL_HOST", "gpu-box")
     sent: dict[str, Any] = {}
 
     def fake_urlopen(request, timeout=None):
@@ -88,6 +89,8 @@ def test_a_token_is_spent_for_a_credential(credential_file, monkeypatch) -> None
     assert identity.credential == "hc_secret"
     assert sent["body"]["enroll_token"] == "enroll-once"
     assert sent["body"]["slots_total"] == 4
+    assert sent["body"]["name"] == "h1"
+    assert sent["body"]["labels"] == {"physical_host": "gpu-box"}
     assert sent["url"].endswith("/v1/agent/host/register")
 
 
@@ -515,3 +518,22 @@ def test_legacy_host_residency_client_is_removed() -> None:
     """The host cannot bypass attempt-fenced worker residency coordination."""
     assert not hasattr(enrollment, "establish_residency")
     assert not hasattr(enrollment, "release_residency")
+
+
+def test_physical_server_is_reported_separately_from_enrolled_identity(monkeypatch):
+    """Two deployments can name one server without sharing credentials."""
+    calls = []
+    monkeypatch.setenv("AGENT_PHYSICAL_HOST", " gpu-box ")
+    monkeypatch.setattr(
+        enrollment,
+        "_post",
+        lambda url, body, bearer="": calls.append((body, bearer)) or {"status": "online"},
+    )
+    identity = enrollment.HostIdentity(host="gpu-box-kata", credential="kata-only")
+    enrollment.heartbeat(base_url="http://cp", identity=identity)
+    assert calls[-1][0]["physical_host"] == "gpu-box"
+    assert calls[-1][1] == "kata-only"
+    assert identity.host == "gpu-box-kata"
+    monkeypatch.delenv("AGENT_PHYSICAL_HOST")
+    enrollment.heartbeat(base_url="http://cp", identity=identity)
+    assert calls[-1][0]["physical_host"] is None

@@ -3257,6 +3257,7 @@ class AgentJobStore:
         self,
         *,
         host: str,
+        physical_host: str | None = None,
         slots_total: int | None = None,
         runner_version: str | None = None,
         broker_url: str | None = None,
@@ -3297,7 +3298,8 @@ class AgentJobStore:
                     sandbox_image_digest = COALESCE($7, sandbox_image_digest),
                     runtime_versions = COALESCE($8::jsonb, runtime_versions),
                     runtime_versions_available =
-                        COALESCE($9::jsonb, runtime_versions_available)
+                        COALESCE($9::jsonb, runtime_versions_available),
+                    labels = COALESCE(labels, '{{}}'::jsonb) || $10::jsonb
                 WHERE host = $1
                 RETURNING {_HOST_COLUMNS}
                 """,
@@ -3316,6 +3318,7 @@ class AgentJobStore:
                     if runtime_versions_available is None
                     else json.dumps(runtime_versions_available)
                 ),
+                json.dumps({"physical_host": physical_host} if physical_host is not None else {}),
             )
         return None if row is None else self._host_row_to_dict(row)
 

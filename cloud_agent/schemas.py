@@ -1863,6 +1863,13 @@ class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
     declared.
     """
 
+    physical_host: str | None = Field(
+        None,
+        min_length=1,
+        max_length=255,
+        pattern=r"^\S(?:[^\r\n]*\S)?$",
+        description="Physical server name for admin grouping only; never a scheduling or credential identity.",
+    )
     slots_total: int | None = Field(None, gt=0, le=1024)
     runner_version: str | None = Field(None, max_length=128)
     broker_url: str | None = Field(None, max_length=2048)

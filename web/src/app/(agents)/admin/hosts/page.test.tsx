@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const auth = vi.hoisted(() => ({ role: 'admin' }));
@@ -124,6 +124,43 @@ describe('AdminHostsPage', () => {
     expect(await screen.findByText('legacy-box')).toBeInTheDocument();
     // No ceiling declared: the slot cell is the count alone, not "0 / null".
     expect(screen.getByText('0')).toBeInTheDocument();
+  });
+
+  it('groups deployments on one server while keeping actions scoped to their identity', async () => {
+    const rows = [
+      host({ host: 'gpu-box', labels: { physical_host: 'gpu-box' }, sandbox_runtime: 'runc' }),
+      host({
+        host: 'gpu-box-kata',
+        labels: { physical_host: 'gpu-box' },
+        sandbox_runtime: 'io.containerd.kata.v2',
+      }),
+    ];
+    mocked.list.mockResolvedValue(pool(rows));
+    mocked.pin.mockResolvedValue(pool(rows));
+    mocked.drain.mockResolvedValue(pool(rows));
+    render(<AdminHostsPage />);
+
+    const server = await screen.findByRole('rowgroup', { name: 'gpu-box' });
+    expect(within(server).getAllByRole('row')).toHaveLength(2);
+    expect(within(server).getByRole('rowheader', { name: 'gpu-box' })).toHaveAttribute(
+      'rowspan',
+      '2',
+    );
+    const kata = within(server).getByText('Kata').closest('tr')!;
+    fireEvent.click(within(kata).getByRole('button', { name: 'Pin' }));
+    await waitFor(() => expect(mocked.pin).toHaveBeenCalledWith('gpu-box-kata'));
+    await waitFor(() => expect(within(kata).getByRole('button', { name: 'Drain' })).toBeEnabled());
+    fireEvent.click(within(kata).getByRole('button', { name: 'Drain' }));
+    await waitFor(() => expect(mocked.drain).toHaveBeenCalledWith('gpu-box-kata'));
+  });
+
+  it('does not infer physical servers from deployment name suffixes', async () => {
+    mocked.list.mockResolvedValue(
+      pool([host({ host: 'gpu-box' }), host({ host: 'gpu-box-kata' })]),
+    );
+    render(<AdminHostsPage />);
+    expect(await screen.findByRole('rowgroup', { name: 'gpu-box' })).toBeInTheDocument();
+    expect(screen.getByRole('rowgroup', { name: 'gpu-box-kata' })).toBeInTheDocument();
   });
 
   it('pins new chats and reports that retained chats stay on their owning hosts', async () => {

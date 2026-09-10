@@ -664,6 +664,15 @@ cmd_up() {
   # This machine's name in the admin host switch. Resolved here because the
   # script runs on the host: inside a container the hostname is a container id,
   # so a runner cannot answer "which machine am I" for itself.
+  # One server may run several independently enrolled execution environments.
+  # Report the server separately; container hostnames and deployment aliases
+  # cannot identify the physical machine in the admin inventory.
+  AGENT_PHYSICAL_HOST="$(env_or_dotenv AGENT_PHYSICAL_HOST)"
+  if [[ -z "$AGENT_PHYSICAL_HOST" ]]; then
+    AGENT_PHYSICAL_HOST="$(hostname -s 2>/dev/null || hostname)"
+  fi
+  export AGENT_PHYSICAL_HOST
+
   if [[ -z "$(env_or_dotenv AGENT_RUNNER_HOST)" ]]; then
     AGENT_RUNNER_HOST="$(hostname -s 2>/dev/null || hostname)"
     export AGENT_RUNNER_HOST
