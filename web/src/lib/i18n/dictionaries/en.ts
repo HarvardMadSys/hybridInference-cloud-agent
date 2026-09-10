@@ -28,7 +28,6 @@ export const en = {
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.projects': 'Projects',
-  'sidebar.current': 'Current',
   'sidebar.viewOptions': 'View options',
   'sidebar.groupBy': 'Group by',
   'sidebar.orderBy': 'Order by',
@@ -36,6 +35,10 @@ export const en = {
   'sidebar.inOneList': 'In one list',
   'sidebar.manual': 'Manual',
   'sidebar.lastUpdated': 'Last updated',
+  'sidebar.searchScope': 'Search scope',
+  'sidebar.searchScopeUnavailable': 'Open a project to limit search to it',
+  'sidebar.searchAllProjects': 'Search all projects',
+  'sidebar.searchCurrentProject': 'Search only {repo}',
   'sidebar.search': 'Search tasks',
   'sidebar.searchPlaceholder': 'Search titles or repositories…',
   'sidebar.allProjects': 'All projects',

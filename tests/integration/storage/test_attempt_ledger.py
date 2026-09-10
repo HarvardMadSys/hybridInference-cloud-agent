@@ -11,6 +11,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
+from cloud_agent.ledger import summarize_conversation
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent.thread_stats import summarize_thread
 from tests.integration.storage.test_agent_job_store import (
@@ -20,6 +21,7 @@ from tests.integration.storage.test_agent_job_store import (
     _reserve_shared_chat,
 )
 from tests.support.migrations import apply_migrations
+from tests.unit.test_ledger_snapshots import report_payload
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -160,6 +162,42 @@ async def _force_due(store: AgentJobStore, ledger_id: int) -> None:
             "WHERE id = $1",
             ledger_id,
         )
+
+
+async def test_conversation_usage_is_owner_scoped_and_does_not_include_other_threads(store):
+    """One read includes sibling turns, keeps unstarted ones, and excludes forks."""
+    first, first_attempt, first_ledger = await _seed_attempt(store)
+    second, second_attempt, second_ledger = await _seed_attempt(store)
+    queued = await _create_job(store)
+    other_thread, _, _ = await _seed_attempt(store)
+    other_user = await _create_job(store, user_id="another-user")
+    async with store._pool.acquire() as conn:
+        for turn_no, job in enumerate((second, queued, other_user), start=2):
+            await conn.execute(
+                "UPDATE agent_jobs SET thread_id = $2, turn_no = $3 WHERE id = $1",
+                job["id"],
+                first["thread_id"],
+                turn_no,
+            )
+        await conn.execute(
+            "UPDATE agent_attempt_ledger SET snapshot = $2::jsonb, queried_at = NOW() "
+            "WHERE id = ANY($1::bigint[])",
+            [first_ledger, second_ledger],
+            json.dumps(report_payload(grant_id="grant-one")),
+        )
+    rows = await store.ledger_rows_for_conversation(job_id=first["id"], user_id="user-1")
+    assert {row["job_id"] for row in rows} == {first["id"], second["id"], queued["id"]}
+    assert {row["attempt_id"] for row in rows} == {first_attempt, second_attempt, None}
+    summary = summarize_conversation(rows)
+    assert summary.turn_count == 3
+    assert summary.totals.calls == 2
+    assert summary.totals.spent_usd == "0.00024690"
+    assert summary.incomplete is False
+    assert other_thread["id"] not in {row["job_id"] for row in rows}
+    assert (
+        await store.ledger_rows_for_conversation(job_id=first["id"], user_id="another-user") == []
+    )
+    assert await store.ledger_rows_for_conversation(job_id="missing", user_id="user-1") == []
 
 
 async def _complete(

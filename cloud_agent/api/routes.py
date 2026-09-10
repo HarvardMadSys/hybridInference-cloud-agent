@@ -566,6 +566,8 @@ def _job_response(
         native_fork_available=native_fork_available,
         workspace_publication_state=sandbox.get("workspace_publication_state"),
         workspace_epoch=sandbox.get("workspace_epoch"),
+        started_at=_iso((telemetry or {}).get("started_at")),
+        finished_at=_iso((telemetry or {}).get("finished_at")),
         duration_ms=_attempt_duration_ms(telemetry),
         resources=_attempt_resources(telemetry),
         attempt_telemetry=[

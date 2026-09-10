@@ -2249,6 +2249,40 @@ class AgentJobStore:
             )
         return [{**dict(row), "snapshot": _load_json(row["snapshot"])} for row in rows]
 
+    async def ledger_rows_for_conversation(
+        self, *, job_id: str, user_id: str
+    ) -> list[dict[str, Any]]:
+        """Read only this owner's conversation snapshots, including unstarted turns.
+
+        Forks share a workspace but have distinct thread IDs and usage. Read
+        cached totals in one query; a drawer must not fan out to the Gateway
+        or load historical event payloads to calculate a conversation total.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT j.id AS job_id, j.state AS job_state, a.id AS attempt_id, a.attempt_no,
+                       l.id, l.grant_id, l.snapshot, l.queried_at,
+                       l.last_error_code, l.next_refresh_at,
+                       (l.id IS NOT NULL AND (
+                           l.refresh_lease_expires_at IS NOT NULL
+                           OR l.next_refresh_at <= NOW()
+                           OR (a.status <> 'running' AND l.terminal_refresh_count = 0
+                               AND l.next_refresh_at IS NULL)
+                       )) IS TRUE AS refreshing
+                FROM agent_jobs anchor
+                JOIN agent_jobs j ON (j.thread_id = anchor.thread_id OR j.id = anchor.id)
+                    AND j.user_id = $2
+                LEFT JOIN agent_attempts a ON a.job_id = j.id
+                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
+                WHERE anchor.id = $1 AND anchor.user_id = $2
+                ORDER BY j.turn_no, a.attempt_no, l.id
+                """,
+                job_id,
+                user_id,
+            )
+        return [{**dict(row), "snapshot": _load_json(row["snapshot"])} for row in rows]
+
     async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
         """Queue known references, sharing in-flight work and throttling retries."""
         async with self._pool.acquire() as conn:

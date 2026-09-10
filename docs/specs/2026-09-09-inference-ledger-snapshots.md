@@ -75,19 +75,33 @@ Owner endpoints are:
   return cached data immediately. It never waits for the Gateway.
 
 Both check job ownership before reading or queueing anything. The MCP listener
-does not mount these routes. Active runs refresh on demand when the usage
-drawer is opened or its refresh button is used. No usage work blocks task
-completion. Repeated manual requests reuse in-flight work.
+does not mount these routes. While the drawer is open, active runs request
+fresh usage periodically, with backoff on transient failures. Polling reads
+the resulting cache and follows delayed terminal refreshes; it does not
+equate five elapsed minutes with final settlement. No usage work blocks task
+completion. Repeated requests reuse in-flight work.
 
-The run details drawer displays the Gateway and runtime sources separately.
-Gateway input includes cache tokens; Claude's runtime input reports uncached
-input separately. A difference is therefore not automatically an accounting
-error. Partial metrics and missing attempts remain visible alongside sums.
-Only the core metrics (tokens, cache and spend) decide whether a snapshot is
-`partial`. Unreported reasoning tokens stay counted in `unknown_rows` and the
-drawer names them, but they do not degrade the status: the Gateway records a
-reasoning breakdown only when an upstream reports a positive one, and never on
-its Anthropic-messages surface, so a null there means "not reported", not zero.
+Run details serves the task owner: outcome, workspace changes, concise usage,
+and environment. The primary usage summary shows model calls and input/output
+tokens from Gateway snapshots. Cost estimates and known token details are
+collapsed; missing reasoning alone does not produce a warning. The drawer
+does not expose attempt selectors, query windows, or reconciliation internals.
+The API retains those fields for diagnostic clients.
+
+Only when Gateway totals are absent does the drawer fall back to agent-reported
+tokens, with a source label and no invented cost or call count. The additive
+`runtime.normalized_input_tokens` projection includes cache reads and writes
+for Claude and pi, whose raw input excludes both. Codex input already includes
+cache hits. Missing required counters or unknown runtime conventions leave
+that projection null; original runtime counters remain unchanged.
+
+The additive `conversation` field summarizes cached snapshots from jobs in the
+same owned thread, using one database read and no Gateway fan-out. Forks have
+separate thread IDs even when sharing a workspace. Incomplete coverage is
+labelled, and the oldest contributing timestamp plus scheduled refresh state
+remain available. Conversation totals never substitute runtime data into a
+missing Gateway window.
+
 `available` means a readable snapshot, not complete or settled billing.
 The aggregate refresh timestamp is the oldest contributing snapshot's timestamp.
 Failed refreshes preserve the last successful values and timestamp and mark
@@ -101,9 +115,10 @@ there is no offline request-by-request copy or admin-wide aggregation here.
 
 Merge and deploy the Gateway producer before interpreting new snapshots.
 After the Agent PR is merged and deployed, start a new retained session and
-run two tool-using turns, then retry or fail one attempt. Verify distinct turn
-windows with the same saved residency grant, inclusion of retries, and source
-labels. Refresh after a late log write; simulate a failed Gateway refresh and
+run two tool-using turns, then fail or cancel one. Verify distinct turn
+windows with the same saved residency grant and inclusion of failed/cancelled
+usage. Admitted retained turns are not automatically replayed; historical
+attempt aggregation remains supported. Refresh after a late log write; simulate a failed Gateway refresh and
 verify cached values survive. Historical untracked turns must stay unavailable.
 
 Until the producer is deployed, the expected state is an unsupported-schema

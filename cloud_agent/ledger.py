@@ -88,13 +88,29 @@ class RuntimeUsage(BaseModel):
     input_tokens: int | None = None
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
+    normalized_input_tokens: int | None = None
+
+
+class ConversationUsage(BaseModel):
+    """Cached usage for the owned conversation, without per-attempt diagnostics."""
+
+    totals: GrantUsageTotals | None = None
+    unknown_rows: GrantUsageUnknownRows | None = None
+    estimated_calls: int = 0
+    queried_at: datetime | None = None
+    turn_count: int = 0
+    incomplete: bool = False
+    refreshing: bool = False
+    next_refresh_at: datetime | None = None
+    active: bool = False
 
 
 class JobUsageResponse(BaseModel):
-    """The two independent usage sources rendered by the run details view."""
+    """Usage sources and a cached conversation total for an owner's run."""
 
     ledger: JobLedgerSummary
     runtime: RuntimeUsage
+    conversation: ConversationUsage | None = None
 
 
 def _sum_reports(reports: list[GrantUsageReport]) -> dict[str, Any]:
@@ -217,6 +233,33 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
         refreshing=any_refreshing,
         next_refresh_at=min(all_scheduled) if all_scheduled else None,
         **_sum_reports(all_reports),
+    )
+
+
+def summarize_conversation(rows: list[dict[str, Any]]) -> ConversationUsage:
+    """Sum this conversation's snapshots once, retaining gaps and stale reads."""
+    summary = summarize_ledger([row for row in rows if row.get("attempt_id") is not None])
+    unknown = summary.unknown_rows
+    return ConversationUsage(
+        totals=summary.totals,
+        unknown_rows=unknown,
+        estimated_calls=summary.estimated_calls,
+        queried_at=summary.queried_at,
+        turn_count=len({row["job_id"] for row in rows}),
+        incomplete=bool(
+            summary.missing_attempts
+            or any(attempt.reason not in (None, "pending") for attempt in summary.attempts)
+            or (
+                unknown
+                and any(getattr(unknown, name) for name in USAGE_METRICS if name != "reasoning")
+            )
+        ),
+        refreshing=summary.refreshing,
+        next_refresh_at=summary.next_refresh_at,
+        active=any(
+            row.get("job_state") in {"queued", "waiting", "preparing", "running", "publishing"}
+            for row in rows
+        ),
     )
 
 
