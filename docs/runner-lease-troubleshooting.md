@@ -13,6 +13,21 @@ after claim, too late for an unrenewed lease even if connectivity returned at
 100 seconds. The shorter retry interval allows that case to renew at 100 seconds.
 It cannot preserve a lease through an outage longer than the remaining lease.
 
+The lease is not the agent's execution timeout (default 3,600 seconds). A quiet
+tool or model call may span many lease periods: renewal runs on a separate
+thread and does not depend on message/progress events. The regression suite
+exercises a silent six-minute turn with the real heartbeat thread, stream loop
+and HTTP client against a simulated lease endpoint. It succeeds both with a
+healthy connection and with two timed-out reads followed by recovery at 100
+seconds; the original retry cadence loses the latter turn's lease. This is a
+controlled reproduction, not proof of the cause of a historical incident.
+
+Classify historical failures using positive evidence. An execution-timeout
+error, an explicit cancellation, or an agent exit is different from a renewal
+request timeout. `lease_expired` alone proves only that no timely renewal was
+persisted. Missing error events do not prove the worker remained healthy: the
+same control outage can prevent both renewal and error reporting.
+
 When execution fails, error-event upload and the terminal `finish` request are
 independent. Failure of the event endpoint must not skip the terminal request
 and leave the database recording a running attempt. If both control requests
