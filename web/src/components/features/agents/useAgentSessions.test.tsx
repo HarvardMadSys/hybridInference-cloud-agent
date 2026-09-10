@@ -56,6 +56,37 @@ afterEach(() => {
 });
 
 describe('session mutations across active history caches', () => {
+  it.each([{ title: 'Renamed task' }, { pinnedAt: '2026-09-10T00:00:00Z' }])(
+    'refetches the workspace diff after a settled task metadata change: %j',
+    async (change) => {
+      const settled = job('first');
+      vi.mocked(getAgentJob).mockResolvedValue(settled);
+      const patch = [
+        'diff --git a/example.py b/example.py',
+        '--- a/example.py',
+        '+++ b/example.py',
+        '@@ -1 +1 @@',
+        '-before',
+        '+after',
+      ].join('\n');
+      vi.mocked(getAgentJobGit).mockResolvedValue({
+        available: true,
+        branch: 'agent/first',
+        changes: [],
+        patch,
+        commits: [],
+      });
+      const { result } = renderHook(() => useAgentJob('first'));
+      await waitFor(() => expect(result.current.job?.diffFiles).toEqual(['example.py']));
+      const originalDiff = result.current.job?.diffFileDetails;
+      act(() => announceAgentSessionsChanged({ threadIds: ['thread-first'], ...change }));
+      await waitFor(() => expect(getAgentJob).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.job?.diffFileDetails).toEqual(originalDiff);
+      expect(getAgentJobGit).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it('invalidates a deletion before the first detail response establishes the thread ID', async () => {
     const stale = pending<AgentJobApi>();
     vi.mocked(getAgentJob)
