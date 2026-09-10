@@ -63,10 +63,9 @@ services:
       GATEWAY_GRANT_DISPATCH_TOKEN: ${GATEWAY_GRANT_DISPATCH_TOKEN:?shared with the gateway, distinct per environment}
       GATEWAY_GRANT_BASE_PATH: ${GATEWAY_GRANT_BASE_PATH:-/internal/agent-grants}
       GATEWAY_GRANT_BINDING_ID: ${GATEWAY_GRANT_BINDING_ID:-}
-      # Optional, and optional on purpose: a deployment may front the gateway
-      # under a different name than it mints under, and pinning `iss` wrongly
-      # locks every user out.
-      GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
+      # The exact identity authority, independent of the transport URL. Both
+      # listeners compare it with the same database binding during startup.
+      GATEWAY_ISSUER: ${GATEWAY_ISSUER:?exact iss from the Gateway identity token}
       # The consent page a sign-in starts at. Server-side: the whole PKCE round
       # trip is assembled in the control plane now, so the web app no longer
       # needs its own copy of this.
@@ -208,6 +207,7 @@ services:
       - "${AGENT_MCP_RELAY_BIND:-127.0.0.1}:${AGENT_MCP_RELAY_PORT:-8001}:8001"
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      GATEWAY_ISSUER: ${GATEWAY_ISSUER:?exact iss from the Gateway identity token}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:?32+ random bytes, unique per environment}
       # The relay resolves each owner's stored MCP connection and therefore
       # must decrypt it under the same key/domain as the main control-plane

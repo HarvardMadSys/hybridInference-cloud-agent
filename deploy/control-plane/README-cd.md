@@ -16,6 +16,14 @@ Merging to `dev` deploys. `.github/workflows/deploy-staging.yml` waits for
 `CI` to conclude green on `dev`, then starts a deploy script on each target in
 parallel.
 
+Before merging the minimal-identity release, prepare each environment's exact
+Gateway issuer and explicitly adopt any existing Agent database as described
+in [the identity upgrade guide](../../docs/minimal-identity.md#upgrade-an-existing-deployment).
+After migration, the control-plane deploy checks that binding before it starts
+or replaces either listener. Missing configuration or unadopted history aborts
+this deployment while keeping its running API and MCP relay. The host job still
+runs in parallel, so complete this preparation before triggering CD.
+
 **Two machines, two parallel jobs, one runtime compatibility fence.** The control plane and web app
 run on spark2 (ARM64); runners, the workspace broker, egress proxy, and tunnels
 run on the sandbox host (x86_64). They are deployed by
@@ -29,7 +37,8 @@ pin moved elsewhere, before it replaces any running API container. The protocol
 gate therefore preserves host-before-API compatibility without putting the
 whole Actions workflow on a serial critical path.
 
-On a cold machine, the control script first starts Postgres and runs Alembic.
+On a cold machine, the control script first starts Postgres, runs Alembic, and
+checks the identity binding (initializing it only for an empty database).
 If no control-plane container is running, it then starts the target API and the
 scoped, loopback-bound MCP relay before entering the readiness wait. That
 cold-start exception is necessary because host enrollment/heartbeat need the

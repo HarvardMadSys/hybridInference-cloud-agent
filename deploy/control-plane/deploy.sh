@@ -168,6 +168,13 @@ compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres
 log "migrating deployment database"
 compose run --rm --no-deps migrate
 
+# Check the identity boundary before bootstrapping or replacing either listener.
+# Historical data is never adopted by CD: an operator must first acknowledge
+# its original issuer. A refusal here leaves the running API and relay intact.
+log "checking the Agent database identity issuer"
+compose run --rm --no-deps control-plane \
+  python -m cloud_agent.identity_namespace --check
+
 # Heartbeats are HTTP calls to the control plane, not direct database writes.
 # Preserve the old API on an ordinary rolling deploy.  Only when no API
 # container is running may this target generation be started early so a host

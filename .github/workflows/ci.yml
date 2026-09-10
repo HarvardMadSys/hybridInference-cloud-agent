@@ -877,6 +877,7 @@ jobs:
           cat > .env.control-plane <<'ENVFILE'
           AGENT_DATABASE_URL=postgresql://cloudagent:ci@postgres:5432/cloudagent
           GATEWAY_BASE_URL=https://gateway.invalid
+          GATEWAY_ISSUER=https://gateway.invalid
           GATEWAY_JWKS_URL=https://gateway.invalid/v1/identity/jwks
           GATEWAY_GRANT_DISPATCH_TOKEN=ci-placeholder
           AGENT_SESSION_SECRET=ci-placeholder-value-not-a-real-secret
@@ -929,7 +930,7 @@ jobs:
 
           CP=deploy/control-plane/docker-compose.yml
           HOST=deploy/host/docker-compose.sandbox.yml
-          for required in AGENT_SESSION_SECRET AGENT_WORKSPACE_BROKER_TOKEN AGENT_DEPLOYMENT_SHA; do
+          for required in AGENT_SESSION_SECRET AGENT_WORKSPACE_BROKER_TOKEN AGENT_DEPLOYMENT_SHA GATEWAY_ISSUER; do
             check "$CP" .env.control-plane "$required"
           done
           for required in AGENT_WORKSPACE_BROKER_TOKEN; do

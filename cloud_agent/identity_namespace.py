@@ -54,7 +54,7 @@ async def ensure_gateway_namespace(
         if not adopt_existing and await _has_owner_data(conn):
             raise IdentityNamespaceError(
                 "This Agent database has existing owner data but no identity issuer. "
-                "Stop old Agent processes and explicitly initialize its original issuer with "
+                "Verify its original Gateway issuer and explicitly initialize that binding with "
                 "python -m cloud_agent.identity_namespace --adopt-existing --issuer <original-issuer>."
             )
         await conn.execute(
@@ -64,33 +64,40 @@ async def ensure_gateway_namespace(
         return issuer
 
 
-async def _adopt(issuer: str) -> None:
+async def _check_or_adopt(issuer: str | None, *, adopt_existing: bool) -> None:
     import asyncpg
 
     from cloud_agent.identity import gateway_issuer
 
-    if issuer != gateway_issuer():
+    configured_issuer = gateway_issuer()
+    if adopt_existing and issuer != configured_issuer:
         raise IdentityNamespaceError("The adoption issuer must exactly match GATEWAY_ISSUER.")
     dsn = os.environ.get("AGENT_DATABASE_URL")
     if not dsn:
         raise IdentityNamespaceError("AGENT_DATABASE_URL must be set.")
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
     try:
-        await ensure_gateway_namespace(pool, issuer, adopt_existing=True)
+        await ensure_gateway_namespace(pool, configured_issuer, adopt_existing=adopt_existing)
     finally:
         await pool.close()
 
 
 def main() -> None:
-    """Explicitly adopt a legacy database into its original Gateway namespace."""
+    """Check deployment readiness or explicitly adopt the original namespace."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--adopt-existing", action="store_true", required=True)
-    parser.add_argument(
-        "--issuer", required=True, help="Original Gateway issuer, exactly as signed"
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument(
+        "--check", action="store_true", help="Check the issuer; initialize only an empty database"
     )
+    action.add_argument("--adopt-existing", action="store_true")
+    parser.add_argument("--issuer", help="Original Gateway issuer, exactly as signed")
     args = parser.parse_args()
-    asyncio.run(_adopt(args.issuer))
-    print("Agent database identity issuer verified and recorded; owner data was not changed.")
+    if args.adopt_existing and not args.issuer:
+        parser.error("--adopt-existing requires --issuer")
+    if args.check and args.issuer is not None:
+        parser.error("--issuer is only used with --adopt-existing")
+    asyncio.run(_check_or_adopt(args.issuer, adopt_existing=args.adopt_existing))
+    print("Agent database identity issuer verified; owner data was not changed.")
 
 
 if __name__ == "__main__":

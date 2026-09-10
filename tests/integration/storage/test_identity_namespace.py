@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import uuid
+from urllib.parse import quote, urlencode
 
 import asyncpg
 import pytest
@@ -110,5 +112,75 @@ async def test_concurrent_different_issuers_cannot_both_bind(pool):
 
 async def test_unconfigured_empty_deployment_does_not_guess_a_namespace(pool):
     assert await ensure_gateway_namespace(pool, None) is None
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM agent_identity_namespace") == 0
+
+
+@pytest.fixture
+def identity_cli(db_config):
+    async def run(pool, *args, issuer=ISSUER):
+        async with pool.acquire() as conn:
+            schema = await conn.fetchval("SELECT current_schema()")
+        user = quote(db_config["user"], safe="")
+        password = quote(db_config["password"], safe="")
+        dsn = (
+            f"postgresql://{user}:{password}@{db_config['host']}:{db_config['port']}/"
+            f"{db_config['database']}?{urlencode({'search_path': schema})}"
+        )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "cloud_agent.identity_namespace",
+            *args,
+            env={**os.environ, "AGENT_DATABASE_URL": dsn, "GATEWAY_ISSUER": issuer},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return process.returncode, (stdout + stderr).decode()
+
+    return run
+
+
+async def test_deployment_check_refuses_legacy_data_until_explicit_adoption(pool, identity_cli):
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO agent_threads VALUES ('original-thread', 'original-owner')")
+    status, output = await identity_cli(pool, "--check")
+    assert status != 0 and "existing owner data" in output
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM agent_identity_namespace") == 0
+    status, output = await identity_cli(pool, "--adopt-existing", "--issuer", ISSUER)
+    assert status == 0, output
+    status, output = await identity_cli(pool, "--check")
+    assert status == 0, output
+    async with pool.acquire() as conn:
+        assert tuple(await conn.fetchrow("SELECT id, user_id FROM agent_threads")) == (
+            "original-thread",
+            "original-owner",
+        )
+    status, output = await identity_cli(pool, "--check", issuer="https://other.example")
+    assert status != 0 and "does not match" in output
+
+
+async def test_deployment_check_initializes_an_empty_database(pool, identity_cli):
+    status, output = await identity_cli(pool, "--check")
+    assert status == 0, output
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace") == ISSUER
+
+
+@pytest.mark.parametrize(
+    "args, issuer",
+    [
+        (["--adopt-existing"], ISSUER),
+        (["--adopt-existing", "--issuer", "https://other.example"], ISSUER),
+        (["--check", "--adopt-existing", "--issuer", ISSUER], ISSUER),
+        (["--check", "--issuer", ISSUER], ISSUER),
+        (["--check"], ""),
+    ],
+)
+async def test_a_cli_check_cannot_silently_authorize_adoption(pool, identity_cli, args, issuer):
+    status, _ = await identity_cli(pool, *args, issuer=issuer)
+    assert status != 0
     async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT count(*) FROM agent_identity_namespace") == 0

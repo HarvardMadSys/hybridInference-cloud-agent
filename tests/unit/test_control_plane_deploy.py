@@ -74,6 +74,13 @@ def test_the_database_is_required_and_the_service_owns_it(control_plane_env: dic
     assert ":?" in control_plane_env["AGENT_DATABASE_URL"]
 
 
+def test_both_listeners_receive_the_same_required_identity_issuer(compose: dict) -> None:
+    """The shared lifespan checks the database binding in both processes."""
+    expected = "${GATEWAY_ISSUER:?exact iss from the Gateway identity token}"
+    for service in ("control-plane", "mcp-relay"):
+        assert compose["services"][service]["environment"]["GATEWAY_ISSUER"] == expected
+
+
 def test_postgres_publishes_no_port(compose: dict) -> None:
     """The API reaches it over the compose network. A published port is a
     database on the internet one firewall rule later."""
@@ -192,11 +199,12 @@ def test_shared_live_readiness_is_proved_before_any_running_service_is_replaced(
     build = script.index("compose build")
     database = script.index('compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres')
     migration = script.index("compose run --rm --no-deps migrate")
+    identity = script.index("python -m cloud_agent.identity_namespace --check")
     running_probe = script.index("compose ps --status running -q control-plane")
     readiness = script.index("python -m cloud_agent.deploy_readiness")
     bring_up = script.index("compose up -d --remove-orphans")
 
-    assert build < database < migration < running_probe < readiness < bring_up
+    assert build < database < migration < identity < running_probe < readiness < bring_up
     assert "compose run --rm --no-deps control-plane" in script
     assert "BOOTSTRAP_SERVICES+=(control-plane)" in script
     assert "BOOTSTRAP_SERVICES+=(mcp-relay)" in script
@@ -210,6 +218,7 @@ def _run_control_deploy(
     tmp_path: Path,
     *,
     readiness_exit: int,
+    identity_exit: int = 0,
     control_running: bool = True,
     mcp_running: bool = True,
     shared_live: str = "1",
@@ -260,6 +269,8 @@ def _run_control_deploy(
         '    [ "${CONTROL_RUNNING}" = "1" ] && printf "%s\\n" existing-control ; exit 0 ;;\n'
         "  *' ps --status running -q mcp-relay')\n"
         '    [ "${MCP_RUNNING}" = "1" ] && printf "%s\\n" existing-mcp ; exit 0 ;;\n'
+        "  *' run --rm --no-deps control-plane python -m cloud_agent.identity_namespace --check')\n"
+        '    exit "${IDENTITY_EXIT}" ;;\n'
         "  *' run --rm --no-deps control-plane python -m cloud_agent.deploy_readiness '*)\n"
         '    exit "${READINESS_EXIT}" ;;\n'
         "esac\n"
@@ -293,6 +304,7 @@ def _run_control_deploy(
             "HEALTH_TIMEOUT": "1",
             "DOCKER_LOG": str(docker_log),
             "READINESS_EXIT": str(readiness_exit),
+            "IDENTITY_EXIT": str(identity_exit),
             "CONTROL_RUNNING": "1" if control_running else "0",
             "MCP_RUNNING": "1" if mcp_running else "0",
             "FAILED_HEALTH_MATCH": failed_health_match,
@@ -302,6 +314,25 @@ def _run_control_deploy(
         check=False,
     )
     return result, docker_log.read_text() if docker_log.exists() else ""
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_a_failed_identity_check_does_not_start_or_replace_listeners(tmp_path: Path, running: bool):
+    result, docker_calls = _run_control_deploy(
+        tmp_path,
+        readiness_exit=0,
+        identity_exit=18,
+        control_running=running,
+        mcp_running=running,
+    )
+    assert result.returncode == 18
+    assert docker_calls.index(" run --rm --no-deps migrate") < docker_calls.index(
+        "cloud_agent.identity_namespace --check"
+    )
+    assert "cloud_agent.deploy_readiness" not in docker_calls
+    assert " up -d --no-deps " not in docker_calls
+    assert " up -d --remove-orphans" not in docker_calls
+    assert " stop " not in docker_calls
 
 
 def test_a_failed_readiness_probe_never_replaces_the_running_stack(
