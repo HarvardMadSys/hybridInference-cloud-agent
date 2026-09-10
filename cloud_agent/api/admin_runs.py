@@ -167,6 +167,7 @@ async def reveal_admin_event_content(
         # have already happened. Content disclosure needs the opposite policy.
         audit_id = await _require_store(store).record_admin_action(
             action="agent.run.event_content.read",
+            actor_id=admin,
             admin_ip=get_client_ip(request),
             target_user_id=run["user_id"],
             details={
