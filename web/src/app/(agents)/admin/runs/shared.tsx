@@ -95,13 +95,62 @@ export function RunState({ state }: { state: string }) {
   );
 }
 
+/**
+ * Render an instant in UTC and say so.
+ *
+ * Admin usage is grouped by UTC creation day, so a local-time rendering beside
+ * those buckets would disagree with them. Every admin page uses this formatter
+ * instead of the host locale's default.
+ */
 export function dateTime(value: string | null | undefined): string {
   if (!value || !Number.isFinite(Date.parse(value))) return 'Unavailable';
-  return new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+  return `${new Date(value).toLocaleString('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+    timeZone: 'UTC',
+  })} UTC`;
+}
+
+/** A UTC calendar day, without a time, for bucket labels. */
+export function utcDate(value: string | null | undefined): string {
+  if (!value || !Number.isFinite(Date.parse(value))) return 'Unavailable';
+  return new Date(value).toLocaleDateString('en-US', { dateStyle: 'medium', timeZone: 'UTC' });
 }
 
 export function number(value: number | null | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+  // Any finite number is shown, including a negative one. Hiding a value the
+  // code produced behind "Unavailable" is how a wrong count goes unnoticed.
+  return typeof value === 'number' && Number.isFinite(value)
     ? value.toLocaleString()
     : 'Unavailable';
+}
+
+/**
+ * Format a recorded amount without losing what the Gateway reported.
+ *
+ * The value is a decimal string and is never parsed as a float: the display
+ * keeps at most four places, a smaller non-zero amount reads as such rather
+ * than as zero, and the exact string stays available for a tooltip. A true zero
+ * is a zero; an unknown amount is not.
+ */
+export function money(value: string | null | undefined): { display: string; exact: string | null } {
+  if (value == null || !/^\d+(\.\d+)?$/.test(value)) {
+    return { display: 'Unavailable', exact: null };
+  }
+  if (/^0+(\.0*)?$/.test(value)) return { display: '$0', exact: value };
+  const point = value.indexOf('.');
+  const shown = point === -1 ? value : value.slice(0, point + 5);
+  if (/^0(\.0*)?$/.test(shown)) return { display: '<$0.0001', exact: value };
+  const [whole, fraction] = shown.split('.');
+  const trimmed = fraction?.replace(/0+$/, '');
+  return {
+    display: `$${Number(whole).toLocaleString('en-US')}${trimmed ? `.${trimmed}` : ''}`,
+    exact: value,
+  };
+}
+
+/** A metric with its partly-unknown remainder kept visible instead of hidden. */
+export function metric(value: number | null | undefined, unknown: number | undefined): string {
+  if (typeof value !== 'number') return 'Unavailable';
+  return unknown ? `${number(value)} (${number(unknown)} unknown)` : number(value);
 }

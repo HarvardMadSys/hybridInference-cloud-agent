@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -10,6 +11,7 @@ import { getAdminRuns, type AdminRunFilters, type AdminRunsPage } from '@/lib/ap
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
+import { presetKey } from '../usage/present';
 import {
   accessDenied,
   AdminRequired,
@@ -45,33 +47,139 @@ const COLUMNS = [
 
 const SKELETON_ROWS = 6;
 
-function windowFilters(days: number, state?: AgentJobApiState): AdminRunFilters {
-  const until = new Date();
+//: Said only when the list came from a usage breakdown row, where two of the
+//: filters are identities no control on this page displays.
+const LINKED_GROUP_BASIS =
+  'the usage filters from that page, including the user, model, agent or repository the row was grouped by';
+
+const DEFAULT_WINDOW_MS = 7 * 86_400_000;
+
+/** How long the applied window is, read from the window itself. */
+function windowLength(filters: AdminRunFilters): number {
+  const span = Date.parse(filters.until ?? '') - Date.parse(filters.since ?? '');
+  return Number.isFinite(span) && span > 0 ? span : DEFAULT_WINDOW_MS;
+}
+
+/**
+ * Re-anchor a window of a given length at an instant.
+ *
+ * The length is taken from the window on screen rather than from the preset
+ * control: the control reads "Custom" for a linked or a grown-old window, and
+ * a preset key is not a number of days.
+ */
+function windowOfLength(
+  length: number,
+  keep: AdminRunFilters = {},
+  now: Date = new Date(),
+): AdminRunFilters {
   return {
-    state,
-    since: new Date(until.getTime() - days * 86_400_000).toISOString(),
-    until: until.toISOString(),
+    ...keep,
+    since: new Date(now.getTime() - length).toISOString(),
+    until: now.toISOString(),
     limit: 50,
   };
+}
+
+function windowFilters(
+  days: number,
+  keep: AdminRunFilters = {},
+  now: Date = new Date(),
+): AdminRunFilters {
+  return windowOfLength(days * 86_400_000, keep, now);
+}
+
+// Deep links from the Usage page arrive as query parameters. Only these are
+// read. A link that names a window this list cannot use is an error rather than
+// a fallback: answering with the default window would describe other runs, and
+// a missing end or an inverted one is a broken link, not an empty selection.
+const DEEP_LINK_KEYS = ['user_id', 'model', 'runtime', 'repo'] as const;
+
+interface RunLink {
+  filters: AdminRunFilters | null;
+  error: string | null;
+  linked: boolean;
+}
+
+function deepLink(query: string): RunLink {
+  const params = new URLSearchParams(query);
+  const unknown = [...params.keys()].filter(
+    (key) =>
+      key !== 'since' && key !== 'until' && !(DEEP_LINK_KEYS as readonly string[]).includes(key),
+  );
+  if (unknown.length) {
+    return { filters: null, error: `Unsupported filter: ${unknown[0]}`, linked: true };
+  }
+  const since = params.get('since');
+  const until = params.get('until');
+  const named = Boolean(since || until) || DEEP_LINK_KEYS.some((key) => params.get(key));
+  if (!named) return { filters: null, error: null, linked: false };
+  if (!since || !until) {
+    return { filters: null, error: 'This link is missing one end of its window.', linked: true };
+  }
+  if (!(Date.parse(since) < Date.parse(until))) {
+    return { filters: null, error: 'This link has an empty or inverted window.', linked: true };
+  }
+  const filters: AdminRunFilters = { since, until, limit: 50 };
+  for (const key of DEEP_LINK_KEYS) {
+    const value = params.get(key);
+    if (value) filters[key] = value;
+  }
+  return { filters, error: null, linked: true };
 }
 
 export default function AdminRunsPage() {
   const { state } = useAuth();
   if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
-  return <RunsList key={state.user?.id ?? 'admin'} />;
+  return (
+    <Suspense fallback={<RunsSkeletonFallback />}>
+      <LinkedRunsList key={state.user?.id ?? 'admin'} />
+    </Suspense>
+  );
 }
 
-function RunsList() {
-  const [days, setDays] = useState(7);
-  const [filters, setFilters] = useState<AdminRunFilters>(() => windowFilters(7));
+/** Read the linked filters once, keyed by the query so a new link remounts. */
+function LinkedRunsList() {
+  const query = useSearchParams().toString();
+  return <RunsList key={query} initialQuery={query} />;
+}
+
+function RunsSkeletonFallback() {
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <section className="mx-auto w-full max-w-7xl px-6 py-10 lg:px-12 lg:py-14">
+        <div className={`${CARD} mt-8 h-64 animate-pulse`} />
+      </section>
+    </div>
+  );
+}
+
+function RunsList({ initialQuery }: { initialQuery: string }) {
+  // A link from the usage page carries an absolute window and the identities
+  // of the group it came from. It replaces the seven-day default and is kept
+  // for as long as the admin stays on this selection.
+  const linked = deepLink(initialQuery);
+  const [filters, setFilters] = useState<AdminRunFilters>(() => linked.filters ?? windowFilters(7));
+  // The window the admin is actually looking at, so the control names it
+  // instead of claiming the last preset that was clicked. A one-day link is
+  // Custom, and changing Status must not re-anchor it to seven days.
+  const windowDays = presetKey(filters);
+  // A linked window is absolute and stays exactly as linked; a window chosen
+  // here re-anchors on Refresh so the list picks up work finished meanwhile.
+  const [linkedWindow, setLinkedWindow] = useState(linked.linked);
   const [page, setPage] = useState<AdminRunsPage | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!linked.error);
   const [moreLoading, setMoreLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(linked.error);
   const [denied, setDenied] = useState(false);
   const moreRequest = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    if (linked.error) {
+      // A link this list cannot use is reported as it is. Requesting with a
+      // substituted window would return runs the link never named.
+      setLoading(false);
+      return;
+    }
     const controller = new AbortController();
     moreRequest.current?.abort();
     setMoreLoading(false);
@@ -95,7 +203,7 @@ function RunsList() {
       controller.abort();
       moreRequest.current?.abort();
     };
-  }, [filters]);
+  }, [filters, linked.error]);
 
   async function loadMore() {
     if (!page?.next_cursor || moreLoading) return;
@@ -135,7 +243,9 @@ function RunsList() {
         <div className="mt-8">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-50">Runs</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Cross-user agent runs in the selected window.
+            {linked
+              ? `Cross-user agent runs from a linked usage group: ${LINKED_GROUP_BASIS}`
+              : 'Cross-user agent runs in the selected window.'}
           </p>
         </div>
 
@@ -148,16 +258,20 @@ function RunsList() {
             <span className="sr-only">Created</span>
             <select
               className={INPUT}
-              value={days}
+              value={windowDays}
               onChange={(e) => {
+                // Choosing a preset is the only action that re-anchors the
+                // window, and it keeps every other filter, including the
+                // identity a usage link arrived with.
                 const nextDays = Number(e.target.value);
-                setDays(nextDays);
-                setFilters((current) => windowFilters(nextDays, current.state));
+                setLinkedWindow(false);
+                setFilters((current) => windowFilters(nextDays, current));
               }}
             >
               <option value={7}>Last 7 days</option>
               <option value={30}>Last 30 days</option>
               <option value={90}>Last 90 days</option>
+              {windowDays === 'custom' && <option value="custom">Custom</option>}
             </select>
           </label>
           <label className="w-40 shrink-0">
@@ -166,12 +280,13 @@ function RunsList() {
               className={INPUT}
               value={filters.state ?? ''}
               onChange={(e) =>
-                setFilters(
-                  windowFilters(
-                    days,
-                    (e.target.value || undefined) as AgentJobApiState | undefined,
-                  ),
-                )
+                // Status is not part of the window. Changing it keeps the exact
+                // since/until on screen: re-deriving them from a preset here
+                // widened a one-day link back to seven days.
+                setFilters((current) => ({
+                  ...current,
+                  state: (e.target.value || undefined) as AgentJobApiState | undefined,
+                }))
               }
             >
               <option value="">All statuses</option>
@@ -186,7 +301,14 @@ function RunsList() {
             className={`${BUTTON} ml-auto h-10`}
             type="button"
             disabled={loading}
-            onClick={() => setFilters((current) => windowFilters(days, current.state))}
+            onClick={() =>
+              setFilters((current) =>
+                // A linked window is absolute and stays as linked. Any other
+                // window keeps its own length and re-anchors at now, which is
+                // what refreshing a list is for.
+                linkedWindow ? { ...current } : windowOfLength(windowLength(current), current),
+              )
+            }
           >
             Refresh
           </button>
@@ -195,7 +317,8 @@ function RunsList() {
         {error && (
           <ErrorNotice>
             {error}
-            {!page && (
+            {/* A broken link has nothing to retry: the URL has to change. */}
+            {!page && !linked.error && (
               <button
                 type="button"
                 className="ml-3 underline"
@@ -207,7 +330,7 @@ function RunsList() {
           </ErrorNotice>
         )}
 
-        {loading ? (
+        {linked.error ? null : loading ? (
           <LoadingTable />
         ) : (
           page && (

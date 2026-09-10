@@ -18,9 +18,10 @@ from pydantic import BaseModel, Field, ValidationError
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grant_usage import (
     CORE_METRICS,
+    DERIVED_AMOUNT_CHARS,
     USAGE_METRICS,
+    GrantUsageDerivedTotals,
     GrantUsageReport,
-    GrantUsageTotals,
     GrantUsageUnknownRows,
     GrantUsageWindow,
 )
@@ -32,6 +33,13 @@ logger = get_logger(__name__)
 REFRESH_POLL_SECONDS = 2.0
 REFRESH_CONCURRENCY = 4
 REFRESH_TIMEOUT_SECONDS = 15.0
+#: A stored or derived report this service will not add to a total. One reason
+#: covers every rejection so the browser and the stored error stay content-free.
+INVALID_REPORT = "usage_invalid_response"
+#: The width a derived amount may occupy. Reaching it needs more reports than a
+#: selection can hold, so it is a guard rather than a limit; keeping it in a
+#: module attribute lets its refusal path be tested without impossible inputs.
+_derived_amount_chars = DERIVED_AMOUNT_CHARS
 _SAFE_ERRORS = frozenset(
     {
         "usage_unsupported_schema",
@@ -55,7 +63,7 @@ class LedgerSummary(BaseModel):
     """Known totals accompanied by their missing data and refresh state."""
 
     status: LedgerStatus
-    totals: GrantUsageTotals | None = None
+    totals: GrantUsageDerivedTotals | None = None
     unknown_rows: GrantUsageUnknownRows | None = None
     estimated_calls: int = 0
     queried_at: datetime | None = None
@@ -95,7 +103,7 @@ class RuntimeUsage(BaseModel):
 class ConversationUsage(BaseModel):
     """Cached usage for the owned conversation, without per-attempt diagnostics."""
 
-    totals: GrantUsageTotals | None = None
+    totals: GrantUsageDerivedTotals | None = None
     unknown_rows: GrantUsageUnknownRows | None = None
     estimated_calls: int = 0
     queried_at: datetime | None = None
@@ -114,6 +122,20 @@ class JobUsageResponse(BaseModel):
     conversation: ConversationUsage | None = None
 
 
+def summarize_job_ledger(ledger_rows: list[dict[str, Any]], *, terminal: bool) -> JobLedgerSummary:
+    """Account for one job's snapshots with no runtime and no Gateway read.
+
+    Owner reads, the admin run detail and cross-task aggregation share this so
+    that a job means the same thing everywhere. A turn that never claimed has no
+    future snapshot to wait for once it is terminal.
+    """
+    ledger = summarize_ledger(ledger_rows)
+    if not ledger_rows and terminal:
+        # A turn cancelled before claim has no future snapshot to wait for.
+        ledger.status = "unavailable"
+    return ledger
+
+
 def summarize_job_usage(
     *,
     ledger_rows: list[dict[str, Any]],
@@ -128,12 +150,8 @@ def summarize_job_usage(
     This function neither fetches content nor queues a Gateway refresh.
     """
     stats = summarize_thread(**runtime_inputs)
-    ledger = summarize_ledger(ledger_rows)
-    if not ledger_rows and terminal:
-        # A turn cancelled before claim has no future snapshot to wait for.
-        ledger.status = "unavailable"
     return JobUsageResponse(
-        ledger=ledger,
+        ledger=summarize_job_ledger(ledger_rows, terminal=terminal),
         runtime=RuntimeUsage(
             input_tokens=stats.input_tokens,
             output_tokens=stats.output_tokens,
@@ -146,7 +164,40 @@ def summarize_job_usage(
     )
 
 
-def _sum_reports(reports: list[GrantUsageReport]) -> dict[str, Any]:
+def _sum_amounts(amounts: list[str]) -> str:
+    """Add decimal strings and return the exact sum.
+
+    No rounding happens here, at any scale or magnitude: this is the reducer the
+    owner read, the run detail and the cross-task aggregate share, and a total
+    that depends on how the gateway happened to split its reports across jobs
+    would be wrong. Display rounding belongs to the page that shows the number.
+
+    The sum needs one more significant digit than its widest operand plus the
+    carry of adding many of them, so the working precision is sized from the
+    operands rather than taken from the default context, which would round.
+    """
+    integer_digits = 1
+    fractional_digits = 0
+    for amount in amounts:
+        integer, _, fraction = amount.partition(".")
+        integer_digits = max(integer_digits, len(integer))
+        fractional_digits = max(fractional_digits, len(fraction))
+    with localcontext() as context:
+        context.prec = len(amounts).bit_length() + integer_digits + fractional_digits + 2
+        context.Emax = context.prec
+        context.Emin = -context.prec
+        total = sum((Decimal(amount) for amount in amounts), Decimal(0))
+    return f"{total:f}"
+
+
+def _sum_reports(
+    reports: list[GrantUsageReport], reasons: list[str] | None = None
+) -> dict[str, Any] | None:
+    """Sum valid reports exactly, or refuse a derived total this service cannot hold.
+
+    Records the refusal in ``reasons`` and returns ``None`` so the caller counts
+    the snapshot as unreadable and never reports a rounded or truncated amount.
+    """
     if not reports:
         return {"totals": None, "unknown_rows": None, "estimated_calls": 0}
     totals: dict[str, Any] = {"calls": sum(report.totals.calls for report in reports)}
@@ -154,13 +205,16 @@ def _sum_reports(reports: list[GrantUsageReport]) -> dict[str, Any]:
         known = [getattr(report.totals, name) for report in reports]
         known = [value for value in known if value is not None]
         if name == "spent_usd" and known:
-            with localcontext() as context:
-                context.prec = 160
-                totals[name] = format(sum((Decimal(value) for value in known), Decimal(0)), "f")
+            total = _sum_amounts(known)
+            if len(total) > _derived_amount_chars:
+                if reasons is not None:
+                    reasons.append(INVALID_REPORT)
+                return None
+            totals[name] = total
         else:
             totals[name] = sum(known) if known else None
     return {
-        "totals": GrantUsageTotals(**totals),
+        "totals": GrantUsageDerivedTotals(**totals),
         "unknown_rows": GrantUsageUnknownRows(
             **{
                 name: sum(getattr(report.unknown_rows, name) for report in reports)
@@ -172,11 +226,18 @@ def _sum_reports(reports: list[GrantUsageReport]) -> dict[str, Any]:
 
 
 def _status(
-    reports: list[GrantUsageReport], *, missing: bool, failed: bool, refreshing: bool
+    reports: list[GrantUsageReport],
+    *,
+    missing: bool,
+    failed: bool,
+    refreshing: bool,
+    unreadable: bool = False,
 ) -> LedgerStatus:
     if not reports:
         return "pending" if refreshing or not failed else "unavailable"
-    if missing:
+    if missing or unreadable:
+        # A snapshot this service cannot add to a total reads as incomplete,
+        # never as a smaller number.
         return "partial"
     if failed:
         return "stale"
@@ -193,10 +254,12 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
     for row in rows:
         grouped[row["attempt_id"]].append(row)
     all_reports: list[GrantUsageReport] = []
+    job_reasons: list[str] = []
     all_queried: list[datetime] = []
     all_scheduled: list[datetime] = []
     summaries: list[AttemptLedgerSummary] = []
     missing_attempts = 0
+    unreadable_attempts = 0
     any_failed = False
     any_refreshing = False
     for attempt_rows in grouped.values():
@@ -222,7 +285,7 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
                 except (ValidationError, ValueError, TypeError):
                     pass
                 if report is None:
-                    reasons.append("usage_invalid_response")
+                    reasons.append(INVALID_REPORT)
             if report is None:
                 missing = True
                 if row.get("id") is None:
@@ -232,40 +295,48 @@ def summarize_ledger(rows: list[dict[str, Any]]) -> JobLedgerSummary:
                 if row.get("queried_at") is not None:
                     queried.append(row["queried_at"])
         first = attempt_rows[0]
+        attempt_sum = _sum_reports(reports, reasons)
         summaries.append(
             AttemptLedgerSummary(
                 attempt_id=first["attempt_id"],
                 attempt_no=first["attempt_no"],
                 status=_status(
-                    reports, missing=missing, failed=bool(reasons), refreshing=refreshing
+                    reports,
+                    missing=missing,
+                    failed=bool(reasons),
+                    refreshing=refreshing,
+                    unreadable=attempt_sum is None,
                 ),
                 reason=reasons[0] if reasons else ("pending" if not reports else None),
                 windows=[report.window for report in reports],
                 queried_at=min(queried) if queried else None,
                 refreshing=refreshing,
                 next_refresh_at=min(scheduled) if scheduled else None,
-                **_sum_reports(reports),
+                **(attempt_sum or {"totals": None, "unknown_rows": None, "estimated_calls": 0}),
             )
         )
         all_reports.extend(reports)
         all_queried.extend(queried)
         all_scheduled.extend(scheduled)
         missing_attempts += int(missing)
-        any_failed |= bool(reasons)
+        unreadable_attempts += int(attempt_sum is None)
+        any_failed |= bool(reasons) or attempt_sum is None
         any_refreshing |= refreshing
+    job_sum = _sum_reports(all_reports, job_reasons)
     return JobLedgerSummary(
         status=_status(
             all_reports,
             missing=bool(missing_attempts),
             failed=any_failed,
             refreshing=any_refreshing,
+            unreadable=unreadable_attempts > 0 or job_sum is None,
         ),
         attempts=sorted(summaries, key=lambda attempt: attempt.attempt_no),
         missing_attempts=missing_attempts,
         queried_at=min(all_queried) if all_queried else None,
         refreshing=any_refreshing,
         next_refresh_at=min(all_scheduled) if all_scheduled else None,
-        **_sum_reports(all_reports),
+        **(job_sum or {"totals": None, "unknown_rows": None, "estimated_calls": 0}),
     )
 
 

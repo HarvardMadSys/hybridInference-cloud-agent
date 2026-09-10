@@ -65,8 +65,14 @@ _EVENT_COLUMNS = """
     CASE WHEN e.event_type = 'tool_result'
               AND jsonb_typeof(e.payload->'is_error') = 'boolean'
          THEN (e.payload->>'is_error')::boolean END AS is_error,
-    (e.payload IS NOT NULL AND e.payload <> '{}'::jsonb
-     AND e.payload <> 'null'::jsonb) AS has_content
+    -- Content means something a reveal would actually return. An empty object
+    -- is not content, and neither is a payload reduced to the truncation
+    -- markers alone: advertising a reveal there leads to an empty payload.
+    (jsonb_typeof(e.payload) = 'object' AND EXISTS (
+        SELECT 1 FROM jsonb_each(e.payload) AS field(key, value)
+        WHERE value <> 'null'::jsonb
+          AND key NOT IN ('truncated', 'original_payload_bytes', 'truncation_notice')
+     )) AS has_content
 """
 
 # Share exactly the spellings understood by the accounting implementation.

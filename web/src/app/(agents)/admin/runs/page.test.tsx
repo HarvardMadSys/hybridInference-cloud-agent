@@ -2,6 +2,7 @@
 import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useSyncExternalStore } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentAccessApi } from '@/lib/api/session';
@@ -16,6 +17,24 @@ import { APIError } from '@/lib/utils/errors';
 
 const auth = vi.hoisted(() => ({ access: undefined as AgentAccessApi | undefined, id: 'admin-1' }));
 const route = vi.hoisted(() => ({ jobId: 'job-1' }));
+// The applied window comes from the URL, so a usage deep link can open this
+// list on exactly the cohort it was aggregated from. The store notifies its
+// subscribers, which is how a real URL change re-renders the mounted page.
+const search = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  return {
+    value: '',
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    read: () => search.value,
+    set(next: string) {
+      search.value = next;
+      for (const listener of listeners) listener();
+    },
+  };
+});
 vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: auth.id, role: 'admin', agent_access: auth.access } } }),
 }));
@@ -25,7 +44,10 @@ vi.mock('@/components/providers/AuthProvider', async () => {
   );
   return { hasAgentPermission: actual.hasAgentPermission };
 });
-vi.mock('next/navigation', () => ({ useParams: () => route }));
+vi.mock('next/navigation', () => ({
+  useParams: () => route,
+  useSearchParams: () => new URLSearchParams(useSyncExternalStore(search.subscribe, search.read)),
+}));
 vi.mock('@/lib/api/adminRuns', () => ({
   getAdminRuns: vi.fn(),
   getAdminRun: vi.fn(),
@@ -236,6 +258,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  search.value = '';
   auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   auth.id = 'admin-1';
   route.jobId = 'job-1';
@@ -267,7 +290,7 @@ describe('admin runs list', () => {
     expect(getAdminRuns).not.toHaveBeenCalled();
   });
 
-  it('defaults to an anchored seven-day window and exposes only working admin sections', async () => {
+  it('defaults to an anchored seven-day window and exposes working admin sections', async () => {
     render(<AdminRunsPageComponent />);
     expect(await screen.findByRole('link', { name: 'job-1' })).toHaveAttribute(
       'href',
@@ -295,7 +318,128 @@ describe('admin runs list', () => {
       'href',
       '/admin/hosts',
     );
-    expect(within(nav).queryByRole('link', { name: 'Usage' })).not.toBeInTheDocument();
+    expect(within(nav).getByRole('link', { name: 'Usage' })).toHaveAttribute(
+      'href',
+      '/admin/usage',
+    );
+  });
+
+  it('honours an absolute window and identities from a usage deep link', async () => {
+    search.value =
+      'since=2026-09-01T00:00:00.000Z&until=2026-09-08T00:00:00.000Z&model=model-a&user_id=owner-one';
+    vi.mocked(getAdminRuns).mockResolvedValue(page());
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    // The linked window replaces the seven-day default, and the identities the
+    // usage row was grouped by travel with it.
+    expect(vi.mocked(getAdminRuns).mock.calls[0][0]).toMatchObject({
+      since: '2026-09-01T00:00:00.000Z',
+      until: '2026-09-08T00:00:00.000Z',
+      model: 'model-a',
+      user_id: 'owner-one',
+    });
+    // The control names the window that is applied: a week that ended a month
+    // ago is Custom, not "Last 7 days".
+    expect(screen.getByLabelText('Created')).toHaveValue('custom');
+    expect(screen.getByText(/linked usage group/)).toBeInTheDocument();
+  });
+
+  it('keeps a linked window on Refresh instead of drifting with the clock', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-09-10T08:00:00Z'));
+      search.value = 'since=2026-09-01T00:00:00.000Z&until=2026-09-08T00:00:00.000Z';
+      vi.mocked(getAdminRuns).mockResolvedValue(page());
+      render(<AdminRunsPageComponent />);
+      await screen.findByRole('link', { name: 'job-1' });
+      vi.setSystemTime(new Date('2026-09-10T09:00:00Z'));
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
+      expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toMatchObject({
+        since: '2026-09-01T00:00:00.000Z',
+        until: '2026-09-08T00:00:00.000Z',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refreshes a window that has aged past its preset', async () => {
+    // The Created control reads Custom once the window is older than a preset
+    // tolerance, so the refresh length has to come from the window on screen.
+    // Reading it from the control's value produced an invalid date.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-09-10T08:00:00Z'));
+      vi.mocked(getAdminRuns).mockResolvedValue(page());
+      render(<AdminRunsPageComponent />);
+      await screen.findByRole('link', { name: 'job-1' });
+
+      vi.setSystemTime(new Date('2026-09-10T08:06:00Z'));
+      fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
+      await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
+      expect(screen.getByLabelText('Created')).toHaveValue('custom');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(3));
+      const filters = vi.mocked(getAdminRuns).mock.lastCall![0];
+      // The same seven-day window, re-anchored at the current time.
+      expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86_400_000);
+      expect(filters.until).toBe('2026-09-10T08:06:00.000Z');
+      expect(filters.state).toBe('failed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('follows a URL that changes while the list stays mounted', async () => {
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    expect(vi.mocked(getAdminRuns).mock.calls[0][0].model).toBeUndefined();
+
+    search.set('since=2026-08-01T00:00:00.000Z&until=2026-08-08T00:00:00.000Z&model=model-a');
+    await act(async () => {});
+    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(getAdminRuns).mock.calls[1][0]).toMatchObject({
+      since: '2026-08-01T00:00:00.000Z',
+      until: '2026-08-08T00:00:00.000Z',
+      model: 'model-a',
+    });
+  });
+
+  it('reports an unusable link instead of answering for every run', async () => {
+    // An inverted window is a broken link, not an empty selection. Falling back
+    // to the default window would answer a question nobody asked.
+    search.value = 'since=2026-09-08T00:00:00.000Z&until=2026-09-01T00:00:00.000Z';
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('alert');
+    expect(screen.getByText(/empty or inverted window/)).toBeInTheDocument();
+    expect(getAdminRuns).not.toHaveBeenCalled();
+  });
+
+  it('reports a link naming a filter this list cannot express', async () => {
+    search.value = 'since=2026-09-01T00:00:00.000Z&until=2026-09-08T00:00:00.000Z&host=runner-one';
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('alert');
+    expect(screen.getByText(/Unsupported filter: host/)).toBeInTheDocument();
+    expect(getAdminRuns).not.toHaveBeenCalled();
+  });
+
+  it('keeps a one-day linked window when Status changes', async () => {
+    // The Created control names the window that is applied, so changing a
+    // non-time filter cannot re-derive seven days from a stale preset.
+    search.value = 'since=2026-09-09T00:00:00.000Z&until=2026-09-10T00:00:00.000Z';
+    vi.mocked(getAdminRuns).mockResolvedValue(page());
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    expect(screen.getByLabelText('Created')).toHaveValue('custom');
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } });
+    await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toMatchObject({
+      since: '2026-09-09T00:00:00.000Z',
+      until: '2026-09-10T00:00:00.000Z',
+      state: 'failed',
+    });
   });
 
   it('applies filters and paginates with the same window and filter scope', async () => {
@@ -454,7 +598,7 @@ describe('admin run observation', () => {
     expect(screen.queryByText('private command')).not.toBeInTheDocument();
     const calls = screen.getByRole('row', { name: 'Model calls 2 Unavailable' });
     expect(calls).toBeInTheDocument();
-    expect(screen.getByText('$0.00978569')).toBeInTheDocument();
+    expect(screen.getByText('$0.0097')).toBeInTheDocument();
     expect(screen.getByText('Not finalized')).toBeInTheDocument();
     expect(screen.getByText(/Rows missing metrics: reasoning: 2/)).toBeInTheDocument();
     expect(screen.getByText(/Per-request LLM records are not stored here/)).toBeInTheDocument();
@@ -511,7 +655,7 @@ describe('admin run observation', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Content access could not be recorded',
     );
-    expect(screen.getByText('$0.00978569')).toBeInTheDocument();
+    expect(screen.getByText('$0.0097')).toBeInTheDocument();
     expect(screen.queryByText('private command')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Reveal content' }));
     await screen.findByText(/private command/);

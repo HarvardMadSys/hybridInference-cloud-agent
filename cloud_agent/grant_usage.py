@@ -32,7 +32,29 @@ USAGE_METRICS = ("tokens_in", "tokens_out", "cache_read", "cache_write", "reason
 #: does not turn an otherwise complete snapshot into a partial one.
 CORE_METRICS = tuple(name for name in USAGE_METRICS if name != "reasoning")
 NonnegativeInt = Annotated[StrictInt, Field(ge=0)]
-Money = Annotated[StrictStr, Field(pattern=r"^[0-9]+(?:\.[0-9]+)?$", max_length=128)]
+#: Digits of a decimal amount, without its point. A gateway report is one
+#: request's total; a sum over attempts, jobs or administrators is wider.
+DECIMAL_DIGITS = 128
+#: One report's amount. The gateway contract fixes this width.
+REPORT_AMOUNT_CHARS = DECIMAL_DIGITS
+#: A derived amount is never rounded, so its width has to hold the exact sum of
+#: every report in a selection: one report may carry 128 digits, a selection may
+#: hold 50,000 ledger rows, and the integer part can gain five digits from the
+#: carry. 128 + 5 + 1 + 128 = 262; 384 leaves room for the checked bound to sit
+#: above it rather than on it.
+DERIVED_AMOUNT_CHARS = 384
+#: Decimal places the page shows. This is display only: the API returns the whole
+#: exact amount and the browser truncates nothing.
+DISPLAY_AMOUNT_PLACES = 10
+
+
+def _money(max_length: int) -> Any:
+    """Build the amount field for one width without duplicating its pattern."""
+    return Annotated[StrictStr, Field(pattern=r"^[0-9]+(?:\.[0-9]+)?$", max_length=max_length)]
+
+
+Money = _money(REPORT_AMOUNT_CHARS)
+DerivedAmount = _money(DERIVED_AMOUNT_CHARS)
 Identifier = Annotated[StrictStr, Field(min_length=1, max_length=128)]
 
 
@@ -71,8 +93,8 @@ class GrantUsageWindow(_UsageModel):
         return self
 
 
-class GrantUsageTotals(_UsageModel):
-    """Sums over the rows that reported each metric, with unknowns left null."""
+class _UsageTotals(_UsageModel):
+    """Fields shared by one report's totals and by every sum derived from them."""
 
     calls: NonnegativeInt
     tokens_in: NonnegativeInt | None
@@ -80,7 +102,18 @@ class GrantUsageTotals(_UsageModel):
     cache_read: NonnegativeInt | None
     cache_write: NonnegativeInt | None
     reasoning: NonnegativeInt | None
+
+
+class GrantUsageTotals(_UsageTotals):
+    """One report's sums over the rows that reported each metric, unknowns null."""
+
     spent_usd: Money | None
+
+
+class GrantUsageDerivedTotals(_UsageTotals):
+    """Sums of valid reports, which may be wider than any single report."""
+
+    spent_usd: DerivedAmount | None
 
 
 class GrantUsageUnknownRows(_UsageModel):

@@ -1,37 +1,48 @@
 import type { AgentJobUsageApi } from '@/lib/api/agents';
 
-import { CARD, dateTime, number } from './shared';
+import { CARD, dateTime, metric, money, number } from './shared';
 
 /** Pure presentation: admin reads never invoke owner loaders or refresh accounting. */
 export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
   const { ledger, runtime } = usage;
   const totals = ledger.totals;
-  const rows = [
+  const unknownRows = ledger.unknown_rows;
+  const cost = money(totals?.spent_usd);
+  const rows: { label: string; gateway: string; runtime: string; title?: string }[] = [
     { label: 'Model calls', gateway: number(totals?.calls), runtime: 'Unavailable' },
     {
       label: 'Input tokens (including cache)',
-      gateway: number(totals?.tokens_in),
+      gateway: metric(totals?.tokens_in, unknownRows?.tokens_in),
       runtime: number(runtime.normalized_input_tokens),
     },
     {
       label: 'Output tokens',
-      gateway: number(totals?.tokens_out),
+      gateway: metric(totals?.tokens_out, unknownRows?.tokens_out),
       runtime: number(runtime.output_tokens),
     },
     {
       label: 'Cache read tokens',
-      gateway: number(totals?.cache_read),
+      gateway: metric(totals?.cache_read, unknownRows?.cache_read),
       runtime: number(runtime.cache_read_tokens),
     },
-    { label: 'Cache write tokens', gateway: number(totals?.cache_write), runtime: 'Unavailable' },
-    { label: 'Reasoning tokens', gateway: number(totals?.reasoning), runtime: 'Unavailable' },
     {
-      label: 'Cost (USD)',
-      gateway: totals?.spent_usd != null ? `$${totals.spent_usd}` : 'Unavailable',
+      label: 'Cache write tokens',
+      gateway: metric(totals?.cache_write, unknownRows?.cache_write),
       runtime: 'Unavailable',
     },
+    {
+      label: 'Reasoning tokens',
+      gateway: metric(totals?.reasoning, unknownRows?.reasoning),
+      runtime: 'Unavailable',
+    },
+    {
+      label: 'Cost (USD)',
+      gateway: cost.display,
+      runtime: 'Unavailable',
+      title: cost.exact ?? undefined,
+    },
   ];
-  const unknown = Object.entries(ledger.unknown_rows ?? {}).filter(([, count]) => count > 0);
+  const unknown = Object.entries(unknownRows ?? {}).filter(([, count]) => count > 0);
 
   return (
     <section aria-labelledby="usage-heading" className="mt-8">
@@ -68,7 +79,9 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
                   >
                     {row.label}
                   </th>
-                  <td className="px-5 py-2.5 tabular-nums">{row.gateway}</td>
+                  <td className="px-5 py-2.5 tabular-nums" title={row.title}>
+                    {row.gateway}
+                  </td>
                   <td className="px-5 py-2.5 tabular-nums">{row.runtime}</td>
                 </tr>
               ))}
