@@ -58,6 +58,7 @@ from cloud_agent.api.deps import (
     require_conversation_commands,
     require_grants,
     require_host_pool,
+    require_source_control,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
 from cloud_agent.broker_routing import (
@@ -652,11 +653,11 @@ async def _connect_github_for_user(
     *,
     body: GitHubConnectRequest | OAuthConnectRequest,
     user_id: str,
-    store: AgentJobStore,
+    source_control: AgentJobStore,
     app_credentials: Any,
 ) -> GitHubConnectionResponse:
     await consume_oauth_state(
-        store,
+        source_control,
         state=body.state,
         user_id=user_id,
         provider="github",
@@ -667,10 +668,12 @@ async def _connect_github_for_user(
     if not installations:
         github_install_url = (os.getenv("AGENT_GITHUB_APP_INSTALL_URL") or "").strip()
         if github_install_url:
-            install_state = await issue_oauth_state(store, user_id=user_id, provider="github")
+            install_state = await issue_oauth_state(
+                source_control, user_id=user_id, provider="github"
+            )
             install_url = github_authorization_url(github_install_url, state=install_state)
     for installation in installations:
-        await store.record_repo_grant(
+        await source_control.record_repo_grant(
             user_id=user_id,
             installation_id=installation["installation_id"],
             account_login=installation.get("account_login"),
@@ -680,8 +683,10 @@ async def _connect_github_for_user(
         extra={"event": "agent_github_connected", "installations": len(installations)},
     )
     return GitHubConnectionResponse(
-        connections=await store.list_repo_grants(user_id=user_id),
-        repos=await repos_for_user(user_id, grants_repo=store, app_credentials=app_credentials),
+        connections=await source_control.list_repo_grants(user_id=user_id),
+        repos=await repos_for_user(
+            user_id, grants_repo=source_control, app_credentials=app_credentials
+        ),
         install_url=install_url,
     )
 
@@ -689,7 +694,7 @@ async def _connect_github_for_user(
 async def _source_control_providers(
     *,
     user_id: str,
-    store: AgentJobStore,
+    source_control: AgentJobStore,
     app_credentials: Any | None,
     gitlab_oauth: Any | None,
 ) -> list[SourceControlProviderResponse]:
@@ -704,13 +709,13 @@ async def _source_control_providers(
     github_error = None
     if github_configured:
         try:
-            state = await issue_oauth_state(store, user_id=user_id, provider="github")
+            state = await issue_oauth_state(source_control, user_id=user_id, provider="github")
             github_connect_url = app_credentials.user_authorization_url(state)
         except (GitHubAppError, SourceControlError) as exc:
             github_configured = False
             github_error = str(exc)
 
-    grants = await store.list_repo_grants(user_id=user_id)
+    grants = await source_control.list_repo_grants(user_id=user_id)
     # The install URL is the wrong way to *start* a connection — GitHub sends
     # an already-installed App there straight to its settings page instead of
     # through the callback — but that settings page is the only route to
@@ -722,7 +727,9 @@ async def _source_control_providers(
     github_manage_url = None
     if github_configured and grants:
         try:
-            manage_state = await issue_oauth_state(store, user_id=user_id, provider="github")
+            manage_state = await issue_oauth_state(
+                source_control, user_id=user_id, provider="github"
+            )
             github_manage_url = github_authorization_url(github_install_url, state=manage_state)
         except SourceControlError as exc:
             # A malformed install URL no longer breaks connecting, so it must
@@ -735,7 +742,7 @@ async def _source_control_providers(
 
     github_repos = await repos_for_user(
         user_id,
-        grants_repo=store,
+        grants_repo=source_control,
         app_credentials=app_credentials,
         env={"AGENT_REPO_ALLOWLIST": ""},
     )
@@ -766,16 +773,18 @@ async def _source_control_providers(
         )
     ]
 
-    gitlab_connection = await store.get_gitlab_connection(user_id=user_id)
+    gitlab_connection = await source_control.get_gitlab_connection(user_id=user_id)
     gitlab_projects: list[dict[str, Any]] = []
     gitlab_error = None
     gitlab_connect_url = None
     if gitlab_oauth is not None:
         try:
-            gitlab_connect_url = await gitlab_oauth.authorization_url(store, user_id=user_id)
+            gitlab_connect_url = await gitlab_oauth.authorization_url(
+                source_control, user_id=user_id
+            )
             if gitlab_connection:
                 gitlab_projects = await gitlab_oauth.projects_for_connection(
-                    store, gitlab_connection
+                    source_control, gitlab_connection
                 )
         except SourceControlError:
             if gitlab_connection:
@@ -850,20 +859,20 @@ async def _mcp_integrations(
 @router.get("/integrations", response_model=SourceControlIntegrationsResponse)
 async def list_source_control_integrations(
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlIntegrationsResponse:
     """Return configured/connected state for source control and MCP servers."""
-    job_store = _require_store(store)
+    source_control = require_source_control(source_control)
     return SourceControlIntegrationsResponse(
         providers=await _source_control_providers(
             user_id=user["user_id"],
-            store=job_store,
+            source_control=source_control,
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
         ),
-        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=job_store),
+        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=source_control),
     )
 
 
@@ -871,7 +880,7 @@ async def list_source_control_integrations(
 async def disconnect_mcp_integration(
     server: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlIntegrationsResponse:
@@ -887,7 +896,7 @@ async def disconnect_mcp_integration(
     owner's connections per call rather than at job start — so disconnecting
     takes effect immediately without anything having to hunt down live jobs.
     """
-    job_store = _require_store(store)
+    job_store = require_source_control(source_control)
     removed = await job_store.delete_mcp_connection(user_id=user["user_id"], server=server)
     if not removed:
         raise HTTPException(
@@ -906,7 +915,7 @@ async def disconnect_mcp_integration(
     return SourceControlIntegrationsResponse(
         providers=await _source_control_providers(
             user_id=user["user_id"],
-            store=job_store,
+            source_control=job_store,
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
         ),
@@ -918,18 +927,18 @@ async def disconnect_mcp_integration(
 async def connect_github_integration(
     body: OAuthConnectRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> GitHubConnectionResponse:
     """Complete a GitHub App authorization protected by one-time state."""
-    job_store = _require_store(store)
+    job_store = require_source_control(source_control)
     if app_credentials is None:
         raise HTTPException(status_code=503, detail="GitHub App is not configured")
     try:
         return await _connect_github_for_user(
             body=body,
             user_id=user["user_id"],
-            store=job_store,
+            source_control=job_store,
             app_credentials=app_credentials,
         )
     except Exception as exc:
@@ -942,16 +951,16 @@ async def connect_github_integration(
 async def connect_gitlab_integration(
     body: OAuthConnectRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlProviderResponse:
     """Verify a GitLab user and persist only encrypted, refreshable tokens."""
-    job_store = _require_store(store)
+    source_control = require_source_control(source_control)
     if gitlab_oauth is None:
         raise HTTPException(status_code=503, detail="GitLab OAuth is not configured")
     try:
         verifier = await consume_oauth_state(
-            job_store,
+            source_control,
             state=body.state,
             user_id=user["user_id"],
             provider="gitlab",
@@ -962,8 +971,8 @@ async def connect_gitlab_integration(
         token = await gitlab_oauth.exchange_code(body.code, verifier)
         profile = await gitlab_oauth.verify_user(token["access_token"])
         projects = await gitlab_oauth.list_projects(token["access_token"])
-        previous_connection = await job_store.get_gitlab_connection(user_id=user["user_id"])
-        connection_id = await job_store.upsert_gitlab_connection(
+        previous_connection = await source_control.get_gitlab_connection(user_id=user["user_id"])
+        connection_id = await source_control.upsert_gitlab_connection(
             user_id=user["user_id"],
             external_user_id=profile["id"],
             username=profile["username"],
@@ -1006,33 +1015,37 @@ async def connect_gitlab_integration(
 async def disconnect_gitlab_integration(
     connection_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlIntegrationsResponse:
     """Revoke GitLab best-effort, then always remove the local credential."""
-    job_store = _require_store(store)
-    connection = await job_store.get_gitlab_connection(user_id=user["user_id"])
+    source_control = require_source_control(source_control)
+    connection = await source_control.get_gitlab_connection(user_id=user["user_id"])
     if connection is None or connection["id"] != connection_id:
         raise HTTPException(status_code=404, detail="No such GitLab connection")
     if gitlab_oauth is not None:
         try:
-            access_token = await gitlab_oauth.access_token_for_connection(job_store, connection)
+            access_token = await gitlab_oauth.access_token_for_connection(
+                source_control, connection
+            )
             await gitlab_oauth.revoke(access_token)
         except Exception:
             logger.warning("agent_gitlab_revoke_failed", exc_info=True)
-    await job_store.delete_gitlab_connection(user_id=user["user_id"], connection_id=connection_id)
+    await source_control.delete_gitlab_connection(
+        user_id=user["user_id"], connection_id=connection_id
+    )
     return SourceControlIntegrationsResponse(
         providers=await _source_control_providers(
             user_id=user["user_id"],
-            store=job_store,
+            source_control=source_control,
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
         ),
         # This response replaces the page's whole state, so it has to carry the
         # part this endpoint did not touch. Omitted, it would default to an
         # empty list and read as "you have no MCP connections".
-        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=job_store),
+        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=source_control),
     )
 
 
@@ -1043,16 +1056,16 @@ async def disconnect_gitlab_integration(
 async def disconnect_github_integration(
     installation_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> GitHubConnectionResponse:
     """Drop only the authenticated user's GitHub installation grant."""
-    job_store = _require_store(store)
-    await job_store.revoke_repo_grant(user_id=user["user_id"], installation_id=installation_id)
+    source_control = require_source_control(source_control)
+    await source_control.revoke_repo_grant(user_id=user["user_id"], installation_id=installation_id)
     return GitHubConnectionResponse(
-        connections=await job_store.list_repo_grants(user_id=user["user_id"]),
+        connections=await source_control.list_repo_grants(user_id=user["user_id"]),
         repos=await repos_for_user(
-            user["user_id"], grants_repo=job_store, app_credentials=app_credentials
+            user["user_id"], grants_repo=source_control, app_credentials=app_credentials
         ),
     )
 
@@ -1061,7 +1074,7 @@ async def disconnect_github_integration(
 async def connect_github(
     body: GitHubConnectRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> GitHubConnectionResponse:
     """Record the installations this user proved they can reach.
@@ -1072,7 +1085,7 @@ async def connect_github(
     directly would be exactly the confused deputy this whole path exists to
     prevent, so the id is only ever taken from GitHub's own answer.
     """
-    job_store = _require_store(store)
+    source_control = require_source_control(source_control)
     if app_credentials is None:
         raise HTTPException(
             status_code=503,
@@ -1087,7 +1100,7 @@ async def connect_github(
         return await _connect_github_for_user(
             body=body,
             user_id=user["user_id"],
-            store=job_store,
+            source_control=source_control,
             app_credentials=app_credentials,
         )
     except Exception as exc:
@@ -1100,16 +1113,16 @@ async def connect_github(
 async def disconnect_github(
     installation_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> GitHubConnectionResponse:
     """Drop one connection. Uninstalling on GitHub is the other half."""
-    job_store = _require_store(store)
-    await job_store.revoke_repo_grant(user_id=user["user_id"], installation_id=installation_id)
+    source_control = require_source_control(source_control)
+    await source_control.revoke_repo_grant(user_id=user["user_id"], installation_id=installation_id)
     return GitHubConnectionResponse(
-        connections=await job_store.list_repo_grants(user_id=user["user_id"]),
+        connections=await source_control.list_repo_grants(user_id=user["user_id"]),
         repos=await repos_for_user(
-            user["user_id"], grants_repo=job_store, app_credentials=app_credentials
+            user["user_id"], grants_repo=source_control, app_credentials=app_credentials
         ),
     )
 
@@ -1118,7 +1131,7 @@ async def disconnect_github(
 async def list_repo_branches(
     repo: str = Query(..., description="owner/name"),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> RepoBranchesResponse:
     """List a repository's branches, for the composer's branch picker.
@@ -1127,10 +1140,10 @@ async def list_repo_branches(
     installation, so without the check it would be a way to enumerate branches
     of any repository the App happens to cover.
     """
-    job_store = _require_store(store)
+    source_control = require_source_control(source_control)
     try:
         await require_entitled_repo(
-            repo, user["user_id"], grants_repo=job_store, app_credentials=app_credentials
+            repo, user["user_id"], grants_repo=source_control, app_credentials=app_credentials
         )
     except RepoNotAllowed as exc:
         raise HTTPException(
