@@ -4,13 +4,23 @@
 # under `.next/standalone` — so the runtime image carries neither the source
 # nor the dev dependencies.
 #
-# **Every value the browser needs is baked in here, not injected at run time.**
-# `NEXT_PUBLIC_*` variables are substituted into the bundle during
-# `next build`, and `basePath` is resolved by `next.config.js` at the same
-# moment. Setting any of them on the running container does nothing at all,
-# which is a quiet enough failure to be worth stating twice: changing where
-# this app is mounted, or which gateway it signs in against, means rebuilding
-# the image.
+# Two classes of configuration, and the difference is the whole point:
+#
+#   * **Build arguments** are substituted into the bundle during `next build`.
+#     `basePath` is resolved by `next.config.js` at that moment, and
+#     `NEXT_PUBLIC_AGENT_API_URL` is how the browser reaches the control plane.
+#     Both describe the image *variant* — where this app is mounted — so a
+#     deployment that changes one rebuilds.
+#   * **Runtime environment** is read by the server on every request. The
+#     deployment's identity — product name, organisation, status page, the
+#     gateway's origin — is in this class. Setting one of those on the running
+#     container changes the site with no rebuild, and this image carries no
+#     deployment's brand at build time.
+#
+# A variable in the wrong class fails quietly, which is worth stating plainly:
+# a `NEXT_PUBLIC_*` set only on the running container does nothing at all, and
+# a runtime variable passed only as a build argument is discarded before the
+# server starts.
 
 FROM node:20-alpine AS builder
 WORKDIR /app
@@ -33,22 +43,10 @@ COPY web/ ./
 # was exactly that, and the header's Status link pointed at the empty string.
 ARG NEXT_PUBLIC_BASE_PATH=
 ARG NEXT_PUBLIC_AGENT_API_URL=
-ARG NEXT_PUBLIC_GATEWAY_URL=
-ARG NEXT_PUBLIC_APP_NAME=
-ARG NEXT_PUBLIC_ORG_NAME=
-ARG NEXT_PUBLIC_ORG_URL=
-ARG NEXT_PUBLIC_STATUS_URL=
-ARG NEXT_PUBLIC_FEATURE_RAG=
 ARG NEXT_PUBLIC_BUILD_SHA=
 ARG NEXT_PUBLIC_BUILD_TIMESTAMP=
 ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH \
     NEXT_PUBLIC_AGENT_API_URL=$NEXT_PUBLIC_AGENT_API_URL \
-    NEXT_PUBLIC_GATEWAY_URL=$NEXT_PUBLIC_GATEWAY_URL \
-    NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME \
-    NEXT_PUBLIC_ORG_NAME=$NEXT_PUBLIC_ORG_NAME \
-    NEXT_PUBLIC_ORG_URL=$NEXT_PUBLIC_ORG_URL \
-    NEXT_PUBLIC_STATUS_URL=$NEXT_PUBLIC_STATUS_URL \
-    NEXT_PUBLIC_FEATURE_RAG=$NEXT_PUBLIC_FEATURE_RAG \
     NEXT_PUBLIC_BUILD_SHA=$NEXT_PUBLIC_BUILD_SHA \
     NEXT_PUBLIC_BUILD_TIMESTAMP=$NEXT_PUBLIC_BUILD_TIMESTAMP \
     NEXT_TELEMETRY_DISABLED=1

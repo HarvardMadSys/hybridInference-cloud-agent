@@ -18,12 +18,35 @@ vi.mock('next/navigation', () => ({
 // that lists exports goes stale the moment one is added.
 vi.mock('@/config/env', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/config/env')>()),
-  gatewayUrl: 'https://gateway.example.org',
   agentApiBase: 'https://agents.example.org/api',
-  config: { apiBase: '', appName: 'Cloud Agent' },
 }));
 
+import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
+import type { RuntimeSiteConfig } from '@/config/site';
 import LoginPage from './page';
+
+// The deployment identity now arrives as a provider prop rather than from
+// build-time environment, so the test supplies it the same way the root layout
+// does. This is also what proves the page reads the runtime config and not a
+// module-level constant.
+const SITE_CONFIG: RuntimeSiteConfig = {
+  branding: {
+    appName: 'Cloud Agent',
+    orgName: '',
+    orgUrl: '',
+    statusUrl: '',
+    gatewayUrl: 'https://gateway.example.org',
+  },
+  features: { rag: false },
+};
+
+function renderLogin() {
+  return render(
+    <SiteConfigProvider config={SITE_CONFIG}>
+      <LoginPage />
+    </SiteConfigProvider>,
+  );
+}
 
 describe('the login page', () => {
   afterEach(() => {
@@ -32,7 +55,7 @@ describe('the login page', () => {
   });
 
   it('names the authority, so nobody is sent to a stranger unannounced', async () => {
-    render(<LoginPage />);
+    renderLogin();
 
     expect(
       await screen.findByRole('link', { name: /sign in with gateway.example.org/i }),
@@ -43,7 +66,7 @@ describe('the login page', () => {
   it('carries the page the visitor was trying to reach', async () => {
     search = 'return_to=%2Fajob_123%3Ftab%3Ddiff';
 
-    render(<LoginPage />);
+    renderLogin();
 
     const link = await screen.findByRole('link', { name: /sign in/i });
     const url = new URL(link.getAttribute('href') ?? '', 'https://agents.example.org');
@@ -57,7 +80,7 @@ describe('the login page', () => {
     // that counts — but sending it is already wrong.
     search = 'return_to=https%3A%2F%2Fevil.example%2Fx';
 
-    render(<LoginPage />);
+    renderLogin();
 
     const link = await screen.findByRole('link', { name: /sign in/i });
     const url = new URL(link.getAttribute('href') ?? '', 'https://agents.example.org');
@@ -69,7 +92,7 @@ describe('the login page', () => {
     // sign anyone in. Offering the button anyway would loop them straight back.
     search = 'sign_in_error=unavailable';
 
-    render(<LoginPage />);
+    renderLogin();
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Sign-in is not configured correctly for this deployment.',
@@ -79,7 +102,7 @@ describe('the login page', () => {
 
   it('offers a fresh sign-in attempt after an outage and preserves the destination', async () => {
     search = 'sign_in_error=temporary&return_to=%2Fajob_123%3Ftab%3Ddiff';
-    render(<LoginPage />);
+    renderLogin();
     expect(await screen.findByRole('alert')).toHaveTextContent('temporarily unavailable');
     const link = screen.getByRole('link', { name: 'Try again' });
     const url = new URL(link.getAttribute('href') ?? '', 'https://agents.example.org');
@@ -90,14 +113,14 @@ describe('the login page', () => {
 
   it('explains account denial without sending the user back through sign-in', async () => {
     search = 'sign_in_error=account_unavailable';
-    render(<LoginPage />);
+    renderLogin();
     expect(await screen.findByRole('alert')).toHaveTextContent('This account cannot sign in');
     expect(screen.queryByRole('link', { name: /sign in|try again/i })).not.toBeInTheDocument();
   });
 
   it('starts a fresh flow for expired login without carrying the old code', async () => {
     search = 'sign_in_error=expired&return_to=%2Fajob_123&code=spent&state=old';
-    render(<LoginPage />);
+    renderLogin();
     expect(await screen.findByRole('alert')).toHaveTextContent('expired or is no longer valid');
     const target = new URL(
       screen.getByRole('link', { name: 'Start again' }).getAttribute('href') ?? '',

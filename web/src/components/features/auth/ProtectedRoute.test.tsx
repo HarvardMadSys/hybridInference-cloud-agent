@@ -11,15 +11,6 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Spread the real module and override only what this test decides. A factory
-// that lists exports goes stale the moment one is added — `basePath` arrived
-// and six tests failed here with a rendering error that named none of this.
-vi.mock('@/config/env', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/config/env')>()),
-  gatewayUrl: 'https://gateway.example.org',
-  config: { apiBase: '', appName: 'Cloud Agent' },
-}));
-
 vi.mock('@/lib/api/session', () => ({
   getSessionUser: vi.fn(),
   endSession: vi.fn(),

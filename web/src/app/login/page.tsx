@@ -19,11 +19,11 @@
 
 import { Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { config, gatewayUrl } from '@/config/env';
+import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { signInUrl } from '@/lib/auth/signin';
 
 /** The sign-in authority, named by host so a self-hosted deployment reads true. */
-function authorityName(): string {
+function authorityName(gatewayUrl: string): string {
   if (!gatewayUrl) return '';
   try {
     return new URL(gatewayUrl).host;
@@ -34,6 +34,9 @@ function authorityName(): string {
 
 function LoginContent() {
   const params = useSearchParams();
+  // Resolved on the server for this request. The page is outside the
+  // `(agents)` group but inside the root layout, so the provider is above it.
+  const { branding } = useSiteConfig();
   // Attacker-influenced: it survives a round trip through another origin. The
   // control plane reduces it to a same-site path again on the way in, which is
   // the copy that counts.
@@ -43,13 +46,13 @@ function LoginContent() {
   const expired = signInError === 'expired';
   const accountUnavailable = signInError === 'account_unavailable';
   const hasError = params?.has('sign_in_error') ?? false;
-  const authority = authorityName();
+  const authority = authorityName(branding.gatewayUrl);
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-6 px-6">
       <div className="w-full max-w-sm text-center">
         <h1 className="text-2xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
-          {config.appName}
+          {branding.appName}
         </h1>
         <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
           Run coding agents in sandboxed containers against your repositories.

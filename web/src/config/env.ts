@@ -1,17 +1,16 @@
 // Build-time configuration for the cloud agent web app.
 //
-// The bundle is built once and served statically, so every value here has to
-// be available at build time — which is why they are all `NEXT_PUBLIC_*`.
+// Everything here is a property of the *image variant*, not of a deployment:
+// where the app is mounted, and the prefix the browser calls the control plane
+// on. Next resolves both while the bundle is compiled, which is why changing
+// either is a rebuild.
 //
-// Two URLs, two different services, and conflating them is the mistake this
-// module exists to prevent:
-//
-//   * `agentApiBase` is *this* service's control plane. It is the only origin
-//     the session cookie is sent to.
-//   * `gatewayUrl` is the HybridInference gateway's origin, for the links this
-//     app does not host itself. It owns login; we never see a password, never
-//     hold its keys, and — since the sign-in round trip moved into the control
-//     plane — never build an authorize URL here either.
+// The deployment's identity — product name, organisation, status page, the
+// gateway's origin — deliberately does **not** live here. It is read per
+// request on the server in `site.server.ts`, so one built image can serve
+// several deployments without being rebuilt. A `NEXT_PUBLIC_` variable is
+// substituted textually at build time, so anything left in this file is
+// unreachable from the running container by construction.
 
 /**
  * Control plane base URL (`NEXT_PUBLIC_AGENT_API_URL`).
@@ -48,20 +47,14 @@ export function normalizeBasePath(raw: string | undefined): string {
 }
 
 /**
- * The gateway's origin (`NEXT_PUBLIC_GATEWAY_URL`).
+ * Build identity and run mode.
  *
- * For the links this app does not host itself — nothing about sign-in. It
- * replaced `NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only
- * while it assembled the authorize URL and redeemed the code itself. Both are
- * the control plane's job now (`GATEWAY_AUTHORIZE_URL`, server-side), and a
- * variable named for a consent page that no longer starts one here would be a
- * standing invitation to build a second login flow next to the real one.
+ * Not site configuration. `buildSha` and `buildTimestamp` describe the image,
+ * not the deployment, and are never used as a brand or as a substitute for the
+ * deployment's own identity.
  */
-export const gatewayUrl = (process.env.NEXT_PUBLIC_GATEWAY_URL || '').trim();
-
 export const config = {
   apiBase: agentApiBase,
-  appName: process.env.NEXT_PUBLIC_APP_NAME || 'Cloud Agent',
   environment: process.env.NODE_ENV || 'development',
   buildSha: process.env.NEXT_PUBLIC_BUILD_SHA || '',
   buildTimestamp: process.env.NEXT_PUBLIC_BUILD_TIMESTAMP || '',

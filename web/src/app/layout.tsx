@@ -1,6 +1,8 @@
+import type { Metadata } from 'next';
+
 import '../styles/globals.css';
-import { config } from '@/config/env';
 import { Providers } from '@/components/providers';
+import { readRuntimeSiteConfig } from '@/config/site.server';
 import { themeBootScript } from '@/lib/theme';
 
 // The root document.
@@ -18,13 +20,24 @@ import { themeBootScript } from '@/lib/theme';
 // session, so it must not be behind the shell's `ProtectedRoute`. (`/callback`
 // used to live here for the same reason; the code exchange moved into the
 // control plane, so this app no longer has one.)
+//
+// This is the one place that resolves the deployment's identity, and it does so
+// per request — `readRuntimeSiteConfig()` awaits `connection()`. The result
+// feeds both the document's metadata and the provider tree, so the title in the
+// tab and the name in the header can never disagree, and neither can be frozen
+// into the image at build time.
 
-export const metadata = {
-  title: config.appName,
-  description: 'Run coding agents in sandboxed containers against your repositories.',
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const site = await readRuntimeSiteConfig();
+  return {
+    title: site.branding.appName,
+    description: 'Run coding agents in sandboxed containers against your repositories.',
+  };
+}
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const site = await readRuntimeSiteConfig();
+
   return (
     // `suppressHydrationWarning` is load-bearing, not noise suppression: the
     // boot script below deliberately mutates this element's class and
@@ -35,11 +48,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         {/* Runs before first paint. Without it every load renders light and
             then flips, which for a dark-mode user is a full-screen white
-            flash on every navigation into the app. */}
+            flash on every navigation into the app. The script is static: no
+            deployment configuration is interpolated into it. */}
         <script dangerouslySetInnerHTML={{ __html: themeBootScript() }} />
       </head>
       <body className="flex min-h-screen flex-col bg-gray-50 text-black antialiased dark:bg-gray-950 dark:text-gray-100">
-        <Providers>{children}</Providers>
+        <Providers siteConfig={site}>{children}</Providers>
       </body>
     </html>
   );

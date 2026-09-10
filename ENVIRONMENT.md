@@ -267,34 +267,54 @@ is one click from a job that dies at its first turn.
 
 ## Web (`web/`)
 
-Every one of these is baked into the bundle at build time and is therefore
-**public**. Nothing secret may appear here — a `NEXT_PUBLIC_` variable is
-readable by anyone who loads the page.
+Two classes of configuration, and the difference is what changing one costs.
+Both are **public** — one is compiled into a bundle a browser downloads, the
+other is read by a container a browser reaches — so nothing secret may appear
+in either.
 
-Baked in means each one reaches the app as a **build argument** and no other
-way: a row here without an `ARG` in `deploy/control-plane/Dockerfile.web` and a
-matching key under the `web` service's `build.args` is a variable an operator
-can set everywhere and change nothing. Every row therefore names its compose
-argument, and `test_web_build_arguments_are_wired` fails on a row that has
-none.
+### Build-time: the image variant
+
+A `NEXT_PUBLIC_*` variable is substituted into the bundle during `next build`.
+Each one must therefore be an `ARG` in `deploy/control-plane/Dockerfile.web`
+*and* a key under the `web` service's `build.args`: a row here without both is a
+variable an operator can set everywhere and change nothing. Every row names its
+compose argument, and `test_web_build_arguments_are_wired` fails on a row that
+has none. Changing one is a rebuild.
 
 | Variable | New? | Compose build argument | Notes |
 |---|---|---|---|
-| `NEXT_PUBLIC_BASE_PATH` | **NEW** | `AGENT_WEB_BASE_PATH` | Prefix the app is mounted under. `/agents` serves it inside the gateway's own hostname — same origin, so the session cookie needs no CORS and no DNS record is involved, and a rollback is a reverse-proxy edit rather than a DNS change waiting out a TTL. Empty for a deployment that owns its hostname. The redirect URI the gateway allowlists is no longer derived from this: sign-in returns to the control plane's `AGENT_SESSION_REDIRECT_URI`, not to a page in this app. This value still has to match `AGENT_WEB_BASE_URL`, which is where the control plane sends the browser afterwards. |
-| `NEXT_PUBLIC_AGENT_API_URL` | **NEW** | `AGENT_WEB_API_URL` | Control plane base URL. Empty means same-origin, which is the DR4 shape (one host, API under `/api`). Under a base path, the same-origin value is a relative prefix — `/agents/api` — which the reverse proxy strips before forwarding. A cross-origin value additionally needs CORS-with-credentials on the control plane, because the session is a cookie. |
-| `NEXT_PUBLIC_GATEWAY_URL` | **NEW** | `AGENT_WEB_GATEWAY_URL` | `${GATEWAY_BASE_URL}`. The gateway's origin, for the links this app does not host itself — nothing to do with sign-in. It replaced `NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only while it built the authorize URL and redeemed the code itself; both are the control plane's job now (`GATEWAY_AUTHORIZE_URL`). Empty hides those links. |
-| `NEXT_PUBLIC_APP_NAME` | **NEW** | `AGENT_WEB_APP_NAME` | Product name in the header and the document title. Defaults to `Cloud Agent`; a deployment sets its own product name here. |
-| `NEXT_PUBLIC_ORG_NAME` | **NEW** | `AGENT_WEB_ORG_NAME` | Optional organisation name beside the product name. Empty hides it. |
-| `NEXT_PUBLIC_ORG_URL` | **NEW** | `AGENT_WEB_ORG_URL` | Link target for `NEXT_PUBLIC_ORG_NAME`. |
-| `NEXT_PUBLIC_STATUS_URL` | **NEW** | `AGENT_WEB_STATUS_URL` | Status page, opened in a new tab from the header. Empty hides the link — an empty `href` resolves to the current page, so a Status link that is rendered anyway reopens the page the user is standing on. |
-| `NEXT_PUBLIC_FEATURE_RAG` | **NEW** | `AGENT_WEB_FEATURE_RAG` | `true` shows the gateway's Docs Assistant link. Off by default; the page belongs to the gateway, not to this service. |
-| `NEXT_PUBLIC_BUILD_SHA` | **NEW** | `BUILD_SHA` | Optional build identity, baked in by the deploy script. |
-| `NEXT_PUBLIC_BUILD_TIMESTAMP` | **NEW** | `BUILD_TIMESTAMP` | Optional build identity. |
+| `NEXT_PUBLIC_BASE_PATH` | | `AGENT_WEB_BASE_PATH` | Prefix the app is mounted under. `/agents` serves it inside the gateway's own hostname — same origin, so the session cookie needs no CORS and no DNS record is involved, and a rollback is a reverse-proxy edit rather than a DNS change waiting out a TTL. Empty for a deployment that owns its hostname. The redirect URI the gateway allowlists is no longer derived from this: sign-in returns to the control plane's `AGENT_SESSION_REDIRECT_URI`, not to a page in this app. This value still has to match `AGENT_WEB_BASE_URL`, which is where the control plane sends the browser afterwards. |
+| `NEXT_PUBLIC_AGENT_API_URL` | | `AGENT_WEB_API_URL` | Control plane base URL. Empty means same-origin, which is the DR4 shape (one host, API under `/api`). Under a base path, the same-origin value is a relative prefix — `/agents/api` — which the reverse proxy strips before forwarding. A cross-origin value additionally needs CORS-with-credentials on the control plane, because the session is a cookie. |
+| `NEXT_PUBLIC_BUILD_SHA` | | `BUILD_SHA` | Optional build identity, baked in by the deploy script. |
+| `NEXT_PUBLIC_BUILD_TIMESTAMP` | | `BUILD_TIMESTAMP` | Optional build identity. |
+
+### Runtime: the deployment's identity
+
+Read by the web server on every request (`web/src/config/site.server.ts`), so
+the same built image serves any deployment and changing one is a restart, not a
+rebuild. Each must be a key under the `web` service's `environment:`;
+`test_web_runtime_variables_are_wired` fails on one that is not.
+
+| Variable | New? | Notes |
+|---|---|---|
+| `AGENT_WEB_APP_NAME` | **MOVED** | Product name in the header and the document title. Empty shows `Cloud Agent`. |
+| `AGENT_WEB_ORG_NAME` | **MOVED** | Optional organisation name beside the product name. Empty hides it. |
+| `AGENT_WEB_ORG_URL` | **MOVED** | Link target for `AGENT_WEB_ORG_NAME`. |
+| `AGENT_WEB_STATUS_URL` | **MOVED** | Status page, opened in a new tab from the header. Empty hides the link — an empty `href` resolves to the current page, so a Status link that is rendered anyway reopens the page the user is standing on. |
+| `AGENT_WEB_GATEWAY_URL` | **MOVED** | `${GATEWAY_BASE_URL}`. The gateway's origin, for the links this app does not host itself — nothing to do with sign-in. It replaced `NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only while it built the authorize URL and redeemed the code itself; both are the control plane's job now (`GATEWAY_AUTHORIZE_URL`). A path in this value is ignored; empty hides the links. |
+| `AGENT_WEB_FEATURE_RAG` | **MOVED** | `true` shows the gateway's Docs Assistant link. `false` or empty hides it; any other value is refused. The page belongs to the gateway, not to this service. |
+
+These moved out of the build: an operator renaming a deployment should not have
+to rebuild the same image. An illegal value — a non-URL, or a boolean that is
+not `true`/`false` — is refused at render time with a message naming the
+variable, rather than read as "unset"; the previous reader turned a typo into a
+missing link and said nothing.
 
 The source repo's frontend fetched `/site-config` from the gateway at runtime so
 one bundle could serve several deployments. That endpoint is the gateway's and
-is not part of either contract this service consumes, so the four branding
-variables above replace it at build time.
+is not part of either contract this service consumes, so the deployment's
+identity is configuration instead — runtime for the identity, build-time only
+for where the app is mounted.
 
 ## Set on the HybridInference side — not here
 

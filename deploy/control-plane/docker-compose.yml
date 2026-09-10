@@ -222,9 +222,14 @@ services:
         condition: service_healthy
     networks: [control-plane]
 
-  # The browser-facing app. Built, not run from source: `basePath` and every
-  # `NEXT_PUBLIC_*` value below are resolved when the bundle is compiled, so
-  # they are build arguments and a change to any of them is a rebuild.
+  # The browser-facing app. Two classes of configuration meet here, and the
+  # difference is deliberate: `basePath` and the browser's API prefix are
+  # properties of the image variant, resolved when the bundle is compiled, so
+  # they are build arguments and a change to either is a rebuild. The
+  # deployment's identity — name, organisation, status page, the gateway's
+  # origin — is read by the server on every request instead, so it is
+  # `environment:` below and changing it restarts the container rather than
+  # rebuilding the image.
   web:
     build:
       context: ../..
@@ -249,20 +254,22 @@ services:
         # host has to be known at build time. Under a base path this is that
         # base path plus `/api`, which the reverse proxy strips.
         NEXT_PUBLIC_AGENT_API_URL: ${AGENT_WEB_API_URL:?control-plane base URL as the browser calls it, e.g. /agents/api}
-        # The gateway's origin, for links this app does not host. Sign-in does
-        # not pass through the browser any more, so nothing here starts one.
-        NEXT_PUBLIC_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
-        NEXT_PUBLIC_APP_NAME: ${AGENT_WEB_APP_NAME:-}
-        # The rest of the header's identity. Optional — empty hides the link or
-        # the name rather than rendering a blank one — but they have to be
-        # passed to be optional at all: a build argument the compose file never
-        # sets is a variable the deployment has no way to reach.
-        NEXT_PUBLIC_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
-        NEXT_PUBLIC_ORG_URL: ${AGENT_WEB_ORG_URL:-}
-        NEXT_PUBLIC_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
-        NEXT_PUBLIC_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
         NEXT_PUBLIC_BUILD_SHA: ${BUILD_SHA:-}
         NEXT_PUBLIC_BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-}
+    # Read per request by `web/src/config/site.server.ts`. Display values only:
+    # this container is the one a browser can reach, so a secret in this block
+    # is one log line away from being public. Empty optional values are a
+    # legitimate configuration and hide the corresponding link; an illegal one
+    # is refused at render time rather than silently dropped.
+    environment:
+      AGENT_WEB_APP_NAME: ${AGENT_WEB_APP_NAME:-}
+      AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
+      AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
+      AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
+      # The gateway's origin, for links this app does not host. Sign-in does
+      # not pass through the browser any more, so nothing here starts one.
+      AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
+      AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
     restart: unless-stopped
     ports:
       # Loopback, like the API: the reverse proxy in front of the host is what

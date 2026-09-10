@@ -466,11 +466,12 @@ jobs:
               )
           PY
   # -------------------------------------------------------------------- web
-  # One job, five checks, for the reason spelled out over `lint` above — and
+  # One job, six checks, for the reason spelled out over `lint` above — and
   # more sharply here, because Node costs more to install than uv does. Measured
   # over one run: 55s of setup across the five cells for 27s of actual checking,
   # and four of the five spent longer installing than working (Prettier: 10s of
-  # setup, 1s of formatting check).
+  # setup, 1s of formatting check). The sixth check reuses the build rather than
+  # installing anything, so it adds no setup of its own.
   check:
     name: Web
     needs: changes
@@ -560,9 +561,21 @@ jobs:
         working-directory: ./web
         run: npm run build
 
+      # Boots the artifact the Build step just produced, twice, under two
+      # runtime environments. A unit test cannot see this: the failure being
+      # guarded against is configuration resolved at `next build` and frozen
+      # into the bundle, and only the built server can show whether that
+      # happened. See the script's header for what it asserts.
+      - name: Runtime site config
+        id: runtime-config
+        if: steps.detect.outputs.present == 'true'
+        continue-on-error: true
+        working-directory: ./web
+        run: node scripts/check-runtime-site-config.mjs
+
       # Skipped along with the checks when web/ is absent, so this stays the
       # deliberate no-op the `Detect web app` step describes rather than
-      # reading five empty outcomes as five failures.
+      # reading six empty outcomes as six failures.
       - name: Every check passed
         if: steps.detect.outputs.present == 'true'
         env:
@@ -572,6 +585,7 @@ jobs:
             typescript=${{ steps.typescript.outcome }}
             tests=${{ steps.tests.outcome }}
             build=${{ steps.build.outcome }}
+            runtime-config=${{ steps.runtime-config.outcome }}
         run: |
           set -euo pipefail
           failed=0

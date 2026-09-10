@@ -22,6 +22,10 @@ Three invariants, and the first is the only cheap one:
   substituted at `next build`, so an unwired one is not a variable that
   defaults — it is a variable nothing can change, including setting it on the
   running container.
+* **Runtime.** An `AGENT_WEB_*` the web *server* reads must be a key under
+  `environment:` of the `web` service. The mirror image of the rule above:
+  passed as a build argument instead, it is discarded before the server starts,
+  and the deployment renders the neutral default with nothing saying why.
 
 Only the control plane gets the compose check. Host variables are set by an
 operator on the machine, and a check that demanded compose keys for those would
@@ -52,6 +56,11 @@ _PUBLIC_VAR = re.compile(r"process\.env\.(NEXT_PUBLIC_[A-Z0-9_]+)")
 
 #: `ARG NEXT_PUBLIC_FOO=`, declared in the builder stage.
 _DOCKERFILE_ARG = re.compile(r"^ARG\s+(NEXT_PUBLIC_[A-Z0-9_]+)", re.MULTILINE)
+
+#: `'AGENT_WEB_FOO'` — a quoted name in the web site-config modules. The server
+#: reader takes the variable name as a string literal rather than reaching
+#: through `process.env.FOO`, which is what makes it visible to this check.
+_RUNTIME_WEB_VAR = re.compile(r'["\'](AGENT_WEB_[A-Z0-9_]+)["\']')
 
 #: `next.config.js` reads them too, and it is not under `src/`.
 _WEB_SOURCES = ("web/src/**/*.ts", "web/src/**/*.tsx", "web/*.js")
@@ -123,6 +132,18 @@ def _web_build_args() -> set[str]:
     return set(args if isinstance(args, dict) else ())
 
 
+def _web_runtime_env_keys() -> set[str]:
+    """Keys under `environment:` of the `web` service — how a runtime read is set.
+
+    Not `build.args`: a value substituted at `next build` is not available to
+    the server that renders the request, which is the whole distinction this
+    check exists to keep.
+    """
+    document = yaml.safe_load(CONTROL_PLANE_COMPOSE.read_text())
+    environment = ((document.get("services") or {}).get("web") or {}).get("environment") or {}
+    return set(environment if isinstance(environment, dict) else ())
+
+
 def test_web_build_arguments_are_wired() -> None:
     """A `NEXT_PUBLIC_*` the bundle reads can be set by the deployment.
 
@@ -147,6 +168,31 @@ def test_web_build_arguments_are_wired() -> None:
         "the web bundle reads these, but the `web` service in "
         f"{CONTROL_PLANE_COMPOSE.relative_to(REPO_ROOT)} passes no `build.args` entry for "
         f"them, so this stack builds an image that can never carry them: {unpassed}"
+    )
+
+
+def test_web_runtime_variables_are_wired() -> None:
+    """An `AGENT_WEB_*` the web server reads can be set on the running container.
+
+    These are the deployment's identity — name, organisation, status page, the
+    gateway's origin — and they are read per request, so an operator changes one
+    by restarting the container rather than rebuilding the image. That only
+    works if the variable reaches the container: a runtime read wired as a
+    build argument is dropped before the server starts, and the page renders
+    the neutral default with nothing to say the value was ignored.
+    """
+    read = _vars_read(
+        _sources("web/src/config/site.ts", "web/src/config/site.server.ts"),
+        _RUNTIME_WEB_VAR,
+    )
+    assert read, "no AGENT_WEB_* reads found under web/src/config/ — regex drift?"
+
+    missing = sorted(read - _web_runtime_env_keys())
+    assert not missing, (
+        "the web server reads these per request, but they are not keys under "
+        f"`environment:` of the `web` service in "
+        f"{CONTROL_PLANE_COMPOSE.relative_to(REPO_ROOT)}, so the deployment cannot set "
+        f"them without a rebuild: {missing}"
     )
 
 
