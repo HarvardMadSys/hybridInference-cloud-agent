@@ -226,20 +226,23 @@ async def test_recording_against_a_stale_fence_is_refused(store: AgentJobStore) 
 
 
 async def test_an_admin_action_is_recorded(store: AgentJobStore) -> None:
-    """The audit trail migration 0005 added, written through the store."""
+    """The audit trail, written through the store, says who and from where."""
     row_id = await store.record_admin_action(
         action="agent.runner_host.drain",
+        actor_id="admin-1",
         admin_ip="203.0.113.9",
         details={"host": "runner-a"},
     )
 
     async with store._pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT action, admin_ip, details, success FROM agent_admin_audit_log WHERE id = $1",
+            "SELECT action, actor_id, admin_ip, details, success "
+            "FROM agent_admin_audit_log WHERE id = $1",
             row_id,
         )
         await conn.execute("DELETE FROM agent_admin_audit_log WHERE id = $1", row_id)
 
     assert row["action"] == "agent.runner_host.drain"
+    assert row["actor_id"] == "admin-1"
     assert row["admin_ip"] == "203.0.113.9"
     assert row["success"] is True

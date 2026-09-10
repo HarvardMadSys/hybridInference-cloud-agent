@@ -30,6 +30,7 @@ class FakeHostStore:
         # The singleton policy row: two facts, in one place, as in the store.
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
+        self.audit: list[dict[str, Any]] = []
 
     def seed(self, host: str, *, active: bool = False, seen_minutes_ago: float = 0.0) -> None:
         seen = datetime.now(timezone.utc) - timedelta(minutes=seen_minutes_ago)
@@ -75,6 +76,10 @@ class FakeHostStore:
             return False
         self.active_host = host
         return True
+
+    async def record_admin_action(self, **kwargs: Any) -> int:
+        self.audit.append(kwargs)
+        return len(self.audit)
 
     async def forget_runner_host(self, *, host: str) -> str:
         # The active-host refusal is the store's, not the caller's.
@@ -324,3 +329,20 @@ async def test_inventory_reports_the_server_owned_new_chat_policy(admin_client, 
         response = await client.get("/admin/agent/runner-hosts", headers=ADMIN)
         assert response.status_code == 200
         assert response.json()["execution_profile"] == profile
+
+
+@pytest.mark.asyncio
+async def test_an_admin_action_is_recorded_against_the_administrator(admin_client):
+    """The trail says who forgot the host, not only from which address."""
+    client, store = admin_client
+    store.seed("runner-a", active=True)
+    store.seed("old-box", seen_minutes_ago=6000)
+
+    response = await client.delete("/admin/agent/runner-hosts/old-box", headers=ADMIN)
+
+    assert response.status_code == 200
+    assert len(store.audit) == 1
+    entry = store.audit[0]
+    assert entry["action"] == "agent.runner_host.forget"
+    assert isinstance(entry["actor_id"], str) and entry["actor_id"]
+    assert entry["details"] == {"host": "old-box"}

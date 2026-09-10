@@ -89,6 +89,28 @@ EVENT_ATTEMPT_ABORTED = "attempt_aborted"
 ATTEMPT_ABORTED = "aborted"
 
 
+def request_fingerprint(kind: str, payload: dict[str, Any]) -> str:
+    """Hash what a submission asked for, so a replayed key must ask the same thing.
+
+    A client resending a create or follow-up after a lost response carries the
+    same ``Idempotency-Key``; the fingerprint is how the store tells that
+    resend apart from the same key reused for different content. ``kind``
+    keeps a create and a follow-up from ever fingerprinting alike.
+    """
+    canonical = json.dumps(
+        {"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _check_client_request(client_request_id: str | None, fingerprint: str | None) -> None:
+    """A submission key travels with its fingerprint, or not at all."""
+    if (client_request_id is None) != (fingerprint is None):
+        raise ValueError("client_request_id and client_request_fingerprint come together")
+    if client_request_id is not None and not 1 <= len(client_request_id) <= 256:
+        raise ValueError("client_request_id must be 1-256 characters")
+
+
 def _new_job_id() -> str:
     """Generate a new agent job id."""
     return f"ajob_{secrets.token_hex(8)}"
@@ -904,6 +926,8 @@ class AgentJobStore:
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_servers: list[str] | None = None,
+        client_request_id: str | None = None,
+        client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it.
 
@@ -911,55 +935,85 @@ class AgentJobStore:
         server-owned default.  This matters for internal producers that call
         the store directly: bypassing the HTTP route must not silently turn a
         secure deployment's jobs into ``trusted-v1`` work.
+
+        ``client_request_id`` is the caller's key for this one submission,
+        unique per owner, with ``client_request_fingerprint`` describing what
+        was submitted under it. A resend with the same pair returns the job
+        the first send created; the same key with a different fingerprint
+        returns ``{"error": "client_request_conflict"}`` instead of someone
+        else's task. Both or neither.
         """
+        _check_client_request(client_request_id, client_request_fingerprint)
         if execution_profile is None:
             execution_profile = default_execution_profile().value
+        if client_request_id is not None:
+            replayed = await self._replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            if replayed is not None:
+                return replayed
         job_id = _new_job_id()
         thread_id = _new_thread_id()
-        async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute(
-                """
-                INSERT INTO agent_threads (id, user_id, repo, title, title_source)
-                VALUES ($1, $2, $3, $4, 'fallback')
-                """,
-                thread_id,
-                user_id,
-                repo,
-                fallback_title(task_prompt),
+        try:
+            async with self._pool.acquire() as conn, conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO agent_threads (id, user_id, repo, title, title_source)
+                    VALUES ($1, $2, $3, $4, 'fallback')
+                    """,
+                    thread_id,
+                    user_id,
+                    repo,
+                    fallback_title(task_prompt),
+                )
+                row = await conn.fetchrow(
+                    f"""
+                    INSERT INTO agent_jobs
+                        (id, thread_id, turn_no, user_id, repo, base_sha, task_prompt,
+                         setup_script, runtime, model, execution_profile, reasoning_effort,
+                         metadata, mcp_servers, client_request_id, client_request_fingerprint)
+                    VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                            $12::jsonb, $13, $14, $15)
+                    RETURNING {_JOB_COLUMNS}
+                    """,
+                    job_id,
+                    thread_id,
+                    user_id,
+                    repo,
+                    base_sha,
+                    task_prompt,
+                    setup_script,
+                    runtime,
+                    model,
+                    execution_profile,
+                    reasoning_effort,
+                    json.dumps(metadata) if metadata is not None else None,
+                    list(mcp_servers or []),
+                    client_request_id,
+                    client_request_fingerprint,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
+                    VALUES ($1, $2, 'user', $3)
+                    """,
+                    thread_id,
+                    job_id,
+                    task_prompt,
+                )
+        except asyncpg.UniqueViolationError as exc:
+            # Two sends of one submission racing: the loser reads the winner.
+            if exc.constraint_name != "uq_agent_jobs_client_request":
+                raise
+            replayed = await self._replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
             )
-            row = await conn.fetchrow(
-                f"""
-                INSERT INTO agent_jobs
-                    (id, thread_id, turn_no, user_id, repo, base_sha, task_prompt,
-                     setup_script, runtime, model, execution_profile, reasoning_effort,
-                     metadata, mcp_servers)
-                VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                        $12::jsonb, $13)
-                RETURNING {_JOB_COLUMNS}
-                """,
-                job_id,
-                thread_id,
-                user_id,
-                repo,
-                base_sha,
-                task_prompt,
-                setup_script,
-                runtime,
-                model,
-                execution_profile,
-                reasoning_effort,
-                json.dumps(metadata) if metadata is not None else None,
-                list(mcp_servers or []),
-            )
-            await conn.execute(
-                """
-                INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
-                VALUES ($1, $2, 'user', $3)
-                """,
-                thread_id,
-                job_id,
-                task_prompt,
-            )
+            assert replayed is not None
+            return replayed
         result = _job_row_to_dict(row)
         result["title"] = fallback_title(task_prompt)
         result["title_source"] = "fallback"
@@ -975,6 +1029,8 @@ class AgentJobStore:
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
+        client_request_id: str | None = None,
+        client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
         """Append a user turn and create the run that will answer it.
 
@@ -988,7 +1044,75 @@ class AgentJobStore:
         concurrent submissions form one linear chain instead of siblings that
         could later mutate the same branch at once. A request made from an old
         turn also appends to the current tip, matching chat semantics.
+
+        ``client_request_id`` and ``client_request_fingerprint`` work as for
+        :meth:`create_job`: a resend returns the turn the first send made,
+        the same key under different content returns
+        ``{"error": "client_request_conflict"}``.
         """
+        _check_client_request(client_request_id, client_request_fingerprint)
+        if client_request_id is not None:
+            replayed = await self._replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            if replayed is not None:
+                return replayed
+        try:
+            return await self._create_follow_up(
+                parent_job_id=parent_job_id,
+                user_id=user_id,
+                prompt=prompt,
+                runtime=runtime,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                reset_reasoning_effort=reset_reasoning_effort,
+                client_request_id=client_request_id,
+                client_request_fingerprint=client_request_fingerprint,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name != "uq_agent_jobs_client_request":
+                raise
+            replayed = await self._replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            assert replayed is not None
+            return replayed
+
+    async def _replayed_submission(
+        self, *, user_id: str, client_request_id: str, fingerprint: str | None
+    ) -> dict[str, Any] | None:
+        """The job an owner's key already made, a conflict, or ``None`` for a new key."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, client_request_fingerprint FROM agent_jobs "
+                "WHERE user_id = $1 AND client_request_id = $2",
+                user_id,
+                client_request_id,
+            )
+        if row is None:
+            return None
+        if row["client_request_fingerprint"] != fingerprint:
+            return {"error": "client_request_conflict"}
+        return await self.get_job(str(row["id"]))
+
+    async def _create_follow_up(
+        self,
+        *,
+        parent_job_id: str,
+        user_id: str,
+        prompt: str,
+        runtime: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+        reset_reasoning_effort: bool,
+        client_request_id: str | None,
+        client_request_fingerprint: str | None,
+    ) -> dict[str, Any] | None:
+        """The one-transaction body of :meth:`create_follow_up`."""
         job_id = _new_job_id()
         async with self._pool.acquire() as conn, conn.transaction():
             requested = await conn.fetchrow(
@@ -1064,9 +1188,10 @@ class AgentJobStore:
                 INSERT INTO agent_jobs
                     (id, thread_id, parent_job_id, turn_no, user_id, repo, base_sha,
                      task_prompt, setup_script, runtime, model, execution_profile,
-                     reasoning_effort, state, metadata, mcp_servers)
+                     reasoning_effort, state, metadata, mcp_servers,
+                     client_request_id, client_request_fingerprint)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                        $14, $15::jsonb, $16)
+                        $14, $15::jsonb, $16, $17, $18)
                 RETURNING {_JOB_COLUMNS}
                 """,
                 job_id,
@@ -1092,6 +1217,8 @@ class AgentJobStore:
                 # gets the tool surface the thread has been running with, so a
                 # follow-up cannot quietly gain a server the owner never chose.
                 list(parent["mcp_servers"] or []),
+                client_request_id,
+                client_request_fingerprint,
             )
             await conn.execute(
                 """
@@ -7368,6 +7495,7 @@ class AgentJobStore:
         self,
         *,
         action: str,
+        actor_id: str,
         admin_ip: str,
         target_user_id: str | None = None,
         details: dict[str, Any] | None = None,
@@ -7381,6 +7509,7 @@ class AgentJobStore:
 
         Args:
             action: Dotted action name, e.g. ``agent.runner_host.drain``.
+            actor_id: The authenticated administrator who acted.
             admin_ip: Best-effort caller address.
             target_user_id: The user acted upon, where there is one.
             details: Structured context. Never a credential.
@@ -7393,8 +7522,8 @@ class AgentJobStore:
             return await conn.fetchval(
                 """
                 INSERT INTO agent_admin_audit_log
-                    (action, admin_ip, target_user_id, details, success)
-                VALUES ($1, $2, $3, $4::jsonb, $5)
+                    (action, actor_id, admin_ip, target_user_id, details, success)
+                VALUES ($1, $6, $2, $3, $4::jsonb, $5)
                 RETURNING id
                 """,
                 action,
@@ -7402,4 +7531,5 @@ class AgentJobStore:
                 target_user_id,
                 json.dumps(details) if details is not None else None,
                 success,
+                actor_id,
             )

@@ -353,6 +353,8 @@ async def log_admin_action(
     target_user_id: str | None = None,
     details: dict[str, Any] | None = None,
     success: bool = True,
+    *,
+    actor_id: str,
 ) -> None:
     """Append one admin action to this service's audit trail.
 
@@ -375,6 +377,8 @@ async def log_admin_action(
             the same way — the trail is skipped, not fabricated.
         admin_ip: Best-effort caller address, from :func:`get_client_ip`.
         action: Dotted action name, e.g. ``agent.runner_host.drain``.
+        actor_id: The authenticated administrator, from ``verify_admin_access``
+            — the answer to "who", which the address alone never was.
         target_user_id: The user acted upon, where there is one.
         details: Structured context. Never a credential — this trail is read by
             more people than hold the things it would otherwise contain.
@@ -388,6 +392,7 @@ async def log_admin_action(
     try:
         await recorder(
             action=action,
+            actor_id=actor_id,
             admin_ip=admin_ip,
             target_user_id=target_user_id,
             details=details,

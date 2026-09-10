@@ -159,7 +159,10 @@ class FakeAgentJobStore:
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
+        client_request_id: str | None = None,
+        client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
+        self.last_follow_up_request = (client_request_id, client_request_fingerprint)
         requested = self.jobs.get(parent_job_id)
         if requested is None or requested["user_id"] != user_id:
             return None
@@ -5969,3 +5972,55 @@ async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspac
 @pytest.fixture(autouse=True)
 def _configured_identity_issuer(monkeypatch):
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
+
+
+async def test_a_submission_key_reaches_the_store_with_a_fingerprint(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """The ``Idempotency-Key`` header becomes the job's submission key."""
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+        headers={"Idempotency-Key": "submit-1"},
+    )
+    assert response.status_code == 201, response.text
+    created = store.jobs[response.json()["id"]]
+    assert created["client_request_id"] == "submit-1"
+    assert isinstance(created["client_request_fingerprint"], str)
+    assert len(created["client_request_fingerprint"]) == 64
+
+    parent_id = response.json()["id"]
+    follow = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "and then"},
+        headers={"Idempotency-Key": "turn-2"},
+    )
+    assert follow.status_code == 201, follow.text
+    key, fingerprint = store.last_follow_up_request
+    assert key == "turn-2" and isinstance(fingerprint, str) and len(fingerprint) == 64
+
+
+async def test_a_submission_without_a_key_carries_none(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    job_id = await _create_job(client)
+    assert store.jobs[job_id]["client_request_id"] is None
+    assert store.jobs[job_id]["client_request_fingerprint"] is None
+
+
+async def test_a_reused_key_under_different_content_is_a_409(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """The store's conflict answer is the API's ``idempotency_conflict``."""
+
+    async def conflict(**_kwargs: Any) -> dict[str, Any]:
+        return {"error": "client_request_conflict"}
+
+    monkeypatch.setattr(store, "create_job", conflict)
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+        headers={"Idempotency-Key": "submit-1"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"]["type"] == "idempotency_conflict"

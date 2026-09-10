@@ -69,12 +69,30 @@ def _module_constant(name: str) -> object:
     raise AssertionError(f"{name} not assigned at module level")
 
 
-def test_the_chain_is_exactly_one_revision() -> None:
-    """A squashed baseline has nothing to revise and nothing revising it."""
-    files = sorted(path.name for path in VERSIONS.glob("*.py"))
-    assert files == [BASELINE.name], files
-    assert _module_constant("revision") == "0001_schema_baseline"
-    assert _module_constant("down_revision") is None
+def _revision_pair(path: Path) -> tuple[str, str | None]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    values: dict[str, object] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) in (
+            "revision",
+            "down_revision",
+        ):
+            values[node.targets[0].id] = ast.literal_eval(node.value)
+    return str(values["revision"]), values.get("down_revision")  # type: ignore[return-value]
+
+
+def test_the_chain_is_linear_and_rooted_at_the_rewritten_baseline() -> None:
+    """One root, one head, and every revision revises the one before it."""
+    pairs = dict(map(_revision_pair, VERSIONS.glob("*.py")))
+    assert "0001_schema_baseline" in pairs and pairs["0001_schema_baseline"] is None
+    roots = [rev for rev, parent in pairs.items() if parent is None]
+    assert roots == ["0001_schema_baseline"], roots
+    parents = [parent for parent in pairs.values() if parent is not None]
+    assert len(parents) == len(set(parents)), "a revision is revised twice"
+    assert all(parent in pairs for parent in parents), "a down_revision names no file"
+    heads = [rev for rev in pairs if rev not in parents]
+    assert len(heads) == 1, heads
+    assert all(len(rev) <= 32 for rev in pairs)
 
 
 def test_the_revision_identifier_fits_alembic_version_num() -> None:

@@ -162,6 +162,7 @@ async def set_active_agent_runner_host(
         "agent.runner_host.set_active",
         None,
         {"old_host": previous, "new_host": payload.host},
+        actor_id=_admin_id,
     )
     return await _snapshot(job_store)
 
@@ -207,6 +208,7 @@ async def set_agent_runtime_version(
             "old_version": previous.get(payload.runtime),
             "new_version": payload.version,
         },
+        actor_id=_admin_id,
     )
     return await _snapshot(job_store)
 
@@ -248,6 +250,7 @@ async def forget_agent_runner_host(
         "agent.runner_host.forget",
         None,
         {"host": host},
+        actor_id=_admin_id,
     )
     return await _snapshot(job_store)
 
@@ -308,6 +311,7 @@ async def issue_host_enroll_token(
             "expires_at": issued["expires_at"].isoformat(),
             "ttl_seconds": body.ttl_seconds,
         },
+        actor_id=_admin_id,
     )
     return IssueHostEnrollTokenResponse(
         enroll_token=token, host=body.host, expires_at=issued["expires_at"]
@@ -321,6 +325,7 @@ async def _set_status(
     status: str,
     action: str,
     job_store: AgentJobStore,
+    actor_id: str,
 ) -> ListAgentRunnerHostsResponse:
     """Apply one table-driven status change, or say why it was refused."""
     outcome = await job_store.set_host_status(host=host, status=status)
@@ -338,7 +343,9 @@ async def _set_status(
                 f"become {status!r}."
             ),
         )
-    await log_admin_action(job_store, get_client_ip(request), action, None, {"host": host})
+    await log_admin_action(
+        job_store, get_client_ip(request), action, None, {"host": host}, actor_id=actor_id
+    )
     return await _snapshot(job_store)
 
 
@@ -363,6 +370,7 @@ async def drain_agent_runner_host(
         status=HOST_DRAINING,
         action="agent.runner_host.drain",
         job_store=_require_store(store),
+        actor_id=_admin_id,
     )
 
 
@@ -385,6 +393,7 @@ async def undrain_agent_runner_host(
         status=HOST_ONLINE,
         action="agent.runner_host.undrain",
         job_store=_require_store(store),
+        actor_id=_admin_id,
     )
 
 
@@ -441,5 +450,6 @@ async def remove_agent_runner_host(
         "agent.runner_host.remove",
         None,
         {"host": host, "force": force},
+        actor_id=_admin_id,
     )
     return await _snapshot(job_store)

@@ -341,12 +341,18 @@ async def test_an_admin_action_reaches_the_trail() -> None:
     store = _RecordingStore()
 
     await log_admin_action(
-        store, "203.0.113.9", "agent.runner_host.drain", None, {"host": "runner-a"}
+        store,
+        "203.0.113.9",
+        "agent.runner_host.drain",
+        None,
+        {"host": "runner-a"},
+        actor_id="admin-1",
     )
 
     assert store.rows == [
         {
             "action": "agent.runner_host.drain",
+            "actor_id": "admin-1",
             "admin_ip": "203.0.113.9",
             "target_user_id": None,
             "details": {"host": "runner-a"},
@@ -357,7 +363,7 @@ async def test_an_admin_action_reaches_the_trail() -> None:
 
 async def test_no_store_is_a_silent_no_op() -> None:
     """A deployment with no database still serves; it just records nothing."""
-    await log_admin_action(None, "203.0.113.9", "agent.runner_host.drain")
+    await log_admin_action(None, "203.0.113.9", "agent.runner_host.drain", actor_id="admin-1")
 
 
 async def test_a_store_without_the_method_is_a_no_op() -> None:
@@ -366,12 +372,12 @@ async def test_a_store_without_the_method_is_a_no_op() -> None:
     class _Old:
         pass
 
-    await log_admin_action(_Old(), "203.0.113.9", "agent.runner_host.drain")
+    await log_admin_action(_Old(), "203.0.113.9", "agent.runner_host.drain", actor_id="admin-1")
 
 
 async def test_a_failed_audit_write_never_undoes_the_action() -> None:
     """The drain already happened. Raising here would report it as failed."""
-    await log_admin_action(_RecordingStore(explode=True), "203.0.113.9", "x.y")
+    await log_admin_action(_RecordingStore(explode=True), "203.0.113.9", "x.y", actor_id="admin-1")
 
 
 @pytest.fixture(autouse=True)
