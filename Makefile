@@ -40,13 +40,18 @@ test:  ## Run tests (exclude external and db-dependent)
 	$(UV_RUN) pytest -q -m "not external and not dbtest"
 	@echo "$(GREEN)OK Tests passed$(RESET)"
 
+typecheck:  ## Type-check the persistence boundary and its callers (see [tool.mypy])
+	@echo "$(YELLOW)Running mypy...$(RESET)"
+	$(UV_RUN) mypy
+	@echo "$(GREEN)OK Type checking passed$(RESET)"
+
 test-db:  ## Run the dbtest tier (needs Postgres; see TEST_DB_* in ENVIRONMENT.md)
 	$(UV_RUN) pytest -vv -m "dbtest"
 
 test-all:  ## Run all tests except external (includes db-dependent)
 	$(UV_RUN) pytest -q -m "not external"
 
-check: format lint test  ## Format, lint, and test — the gate every task must pass
+check: format lint typecheck test  ## Format, lint, type-check and test — the gate every task must pass
 
 clean:  ## Remove caches and build artifacts
 	rm -rf .pytest_cache .ruff_cache .coverage htmlcov build dist *.egg-info

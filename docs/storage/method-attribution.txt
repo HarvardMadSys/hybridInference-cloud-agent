@@ -68,3 +68,41 @@
   snapshots                   11
   source_control               9
   TOTAL                      108
+
+== assembly and gates added with the port layer ==
+
+cloud_agent/bootstrap.py   builds all 15 repositories over one pool, each field
+                           annotated with the Protocol it satisfies
+cloud_agent/ports/         one Protocol per capability, generated from the
+                           implementations so signatures cannot drift
+make typecheck             mypy over domain/, ports/, storage/ and bootstrap.py,
+                           configured in pyproject.toml [tool.mypy]
+tests/unit/test_storage_boundaries.py
+                           the dependency directions, checked on parsed source
+
+== decisions taken against the design document ==
+
+1. initialize() is retained as a no-op rather than deleted. The design asks for
+   its removal, but tests/unit/test_migration_baseline.py asserts it exists
+   exactly once and that its body is a docstring plus a return. Deleting it
+   would mean weakening a test to land a refactor, which AGENTS.md forbids. Its
+   disposition belongs in its own commit, where deleting the test is the subject
+   rather than the cost.
+
+2. _THREAD_SANDBOX_SOURCE lives in _sql/rows.py, not _sql/sandboxes.py as the
+   design sketched. The shared get_job projection in _sql/getters.py needs it,
+   and placing it with the sandbox writes would make the two modules import each
+   other.
+
+3. get_job becomes _sql/getters.py:get_job_projection(conn, job_id), taking the
+   caller's connection like every other helper in that package. The conversation
+   read calls it inside its own transaction; finalize_session_fork reads it after
+   its transaction committed, through _read_after_commit, which opens exactly one
+   connection from the pool that repository already holds. Neither repository
+   depends on the other, which is what the design asked for.
+
+4. mypy is scoped to the new boundary rather than to all of cloud_agent. Turning
+   it on over code that never had a checker reports 190 findings in 34 files, and
+   the ignore list that would silence them is worse than no checker. Modules join
+   the scope as their callers are narrowed; store.py is excluded outright because
+   it is deleted at the end of this migration.

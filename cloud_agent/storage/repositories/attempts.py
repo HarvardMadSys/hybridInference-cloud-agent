@@ -6,6 +6,7 @@ from typing import Any
 
 import cloud_agent.domain.execution as _execution
 import cloud_agent.domain.runtime_policy as _runtime_policy
+import cloud_agent.execution_profiles as execution_profiles
 import cloud_agent.storage._sql.attempts as _attempts
 import cloud_agent.storage._sql.events as _events
 import cloud_agent.storage._sql.followups as _followups
@@ -13,7 +14,6 @@ import cloud_agent.storage._sql.host_slots as _host_slots
 import cloud_agent.storage._sql.rows as _rows
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
-    ExecutionProfile,
     compatible_shared_sandbox_followup_attested,
     shared_sandbox_claim_attested,
 )
@@ -144,9 +144,9 @@ class PostgresAttemptCommands(PostgresRepository):
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
                   AND (
-                        j.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
+                        j.execution_profile = '{execution_profiles.ExecutionProfile.TRUSTED_V1}'
                         OR (
-                            j.execution_profile = '{ExecutionProfile.UNTRUSTED_KATA_V1.value}'
+                            j.execution_profile = '{execution_profiles.ExecutionProfile.UNTRUSTED_KATA_V1}'
                             AND $3::boolean
                         )
                   )

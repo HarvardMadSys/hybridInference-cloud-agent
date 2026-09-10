@@ -14,6 +14,7 @@ class SandboxRepository(Protocol):
     """Sandbox activation, admission, settlement and reconciliation."""
 
     async def thread_workspace_ready(
+        self,
         *,
         thread_id: str,
     ) -> bool:
@@ -21,6 +22,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def fence_terminal_workspace(
+        self,
         *,
         attempt_id: int,
         lease_generation: int,
@@ -29,6 +31,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def list_terminal_resumes_pending(
+        self,
         *,
         limit: int = 100,
     ) -> list[str]:
@@ -36,6 +39,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def mark_terminal_resume_complete(
+        self,
         *,
         job_id: str,
     ) -> bool:
@@ -43,6 +47,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def reserve_thread_sandbox(
+        self,
         *,
         thread_id: str,
         attempt_id: int,
@@ -63,6 +68,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def mark_thread_sandbox_running(
+        self,
         *,
         thread_id: str,
         attempt_id: int,
@@ -76,6 +82,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def record_thread_sandbox_process(
+        self,
         *,
         thread_id: str,
         attempt_id: int,
@@ -88,6 +95,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def record_shared_thread_residency(
+        self,
         *,
         thread_id: str,
         attempt_id: int,
@@ -99,6 +107,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def admit_thread_sandbox_turn(
+        self,
         *,
         thread_id: str,
         job_id: str,
@@ -111,6 +120,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def settle_thread_sandbox(
+        self,
         *,
         thread_id: str,
         attempt_id: int,
@@ -127,6 +137,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def reconcile_thread_sandbox_observation(
+        self,
         *,
         thread_id: str,
         host: str,
@@ -142,6 +153,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def due_thread_sandbox_stop(
+        self,
         *,
         thread_id: str,
         host: str,
@@ -153,6 +165,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def abandon_thread_sandbox(
+        self,
         *,
         thread_id: str,
         attempt_id: int,
@@ -167,6 +180,7 @@ class SandboxRepository(Protocol):
         ...
 
     async def thread_sandbox(
+        self,
         *,
         thread_id: str,
     ) -> dict[str, Any] | None:

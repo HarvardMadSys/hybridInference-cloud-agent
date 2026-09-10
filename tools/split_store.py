@@ -42,7 +42,7 @@ class Method(NamedTuple):
     """One method of the old store, located in its source file."""
 
     name: str
-    node: ast.AST
+    node: ast.FunctionDef | ast.AsyncFunctionDef
     is_async: bool
 
 
@@ -375,7 +375,12 @@ DOMAIN_ALIASES: dict[str, str] = {
     "_ids": "cloud_agent.domain.ids",
 }
 
-ALIASES: dict[str, str] = {**SQL_ALIASES, **DOMAIN_ALIASES}
+#: Third-party and stdlib modules reached through an alias rather than a symbol.
+PLAIN_MODULES: dict[str, str] = {
+    "execution_profiles": "cloud_agent.execution_profiles",
+}
+
+ALIASES: dict[str, str] = {**SQL_ALIASES, **DOMAIN_ALIASES, **PLAIN_MODULES}
 
 # A cross-port read that moves into _sql because two repositories need the same
 # projection. Maps the old public method to its new module-level function.
@@ -448,7 +453,7 @@ def load_store() -> tuple[str, ast.Module, ast.ClassDef]:
     return source, tree, cls
 
 
-def slice_node(source: str, node: ast.AST) -> str:
+def slice_node(source: str, node: ast.stmt | ast.expr) -> str:
     """Return the exact source text of ``node``, dedented and decorators included.
 
     Dedenting is the only whitespace change the engine makes. It is needed
@@ -500,62 +505,80 @@ def requalify(body: str, *, owner: str | None = None) -> tuple[str, list[Edit]]:
     """Requalify module-level names and moved helper calls in one body.
 
     The edits are computed from the parsed fragment, so a name that merely
-    appears inside a SQL string is never touched. Three classes of edit exist:
+    appears inside a SQL string is never touched. Five classes of edit exist:
 
     1. a moved module-level value is prefixed with its new module alias,
-    2. ``self.<helper>(...)`` becomes ``<alias>.<helper>(...)``, and
-    3. a top-level ``def`` of a moved helper is renamed to its new local name.
+    2. a value reached through its module (an enum member, say) is qualified,
+    3. ``self.<helper>(...)`` becomes ``<alias>.<helper>(...)``,
+    4. a top-level ``def`` of a moved helper is renamed to its new local name,
+    5. a moved definition's own name is renamed rather than aliased.
     """
     tree = ast.parse(body)
     lines = body.splitlines()
     edits: list[Edit] = []
 
-    # The def/assign statement that introduces a moved name, so its own name is
-    # renamed locally instead of being read as a reference to another module.
-    # Keyed by node identity of the *name* node, which is what ``ast.walk``
-    # yields: keying on the statement would never match a Name.
+    # The statement that introduces a moved name, so its own name is renamed
+    # locally instead of being read as a reference to another module. Keyed by
+    # the identity of the *name* node, which is what ``ast.walk`` yields.
     definitions: dict[str, ast.AST] = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            definitions[node.name] = node
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
+    for statement in tree.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            definitions[statement.name] = statement
+        elif isinstance(statement, ast.Assign):
+            for target in statement.targets:
                 if isinstance(target, ast.Name):
                     definitions[target.id] = target
 
-    for node in ast.walk(tree):
+    def replace(node: ast.stmt | ast.expr, col: int, end_col: int, old: str, new: str) -> None:
+        """Record one substitution."""
+        edits.append(Edit(node.lineno, col, end_col, old, new))
+
+    for walked in ast.walk(tree):
+        node: ast.AST = walked
         if isinstance(node, ast.Name) and node.id in GLOBAL_MOVES:
             if definitions.get(node.id) is node:
-                # This is the moved definition itself.
                 new = local_name(node.id)
                 if new != node.id:
-                    edits.append(
-                        Edit(
-                            node.lineno,
-                            node.col_offset,
-                            node.end_col_offset or node.col_offset,
-                            node.id,
-                            new,
-                        )
-                    )
+                    replace(node, node.col_offset, node.end_col_offset or 0, node.id, new)
                 continue
-            alias = GLOBAL_MOVES[node.id]
             # A module that owns the name refers to it directly rather than
             # through an import of itself. ``owner`` is a full module path, so
-            # the repository named ``ledger`` is not confused with the SQL
-            # helper module also named ``ledger``.
+            # the repository named ``ledger`` is not confused with the SQL helper
+            # module also named ``ledger``.
+            alias = GLOBAL_MOVES[node.id]
             if owner is not None and ALIASES.get(alias) == owner:
                 new = local_name(node.id)
             else:
                 new = f"{alias}.{local_name(node.id)}"
-            edits.append(
-                Edit(
-                    node.lineno,
+            replace(node, node.col_offset, node.end_col_offset or 0, node.id, new)
+        elif isinstance(node, ast.Name) and node.id in MODULE_QUALIFIED:
+            # ``ExecutionProfile.X``: only the object part is qualified, whether
+            # it appears in code or inside an f-string.
+            if definitions.get(node.id) is not node:
+                replace(
+                    node,
                     node.col_offset,
-                    node.end_col_offset or node.col_offset,
+                    node.end_col_offset or 0,
                     node.id,
-                    new,
+                    f"{MODULE_QUALIFIED[node.id]}.{node.id}",
                 )
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr == "value"
+            and isinstance(node.value, ast.Attribute)
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id in MODULE_QUALIFIED
+        ):
+            # ``ExecutionProfile.TRUSTED_V1.value`` on a ``StrEnum``: the member
+            # already is the string, and a type checker that reads the module
+            # through a silent import narrows the member to ``str`` and then
+            # rejects ``.value``. Dropping it says the same thing and type-checks.
+            replace(
+                node.value,
+                node.value.end_col_offset or 0,
+                node.end_col_offset or 0,
+                "." + node.attr,
+                "",
             )
         elif (
             isinstance(node, ast.Attribute)
@@ -563,31 +586,46 @@ def requalify(body: str, *, owner: str | None = None) -> tuple[str, list[Edit]]:
             and node.value.id == "self"
             and node.attr in HELPER_MOVES
         ):
-            alias = HELPER_MOVES[node.attr]
-            if alias is not None:
-                edits.append(
-                    Edit(
-                        node.value.lineno,
-                        node.value.col_offset,
-                        node.end_col_offset or node.col_offset,
-                        f"self.{node.attr}",
-                        f"{alias}.{HELPER_RENAMES[node.attr]}",
-                    )
+            helper_alias: str | None = HELPER_MOVES[node.attr]
+            if helper_alias is not None:
+                replace(
+                    node,
+                    node.value.col_offset,
+                    node.end_col_offset or 0,
+                    f"self.{node.attr}",
+                    f"{helper_alias}.{HELPER_RENAMES[node.attr]}",
                 )
         elif (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "self"
-            and node.attr in SHARED_READS
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+            and node.func.attr in SHARED_READS
         ):
-            edits.append(
-                Edit(
-                    node.value.lineno,
-                    node.value.col_offset,
-                    node.end_col_offset or node.col_offset,
-                    f"self.{node.attr}",
-                    f"{SHARED_READS[node.attr]}.{node.attr}_projection",
-                )
+            # The projection takes a pool and nothing else. Two callers need it:
+            # the conversation read, which is happy to open its own connection,
+            # and a fork finalization that reads after its transaction has
+            # committed and therefore must not share one. Passing the pool serves
+            # both without either repository depending on the other.
+            #
+            # This branch is on the call rather than on the attribute because the
+            # attribute alone is also visited by the walk, and only the call knows
+            # what was passed to it.
+            if not node.args:
+                raise AssertionError(f"self.{node.func.attr} is called without a subject")
+            alias = SHARED_READS[node.func.attr]
+            subject = ast.unparse(node.args[0])
+            replace(
+                node,
+                node.col_offset,
+                node.end_col_offset or 0,
+                ast.unparse(node),
+                # This read happens after the operation's transaction committed,
+                # so it must not join that transaction. It takes a connection of
+                # its own from the pool this repository already holds, rather
+                # than borrowing another repository's.
+                f"self._read_after_commit({subject}, lambda conn: "
+                f"{alias}.{node.func.attr}_projection(conn, {subject}))",
             )
 
     # A moved helper's own definition is renamed at the point of definition.
@@ -598,34 +636,71 @@ def requalify(body: str, *, owner: str | None = None) -> tuple[str, list[Edit]]:
         if new_name == node.name:
             continue
         prefix = len("async def ") if isinstance(node, ast.AsyncFunctionDef) else len("def ")
-        edits.append(
-            Edit(
-                node.lineno,
-                node.col_offset + prefix,
-                node.col_offset + prefix + len(node.name),
-                node.name,
-                new_name,
-            )
+        replace(
+            node,
+            node.col_offset + prefix,
+            node.col_offset + prefix + len(node.name),
+            node.name,
+            new_name,
         )
 
     if not edits:
         return body, []
 
+    # Validate every edit against the text before applying any of them, so a
+    # desynchronised column is reported as a mismatch rather than silently
+    # corrupting the SQL next to it.
+    for edit in edits:
+        line = lines[edit.lineno - 1]
+        if line[edit.col : edit.end_col] != edit.old:
+            raise AssertionError(
+                f"requalify mismatch on line {edit.lineno}: "
+                f"{line[edit.col : edit.end_col]!r} != {edit.old!r}"
+            )
     # Apply right-to-left inside each line so earlier columns stay valid.
     out = list(lines)
     for edit in sorted(edits, key=lambda e: (e.lineno, e.col), reverse=True):
         line = out[edit.lineno - 1]
-        segment = line[edit.col : edit.end_col]
-        if segment != edit.old:
-            raise AssertionError(
-                f"requalify mismatch on line {edit.lineno}: {segment!r} != {edit.old!r}"
-            )
         out[edit.lineno - 1] = line[: edit.col] + edit.new + line[edit.end_col :]
     return "\n".join(out), sorted(edits, key=lambda e: (e.lineno, e.col))
 
 
+def read_after_commit_helper(method: str) -> str:
+    """Return the method that runs a shared read after a commit.
+
+    The read must not join the transaction that just ended and must not borrow
+    another repository's pool, so this is the one place a repository opens a
+    connection of its own around a shared read.
+
+    The body is written at column 0: the repository emitter indents a whole body
+    into the class, and a pre-indented helper would end up nested inside the
+    method before it.
+    """
+    return textwrap.dedent(
+        '''    async def _read_after_commit(
+            self,
+            job_id: str,
+            read: Callable[..., Awaitable[dict[str, Any] | None]],
+        ) -> dict[str, Any] | None:
+            """Run one shared read on a fresh connection, after this commit.
+
+            The caller has already committed by the time this is reached, so the read
+            deliberately does not join that transaction. The connection comes from the
+            pool this repository already holds rather than from another repository,
+            which keeps this a read of the same database rather than a second
+            composition root.
+            """
+            async with self._pool.acquire() as conn:
+                return await read(conn, job_id)'''
+    )
+
+
 def module_preamble(body: str) -> str:
-    """Return the module-level definitions a moved body assumes exist."""
+    """Return the module-level definitions a moved body assumes exist.
+
+    The store defined a logger at module level and a moved method may use it.
+    The emitted module owns that definition now, so the emitter carries it.
+    """
     needed = {node.id for node in ast.walk(ast.parse(body)) if isinstance(node, ast.Name)}
     parts: list[str] = []
     if "logger" in needed:
@@ -645,9 +720,13 @@ def names_in(body: str) -> set[str]:
 
 
 def helper_calls_in(body: str) -> set[str]:
-    """Return every moved helper the body calls, as an old helper name."""
+    """Return every moved helper the body calls, as an old helper name.
+
+    ``body`` may already be indented for a class, which is why it is dedented
+    before parsing: only the names matter here, not the layout.
+    """
     found: set[str] = set()
-    for node in ast.walk(ast.parse(body)):
+    for node in ast.walk(ast.parse(textwrap.dedent(body))):
         if (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
@@ -731,7 +810,13 @@ IMPORT_SPEC: dict[str, tuple[str, str] | None] = {
     "json": ("json", "__module__"),
     "secrets": ("secrets", "__module__"),
     "KATA_RUNTIME": ("cloud_agent.execution_profiles", "KATA_RUNTIME"),
-    "ExecutionProfile": ("cloud_agent.execution_profiles", "ExecutionProfile"),
+    # An enum read as ``ExecutionProfile.X`` narrows to ``str`` under a silent
+    # import, so its members are reached through the module rather than imported
+    # as a symbol. A later entry would simply win here, which is why the
+    # duplicate that used to sit beside this one was a real bug.
+    "ExecutionProfile": ("cloud_agent.execution_profiles", "__module__"),
+    "Callable": ("collections.abc", "__typeonly__"),
+    "Awaitable": ("collections.abc", "__typeonly__"),
     "compatible_shared_sandbox_followup_attested": (
         "cloud_agent.execution_profiles",
         "compatible_shared_sandbox_followup_attested",
@@ -780,6 +865,9 @@ IMPORT_SPEC: dict[str, tuple[str, str] | None] = {
     "_NATIVE_FORK_CAPABILITY_JSON": None,
 }
 
+#: Names reached as ``module.Name`` rather than imported directly.
+MODULE_QUALIFIED: dict[str, str] = {"ExecutionProfile": "execution_profiles"}
+
 STORED_IMPORTS: dict[str, tuple[str, str]] = {
     name: spec for name, spec in IMPORT_SPEC.items() if spec is not None
 }
@@ -790,6 +878,7 @@ STORED_IMPORTS: dict[str, tuple[str, str]] = {
 ASYNCPG_USERS = ("asyncpg",)
 
 _STDLIB_ROOTS = {
+    "collections",
     "typing",
     "datetime",
     "json",
@@ -798,7 +887,6 @@ _STDLIB_ROOTS = {
     "binascii",
     "hashlib",
     "textwrap",
-    "collections",
     "contextlib",
     "itertools",
     "math",
@@ -823,9 +911,15 @@ def imported_names(body: str, owned: set[str]) -> dict[str, tuple[str, str]]:
 def render_imports(imports: dict[str, tuple[str, str]]) -> str:
     """Render an import block grouped stdlib / third-party / first-party."""
     buckets: dict[str, list[str]] = {"std": [], "third": [], "first": []}
+    typeonly: list[str] = []
     for name, (module, _attr) in sorted(imports.items()):
         if _attr == "__module__":
             buckets["std"].append(f"import {module}")
+            continue
+        if _attr == "__typeonly__":
+            # An annotation-only name: with ``from __future__ import
+            # annotations`` it never runs, so it belongs under the guard.
+            typeonly.append(f"from {module} import {name}")
             continue
         root = module.split(".")[0]
         if root in _STDLIB_ROOTS:
@@ -835,7 +929,14 @@ def render_imports(imports: dict[str, tuple[str, str]]) -> str:
         else:
             buckets["third"].append(f"from {module} import {name}")
     blocks = ["\n".join(sorted(buckets[key])) for key in ("std", "third", "first")]
-    return "\n\n".join(block for block in blocks if block)
+    rendered = "\n\n".join(block for block in blocks if block)
+    if typeonly:
+        buckets["std"].append("from typing import TYPE_CHECKING")
+        blocks = ["\n".join(sorted(buckets[key])) for key in ("std", "third", "first")]
+        rendered = "\n\n".join(block for block in blocks if block)
+        guard = "if TYPE_CHECKING:\n" + "\n".join(f"    {line}" for line in sorted(typeonly))
+        rendered = f"{rendered}\n\n{guard}" if rendered else guard
+    return rendered
 
 
 def emit_domain(source: str, tree: ast.Module) -> dict[pathlib.Path, str]:
@@ -947,7 +1048,10 @@ import secrets
 
 
 def emit_sql(
-    source: str, tree: ast.Module, public: dict[str, Method], private: dict[str, Method]
+    source: str,
+    tree: ast.Module,
+    public: dict[str, Method],
+    private: dict[str, Method],
 ) -> dict[pathlib.Path, str]:
     """Emit cloud_agent/storage/_sql/**: conn-level helpers and shared projections.
 
@@ -1099,7 +1203,10 @@ def drop_self_parameter(body: str) -> str:
     lines[target.lineno - 1] = line[:start] + line[end:]
     result = "".join(lines)
     parsed = ast.parse(result)
-    remaining = [*parsed.body[0].args.args, *parsed.body[0].args.kwonlyargs]
+    rewritten = parsed.body[0]
+    if not isinstance(rewritten, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise AssertionError(f"rewriting {node.name} did not produce a function")
+    remaining = [*rewritten.args.args, *rewritten.args.kwonlyargs]
     if any(argument.arg == "self" for argument in remaining):
         raise AssertionError(f"self survived the rewrite of {node.name}")
     return result
@@ -1137,7 +1244,7 @@ def unindent_lines(text: str, width: int = 4) -> str:
     return "\n".join(out)
 
 
-def render_cross_port_read(source: str, node: ast.AST) -> str:
+def render_cross_port_read(source: str, node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Turn the old ``get_job`` method into a conn-taking projection function.
 
     ``finalize_session_fork`` reads this projection *after* its commit, from a
@@ -1179,7 +1286,11 @@ def render_cross_port_read(source: str, node: ast.AST) -> str:
         "async def get_job_projection(\n"
         "    conn: asyncpg.Connection, job_id: str\n"
         ") -> dict[str, Any] | None:\n"
-        f'    """{docstring} Uses the connection the caller already holds."""\n'
+        f'    """{docstring}\n\n'
+        "    Uses the connection the caller passes, like every helper in this\n"
+        "    package: none of them acquires one, so which transaction the read\n"
+        "    joins is the caller's decision and never a surprise.\n"
+        '    """\n'
         "    row = await conn.fetchrow(\n"
         f"{indented},\n"
         f"        {parameter},\n"
@@ -1201,7 +1312,8 @@ def alias_imports_for(bodies: list[str], *, exclude: str | None = None) -> list[
     """
     used: set[str] = set()
     for body in bodies:
-        for node in ast.walk(ast.parse(body)):
+        # A body may already carry class indentation, so only the names matter.
+        for node in ast.walk(ast.parse(textwrap.dedent(body))):
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
                 if node.value.id in ALIASES:
                     used.add(node.value.id)
@@ -1257,22 +1369,33 @@ class PostgresRepository:
             for name in names
         ]
 
+        # Helpers are collected apart from the operations. ``bodies`` is what the
+        # appendix lists; a later pass over it must not meet a helper and take it
+        # for the last operation.
+        helpers: list[str] = []
+
+        # A repository that reads a shared projection after committing gets the
+        # helper that opens exactly one connection for it.
+        if any("_read_after_commit(" in body for body in bodies):
+            helpers.append(read_after_commit_helper("get_job"))
+
         # A helper that is still a method travels with the repository it serves.
         for old, alias in HELPER_MOVES.items():
             if alias is not None:
                 continue
             if any(old in helper_calls_in(body) for body in bodies):
-                bodies.append(
+                helpers.append(
                     requalify(slice_node(source, private[old].node), owner=repository_path(module))[
                         0
                     ]
                 )
 
-        indented = "\n\n\n".join(textwrap.indent(body, "    ") for body in bodies)
+        indented = "\n\n\n".join(textwrap.indent(body, "    ") for body in [*bodies, *helpers])
 
         # Imports are entirely inferred. A header that hardcoded ``Any`` would
         # duplicate what the methods already pull in.
-        direct = imported_names("\n\n".join(bodies), owned=set())
+        # Helpers count: the names they use need importing too.
+        direct = imported_names("\n\n".join([*bodies, *helpers]), owned=set())
         import_parts: list[str] = []
         header = f'''"""{REPOSITORY_DOCSTRINGS[module]}"""
 

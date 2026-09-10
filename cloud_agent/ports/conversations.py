@@ -14,6 +14,7 @@ class ConversationCommands(Protocol):
     """Creating conversations and changing their metadata."""
 
     async def create_job(
+        self,
         *,
         user_id: str,
         repo: str,
@@ -31,6 +32,7 @@ class ConversationCommands(Protocol):
         ...
 
     async def create_follow_up(
+        self,
         *,
         parent_job_id: str,
         user_id: str,
@@ -44,6 +46,7 @@ class ConversationCommands(Protocol):
         ...
 
     async def set_sessions_archived(
+        self,
         *,
         thread_ids: list[str],
         user_id: str,
@@ -53,6 +56,7 @@ class ConversationCommands(Protocol):
         ...
 
     async def delete_sessions(
+        self,
         *,
         thread_ids: list[str],
         user_id: str,
@@ -61,6 +65,7 @@ class ConversationCommands(Protocol):
         ...
 
     async def set_thread_archived(
+        self,
         *,
         job_id: str,
         user_id: str,
@@ -70,6 +75,7 @@ class ConversationCommands(Protocol):
         ...
 
     async def set_thread_title(
+        self,
         *,
         job_id: str,
         user_id: str,
@@ -79,6 +85,7 @@ class ConversationCommands(Protocol):
         ...
 
     async def set_generated_thread_title(
+        self,
         *,
         job_id: str,
         attempt_id: int,
@@ -89,6 +96,7 @@ class ConversationCommands(Protocol):
         ...
 
     async def set_thread_pinned(
+        self,
         *,
         job_id: str,
         user_id: str,

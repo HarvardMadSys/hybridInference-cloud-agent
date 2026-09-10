@@ -14,6 +14,7 @@ class AuditRepository(Protocol):
     """Durable admin audit records."""
 
     async def record_admin_action(
+        self,
         *,
         action: str,
         admin_ip: str,

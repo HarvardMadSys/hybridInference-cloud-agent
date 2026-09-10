@@ -14,6 +14,7 @@ class AttemptCommands(Protocol):
     """Claim, lease, cancellation and the atomic end of a turn."""
 
     async def claim_job(
+        self,
         *,
         worker_id: str,
         lease_ttl_seconds: float,
@@ -26,6 +27,7 @@ class AttemptCommands(Protocol):
         ...
 
     async def release_claim(
+        self,
         *,
         job_id: str,
         attempt_id: int,
@@ -35,6 +37,7 @@ class AttemptCommands(Protocol):
         ...
 
     async def heartbeat(
+        self,
         *,
         attempt_id: int,
         lease_generation: int,
@@ -44,6 +47,7 @@ class AttemptCommands(Protocol):
         ...
 
     async def transition(
+        self,
         *,
         job_id: str,
         attempt_id: int,
@@ -57,6 +61,7 @@ class AttemptCommands(Protocol):
         ...
 
     async def request_cancel(
+        self,
         *,
         job_id: str,
         user_id: str | None = None,
@@ -65,6 +70,7 @@ class AttemptCommands(Protocol):
         ...
 
     async def reap_expired(
+        self,
         *,
         max_attempts: int = 3,
     ) -> list[dict[str, Any]]:
@@ -72,6 +78,7 @@ class AttemptCommands(Protocol):
         ...
 
     async def append_event(
+        self,
         *,
         attempt_id: int,
         lease_generation: int,
@@ -83,6 +90,7 @@ class AttemptCommands(Protocol):
         ...
 
     async def record_continuity_mode(
+        self,
         *,
         attempt_id: int,
         lease_generation: int,
@@ -93,6 +101,7 @@ class AttemptCommands(Protocol):
         ...
 
     async def record_attempt_resources(
+        self,
         *,
         attempt_id: int,
         lease_generation: int,

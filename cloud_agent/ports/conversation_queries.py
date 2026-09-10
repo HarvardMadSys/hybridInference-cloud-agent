@@ -14,6 +14,7 @@ class ConversationQueries(Protocol):
     """User-scoped reads over conversations, jobs and projects."""
 
     async def get_thread_for_job(
+        self,
         *,
         job_id: str,
         user_id: str,
@@ -22,12 +23,14 @@ class ConversationQueries(Protocol):
         ...
 
     async def get_job(
+        self,
         job_id: str,
     ) -> dict[str, Any] | None:
         """Fetch one job by id."""
         ...
 
     async def list_jobs(
+        self,
         *,
         user_id: str,
         limit: int = 50,
@@ -38,6 +41,7 @@ class ConversationQueries(Protocol):
         ...
 
     async def list_conversations(
+        self,
         *,
         user_id: str,
         q: str = "",
@@ -51,6 +55,7 @@ class ConversationQueries(Protocol):
         ...
 
     async def list_projects(
+        self,
         *,
         user_id: str,
         archived: bool = False,
@@ -59,6 +64,7 @@ class ConversationQueries(Protocol):
         ...
 
     async def list_sessions(
+        self,
         *,
         user_id: str,
         archived: bool = False,

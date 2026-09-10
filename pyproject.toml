@@ -129,6 +129,51 @@ add-ignore = [
 match = ".+\\.py"
 match-dir = "(?!tests|\\.venv|node_modules|web|migrations|docs).*"
 
+# Type checking is scoped to the persistence boundary: the ports, the Postgres
+# implementations behind them, the assembly in bootstrap.py, and the tools that
+# generate and verify the split. A module joins this list when its callers are
+# narrowed to capabilities; widening it further is its own task, because a type
+# checker turned on over a codebase that never had one reports thousands of
+# findings, and the ignore list that silences them is worse than no checker.
+[tool.mypy]
+python_version = "3.10"
+files = [
+  "cloud_agent/domain",
+  "cloud_agent/ports",
+  "cloud_agent/storage",
+  "cloud_agent/bootstrap.py",
+  "tools",
+]
+# ``cloud_agent/storage/store.py`` is the monolith this boundary replaces. It is
+# still imported by every caller during the migration and is deleted at the end
+# of it, so it is excluded rather than repaired: annotating code that is about to
+# disappear is work spent twice.
+exclude = ["^cloud_agent/storage/store\\.py$"]
+# ``follow_imports = silent`` treats a module outside the checked set as ``Any``
+# rather than reporting it, which is what makes a partial rollout possible. It
+# does not excuse an error inside a checked module.
+follow_imports = "silent"
+ignore_missing_imports = true
+# A new boundary is worth checking properly: an unannotated function and a bare
+# ``dict`` are both errors here. ``warn_unused_ignores`` stops a stale
+# ``# type: ignore`` outliving the problem it silenced.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+strict_equality = true
+show_error_codes = true
+pretty = true
+
+# asyncpg ships no stubs. Infrastructure converts its rows at the boundary, so
+# the gap stays in the modules that touch a connection instead of spreading
+# ``Any`` through every repository signature.
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "jwt.*"]
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
   "httpx>=0.27.0",

@@ -14,6 +14,7 @@ class HostPoolRepository(Protocol):
     """Enrollment, heartbeat, capacity, placement and host reads."""
 
     async def issue_enroll_token(
+        self,
         *,
         token_hash: str,
         host: str,
@@ -24,6 +25,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def consume_enroll_token(
+        self,
         *,
         token_hash: str,
         host: str,
@@ -32,6 +34,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def get_host(
+        self,
         *,
         host: str,
     ) -> dict[str, Any] | None:
@@ -39,6 +42,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def register_host(
+        self,
         *,
         host: str,
         credential_hash: str,
@@ -52,6 +56,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def authenticate_host(
+        self,
         *,
         host: str,
         credential_hash: str,
@@ -60,6 +65,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def record_host_heartbeat(
+        self,
         *,
         host: str,
         physical_host: str | None = None,
@@ -76,6 +82,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def set_host_status(
+        self,
         *,
         host: str,
         status: str,
@@ -84,6 +91,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def remove_host(
+        self,
         *,
         host: str,
         force: bool = False,
@@ -92,6 +100,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def reap_offline_hosts(
+        self,
         *,
         interval_seconds: float,
         missed_intervals: int,
@@ -100,6 +109,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def host_for_attempt(
+        self,
         *,
         attempt_id: int,
     ) -> dict[str, Any] | None:
@@ -107,31 +117,39 @@ class HostPoolRepository(Protocol):
         ...
 
     async def host_for_job(
+        self,
         *,
         job_id: str,
     ) -> dict[str, Any] | None:
         """The job attempt's host, or its retained thread's durable host."""
         ...
 
-    async def active_runner_host() -> str | None:
+    async def active_runner_host(
+        self,
+    ) -> str | None:
         """The new-chat placement host, or ``None`` when any may materialize."""
         ...
 
-    async def runner_pool() -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
+    async def runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
         """The pool, the pinned host and the version selection, read together."""
         ...
 
-    async def deployment_runner_pool() -> tuple[
-        list[dict[str, Any]], str | None, dict[str, str], set[str]
-    ]:
+    async def deployment_runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], set[str]]:
         """Read placement policy, hosts, and retained owners for rollout fencing."""
         ...
 
-    async def list_runner_hosts() -> list[dict[str, Any]]:
+    async def list_runner_hosts(
+        self,
+    ) -> list[dict[str, Any]]:
         """Return every host seen polling, most recent poll first."""
         ...
 
     async def set_runtime_version(
+        self,
         *,
         runtime: str,
         version: str | None,
@@ -140,6 +158,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def set_active_runner_host(
+        self,
         *,
         host: str | None,
     ) -> bool:
@@ -147,6 +166,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def forget_runner_host(
+        self,
         *,
         host: str,
     ) -> str:

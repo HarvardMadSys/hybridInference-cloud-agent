@@ -14,6 +14,7 @@ class McpConnectionRepository(Protocol):
     """Per-user MCP connection storage."""
 
     async def list_mcp_connections(
+        self,
         *,
         user_id: str,
     ) -> list[dict[str, Any]]:
@@ -21,6 +22,7 @@ class McpConnectionRepository(Protocol):
         ...
 
     async def upsert_mcp_connection(
+        self,
         *,
         user_id: str,
         server: str,
@@ -33,6 +35,7 @@ class McpConnectionRepository(Protocol):
         ...
 
     async def delete_mcp_connection(
+        self,
         *,
         user_id: str,
         server: str,

@@ -92,17 +92,26 @@ def stub(method: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     defaults: list[ast.expr | None] = [None] * (len(positional) - len(args.defaults)) + list(
         args.defaults
     )
-    # Drop ``self``: a Protocol method describes the instance, not an argument.
-    positional = positional[1:]
-    defaults = defaults[1:]
+    if not positional or positional[0].arg != "self":
+        raise AssertionError(f"{method.name} does not take self as its first parameter")
 
+    # ``self`` is kept, without an annotation. Dropping it looks tidier and is
+    # wrong twice over: a method that takes only keyword-only arguments would
+    # then have no positional parameter at all, and a type checker reads the
+    # ``*`` marker as making ``self`` keyword-only.
     parts = [_render_arg(arg, default) for arg, default in zip(positional, defaults, strict=True)]
+    kwonly = [
+        _render_arg(arg, default)
+        for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
+    ]
     if args.vararg is not None:
         parts.append("*" + args.vararg.arg)
-    elif args.kwonlyargs:
+    elif kwonly:
+        # The implementation wrote ``*, a, b`` after ``self``. Dropping ``self``
+        # would leave ``a`` positional, so the marker is re-emitted: a caller
+        # that passes these by keyword must stay unable to pass them by position.
         parts.append("*")
-    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
-        parts.append(_render_arg(arg, default))
+    parts += kwonly
     if args.kwarg is not None:
         parts.append("**" + args.kwarg.arg)
 

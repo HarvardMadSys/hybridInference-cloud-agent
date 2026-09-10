@@ -14,6 +14,7 @@ class LedgerRepository(Protocol):
     """Usage snapshot reads, refresh queueing, leases and commits."""
 
     async def ledger_rows_for_job(
+        self,
         *,
         job_id: str,
     ) -> list[dict[str, Any]]:
@@ -21,6 +22,7 @@ class LedgerRepository(Protocol):
         ...
 
     async def ledger_rows_for_conversation(
+        self,
         *,
         job_id: str,
         user_id: str,
@@ -29,6 +31,7 @@ class LedgerRepository(Protocol):
         ...
 
     async def queue_job_ledger_refresh(
+        self,
         *,
         job_id: str,
     ) -> int:
@@ -36,6 +39,7 @@ class LedgerRepository(Protocol):
         ...
 
     async def claim_due_ledger_refresh(
+        self,
         *,
         lease_seconds: float = 60,
     ) -> dict[str, Any] | None:
@@ -43,6 +47,7 @@ class LedgerRepository(Protocol):
         ...
 
     async def complete_ledger_refresh(
+        self,
         *,
         ledger_id: int,
         refresh_generation: int,

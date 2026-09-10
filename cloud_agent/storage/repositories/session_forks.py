@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 import cloud_agent.domain.execution as _execution
 import cloud_agent.domain.ids as _ids
@@ -752,7 +755,13 @@ class PostgresSessionForkRepository(PostgresRepository):
                 )
             else:
                 return None
-        return None if anchor_id is None else await _getters.get_job_projection(anchor_id)
+        return (
+            None
+            if anchor_id is None
+            else await self._read_after_commit(
+                anchor_id, lambda conn: _getters.get_job_projection(conn, anchor_id)
+            )
+        )
 
     async def reap_stalled_session_forks(
         self, *, stall_seconds: float = 900.0
@@ -882,3 +891,19 @@ class PostgresSessionForkRepository(PostgresRepository):
                 item["cleanup_residencies"] = cleanup
                 actions.append(item)
         return actions
+
+    async def _read_after_commit(
+        self,
+        job_id: str,
+        read: Callable[..., Awaitable[dict[str, Any] | None]],
+    ) -> dict[str, Any] | None:
+        """Run one shared read on a fresh connection, after this commit.
+
+        The caller has already committed by the time this is reached, so the read
+        deliberately does not join that transaction. The connection comes from the
+        pool this repository already holds rather than from another repository,
+        which keeps this a read of the same database rather than a second
+        composition root.
+        """
+        async with self._pool.acquire() as conn:
+            return await read(conn, job_id)

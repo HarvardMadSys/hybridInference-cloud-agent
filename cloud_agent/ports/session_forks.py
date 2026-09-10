@@ -14,6 +14,7 @@ class SessionForkRepository(Protocol):
     """Fork preparation, leases, receipts and recovery."""
 
     async def prepare_session_fork(
+        self,
         *,
         source_job_id: str,
         user_id: str,
@@ -23,6 +24,7 @@ class SessionForkRepository(Protocol):
         ...
 
     async def establish_session_fork_residencies(
+        self,
         *,
         operation_id: str,
         coordinator_token: str,
@@ -32,6 +34,7 @@ class SessionForkRepository(Protocol):
         ...
 
     async def claim_session_fork_materialization(
+        self,
         *,
         operation_id: str,
         coordinator_token: str,
@@ -41,6 +44,7 @@ class SessionForkRepository(Protocol):
         ...
 
     async def release_session_fork_materialization(
+        self,
         *,
         operation_id: str,
         coordinator_token: str,
@@ -49,6 +53,7 @@ class SessionForkRepository(Protocol):
         ...
 
     async def record_session_fork_materialized(
+        self,
         *,
         operation_id: str,
         coordinator_token: str,
@@ -58,6 +63,7 @@ class SessionForkRepository(Protocol):
         ...
 
     async def finalize_session_fork(
+        self,
         *,
         operation_id: str,
     ) -> dict[str, Any] | None:
@@ -65,6 +71,7 @@ class SessionForkRepository(Protocol):
         ...
 
     async def reap_stalled_session_forks(
+        self,
         *,
         stall_seconds: float = 900.0,
     ) -> list[dict[str, Any]]:

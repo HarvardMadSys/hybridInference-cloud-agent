@@ -14,6 +14,7 @@ class GrantRepository(Protocol):
     """Attempt and residency grant records and revocation queries."""
 
     async def record_attempt_grant(
+        self,
         *,
         attempt_id: int,
         lease_generation: int,
@@ -23,6 +24,7 @@ class GrantRepository(Protocol):
         ...
 
     async def list_renewable_grants(
+        self,
         *,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
@@ -30,6 +32,7 @@ class GrantRepository(Protocol):
         ...
 
     async def take_revocable_grants(
+        self,
         *,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
@@ -37,6 +40,7 @@ class GrantRepository(Protocol):
         ...
 
     async def link_residency_grant(
+        self,
         *,
         thread_id: str,
         generation: int,

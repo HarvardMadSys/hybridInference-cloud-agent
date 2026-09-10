@@ -14,6 +14,7 @@ class SourceControlRepository(Protocol):
     """Repository grants, OAuth state and GitLab connections."""
 
     async def record_repo_grant(
+        self,
         *,
         user_id: str,
         installation_id: int,
@@ -23,6 +24,7 @@ class SourceControlRepository(Protocol):
         ...
 
     async def list_repo_grants(
+        self,
         *,
         user_id: str,
     ) -> list[dict[str, Any]]:
@@ -30,6 +32,7 @@ class SourceControlRepository(Protocol):
         ...
 
     async def revoke_repo_grant(
+        self,
         *,
         user_id: str,
         installation_id: int,
@@ -38,6 +41,7 @@ class SourceControlRepository(Protocol):
         ...
 
     async def create_oauth_state(
+        self,
         *,
         state_hash: str,
         user_id: str,
@@ -49,6 +53,7 @@ class SourceControlRepository(Protocol):
         ...
 
     async def consume_oauth_state(
+        self,
         *,
         state_hash: str,
         user_id: str,
@@ -58,6 +63,7 @@ class SourceControlRepository(Protocol):
         ...
 
     async def upsert_gitlab_connection(
+        self,
         *,
         user_id: str,
         external_user_id: int,
@@ -72,6 +78,7 @@ class SourceControlRepository(Protocol):
         ...
 
     async def get_gitlab_connection(
+        self,
         *,
         user_id: str,
     ) -> dict[str, Any] | None:
@@ -79,6 +86,7 @@ class SourceControlRepository(Protocol):
         ...
 
     async def update_gitlab_tokens(
+        self,
         *,
         connection_id: int,
         user_id: str,
@@ -90,6 +98,7 @@ class SourceControlRepository(Protocol):
         ...
 
     async def delete_gitlab_connection(
+        self,
         *,
         user_id: str,
         connection_id: int,

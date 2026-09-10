@@ -14,6 +14,7 @@ class ResidencyRepository(Protocol):
     """Residency lifecycles that outlive one attempt."""
 
     async def establish_residency(
+        self,
         *,
         thread_id: str,
         host: str,
@@ -26,6 +27,7 @@ class ResidencyRepository(Protocol):
         ...
 
     async def heartbeat_residency(
+        self,
         *,
         thread_id: str,
         generation: int,
@@ -36,6 +38,7 @@ class ResidencyRepository(Protocol):
         ...
 
     async def release_residency(
+        self,
         *,
         thread_id: str,
         generation: int,
@@ -45,6 +48,7 @@ class ResidencyRepository(Protocol):
         ...
 
     async def release_shared_residency_if_quiescent(
+        self,
         *,
         thread_id: str,
         generation: int,
@@ -56,12 +60,15 @@ class ResidencyRepository(Protocol):
         ...
 
     async def resident_host(
+        self,
         *,
         thread_id: str,
     ) -> dict[str, Any] | None:
         """The live hot residency for a thread, or ``None``."""
         ...
 
-    async def reap_expired_residencies() -> list[dict[str, Any]]:
+    async def reap_expired_residencies(
+        self,
+    ) -> list[dict[str, Any]]:
         """Mark every hot residency whose lease lapsed as ``none``."""
         ...

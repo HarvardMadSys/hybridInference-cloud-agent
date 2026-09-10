@@ -14,6 +14,7 @@ class CredentialQueries(Protocol):
     """The live credential fence the MCP relay resolves per call."""
 
     async def resolve_model_credential(
+        self,
         *,
         job_id: str,
         attempt_id: int,

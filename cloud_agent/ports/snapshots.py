@@ -13,11 +13,14 @@ from typing import Any, Protocol
 class SnapshotRepository(Protocol):
     """Snapshot capture, publication and base import."""
 
-    async def claim_due_sandbox_snapshot() -> dict[str, Any] | None:
+    async def claim_due_sandbox_snapshot(
+        self,
+    ) -> dict[str, Any] | None:
         """Fence one quiescent shared workspace for bounded patch capture."""
         ...
 
     async def record_sandbox_snapshot_capture(
+        self,
         *,
         snapshot_id: int,
         sandbox_id: str,
@@ -32,6 +35,7 @@ class SnapshotRepository(Protocol):
         ...
 
     async def defer_sandbox_snapshot_capture(
+        self,
         *,
         snapshot_id: int,
         sandbox_id: str,
@@ -44,17 +48,21 @@ class SnapshotRepository(Protocol):
         ...
 
     async def reap_stalled_sandbox_snapshot_captures(
+        self,
         *,
         stall_seconds: float = 300.0,
     ) -> list[int]:
         """Return abandoned CAPTURING claims to the retryable pending queue."""
         ...
 
-    async def claim_for_publish() -> dict[str, Any] | None:
+    async def claim_for_publish(
+        self,
+    ) -> dict[str, Any] | None:
         """Take one immutable shared-workspace snapshot."""
         ...
 
     async def record_snapshot_publish(
+        self,
         *,
         snapshot_id: int,
         pr_url: str,
@@ -64,6 +72,7 @@ class SnapshotRepository(Protocol):
         ...
 
     async def fail_snapshot_publish(
+        self,
         *,
         snapshot_id: int,
         detail: str,
@@ -71,11 +80,14 @@ class SnapshotRepository(Protocol):
         """Retain a rejected group artifact without failing included turns."""
         ...
 
-    async def pending_snapshot_base_import() -> dict[str, Any] | None:
+    async def pending_snapshot_base_import(
+        self,
+    ) -> dict[str, Any] | None:
         """Return one published group commit whose object import is pending."""
         ...
 
     async def complete_snapshot_base_import(
+        self,
         *,
         snapshot_id: int,
         commit_sha: str,
@@ -84,6 +96,7 @@ class SnapshotRepository(Protocol):
         ...
 
     async def record_snapshot_base_import_failure(
+        self,
         *,
         snapshot_id: int,
         detail: str,
@@ -92,6 +105,7 @@ class SnapshotRepository(Protocol):
         ...
 
     async def reap_stalled_snapshot_publishes(
+        self,
         *,
         stall_seconds: float = 900.0,
     ) -> list[int]:

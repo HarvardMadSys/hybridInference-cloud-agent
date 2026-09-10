@@ -14,6 +14,7 @@ class ExecutionQueries(Protocol):
     """Observation reads over events, attempts and usage inputs."""
 
     async def list_thread_events_after(
+        self,
         *,
         job_id: str,
         user_id: str,
@@ -24,6 +25,7 @@ class ExecutionQueries(Protocol):
         ...
 
     async def thread_stats_inputs(
+        self,
         *,
         job_id: str,
         user_id: str,
@@ -32,6 +34,7 @@ class ExecutionQueries(Protocol):
         ...
 
     async def job_usage_inputs(
+        self,
         *,
         job_id: str,
     ) -> dict[str, Any]:
@@ -39,6 +42,7 @@ class ExecutionQueries(Protocol):
         ...
 
     async def job_attempts_telemetry(
+        self,
         *,
         job_id: str,
     ) -> list[dict[str, Any]]:
@@ -46,6 +50,7 @@ class ExecutionQueries(Protocol):
         ...
 
     async def job_turn_telemetry(
+        self,
         *,
         job_id: str,
         attempt_id: int | None = None,
@@ -54,6 +59,7 @@ class ExecutionQueries(Protocol):
         ...
 
     async def list_events_after(
+        self,
         *,
         job_id: str,
         after_id: int = 0,
