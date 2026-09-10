@@ -20,8 +20,8 @@ from cloud_agent.api import admin_runs
 from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.api.routes import _attempt_resources
 from cloud_agent.ledger import summarize_job_usage
+from cloud_agent.storage._sql import load_json as _load_json
 from cloud_agent.storage.admin_queries import AdminRunQueries
-from cloud_agent.storage.store import _load_json
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, store as store
