@@ -44,7 +44,8 @@ vi.mock('@/components/features/agents/AgentsSidebar', () => ({
     collapsed ? null : <aside data-testid="sidebar-stub">tasks</aside>,
 }));
 
-import AgentsLayout, { SIDEBAR_COLLAPSED_STORAGE_KEY } from './layout';
+import AgentsLayout from './layout';
+import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
 function toggle(): HTMLElement {
   return screen.getByRole('button', { name: /(Collapse|Expand) task list/ });

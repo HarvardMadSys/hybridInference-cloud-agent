@@ -255,6 +255,7 @@ export interface AgentThreadMessageApi {
 }
 
 export interface AgentThreadApi {
+  archived_at?: string | null;
   thread_id: string;
   title?: string;
   repo?: string;
@@ -506,6 +507,30 @@ export async function listAgentJobs(
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs?${query.toString()}`);
   const body = await jsonOrThrow<{ jobs: AgentJobApi[] }>(resp);
   return body.jobs;
+}
+
+export interface AgentConversationApi {
+  job: AgentJobApi;
+  title: string;
+  archived: boolean;
+  last_activity_at: string | null;
+}
+
+export async function listAgentConversations(
+  options: {
+    q?: string;
+    repo?: string;
+    includeArchived?: boolean;
+    cursor?: string;
+    limit?: number;
+  } = {},
+): Promise<{ conversations: AgentConversationApi[]; next_cursor: string | null }> {
+  const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
+  if (options.q) query.set('q', options.q);
+  if (options.repo) query.set('repo', options.repo);
+  if (options.includeArchived) query.set('include_archived', 'true');
+  if (options.cursor) query.set('cursor', options.cursor);
+  return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/conversations?${query}`));
 }
 
 export interface AgentProjectApi {

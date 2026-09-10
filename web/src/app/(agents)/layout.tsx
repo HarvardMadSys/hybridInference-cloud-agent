@@ -9,7 +9,7 @@ import { useAuth, useT } from '@/components/providers';
 import { hasRole } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 
-export const SIDEBAR_COLLAPSED_STORAGE_KEY = 'agents.sidebar.collapsed';
+import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
 const NAV_ITEM =
   'rounded-md px-2.5 py-1.5 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-white/10 dark:hover:text-gray-100';

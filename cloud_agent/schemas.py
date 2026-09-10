@@ -374,6 +374,22 @@ class AgentJobListResponse(BaseModel):
     jobs: list[AgentJobResponse]
 
 
+class AgentConversation(BaseModel):
+    """One conversation, with its canonical title and latest run."""
+
+    job: AgentJobResponse
+    title: str
+    archived: bool
+    last_activity_at: str | None = None
+
+
+class AgentConversationListResponse(BaseModel):
+    """A searchable page of conversations owned by the caller."""
+
+    conversations: list[AgentConversation]
+    next_cursor: str | None = None
+
+
 class AgentProject(BaseModel):
     """One repo the caller has run tasks in, summarized for the task tree."""
 
@@ -509,6 +525,7 @@ class AgentThreadResponse(BaseModel):
     jobs: list[AgentJobResponse]
     created_at: str | None = None
     updated_at: str | None = None
+    archived_at: str | None = None
 
 
 class AgentThreadStatsResponse(BaseModel):

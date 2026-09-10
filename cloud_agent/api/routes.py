@@ -81,6 +81,8 @@ from cloud_agent.schemas import (
     AgentAttemptSummary,
     AgentAttemptTelemetry,
     AgentConfigResponse,
+    AgentConversation,
+    AgentConversationListResponse,
     AgentFollowUpRequest,
     AgentGitWorkspaceResponse,
     AgentJobCancelResponse,
@@ -1541,6 +1543,43 @@ async def list_agent_jobs(
     return AgentJobListResponse(jobs=[_job_response(job) for job in jobs])
 
 
+@router.get("/conversations", response_model=AgentConversationListResponse)
+async def list_agent_conversations(
+    q: str = Query("", max_length=200),
+    repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
+    include_archived: bool = Query(False),
+    limit: int = Query(50, ge=1, le=200),
+    cursor: str | None = Query(None, min_length=1, max_length=2048),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> AgentConversationListResponse:
+    """Search owned conversation titles and repositories across all history."""
+    job_store = _require_store(store)
+    try:
+        page = await job_store.list_conversations(
+            user_id=user["user_id"],
+            q=q.strip(),
+            repo=repo,
+            include_archived=include_archived,
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return AgentConversationListResponse(
+        conversations=[
+            AgentConversation(
+                job=_job_response(item["job"]),
+                title=item["title"],
+                archived=item["archived"],
+                last_activity_at=_iso(item["last_activity_at"]),
+            )
+            for item in page["conversations"]
+        ],
+        next_cursor=page["next_cursor"],
+    )
+
+
 @router.get("/projects", response_model=AgentProjectListResponse)
 async def list_agent_projects(
     archived: bool = Query(False),
@@ -2279,6 +2318,7 @@ async def get_agent_thread(
         jobs=[_job_response(job) for job in thread["jobs"]],
         created_at=_iso(thread["created_at"]),
         updated_at=_iso(thread["updated_at"]),
+        archived_at=_iso(thread.get("archived_at")),
     )
 
 
