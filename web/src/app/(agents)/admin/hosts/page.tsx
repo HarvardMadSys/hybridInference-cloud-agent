@@ -29,6 +29,7 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { formatAge, formatSlots, runtimeMenu, serverInventory } from './format';
+import { AdminNavigation } from '../AdminNavigation';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
 // easily as "gone". Carried over from the gateway's section along with the
@@ -227,6 +228,7 @@ export default function AdminHostsPage() {
         <h1 className="text-3xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
           Admin
         </h1>
+        <AdminNavigation current="servers" />
 
         {error && (
           <div className="mt-6 flex items-center justify-between gap-4 rounded-xl border border-red-200 dark:border-red-500/25 bg-red-50 dark:bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-400">

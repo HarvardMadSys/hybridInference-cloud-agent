@@ -191,19 +191,22 @@ describe('AgentsLayout product navigation', () => {
     expect(screen.getByRole('link', { name: 'Admin' })).not.toHaveAttribute('aria-current');
   });
 
-  it('moves the highlight to Admin on the admin page', () => {
-    pathname = '/admin/hosts';
+  it.each(['/admin/hosts', '/admin/runs', '/admin/runs/job-1'])(
+    'moves the highlight to Admin on %s',
+    (route) => {
+      pathname = route;
 
-    renderLayout();
+      renderLayout();
 
-    expect(screen.getByRole('link', { name: 'Admin' })).toHaveAttribute('aria-current', 'page');
+      expect(screen.getByRole('link', { name: 'Admin' })).toHaveAttribute('aria-current', 'page');
 
-    // And Agents is a way back rather than a label: it was a bare <span>, so
-    // the only route off this page was the browser's back button.
-    const agents = screen.getByRole('link', { name: 'Agents' });
-    expect(agents).not.toHaveAttribute('aria-current');
-    expect(agents).toHaveAttribute('href', '/');
-  });
+      // And Agents is a way back rather than a label: it was a bare <span>, so
+      // the only route off this page was the browser's back button.
+      const agents = screen.getByRole('link', { name: 'Agents' });
+      expect(agents).not.toHaveAttribute('aria-current');
+      expect(agents).toHaveAttribute('href', '/');
+    },
+  );
 
   it.each(['/archived', '/integrations'])(
     'keeps the workspace sidebar on %s and only changes the main content',

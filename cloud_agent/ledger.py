@@ -25,6 +25,7 @@ from cloud_agent.grant_usage import (
     GrantUsageWindow,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.thread_stats import normalized_runtime_input_tokens, summarize_thread
 
 logger = get_logger(__name__)
 
@@ -111,6 +112,38 @@ class JobUsageResponse(BaseModel):
     ledger: JobLedgerSummary
     runtime: RuntimeUsage
     conversation: ConversationUsage | None = None
+
+
+def summarize_job_usage(
+    *,
+    ledger_rows: list[dict[str, Any]],
+    runtime_inputs: dict[str, Any],
+    runtime: str | None,
+    terminal: bool,
+    conversation: ConversationUsage | None = None,
+) -> JobUsageResponse:
+    """Use one accounting definition for owner and admin reads of a turn.
+
+    Callers authorize their own read and supply explicitly projected inputs.
+    This function neither fetches content nor queues a Gateway refresh.
+    """
+    stats = summarize_thread(**runtime_inputs)
+    ledger = summarize_ledger(ledger_rows)
+    if not ledger_rows and terminal:
+        # A turn cancelled before claim has no future snapshot to wait for.
+        ledger.status = "unavailable"
+    return JobUsageResponse(
+        ledger=ledger,
+        runtime=RuntimeUsage(
+            input_tokens=stats.input_tokens,
+            output_tokens=stats.output_tokens,
+            cache_read_tokens=stats.cache_read_tokens,
+            normalized_input_tokens=normalized_runtime_input_tokens(
+                runtime=runtime, events=runtime_inputs["events"]
+            ),
+        ),
+        conversation=conversation,
+    )
 
 
 def _sum_reports(reports: list[GrantUsageReport]) -> dict[str, Any]:

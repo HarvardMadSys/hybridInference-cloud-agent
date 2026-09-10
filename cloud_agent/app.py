@@ -881,7 +881,16 @@ def create_app() -> FastAPI:
     """Build the control plane application."""
     configure_process_logging()
 
-    from cloud_agent.api import admin_hosts, hosts, mcp_relay, routes, service_jobs, session, usage
+    from cloud_agent.api import (
+        admin_hosts,
+        admin_runs,
+        hosts,
+        mcp_relay,
+        routes,
+        service_jobs,
+        session,
+        usage,
+    )
 
     app = FastAPI(
         title="Cloud Agent",
@@ -894,6 +903,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)
     app.include_router(admin_hosts.router)
+    app.include_router(admin_runs.router)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
     # to one configured service account. Its own module because its caller is a
     # service holding a dispatch token, not a browser holding a session.

@@ -39,7 +39,7 @@ function AgentsHeader({
   // Split by section rather than by exact path: a job page is still the task
   // app, and an `/admin/*` page added later without a nav entry of its own
   // lights neither item instead of wrongly lighting `Agents`.
-  const onHosts = pathname.startsWith('/admin/hosts');
+  const onAdmin = pathname.startsWith('/admin/');
   const onTasks = !pathname.startsWith('/admin');
 
   const handleLogout = async () => {
@@ -131,8 +131,8 @@ function AgentsHeader({
         {hasAgentPermission(state.user?.agent_access, 'agent.admin') && (
           <Link
             href="/admin/hosts"
-            className={onHosts ? NAV_ITEM_CURRENT : NAV_ITEM}
-            aria-current={onHosts ? 'page' : undefined}
+            className={onAdmin ? NAV_ITEM_CURRENT : NAV_ITEM}
+            aria-current={onAdmin ? 'page' : undefined}
           >
             {t('nav.admin')}
           </Link>

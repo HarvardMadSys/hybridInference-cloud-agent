@@ -10,12 +10,10 @@ from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.api.routes import _owned_job, _require_store, require_agent_owner
 from cloud_agent.ledger import (
     JobUsageResponse,
-    RuntimeUsage,
     summarize_conversation,
-    summarize_ledger,
+    summarize_job_usage,
 )
 from cloud_agent.storage.store import TERMINAL_STATES
-from cloud_agent.thread_stats import normalized_runtime_input_tokens, summarize_thread
 
 if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore
@@ -27,22 +25,11 @@ async def _usage_response(store: AgentJobStore, job: dict[str, Any]) -> JobUsage
     job_id = job["id"]
     rows = await store.ledger_rows_for_job(job_id=job_id)
     inputs = await store.job_usage_inputs(job_id=job_id)
-    stats = summarize_thread(**inputs)
-    ledger = summarize_ledger(rows)
-    if not rows and job.get("state") in TERMINAL_STATES:
-        # Cancellation before the first claim creates no attempt to refresh.
-        # Preserve unknown counters without promising a future snapshot.
-        ledger.status = "unavailable"
-    return JobUsageResponse(
-        ledger=ledger,
-        runtime=RuntimeUsage(
-            input_tokens=stats.input_tokens,
-            output_tokens=stats.output_tokens,
-            cache_read_tokens=stats.cache_read_tokens,
-            normalized_input_tokens=normalized_runtime_input_tokens(
-                runtime=job.get("runtime"), events=inputs["events"]
-            ),
-        ),
+    return summarize_job_usage(
+        ledger_rows=rows,
+        runtime_inputs=inputs,
+        runtime=job.get("runtime"),
+        terminal=job.get("state") in TERMINAL_STATES,
         conversation=summarize_conversation(
             await store.ledger_rows_for_conversation(job_id=job_id, user_id=job["user_id"])
         ),
