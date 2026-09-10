@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import subprocess
 import threading
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
@@ -24,12 +25,13 @@ from cloud_agent_host.resident_transport import (
     ResidentTransport,
     ResidentTransportFactory,
 )
-from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
+from cloud_agent_host.sandbox import KATA_RUNTIME, ProcessBackend, SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
 )
+from cloud_agent_host.workspace_broker import create_app
 
 
 class _Manager:
@@ -830,6 +832,97 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():
     assert supervisor.status("athr_child").resident_state == "live"
     assert supervisor.status("athr_source").operation_count == 0
     assert supervisor.status("athr_source").idle_deadline_monotonic is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_registered", [False, True])
+async def test_broker_fork_materializes_reserved_target_and_replays_stale_manifest(
+    already_registered,
+):
+    """A durable child reservation must neither block Fork nor erase its retry."""
+    manager = _Manager()
+    factory = _TransportFactory()
+    fork_calls: list[str] = []
+
+    def native_forker(_spec, _transport, operation_id, _launch, _turn_no):
+        fork_calls.append(operation_id)
+        return "native-child"
+
+    supervisor = SharedChatSessionSupervisor(
+        manager, transport_factory=factory, native_forker=native_forker
+    )
+    spec = _spec()
+    reserved = SharedMemberManifest(thread_id="athr_child", resident_slot_id=2)
+    members = [*_members(), reserved]
+    supervisor.register_manifest(spec, members if already_registered else _members())
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="broker-secret",
+        shared_session_supervisor=supervisor,
+    )
+    body = {
+        "sandbox_id": spec.sandbox_id,
+        "generation": spec.generation,
+        "origin_thread_id": spec.thread_id,
+        "runtime_id": spec.runtime_id,
+        "runtime_version": spec.runtime_version,
+        "sandbox_image_digest": spec.sandbox_image_digest,
+        "expected_container_id": "container-shared",
+        "resident_slot_capacity": spec.resident_slot_capacity,
+        "memory_limit": spec.memory_limit,
+        "cpu_limit": spec.cpu_limit,
+        "stop_timeout_s": spec.stop_timeout_s,
+        "members": [asdict(member) for member in members],
+        "operation_id": "fork-reserved-target",
+        "source_native_session_id": "native-source",
+        "source_native_turn_no": 1,
+        "target_thread_id": "athr_child",
+        "target_slot_id": 2,
+        "source_launch": asdict(_launch("athr_source", native_session_id="native-source", slot=0)),
+        "target_launch": asdict(_launch("athr_child", native_session_id=None, slot=2)),
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+        first = await client.post(
+            "/shared-sandboxes/athr_source/fork",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json=body,
+        )
+        assert first.status_code == 200, first.text
+        # The control plane can retry before storing the receipt, so the
+        # durable target manifest still contains no native session identity.
+        body["source_launch"]["residency_generation"] = 10
+        body["target_launch"]["residency_generation"] = 11
+        retried = await client.post(
+            "/shared-sandboxes/athr_source/fork",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json=body,
+        )
+        assert retried.status_code == 200, retried.text
+
+        collision = {
+            **body,
+            "members": [
+                *[asdict(member) for member in _members()],
+                asdict(replace(reserved, native_session_id="native-child")),
+            ],
+            "target_thread_id": "athr_collision",
+            "target_slot_id": 1,  # The unaffected peer already owns this slot.
+            "target_launch": {**body["target_launch"], "slot_id": 1},
+        }
+        refused = await client.post(
+            "/shared-sandboxes/athr_source/fork",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json=collision,
+        )
+        assert refused.status_code == 409, refused.text
+        assert "slot is already occupied" in refused.json()["detail"]
+
+    assert fork_calls == ["fork-reserved-target"]
+    assert first.json()["target_native_session_id"] == "native-child"
+    assert retried.json()["target_native_session_id"] == "native-child"
+    assert retried.json()["target_residency_generation"] == 11
+    assert supervisor.status("athr_child").resident_state == "live"
+    assert supervisor.status("athr_peer").native_session_id == "native-peer"
 
 
 def test_native_fork_retry_rotates_only_source_and_hidden_child_processes():

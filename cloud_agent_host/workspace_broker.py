@@ -1670,10 +1670,18 @@ def create_app(
     ) -> dict[str, Any]:
         owner = require_shared_supervisor()
         try:
+            # The target already has a durable slot reservation, but Fork
+            # itself installs its native identity. Reconciling that placeholder
+            # first would occupy the identity with None, or overwrite a child
+            # recovered after a lost receipt. Keep local live-child ownership
+            # intact so fork_native can recover it under the existing fences.
+            source_members = [
+                member for member in body.members if member.thread_id != body.target_thread_id
+            ]
             await asyncio.to_thread(
                 owner.register_manifest,
                 shared_spec(body),
-                shared_manifest(body.members),
+                shared_manifest(source_members),
                 expected_container_id=body.expected_container_id,
             )
             result = await asyncio.to_thread(
