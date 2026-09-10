@@ -3267,7 +3267,7 @@ _HOST_TOKEN_HINT = "aht."
 
 async def verify_claiming_host(
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> dict[str, str]:
     """Authenticate the enrolled host that is claiming retained work.
 
@@ -3278,7 +3278,7 @@ async def verify_claiming_host(
     presented = (
         authorization[7:].strip() if authorization and authorization.startswith("Bearer ") else ""
     )
-    if presented and store is not None and presented.startswith(_HOST_TOKEN_HINT):
+    if presented and hosts is not None and presented.startswith(_HOST_TOKEN_HINT):
         try:
             claims = parse_host_token(presented)
         except (InvalidHostToken, ValueError):
@@ -3286,7 +3286,7 @@ async def verify_claiming_host(
             claims = None
         if claims is not None:
             credential_hash = hash_secret(presented)
-            host = await store.authenticate_host(
+            host = await hosts.authenticate_host(
                 host=claims["host"], credential_hash=credential_hash
             )
             if host is None:
@@ -4198,17 +4198,19 @@ async def worker_suspend_terminals(
     job_id: str,
     body: WorkerTerminalSuspendRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> WorkerAckResponse:
     """Fence terminal writes, then freeze retained PTYs for a protected phase."""
-    job_store = _require_store(store)
+    job_store = require_queries(conversations)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     job = await job_store.get_job(job_id)
     if job is None:
         raise _lease_lost()
     workspace_id = _workspace_id(job)
-    event_id = await job_store.append_event(
+    event_id = await require_attempts(attempts).append_event(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
         event_type="lifecycle",
@@ -4217,7 +4219,7 @@ async def worker_suspend_terminals(
     if event_id is None:
         raise _lease_lost()
     broker = await _worker_workspace_broker(
-        job_store, job, attempt_id=claims["attempt_id"], required=True
+        require_host_pool(hosts), job, attempt_id=claims["attempt_id"], required=True
     )
     try:
         await broker.suspend_terminals(
