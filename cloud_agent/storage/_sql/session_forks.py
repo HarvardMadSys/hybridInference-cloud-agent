@@ -11,7 +11,7 @@ from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
 _NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
 
 
-async def session_fork_details(self, conn: Any, operation_id: str) -> dict[str, Any] | None:
+async def session_fork_details(conn: Any, operation_id: str) -> dict[str, Any] | None:
     """Return one native-fork saga with its immutable host launch inputs."""
     operation = await conn.fetchrow(
         "SELECT * FROM agent_session_forks WHERE id = $1",

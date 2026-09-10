@@ -980,6 +980,18 @@ def emit_sql(
             return method(name)
         return top_level(name)
 
+    def as_function(name: str) -> str:
+        """A moved helper as a module-level function, without ``self``.
+
+        The call sites already pass the connection positionally, so leaving
+        ``self`` in the signature would bind the connection to it and fail on
+        the first argument that matters.
+        """
+        body = own(name) if name not in private else strip_decorators(
+            slice_node(source, private[name].node)
+        )
+        return drop_self_parameter(body) if name in DROP_SELF else body
+
     # Local names emitted into each module, needed so import inference does not
     # re-import a name the module defines itself.
     emitted: dict[pathlib.Path, str] = {}
@@ -991,7 +1003,7 @@ def emit_sql(
             bodies.append(render_cross_port_read(source, public["get_job"].node))
         else:
             for name in names:
-                bodies.append(own(name))
+                bodies.append(as_function(name))
         joined = "\n\n\n".join(requalify(body, owner=MODULE_PATHS[module])[0] for body in bodies)
         sql_text[module] = joined
 
@@ -1044,6 +1056,51 @@ from __future__ import annotations
 def repository_path(module: str) -> str:
     """Return the dotted path of one emitted repository module."""
     return f"cloud_agent.storage.repositories.{module}"
+
+
+def drop_self_parameter(body: str) -> str:
+    """Remove ``self`` from a definition that is no longer a method.
+
+    The removal is positional and touches nothing else: the trailing comma and
+    the whitespace that followed ``self`` go with it, while the layout of the
+    remaining parameters and of the whole body is preserved. ``ast.unparse``
+    cannot be used instead, because it reflows a multi-line signature and would
+    move the SQL literals in the body with it.
+    """
+    tree = ast.parse(body)
+    node = tree.body[0]
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise AssertionError("drop_self_parameter needs a function definition")
+    positional = [*node.args.posonlyargs, *node.args.args]
+    if not positional or positional[0].arg != "self":
+        raise AssertionError(f"{node.name} does not take self as its first parameter")
+
+    target = positional[0]
+    lines = body.splitlines(keepends=True)
+    line = lines[target.lineno - 1]
+    start, end = target.col_offset, target.end_col_offset or target.col_offset
+    if line[start:end] != "self":
+        raise AssertionError(f"column offsets did not locate self in {node.name}")
+    if len(positional) > 1:
+        # ``self`` is followed by its own separator, which goes with it.
+        cursor = end
+        if cursor < len(line) and line[cursor] == ",":
+            cursor += 1
+        while cursor < len(line) and line[cursor] in " \t":
+            cursor += 1
+        end = cursor
+    else:
+        # ``self`` was the only parameter, so the comma that follows the list
+        # belongs to the call, not to ``self``; take the comma before it instead.
+        if start > 0 and line[start - 1] == ",":
+            start -= 1
+    lines[target.lineno - 1] = line[:start] + line[end:]
+    result = "".join(lines)
+    parsed = ast.parse(result)
+    remaining = [*parsed.body[0].args.args, *parsed.body[0].args.kwonlyargs]
+    if any(argument.arg == "self" for argument in remaining):
+        raise AssertionError(f"self survived the rewrite of {node.name}")
+    return result
 
 
 def strip_decorators(body: str) -> str:

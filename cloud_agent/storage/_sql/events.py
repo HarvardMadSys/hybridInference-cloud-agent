@@ -7,7 +7,6 @@ from typing import Any
 
 
 async def insert_event(
-    self,
     conn: Any,
     *,
     job_id: str,

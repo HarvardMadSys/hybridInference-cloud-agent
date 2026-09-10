@@ -8,7 +8,6 @@ import cloud_agent.storage._sql.rows as _rows
 
 
 async def reserve_shared_thread_sandbox(
-    self,
     conn: Any,
     *,
     thread_id: str,
