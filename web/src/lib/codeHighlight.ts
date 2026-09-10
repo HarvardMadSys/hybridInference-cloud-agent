@@ -323,3 +323,36 @@ export function highlightCode(source: string, path: string): CodeToken[][] {
   if (!spec || source.length > MAX_HIGHLIGHT_CHARS) return plainLines(source);
   return splitLines(scan(source, spec));
 }
+
+/**
+ * Fence info strings that are not also file extensions. A harness writes
+ * ```python far more often than ```py, and ```console for a shell transcript.
+ */
+const LANGUAGE_ALIASES: Record<string, SpecName> = {
+  javascript: 'js',
+  typescript: 'js',
+  python: 'py',
+  python3: 'py',
+  ruby: 'py',
+  golang: 'native',
+  rust: 'native',
+  'c++': 'native',
+  csharp: 'native',
+  kotlin: 'native',
+  objc: 'native',
+  shell: 'shell',
+  console: 'shell',
+  dockerfile: 'shell',
+  makefile: 'shell',
+  postgresql: 'sql',
+  json5: 'json',
+  dotenv: 'data',
+};
+
+/** Tokenize a fenced code block by the language its fence names. */
+export function highlightFence(source: string, language: string): CodeToken[][] {
+  const key = language.trim().toLowerCase();
+  const name = LANGUAGE_ALIASES[key] ?? EXTENSIONS[key];
+  if (!name || source.length > MAX_HIGHLIGHT_CHARS) return plainLines(source);
+  return splitLines(scan(source, SPECS[name]));
+}

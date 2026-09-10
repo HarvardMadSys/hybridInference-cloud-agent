@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { useEffect, useState, type HTMLAttributes } from 'react';
 import { useT } from '@/components/providers';
 import { projectLabel } from './conversations';
+import { activityLabel } from './relativeTime';
 import { useConversationList, type SidebarConversation } from './useConversationList';
 export function Highlight({ text, query }: { text: string; query: string }) {
   if (!query) return <>{text}</>;
@@ -37,6 +38,9 @@ function DropIndicator({ position }: { position?: 'before' | 'after' }) {
     />
   ) : null;
 }
+/** The hover-revealed icon buttons at the right end of a row. */
+const ROW_ACTION =
+  'absolute top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-300/50 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-100';
 export interface RowActions {
   activeKey: string | null;
   isUnread: (row: SidebarConversation) => boolean;
@@ -73,6 +77,10 @@ export function TaskRow({
   useEffect(() => {
     if (isActive && !inProgress) onRead(row);
   }, [isActive, inProgress, row, onRead]);
+  // When the conversation last moved — the one thing that tells a dozen rows
+  // with the same truncated title apart. A pinned row already has its pin
+  // sitting in this corner, so it goes without.
+  const activity = job.pinnedAt ? null : activityLabel(row.lastActivityAt, Date.now(), t);
   return (
     <div className="group relative" {...reorderProps}>
       <DropIndicator position={reorderProps?.['data-drop-position']} />
@@ -87,10 +95,10 @@ export function TaskRow({
         aria-current={isActive ? 'page' : undefined}
         data-search-result={search ? 'true' : undefined}
         title={`${job.repo} · ${job.title}`}
-        className={`flex w-full items-center gap-2 rounded-lg border border-transparent py-1.5 pl-4 pr-16 text-left text-[13px] transition-colors ${
+        className={`flex w-full items-center gap-2 rounded-md py-[5px] pl-2 pr-14 text-left text-[13px] transition-colors ${
           isActive
-            ? 'border-gray-200/80 bg-white font-medium text-gray-900 shadow-subtle dark:border-white/10 dark:bg-gray-800 dark:text-gray-50'
-            : 'text-gray-600 hover:bg-white/70 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
+            ? 'bg-gray-200/70 font-medium text-gray-900 dark:bg-white/10 dark:text-gray-50'
+            : 'text-gray-600 hover:bg-gray-200/50 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100'
         }`}
       >
         <span className="flex h-3 w-3 shrink-0 items-center justify-center">
@@ -118,6 +126,14 @@ export function TaskRow({
           )}
         </span>
       </Link>
+      {activity && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[11px] tabular-nums text-gray-400 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 dark:text-gray-500"
+        >
+          {activity}
+        </span>
+      )}
       <button
         type="button"
         aria-label={
@@ -130,7 +146,7 @@ export function TaskRow({
         title={job.pinnedAt ? t('sidebar.unpinTask') : t('sidebar.pinTask')}
         disabled={pinning === key || archiving === key}
         onClick={() => onSetPinned(key, job.id, job.repo, !job.pinnedAt)}
-        className={`absolute right-7 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 ${
+        className={`${ROW_ACTION} right-7 ${
           job.pinnedAt
             ? 'opacity-100'
             : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
@@ -157,7 +173,7 @@ export function TaskRow({
         title={t('sidebar.archiveTask')}
         disabled={row.archived || archiving === key || pinning === key}
         onClick={() => onArchive(key, job.id, jobIds)}
-        className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-gray-500 opacity-0 transition hover:bg-gray-100 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 disabled:cursor-wait disabled:opacity-60 group-hover:opacity-100 group-focus-within:opacity-100 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+        className={`${ROW_ACTION} right-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100`}
       >
         <svg
           className="h-4 w-4"
@@ -199,12 +215,12 @@ export function ListStatus({
   return (
     <>
       {loading && (
-        <p role="status" className="px-4 py-2 text-[12px] text-gray-500 dark:text-gray-400">
+        <p role="status" className="px-2 py-1.5 text-[12px] text-gray-500 dark:text-gray-400">
           {t('common.loading')}
         </p>
       )}
       {error && (
-        <p role="alert" className="px-4 py-2 text-[12px] text-red-500">
+        <p role="alert" className="px-2 py-1.5 text-[12px] text-red-500">
           {error}{' '}
           <button onClick={onRetry} className="underline">
             {t('sidebar.retry')}
@@ -212,7 +228,7 @@ export function ListStatus({
         </p>
       )}
       {!loading && !error && empty && (
-        <p className="px-4 py-2 text-[12px] text-gray-500 dark:text-gray-400">
+        <p className="px-2 py-1.5 text-[12px] text-gray-500 dark:text-gray-400">
           {t(search ? 'sidebar.noMatches' : 'sidebar.noJobs')}
         </p>
       )}
@@ -220,7 +236,7 @@ export function ListStatus({
         <button
           disabled={loading}
           onClick={onMore}
-          className="w-full rounded-md px-4 py-1.5 text-left text-[12px] text-gray-500 dark:text-gray-400 hover:bg-gray-100 disabled:opacity-50 dark:hover:bg-white/5"
+          className="w-full rounded-md px-2 py-1 text-left text-[12px] text-gray-500 transition-colors hover:bg-gray-200/50 hover:text-gray-800 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200"
         >
           {t('sidebar.loadMore')}
         </button>
@@ -310,8 +326,15 @@ export function ProjectFolder({
   const visible = rows.slice(0, Math.max(shown, selectedIndex + 1));
   const listId = `project-${encodeURIComponent(repo)}`;
   return (
-    <div className="mt-3">
-      <div className="group relative flex items-center gap-0.5" {...reorderProps}>
+    <div className="mt-1">
+      {/* A folder is a heading for the rows under it, not a destination, so it
+          is never painted as selected: the selected row is inside it. The one
+          it contains is told apart by weight and a crimson folder icon, which
+          still reads when the folder is collapsed. */}
+      <div
+        className="group relative flex items-center gap-0.5 rounded-md transition-colors hover:bg-gray-200/50 dark:hover:bg-white/5"
+        {...reorderProps}
+      >
         <DropIndicator position={reorderProps['data-drop-position']} />
         <button
           type="button"
@@ -322,10 +345,10 @@ export function ProjectFolder({
           aria-current={active ? 'true' : undefined}
           title={repo}
           onClick={onToggle}
-          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border-l-2 px-2 py-2 text-left text-[13px] font-medium ${active ? 'border-crimson bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-rose-300' : 'border-transparent text-gray-700 hover:bg-white/80 dark:text-gray-300 dark:hover:bg-white/5'}`}
+          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-1.5 pl-1.5 pr-1 text-left text-[13px] font-medium ${active ? 'text-gray-900 dark:text-gray-50' : 'text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100'}`}
         >
           <svg
-            className={`h-3 w-3 shrink-0 text-gray-500 dark:text-gray-400 ${expanded ? 'rotate-90' : ''}`}
+            className={`h-3 w-3 shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${expanded ? 'rotate-90' : ''}`}
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -335,7 +358,7 @@ export function ProjectFolder({
             <path d="m9 6 6 6-6 6" />
           </svg>
           <svg
-            className={`h-4 w-4 shrink-0 ${active ? 'text-crimson dark:text-rose-300' : 'text-gray-500 dark:text-gray-400'}`}
+            className={`h-4 w-4 shrink-0 ${active ? 'text-crimson dark:text-crimson-light' : 'text-gray-400 dark:text-gray-500'}`}
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -358,13 +381,26 @@ export function ProjectFolder({
           data-row-action
           aria-label={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
           title={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:bg-white focus:ring-2 focus:ring-crimson/30 dark:hover:bg-white/10"
+          className="mr-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-400 opacity-0 transition hover:bg-gray-300/50 hover:text-gray-800 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-crimson/30 group-hover:opacity-100 group-focus-within:opacity-100 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-100"
         >
-          +
+          <svg
+            className="h-3.5 w-3.5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            aria-hidden="true"
+          >
+            <path d="M12 5v14M5 12h14" />
+          </svg>
         </Link>
       </div>
       {expanded && (
-        <div id={listId} className="mt-1 space-y-0.5">
+        <div
+          id={listId}
+          className="ml-[13px] mt-0.5 space-y-0.5 border-l border-gray-200 pl-1.5 dark:border-white/10"
+        >
           {visible.map((row) => (
             <TaskRow key={row.key} row={row} {...actions} reorderProps={taskReorder(rows, row)} />
           ))}

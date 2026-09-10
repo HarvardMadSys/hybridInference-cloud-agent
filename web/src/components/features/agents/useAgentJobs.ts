@@ -432,6 +432,45 @@ export function useAgentJob(jobId: string): {
     return () => controller.abort();
   }, [currentTurnNo, jobId, isLive, reload]);
 
+  // Title generation runs alongside the first attempt. Refresh just its metadata
+  // briefly, so a long-running task does not keep its temporary title until SSE ends.
+  const awaitingTitle =
+    api?.id === jobId &&
+    api.title_source === 'fallback' &&
+    api.turn_no === 1 &&
+    (state === 'running' || state === 'publishing' || state === 'succeeded');
+  useEffect(() => {
+    if (!awaitingTitle) return;
+    let cancelled = false;
+    let requests = 0;
+    let pending = false;
+    const version = generation.current;
+    const timer = setInterval(() => {
+      if (pending) return;
+      pending = true;
+      if (++requests >= 8) clearInterval(timer);
+      void getAgentJob(jobId)
+        .then((latest) => {
+          if (cancelled || generation.current !== version) return;
+          setApi((current) =>
+            current?.id === latest.id
+              ? { ...current, title: latest.title, title_source: latest.title_source }
+              : current,
+          );
+        })
+        .catch(() => {
+          // A title lookup must never interrupt the running conversation.
+        })
+        .finally(() => {
+          pending = false;
+        });
+    }, 2_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [awaitingTitle, jobId, tick]);
+
   // A shared turn reaches its terminal job state before its quiescent
   // workspace snapshot is captured and published. The SSE correctly closes
   // at the turn boundary, so keep only that small, asynchronous tail live;

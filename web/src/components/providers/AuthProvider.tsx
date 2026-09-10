@@ -26,6 +26,7 @@ interface AuthState {
   isAuthenticated: boolean;
   loading: boolean;
   user: User | null;
+  error?: 'unavailable' | null;
 }
 
 interface AuthContextValue {
@@ -62,6 +63,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   });
 
   const refreshUser = useCallback(async () => {
+    setState((previous) => ({ ...previous, loading: true, error: null }));
     try {
       const me = await getSessionUser();
       if (!me) {
@@ -77,10 +79,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         },
       });
     } catch {
-      // An unreachable control plane is not a signed-in user. Failing closed
-      // here costs a redirect through sign-in; failing open would render the
-      // app to someone who may have no session at all.
-      setState(SIGNED_OUT);
+      // Do not retain permissions or mistake an outage for an expired session.
+      setState({ ...SIGNED_OUT, error: 'unavailable' });
     }
   }, []);
 

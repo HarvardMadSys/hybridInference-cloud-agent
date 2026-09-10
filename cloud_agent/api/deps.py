@@ -134,15 +134,23 @@ def get_log_store(request: Request) -> Any | None:
 # ── Agent permissions and credential namespaces ────────────────────────
 
 
-async def resolve_agent_access(gateway: Any, user_id: str) -> AgentAccessDecision:
-    """Read current Agent permissions, with no session or role fallback."""
+async def resolve_agent_access(
+    gateway: Any, user_id: str, *, reject_unavailable_subject: bool = False
+) -> AgentAccessDecision:
+    """Read current Agent permissions, with no session or role fallback.
+
+    Login additionally rejects an unavailable subject. A policy denial for an
+    active account may still establish identity for the access-required page.
+    """
     try:
         decision = AgentAccessDecision.model_validate(await gateway.agent_access(user_id))
         if decision.user_id != user_id:
             raise ValueError("Agent access subject mismatch")
         return decision
     except GatewayError as exc:
-        if exc.status_code == 403:
+        if exc.status_code == 403 and exc.error_type == "subject_unavailable":
+            if reject_unavailable_subject:
+                raise HTTPException(status_code=403, detail="This account cannot sign in.") from exc
             return AgentAccessDecision(user_id=user_id, allowed=False, permissions=[])
     except ValueError:
         pass

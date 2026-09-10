@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { AgentJobFileEntryApi } from '@/lib/api/agents';
 
-import { highlightCode, TOKEN_CLASS, type CodeToken } from './codeHighlight';
+import { highlightCode, TOKEN_CLASS, type CodeToken } from '@/lib/codeHighlight';
 import type { AgentJob } from './types';
 import { useWorkspaceFiles, type WorkspaceDirectory } from './useAgentJobs';
 import { PANE_RESIZE_EVENT } from './useResizablePane';

@@ -26,14 +26,14 @@ import { safeReturnTo } from '@/lib/auth/signin';
 const SIGN_IN_ERROR_PARAM = 'sign_in_error';
 
 export function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { state } = useAuth();
+  const { state, refreshUser } = useAuth();
   const [error, setError] = useState<string | null>(null);
   // One redirect per mount. Without this a slow navigation lets the effect run
   // twice and mint a second verifier, invalidating the first.
   const started = useRef(false);
 
   useEffect(() => {
-    if (state.loading || state.isAuthenticated || started.current) return;
+    if (state.loading || state.error || state.isAuthenticated || started.current) return;
     started.current = true;
     // Read from `location` rather than `useSearchParams`, which would force
     // every page under this layout behind a Suspense boundary at build time.
@@ -48,7 +48,27 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     // is still deciding nobody is signed in.
     const query = new URLSearchParams({ return_to: returnTo });
     window.location.assign(`${basePath}/login?${query.toString()}`);
-  }, [state.loading, state.isAuthenticated]);
+  }, [state.loading, state.error, state.isAuthenticated]);
+
+  if (state.error === 'unavailable') {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 px-6 text-center">
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
+          Agent temporarily unavailable
+        </h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400" role="alert">
+          We cannot confirm your access right now. Please try again shortly.
+        </p>
+        <button
+          type="button"
+          onClick={() => void refreshUser()}
+          className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white dark:bg-gray-100 dark:text-gray-900"
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
 
   if (error) {
     return (

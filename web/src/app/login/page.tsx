@@ -38,7 +38,10 @@ function LoginContent() {
   // control plane reduces it to a same-site path again on the way in, which is
   // the copy that counts.
   const returnTo = params?.get('return_to') || '/';
-  const unavailable = params?.has('sign_in_error') ?? false;
+  const signInError = params?.get('sign_in_error');
+  const temporary = signInError === 'temporary';
+  const accountUnavailable = signInError === 'account_unavailable';
+  const hasError = params?.has('sign_in_error') ?? false;
   const authority = authorityName();
 
   return (
@@ -51,15 +54,19 @@ function LoginContent() {
           Run coding agents in sandboxed containers against your repositories.
         </p>
 
-        {unavailable ? (
+        {hasError && (
           <p
             role="alert"
             className="mt-6 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200"
           >
-            Sign-in is not configured for this deployment. Ask whoever runs it to set the identity
-            provider.
+            {temporary
+              ? 'Sign-in is temporarily unavailable. Please try again shortly.'
+              : accountUnavailable
+                ? 'This account cannot sign in. Contact the service administrator for help.'
+                : 'Sign-in is not configured for this deployment. Ask whoever runs it to set the identity provider.'}
           </p>
-        ) : (
+        )}
+        {(!hasError || temporary) && (
           <>
             {/* A plain link, not a button with a handler: the destination is a
                 server route that answers with a redirect, and a full
@@ -68,7 +75,7 @@ function LoginContent() {
               href={signInUrl(returnTo)}
               className="mt-6 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
             >
-              Sign in{authority ? ` with ${authority}` : ''}
+              {temporary ? 'Try again' : `Sign in${authority ? ` with ${authority}` : ''}`}
             </a>
             <p className="mt-4 text-xs text-gray-400 dark:text-gray-500">
               {authority

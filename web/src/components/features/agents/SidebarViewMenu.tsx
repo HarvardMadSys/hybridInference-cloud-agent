@@ -47,7 +47,7 @@ export function SidebarViewMenu({
         title={t('sidebar.viewOptions')}
         aria-haspopup="menu"
         aria-expanded={Boolean(position)}
-        className="rounded-md p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200/60 dark:hover:bg-white/10"
+        className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-200/60 hover:text-gray-700 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
         onClick={() => {
           if (position) {
             close();
@@ -61,8 +61,8 @@ export function SidebarViewMenu({
         }}
       >
         <svg
-          width="18"
-          height="18"
+          width="16"
+          height="16"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"

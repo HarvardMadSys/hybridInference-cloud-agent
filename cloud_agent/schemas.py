@@ -291,6 +291,7 @@ class AgentJobResponse(BaseModel):
     repo: str
     task_prompt: str
     title: str | None = None
+    title_source: str | None = None
     runtime: str
     model: str
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1

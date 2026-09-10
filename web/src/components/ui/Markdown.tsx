@@ -1,5 +1,53 @@
+'use client';
+
+import { createContext, Fragment, useContext, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+
+import { highlightFence, TOKEN_CLASS } from '@/lib/codeHighlight';
+
+// react-markdown gives `code` no way to tell a fenced block from inline code
+// (the `inline` prop went away in v9), so `pre` marks its subtree and `code`
+// reads the mark. Sniffing `language-*` is not enough: an unlabelled fence has
+// no class at all, and used to be styled as inline code — one chip per line,
+// crimson on a dark block.
+const FencedContext = createContext(false);
+
+const INLINE_CODE =
+  'rounded-[4px] bg-gray-950/[0.06] px-[5px] py-px font-mono text-[0.85em] text-gray-800 dark:bg-white/10 dark:text-gray-200';
+
+function FencedCode({ className, children }: { className?: string; children?: ReactNode }) {
+  const language = /language-([\w+#.-]+)/.exec(className ?? '')?.[1];
+  // The text of a fence ends in the newline that closed it; drop that one so
+  // the block does not finish on an empty line.
+  const source = typeof children === 'string' ? children.replace(/\n$/, '') : null;
+  if (source === null) return <code className={className}>{children}</code>;
+  if (!language) return <code className={className}>{source}</code>;
+  const lines = highlightFence(source, language);
+  return (
+    <code className={className}>
+      {lines.map((tokens, line) => (
+        <Fragment key={line}>
+          {line > 0 ? '\n' : null}
+          {tokens.map((token, at) =>
+            token.kind === 'plain' ? (
+              token.text
+            ) : (
+              <span key={at} className={TOKEN_CLASS[token.kind]}>
+                {token.text}
+              </span>
+            ),
+          )}
+        </Fragment>
+      ))}
+    </code>
+  );
+}
+
+function Code({ className, children }: { className?: string; children?: ReactNode }) {
+  if (useContext(FencedContext)) return <FencedCode className={className}>{children}</FencedCode>;
+  return <code className={INLINE_CODE}>{children}</code>;
+}
 
 // Render each element explicitly with Tailwind utilities: the
 // @tailwindcss/typography (`prose`) plugin isn't installed, so element defaults
@@ -28,26 +76,22 @@ const components: Components = {
       {children}
     </blockquote>
   ),
+  hr: () => <hr className="my-3 border-gray-200 dark:border-white/10" />,
   pre: ({ children }) => (
-    <pre className="mb-2 overflow-x-auto rounded-lg bg-gray-900 dark:bg-black p-3 text-xs text-gray-100">
-      {children}
-    </pre>
-  ),
-  code: ({ className, children }) =>
-    /language-/.test(className || '') ? (
-      <code className={className}>{children}</code>
-    ) : (
-      <code className="rounded bg-gray-100 dark:bg-white/5 px-1 py-0.5 text-[0.85em] text-crimson dark:text-crimson-light">
+    <FencedContext.Provider value={true}>
+      <pre className="mb-3 overflow-x-auto rounded-lg border border-gray-200 bg-gray-50 px-3.5 py-3 font-mono text-[12px] leading-[1.6] text-gray-800 dark:border-white/10 dark:bg-white/[0.04] dark:text-gray-200">
         {children}
-      </code>
-    ),
+      </pre>
+    </FencedContext.Provider>
+  ),
+  code: ({ className, children }) => <Code className={className}>{children}</Code>,
   table: ({ children }) => (
-    <div className="mb-2 overflow-x-auto">
+    <div className="mb-3 overflow-x-auto">
       <table className="w-full border-collapse text-xs">{children}</table>
     </div>
   ),
   th: ({ children }) => (
-    <th className="border border-gray-200 dark:border-white/10 px-2 py-1 text-left font-semibold">
+    <th className="border border-gray-200 bg-gray-50 px-2 py-1 text-left font-semibold dark:border-white/10 dark:bg-white/5">
       {children}
     </th>
   ),

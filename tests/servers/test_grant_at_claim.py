@@ -325,3 +325,69 @@ async def test_a_grant_with_no_scope_at_all_is_refused(claim):
     assert response.status_code == 503
     assert response.json()["detail"]["error"]["type"] == "model_not_granted"
     assert grants.revoked == ["agr_7"]
+
+
+@pytest.mark.parametrize("pending", [True, False])
+async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch, pending):
+    """Claim returns before title inference and never gives its token extra scope."""
+    from unittest.mock import AsyncMock
+
+    from fastapi import BackgroundTasks
+
+    from cloud_agent.schemas import WorkerClaimRequest
+
+    store, grants = _ClaimStore(), _Grants()
+    original_claim = store.claim_job
+
+    async def claim_with_title_state(**kwargs):
+        result = await original_claim(**kwargs)
+        result["title_generation_pending"] = pending
+        return result
+
+    monkeypatch.setattr(store, "claim_job", claim_with_title_state)
+    generate = AsyncMock()
+    monkeypatch.setattr(agent_jobs_router, "generate_thread_title", generate)
+    background = BackgroundTasks()
+    response = await agent_jobs_router.worker_claim(
+        WorkerClaimRequest(worker_id="w1"),
+        background,
+        claiming_host={"host": "runner-test", "credential_hash": "test-credential-hash"},
+        store=store,
+        app_credentials=None,
+        grants=grants,
+    )
+    assert response.job_id == _JOB
+    generate.assert_not_awaited()
+    assert len(background.tasks) == int(pending)
+    await background()
+    if pending:
+        generate.assert_awaited_once_with(
+            store,
+            job_id=_JOB,
+            attempt_id=_ATTEMPT,
+            lease_generation=_GENERATION,
+            prompt="fix it",
+            model="glm-5.1",
+            sandbox_token="agr.header.signature",
+        )
+    else:
+        generate.assert_not_awaited()
+
+
+async def test_failed_claim_does_not_schedule_title_generation(monkeypatch, claim):
+    from unittest.mock import AsyncMock
+
+    generate = AsyncMock()
+    monkeypatch.setattr(agent_jobs_router, "generate_thread_title", generate)
+    store, grants = _ClaimStore(), _Grants(fail=True)
+    original_claim = store.claim_job
+
+    async def claim_with_title_state(**kwargs):
+        result = await original_claim(**kwargs)
+        result["title_generation_pending"] = True
+        return result
+
+    monkeypatch.setattr(store, "claim_job", claim_with_title_state)
+    response = await claim(store, grants)
+    assert response.status_code == 503
+    generate.assert_not_awaited()

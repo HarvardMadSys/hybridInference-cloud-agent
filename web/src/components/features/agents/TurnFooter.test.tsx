@@ -214,25 +214,25 @@ describe('TurnFooter', () => {
 
   it('closes a resource explanation when its chip is clicked again', () => {
     render(<TurnFooter job={job({ resources: { ...RESOURCES, coverage: 0.4 } })} />);
-    const badge = screen.getByRole('button', { name: 'partial' });
+    const badge = screen.getByRole('button', { name: 'Partial usage' });
 
     fireEvent.click(badge);
-    expect(screen.getByText(/40% of this turn was sampled/)).toBeInTheDocument();
+    expect(screen.getByText(/Usage is available for 40% of this turn/)).toBeInTheDocument();
     fireEvent.click(badge);
 
-    expect(screen.queryByText(/40% of this turn was sampled/)).toBeNull();
+    expect(screen.queryByText(/Usage is available for 40% of this turn/)).toBeNull();
   });
 
   it('calls a partly sampled turn a floor, not a total', () => {
     render(<TurnFooter job={job({ resources: { ...RESOURCES, coverage: 0.4 } })} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'partial' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Partial usage' }));
 
-    expect(screen.getByText(/40% of this turn was sampled/)).toBeInTheDocument();
-    expect(screen.getByText(/lower bounds rather than totals/)).toBeInTheDocument();
+    expect(screen.getByText(/Usage is available for 40% of this turn/)).toBeInTheDocument();
+    expect(screen.getByText(/Actual usage may be higher/)).toBeInTheDocument();
   });
 
-  it('says nothing was measured rather than showing zeros', () => {
+  it('omits unavailable totals rather than showing zeros', () => {
     const unmeasured: TurnResources = {
       cpuUsec: null,
       memPeakBytes: null,
@@ -248,16 +248,17 @@ describe('TurnFooter', () => {
       toolCalls: [],
       toolCallsTruncated: false,
     };
-    render(<TurnFooter job={job({ resources: unmeasured })} />);
-    expect(screen.getByText('turn totals unavailable')).toBeInTheDocument();
-    expect(screen.queryByText(/^0/)).toBeNull();
+    const { container, rerender } = render(<TurnFooter job={job({ resources: unmeasured })} />);
+    expect(container).toBeEmptyDOMElement();
 
-    fireEvent.click(screen.getByRole('button', { name: 'turn totals unavailable' }));
-    expect(screen.getByText(/not the same as a turn that consumed nothing/)).toBeInTheDocument();
+    rerender(<TurnFooter job={job({ resources: unmeasured, durationMs: 12_000 })} />);
+    expect(screen.getByText('12s')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.queryByText(/^0/)).toBeNull();
   });
 
-  it('keeps a historical sampler failure distinct from shared-member accounting', () => {
-    render(
+  it('omits an empty footer when historical resource totals are unavailable', () => {
+    const { container } = render(
       <TurnFooter
         job={job({
           resources: {
@@ -274,13 +275,24 @@ describe('TurnFooter', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'resource data unavailable' }));
-    expect(screen.getByText(/historical sampler could not read/i)).toBeInTheDocument();
-    expect(screen.queryByText(/fork siblings/i)).toBeNull();
+    expect(container).toBeEmptyDOMElement();
   });
 
   it('renders nothing at all when there is nothing honest to say', () => {
-    const { container } = render(<TurnFooter job={job()} />);
+    const { container, rerender } = render(<TurnFooter job={job()} />);
+    expect(container).toBeEmptyDOMElement();
+    rerender(
+      <TurnFooter
+        job={job({
+          resources: toTurnResources({
+            sampler_version: 'shared-member-v1',
+            process_observer: 'kata-guest-ebpf-v1',
+            process_observation_complete: true,
+            processes: [],
+          } as never),
+        })}
+      />,
+    );
     expect(container).toBeEmptyDOMElement();
   });
 
@@ -307,12 +319,7 @@ describe('TurnFooter', () => {
     fireEvent.click(screen.getByRole('button', { name: '1 tool call' }));
     expect(screen.getByText('cargo build')).toBeInTheDocument();
     expect(screen.getByText('15s')).toBeInTheDocument();
-    // The note used to say these windows include the model's thinking time.
-    // They do not: the call's event is emitted once the model has finished
-    // producing it, which is why production's median call is 35 ms and not
-    // seconds. What they do include is the platform's own parse latency, so
-    // the note now says they bracket the execution rather than time it.
-    expect(screen.getByText(/brackets the execution from outside/)).toBeInTheDocument();
+    expect(screen.getByTitle('Approximate duration')).toHaveTextContent('15s');
   });
 });
 
@@ -557,7 +564,7 @@ describe('per-call resources, through both real adapters', () => {
     // CPU and memory are unmeasured; process counts are also unknown because
     // this fixture predates the guest observer. None of those is a measured 0.
     expect(screen.getAllByText('—')).toHaveLength(4);
-    expect(screen.getByText(/historical periodic sampler did not span/i)).toBeInTheDocument();
+    expect(screen.getAllByTitle('Not available').length).toBeGreaterThan(0);
     expect(screen.queryByText('0s')).toBeNull();
     expect(screen.queryByText('0B')).toBeNull();
   });
@@ -574,13 +581,13 @@ describe('per-call resources, through both real adapters', () => {
     openTable(withCalls([shared, unmeasuredShortCall]));
 
     expect(screen.getByText('4.4s')).toBeInTheDocument();
-    expect(screen.getByText(/upper bound/)).toBeInTheDocument();
+    expect(screen.getAllByTitle(/upper bound/)[0]).toBeInTheDocument();
   });
 
   it('does not claim an upper bound when nothing was shared', () => {
     openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
 
-    expect(screen.queryByText(/upper bound/)).toBeNull();
+    expect(screen.queryByTitle(/upper bound/)).toBeNull();
   });
 
   it('names the longest call so a 157-row table does not have to be read', () => {
@@ -608,7 +615,7 @@ describe('per-call resources, through both real adapters', () => {
 
     expect(screen.getByText(/more calls than are listed/)).toBeInTheDocument();
     expect(screen.queryByText('4.4s')).toBeNull();
-    expect(screen.queryByText(/outside tools/)).toBeNull();
+    expect(screen.queryByText(/on other work/)).toBeNull();
   });
 
   it('says where the turn\u2019s time actually went', () => {
@@ -626,7 +633,7 @@ describe('per-call resources, through both real adapters', () => {
 
     // The most explanatory number on the footer: on the production turns this
     // was built against, the sandbox was busy for about 1% of the wall clock.
-    expect(screen.getByText(/outside tools/)).toBeInTheDocument();
+    expect(screen.getByText(/on other work/)).toBeInTheDocument();
     expect(screen.getByText('49.6s')).toBeInTheDocument();
   });
 
@@ -635,35 +642,36 @@ describe('per-call resources, through both real adapters', () => {
     render(<TurnFooter job={{ ...withSplit, durationMs: 3_559_000 }} />);
     fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
 
-    expect(screen.queryByText(/outside tools/)).toBeNull();
+    expect(screen.queryByText(/on other work/)).toBeNull();
   });
 
-  it('says a message-level duration brackets the call rather than timing it', () => {
+  it('marks message-level durations as approximate without timing-source prose', () => {
     openTable(withCalls([measuredLongCall, unmeasuredShortCall]));
 
-    expect(screen.getByText(/brackets the execution from outside/)).toBeInTheDocument();
+    expect(screen.getAllByTitle('Approximate duration')).toHaveLength(2);
   });
 
-  it('says so when the sandbox\u2019s own hooks timed the calls', () => {
+  it('does not mark directly measured durations as approximate', () => {
     const exact = { ...measuredLongCall, timing_source: 'exact' };
     const exactShort = { ...unmeasuredShortCall, timing_source: 'exact' };
     openTable(withCalls([exact, exactShort]));
 
-    expect(screen.getByText(/own tool boundaries/)).toBeInTheDocument();
-    expect(screen.queryByText(/brackets the execution/)).toBeNull();
+    expect(screen.queryByTitle('Approximate duration')).toBeNull();
+    expect(
+      within(screen.getByText('cargo build').closest('tr')!).getByText('9.5s'),
+    ).toBeInTheDocument();
   });
 
-  it('counts them when only some calls carry the sandbox\u2019s boundaries', () => {
+  it('only marks durations that were not directly measured as approximate', () => {
     const exact = { ...measuredLongCall, timing_source: 'exact' };
     openTable(withCalls([exact, unmeasuredShortCall]));
 
-    expect(screen.getByText(/1 of 2 durations/)).toBeInTheDocument();
     expect(
-      within(screen.getByText('cargo build').closest('tr')!).getByText('sandbox timing'),
-    ).toBeInTheDocument();
+      within(screen.getByText('cargo build').closest('tr')!).queryByTitle('Approximate duration'),
+    ).toBeNull();
     expect(
-      within(screen.getByText('src/main.rs').closest('tr')!).getByText('outside bracket'),
-    ).toBeInTheDocument();
+      within(screen.getByText('src/main.rs').closest('tr')!).getByTitle('Approximate duration'),
+    ).toHaveTextContent('35ms');
   });
 
   it('never reuses one recorded row for two malformed duplicate tool ids', () => {
@@ -712,10 +720,12 @@ describe('per-call resources, through both real adapters', () => {
     fireEvent.click(screen.getByRole('button', { name: '2 tool calls' }));
 
     expect(
-      within(screen.getByText('first duplicate').closest('tr')!).getByText('sandbox timing'),
+      within(screen.getByText('first duplicate').closest('tr')!).getByText('10ms'),
     ).toBeInTheDocument();
     expect(
-      within(screen.getByText('second duplicate').closest('tr')!).getByText('outside bracket'),
+      within(screen.getByText('second duplicate').closest('tr')!).getByTitle(
+        'Approximate duration',
+      ),
     ).toBeInTheDocument();
   });
 
@@ -725,7 +735,7 @@ describe('per-call resources, through both real adapters', () => {
     openTable(withCalls([]));
 
     expect(screen.getAllByText('—')).toHaveLength(6);
-    expect(screen.getByText(/historical periodic sampler did not span/i)).toBeInTheDocument();
+    expect(screen.getAllByTitle('Not available').length).toBeGreaterThan(0);
   });
 
   it('renders a sub-tick process delivered by the guest observer', () => {
@@ -739,10 +749,10 @@ describe('per-call resources, through both real adapters', () => {
       }),
     );
 
-    expect(screen.getByText('Guest process starts')).toBeInTheDocument();
+    expect(screen.getAllByText('Processes').length).toBeGreaterThan(0);
     expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
     expect(screen.getByText('+12ms')).toBeInTheDocument();
-    expect(screen.queryByText(/Process observation is partial/)).toBeNull();
+    expect(screen.queryByText(/Process data is incomplete/)).toBeNull();
   });
 
   it('does not present a lossy guest observation as a complete process census', () => {
@@ -756,9 +766,7 @@ describe('per-call resources, through both real adapters', () => {
       }),
     );
 
-    expect(
-      screen.getByText(/Process observation is partial \(2 process lifecycle events lost\)/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Process data is incomplete/)).toBeInTheDocument();
     expect(screen.getByText('≥1')).toBeInTheDocument();
   });
 
@@ -776,9 +784,7 @@ describe('per-call resources, through both real adapters', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
 
-    expect(
-      screen.getByText(/Process observation is partial; bounded observer data was incomplete/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Process data is incomplete/)).toBeInTheDocument();
   });
 
   it('keeps guest process details accessible when a turn emitted no tool event', () => {
@@ -792,7 +798,7 @@ describe('per-call resources, through both real adapters', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
 
-    expect(screen.getByText('Guest process starts')).toBeInTheDocument();
+    expect(screen.getAllByText('Processes').length).toBeGreaterThan(0);
     expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
   });
 
@@ -812,10 +818,8 @@ describe('per-call resources, through both real adapters', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
 
-    expect(
-      screen.getByText(/Process observation is partial \(1 process lifecycle event lost\)/),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/observed no child process/)).toBeNull();
+    expect(screen.getByText(/Process data is incomplete/)).toBeInTheDocument();
+    expect(screen.queryByText(/No processes were recorded/)).toBeNull();
   });
 
   const accountedProcess = {
@@ -844,7 +848,7 @@ describe('per-call resources, through both real adapters', () => {
     expect(within(row).getByText('15ms')).toBeInTheDocument();
     expect(within(row).getByText('2.1MB')).toBeInTheDocument();
     expect(within(row).getByText('r0B w8MB')).toBeInTheDocument();
-    expect(screen.getByText(/accounting of each process at exit/)).toBeInTheDocument();
+    expect(screen.queryByText(/guest kernel/i)).toBeNull();
   });
 
   it('leaves consumption blank for a process that had not exited', () => {
@@ -902,10 +906,8 @@ describe('per-call resources, through both real adapters', () => {
     const longRow = screen.getByText('4.4s').closest('tr')!;
     expect(within(longRow).getByText('270MB')).toBeInTheDocument();
     expect(within(longRow).queryByText('ᵖ')).toBeNull();
-    expect(screen.getByText(/accounted by the guest kernel/)).toBeInTheDocument();
-    // This fixture is a historical sampled turn, so it retains the sampled
-    // aggregate instead of showing the current shared-member disclaimer.
-    expect(screen.queryByText(/current shared turns never assign/i)).toBeNull();
+    expect(within(shortRow).getAllByTitle(/Child processes only/)).toHaveLength(2);
+    expect(screen.getByText('5s')).toBeInTheDocument();
   });
 
   it('marks a call whose processes were not all its own as a floor', () => {
@@ -936,7 +938,7 @@ describe('per-call resources, through both real adapters', () => {
 
     const shortRow = screen.getByText('Read').closest('tr')!;
     expect(within(shortRow).getByText('≥15ms')).toBeInTheDocument();
-    expect(screen.getByText(/leave out a process it may own/)).toBeInTheDocument();
+    expect(within(shortRow).getByTitle(/At least this much/)).toHaveTextContent('≥15ms');
   });
 
   it('treats every charged call as a floor when the census lost events', () => {

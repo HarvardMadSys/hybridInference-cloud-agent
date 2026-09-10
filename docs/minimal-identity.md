@@ -6,6 +6,11 @@ An older Gateway may still include profile claims during the rollout; the
 verifier discards them immediately. Agent no longer calls the account-status
 endpoint. Admission comes from the existing `agent-access` contract.
 
+A policy denial for an active account still permits a minimal identity session
+so the web app can explain that access is required. An unavailable account is
+refused at login using that same access contract's `subject_unavailable` error;
+proxy failures or unreadable responses remain temporary failures.
+
 The Agent session contains only `sub`, `gateway_issuer`, `iat` and `exp`, signed
 with the Agent's own session secret. `gateway_issuer` identifies the upstream
 identity authority; it does not claim the Gateway signed this cookie. Sessions
@@ -21,7 +26,7 @@ remain Agent-owned data; this change does not filter user-authored content.
 
 ## Database identity boundary
 
-Migration `0028_identity_namespace` adds one singleton record. It does not
+Migration `0029_identity_namespace` adds one singleton record. It does not
 rewrite owners or infer the original issuer from a URL, a user ID, or old data.
 At startup both control-plane and MCP listeners compare `GATEWAY_ISSUER` with
 that record before starting background workers. A mismatch, or removing the
@@ -74,7 +79,7 @@ prefer a compatible fix or stop Agent while leaving the Gateway running.
 ## Local verification (2026-09-10)
 
 Gateway `make all` passed (5,254 tests; 48 skipped). Agent `make check` passed
-(2,096 tests), as did its 689 web tests, lint, type checking and production build.
+(2,144 tests), as did its 710 web tests, lint, type checking and production build.
 Eight additional PostgreSQL integration cases exercised initial binding,
 explicit adoption, preservation of existing owners and concurrent startup.
 
