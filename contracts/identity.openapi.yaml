@@ -2,10 +2,10 @@ openapi: 3.1.0
 
 info:
   title: HybridInference gateway — cross-service identity
-  version: "1.0.0"
+  version: "2.0.0"
   x-source:
     repo: HarvardMadSys/hybridInference
-    branch: murphy/claude/identity-code-exchange
+    branch: murphy/codex/gateway-minimal-agent-identity
     files:
       - apps/backend/serving/servers/routers/identity.py
       - apps/backend/serving/utils/identity_tokens.py
@@ -268,8 +268,8 @@ paths:
                   access_token:
                     type: string
                     description: |
-                      An RS256 JWT. Claims: `sub` (the gateway user id), `email`,
-                      `role`, `iss`, `aud`, `iat`, `exp`. Verified against
+                      An RS256 JWT. Claims: `sub` (the gateway user id),
+                      `iss`, `aud`, `iat`, `exp`. No account profile is included. Verified against
                       `/v1/identity/jwks`; **no gateway secret is needed to do
                       so, and that is the point of the whole flow.**
 

@@ -438,8 +438,13 @@ async def test_oncall_session_admin_uses_resolved_gateway_and_checks_service_use
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
         client.cookies.set(
             identity.SESSION_COOKIE,
-            identity.mint_session(user_id="operator", email=None, role="free"),
+            identity.mint_session(user_id="operator"),
         )
         response = await client.post("/v1/agent/service/oncall/jobs", json=_create_body())
     assert response.status_code == 201
     assert asked == ["operator", _SERVICE_USER]
+
+
+@pytest.fixture(autouse=True)
+def _configured_identity_issuer(monkeypatch):
+    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")

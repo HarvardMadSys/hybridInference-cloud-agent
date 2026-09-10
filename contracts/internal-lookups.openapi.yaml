@@ -28,7 +28,6 @@ info:
     | Endpoint | Replaces |
     |---|---|
     | `GET /internal/model-catalog` | the `visible_models` catalog read |
-    | `GET /internal/users/{id}/status` | account profile and status |
     | `GET /internal/users/{id}/agent-access` | Agent admission and administration policy |
 
     **Every consumer of this document must fail closed.** An unreachable
@@ -119,74 +118,6 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
               example:
                 error: { type: subject_unavailable, message: That user cannot be resolved. }
-        "404":
-          description: Internal endpoints are not configured on this deployment.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
-  /internal/users/{user_id}/status:
-    get:
-      tags: [internal]
-      operationId: userStatus
-      summary: Whether a user exists, may sign in, and with what role
-      description: |
-        The control plane keeps only an external user id; everything else about
-        an account stays with the gateway. This is how it answers "may this
-        person still use the service" without holding a copy of the users
-        table.
-
-        **Unlike the other two, an unknown user is a 200 with `exists: false`
-        rather than a 403.** The caller is asking a question *about* an
-        account, not trying to act *as* one, and it needs to tell "gone" from
-        "suspended" to decide whether to archive a thread or show a message.
-      security:
-        - dispatchToken: []
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        "200":
-          description: |
-            The account's status. When `exists` is false, only `user_id`,
-            `exists` and `active` are present — there is nothing else to report.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [user_id, exists, active]
-                properties:
-                  user_id: { type: string }
-                  exists: { type: boolean }
-                  active:
-                    type: boolean
-                    description: True only for status `active`.
-                  status: { type: [string, "null"] }
-                  role: { type: string }
-                  email:
-                    type: [string, "null"]
-                    description: |
-                      The account's email. **Not a display name** — no gateway
-                      contract carries one, so a consumer with a "name" field
-                      reports null rather than inventing one from this.
-              examples:
-                active:
-                  value:
-                    user_id: usr_123
-                    exists: true
-                    active: true
-                    status: active
-                    role: pro
-                    email: someone@example.com
-                unknown:
-                  value: { user_id: usr_gone, exists: false, active: false }
-        "401":
-          description: Wrong or missing dispatch token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: Internal endpoints are not configured on this deployment.
           content:

@@ -239,8 +239,6 @@ async def identity_token(request: Request) -> dict[str, Any]:
     token = jwt.encode(
         {
             "sub": USER_ID,
-            "email": "developer@localhost",
-            "role": "admin",
             "iss": "freeinference-local",
             "aud": "cloud-agent",
             "iat": now,
@@ -253,19 +251,12 @@ async def identity_token(request: Request) -> dict[str, Any]:
     return {"access_token": token, "token_type": "Bearer", "expires_in": IDENTITY_TTL_S}
 
 
-@app.get("/internal/users/{user_id}/status")
-async def user_status(user_id: str, authorization: str | None = Header(None)) -> dict[str, Any]:
+@app.get("/internal/users/{user_id}/agent-access")
+async def agent_access(user_id: str, authorization: str | None = Header(None)) -> dict[str, Any]:
     _require_dispatch(authorization)
     if user_id != USER_ID:
-        return {"user_id": user_id, "exists": False, "active": False}
-    return {
-        "user_id": USER_ID,
-        "exists": True,
-        "active": True,
-        "status": "active",
-        "role": "admin",
-        "email": "developer@localhost",
-    }
+        raise _error(403, "subject_unavailable", "That user cannot be resolved.")
+    return {"user_id": user_id, "allowed": True, "permissions": ["agent.use", "agent.admin"]}
 
 
 @app.get("/internal/model-catalog")

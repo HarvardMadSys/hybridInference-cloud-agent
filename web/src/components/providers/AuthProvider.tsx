@@ -19,10 +19,6 @@ import {
 
 interface User {
   id: string;
-  email: string | null;
-  user_name?: string | null;
-  role: string;
-  is_admin: boolean;
   agent_access?: AgentAccessApi;
 }
 
@@ -77,10 +73,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading: false,
         user: {
           id: me.id,
-          email: me.email ?? null,
-          user_name: me.user_name,
-          role: me.role || 'free',
-          is_admin: hasAgentPermission(me.agent_access, 'agent.admin'),
           agent_access: me.agent_access,
         },
       });

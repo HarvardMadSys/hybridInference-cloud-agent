@@ -98,8 +98,6 @@ describe('ProtectedRoute', () => {
   it('renders the app for a signed-in user and redirects nobody', async () => {
     vi.mocked(getSessionUser).mockResolvedValue({
       id: 'u1',
-      email: 'ada@example.com',
-      role: 'internal',
     });
 
     renderApp();

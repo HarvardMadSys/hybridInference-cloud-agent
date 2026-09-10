@@ -818,7 +818,17 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     store = AgentJobStore(pool)
     # Schema is Alembic's; this is a no-op kept so the call site is honest
     # about when the store becomes usable.
-    await store.initialize()
+    try:
+        await store.initialize()
+        from cloud_agent.identity import ENV_ISSUER, gateway_issuer
+        from cloud_agent.identity_namespace import ensure_gateway_namespace
+
+        configured = bool(os.environ.get("GATEWAY_BASE_URL") or os.environ.get(ENV_ISSUER))
+        issuer = gateway_issuer() if configured else None
+        app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
+    except Exception:
+        await pool.close()
+        raise
 
     app.state.store = store
     app.state.gateway = GatewayClient()

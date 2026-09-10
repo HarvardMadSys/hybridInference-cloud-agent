@@ -75,7 +75,7 @@ def _identity_env(monkeypatch, key):
     monkeypatch.setenv(session_router.ENV_AUTHORIZE_URL, _AUTHORIZE_URL)
     monkeypatch.setenv(session_router.ENV_REDIRECT_URI, _REDIRECT_URI)
     monkeypatch.setenv(session_router.ENV_WEB_BASE_URL, _WEB_BASE_URL)
-    monkeypatch.delenv(identity.ENV_ISSUER, raising=False)
+    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
 
     class _Client:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -95,6 +95,7 @@ def _identity_token(key, *, sub: str = _USER, aud: str = identity.AUDIENCE, **ex
     claims: dict[str, Any] = {
         "sub": sub,
         "aud": aud,
+        "iss": "https://gateway.example",
         "iat": now,
         "exp": now + 600,
         "email": "owner@example.com",
@@ -313,7 +314,8 @@ async def test_sign_in_sets_an_httponly_session_cookie(client_and_gateway):
 
     assert response.status_code == 303
     assert response.headers["location"] == f"{_WEB_BASE_URL}/jobs/42"
-    assert gateway.asked == [_USER]
+    assert gateway.asked == []
+    assert gateway.access_asked == [_USER]
 
     raw = response.headers["set-cookie"]
     assert raw.startswith(f"{identity.SESSION_COOKIE}=")
@@ -323,11 +325,10 @@ async def test_sign_in_sets_an_httponly_session_cookie(client_and_gateway):
     assert "secure" in lowered
     assert "path=/" in lowered
 
-    # And what it carries is a session this service can verify, holding the
-    # role the *gateway* reported rather than anything the token claimed.
+    # The cookie contains identity and expiry, never account profile claims.
     claims = identity.verify_session(client.cookies[identity.SESSION_COOKIE])
     assert claims["sub"] == _USER
-    assert claims["role"] == "internal"
+    assert set(claims) == {"sub", "gateway_issuer", "iat", "exp"}
 
 
 async def test_the_code_is_exchanged_here_and_the_token_never_reaches_the_browser(
@@ -457,7 +458,7 @@ async def test_a_refused_exchange_is_a_400_and_an_unreachable_gateway_a_503(key)
 # ── What the gateway says about the account ───────────────────────────────
 
 
-async def test_the_gateways_role_wins_over_the_tokens_claim(key):
+async def test_identity_profile_claims_are_not_copied_into_the_session(key):
     """A role in the identity token must not be able to promote its bearer."""
     gateway = _FakeGateway(
         {"exists": True, "active": True, "role": "internal"},
@@ -470,7 +471,7 @@ async def test_the_gateways_role_wins_over_the_tokens_claim(key):
         await _sign_in(client)
         claims = identity.verify_session(client.cookies[identity.SESSION_COOKIE])
 
-    assert claims["role"] == "internal"
+    assert set(claims) == {"sub", "gateway_issuer", "iat", "exp"}
 
 
 @pytest.mark.parametrize(
@@ -559,22 +560,17 @@ async def test_me_returns_the_current_user(client_and_gateway):
 
     assert response.status_code == 200
     assert response.json()["id"] == _USER
-    assert response.json()["role"] == "internal"
+    assert set(response.json()) == {"id", "agent_access"}
 
 
-async def test_a_display_name_survives_into_me(client_and_gateway_named):
-    """When there *is* a name to report, ``/me`` can prove it.
-
-    Nothing on either gateway contract carries a display name today. This is
-    what makes the fix the right one: the name is minted into the session, so
-    ``/me`` reads it rather than answering ``null`` for the life of the cookie.
-    """
+async def test_a_display_name_does_not_survive_into_me(client_and_gateway_named):
+    """A Gateway profile is never copied into the Agent API."""
     client, _ = client_and_gateway_named
     await _sign_in(client)
 
     me = await client.get("/v1/session/me")
 
-    assert me.json()["user_name"] == "Ada Lovelace"
+    assert set(me.json()) == {"id", "agent_access"}
 
 
 async def test_me_is_401_without_a_session(client_and_gateway):
@@ -623,7 +619,12 @@ async def test_me_is_401_when_the_session_has_expired(client_and_gateway):
     """And says so, so a client knows to sign in rather than to retry."""
     client, _ = client_and_gateway
     expired = jwt.encode(
-        {"sub": _USER, "role": "internal", "exp": int(time.time()) - 1},
+        {
+            "sub": _USER,
+            "gateway_issuer": "https://gateway.example",
+            "iat": int(time.time()) - 600,
+            "exp": int(time.time()) - 1,
+        },
         _SESSION_SECRET,
         algorithm="HS256",
     )
@@ -707,7 +708,7 @@ async def test_login_accepts_a_free_profile_with_explicit_agent_access(key):
         response = await _sign_in(client)
         assert response.status_code == 303
         claims = identity.verify_session(client.cookies[identity.SESSION_COOKIE])
-        assert claims["role"] == "free"
+        assert "role" not in claims
         assert "permissions" not in claims
         assert (await client.get("/v1/session/me")).json()["agent_access"] == {
             "allowed": True,

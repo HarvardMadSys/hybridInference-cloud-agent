@@ -54,11 +54,10 @@ describe('Agent permission validation', () => {
 });
 
 describe('AuthProvider current decision', () => {
-  it('accepts explicit administration for a free account', async () => {
+  it('accepts explicit administration for an identified account', async () => {
     getMe.mockResolvedValue({
       id: 'u1',
-      email: null,
-      role: 'free',
+
       agent_access: { allowed: true, permissions: ['agent.use', 'agent.admin'] },
     });
     render(
@@ -68,11 +67,11 @@ describe('AuthProvider current decision', () => {
     );
     await waitFor(() => expect(current().loading).toBe(false));
     expect(current().isAuthenticated).toBe(true);
-    expect(current().user.is_admin).toBe(true);
+    expect(hasAgentPermission(current().user.agent_access, 'agent.admin')).toBe(true);
   });
 
-  it('keeps an old admin profile identifiable without granting access', async () => {
-    getMe.mockResolvedValue({ id: 'u1', email: null, role: 'admin' });
+  it('keeps an identity response identifiable without granting access', async () => {
+    getMe.mockResolvedValue({ id: 'u1' });
     render(
       <AuthProvider>
         <Consumer />
@@ -80,15 +79,14 @@ describe('AuthProvider current decision', () => {
     );
     await waitFor(() => expect(current().loading).toBe(false));
     expect(current().isAuthenticated).toBe(true);
-    expect(current().user.is_admin).toBe(false);
+    expect(hasAgentPermission(current().user.agent_access, 'agent.admin')).toBe(false);
     expect(hasAgentPermission(current().user.agent_access, 'agent.use')).toBe(false);
   });
 
   it('replaces granted permissions with a revoked decision on refresh', async () => {
     getMe.mockResolvedValue({
       id: 'u1',
-      email: null,
-      role: 'admin',
+
       agent_access: { allowed: true, permissions: ['agent.use', 'agent.admin'] },
     });
     render(
@@ -96,15 +94,18 @@ describe('AuthProvider current decision', () => {
         <Consumer />
       </AuthProvider>,
     );
-    await waitFor(() => expect(current().user?.is_admin).toBe(true));
+    await waitFor(() =>
+      expect(hasAgentPermission(current().user?.agent_access, 'agent.admin')).toBe(true),
+    );
     getMe.mockResolvedValue({
       id: 'u1',
-      email: null,
-      role: 'admin',
+
       agent_access: { allowed: false, permissions: [] },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await waitFor(() => expect(current().user?.is_admin).toBe(false));
+    await waitFor(() =>
+      expect(hasAgentPermission(current().user?.agent_access, 'agent.admin')).toBe(false),
+    );
     expect(current().isAuthenticated).toBe(true);
     expect(current().user.agent_access.allowed).toBe(false);
   });
@@ -112,8 +113,7 @@ describe('AuthProvider current decision', () => {
   it('does not retain previous permissions when refresh is unavailable', async () => {
     getMe.mockResolvedValue({
       id: 'u1',
-      email: null,
-      role: 'admin',
+
       agent_access: { allowed: true, permissions: ['agent.use', 'agent.admin'] },
     });
     render(
@@ -121,10 +121,31 @@ describe('AuthProvider current decision', () => {
         <Consumer />
       </AuthProvider>,
     );
-    await waitFor(() => expect(current().user?.is_admin).toBe(true));
+    await waitFor(() =>
+      expect(hasAgentPermission(current().user?.agent_access, 'agent.admin')).toBe(true),
+    );
     getMe.mockRejectedValue(new Error('Gateway unavailable'));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(current().isAuthenticated).toBe(false));
     expect(current().user).toBeNull();
+  });
+});
+
+it('does not retain profile fields from an older API response', async () => {
+  getMe.mockResolvedValue(
+    Object.assign(
+      { id: 'u1', agent_access: { allowed: true, permissions: ['agent.use' as const] } },
+      { email: 'sentinel@example.test', user_name: 'Sentinel', role: 'admin' },
+    ),
+  );
+  render(
+    <AuthProvider>
+      <Consumer />
+    </AuthProvider>,
+  );
+  await waitFor(() => expect(current().loading).toBe(false));
+  expect(current().user).toEqual({
+    id: 'u1',
+    agent_access: { allowed: true, permissions: ['agent.use'] },
   });
 });

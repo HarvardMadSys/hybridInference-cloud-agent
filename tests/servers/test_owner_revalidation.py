@@ -194,9 +194,7 @@ async def test_admin_permission_is_scoped_separately(
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="https://test"
     ) as client:
-        client.cookies.set(
-            identity.SESSION_COOKIE, identity.mint_session(user_id=_OWNER, email=None, role=role)
-        )
+        client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id=_OWNER))
         response = await client.request(method, "/admin/probe")
     assert response.status_code == expected
     assert gateway.asked == [_OWNER]
@@ -215,3 +213,8 @@ async def test_the_machine_token_stays_independent_of_gateway_permissions(admin_
     assert response.status_code == 200
     assert response.json()["actor"] == "admin-token"
     assert gateway.asked == []
+
+
+@pytest.fixture(autouse=True)
+def _configured_identity_issuer(monkeypatch):
+    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")

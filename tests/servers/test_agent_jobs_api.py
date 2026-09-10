@@ -1118,7 +1118,7 @@ def _browser_session(*, expires_delta=None) -> str:
 
     from cloud_agent.identity import mint_session
 
-    token = mint_session(user_id=_OWNER, email="owner@example.com", role="admin")
+    token = mint_session(user_id=_OWNER)
     if expires_delta is None:
         return token
     import os
@@ -5964,3 +5964,8 @@ async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspac
     for suffix, body in (("/follow-ups", {"prompt": "continue"}), ("/fork", {}), ("/cancel", {})):
         response = await client.post(f"/v1/agent/jobs/{job_id}{suffix}", json=body)
         assert response.status_code == 404, (suffix, response.text)
+
+
+@pytest.fixture(autouse=True)
+def _configured_identity_issuer(monkeypatch):
+    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")

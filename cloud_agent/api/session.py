@@ -32,7 +32,7 @@ to ``redirect_uri?code=…``, and a redirect is a GET navigation.
 
 **Identity and admission are separate.** The identity token proves who signs in;
 the Gateway's current Agent access decision grants admission. Sessions retain
-profile fields for compatibility, while every owner/admin request and ``/me``
+only the user identifier and issuer, while every owner/admin request and ``/me``
 reads current permissions. Account roles in tokens or profiles confer no Agent
 permission.
 
@@ -361,7 +361,7 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
 
     Args:
         identity_token: The gateway's RS256 identity token.
-        gateway: The gateway's contracts, for the account's status.
+        gateway: The gateway's contracts, for current Agent permissions.
 
     Returns:
         The signed session, and the user record the routes answer with.
@@ -387,48 +387,10 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
 
     decision = await require_agent_access(gateway, user_id)
     try:
-        status = await gateway.user_status(user_id)
-    except GatewayError as exc:
-        logger.warning(
-            "agent_session_status_unavailable",
-            exc_info=True,
-            extra={"event": "agent_session_status_unavailable", "user_id": user_id},
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="Cannot confirm this account with the gateway; try again shortly.",
-        ) from exc
-
-    # Retain the existing profile fields for compatibility. They never grant
-    # Agent permissions; only the access decision above can do that.
-    role = str(status.get("role") or "free")
-    email = status.get("email") or claims.get("email")
-    email = str(email) if email else None
-    # Read from either source and then **minted into the session**, because the
-    # session is the only thing ``/me`` can read. Sourcing it here and returning
-    # it without minting it is what made the two routes disagree: login answered
-    # with a name and ``/me`` answered ``null`` for the same signed-in person,
-    # for the whole life of the cookie. Today no gateway contract reports a name
-    # at all, so both answer ``null`` — but they now do so for the same reason,
-    # and a gateway that grows the field is answered consistently without a
-    # second change here.
-    user_name = status.get("user_name") or claims.get("user_name")
-    user_name = str(user_name) if user_name else None
-
-    try:
-        session = identity.mint_session(
-            user_id=user_id, email=email, role=role, user_name=user_name
-        )
+        session = identity.mint_session(user_id=user_id)
     except identity.IdentityNotConfigured as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
-
-    return session, {
-        "id": user_id,
-        "email": email,
-        "role": role,
-        "user_name": user_name,
-        "agent_access": decision.public().model_dump(),
-    }
+    return session, {"id": user_id, "agent_access": decision.public().model_dump()}
 
 
 def _set_session_cookie(response: Response, session: str) -> None:
@@ -491,8 +453,5 @@ async def session_me(
     decision = await resolve_agent_access(gateway, user["user_id"])
     return SessionUserResponse(
         id=user["user_id"],
-        email=user.get("email"),
-        role=user["role"],
-        user_name=user.get("user_name"),
         agent_access=decision.public(),
     )

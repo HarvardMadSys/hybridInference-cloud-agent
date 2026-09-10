@@ -91,6 +91,9 @@ export const en = {
   'sidebar.openSettings': 'Open settings',
 
   // ── Settings ────────────────────────────────────────────────────────────
+  'settings.account': 'My account',
+  'settings.accountManaged': 'Your account is managed by the Gateway.',
+  'settings.manageAccount': 'Manage account',
   'settings.title': 'Settings',
   'settings.close': 'Close settings',
   'settings.done': 'Done',

@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import Link from 'next/link';
-import { useAuth, useLocale, useTheme } from '@/components/providers';
+import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
+import { useLocale, useTheme } from '@/components/providers';
 import { LOCALES, LOCALE_LABELS, isLocale } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
-import { CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
+import { AccountIcon, CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
 
 const THEME_ICONS: Record<ThemePreference, typeof SunIcon> = {
   light: SunIcon,
@@ -31,7 +32,7 @@ const FOCUSABLE =
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const { t, locale, setLocale } = useLocale();
   const { preference, setPreference } = useTheme();
-  const { state } = useAuth();
+  const { branding } = useSiteConfig();
 
   const panel = useRef<HTMLDivElement>(null);
   const titleId = 'settings-dialog-title';
@@ -69,9 +70,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     },
     [onClose],
   );
-
-  const name = state.user?.user_name || state.user?.email || '';
-  const email = state.user?.email ?? '';
 
   return (
     <div
@@ -115,23 +113,27 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {name ? (
-            <div className="mb-5 flex items-center gap-3">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-crimson/[0.08] text-[12px] font-semibold text-crimson ring-1 ring-inset ring-crimson/10 dark:bg-crimson/20 dark:text-crimson-light dark:ring-crimson/25">
-                {initials(name, email)}
-              </span>
-              <span className="min-w-0">
-                <span className="block truncate text-[13px] font-medium text-gray-900 dark:text-gray-100">
-                  {name}
-                </span>
-                {email && email !== name ? (
-                  <span className="block truncate text-[12px] text-gray-500 dark:text-gray-400">
-                    {email}
-                  </span>
-                ) : null}
-              </span>
+          <div className="mb-5 flex items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-crimson/[0.08] text-crimson dark:bg-crimson/20 dark:text-crimson-light">
+              <AccountIcon />
+            </span>
+            <div className="min-w-0 text-[13px]">
+              <p className="font-medium text-gray-900 dark:text-gray-100">
+                {t('settings.account')}
+              </p>
+              <p className="mt-1 text-gray-500 dark:text-gray-400">
+                {t('settings.accountManaged')}
+              </p>
+              {branding.gatewayUrl && (
+                <a
+                  href={`${branding.gatewayUrl}/dashboard`}
+                  className="mt-1 inline-block text-crimson dark:text-crimson-light"
+                >
+                  {t('settings.manageAccount')}
+                </a>
+              )}
             </div>
-          ) : null}
+          </div>
 
           <section aria-labelledby="settings-appearance">
             <h3 id="settings-appearance" className={SECTION_TITLE}>
@@ -230,8 +232,4 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       </div>
     </div>
   );
-}
-
-function initials(name: string, email: string): string {
-  return (name || email || '?').slice(0, 2).toUpperCase();
 }

@@ -60,7 +60,7 @@ USER_AGENT = "hybridinference-cloud-agent"
 #: turn the intended bounded revocation window into an unbounded one.
 JWKS_CACHE_LIFESPAN_S = 5 * 60
 
-#: Our own identity/profile session, with a fixed eight-hour expiry.
+#: Our own identity session, with a fixed eight-hour expiry.
 #:
 #: Every protected request resolves Agent permissions afresh at the Gateway.
 #: No role or permission in a session is an authorization cache. The expiry
@@ -144,6 +144,14 @@ def reset_jwks_cache() -> None:
     _jwk_client_url = ""
 
 
+def gateway_issuer() -> str:
+    """Return the explicitly configured identity issuer, never the transport URL."""
+    issuer = (os.environ.get(ENV_ISSUER) or "").strip()
+    if not issuer:
+        raise IdentityNotConfigured(f"{ENV_ISSUER} must be set to verify Gateway identity")
+    return issuer
+
+
 def verify_identity_token(token: str) -> dict[str, Any]:
     """Verify a gateway identity token and return its claims.
 
@@ -154,12 +162,13 @@ def verify_identity_token(token: str) -> dict[str, Any]:
         The verified claims.
 
     Raises:
-        IdentityNotConfigured: If this deployment has no JWKS URL.
+        IdentityNotConfigured: If this deployment has no JWKS URL or issuer.
         IdentityError: If the token is missing, malformed, expired, signed by
-            an unknown key, or issued for another audience.
+            an unknown key, or issued by another issuer or for another audience.
     """
     if not token:
         raise IdentityError("no identity token presented")
+    issuer = gateway_issuer()
     try:
         signing_key = _jwks_client().get_signing_key_from_jwt(token)
     except IdentityNotConfigured:
@@ -169,19 +178,20 @@ def verify_identity_token(token: str) -> dict[str, Any]:
         # open here would accept any token during a gateway outage.
         raise IdentityError(f"cannot resolve the signing key: {exc}") from exc
 
-    issuer = (os.environ.get(ENV_ISSUER) or "").strip()
     try:
-        return jwt.decode(
+        claims = jwt.decode(
             token,
             signing_key.key,
             algorithms=["RS256"],
             audience=AUDIENCE,
-            # Issuer is checked when configured. Left optional because a
-            # deployment may front the gateway at a different name than it
-            # mints; pinning it wrongly locks everyone out.
-            issuer=issuer or None,
-            options={"require": ["exp", "sub"]},
+            issuer=issuer,
+            options={"require": ["iss", "aud", "iat", "exp", "sub"]},
         )
+        if not isinstance(claims["sub"], str) or not claims["sub"]:
+            raise IdentityError("invalid identity subject")
+        # Older Gateways may still send profile claims during rollout. Never
+        # copy them into this service's identity context, API or session.
+        return {key: claims[key] for key in ("iss", "aud", "sub", "iat", "exp")}
     except jwt.PyJWTError as exc:
         raise IdentityError(f"invalid identity token: {exc}") from exc
 
@@ -212,73 +222,38 @@ def _session_secret() -> str:
     return secret
 
 
-def mint_session(
-    *, user_id: str, email: str | None, role: str, user_name: str | None = None
-) -> str:
-    """Mint the session token the browser holds.
-
-    HS256 rather than RS256: this token is issued and verified by the same
-    service, so there is nothing to publish and a symmetric key is the simpler
-    correct choice.
-
-    **Everything the session routes answer with is minted in here.** ``/me`` has
-    nothing but these claims to read, so anything login reports that this token
-    does not carry is something the two routes will disagree about for the whole
-    life of the cookie.
-
-    Args:
-        user_id: The gateway's user identifier, carried as ``sub``.
-        email: The user's email, if known.
-        role: The user's role at the time of sign-in.
-        user_name: The user's display name, if the gateway reported one.
-            Omitted from the claims when absent — which is every deployment
-            today, since neither the identity token nor the user-status record
-            carries a name.
-
-    Returns:
-        A signed session token.
-
-    Raises:
-        IdentityNotConfigured: If no session secret is set.
-    """
+def mint_session(*, user_id: str) -> str:
+    """Mint a minimal Agent session bound to the configured Gateway issuer."""
+    if not isinstance(user_id, str) or not user_id:
+        raise IdentityError("invalid session subject")
     now = int(time.time())
-    claims: dict[str, Any] = {
+    claims = {
         "sub": user_id,
-        "role": role,
+        "gateway_issuer": gateway_issuer(),
         "iat": now,
         "exp": now + SESSION_TTL_S,
     }
-    if email:
-        claims["email"] = email
-    if user_name:
-        claims["user_name"] = user_name
     return jwt.encode(claims, _session_secret(), algorithm="HS256")
 
 
 def verify_session(token: str) -> dict[str, Any]:
-    """Verify a session token and return its claims.
-
-    Args:
-        token: The cookie's value.
-
-    Returns:
-        The verified claims.
-
-    Raises:
-        IdentityNotConfigured: If no session secret is set.
-        IdentityError: If the session is missing, malformed, or expired.
-    """
+    """Verify a minimal session and reject legacy or foreign-issuer cookies."""
     if not token:
         raise IdentityError("no session presented")
     try:
-        return jwt.decode(
+        claims = jwt.decode(
             token,
             _session_secret(),
             algorithms=["HS256"],
-            options={"require": ["exp", "sub"]},
+            options={"require": ["exp", "iat", "sub", "gateway_issuer"]},
         )
     except jwt.PyJWTError as exc:
         raise IdentityError(f"invalid session: {exc}") from exc
+    if set(claims) != {"sub", "gateway_issuer", "iat", "exp"}:
+        raise IdentityError("unsupported session claims; sign in again")
+    if claims["gateway_issuer"] != gateway_issuer():
+        raise IdentityError("session belongs to another Gateway")
+    return claims
 
 
 #: Domain separation for the two things this service signs. Both are HS256

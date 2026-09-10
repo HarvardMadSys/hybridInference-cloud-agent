@@ -72,7 +72,9 @@ async def test_pkce_identity_internal_contracts_and_inference_grant() -> None:
             algorithms=["RS256"],
             audience="cloud-agent",
         )
-        status = await client.get(f"/internal/users/{gateway.USER_ID}/status", headers=internal)
+        access = await client.get(
+            f"/internal/users/{gateway.USER_ID}/agent-access", headers=internal
+        )
         catalog = await client.get(
             "/internal/model-catalog", params={"user_id": gateway.USER_ID}, headers=internal
         )
@@ -96,7 +98,12 @@ async def test_pkce_identity_internal_contracts_and_inference_grant() -> None:
     assert "Continue locally" in consent.text
     assert continued.status_code == 302
     assert claims["sub"] == gateway.USER_ID
-    assert status.json()["active"] is True
+    assert set(claims) == {"sub", "iss", "aud", "iat", "exp"}
+    assert access.json() == {
+        "user_id": gateway.USER_ID,
+        "allowed": True,
+        "permissions": ["agent.use", "agent.admin"],
+    }
     assert catalog.json()["models"] == [gateway.MODEL_ID]
     assert minted.json()["allowed_models"] == [gateway.MODEL_ID]
     assert "event: message_stop" in inference.text

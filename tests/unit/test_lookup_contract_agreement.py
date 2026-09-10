@@ -36,11 +36,6 @@ CATALOG_READS = {
     "aliases": "GatewayClient.model_catalog_with_aliases",
 }
 
-STATUS_READS = {
-    "role": "session._establish_session — profile metadata, never Agent authorization",
-    "email": "session._establish_session — preferred over the identity token's",
-}
-
 
 ACCESS_READS = {
     "user_id": "GatewayClient.agent_access — exact subject binding",
@@ -61,7 +56,6 @@ def _declared(path: str) -> set[str]:
     ("path", "reads"),
     [
         ("/internal/model-catalog", CATALOG_READS),
-        ("/internal/users/{user_id}/status", STATUS_READS),
         ("/internal/users/{user_id}/agent-access", ACCESS_READS),
     ],
 )

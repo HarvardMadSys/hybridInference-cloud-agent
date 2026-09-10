@@ -9,9 +9,9 @@ access without changing this service.
 
 `agent.use` permits the owner API, subject to the existing job ownership checks.
 `agent.admin` additionally permits the runner-host administration API. The latter
-requires `agent.use`. Session `role` remains profile metadata and is never a
-substitute for either permission. The Agent database needs no account table or
-schema migration for this change.
+requires `agent.use`. Sessions contain no account role or profile. The access
+policy migration itself needs no account table; the subsequent
+[minimal identity migration](minimal-identity.md) records the database issuer.
 
 Login checks the current decision before issuing a session. Existing sessions
 are checked again on each protected owner/admin request and on `/v1/session/me`.
@@ -50,6 +50,11 @@ without the endpoint is incompatible with the permission-consuming Agent and
 causes protected requests to fail closed. To roll back the Gateway to such a
 version, first roll back the Agent backend and web app to a mutually compatible
 release. Never compensate by restoring role-based fallback in the new Agent.
+
+After adopting the minimal-identity release, follow its
+[upgrade and rollback constraints](minimal-identity.md#upgrade-an-existing-deployment)
+instead: older Agent binaries do not enforce the database's stored issuer, and
+existing profile cookies must be replaced through a fresh login.
 
 The API's wire schema and errors are recorded in
 [`internal-lookups.openapi.yaml`](../contracts/internal-lookups.openapi.yaml).

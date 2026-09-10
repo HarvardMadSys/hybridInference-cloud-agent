@@ -50,6 +50,7 @@ def keypair():
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     identity.reset_jwks_cache()
+    monkeypatch.setenv("GATEWAY_ISSUER", ISSUER)
     monkeypatch.delenv(ENV_JWKS_URL, raising=False)
     monkeypatch.delenv(ENV_SESSION_SECRET, raising=False)
     yield
@@ -108,7 +109,7 @@ def test_a_valid_token_verifies(monkeypatch, keypair) -> None:
     _serve_key(monkeypatch, key)
     claims = verify_identity_token(_token(key))
     assert claims["sub"] == "user_1"
-    assert claims["role"] == "pro"
+    assert "role" not in claims
 
 
 def test_a_token_for_another_audience_is_refused(monkeypatch, keypair) -> None:
@@ -205,7 +206,7 @@ def test_an_empty_token_is_refused() -> None:
         verify_identity_token("")
 
 
-def test_the_issuer_is_checked_when_configured(monkeypatch, keypair) -> None:
+def test_the_issuer_must_match_the_configured_gateway(monkeypatch, keypair) -> None:
     key, _ = keypair
     _serve_key(monkeypatch, key)
     monkeypatch.setenv("GATEWAY_ISSUER", ISSUER)
@@ -221,20 +222,24 @@ def test_the_issuer_is_checked_when_configured(monkeypatch, keypair) -> None:
 
 def test_a_session_round_trips(monkeypatch) -> None:
     monkeypatch.setenv(ENV_SESSION_SECRET, SESSION_SECRET)
-    claims = verify_session(mint_session(user_id="user_1", email="a@b.test", role="pro"))
+    claims = verify_session(mint_session(user_id="user_1"))
     assert claims["sub"] == "user_1"
-    assert claims["email"] == "a@b.test"
-    assert claims["role"] == "pro"
+    assert "role" not in claims
 
 
-def test_a_session_omits_an_unknown_email(monkeypatch) -> None:
+def test_a_session_contains_only_minimal_identity(monkeypatch) -> None:
     monkeypatch.setenv(ENV_SESSION_SECRET, SESSION_SECRET)
-    assert "email" not in verify_session(mint_session(user_id="user_1", email=None, role="free"))
+    assert set(verify_session(mint_session(user_id="user_1"))) == {
+        "sub",
+        "gateway_issuer",
+        "iat",
+        "exp",
+    }
 
 
 def test_a_session_signed_with_another_secret_is_refused(monkeypatch) -> None:
     monkeypatch.setenv(ENV_SESSION_SECRET, SESSION_SECRET)
-    token = mint_session(user_id="user_1", email=None, role="pro")
+    token = mint_session(user_id="user_1")
     monkeypatch.setenv(ENV_SESSION_SECRET, "a-different-secret-also-long-enough-x")
     with pytest.raises(IdentityError):
         verify_session(token)
@@ -251,7 +256,7 @@ def test_an_expired_session_is_refused(monkeypatch) -> None:
 def test_no_session_secret_is_not_configured() -> None:
     """Refusing beats defaulting: a shared default forges every deployment."""
     with pytest.raises(IdentityNotConfigured):
-        mint_session(user_id="user_1", email=None, role="pro")
+        mint_session(user_id="user_1")
 
 
 def test_a_short_session_secret_is_refused(monkeypatch) -> None:
@@ -263,7 +268,7 @@ def test_a_short_session_secret_is_refused(monkeypatch) -> None:
     """
     monkeypatch.setenv(ENV_SESSION_SECRET, "too-short")
     with pytest.raises(IdentityNotConfigured, match="at least"):
-        mint_session(user_id="user_1", email=None, role="pro")
+        mint_session(user_id="user_1")
 
 
 def test_an_identity_token_is_not_accepted_as_a_session(monkeypatch, keypair) -> None:
@@ -314,3 +319,51 @@ def test_the_jwks_fetch_identifies_itself(monkeypatch) -> None:
         "the User-Agent should name this service, so an operator reading a "
         f"gateway's access log can tell who was refused; got {agent!r}"
     )
+
+
+def test_identity_profiles_are_discarded_even_from_an_older_gateway(monkeypatch, keypair):
+    key, _ = keypair
+    _serve_key(monkeypatch, key)
+    claims = verify_identity_token(_token(key, email="sentinel@example.test", user_name="Sentinel"))
+    assert set(claims) == {"iss", "aud", "sub", "iat", "exp"}
+
+
+def test_a_session_without_the_namespace_is_refused(monkeypatch):
+    monkeypatch.setenv(ENV_SESSION_SECRET, SESSION_SECRET)
+    legacy = jwt.encode(
+        {
+            "sub": "user_1",
+            "role": "admin",
+            "email": "sentinel@example.test",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 600,
+        },
+        SESSION_SECRET,
+        algorithm="HS256",
+    )
+    with pytest.raises(IdentityError):
+        verify_session(legacy)
+
+
+def test_changing_gateway_rejects_old_sessions_even_with_the_same_secret(monkeypatch):
+    monkeypatch.setenv(ENV_SESSION_SECRET, SESSION_SECRET)
+    token = mint_session(user_id="same-user-id")
+    monkeypatch.setenv("GATEWAY_ISSUER", "https://other.example")
+    with pytest.raises(IdentityError, match="another Gateway"):
+        verify_session(token)
+
+
+def test_session_profiles_are_rejected_instead_of_retained(monkeypatch):
+    monkeypatch.setenv(ENV_SESSION_SECRET, SESSION_SECRET)
+    claims = verify_session(mint_session(user_id="user_1"))
+    claims["email"] = "sentinel@example.test"
+    token = jwt.encode(claims, SESSION_SECRET, algorithm="HS256")
+    with pytest.raises(IdentityError, match="unsupported session claims"):
+        verify_session(token)
+
+
+def test_issuer_is_required_even_when_the_identity_signature_verifies(monkeypatch, keypair):
+    key, _ = keypair
+    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
+    with pytest.raises(IdentityNotConfigured, match="GATEWAY_ISSUER"):
+        verify_identity_token(_token(key))

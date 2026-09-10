@@ -52,7 +52,7 @@ def _session_env(monkeypatch):
 
 def _session(*, role: str = "internal", expired: bool = False, email: str | None = None) -> str:
     """Mint what ``/v1/session/login`` would have set."""
-    token = identity.mint_session(user_id=_USER, email=email, role=role)
+    token = identity.mint_session(user_id=_USER)
     if not expired:
         return token
     claims = jwt.decode(token, options={"verify_signature": False})
@@ -128,16 +128,7 @@ async def test_the_session_cookie_authenticates(client: AsyncClient) -> None:
     response = await client.get("/who")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "user_id": _USER,
-        "email": "owner@example.com",
-        # Absent from the claims, and therefore absent here — the same answer
-        # ``/v1/session/login`` gives, which is the point of carrying it in the
-        # session at all.
-        "user_name": None,
-        "role": "internal",
-        "authenticated": True,
-    }
+    assert response.json() == {"user_id": _USER, "authenticated": True}
 
 
 async def test_a_bearer_session_authenticates_too(client: AsyncClient) -> None:
@@ -195,18 +186,18 @@ async def test_a_deployment_with_no_session_secret_says_503(
     assert response.status_code == 503
 
 
-async def test_the_session_carries_the_display_name_when_there_is_one(
+async def test_the_identity_context_contains_no_profile(
     client: AsyncClient,
 ) -> None:
-    """Whatever ``/me`` answers has to be provable from the cookie alone."""
+    """Downstream owner handlers receive only the verified user identifier."""
     client.cookies.set(
         identity.SESSION_COOKIE,
-        identity.mint_session(user_id=_USER, email=None, role="free", user_name="Ada Lovelace"),
+        identity.mint_session(user_id=_USER),
     )
 
     response = await client.get("/who")
 
-    assert response.json()["user_name"] == "Ada Lovelace"
+    assert response.json() == {"user_id": _USER, "authenticated": True}
 
 
 async def test_a_worker_token_is_not_read_as_a_session(client: AsyncClient) -> None:
@@ -381,3 +372,8 @@ async def test_a_store_without_the_method_is_a_no_op() -> None:
 async def test_a_failed_audit_write_never_undoes_the_action() -> None:
     """The drain already happened. Raising here would report it as failed."""
     await log_admin_action(_RecordingStore(explode=True), "203.0.113.9", "x.y")
+
+
+@pytest.fixture(autouse=True)
+def _configured_identity_issuer(monkeypatch):
+    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")

@@ -174,6 +174,7 @@ upgrade_existing_env() {
   append_env_if_missing AGENT_DEPLOYMENT_SHA "local-$(local_project_name)"
   append_env_if_missing LOCAL_AGENT_EGRESS_NETWORK freeinference-local-agent-egress
   append_env_if_missing LOCAL_CHAT_NETWORK_POOL 10.240.0.0/16
+  append_env_if_missing GATEWAY_ISSUER "freeinference-local"
   append_env_if_missing GATEWAY_AUTHORIZE_URL "http://127.0.0.1:${edge_port}/authorize"
   append_env_if_missing AGENT_SESSION_REDIRECT_URI \
     "http://127.0.0.1:${edge_port}/api/v1/session/callback"
@@ -206,6 +207,7 @@ ensure_env() {
       "AGENT_POSTGRES_PASSWORD=$postgres_password" \
       "AGENT_DATABASE_URL=postgresql://cloudagent:$postgres_password@postgres:5432/cloudagent" \
       'GATEWAY_BASE_URL=http://local-gateway:8080' \
+      'GATEWAY_ISSUER=freeinference-local' \
       'GATEWAY_JWKS_URL=http://local-gateway:8080/v1/identity/jwks' \
       "GATEWAY_GRANT_DISPATCH_TOKEN=$dispatch_token" \
       "AGENT_SESSION_SECRET=$session_secret" \

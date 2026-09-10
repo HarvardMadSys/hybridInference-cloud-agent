@@ -243,20 +243,6 @@ class GatewayClient:
                 efforts[str(model)] = levels
         return efforts
 
-    async def user_status(self, user_id: str) -> dict[str, Any]:
-        """Report whether a user exists, may sign in, and with what role.
-
-        Args:
-            user_id: The gateway's user identifier.
-
-        Returns:
-            The gateway's status record.
-
-        Raises:
-            GatewayError: If the status cannot be read.
-        """
-        return await self._get(f"/internal/users/{user_id}/status")
-
     async def agent_access(self, user_id: str) -> AgentAccessDecision:
         """Read the current Agent policy decision without a role-based fallback.
 
