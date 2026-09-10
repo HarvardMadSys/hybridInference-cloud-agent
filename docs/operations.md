@@ -51,6 +51,25 @@ Two properties are load-bearing and easy to break by accident:
   write the event log, upload a replacement patch, or move the job to a
   terminal state; the trusted runner holds the token that can.
 
+### Automatic task titles
+
+New conversations initially use the first meaningful prompt line, shortened to
+36 characters. After the first turn's first claim is dispatched, the control
+plane makes one background title request to `GATEWAY_BASE_URL` using that
+attempt's existing inference grant and selected model. This is a separate
+request, not a CLI turn: it does not alter the task prompt or conversation.
+It uses at most 4,000 input characters and 256 output tokens, has a 10-second
+deadline, and is attributed to the same owner and job by the gateway.
+
+The generated title summarizes the task in the user's language and retains
+relevant identifiers. Failed or malformed responses leave the short fallback;
+there are no automatic retries. This includes reasoning-only responses from
+models that consume the output allowance without returning a title. The UI
+briefly refreshes title metadata during the first turn and its completion.
+Manual renames always take precedence, including a rename to the same text.
+Follow-ups keep the conversation name; forks inherit it. Existing conversation
+titles are preserved by migration and are not automatically regenerated.
+
 ## Verified
 
 Against real components on a developer machine:

@@ -35,7 +35,7 @@ import secrets
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 
 from cloud_agent.api.deps import (
@@ -160,6 +160,7 @@ from cloud_agent.source_control import (
     issue_oauth_state,
 )
 from cloud_agent.storage.store import RUNNING, SUCCEEDED, TERMINAL_STATES
+from cloud_agent.task_titles import generate_thread_title
 from cloud_agent.terminal_coordination import resume_settled_terminal
 from cloud_agent.thread_stats import summarize_thread
 from cloud_agent.tokens import (
@@ -461,6 +462,7 @@ def _job_response(
         repo=job["repo"],
         task_prompt=job["task_prompt"],
         title=job.get("title"),
+        title_source=job.get("title_source"),
         runtime=job["runtime"],
         model=job["model"],
         execution_profile=job.get("execution_profile", "trusted-v1"),
@@ -3432,6 +3434,7 @@ async def _mint_sandbox_grant(
 @router.post("/worker/claim", response_model=WorkerClaimResponse | None)
 async def worker_claim(
     body: WorkerClaimRequest,
+    background_tasks: BackgroundTasks,
     claiming_host: dict[str, str] = Depends(verify_claiming_host),
     store: AgentJobStore | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
@@ -3589,7 +3592,7 @@ async def worker_claim(
                 },
             ) from exc
 
-    return WorkerClaimResponse(
+    response = WorkerClaimResponse(
         job_id=claim["id"],
         thread_id=claim.get("thread_id"),
         parent_job_id=claim.get("parent_job_id"),
@@ -3617,6 +3620,19 @@ async def worker_claim(
         mcp_servers=list(claim.get("mcp_servers") or []),
         metadata=claim["metadata"],
     )
+    if claim.get("title_generation_pending") is True:
+        # FastAPI sends the claim first; title inference cannot delay the runner.
+        # The store only marks the first eligible claim, so follow-ups and retries
+        # retain a stable title without making further title-generation calls.
+        background_tasks.add_task(
+            generate_thread_title,
+            job_store,
+            **fence,
+            prompt=claim["task_prompt"],
+            model=claim["model"],
+            sandbox_token=sandbox_token,
+        )
+    return response
 
 
 @router.post("/worker/jobs/{job_id}/heartbeat", response_model=WorkerHeartbeatResponse)

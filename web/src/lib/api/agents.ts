@@ -190,6 +190,7 @@ export interface AgentJobUsageApi {
 
 export interface AgentJobApi {
   title?: string | null;
+  title_source?: 'fallback' | 'generated' | 'manual' | 'inherited' | null;
   id: string;
   /** Actual execution timestamps, matching duration_ms's selected attempt. */
   started_at?: string | null;

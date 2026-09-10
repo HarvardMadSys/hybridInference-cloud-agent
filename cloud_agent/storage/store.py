@@ -57,6 +57,7 @@ from cloud_agent.host_pool import (
     transition_allowed,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.task_titles import fallback_title
 from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
 
 if TYPE_CHECKING:
@@ -274,6 +275,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "base_sha": row["base_sha"],
         "task_prompt": row["task_prompt"],
         "title": row.get("title") or row.get("session_title"),
+        "title_source": row.get("title_source"),
         "setup_script": row["setup_script"],
         "runtime": row["runtime"],
         "model": row["model"],
@@ -319,7 +321,7 @@ def _session_query(*, filter_repo: bool = False) -> str:
     repo_filter = "AND ($5::text IS NULL OR t.repo = $5)" if filter_repo else ""
     return f"""
 WITH latest AS (
-    SELECT {_QUALIFIED_JOB_COLUMNS}, t.id AS session_id, t.title AS session_title,
+    SELECT {_QUALIFIED_JOB_COLUMNS}, t.id AS session_id, t.title AS session_title, t.title_source,
            t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
            CASE
                WHEN j.state IN ('queued', 'waiting') THEN 'queued'
@@ -913,13 +915,13 @@ class AgentJobStore:
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 """
-                INSERT INTO agent_threads (id, user_id, repo, title)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO agent_threads (id, user_id, repo, title, title_source)
+                VALUES ($1, $2, $3, $4, 'fallback')
                 """,
                 thread_id,
                 user_id,
                 repo,
-                task_prompt.splitlines()[0][:160],
+                fallback_title(task_prompt),
             )
             row = await conn.fetchrow(
                 f"""
@@ -954,7 +956,10 @@ class AgentJobStore:
                 job_id,
                 task_prompt,
             )
-        return _job_row_to_dict(row)
+        result = _job_row_to_dict(row)
+        result["title"] = fallback_title(task_prompt)
+        result["title_source"] = "fallback"
+        return result
 
     async def create_follow_up(
         self,
@@ -990,7 +995,7 @@ class AgentJobStore:
             if requested is None:
                 return None
             thread = await conn.fetchrow(
-                "SELECT id, title, pinned_at, archived_at FROM agent_threads "
+                "SELECT id, title, title_source, pinned_at, archived_at FROM agent_threads "
                 "WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
                 requested["thread_id"],
                 user_id,
@@ -1114,6 +1119,7 @@ class AgentJobStore:
             )
         result = _job_row_to_dict(row)
         result["title"] = thread["title"]
+        result["title_source"] = thread["title_source"]
         result["pinned_at"] = thread["pinned_at"]
         return result
 
@@ -1730,8 +1736,8 @@ class AgentJobStore:
                 )
                 await conn.execute(
                     """
-                    INSERT INTO agent_threads (id, user_id, repo, title)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO agent_threads (id, user_id, repo, title, title_source)
+                    VALUES ($1, $2, $3, $4, 'inherited')
                     """,
                     operation["target_thread_id"],
                     operation["user_id"],
@@ -2477,7 +2483,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, t.title, t.pinned_at, t.archived_at, t.deleted_at,
+                SELECT {_QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at, t.deleted_at,
                        to_jsonb(s) AS thread_sandbox
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
@@ -2504,7 +2510,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, t.title, t.pinned_at, t.archived_at
+                SELECT {_QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
@@ -2870,7 +2876,7 @@ class AgentJobStore:
             row = await conn.fetchrow(
                 """
                 UPDATE agent_threads t
-                SET title = $3
+                SET title = $3, title_source = 'manual'
                 WHERE t.user_id = $2
                   AND t.deleted_at IS NULL
                   AND EXISTS (
@@ -2884,6 +2890,55 @@ class AgentJobStore:
                 title,
             )
         return dict(row) if row is not None else None
+
+    async def set_generated_thread_title(
+        self, *, job_id: str, attempt_id: int, lease_generation: int, title: str
+    ) -> bool:
+        """Save a first-turn title while its running/successful attempt remains current."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            # Match follow-up/fork lock ordering: thread before job. Locking the
+            # source also makes a simultaneous manual rename win in either order.
+            thread_id = await conn.fetchval(
+                """
+                SELECT t.id FROM agent_threads t
+                JOIN agent_jobs j ON j.thread_id = t.id
+                WHERE j.id = $1 AND j.turn_no = 1
+                  AND t.title_source = 'fallback' AND t.deleted_at IS NULL
+                FOR UPDATE OF t
+                """,
+                job_id,
+            )
+            if thread_id is None:
+                return False
+            live = await conn.fetchval(
+                """
+                SELECT a.id FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                WHERE j.id = $1 AND j.current_attempt_id = a.id
+                  AND a.id = $2 AND a.lease_generation = $3 AND a.attempt_no = 1
+                  AND (
+                      (j.state = 'running' AND a.status = 'running'
+                       AND a.lease_expires_at > clock_timestamp())
+                      OR (j.state = 'succeeded' AND a.status = 'finished')
+                  )
+                FOR SHARE OF a, j
+                """,
+                job_id,
+                attempt_id,
+                lease_generation,
+            )
+            if live is None:
+                return False
+            updated = await conn.fetchval(
+                """
+                UPDATE agent_threads SET title = $2, title_source = 'generated'
+                WHERE id = $1 AND title_source = 'fallback' AND deleted_at IS NULL
+                RETURNING id
+                """,
+                thread_id,
+                title,
+            )
+            return updated is not None
 
     async def set_thread_pinned(
         self, *, job_id: str, user_id: str, pinned: bool
@@ -3635,8 +3690,10 @@ class AgentJobStore:
             await self._advance_waiting_follow_ups(conn)
             job_row = await conn.fetchrow(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox
+                SELECT {_QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox,
+                       t.title_source
                 FROM agent_jobs j
+                JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN {_THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
@@ -3766,6 +3823,11 @@ class AgentJobStore:
         claim["current_attempt_id"] = attempt["id"]
         claim["attempt_id"] = attempt["id"]
         claim["attempt_no"] = attempt["attempt_no"]
+        claim["title_generation_pending"] = (
+            job_row["title_source"] == "fallback"
+            and job_row["turn_no"] == 1
+            and attempt["attempt_no"] == 1
+        )
         claim["lease_generation"] = attempt["lease_generation"]
         # The stamp as written, not as the host row reads later: a rolling
         # upgrade heartbeat can move that row after this attempt starts.
