@@ -43,15 +43,20 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_agent_gitlab_oauth,
     get_agent_job_store,
+    get_attempt_commands,
     get_conversation_commands,
     get_current_user,
     get_gateway_client,
     get_grant_client,
+    get_grant_repository,
     get_host_pool,
     get_log_store,
     get_mcp_connections,
+    get_source_control_repository,
     looks_like_agent_token,
+    require_attempts,
     require_conversation_commands,
+    require_grants,
     require_host_pool,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
@@ -202,9 +207,16 @@ from cloud_agent_host.workspace_browser import (
 )
 
 if TYPE_CHECKING:
+    from cloud_agent.ports.attempts import AttemptCommands
+    from cloud_agent.ports.conversation_queries import ConversationQueries
     from cloud_agent.ports.conversations import ConversationCommands
+    from cloud_agent.ports.grants import GrantRepository
     from cloud_agent.ports.host_pool import HostPoolRepository
     from cloud_agent.ports.mcp import McpConnectionRepository
+    from cloud_agent.ports.sandboxes import SandboxRepository
+    from cloud_agent.ports.source_control import (
+        SourceControlRepository as SourceControlGrants,
+    )
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
@@ -533,7 +545,7 @@ def _event_response(event: dict[str, Any]) -> AgentJobEvent:
 
 
 async def _owned_job(
-    store: AgentJobStore,
+    conversations: ConversationQueries,
     job_id: str,
     user: dict[str, Any],
 ) -> dict[str, Any]:
@@ -542,7 +554,7 @@ async def _owned_job(
     A job owned by someone else is reported as 404 rather than 403 so job ids
     cannot be probed for existence across accounts.
     """
-    job = await store.get_job(job_id)
+    job = await conversations.get_job(job_id)
     if job is None or job["user_id"] != user["user_id"] or job.get("deleted_at") is not None:
         raise HTTPException(
             status_code=404,
@@ -795,7 +807,9 @@ async def _source_control_providers(
     return providers
 
 
-async def _mcp_integrations(*, user_id: str, store: AgentJobStore) -> list[McpIntegrationResponse]:
+async def _mcp_integrations(
+    *, user_id: str, mcp: McpConnectionRepository
+) -> list[McpIntegrationResponse]:
     """The catalogue, marked with what this user has connected.
 
     The whole catalogue, not just the connected part: a page that listed only
@@ -815,7 +829,7 @@ async def _mcp_integrations(*, user_id: str, store: AgentJobStore) -> list[McpIn
     composer offering nothing — same data, two answers, and no way for the
     owner to tell which one is wrong.
     """
-    states = {state.server: state for state in await connection_states(store, user_id=user_id)}
+    states = {state.server: state for state in await connection_states(mcp, user_id=user_id)}
     return [
         McpIntegrationResponse(
             name=provider.name,
@@ -849,7 +863,7 @@ async def list_source_control_integrations(
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
         ),
-        mcp=await _mcp_integrations(user_id=user["user_id"], store=job_store),
+        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=job_store),
     )
 
 
@@ -896,7 +910,7 @@ async def disconnect_mcp_integration(
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
         ),
-        mcp=await _mcp_integrations(user_id=user["user_id"], store=job_store),
+        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=job_store),
     )
 
 
@@ -1018,7 +1032,7 @@ async def disconnect_gitlab_integration(
         # This response replaces the page's whole state, so it has to carry the
         # part this endpoint did not touch. Omitted, it would default to an
         # empty list and read as "you have no MCP connections".
-        mcp=await _mcp_integrations(user_id=user["user_id"], store=job_store),
+        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=job_store),
     )
 
 
@@ -2674,12 +2688,14 @@ def _workspace_not_ready() -> HTTPException:
     )
 
 
-async def _require_mutable_workspace_ready(*, job: dict[str, Any], store: AgentJobStore) -> None:
+async def _require_mutable_workspace_ready(
+    *, job: dict[str, Any], sandboxes: SandboxRepository
+) -> None:
     """Fence retained mutations through the durable thread-wide barrier."""
     if job.get("thread_sandbox") is None:
         raise _workspace_not_ready()
     thread_id = job.get("thread_id")
-    if not thread_id or not await store.thread_workspace_ready(thread_id=str(thread_id)):
+    if not thread_id or not await sandboxes.thread_workspace_ready(thread_id=str(thread_id)):
         raise _workspace_not_ready()
 
 
@@ -2687,7 +2703,7 @@ async def _require_workspace_entitlement(
     *,
     job: dict[str, Any],
     user: dict[str, Any],
-    store: Any,
+    source_control: SourceControlGrants,
     app_credentials: Any | None,
 ) -> None:
     """Recheck that the owner may still access the workspace repository."""
@@ -2695,7 +2711,7 @@ async def _require_workspace_entitlement(
         await require_entitled_repo(
             job["repo"],
             user["user_id"],
-            grants_repo=store,
+            grants_repo=source_control,
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
@@ -2736,7 +2752,7 @@ async def _terminal_owner_workspace(
         await _require_workspace_entitlement(
             job=job,
             user=user,
-            store=job_store,
+            source_control=job_store,
             app_credentials=app_credentials,
         )
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
@@ -2794,7 +2810,7 @@ async def get_agent_job_workspace_file(
         ) from exc
 
     await _require_workspace_entitlement(
-        job=job, user=user, store=job_store, app_credentials=app_credentials
+        job=job, user=user, source_control=job_store, app_credentials=app_credentials
     )
 
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
@@ -2837,9 +2853,9 @@ async def write_agent_job_workspace_file(
     if not safe_path:
         raise HTTPException(status_code=400, detail="A file path is required.")
     await _require_workspace_entitlement(
-        job=job, user=user, store=job_store, app_credentials=app_credentials
+        job=job, user=user, source_control=job_store, app_credentials=app_credentials
     )
-    await _require_mutable_workspace_ready(job=job, store=job_store)
+    await _require_mutable_workspace_ready(job=job, sandboxes=job_store)
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         raise HTTPException(
@@ -2882,9 +2898,9 @@ async def run_agent_job_terminal_command(
     job_store = _require_store(store)
     job = await _owned_job(job_store, job_id, user)
     await _require_workspace_entitlement(
-        job=job, user=user, store=job_store, app_credentials=app_credentials
+        job=job, user=user, source_control=job_store, app_credentials=app_credentials
     )
-    await _require_mutable_workspace_ready(job=job, store=job_store)
+    await _require_mutable_workspace_ready(job=job, sandboxes=job_store)
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         raise HTTPException(status_code=409, detail="This deployment has no live workspace broker.")
@@ -3113,7 +3129,7 @@ async def get_agent_job_git_workspace(
     job_store = _require_store(store)
     job = await _owned_job(job_store, job_id, user)
     await _require_workspace_entitlement(
-        job=job, user=user, store=job_store, app_credentials=app_credentials
+        job=job, user=user, source_control=job_store, app_credentials=app_credentials
     )
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
@@ -3361,7 +3377,7 @@ async def _restore_terminal_suspension(
 
 
 async def _worker_workspace_broker(
-    job_store: AgentJobStore,
+    hosts: HostPoolRepository,
     job: dict[str, Any],
     *,
     attempt_id: int,
@@ -3378,7 +3394,7 @@ async def _worker_workspace_broker(
         if required:
             raise _workspace_not_ready()
         return None
-    broker = await broker_for_attempt(job_store, attempt_id)
+    broker = await broker_for_attempt(hosts, attempt_id)
     try:
         broker = await hydrate_shared_broker(job, broker)
     except WorkspaceBrokerError as exc:
@@ -3397,7 +3413,8 @@ async def _worker_workspace_broker(
 
 
 async def _mint_sandbox_grant(
-    job_store: AgentJobStore,
+    attempts: AttemptCommands,
+    grant_records: GrantRepository,
     grants: Any,
     claim: dict[str, Any],
 ) -> str:
@@ -3447,7 +3464,7 @@ async def _mint_sandbox_grant(
             models=[claim["model"]],
         )
     except GatewayError as exc:
-        await job_store.release_claim(
+        await attempts.release_claim(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -3492,7 +3509,7 @@ async def _mint_sandbox_grant(
     if not isinstance(granted_models, list) or claim["model"] not in granted_models:
         if grant_id:
             await grants.revoke(grant_id)
-        await job_store.release_claim(
+        await attempts.release_claim(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -3519,7 +3536,7 @@ async def _mint_sandbox_grant(
             },
         )
 
-    linked = bool(grant_id) and await job_store.record_attempt_grant(
+    linked = bool(grant_id) and await grant_records.record_attempt_grant(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         grant_id=grant_id,
@@ -3530,7 +3547,7 @@ async def _mint_sandbox_grant(
         # its TTL can end it.
         if grant_id:
             await grants.revoke(grant_id)
-        await job_store.release_claim(
+        await attempts.release_claim(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -3564,7 +3581,9 @@ async def worker_claim(
     body: WorkerClaimRequest,
     background_tasks: BackgroundTasks,
     claiming_host: dict[str, str] = Depends(verify_claiming_host),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
+    grant_records: GrantRepository | None = Depends(get_grant_repository),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     grants: Any = Depends(get_grant_client),
     conversation_commands: ConversationCommands | None = Depends(get_conversation_commands),
@@ -3587,7 +3606,7 @@ async def worker_claim(
     The per-host credential opens registration/heartbeat/claim surfaces and
     never enters the sandbox; only the returned per-attempt tokens go in.
     """
-    job_store = _require_store(store)
+    job_store = require_attempts(attempts)
     if not (os.environ.get(ENV_BROKER_TOKEN) or "").strip():
         raise HTTPException(
             status_code=503,
@@ -3626,7 +3645,12 @@ async def worker_claim(
     # a ``SCOPE_MODEL`` token signed with a root the gateway does not know —
     # which bought nothing, and failed at the sandbox's first model call.)
     token = mint_worker_token(**fence, scope=SCOPE_FULL)
-    sandbox_token = await _mint_sandbox_grant(job_store, grants, claim)
+    sandbox_token = await _mint_sandbox_grant(
+        require_attempts(attempts),
+        require_grants(grant_records),
+        grants,
+        claim,
+    )
 
     # The sandbox's *second* credential, and this one is ours to mint: MCP is
     # served by this service's relay, against this service's registry and this
@@ -3658,7 +3682,7 @@ async def worker_claim(
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
-        await job_store.release_claim(
+        await attempts.release_claim(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -3699,7 +3723,7 @@ async def worker_claim(
             # across three claim cycles would fail every queued private-repo
             # job outright, without an agent ever having started — the very
             # outcome this branch exists to avoid, only slower.
-            await job_store.release_claim(
+            await attempts.release_claim(
                 job_id=claim["id"],
                 attempt_id=claim["attempt_id"],
                 lease_generation=claim["lease_generation"],
@@ -3836,9 +3860,9 @@ async def worker_report_continuity(
     return WorkerAckResponse(ok=True)
 
 
-async def _worker_thread_id(job_store: AgentJobStore, job_id: str) -> str:
+async def _worker_thread_id(conversations: ConversationQueries, job_id: str) -> str:
     """Resolve the claimed job's thread for restartable-sandbox writes."""
-    job = await job_store.get_job(job_id)
+    job = await conversations.get_job(job_id)
     thread_id = None if job is None else job.get("thread_id")
     if not thread_id:
         raise HTTPException(status_code=409, detail="this job has no chat thread")

@@ -233,6 +233,41 @@ def require_audit(capability: AuditRepository | None) -> AuditRepository:
     return require_capability(capability, "admin audit")
 
 
+def require_grants(capability: GrantRepository | None) -> GrantRepository:
+    """Require the grant records."""
+    return require_capability(capability, "grant records")
+
+
+def require_sandboxes(capability: SandboxRepository | None) -> SandboxRepository:
+    """Require the sandbox state."""
+    return require_capability(capability, "sandbox state")
+
+
+def require_residencies(capability: ResidencyRepository | None) -> ResidencyRepository:
+    """Require the residencies."""
+    return require_capability(capability, "residencies")
+
+
+def require_session_forks(capability: SessionForkRepository | None) -> SessionForkRepository:
+    """Require the session forks."""
+    return require_capability(capability, "session forks")
+
+
+def require_snapshots(capability: SnapshotRepository | None) -> SnapshotRepository:
+    """Require the snapshots."""
+    return require_capability(capability, "snapshots")
+
+
+def require_mcp(capability: McpConnectionRepository | None) -> McpConnectionRepository:
+    """Require the MCP connections."""
+    return require_capability(capability, "MCP connections")
+
+
+def require_credentials(capability: CredentialQueries | None) -> CredentialQueries:
+    """Require the credentials."""
+    return require_capability(capability, "credentials")
+
+
 def require_conversation_commands(
     capability: ConversationCommands | None,
 ) -> ConversationCommands:

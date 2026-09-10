@@ -1128,6 +1128,13 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
         "source_control",
         "hosts",
         "grants",
+        "attempts",
+        "sandboxes",
+        "residencies",
+        "session_forks",
+        "snapshots",
+        "source_control",
+        "audit",
     )
     # The create endpoints fail fast on models the deployment cannot serve, so
     # the gateway the test answers with must contain what the tests submit.

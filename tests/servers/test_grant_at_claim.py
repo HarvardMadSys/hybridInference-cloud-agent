@@ -39,10 +39,10 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_agent_job_store,
     get_grant_client,
 )
 from cloud_agent.gateway import GatewayError
+from tests.support.storage_fakes import capability_overrides
 
 pytestmark = pytest.mark.asyncio
 
@@ -153,7 +153,19 @@ class _Grants:
 def _app(store: _ClaimStore, grants: _Grants) -> FastAPI:
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The claim route takes the capabilities it uses now, so the fixture names
+    # the ones this fake answers.
+    capability_overrides(
+        app,
+        store,
+        "attempts",
+        "grants",
+        "source_control",
+        "conversation_commands",
+        "credentials",
+        "hosts",
+        "sandboxes",
+    )
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[get_grant_client] = lambda: grants
     app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
@@ -352,11 +364,13 @@ async def test_title_generation_is_scheduled_after_successful_claim(monkeypatch,
         WorkerClaimRequest(worker_id="w1"),
         background,
         claiming_host={"host": "runner-test", "credential_hash": "test-credential-hash"},
-        store=store,
+        # The handler takes the capabilities it uses now, not the store they
+        # were split from. This fake answers all of them.
+        attempts=store,
+        grant_records=store,
+        source_control=store,
         app_credentials=None,
         grants=grants,
-        # Title generation writes through the conversation commands now, so the
-        # handler is called with the capability rather than the store.
         conversation_commands=store,
     )
     assert response.job_id == _JOB
