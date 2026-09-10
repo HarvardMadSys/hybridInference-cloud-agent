@@ -82,8 +82,11 @@ administrator page.
 Default responses and queries use an explicit metadata allowlist. Removing a
 few known content keys from an arbitrary payload is not a privacy boundary.
 Prompts, tool arguments, outputs, diffs, raw error text and service credentials
-do not belong in default responses. The stored task title is an intentional
-metadata field and is displayed as bounded plain text.
+do not belong in default responses. Generated and manually edited task titles
+are intentional metadata fields and are displayed as bounded plain text.
+Fallback titles quote the prompt, so SQL excludes them from both list and detail
+responses. A missing or unrecognized title source also yields no title; the
+page displays the task id instead.
 
 Content access records the administrator identity, task owner, task and event
 identity, and request time through the existing Agent audit store. Content is

@@ -32,7 +32,6 @@ class AdminRun(BaseModel):
     created_at: datetime
     updated_at: datetime
     hosts: list[str] = Field(default_factory=list)
-    event_count: int = 0
     tool_calls: int = 0
 
 

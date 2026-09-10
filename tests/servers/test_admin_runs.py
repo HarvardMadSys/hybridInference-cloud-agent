@@ -51,7 +51,6 @@ def setup(monkeypatch):
         "created_at": START,
         "updated_at": END,
         "hosts": ["example-runner"],
-        "event_count": 3,
         "tool_calls": 1,
         # A response model is a second boundary even if a future query grows.
         "task_prompt": "private prompt",

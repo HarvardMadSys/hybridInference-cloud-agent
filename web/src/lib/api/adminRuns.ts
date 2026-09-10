@@ -21,7 +21,6 @@ export interface AdminRun {
   created_at: string;
   updated_at: string;
   hosts: string[];
-  event_count: number;
   tool_calls: number;
 }
 

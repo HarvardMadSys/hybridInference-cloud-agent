@@ -34,7 +34,10 @@ if TYPE_CHECKING:
 
 
 _RUN_COLUMNS = """
-    j.id, j.thread_id, LEFT(t.title, 160) AS title, j.turn_no,
+    j.id, j.thread_id,
+    CASE WHEN t.title_source IN ('generated', 'manual')
+         THEN LEFT(t.title, 160) END AS title,
+    j.turn_no,
     LEFT(j.user_id, 256) AS user_id, LEFT(j.repo, 256) AS repo,
     LEFT(j.runtime, 128) AS runtime, LEFT(j.model, 256) AS model,
     LEFT(j.reasoning_effort, 64) AS reasoning_effort,
@@ -42,7 +45,6 @@ _RUN_COLUMNS = """
     ARRAY(SELECT DISTINCT LEFT(a.host_id, 256) FROM agent_attempts a
           WHERE a.job_id = j.id AND a.host_id IS NOT NULL
           ORDER BY 1) AS hosts,
-    (SELECT COUNT(*) FROM agent_job_events e WHERE e.job_id = j.id) AS event_count,
     (SELECT COUNT(*) FROM agent_job_events e
      WHERE e.job_id = j.id AND e.event_type = 'tool_use') AS tool_calls
 """

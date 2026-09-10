@@ -46,7 +46,9 @@ async def _event(store, job, attempt_id, seq, event_type="message", payload=None
 async def _safe_title(store, job, title="Example task"):
     async with store._pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_threads SET title = $2 WHERE id = $1", job["thread_id"], title
+            "UPDATE agent_threads SET title = $2, title_source = 'generated' WHERE id = $1",
+            job["thread_id"],
+            title,
         )
 
 
@@ -91,7 +93,7 @@ async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turn
     assert "PRIVATE" not in all_runs.model_dump_json()
     by_id = {run.id: run for run in all_runs.runs}
     assert by_id[first["id"]].tool_calls == 2
-    assert by_id[first["id"]].event_count == 2
+    assert "event_count" not in all_runs.model_dump_json()
     assert by_id[first["id"]].hosts == ["runner-one"]
     assert len(by_id[first["id"]].title) == 160
     assert [row.id for row in (await page(host="runner-one")).runs] == [first["id"]]
@@ -100,7 +102,49 @@ async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turn
     ]
     assert (await page(repo="unrelated/repo")).runs == []
     assert (await page(state="failed")).runs == []
-    assert "PRIVATE" not in json.dumps(await queries.get_run(first["id"]), default=str)
+    run = await queries.get_run(first["id"])
+    assert "PRIVATE" not in json.dumps(run, default=str)
+    assert "event_count" not in run
+
+
+@pytest.mark.parametrize("title_source", ["fallback", "generated", "manual"])
+async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypatch, title_source):
+    job = await _create_job(store, task_prompt="PRIVATE-PROMPT-FIRST-LINE\nMore private content")
+    expected = None if title_source == "fallback" else "Approved task title"
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET created_at = $1 WHERE id = $2", START, job["id"])
+        if expected is not None:
+            await conn.execute(
+                "UPDATE agent_threads SET title = $2, title_source = $3 WHERE id = $1",
+                job["thread_id"],
+                expected,
+                title_source,
+            )
+        else:
+            assert (
+                await conn.fetchval(
+                    "SELECT title FROM agent_threads WHERE id = $1", job["thread_id"]
+                )
+                == "PRIVATE-PROMPT-FIRST-LINE"
+            )
+    monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
+    app = FastAPI()
+    app.include_router(admin_runs.router)
+    app.dependency_overrides[get_agent_job_store] = lambda: store
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers = {"Authorization": "Bearer db-admin-observation-test"}
+        listing = await client.get(
+            "/admin/agent/runs",
+            params={"since": START.isoformat(), "until": END.isoformat()},
+            headers=headers,
+        )
+        detail = await client.get(f"/admin/agent/runs/{job['id']}", headers=headers)
+    for response in (listing, detail):
+        assert response.status_code == 200, response.text
+        assert "PRIVATE" not in response.text
+        assert "event_count" not in response.text
+    assert listing.json()["runs"][0]["title"] == expected
+    assert detail.json()["run"]["title"] == expected
 
 
 async def test_run_cursor_keeps_tied_timestamps_and_the_original_filter_window(store):
