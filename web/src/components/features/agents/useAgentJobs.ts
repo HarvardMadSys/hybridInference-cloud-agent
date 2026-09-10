@@ -128,7 +128,7 @@ export function useAgentJobList(
   useEffect(
     () =>
       onAgentSessionsChanged((change) => {
-        if (change.deleted || change.archived !== archived) {
+        if (change.deleted || (change.archived !== undefined && change.archived !== archived)) {
           const changed = new Set(change.threadIds);
           setJobs((current) => current.filter((job) => !changed.has(job.threadId ?? job.id)));
         }

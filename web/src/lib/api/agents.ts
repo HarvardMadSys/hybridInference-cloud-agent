@@ -189,6 +189,7 @@ export interface AgentJobUsageApi {
 }
 
 export interface AgentJobApi {
+  title?: string | null;
   id: string;
   /** Actual execution timestamps, matching duration_ms's selected attempt. */
   started_at?: string | null;
@@ -703,6 +704,25 @@ export async function restoreAgentJob(jobId: string): Promise<AgentThreadArchive
   return result;
 }
 
+/** Rename the conversation without changing any turn's prompt. */
+export async function renameAgentJob(
+  jobId: string,
+  title: string,
+): Promise<{ thread_id: string; title: string }> {
+  const response = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/title`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    },
+  );
+  const result = await jsonOrThrow<{ thread_id: string; title: string }>(response);
+  announceAgentSessionsChanged({ threadIds: [result.thread_id], title: result.title });
+  return result;
+}
+
 export interface AgentThreadPinApi {
   thread_id: string;
   pinned: boolean;
@@ -714,7 +734,9 @@ export async function pinAgentJob(jobId: string): Promise<AgentThreadPinApi> {
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/pin`, {
     method: 'POST',
   });
-  return jsonOrThrow(resp);
+  const result = await jsonOrThrow<AgentThreadPinApi>(resp);
+  announceAgentSessionsChanged({ threadIds: [result.thread_id], pinnedAt: result.pinned_at });
+  return result;
 }
 
 /** Return a pinned conversation to normal activity ordering. */
@@ -722,7 +744,9 @@ export async function unpinAgentJob(jobId: string): Promise<AgentThreadPinApi> {
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/pin`, {
     method: 'DELETE',
   });
-  return jsonOrThrow(resp);
+  const result = await jsonOrThrow<AgentThreadPinApi>(resp);
+  announceAgentSessionsChanged({ threadIds: [result.thread_id], pinnedAt: result.pinned_at });
+  return result;
 }
 
 export async function getAgentJob(jobId: string): Promise<AgentJobApi> {

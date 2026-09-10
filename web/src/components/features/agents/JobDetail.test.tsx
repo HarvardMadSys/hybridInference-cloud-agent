@@ -19,12 +19,17 @@ import {
   resizeAgentTerminal,
   refreshAgentJobUsage,
   restoreAgentJob,
+  renameAgentJob,
+  pinAgentJob,
+  unpinAgentJob,
   streamAgentTerminal,
   writeAgentTerminalInput,
   writeAgentJobFile,
   type AgentJobFilesApi,
   type AgentJobUsageApi,
 } from '@/lib/api/agents';
+
+import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
 import type { AgentJob } from './types';
@@ -50,6 +55,9 @@ vi.mock('@/lib/api/agents', () => ({
   resizeAgentTerminal: vi.fn(),
   refreshAgentJobUsage: vi.fn(),
   restoreAgentJob: vi.fn(),
+  renameAgentJob: vi.fn(),
+  pinAgentJob: vi.fn(),
+  unpinAgentJob: vi.fn(),
   streamAgentTerminal: vi.fn(),
   writeAgentTerminalInput: vi.fn(),
   writeAgentJobFile: vi.fn(),
@@ -114,6 +122,11 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
   };
 }
 
+function openRunDetails() {
+  fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Run details' }));
+}
+
 function openWorkspace() {
   fireEvent.click(screen.getByRole('button', { name: 'Open workspace' }));
 }
@@ -136,6 +149,9 @@ describe('JobDetail', () => {
     vi.mocked(followUpAgentJob).mockReset();
     vi.mocked(forkAgentJob).mockReset();
     vi.mocked(restoreAgentJob).mockReset();
+    vi.mocked(renameAgentJob).mockReset();
+    vi.mocked(pinAgentJob).mockReset();
+    vi.mocked(unpinAgentJob).mockReset();
     vi.mocked(getAgentConfig).mockReset();
     vi.mocked(getAgentConfig).mockResolvedValue(AGENT_CONFIG);
     vi.mocked(getAgentJobFiles).mockReset();
@@ -169,6 +185,108 @@ describe('JobDetail', () => {
   });
 
   afterEach(() => cleanup());
+
+  it('replaces duplicate header metadata with a keyboard-accessible task menu', () => {
+    render(<JobDetail job={makeJob({ turnNo: 3 })} />);
+    const header = screen.getByRole('heading', { level: 1 }).closest('header')!;
+    expect(within(header).queryByText(/turn 3/)).not.toBeInTheDocument();
+    expect(within(header).queryByText('Run details')).not.toBeInTheDocument();
+    const trigger = screen.getByRole('button', { name: 'Task actions' });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menuitem', { name: 'Rename' })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitem', { name: 'Pin' })).toHaveFocus();
+    expect(screen.getByRole('menuitem', { name: 'Fork' })).toBeDisabled();
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('renames persistently while preserving the prompt and keeps failures editable', async () => {
+    vi.mocked(renameAgentJob).mockRejectedValueOnce(new Error('Rename unavailable'));
+    vi.mocked(renameAgentJob).mockResolvedValueOnce({ thread_id: 'thread-1', title: 'New title' });
+    render(<JobDetail job={makeJob()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
+    const input = screen.getByRole('textbox', { name: 'Task name' });
+    expect(input).toHaveFocus();
+    expect(input).toHaveAttribute('maxlength', '160');
+    fireEvent.change(input, { target: { value: '   ' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.change(input, { target: { value: ' New title ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Rename unavailable');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Current task');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(renameAgentJob).toHaveBeenLastCalledWith('ajob_1', 'New title');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('New title');
+    expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
+  });
+
+  it('dismisses rename without stopping a live run and traps focus inside the dialog', () => {
+    render(<JobDetail job={makeJob()} />);
+    const trigger = screen.getByRole('button', { name: 'Task actions' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
+    const input = screen.getByRole('textbox', { name: 'Task name' });
+    fireEvent.keyDown(input, { key: 'Tab', shiftKey: true });
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    expect(renameAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('pins and unpins the thread and follows sidebar pin changes', async () => {
+    vi.mocked(pinAgentJob).mockResolvedValue({
+      thread_id: 'thread-1',
+      pinned: true,
+      pinned_at: '2026-09-10',
+    });
+    vi.mocked(unpinAgentJob).mockResolvedValue({
+      thread_id: 'thread-1',
+      pinned: false,
+      pinned_at: null,
+    });
+    render(<JobDetail job={makeJob({ threadId: 'thread-1' })} />);
+    const trigger = screen.getByRole('button', { name: 'Task actions' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Pin' }));
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    expect(pinAgentJob).toHaveBeenCalledWith('ajob_1');
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Unpin' }));
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    expect(unpinAgentJob).toHaveBeenCalledWith('ajob_1');
+    act(() => announceAgentSessionsChanged({ threadIds: ['thread-1'], pinnedAt: '2026-09-10' }));
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menuitem', { name: 'Unpin' })).toBeInTheDocument();
+  });
+
+  it('uses the native fork action from the task menu', async () => {
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_fork' } as never);
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          sandboxId: 'sandbox',
+          workspaceShared: true,
+          nativeForkAvailable: true,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Fork' }));
+    await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_1'));
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_fork');
+  });
 
   it('keeps an archived conversation readable but requires unarchive before continuing', async () => {
     const onReload = vi.fn();
@@ -509,7 +627,7 @@ describe('JobDetail', () => {
     expect(screen.queryByText('Input tokens')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Details' })).not.toBeInTheDocument();
     expect(getAgentJobUsage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     expect(screen.getByRole('dialog', { name: 'Run details' })).toBeInTheDocument();
     expect(screen.getByRole('status', { name: 'Loading usage' })).toBeInTheDocument();
     expect(screen.getByText('Sandbox')).toBeInTheDocument();
@@ -533,7 +651,7 @@ describe('JobDetail', () => {
         })}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     const drawer = screen.getByRole('dialog', { name: 'Run details' });
     const outcome = within(drawer).getByRole('region', { name: 'Run outcome' });
     expect(within(outcome).getByText('Done')).toBeInTheDocument();
@@ -565,7 +683,7 @@ describe('JobDetail', () => {
       expect(screen.queryByText('Done')).not.toBeInTheDocument();
       expect(screen.queryByText('Run completed')).not.toBeInTheDocument();
       expect(screen.queryByText('Run complete')).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+      openRunDetails();
       const outcome = screen.getByRole('region', { name: 'Run outcome' });
       expect(
         within(outcome).getByText(state === 'needs_review' ? 'Completed' : 'Done'),
@@ -582,7 +700,7 @@ describe('JobDetail', () => {
         job={makeJob({ state: 'queued', createdAt: '2026-09-10T10:00:00Z', attempts: [] })}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     const outcome = screen.getByRole('region', { name: 'Run outcome' });
     expect(within(outcome).getByText('Not started')).toBeInTheDocument();
     expect(within(outcome).queryByText('Elapsed')).not.toBeInTheDocument();
@@ -600,7 +718,7 @@ describe('JobDetail', () => {
         })}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     const row = screen.getByText('Elapsed').parentElement!;
     expect(within(row).getByText('Not recorded')).toBeInTheDocument();
   });
@@ -611,7 +729,7 @@ describe('JobDetail', () => {
     try {
       const job = makeJob({ startedAt: '2026-09-10T10:00:00Z', finishedAt: null });
       const { rerender, unmount } = render(<JobDetail job={job} />);
-      fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+      openRunDetails();
       expect(screen.getByText('10s')).toBeInTheDocument();
       act(() => vi.advanceTimersByTime(2000));
       expect(screen.getByText('12s')).toBeInTheDocument();
@@ -645,7 +763,7 @@ describe('JobDetail', () => {
     );
     expect(screen.getByRole('button', { name: 'View changes' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     const artifacts = screen.getByRole('region', { name: 'Workspace changes' });
     expect(within(artifacts).getByText('1 file changed')).toBeInTheDocument();
     expect(within(artifacts).getByText('+1')).toBeInTheDocument();
@@ -680,7 +798,7 @@ describe('JobDetail', () => {
           })}
         />,
       );
-      fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+      openRunDetails();
       const artifacts = screen.getByRole('region', { name: 'Workspace changes' });
       expect(
         within(artifacts).getByText(
@@ -697,7 +815,7 @@ describe('JobDetail', () => {
 
   it('shows a warning only when the sandbox actually blocked a request', () => {
     const { rerender } = render(<JobDetail job={makeJob()} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     const drawer = screen.getByRole('dialog', { name: 'Run details' });
     expect(within(drawer).queryByRole('note')).not.toBeInTheDocument();
     rerender(<JobDetail job={makeJob({ egressDenials: 3 })} />);
@@ -709,7 +827,7 @@ describe('JobDetail', () => {
   it('requires a new chat only when context loss is confirmed', () => {
     const job = makeJob({ state: 'cancelled' });
     const { rerender } = render(<JobDetail job={job} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     const outcome = screen.getByRole('region', { name: 'Run outcome' });
     expect(within(outcome).getByText(/Send a follow-up to continue/)).toBeInTheDocument();
     expect(within(outcome).queryByRole('link', { name: 'New chat' })).not.toBeInTheDocument();
@@ -721,7 +839,7 @@ describe('JobDetail', () => {
 
   it('keeps the failure reason in run details without raw-event navigation', () => {
     render(<JobDetail job={makeJob({ state: 'failed', stateNote: 'Agent exited 1' })} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     const outcome = screen.getByRole('region', { name: 'Run outcome' });
     expect(within(outcome).getByText('Agent exited 1')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'View failure event' })).not.toBeInTheDocument();
@@ -760,7 +878,7 @@ describe('JobDetail', () => {
     } satisfies AgentJobUsageApi);
     const job = makeJob();
     render(<JobDetail job={{ ...job, usage: { ...job.usage, turns: 999 } }} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     await waitFor(() => expect(screen.queryByText('Loading usage…')).not.toBeInTheDocument());
     const usage = screen.getByRole('region', { name: 'Usage' });
     expect(
@@ -1670,13 +1788,13 @@ describe('JobDetail reasoning effort', () => {
 
   it('shows the effort a turn ran at, and nothing for turns that predate it', () => {
     const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'max' })} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     expect(screen.getByText('Reasoning')).toBeInTheDocument();
     expect(screen.getByText('max')).toBeInTheDocument();
     unmount();
 
     render(<JobDetail job={makeJob()} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    openRunDetails();
     // An absent row is the honest display of a turn nobody chose a depth for,
     // which is every turn created before this control existed.
     expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();

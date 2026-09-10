@@ -12,6 +12,19 @@ import type { TranslationKey } from './en';
  * easier to read.
  */
 export const zhCN: Record<TranslationKey, string> = {
+  'taskActions.options': '任务操作',
+  'taskActions.rename': '重命名',
+  'taskActions.renameTitle': '重命名任务',
+  'taskActions.title': '任务名称',
+  'taskActions.pin': '置顶',
+  'taskActions.unpin': '取消置顶',
+  'taskActions.fork': 'Fork',
+  'taskActions.details': '运行详情',
+  'taskActions.cancel': '取消',
+  'taskActions.save': '保存',
+  'taskActions.saving': '保存中…',
+  'taskActions.renameFailed': '无法重命名任务',
+  'taskActions.pinFailed': '无法更新置顶状态',
   // ── Shell chrome ────────────────────────────────────────────────────────
   'nav.aria': '产品导航',
   'nav.status': '服务状态',

@@ -63,7 +63,20 @@ export function useConversationList({
           rows: current.rows.flatMap((row) => {
             if (!change.threadIds.includes(row.key)) return [row];
             if (change.deleted || (change.archived && !includeArchived)) return [];
-            return [{ ...row, archived: change.archived ?? row.archived }];
+            return [
+              {
+                ...row,
+                archived: change.archived ?? row.archived,
+                job: {
+                  ...row.job,
+                  title: change.title ?? row.job.title,
+                  pinnedAt:
+                    change.pinnedAt !== undefined
+                      ? (change.pinnedAt ?? undefined)
+                      : row.job.pinnedAt,
+                },
+              },
+            ];
           }),
         }));
         reload();

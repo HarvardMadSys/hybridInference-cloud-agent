@@ -35,6 +35,7 @@ import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
+import { ThreadActions } from './ThreadActions';
 import type { AgentEvent, AgentHistoryTurn, AgentJob, AgentThreadMessage } from './types';
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
@@ -1264,6 +1265,8 @@ export function JobDetail({
     // would fight the reader's own selection.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job.id]);
+  const [title, setTitle] = useState(job.title);
+  useEffect(() => setTitle(job.title), [job.title, job.threadId]);
   const [drawer, setDrawer] = useState<DrawerView | null>(null);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -1588,7 +1591,7 @@ export function JobDetail({
         <div className="flex w-full items-center gap-3 py-3.5 pr-14">
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50">
-              {job.title}
+              {title}
             </h1>
             <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
               <svg
@@ -1606,17 +1609,17 @@ export function JobDetail({
                 />
               </svg>
               <span className="truncate">{job.repo}</span>
-              {job.turnNo && job.turnNo > 1 ? <span>· turn {job.turnNo}</span> : null}
-              <span aria-hidden="true">·</span>
-              <button
-                type="button"
-                onClick={() => setDrawer('overview')}
-                className="shrink-0 font-medium text-gray-500 dark:text-gray-400 transition-colors hover:text-crimson dark:hover:text-crimson-light hover:underline"
-              >
-                Run details
-              </button>
             </div>
           </div>
+          <ThreadActions
+            key={job.threadId ?? job.id}
+            job={{ ...job, title }}
+            canFork={canForkCurrent}
+            forking={forking}
+            onFork={() => void forkFrom(job.id)}
+            onDetails={() => setDrawer('overview')}
+            onRename={setTitle}
+          />
           <nav aria-label="Run views" className="mr-3 flex shrink-0 items-center gap-1 text-[13px]">
             {(['chat', 'trajectory'] as const).map((view) => (
               <button

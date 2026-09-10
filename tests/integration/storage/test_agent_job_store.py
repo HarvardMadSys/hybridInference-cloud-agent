@@ -1864,6 +1864,41 @@ async def test_archive_and_restore_filter_owned_threads_without_cancelling(
     }
 
 
+async def test_rename_persists_across_turns_and_search_without_changing_prompts(
+    store: AgentJobStore,
+):
+    """The canonical thread title survives reads, follow-ups, and owner isolation."""
+    parent = await _create_job(store)
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
+    )
+    foreign = await _create_job(store, user_id="user-2")
+    title = "Renamed CSV conversation"
+    result = await store.set_thread_title(job_id=child["id"], user_id="user-1", title=title)
+    assert result == {"thread_id": parent["thread_id"], "title": title}
+    for original in (parent, child):
+        job = await store.get_job(original["id"])
+        assert job["title"] == title
+        assert job["task_prompt"] == original["task_prompt"]
+        thread = await store.get_thread_for_job(job_id=original["id"], user_id="user-1")
+        assert thread["title"] == title
+        assert all(turn["title"] == title for turn in thread["jobs"])
+    assert all(job["title"] == title for job in await store.list_jobs(user_id="user-1"))
+    conversations = await store.list_conversations(user_id="user-1", q="Renamed CSV")
+    assert [item["title"] for item in conversations["conversations"]] == [title]
+    next_turn = await store.create_follow_up(
+        parent_job_id=child["id"], user_id="user-1", prompt="one more change"
+    )
+    assert next_turn["title"] == title
+    for job_id in (foreign["id"], "ajob_missing"):
+        assert await store.set_thread_title(job_id=job_id, user_id="user-1", title="no") is None
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", parent["thread_id"]
+        )
+    assert await store.set_thread_title(job_id=parent["id"], user_id="user-1", title="no") is None
+
+
 async def test_pin_and_unpin_owned_threads_are_idempotent_and_reorder_lists(
     store: AgentJobStore,
 ):

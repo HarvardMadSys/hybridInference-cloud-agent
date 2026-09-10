@@ -5,6 +5,9 @@ import {
   deleteAgentSessions,
   listAgentSessions,
   restoreAgentJob,
+  renameAgentJob,
+  pinAgentJob,
+  unpinAgentJob,
   setAgentSessionsArchived,
 } from '../agents';
 import { onAgentSessionsChanged } from '../agentSessionEvents';
@@ -86,6 +89,40 @@ describe('session history API', () => {
         body: JSON.stringify({ thread_ids: ['thread-1'] }),
       });
       expect(changed).toHaveBeenLastCalledWith({ threadIds: ['thread-1'], deleted: true });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('synchronizes saved titles and pins without announcing failed mutations', async () => {
+    const fetch = vi.spyOn(client, 'fetchWithAuth');
+    const changed = vi.fn();
+    const unsubscribe = onAgentSessionsChanged(changed);
+    try {
+      fetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ thread_id: 'thread-1', title: 'New title' })),
+      );
+      await renameAgentJob('job-2', 'New title');
+      fetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ thread_id: 'thread-1', pinned: true, pinned_at: '2026-09-10' }),
+        ),
+      );
+      await pinAgentJob('job-2');
+      fetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ thread_id: 'thread-1', pinned: false, pinned_at: null })),
+      );
+      await unpinAgentJob('job-2');
+      expect(changed.mock.calls.map(([change]) => change)).toEqual([
+        { threadIds: ['thread-1'], title: 'New title' },
+        { threadIds: ['thread-1'], pinnedAt: '2026-09-10' },
+        { threadIds: ['thread-1'], pinnedAt: null },
+      ]);
+      fetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: 'Save failed' }), { status: 500 }),
+      );
+      await expect(renameAgentJob('job-2', 'Unsaved title')).rejects.toThrow();
+      expect(changed).toHaveBeenCalledTimes(3);
     } finally {
       unsubscribe();
     }

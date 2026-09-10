@@ -3,6 +3,8 @@ export const AGENT_SESSIONS_CHANGED = 'agents:sessions-changed';
 export interface AgentSessionsChange {
   threadIds: string[];
   archived?: boolean;
+  title?: string;
+  pinnedAt?: string | null;
   deleted?: boolean;
 }
 

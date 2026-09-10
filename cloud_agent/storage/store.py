@@ -273,6 +273,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "repo": row["repo"],
         "base_sha": row["base_sha"],
         "task_prompt": row["task_prompt"],
+        "title": row.get("title") or row.get("session_title"),
         "setup_script": row["setup_script"],
         "runtime": row["runtime"],
         "model": row["model"],
@@ -989,7 +990,7 @@ class AgentJobStore:
             if requested is None:
                 return None
             thread = await conn.fetchrow(
-                "SELECT id, pinned_at, archived_at FROM agent_threads "
+                "SELECT id, title, pinned_at, archived_at FROM agent_threads "
                 "WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
                 requested["thread_id"],
                 user_id,
@@ -1112,6 +1113,7 @@ class AgentJobStore:
                 "UPDATE agent_threads SET updated_at = NOW() WHERE id = $1", thread_id
             )
         result = _job_row_to_dict(row)
+        result["title"] = thread["title"]
         result["pinned_at"] = thread["pinned_at"]
         return result
 
@@ -2048,6 +2050,7 @@ class AgentJobStore:
             )
             job_rows = [_job_row_to_dict(job) for job in jobs]
             for job in job_rows:
+                job["title"] = thread["title"]
                 job["pinned_at"] = thread["pinned_at"]
                 job["archived_at"] = thread["archived_at"]
                 if sandbox is not None:
@@ -2474,7 +2477,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, t.pinned_at, t.archived_at, t.deleted_at,
+                SELECT {_QUALIFIED_JOB_COLUMNS}, t.title, t.pinned_at, t.archived_at, t.deleted_at,
                        to_jsonb(s) AS thread_sandbox
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
@@ -2501,7 +2504,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, t.pinned_at, t.archived_at
+                SELECT {_QUALIFIED_JOB_COLUMNS}, t.title, t.pinned_at, t.archived_at
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
@@ -2858,6 +2861,29 @@ class AgentJobStore:
         if row is None:
             return None
         return {"thread_id": row["thread_id"], "archived_at": row["archived_at"]}
+
+    async def set_thread_title(
+        self, *, job_id: str, user_id: str, title: str
+    ) -> dict[str, Any] | None:
+        """Rename the owned conversation without changing any turn's prompt."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_threads t
+                SET title = $3
+                WHERE t.user_id = $2
+                  AND t.deleted_at IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM agent_jobs j
+                      WHERE j.id = $1 AND j.thread_id = t.id AND j.user_id = $2
+                  )
+                RETURNING t.id AS thread_id, t.title
+                """,
+                job_id,
+                user_id,
+                title,
+            )
+        return dict(row) if row is not None else None
 
     async def set_thread_pinned(
         self, *, job_id: str, user_id: str, pinned: bool

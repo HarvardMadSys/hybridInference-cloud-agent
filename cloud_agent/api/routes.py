@@ -112,6 +112,8 @@ from cloud_agent.schemas import (
     AgentThreadEventsResponse,
     AgentThreadMessageResponse,
     AgentThreadPinResponse,
+    AgentThreadRenameRequest,
+    AgentThreadRenameResponse,
     AgentThreadResponse,
     AgentThreadStatsResponse,
     AgentWorkspaceResponse,
@@ -527,6 +529,7 @@ def _job_response(
         turn_no=job.get("turn_no") or 1,
         repo=job["repo"],
         task_prompt=job["task_prompt"],
+        title=job.get("title"),
         runtime=job["runtime"],
         model=job["model"],
         execution_profile=job.get("execution_profile", "trusted-v1"),
@@ -1839,6 +1842,25 @@ async def restore_agent_thread(
 ) -> AgentThreadArchiveResponse:
     """Restore the entire task thread containing an owned job."""
     return await _set_agent_thread_archived(job_id=job_id, archived=False, user=user, store=store)
+
+
+@router.patch("/jobs/{job_id}/title", response_model=AgentThreadRenameResponse)
+async def rename_agent_thread(
+    job_id: str,
+    body: AgentThreadRenameRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> AgentThreadRenameResponse:
+    """Rename the entire conversation containing an owned job."""
+    result = await _require_store(store).set_thread_title(
+        job_id=job_id, user_id=user["user_id"], title=body.title
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
+        )
+    return AgentThreadRenameResponse(**result)
 
 
 async def _set_agent_thread_pinned(

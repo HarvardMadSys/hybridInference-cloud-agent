@@ -289,6 +289,7 @@ class AgentJobResponse(BaseModel):
     turn_no: int = 1
     repo: str
     task_prompt: str
+    title: str | None = None
     runtime: str
     model: str
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1
@@ -535,6 +536,25 @@ class AgentSessionArchiveResponse(BaseModel):
     """Archive state for the complete selected conversation snapshot."""
 
     sessions: list[AgentThreadArchiveResponse]
+
+
+class AgentThreadRenameRequest(BaseModel):
+    """An owner-selected title for the entire conversation."""
+
+    title: str = Field(..., min_length=1, max_length=160)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def trim_title(cls, value: Any) -> Any:
+        """Validate the length of the trimmed title, including blank titles."""
+        return value.strip() if isinstance(value, str) else value
+
+
+class AgentThreadRenameResponse(BaseModel):
+    """The persisted title for the thread containing a requested job."""
+
+    thread_id: str
+    title: str
 
 
 class AgentThreadPinResponse(BaseModel):

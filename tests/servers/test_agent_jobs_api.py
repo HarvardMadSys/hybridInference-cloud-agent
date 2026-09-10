@@ -132,6 +132,7 @@ class FakeAgentJobStore:
             **kwargs,
         }
         job.setdefault("base_sha", None)
+        job.setdefault("title", job["task_prompt"].splitlines()[0][:160])
         job.setdefault("metadata", None)
         job.setdefault("execution_profile", "trusted-v1")
         job.setdefault("reasoning_effort", None)
@@ -498,7 +499,7 @@ class FakeAgentJobStore:
         return {
             "id": thread_id,
             "repo": job["repo"],
-            "title": jobs[0]["task_prompt"].splitlines()[0],
+            "title": jobs[0].get("title") or jobs[0]["task_prompt"].splitlines()[0],
             "archived_at": self.archived_threads.get(thread_id),
             "created_at": None,
             "updated_at": None,
@@ -698,6 +699,17 @@ class FakeAgentJobStore:
             self.archived_threads.pop(thread_id, None)
             archived_at = None
         return {"thread_id": thread_id, "archived_at": archived_at}
+
+    async def set_thread_title(
+        self, *, job_id: str, user_id: str, title: str
+    ) -> dict[str, Any] | None:
+        job = self.jobs.get(job_id)
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
+            return None
+        for item in self.jobs.values():
+            if item["thread_id"] == job["thread_id"]:
+                item["title"] = title
+        return {"thread_id": job["thread_id"], "title": title}
 
     async def set_thread_pinned(
         self, *, job_id: str, user_id: str, pinned: bool
@@ -1518,6 +1530,72 @@ async def test_archive_and_restore_filter_the_entire_thread_without_cancelling(
     assert thread["archived_at"] is None
     active_jobs = (await client.get("/v1/agent/jobs")).json()["jobs"]
     assert {job["id"] for job in active_jobs} == {parent_id, child_id}
+
+
+async def test_rename_from_a_follow_up_updates_the_conversation_and_preserves_prompts(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Any turn renames all owner-facing views while keeping execution inputs intact."""
+    parent_id = await _create_job(client)
+    follow_up = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups", json={"prompt": "also update the docs"}
+    )
+    child_id = follow_up.json()["id"]
+    prompts = {job_id: store.jobs[job_id]["task_prompt"] for job_id in (parent_id, child_id)}
+    response = await client.patch(
+        f"/v1/agent/jobs/{child_id}/title", json={"title": "  Export CSV 导出  "}
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "thread_id": follow_up.json()["thread_id"],
+        "title": "Export CSV 导出",
+    }
+    for job_id in (parent_id, child_id):
+        thread = (await client.get(f"/v1/agent/jobs/{job_id}/thread")).json()
+        assert thread["title"] == "Export CSV 导出"
+        assert all(job["title"] == "Export CSV 导出" for job in thread["jobs"])
+        assert (await client.get(f"/v1/agent/jobs/{job_id}")).json()["title"] == "Export CSV 导出"
+        assert store.jobs[job_id]["task_prompt"] == prompts[job_id]
+    assert all(
+        job["title"] == "Export CSV 导出"
+        for job in (await client.get("/v1/agent/jobs")).json()["jobs"]
+    )
+    next_turn = await client.post(
+        f"/v1/agent/jobs/{child_id}/follow-ups", json={"prompt": "one more change"}
+    )
+    assert next_turn.json()["title"] == "Export CSV 导出"
+
+
+@pytest.mark.parametrize("title", ["", " \n\t ", "x" * 161, None, 123])
+async def test_rename_rejects_invalid_titles(client: AsyncClient, title):
+    """Blank and oversized titles cannot overwrite a conversation's name."""
+    job_id = await _create_job(client)
+    response = await client.patch(f"/v1/agent/jobs/{job_id}/title", json={"title": title})
+    assert response.status_code == 422
+
+
+async def test_rename_accepts_trimmed_title_limit(client: AsyncClient):
+    """Surrounding whitespace does not consume the canonical title limit."""
+    job_id = await _create_job(client)
+    response = await client.patch(
+        f"/v1/agent/jobs/{job_id}/title", json={"title": " " + "名" * 160 + " "}
+    )
+    assert response.status_code == 200
+    assert response.json()["title"] == "名" * 160
+
+
+async def test_rename_hides_foreign_missing_and_deleted_jobs(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Renaming exposes no other owner's jobs and cannot restore deleted history."""
+    foreign_id = await _create_job(client)
+    store.jobs[foreign_id]["user_id"] = _OTHER
+    deleted_id = await _create_job(client)
+    store.jobs[deleted_id]["deleted_at"] = datetime.now(timezone.utc)
+    for job_id in (foreign_id, deleted_id, "ajob_missing"):
+        response = await client.patch(f"/v1/agent/jobs/{job_id}/title", json={"title": "New title"})
+        assert response.status_code == 404
+        assert response.json()["detail"]["error"]["type"] == "not_found"
 
 
 async def test_pin_and_unpin_are_thread_scoped_idempotent_and_reorder_lists(
