@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 import httpx
+from pydantic import ValidationError
 
+from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -253,6 +256,21 @@ class GatewayClient:
             GatewayError: If the status cannot be read.
         """
         return await self._get(f"/internal/users/{user_id}/status")
+
+    async def agent_access(self, user_id: str) -> AgentAccessDecision:
+        """Read the current Agent policy decision without a role-based fallback.
+
+        An older, unreachable, or malformed Gateway response grants nothing.
+        The user identifier is checked before its permissions can be consumed.
+        """
+        body = await self._get(f"/internal/users/{quote(user_id, safe='')}/agent-access")
+        try:
+            decision = AgentAccessDecision.model_validate(body)
+        except ValidationError as exc:
+            raise GatewayError("gateway returned an invalid Agent access decision") from exc
+        if decision.user_id != user_id:
+            raise GatewayError("gateway returned an Agent access decision for another user")
+        return decision
 
     async def exchange_authorization_code(
         self, *, code: str, verifier: str, client_id: str, redirect_uri: str

@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cloud_agent.agent_access import AgentAccess  # noqa: TC001 — Pydantic resolves this at runtime.
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
@@ -1994,3 +1995,4 @@ class SessionUserResponse(BaseModel):  # type: ignore[no-any-unimported]
     email: str | None = None
     role: str
     user_name: str | None = None
+    agent_access: AgentAccess

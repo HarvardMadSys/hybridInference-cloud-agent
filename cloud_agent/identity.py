@@ -60,16 +60,11 @@ USER_AGENT = "hybridinference-cloud-agent"
 #: turn the intended bounded revocation window into an unbounded one.
 JWKS_CACHE_LIFESPAN_S = 5 * 60
 
-#: Our own session, and **hours rather than days on purpose**.
+#: Our own identity/profile session, with a fixed eight-hour expiry.
 #:
-#: The session is a cache of an authorization decision, so it has to expire like
-#: one. At seven days a user the gateway suspends or downgrades keeps this
-#: service's privileges for a week, because nothing re-asks; that is the window
-#: this bounds. It is deliberately *not* extended on use — a sliding expiry
-#: rebuilds the week it replaces — and the other half of the answer is
-#: revalidation against the gateway on privileged actions
-#: (``require_agent_owner``), which is what keeps the window from having to be
-#: minutes.
+#: Every protected request resolves Agent permissions afresh at the Gateway.
+#: No role or permission in a session is an authorization cache. The expiry
+#: bounds the identity credential's lifetime and is never extended on use.
 SESSION_TTL_S = 8 * 60 * 60
 SESSION_COOKIE = "cloud_agent_session"
 

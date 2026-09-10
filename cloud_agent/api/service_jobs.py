@@ -44,6 +44,7 @@ from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_agent_job_store,
     get_gateway_client,
+    require_agent_access,
     verify_admin_access,
 )
 from cloud_agent.api.routes import (
@@ -81,6 +82,7 @@ ONCALL_METADATA_KEY = "oncall"
 async def verify_oncall_dispatch(
     request: Request,
     authorization: str | None = Header(None),
+    gateway: Any = Depends(get_gateway_client),
 ) -> str:
     """Gate for the machine-to-machine on-call dispatch.
 
@@ -100,7 +102,7 @@ async def verify_oncall_dispatch(
     )
     if configured and presented and secrets.compare_digest(presented, configured):
         return "oncall-dispatch"
-    return await verify_admin_access(request, authorization)
+    return await verify_admin_access(request, authorization, gateway)
 
 
 def _oncall_owner() -> dict[str, Any]:
@@ -148,6 +150,7 @@ async def create_oncall_job(
     """
     job_store = _require_store(store)
     user = _oncall_owner()
+    await require_agent_access(gateway, user["user_id"])
     job = await _create_job_as(
         body,
         user,

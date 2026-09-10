@@ -4,20 +4,25 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const auth = vi.hoisted(() => ({ role: 'admin' }));
+import type { AgentAccessApi } from '@/lib/api/session';
+
+const auth = vi.hoisted(() => ({ role: 'admin', access: undefined as AgentAccessApi | undefined }));
+beforeEach(() => {
+  auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
+});
 
 vi.mock('@/components/providers', () => ({
-  useAuth: () => ({ state: { user: { user_name: 'Ada', role: auth.role } } }),
+  useAuth: () => ({
+    state: { user: { user_name: 'Ada', role: auth.role, agent_access: auth.access } },
+  }),
 }));
 
-// The real ranking, not a stub that always says yes: the point of two of these
-// cases is that a non-admin is refused, and a `hasRole` mocked to true would
-// pass them while the page was wide open.
+// Use the real permission check so denied cases cannot pass through a stub.
 vi.mock('@/components/providers/AuthProvider', async () => {
   const actual = await vi.importActual<typeof import('@/components/providers/AuthProvider')>(
     '@/components/providers/AuthProvider',
   );
-  return { hasRole: actual.hasRole };
+  return { hasAgentPermission: actual.hasAgentPermission };
 });
 
 vi.mock('@/lib/api/admin', () => ({
@@ -94,13 +99,27 @@ describe('AdminHostsPage', () => {
     vi.unstubAllGlobals();
   });
 
-  it('refuses a non-admin without asking the control plane', async () => {
-    auth.role = 'internal';
+  it('refuses an admin with only agent.use without asking the control plane', async () => {
+    auth.access = { allowed: true, permissions: ['agent.use'] };
     render(<AdminHostsPage />);
 
     expect(await screen.findByText('Admin access required')).toBeInTheDocument();
     // Not merely hidden: a page that renders the refusal *and* fetches has told
     // the operator no while doing the thing anyway.
+    expect(mocked.list).not.toHaveBeenCalled();
+  });
+
+  it('admits a free account granted Agent administration', async () => {
+    auth.role = 'free';
+    render(<AdminHostsPage />);
+    expect(await screen.findByText('runner-a')).toBeInTheDocument();
+    expect(mocked.list).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an old admin profile without an explicit decision', async () => {
+    auth.access = undefined;
+    render(<AdminHostsPage />);
+    expect(await screen.findByText('Admin access required')).toBeInTheDocument();
     expect(mocked.list).not.toHaveBeenCalled();
   });
 

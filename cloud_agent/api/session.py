@@ -30,15 +30,11 @@ nothing.
 **The callback is a ``GET``.** The gateway finishes by redirecting the browser
 to ``redirect_uri?code=…``, and a redirect is a GET navigation.
 
-**Why the gateway is asked about the account.** Verifying the identity token
-proves who someone is, not that they may use anything: it is minted at
-authentication time and says nothing about a suspension since. So the status
-call happens at sign-in, and the role written into the session is the gateway's
-answer rather than a claim in the token — the role is what gates the
-internal-only surface, so it should come from the service that owns it. The
-session it buys is hours long, not days, and privileged actions revalidate
-(``require_agent_owner``); it is a cache of an authorization decision and
-expires like one.
+**Identity and admission are separate.** The identity token proves who signs in;
+the Gateway's current Agent access decision grants admission. Sessions retain
+profile fields for compatibility, while every owner/admin request and ``/me``
+reads current permissions. Account roles in tokens or profiles confer no Agent
+permission.
 
 It **fails closed**, like every other gateway call in this service: a gateway
 that cannot be reached mints no session. That is a worse day for someone trying
@@ -49,8 +45,8 @@ assumed permission.
 **A 401 from ``/me`` is not an error.** It is the answer "not signed in", which
 is what the browser asks on every load. ``ProtectedRoute`` loops if that ever
 arrives as a 500, so the failure taxonomy here is deliberately narrow: 401 for
-"no or bad session", 503 only for "this deployment cannot verify sessions at
-all".
+"no or bad session", and 503 when identity verification or current Agent
+admission cannot be resolved.
 """
 
 from __future__ import annotations
@@ -63,7 +59,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 
 from cloud_agent import identity
-from cloud_agent.api.deps import get_current_user, get_gateway_client, may_sign_in
+from cloud_agent.api.deps import (
+    get_current_user,
+    get_gateway_client,
+    require_agent_access,
+    resolve_agent_access,
+)
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import SessionUserResponse
@@ -384,6 +385,7 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid identity token.")
 
+    decision = await require_agent_access(gateway, user_id)
     try:
         status = await gateway.user_status(user_id)
     except GatewayError as exc:
@@ -397,11 +399,8 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
             detail="Cannot confirm this account with the gateway; try again shortly.",
         ) from exc
 
-    if not may_sign_in(status):
-        raise HTTPException(status_code=403, detail="This account cannot sign in.")
-
-    # The gateway's role, not the token's. The identity token proves who; the
-    # status record is what this deployment's role gates should believe.
+    # Retain the existing profile fields for compatibility. They never grant
+    # Agent permissions; only the access decision above can do that.
     role = str(status.get("role") or "free")
     email = status.get("email") or claims.get("email")
     email = str(email) if email else None
@@ -423,7 +422,13 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
     except identity.IdentityNotConfigured as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
 
-    return session, {"id": user_id, "email": email, "role": role, "user_name": user_name}
+    return session, {
+        "id": user_id,
+        "email": email,
+        "role": role,
+        "user_name": user_name,
+        "agent_access": decision.public().model_dump(),
+    }
 
 
 def _set_session_cookie(response: Response, session: str) -> None:
@@ -471,24 +476,23 @@ async def session_logout(response: Response) -> dict[str, bool]:
 
 
 @router.get("/me", response_model=SessionUserResponse)
-async def session_me(request: Request) -> SessionUserResponse:
-    """Return the current user, or 401 when there is no valid session.
+async def session_me(
+    request: Request, gateway: Any = Depends(get_gateway_client)
+) -> SessionUserResponse:
+    """Return session identity and a fresh Agent access decision.
 
-    No gateway call. The account was checked at sign-in, privileged actions
-    revalidate, and the session's own expiry bounds how stale this answer can
-    get; putting a gateway round trip on the call every page load makes the
-    whole app unavailable whenever the gateway is, for a question already
-    answered.
-
-    **Every field here comes out of the session sign-in minted**, which is what
-    makes the two answers agree for the same person.
+    Existing sessions whose access was revoked remain identifiable with a
+    denied decision, so the UI can explain the refusal without a login loop.
+    An unavailable authority returns 503, never cached permission.
     """
     user = await get_current_user(
         request=request, authorization=request.headers.get("authorization")
     )
+    decision = await resolve_agent_access(gateway, user["user_id"])
     return SessionUserResponse(
         id=user["user_id"],
         email=user.get("email"),
         role=user["role"],
         user_name=user.get("user_name"),
+        agent_access=decision.public(),
     )

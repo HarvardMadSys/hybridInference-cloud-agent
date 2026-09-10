@@ -21,10 +21,9 @@ export const en = {
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
-  'shell.internalRequired.title': 'Administrator access required',
-  'shell.internalRequired.body':
-    "The agent sandbox runs code under this deployment's own credentials, so it is limited to administrators.",
-  'shell.internalRequired.back': 'Back to Dashboard',
+  'shell.accessRequired.title': 'Agent access required',
+  'shell.accessRequired.body': 'This account has not been granted access to this Agent deployment.',
+  'shell.accessRequired.back': 'Back to Dashboard',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.projects': 'Projects',

@@ -8,12 +8,14 @@
 // this provider can answer is "does the cookie still work", which it asks by
 // calling `/v1/session/me`.
 //
-// `hasRole` is carried over unchanged — the layout's admin-only gate depends
-// on its exact ordering.
-
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { AUTH_EXPIRED_EVENT } from '@/lib/api/client';
-import { endSession, getSessionUser } from '@/lib/api/session';
+import {
+  endSession,
+  getSessionUser,
+  type AgentAccessApi,
+  type AgentPermission,
+} from '@/lib/api/session';
 
 interface User {
   id: string;
@@ -21,6 +23,7 @@ interface User {
   user_name?: string | null;
   role: string;
   is_admin: boolean;
+  agent_access?: AgentAccessApi;
 }
 
 interface AuthState {
@@ -35,16 +38,20 @@ interface AuthContextValue {
   refreshUser: () => Promise<void>;
 }
 
-const ROLE_RANK: Record<string, number> = {
-  free: 0,
-  pro: 1,
-  internal: 2,
-  admin: 3,
-};
-
-export function hasRole(userRole: string | undefined, required: string): boolean {
-  if (!(required in ROLE_RANK)) return false;
-  return (ROLE_RANK[userRole ?? 'free'] ?? 0) >= ROLE_RANK[required];
+export function hasAgentPermission(
+  access: AgentAccessApi | null | undefined,
+  required: AgentPermission,
+): boolean {
+  if (!access || access.allowed !== true || !Array.isArray(access.permissions)) return false;
+  const permissions = access.permissions;
+  if (
+    permissions.some((permission) => permission !== 'agent.use' && permission !== 'agent.admin') ||
+    new Set(permissions).size !== permissions.length ||
+    !permissions.includes('agent.use')
+  ) {
+    return false;
+  }
+  return permissions.includes(required);
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -73,7 +80,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           email: me.email ?? null,
           user_name: me.user_name,
           role: me.role || 'free',
-          is_admin: hasRole(me.role, 'admin'),
+          is_admin: hasAgentPermission(me.agent_access, 'agent.admin'),
+          agent_access: me.agent_access,
         },
       });
     } catch {

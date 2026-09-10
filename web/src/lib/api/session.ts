@@ -11,11 +11,19 @@
 import { agentApiBase } from '@/config/env';
 import { jsonOrThrow, safeFetch } from './client';
 
+export type AgentPermission = 'agent.use' | 'agent.admin';
+
+export interface AgentAccessApi {
+  allowed: boolean;
+  permissions: AgentPermission[];
+}
+
 export interface SessionUserApi {
   id: string;
   email: string | null;
   role: string;
   user_name?: string | null;
+  agent_access?: AgentAccessApi;
 }
 
 /** Who the cookie says we are. A 401 here means "not signed in", not an error. */

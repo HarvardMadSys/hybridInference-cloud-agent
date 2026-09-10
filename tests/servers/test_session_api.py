@@ -20,8 +20,8 @@ The properties worth more than the rest, each with its own case:
   they may still use anything.
 - **An unreachable gateway mints nothing.** Fail-closed, per AGENTS.md rule 4:
   a status call that cannot be made is not a status call that said yes.
-- **The session is hours, not days.** It is a cache of an authorization
-  decision; at seven days a suspension took a week to take effect here.
+- **The session is hours, not days.** It bounds the identity credential's
+  lifetime; admission is checked separately on every protected request.
 - **A 401 from ``/me`` is the ordinary answer**, not a server error. The web
   app's ``ProtectedRoute`` loops if it ever arrives as a 5xx.
 - **Sign-in and ``/me`` answer the same thing about the same person.** They are
@@ -113,13 +113,26 @@ class _FakeGateway:
         error: bool = False,
         identity_token: str = "",
         exchange_error: GatewayError | None = None,
+        permissions: list[str] | None = None,
     ) -> None:
         self.record = record if record is not None else {"exists": True, "active": True}
         self.error = error
+        self.permissions = permissions if permissions is not None else ["agent.use"]
+        self.access_asked: list[str] = []
         self.identity_token = identity_token
         self.exchange_error = exchange_error
         self.asked: list[str] = []
         self.exchanged: list[dict[str, str]] = []
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        self.access_asked.append(user_id)
+        if self.error:
+            raise GatewayError("gateway unavailable")
+        return {
+            "user_id": user_id,
+            "allowed": "agent.use" in self.permissions,
+            "permissions": self.permissions,
+        }
 
     async def user_status(self, user_id: str) -> dict[str, Any]:
         self.asked.append(user_id)
@@ -475,7 +488,7 @@ async def test_an_account_the_gateway_will_not_vouch_for_gets_no_cookie(record, 
     — and says nothing about a suspension that happened afterwards. An answer
     with no recognizable verdict is not a yes either.
     """
-    gateway = _FakeGateway(record, identity_token=_identity_token(key))
+    gateway = _FakeGateway(record, permissions=[], identity_token=_identity_token(key))
     transport = ASGITransport(app=_app(gateway))
     async with AsyncClient(
         transport=transport, base_url="https://test", follow_redirects=False
@@ -533,13 +546,7 @@ async def test_a_garbage_identity_token_is_a_401(key):
 
 
 async def test_the_session_is_hours_not_days():
-    """A session is a cache of an authorization decision, and expires like one.
-
-    At seven days a user the gateway suspends keeps this service's privileges
-    for a week, because the cookie is the only thing that re-asks. This bound
-    and ``require_agent_owner``'s revalidation are two halves of one answer;
-    loosening this one silently widens that window.
-    """
+    """Keep identity credentials short-lived even though access is checked afresh."""
     assert identity.SESSION_TTL_S <= 24 * 60 * 60
 
 
@@ -672,3 +679,60 @@ async def test_secure_can_be_turned_off_only_deliberately(monkeypatch, key):
         response = await _sign_in(client)
 
     assert "secure" not in response.headers["set-cookie"].lower()
+
+
+async def test_login_denies_an_admin_profile_without_agent_access(key):
+    gateway = _FakeGateway(
+        {"exists": True, "active": True, "role": "admin"},
+        permissions=[],
+        identity_token=_identity_token(key, role="admin"),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(gateway)), base_url="https://test", follow_redirects=False
+    ) as client:
+        response = await _sign_in(client)
+        assert response.status_code == 403
+        assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert gateway.access_asked == [_USER]
+    assert gateway.asked == [], "profile metadata must not substitute for denied admission"
+
+
+async def test_login_accepts_a_free_profile_with_explicit_agent_access(key):
+    gateway = _FakeGateway(
+        {"exists": True, "active": True, "role": "free"}, identity_token=_identity_token(key)
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(gateway)), base_url="https://test", follow_redirects=False
+    ) as client:
+        response = await _sign_in(client)
+        assert response.status_code == 303
+        claims = identity.verify_session(client.cookies[identity.SESSION_COOKIE])
+        assert claims["role"] == "free"
+        assert "permissions" not in claims
+        assert (await client.get("/v1/session/me")).json()["agent_access"] == {
+            "allowed": True,
+            "permissions": ["agent.use"],
+        }
+
+
+async def test_me_reports_revocation_without_erasing_authenticated_identity(client_and_gateway):
+    client, gateway = client_and_gateway
+    await _sign_in(client)
+    assert (await client.get("/v1/session/me")).json()["agent_access"]["allowed"] is True
+    gateway.permissions = []
+    response = await client.get("/v1/session/me")
+    assert response.status_code == 200
+    assert response.json()["id"] == _USER
+    assert response.json()["agent_access"] == {"allowed": False, "permissions": []}
+    assert gateway.access_asked == [_USER, _USER, _USER]
+
+
+async def test_me_fails_closed_after_an_earlier_allow_when_gateway_is_unavailable(
+    client_and_gateway,
+):
+    client, gateway = client_and_gateway
+    await _sign_in(client)
+    gateway.error = True
+    response = await client.get("/v1/session/me")
+    assert response.status_code == 503
+    assert "agent_access" not in response.json()

@@ -995,11 +995,11 @@ class _FakeGateway:
     async def model_catalog(self, user_id: str) -> list[str]:
         return list(_TEST_MODELS)
 
-    #: What the gateway says about the account. Read by ``require_agent_owner``
-    #: on every write, so a fake without it sends every mutating route down an
-    #: ``AttributeError`` — the same trap ``model_catalog_with_aliases``
-    #: documents below. Overridden per-test to exercise a refusal.
+    #: Profile metadata remains separate from the explicit admission decision.
     status: ClassVar[dict[str, Any]] = {"exists": True, "active": True, "role": "admin"}
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 
     async def user_status(self, user_id: str) -> dict[str, Any]:
         return dict(self.status)
@@ -1084,8 +1084,7 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     # than reported as a fabricated zero.
     app.dependency_overrides[get_log_store] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
-    # Override the credential resolver, not the role gate, so the normal test
-    # client still exercises the admin-only entitlement.
+    # Override identity only; every request still exercises Gateway admission.
     app.dependency_overrides[agent_jobs_router.authenticate_agent_owner] = lambda: identity
     if claim_auth:
         app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
@@ -2254,20 +2253,13 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeAgentJobStore)
 
 
 @pytest.mark.parametrize("role", ["free", "pro", "internal"])
-async def test_a_non_admin_owner_is_denied_server_side(store: FakeAgentJobStore, role: str):
-    """The gate must not be bypassable via the API.
-
-    ``internal`` is in the list on purpose. It used to be the bar, and it is
-    handed out for model access — a different question from who may run code
-    in this deployment's sandboxes under its GitHub App.
-    """
+async def test_a_gateway_allowed_non_admin_owner_can_read(store: FakeAgentJobStore, role: str):
+    """The explicit policy, rather than a profile role, admits the owner."""
     app = _build_app(store, role=role)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as denied_client:
-        response = await denied_client.get("/v1/agent/jobs")
-
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Agent access requires role 'admin'."
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/agent/jobs")
+    assert response.status_code == 200
 
 
 async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: FakeAgentJobStore):

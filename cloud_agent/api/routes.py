@@ -6,8 +6,8 @@ Two audiences, two authentication schemes:
   ``/v1/session/login`` sets, or the same token as a bearer): create, inspect,
   list, cancel jobs, browse the retained workspace, and subscribe to the event stream. Every
   read and mutation is scoped to ``user_id`` so one user can never touch
-  another's job. P0 remains dogfood-only, so the same dependency also requires
-  the ``internal`` role (admins satisfy it through the normal role hierarchy).
+  another's job. The same dependency also requires
+  the Gateway's explicit ``agent.use`` permission.
 - **Workers** (the sandbox runner, via a per-attempt capability token minted at
   claim time): report events, renew the lease, and drive fenced Agent-turn
   transitions. The token carries the
@@ -287,93 +287,24 @@ async def authenticate_agent_owner(
     return await get_current_user(request=request, authorization=authorization)
 
 
-#: The gateway role this surface demands. Named once because the check runs
-#: twice — on the presented session and again on the role the gateway returns
-#: when a write revalidates — and two literals drift. Raised from ``internal``
-#: to ``admin`` on 2026-09-04: ``internal`` is handed out to people who ask for
-#: model access, which is a different question from who may run code in this
-#: deployment's sandboxes against its GitHub App.
-AGENT_REQUIRED_ROLE = "admin"
-
-_AGENT_ROLE_DENIED = f"Agent access requires role {AGENT_REQUIRED_ROLE!r}."
-
-
 async def require_agent_owner(
     request: Request,
     user: dict[str, Any] = Depends(authenticate_agent_owner),
     gateway=Depends(get_gateway_client),
 ) -> dict[str, Any]:
-    """Keep the Agent surface restricted to this deployment's administrators.
+    """Require current Gateway admission for every owner read and write.
 
-    **Writes revalidate against the gateway; reads do not.** The session is a
-    cache of an authorization decision the gateway made at sign-in, and a cache
-    is only as good as what re-checks it: without this, a user suspended or
-    downgraded on the gateway keeps this service's privileges until their
-    cookie expires. Bounding that to the session TTL alone would mean a TTL of
-    minutes, which is why the two halves are designed together.
-
-    It hangs on the **method** rather than a list of privileged paths because a
-    list is a thing the next route added quietly falls off. Reads stay a pure
-    session check so that a gateway outage costs nobody their open pages, and
-    so that polling this surface is not an amplifier on the gateway.
-
-    The check is here rather than in ``get_current_user`` because this is the
-    dependency the whole owner surface already goes through, and there is one
-    owner credential to check.
-
-    **Grant minting is not listed here, and does not need to be.** The gateway
-    re-reads the account inside ``POST /internal/agent-grants`` itself, so the
-    check and the credential it guards are one call — there is no window
-    between them for this service to widen by asking first.
-
-    Args:
-        request: The incoming request, for its method.
-        user: The authenticated owner, from the session.
-        gateway: The gateway's contracts.
-
-    Returns:
-        The owner, carrying the gateway's current role on a revalidated
-        request so a downgrade takes effect on the request in hand rather than
-        only on the next one.
-
-    Raises:
-        HTTPException: 403 if the account may no longer use this surface, 503
-            if the gateway could not be asked.
+    Identity selects the owner; the Gateway's explicit agent.use permission
+    admits the request. Local ownership checks still fence every resource.
     """
-    from cloud_agent.api.deps import SAFE_METHODS, has_role, may_sign_in
+    from cloud_agent.api.deps import require_agent_access
 
-    if not has_role(user.get("role", "free"), AGENT_REQUIRED_ROLE):
-        raise HTTPException(status_code=403, detail=_AGENT_ROLE_DENIED)
-
-    if request.method.upper() in SAFE_METHODS:
-        return user
-
-    try:
-        status = await gateway.user_status(user["user_id"])
-    except GatewayError as exc:
-        # Fail closed, per AGENTS.md rule 4: an authority that cannot be
-        # reached has not granted anything.
-        logger.warning(
-            "agent_owner_revalidation_unavailable",
-            exc_info=True,
-            extra={
-                "event": "agent_owner_revalidation_unavailable",
-                "user_id": user["user_id"],
-            },
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="Cannot confirm this account with the gateway; try again shortly.",
-        ) from exc
-
-    if not may_sign_in(status):
-        raise HTTPException(status_code=403, detail="This account cannot sign in.")
-
-    role = str(status.get("role") or "free")
-    if not has_role(role, AGENT_REQUIRED_ROLE):
-        raise HTTPException(status_code=403, detail=_AGENT_ROLE_DENIED)
-
-    return {**user, "role": role, "is_admin": role == "admin"}
+    decision = await require_agent_access(gateway, user["user_id"])
+    return {
+        **user,
+        "agent_access": decision.public().model_dump(),
+        "is_admin": decision.permits("agent.admin"),
+    }
 
 
 def _sse_frame(event: dict[str, Any]) -> str:

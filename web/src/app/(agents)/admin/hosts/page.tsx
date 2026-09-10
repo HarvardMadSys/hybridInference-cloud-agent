@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasRole } from '@/components/providers/AuthProvider';
+import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type { AgentRunnerHost, AgentRunnerHostPool } from '@/lib/api/admin';
 import {
   drainAgentRunnerHost,
@@ -73,7 +73,7 @@ export default function AdminHostsPage() {
   const [busy, setBusy] = useState(false);
 
   const mounted = useRef(true);
-  const isAdmin = hasRole(state.user?.role, 'admin');
+  const isAdmin = hasAgentPermission(state.user?.agent_access, 'agent.admin');
 
   const load = useCallback(async (background = false) => {
     if (!background) setLoading(true);

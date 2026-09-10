@@ -49,3 +49,7 @@ uv run python -m openapi_spec_validator contracts/*.yaml
 CI runs exactly that. It checks the documents are well-formed OpenAPI; it
 cannot check they describe the gateway, which is what the `x-source` references
 and the paired tests are for.
+
+Agent admission now also depends on `/internal/users/{user_id}/agent-access`.
+See [the policy rollout and verification notes](../docs/agent-access-policy.md)
+before upgrading the Agent against an older Gateway.
