@@ -84,8 +84,8 @@ function over(
 function taskOrder() {
   return screen
     .getAllByRole('link')
-    .filter((link) => ['first', 'second'].includes(link.textContent ?? ''))
-    .map((link) => link.textContent);
+    .filter((link) => ['/first', '/second'].includes(link.getAttribute('href') ?? ''))
+    .map((link) => link.getAttribute('href')?.slice(1));
 }
 describe('manual pointer reordering', () => {
   it('moves downward when dropped on the lower half of the next row', async () => {
@@ -155,7 +155,7 @@ describe('manual pointer reordering', () => {
       next_cursor: null,
     });
     render(<AgentsSidebar />);
-    const first = (await screen.findByRole('link', { name: 'first' })).parentElement!;
+    const first = (await screen.findByRole('link', { name: 'first · owner/repo' })).parentElement!;
     const second = screen.getByRole('link', { name: 'second' }).parentElement!;
     const dataTransfer = transfer();
     fireEvent.dragStart(first, { dataTransfer });

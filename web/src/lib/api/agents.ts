@@ -537,6 +537,7 @@ export async function listAgentConversations(
     q?: string;
     repo?: string;
     includeArchived?: boolean;
+    pinned?: boolean;
     cursor?: string;
     limit?: number;
   } = {},
@@ -545,6 +546,7 @@ export async function listAgentConversations(
   if (options.q) query.set('q', options.q);
   if (options.repo) query.set('repo', options.repo);
   if (options.includeArchived) query.set('include_archived', 'true');
+  if (options.pinned !== undefined) query.set('pinned', String(options.pinned));
   if (options.cursor) query.set('cursor', options.cursor);
   return jsonOrThrow(await fetchWithAuth(API_BASE, `/v1/agent/conversations?${query}`));
 }

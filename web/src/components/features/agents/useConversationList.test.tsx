@@ -25,6 +25,41 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('conversation navigation queries', () => {
+  it('isolates pin filters and stamps only the refresh that loaded the rows', async () => {
+    api.list.mockResolvedValueOnce({
+      conversations: [row('regular')],
+      next_cursor: 'regular-next',
+    });
+    const { result, rerender } = renderHook(
+      ({ pinned, refresh, enabled }) => useConversationList({ pinned, refresh, enabled }),
+      { initialProps: { pinned: false, refresh: 0, enabled: true } },
+    );
+    await waitFor(() => expect(result.current.loadedRefresh).toBe(0));
+    rerender({ pinned: false, refresh: 1, enabled: false });
+    expect(result.current.loadedRefresh).toBe(0);
+    let resolveOld!: (value: unknown) => void;
+    api.list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    rerender({ pinned: false, refresh: 1, enabled: true });
+    expect(result.current.loadedRefresh).toBe(0);
+    api.list.mockResolvedValueOnce({ conversations: [row('pinned')], next_cursor: null });
+    rerender({ pinned: true, refresh: 2, enabled: true });
+    expect(result.current.rows).toEqual([]);
+    expect(result.current.loadedRefresh).toBeNull();
+    await waitFor(() => expect(result.current.loadedRefresh).toBe(2));
+    await act(async () => resolveOld({ conversations: [row('stale')], next_cursor: 'stale-next' }));
+    expect(result.current.rows.map((row) => row.key)).toEqual(['pinned']);
+    expect(result.current.cursor).toBeNull();
+    expect(result.current.loadedRefresh).toBe(2);
+    expect(api.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ pinned: true, cursor: undefined }),
+    );
+  });
+
   it('refreshes four loaded pages in one bounded request and retains the next cursor', async () => {
     const all = Array.from({ length: 260 }, (_, index) => row(String(index)));
     api.list.mockImplementation(async ({ cursor, limit }: { cursor?: string; limit: number }) => {

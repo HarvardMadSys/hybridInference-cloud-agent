@@ -1270,6 +1270,7 @@ async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
             "q": "  Original  ",
             "repo": "owner/name",
             "include_archived": "true",
+            "pinned": "true",
             "limit": 17,
             "cursor": "previous-page",
         },
@@ -1280,6 +1281,7 @@ async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
         q="Original",
         repo="owner/name",
         include_archived=True,
+        pinned=True,
         limit=17,
         cursor="previous-page",
     )
@@ -1300,6 +1302,7 @@ async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
         {"repo": "--upload-pack=sh"},
         {"q": "x" * 201},
         {"include_archived": "invalid"},
+        {"pinned": "invalid"},
         {"cursor": ""},
         {"cursor": "x" * 2049},
     ],
@@ -1338,8 +1341,19 @@ async def test_conversation_search_requires_owner_and_accepts_browser_session(
     assert response.status_code == 200
     assert response.json() == {"conversations": [], "next_cursor": None}
     search.assert_awaited_once_with(
-        user_id=_OWNER, q="", repo=None, include_archived=False, limit=50, cursor=None
+        user_id=_OWNER, q="", repo=None, include_archived=False, pinned=None, limit=50, cursor=None
     )
+
+
+async def test_conversation_search_forwards_unpinned_filter(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """False selects the ordinary list rather than omitting the filter."""
+    search = AsyncMock(return_value={"conversations": [], "next_cursor": None})
+    monkeypatch.setattr(store, "list_conversations", search, raising=False)
+    response = await client.get("/v1/agent/conversations", params={"pinned": "false"})
+    assert response.status_code == 200
+    assert search.await_args.kwargs["pinned"] is False
 
 
 def _seed_event(

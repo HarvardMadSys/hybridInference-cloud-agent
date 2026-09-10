@@ -328,11 +328,18 @@ describe('sidebar navigation interactions', () => {
       await screen.findByRole('link', { name: 'Task a · owner/repo · Archived' }),
     ).toHaveAttribute('href', '/a');
   });
-  it('loads only expanded project pages and records no history IDs before manual order', async () => {
+  it('loads pins and only expanded project pages, and records no history IDs before manual order', async () => {
     render(<AgentsSidebar />);
     await screen.findByText('Task a');
     expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
-    expect(api.list.mock.calls.every(([options]) => options.repo === 'owner/repo')).toBe(true);
+    expect(
+      api.list.mock.calls.every(
+        ([options]) => options.pinned === true || options.repo === 'owner/repo',
+      ),
+    ).toBe(true);
+    expect(api.list).toHaveBeenCalledWith(
+      expect.objectContaining({ pinned: true, repo: undefined }),
+    );
     expect(localStorage.getItem(sidebarPreferencesKey('alice'))).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'View options' }));
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'In one list' }));

@@ -2387,6 +2387,7 @@ class AgentJobStore:
         q: str = "",
         repo: str | None = None,
         include_archived: bool = False,
+        pinned: bool | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
@@ -2403,9 +2404,11 @@ class AgentJobStore:
         q = q.strip()
         if not 1 <= limit <= 200 or len(q) > 200 or "\x00" in q:
             raise ValueError("Invalid conversation search parameters")
-        scope = hashlib.sha256(
-            json.dumps([user_id, q, repo, include_archived]).encode()
-        ).hexdigest()
+        scope_filters = [user_id, q, repo, include_archived]
+        # Preserve issued cursors for searches that do not filter pin state.
+        if pinned is not None:
+            scope_filters.append(pinned)
+        scope = hashlib.sha256(json.dumps(scope_filters).encode()).hexdigest()
         boundary = (
             _decode_conversation_cursor(cursor, scope)
             if cursor is not None
@@ -2425,6 +2428,7 @@ class AgentJobStore:
                       AND ($3::text = '' OR POSITION(LOWER($3) IN LOWER(t.title)) > 0
                            OR POSITION(LOWER($3) IN LOWER(t.repo)) > 0)
                       AND ($4::boolean OR t.archived_at IS NULL)
+                      AND ($10::boolean IS NULL OR (t.pinned_at IS NOT NULL) = $10)
                     GROUP BY t.id
                 ), page AS (
                     SELECT * FROM owned
@@ -2457,6 +2461,7 @@ class AgentJobStore:
                 include_archived,
                 limit + 1,
                 *boundary,
+                pinned,
             )
         next_cursor = None
         if len(rows) > limit:

@@ -23,6 +23,7 @@ import {
   getAgentJobUsage,
   getAgentJobThread,
   listAllAgentThreadEvents,
+  listAgentConversations,
   listAgentTerminals,
   listAgentJobs,
   pinAgentJob,
@@ -86,6 +87,18 @@ describe('agents api', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  it.each([true, false, undefined])(
+    'sends the pin filter %s without conflating false with omitted',
+    async (pinned) => {
+      fetchWithAuth.mockResolvedValue(jsonResponse({ conversations: [], next_cursor: null }));
+      await listAgentConversations({ pinned });
+      expect(fetchWithAuth).toHaveBeenCalledWith(
+        expect.any(String),
+        `/v1/agent/conversations?limit=50${pinned === undefined ? '' : `&pinned=${pinned}`}`,
+      );
+    },
+  );
 
   it('pins legacy telemetry identity when fetching a snapshot', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ current_attempt_id: 10 }));

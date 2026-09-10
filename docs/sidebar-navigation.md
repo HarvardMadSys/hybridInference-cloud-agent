@@ -6,6 +6,12 @@ indicators, with no extra “Current” badge. Switching between loaded conversa
 in the same project preserves the highlight while details load. Opening a historical turn keeps the conversation selected and links
 back to its latest turn.
 
+Pinned conversations appear in a dedicated **Pinned** section below **New task**
+and above **Projects**, including pins from collapsed projects. They appear once,
+outside both project folders and the ordinary flat list. Unpinning returns a
+conversation to its project or flat list. The section is hidden when empty and
+has its own **Show more** control. Search remains one unified result list.
+
 The view menu has two independent choices:
 
 - Group: **By project** (default) or **In one list**.
@@ -15,7 +21,7 @@ Manual mode shows drag grips on projects and task rows. Drop above or below a
 row’s midpoint to insert before or after it; an insertion line previews the result.
 It also supports **Alt+ArrowUp/ArrowDown**
 while a row is focused. Reordering changes display order, never repository
-ownership. Pinned and unpinned tasks remain separate. Manual order, grouping,
+ownership. Pinned tasks have their own manual order, shared by both grouping modes. Manual order, grouping,
 sorting, and expanded projects are remembered for each signed-in user in the
 current browser; switching to Last updated retains the manual order.
 Conversation IDs are persisted only after manual ordering is enabled. The former
@@ -32,8 +38,9 @@ including conversations outside the first page, without changing its activity ti
 
 ## API
 
-`GET /v1/agent/conversations` accepts `q`, `repo`, `include_archived`, `limit`, and
-an opaque `cursor`. It returns `conversations` and `next_cursor`. Each row includes
+`GET /v1/agent/conversations` accepts `q`, `repo`, `include_archived`, `pinned`,
+`limit`, and an opaque `cursor`. `pinned=true` or `pinned=false` restricts the pin
+partition; omitting it includes both. It returns `conversations` and `next_cursor`. Each row includes
 the latest `job`, canonical `title`, `archived`, and `last_activity_at`.
 
 Search is a case-insensitive literal substring match, including `%` and `_`.
@@ -46,5 +53,5 @@ The query aggregates matching job activity by conversation before applying the
 page boundary, then reads the latest job for only that page using the existing
 thread/turn index. It still aggregates matching history; keyset pagination does
 not make this an index-only, constant-time query. Grouped view fetches expanded
-repositories without an additional global conversation list, and refreshes batch
+repositories with `pinned=false` plus a separate global `pinned=true` list. Refreshes batch
 already loaded rows in requests of up to 200 rather than repeating 50-row queries.

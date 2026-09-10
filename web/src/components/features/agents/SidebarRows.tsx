@@ -236,6 +236,27 @@ export function ListStatus({
     </>
   );
 }
+export interface SidebarPinUpdate {
+  row: SidebarConversation;
+  refresh: number;
+}
+/** Keep a completed pin action visible until this particular list catches up. */
+export function reconcileSidebarPins(
+  rows: SidebarConversation[],
+  updates: ReadonlyMap<string, SidebarPinUpdate>,
+  loadedRefresh: number | null,
+  includeMoved = false,
+): SidebarConversation[] {
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  for (const [key, update] of updates) {
+    if (loadedRefresh !== null && loadedRefresh >= update.refresh) continue;
+    const row = byKey.get(key);
+    if (row) byKey.set(key, { ...row, job: { ...row.job, pinnedAt: update.row.job.pinnedAt } });
+    else if (includeMoved) byKey.set(key, update.row);
+  }
+  return [...byKey.values()];
+}
+
 export function ProjectFolder({
   repo,
   active,
@@ -247,6 +268,7 @@ export function ProjectFolder({
   userId,
   refresh,
   hiddenThreads,
+  pinUpdates,
   registerRows,
   orderRows,
   taskReorder,
@@ -263,26 +285,32 @@ export function ProjectFolder({
   userId?: string;
   refresh: number;
   hiddenThreads: Set<string>;
-  registerRows: (rows: SidebarConversation[]) => void;
+  pinUpdates?: ReadonlyMap<string, SidebarPinUpdate>;
+  registerRows: (rows: SidebarConversation[], loadedRefresh: number | null) => void;
   orderRows: (rows: SidebarConversation[]) => SidebarConversation[];
   taskReorder: (rows: SidebarConversation[], row: SidebarConversation) => SidebarReorderProps;
   reorderProps: SidebarReorderProps;
 }) {
   const t = useT();
-  const list = useConversationList({ repo, enabled: expanded, userId, refresh });
+  const list = useConversationList({ repo, pinned: false, enabled: expanded, userId, refresh });
   const [shown, setShown] = useState(15);
   useEffect(() => {
-    registerRows(list.rows);
-  }, [list.rows, registerRows]);
+    registerRows(list.rows, list.loadedRefresh);
+  }, [list.rows, list.loadedRefresh, registerRows]);
   const byKey = new Map(initial.map((row) => [row.key, row]));
   for (const row of list.rows) byKey.set(row.key, row);
   if (selected && !selected.archived && !byKey.has(selected.key)) byKey.set(selected.key, selected);
   const rows = orderRows(
-    [...byKey.values()]
-      .filter((row) => !hiddenThreads.has(row.key))
+    reconcileSidebarPins([...byKey.values()], pinUpdates ?? new Map(), list.loadedRefresh, true)
+      .filter(
+        (row) =>
+          row.job.repo === repo &&
+          !row.job.pinnedAt &&
+          !row.archived &&
+          !hiddenThreads.has(row.key),
+      )
       .sort(
         (a, b) =>
-          (Date.parse(b.job.pinnedAt ?? '') || 0) - (Date.parse(a.job.pinnedAt ?? '') || 0) ||
           (Date.parse(b.lastActivityAt ?? '') || 0) - (Date.parse(a.lastActivityAt ?? '') || 0),
       ),
   );

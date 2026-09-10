@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentJobApi, AgentProjectApi } from '@/lib/api/agents';
 
@@ -72,22 +72,28 @@ function apiProject(overrides: Partial<AgentProjectApi> = {}): AgentProjectApi {
 describe('AgentsSidebar layout', () => {
   beforeEach(() => {
     localStorage.clear();
-    mocks.listAgentConversations.mockImplementation(async (options: { repo?: string } = {}) => {
-      const jobs: AgentJobApi[] = await mocks.listAgentJobs(
-        options.repo ? 200 : 50,
-        false,
-        options.repo,
-      );
-      return {
-        conversations: jobs.map((job) => ({
-          job,
-          title: job.task_prompt,
-          archived: false,
-          last_activity_at: job.created_at,
-        })),
-        next_cursor: null,
-      };
-    });
+    mocks.listAgentConversations.mockImplementation(
+      async (options: { repo?: string; pinned?: boolean } = {}) => {
+        const jobs: AgentJobApi[] = await mocks.listAgentJobs(
+          options.repo ? 200 : 50,
+          false,
+          options.repo,
+        );
+        return {
+          conversations: jobs
+            .filter(
+              (job) => options.pinned === undefined || Boolean(job.pinned_at) === options.pinned,
+            )
+            .map((job) => ({
+              job,
+              title: job.task_prompt,
+              archived: false,
+              last_activity_at: job.created_at,
+            })),
+          next_cursor: null,
+        };
+      },
+    );
     window.innerWidth = 1400;
     mocks.listAgentJobs.mockResolvedValue([]);
     mocks.listAgentProjects.mockResolvedValue([]);
@@ -137,22 +143,28 @@ describe('AgentsSidebar layout', () => {
 describe('AgentsSidebar project tree', () => {
   beforeEach(() => {
     localStorage.clear();
-    mocks.listAgentConversations.mockImplementation(async (options: { repo?: string } = {}) => {
-      const jobs: AgentJobApi[] = await mocks.listAgentJobs(
-        options.repo ? 200 : 50,
-        false,
-        options.repo,
-      );
-      return {
-        conversations: jobs.map((job) => ({
-          job,
-          title: job.task_prompt,
-          archived: false,
-          last_activity_at: job.created_at,
-        })),
-        next_cursor: null,
-      };
-    });
+    mocks.listAgentConversations.mockImplementation(
+      async (options: { repo?: string; pinned?: boolean } = {}) => {
+        const jobs: AgentJobApi[] = await mocks.listAgentJobs(
+          options.repo ? 200 : 50,
+          false,
+          options.repo,
+        );
+        return {
+          conversations: jobs
+            .filter(
+              (job) => options.pinned === undefined || Boolean(job.pinned_at) === options.pinned,
+            )
+            .map((job) => ({
+              job,
+              title: job.task_prompt,
+              archived: false,
+              last_activity_at: job.created_at,
+            })),
+          next_cursor: null,
+        };
+      },
+    );
     window.innerWidth = 1400;
     mocks.listAgentProjects.mockResolvedValue([
       apiProject({ task_count: 2, active_count: 1 }),
@@ -265,7 +277,10 @@ describe('AgentsSidebar project tree', () => {
     fireEvent.click(screen.getByRole('button', { name: /hybridInference/ }));
 
     await waitFor(() => expect(screen.getByLabelText('1 running or queued')).toBeInTheDocument());
-    expect(screen.queryByText('Add Git terminal')).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole('region', { name: 'Pinned' })).getByText('Add Git terminal'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Explain this repo')).not.toBeInTheDocument();
   });
 
   it('renders pinned state and refreshes jobs and projects after pin changes', async () => {
