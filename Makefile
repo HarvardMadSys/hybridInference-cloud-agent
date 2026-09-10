@@ -1,4 +1,4 @@
-.PHONY: help setup-dev format lint test test-db test-all check clean
+.PHONY: help setup-dev format lint typecheck test test-db test-all check clean
 
 .DEFAULT_GOAL := help
 
@@ -35,6 +35,19 @@ lint:  ## Run linters (ruff format check, ruff lint, pydocstyle)
 	$(UV_RUN) pydocstyle cloud_agent cloud_agent_host
 	@echo "$(GREEN)OK Linting passed$(RESET)"
 
+typecheck:  ## Type-check the ports and every caller narrowed to one
+	@echo "$(YELLOW)Running mypy...$(RESET)"
+	$(UV_RUN) mypy --follow-imports=silent --ignore-missing-imports \
+		cloud_agent/ports \
+		cloud_agent/storage/repositories \
+		cloud_agent/storage/store.py \
+		cloud_agent/api/admin_hosts.py \
+		cloud_agent/api/hosts.py \
+		cloud_agent/broker_routing.py \
+		cloud_agent/deploy_readiness.py \
+		cloud_agent/mcp_registry.py
+	@echo "$(GREEN)OK Type checking passed$(RESET)"
+
 test:  ## Run tests (exclude external and db-dependent)
 	@echo "$(YELLOW)Running tests (not external, not dbtest)...$(RESET)"
 	$(UV_RUN) pytest -q -m "not external and not dbtest"
@@ -46,7 +59,7 @@ test-db:  ## Run the dbtest tier (needs Postgres; see TEST_DB_* in ENVIRONMENT.m
 test-all:  ## Run all tests except external (includes db-dependent)
 	$(UV_RUN) pytest -q -m "not external"
 
-check: format lint test  ## Format, lint, and test — the gate every task must pass
+check: format lint typecheck test  ## Format, lint, type-check and test — the gate every task must pass
 
 clean:  ## Remove caches and build artifacts
 	rm -rf .pytest_cache .ruff_cache .coverage htmlcov build dist *.egg-info

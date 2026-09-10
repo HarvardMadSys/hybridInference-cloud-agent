@@ -216,6 +216,24 @@ jobs:
         continue-on-error: true
         run: uv run pydocstyle cloud_agent cloud_agent_host
 
+      # Scoped to the ports and the callers narrowed to them. The rest of the
+      # tree is not mypy-clean yet, and a gate that starts red is a gate nobody
+      # reads. `--follow-imports=silent` keeps the report to these files;
+      # `--ignore-missing-imports` covers asyncpg, which ships no stubs.
+      - name: Mypy
+        id: mypy
+        continue-on-error: true
+        run: |
+          uv run mypy --follow-imports=silent --ignore-missing-imports \
+            cloud_agent/ports \
+            cloud_agent/storage/repositories \
+            cloud_agent/storage/store.py \
+            cloud_agent/api/admin_hosts.py \
+            cloud_agent/api/hosts.py \
+            cloud_agent/broker_routing.py \
+            cloud_agent/deploy_readiness.py \
+            cloud_agent/mcp_registry.py
+
       # `continue-on-error` keeps a failed check from failing the job, so
       # without this the job would be green with a red step inside it. Same
       # shape as `CI Gate` below, for the same reason.
@@ -225,6 +243,7 @@ jobs:
             ruff-format=${{ steps.ruff_format.outcome }}
             ruff-lint=${{ steps.ruff_lint.outcome }}
             pydocstyle=${{ steps.pydocstyle.outcome }}
+            mypy=${{ steps.mypy.outcome }}
         run: |
           set -euo pipefail
           failed=0
