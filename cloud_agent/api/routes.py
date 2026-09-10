@@ -1553,6 +1553,7 @@ async def list_agent_jobs(
 async def list_agent_sessions(
     limit: int = Query(50, ge=1, le=200),
     archived: bool = Query(False),
+    include_summary: bool = Query(True),
     cursor: str | None = Query(None, max_length=1024),
     search: str | None = Query(None, max_length=200, pattern=r"^[^\x00]*$"),
     repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
@@ -1571,6 +1572,7 @@ async def list_agent_sessions(
             search=(search.strip() or None) if search is not None else None,
             repo=repo,
             state=state,
+            include_summary=include_summary,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

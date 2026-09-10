@@ -96,6 +96,7 @@ export function ArchiveProjectSection({
           {
             ...filters,
             repo: project.repo,
+            includeSummary: false,
             limit: Math.min(200, revealedDepth.current - rows.size),
             ...(nextCursor ? { cursor: nextCursor } : {}),
           },
@@ -143,7 +144,7 @@ export function ArchiveProjectSection({
     setError(false);
     try {
       const page = await listAgentSessions(
-        { ...filters, repo: project.repo, limit: ROWS_PER_PAGE, cursor },
+        { ...filters, repo: project.repo, limit: ROWS_PER_PAGE, cursor, includeSummary: false },
         controller.signal,
       );
       if (controller.signal.aborted) return;

@@ -400,12 +400,12 @@ class AgentSessionProjectCount(BaseModel):
 
 
 class AgentSessionListResponse(BaseModel):
-    """A cursor page of conversations, with complete filtered counts."""
+    """A cursor page of conversations, with optional complete filtered counts."""
 
     sessions: list[AgentSessionResponse]
-    total: int
+    total: int | None
     next_cursor: str | None = None
-    projects: list[AgentSessionProjectCount]
+    projects: list[AgentSessionProjectCount] | None
 
 
 class AgentSessionSelection(BaseModel):

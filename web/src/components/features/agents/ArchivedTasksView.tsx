@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import {
+  AGENT_SESSION_SELECTION_LIMIT as BULK_LIMIT,
   deleteAgentSessions,
   listAgentSessions,
   setAgentSessionsArchived,
@@ -13,11 +14,19 @@ import {
   type AgentSessionState,
 } from '@/lib/api/agents';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { APIError } from '@/lib/utils/errors';
 import { ARCHIVE_FOCUS, ArchiveDeleteDialog, ArchiveIcon } from './ArchiveControls';
 import { ArchiveProjectSection, ARCHIVE_STATE_KEYS } from './ArchiveProjectSection';
 
 const GROUPS_PER_PAGE = 6;
-const BULK_LIMIT = 1000;
+const BULK_PAGE_SIZE = 100;
+const SESSION_ERROR_KEYS = {
+  session_active: 'archive.sessionActive',
+  fork_in_progress: 'archive.forkInProgress',
+  publication_pending: 'archive.publicationPending',
+  not_archived: 'archive.sessionNotArchived',
+  not_found: 'archive.sessionNotFound',
+} as const;
 const SOFT_BUTTON = `inline-flex items-center justify-center gap-1.5 rounded-lg bg-gray-100 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10 ${ARCHIVE_FOCUS}`;
 const TEXT_BUTTON = `rounded px-1 py-1 text-xs font-medium text-crimson hover:underline disabled:opacity-50 dark:text-rose-300 ${ARCHIVE_FOCUS}`;
 
@@ -113,6 +122,8 @@ export function ArchivedTasksView() {
     void listAgentSessions({ ...filters, limit: 1 }, controller.signal)
       .then((result) => {
         if (controller.signal.aborted) return;
+        if (result.projects === null || result.total === null)
+          throw new Error('Archive summary is missing');
         setProjects(result.projects);
         setTotal(result.total);
         loadedFilters.current = filters;
@@ -168,6 +179,20 @@ export function ArchivedTasksView() {
     setState('');
   }
 
+  function actionFailure(cause: unknown, fallback: string): string {
+    if (!(cause instanceof APIError)) return fallback;
+    if (cause.code === 'session_selection_too_large')
+      return t('archive.bulkLimit', { count: BULK_LIMIT });
+    const key = SESSION_ERROR_KEYS[cause.code as keyof typeof SESSION_ERROR_KEYS];
+    return key ? t(key) : cause.message;
+  }
+
+  function refreshAfterConflict(cause: unknown): boolean {
+    if (!(cause instanceof APIError) || ![404, 409].includes(cause.statusCode ?? 0)) return false;
+    setRevision((current) => current + 1);
+    return true;
+  }
+
   async function collectSessions(project?: string): Promise<AgentSessionApi[]> {
     actionRequest.current?.abort();
     const controller = new AbortController();
@@ -175,17 +200,27 @@ export function ArchivedTasksView() {
     const byId = new Map<string, AgentSessionApi>();
     const cursors = new Set<string>();
     let cursor: string | undefined;
+    let pages = 0;
     do {
+      // Bound requests too: concurrent changes must not keep collection paging forever.
+      if (++pages > Math.ceil(BULK_LIMIT / BULK_PAGE_SIZE) + 1)
+        throw new APIError('session_selection_too_large', 'Selection exceeds the bulk limit');
       const page = await listAgentSessions(
         {
           ...filters,
           ...(project !== undefined ? { repo: project } : {}),
-          limit: 100,
+          limit: BULK_PAGE_SIZE,
+          includeSummary: !cursor,
           ...(cursor ? { cursor } : {}),
         },
         controller.signal,
       );
+      if (!cursor && page.total === null) throw new Error('Archive summary is missing');
+      if (page.total !== null && page.total > BULK_LIMIT)
+        throw new APIError('session_selection_too_large', 'Selection exceeds the bulk limit');
       for (const session of page.sessions) byId.set(session.thread_id, session);
+      if (byId.size > BULK_LIMIT)
+        throw new APIError('session_selection_too_large', 'Selection exceeds the bulk limit');
       const next = page.next_cursor;
       if (next && cursors.has(next)) throw new Error('Repeated archive cursor');
       if (next) cursors.add(next);
@@ -216,8 +251,9 @@ export function ArchivedTasksView() {
         ids,
         href: restored.length === 1 ? `/${restored[0].job.id}` : '/',
       });
-    } catch {
-      setActionError(t('archive.unarchiveFailed'));
+    } catch (cause) {
+      refreshAfterConflict(cause);
+      setActionError(actionFailure(cause, t('archive.unarchiveFailed')));
     } finally {
       setBusy(null);
     }
@@ -236,8 +272,9 @@ export function ArchivedTasksView() {
       const sessions = session ? [session] : await collectSessions(project);
       const deletable = sessions.filter((item) => item.can_delete);
       setPendingDelete({ sessions: deletable, skipped: sessions.length - deletable.length, scope });
-    } catch {
-      setActionError(t('archive.prepareFailed'));
+    } catch (cause) {
+      refreshAfterConflict(cause);
+      setActionError(actionFailure(cause, t('archive.prepareFailed')));
     } finally {
       setBusy(null);
     }
@@ -259,8 +296,14 @@ export function ArchivedTasksView() {
       setRemoved((current) => new Set([...current, ...result.thread_ids]));
       setNotice({ kind: 'deleted', count: result.thread_ids.length });
       setPendingDelete(null);
-    } catch {
-      setDeleteError(t('archive.deleteFailed'));
+    } catch (cause) {
+      const message = actionFailure(cause, t('archive.deleteFailed'));
+      if (refreshAfterConflict(cause)) {
+        setPendingDelete(null);
+        setActionError(`${message} ${t('archive.selectionChanged')}`);
+      } else {
+        setDeleteError(message);
+      }
     } finally {
       setBusy(null);
     }
@@ -278,8 +321,10 @@ export function ArchivedTasksView() {
         return next;
       });
       setNotice({ kind: 'undone' });
-    } catch {
-      setActionError(t('archive.undoFailed'));
+    } catch (cause) {
+      refreshAfterConflict(cause);
+      if (cause instanceof APIError && cause.statusCode === 404) setNotice(null);
+      setActionError(actionFailure(cause, t('archive.undoFailed')));
     } finally {
       setBusy(null);
     }

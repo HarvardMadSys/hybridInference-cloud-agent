@@ -311,7 +311,11 @@ _JOB_COLUMNS = (
 )
 _QUALIFIED_JOB_COLUMNS = ", ".join(f"j.{column.strip()}" for column in _JOB_COLUMNS.split(","))
 
-_SESSION_QUERY = f"""
+
+def _session_query(*, filter_repo: bool = False) -> str:
+    """Filter project rows before looking up each conversation's latest turn."""
+    repo_filter = "AND ($5::text IS NULL OR t.repo = $5)" if filter_repo else ""
+    return f"""
 WITH latest AS (
     SELECT {_QUALIFIED_JOB_COLUMNS}, t.id AS session_id, t.title AS session_title,
            t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
@@ -332,10 +336,12 @@ WITH latest AS (
     WHERE t.user_id = $1 AND t.deleted_at IS NULL
       AND (($2 AND t.archived_at IS NOT NULL) OR (NOT $2 AND t.archived_at IS NULL))
       AND ($3::text IS NULL OR STRPOS(LOWER(t.title), LOWER($3)) > 0)
+      {repo_filter}
 ), matched AS (
     SELECT * FROM latest WHERE $4::text IS NULL OR display_state = $4
 )
 """
+
 
 # An idle native process and its HOT credential lease outlive the completed
 # turn. Removing a chat from owner history must not tear down that process or
@@ -2526,12 +2532,14 @@ class AgentJobStore:
         search: str | None = None,
         repo: str | None = None,
         state: str | None = None,
+        include_summary: bool = True,
     ) -> dict[str, Any]:
         """Page complete conversations independently of their number of turns.
 
         Project facets apply search/state/archive filters before the selected
         repo. The page and its counts share a database snapshot; the opaque
         keyset remains valid when earlier rows are unarchived or deleted.
+        Row-only requests skip the full-history aggregate and return null counts.
         """
         scope = _session_cursor_scope(user_id, archived, search, repo, state)
         after_at, after_id = _decode_session_cursor(cursor, scope)
@@ -2539,21 +2547,24 @@ class AgentJobStore:
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
-            projects = await conn.fetch(
-                _SESSION_QUERY
-                + "SELECT repo, COUNT(*) AS count FROM matched GROUP BY repo ORDER BY repo",
-                user_id,
-                archived,
-                search,
-                state,
+            projects = (
+                await conn.fetch(
+                    _session_query()
+                    + "SELECT repo, COUNT(*) AS count FROM matched GROUP BY repo ORDER BY repo",
+                    user_id,
+                    archived,
+                    search,
+                    state,
+                )
+                if include_summary
+                else None
             )
             rows = await conn.fetch(
-                _SESSION_QUERY
+                _session_query(filter_repo=True)
                 + f"""
                 SELECT t.*, {_SESSION_DELETE_BLOCK_SQL} AS delete_block_reason
                 FROM matched t
-                WHERE ($5::text IS NULL OR t.repo = $5)
-                  AND ($6::timestamptz IS NULL OR (t.sort_at, t.session_id) < ($6, $7::text))
+                WHERE ($6::timestamptz IS NULL OR (t.sort_at, t.session_id) < ($6, $7::text))
                 ORDER BY t.sort_at DESC, t.session_id DESC
                 LIMIT $8
                 """,
@@ -2579,10 +2590,16 @@ class AgentJobStore:
                 }
                 for row in page
             ],
-            "total": sum(
-                int(item["count"]) for item in projects if repo is None or item["repo"] == repo
+            "total": (
+                sum(int(item["count"]) for item in projects if repo is None or item["repo"] == repo)
+                if projects is not None
+                else None
             ),
-            "projects": [{"repo": item["repo"], "count": int(item["count"])} for item in projects],
+            "projects": (
+                [{"repo": item["repo"], "count": int(item["count"])} for item in projects]
+                if projects is not None
+                else None
+            ),
             "next_cursor": (
                 _encode_session_cursor(page[-1]["sort_at"], page[-1]["session_id"], scope)
                 if len(rows) > limit

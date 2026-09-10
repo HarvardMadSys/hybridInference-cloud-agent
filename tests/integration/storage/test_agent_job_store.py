@@ -3787,6 +3787,88 @@ async def test_session_cursor_is_scoped_to_owner_and_filters(store: AgentJobStor
             await store.list_sessions(**args)
 
 
+async def test_session_pages_can_skip_summary_without_changing_rows_or_cursor(store: AgentJobStore):
+    for repo in ("acme/api", "acme/api", "acme/web"):
+        job = await _create_job(store, repo=repo)
+        await store.set_thread_archived(job_id=job["id"], user_id="user-1", archived=True)
+    options = {"user_id": "user-1", "archived": True, "repo": "acme/api", "limit": 1}
+    summary = await store.list_sessions(**options)
+    rows = await store.list_sessions(**options, include_summary=False)
+    assert rows == {**summary, "total": None, "projects": None}
+    assert summary["projects"] == [
+        {"repo": "acme/api", "count": 2},
+        {"repo": "acme/web", "count": 1},
+    ]
+    assert rows["next_cursor"] is not None
+    next_rows = await store.list_sessions(
+        **options, cursor=rows["next_cursor"], include_summary=False
+    )
+    assert next_rows["total"] is None and next_rows["projects"] is None
+    assert next_rows["sessions"][0]["thread_id"] != rows["sessions"][0]["thread_id"]
+    assert next_rows["sessions"][0]["job"]["repo"] == "acme/api"
+    assert next_rows["next_cursor"] is None
+
+
+async def test_session_index_migration_recovers_a_cancelled_build_and_retains_tombstones(
+    store: AgentJobStore,
+):
+    import asyncpg
+
+    from tests.support.migrations import downgrade_to
+
+    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    db_config = {
+        "host": os.getenv("TEST_DB_HOST", "localhost"),
+        "port": int(os.getenv("TEST_DB_PORT", "5432")),
+        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
+        "user": os.getenv("TEST_DB_USER", "postgres"),
+        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
+    }
+    job = await _create_job(store)
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
+        )
+    try:
+        downgrade_to(db_config, "0026_attempt_ledger")
+        # An open writer makes the concurrent build wait after registering its
+        # index. Cancelling then leaves the real INVALID-index retry scenario.
+        async with store._pool.acquire() as writer, writer.transaction():
+            await writer.execute(
+                "UPDATE agent_threads SET title = title WHERE id = $1", job["thread_id"]
+            )
+            async with store._pool.acquire() as conn:
+                await conn.execute("SET statement_timeout = '100ms'")
+                try:
+                    with pytest.raises(asyncpg.QueryCanceledError):
+                        await conn.execute(
+                            "CREATE INDEX CONCURRENTLY idx_agent_threads_archive_history "
+                            "ON agent_threads(user_id, archived_at DESC, id DESC) WHERE deleted_at IS NULL"
+                        )
+                finally:
+                    await conn.execute("RESET statement_timeout")
+        async with store._pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_agent_threads_archive_history'::regclass"
+                )
+                is False
+            )
+        apply_migrations(db_config)
+        async with store._pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_agent_threads_archive_history'::regclass"
+                )
+                is True
+            )
+        assert (await store.get_job(job["id"]))["deleted_at"] is not None
+        assert (await store.list_sessions(user_id="user-1"))["total"] == 0
+    finally:
+        apply_migrations(db_config)
+
+
 async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(store: AgentJobStore):
     mine = await _create_job(store)
     busy = await _create_job(store)

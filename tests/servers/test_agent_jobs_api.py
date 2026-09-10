@@ -5574,7 +5574,22 @@ async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
         state="queued",
         limit=20,
         cursor="previous-page",
+        include_summary=True,
     )
+
+
+async def test_session_list_can_omit_summary(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    listing = AsyncMock(
+        return_value={"sessions": [], "total": None, "projects": None, "next_cursor": None}
+    )
+    monkeypatch.setattr(store, "list_sessions", listing, raising=False)
+    response = await client.get("/v1/agent/sessions?include_summary=false&repo=owner/name")
+    assert response.status_code == 200
+    assert response.json() == {"sessions": [], "total": None, "projects": None, "next_cursor": None}
+    assert listing.call_args.kwargs["include_summary"] is False
+    assert listing.call_args.kwargs["repo"] == "owner/name"
 
 
 async def test_session_list_rejects_bad_cursor_and_display_filters(

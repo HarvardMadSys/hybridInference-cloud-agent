@@ -326,29 +326,37 @@ export function useAgentJob(jobId: string): {
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const seen = useRef<Set<number>>(new Set());
+  const generation = useRef(0);
 
-  const reload = useCallback(() => setTick((value) => value + 1), []);
+  const reload = useCallback(() => {
+    generation.current += 1;
+    setTick((value) => value + 1);
+  }, []);
 
   useEffect(
     () =>
       onAgentSessionsChanged((change) => {
-        if (!change.threadIds.includes(api?.thread_id ?? jobId)) return;
+        // Until this job resolves, its conversation identity is unknown. A job
+        // ID cannot be compared with thread IDs, so invalidate any pending load.
+        const threadId = api?.id === jobId ? api.thread_id : undefined;
+        if (threadId && !change.threadIds.includes(threadId)) return;
         if (change.deleted) setApi(null);
         reload();
       }),
-    [api?.thread_id, jobId, reload],
+    [api?.id, api?.thread_id, jobId, reload],
   );
 
   useEffect(() => {
     if (!jobId) return undefined;
     let cancelled = false;
+    const requestGeneration = generation.current;
     seen.current = new Set();
     setPatch(null);
     setLoading(true);
 
     Promise.all([getAgentJob(jobId), getAgentJobThread(jobId), listAllAgentThreadEvents(jobId)])
       .then(([job, foundThread, foundEvents]) => {
-        if (cancelled) return;
+        if (cancelled || requestGeneration !== generation.current) return;
         const ownEvents = foundEvents.filter((event) => event.job_id === jobId);
         setApi(job);
         setEvents(ownEvents);
@@ -358,10 +366,11 @@ export function useAgentJob(jobId: string): {
         setError(null);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'could not load the job');
+        if (!cancelled && requestGeneration === generation.current)
+          setError(cause instanceof Error ? cause.message : 'could not load the job');
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && requestGeneration === generation.current) setLoading(false);
       });
 
     return () => {

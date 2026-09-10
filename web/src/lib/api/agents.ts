@@ -570,14 +570,15 @@ export interface AgentSessionProjectApi {
 
 export interface AgentSessionListApi {
   sessions: AgentSessionApi[];
-  total: number;
+  total: number | null;
   next_cursor: string | null;
-  /** Facets honor search and state, before selecting one repository. */
-  projects: AgentSessionProjectApi[];
+  /** Facets honor search and state, before selecting one repository; null when omitted. */
+  projects: AgentSessionProjectApi[] | null;
 }
 
 export interface AgentSessionListOptions {
   archived?: boolean;
+  includeSummary?: boolean;
   limit?: number;
   cursor?: string;
   search?: string;
@@ -597,9 +598,14 @@ export async function listAgentSessions(
   if (options.search) query.set('search', options.search);
   if (options.repo !== undefined) query.set('repo', options.repo);
   if (options.state) query.set('state', options.state);
+  if (options.includeSummary !== undefined)
+    query.set('include_summary', String(options.includeSummary));
   const response = await fetchWithAuth(API_BASE, `/v1/agent/sessions?${query}`, { signal });
   return jsonOrThrow<AgentSessionListApi>(response);
 }
+
+/** Matches the backend's explicit session-selection bound. */
+export const AGENT_SESSION_SELECTION_LIMIT = 1000;
 
 export async function setAgentSessionsArchived(
   threadIds: string[],

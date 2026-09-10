@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import { AGENT_SESSION_SELECTION_LIMIT } from '@/lib/api/agents';
 
 export const ARCHIVE_FOCUS =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900';
@@ -301,7 +302,7 @@ export function ArchiveDeleteDialog({
           {skipped > 0 ? <p>{t('archive.deleteSkipped', { count: skipped })}</p> : null}
           {limitExceeded ? (
             <p className="text-red-600 dark:text-red-300">
-              {t('archive.bulkLimit', { count: 1000 })}
+              {t('archive.bulkLimit', { count: AGENT_SESSION_SELECTION_LIMIT })}
             </p>
           ) : null}
         </div>

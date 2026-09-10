@@ -146,8 +146,14 @@ export const en = {
   'archive.deleteCountOne': 'Delete 1 session',
   'archive.deleteCount': 'Delete {count} sessions',
   'archive.deleting': 'Deleting…',
-  'archive.deleteFailed':
-    'Could not delete these sessions. A session may have become active. Close this dialog and try again to refresh the selection.',
+  'archive.deleteFailed': 'Could not delete these sessions. Check your connection and try again.',
+  'archive.sessionActive': 'A selected session is still active. Wait for its work to finish.',
+  'archive.forkInProgress': 'A selected session is being forked. Wait for the fork to finish.',
+  'archive.publicationPending':
+    'A selected session has unfinished publication. Wait for it to finish.',
+  'archive.sessionNotArchived': 'A selected session was unarchived. Archive it before deleting.',
+  'archive.sessionNotFound': 'A selected session is no longer available.',
+  'archive.selectionChanged': 'The selection has changed. Review the refreshed list and try again.',
   'archive.deletedOne': '1 session deleted',
   'archive.deleted': '{count} sessions deleted',
   'archive.cancel': 'Cancel',

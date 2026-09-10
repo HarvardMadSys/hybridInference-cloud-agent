@@ -23,6 +23,7 @@ describe('session history API', () => {
     await listAgentSessions(
       {
         archived: true,
+        includeSummary: false,
         limit: 25,
         cursor: 'page/+2=',
         search: 'native & fork',
@@ -34,6 +35,7 @@ describe('session history API', () => {
     const query = new URLSearchParams(fetch.mock.calls[0][1].split('?')[1]);
     expect(Object.fromEntries(query)).toEqual({
       archived: 'true',
+      include_summary: 'false',
       limit: '25',
       cursor: 'page/+2=',
       search: 'native & fork',
@@ -63,9 +65,18 @@ describe('session history API', () => {
       });
       expect(changed).toHaveBeenLastCalledWith({ threadIds: ['thread-1'], archived: false });
       fetch.mockResolvedValueOnce(
-        new Response(JSON.stringify({ detail: 'Still running' }), { status: 409 }),
+        new Response(
+          JSON.stringify({
+            detail: { error: { type: 'session_active', message: 'Still running' } },
+          }),
+          { status: 409 },
+        ),
       );
-      await expect(deleteAgentSessions(['thread-1'])).rejects.toThrow('Still running');
+      await expect(deleteAgentSessions(['thread-1'])).rejects.toMatchObject({
+        code: 'session_active',
+        message: 'Still running',
+        statusCode: 409,
+      });
       expect(changed).toHaveBeenCalledTimes(1);
       fetch.mockResolvedValueOnce(new Response(JSON.stringify({ thread_ids: ['thread-1'] })));
       await deleteAgentSessions(['thread-1']);
