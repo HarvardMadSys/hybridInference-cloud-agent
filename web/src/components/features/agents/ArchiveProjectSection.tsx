@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import {
   listAgentSessions,
@@ -9,6 +9,7 @@ import {
   type AgentSessionListOptions,
   type AgentSessionProjectApi,
 } from '@/lib/api/agents';
+import { ArchiveAutoLoad } from './ArchiveAutoLoad';
 import { toDisplayState } from './adapt';
 import { projectLabel } from './conversations';
 import { ARCHIVE_FOCUS, ArchiveIcon, ArchiveProjectMenu } from './ArchiveControls';
@@ -135,7 +136,7 @@ export function ArchiveProjectSection({
   }, [project.repo, needsRefresh, onNeedsRefresh]);
   useEffect(() => () => onNeedsRefresh(project.repo, false), [project.repo, onNeedsRefresh]);
 
-  async function loadMore() {
+  const loadMore = useCallback(async () => {
     if (!cursor || loading) return;
     const controller = new AbortController();
     activeRequest.current?.abort();
@@ -160,7 +161,7 @@ export function ArchiveProjectSection({
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }
+  }, [cursor, loading, filters, project.repo]);
 
   return (
     <section aria-label={project.repo}>
@@ -283,12 +284,8 @@ export function ArchiveProjectSection({
             </button>
           </div>
         ) : null}
-        {!loading && !error && cursor ? (
-          <div className="py-2 text-center">
-            <button type="button" onClick={() => void loadMore()} className={TEXT_BUTTON}>
-              {t('archive.moreSessions', { count: Math.max(0, project.count - visible.length) })}
-            </button>
-          </div>
+        {!collapsed && !disabled && !loading && !error && cursor ? (
+          <ArchiveAutoLoad onLoad={loadMore} />
         ) : null}
         {!loading && !error && !cursor && !visible.length ? (
           <p className="py-4 text-center text-xs text-gray-500 dark:text-gray-400">

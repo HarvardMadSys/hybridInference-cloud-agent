@@ -189,8 +189,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'archive.emptyHint': '之后归档的会话会出现在这里，随时可以找回。',
   'archive.groupEmpty': '此项目中已没有归档会话。',
   'archive.clearFilters': '清除筛选',
-  'archive.moreSessions': '查看更多会话（剩余 {count} 个）',
-  'archive.moreProjects': '查看更多项目（剩余 {count} 个）',
   'archive.showing': '已显示 {count} / {total} 个会话',
   'archive.order': '按归档时间从近到远',
 

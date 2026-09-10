@@ -62,6 +62,13 @@ function session(
 }
 
 let sessions: AgentSessionApi[];
+const intersections = new Map<Element, (visible: boolean) => void>();
+
+async function approachBoundary(container: HTMLElement) {
+  const boundary = [...intersections.keys()].find((element) => container.contains(element));
+  expect(boundary).toBeDefined();
+  await act(async () => intersections.get(boundary!)!(true));
+}
 
 function listing(options: AgentSessionListOptions = {}) {
   const matches = sessions.filter(
@@ -87,6 +94,26 @@ function listing(options: AgentSessionListOptions = {}) {
 }
 
 beforeEach(() => {
+  intersections.clear();
+  vi.stubGlobal(
+    'IntersectionObserver',
+    class {
+      private element: Element | null = null;
+      constructor(private callback: IntersectionObserverCallback) {}
+      observe(element: Element) {
+        this.element = element;
+        intersections.set(element, (isIntersecting) =>
+          this.callback(
+            [{ target: element, isIntersecting } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver,
+          ),
+        );
+      }
+      disconnect() {
+        if (this.element) intersections.delete(this.element);
+      }
+    },
+  );
   mocks.locale = 'en';
   sessions = [session('one')];
   mocks.list.mockImplementation(async (options: AgentSessionListOptions) => listing(options));
@@ -116,6 +143,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.resetAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('archived session management', () => {
@@ -157,9 +185,8 @@ describe('archived session management', () => {
     await within(alpha).findByRole('link', { name: /Session 4 / });
     expect(within(alpha).getByText('55 sessions')).toBeVisible();
     expect(screen.getByRole('combobox', { name: 'Filter by project' })).toContainHTML('other/beta');
-    fireEvent.click(
-      within(alpha).getByRole('button', { name: 'Show more sessions (50 remaining)' }),
-    );
+    expect(screen.queryByRole('button', { name: /Show more/ })).not.toBeInTheDocument();
+    await approachBoundary(alpha);
     expect(await within(alpha).findByRole('link', { name: /Session 9 / })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'beta' }));
     fireEvent.click(within(alpha).getByRole('button', { name: 'Unarchive Session 0' }));
@@ -168,6 +195,33 @@ describe('archived session management', () => {
     expect(await within(alpha).findByRole('link', { name: /Session 9 / })).toBeVisible();
     expect(await within(alpha).findByRole('link', { name: /Session 10 / })).toBeVisible();
     expect(within(alpha).getAllByRole('link')).toHaveLength(10);
+  });
+
+  it('reveals later projects on scroll without a more-projects button', async () => {
+    sessions = Array.from({ length: 8 }, (_, index) =>
+      session(`project-${index}`, {}, { repo: `owner/project-${index}` }),
+    );
+    render(<ArchivedTasksView />);
+    await screen.findByRole('link', { name: /Session project-5/ });
+    expect(screen.queryByRole('region', { name: 'owner/project-6' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Show more/ })).not.toBeInTheDocument();
+    await approachBoundary(document.body);
+    expect(await screen.findByRole('link', { name: /Session project-7/ })).toBeVisible();
+  });
+
+  it('stops automatic paging on failure and lets retry recover the same page', async () => {
+    sessions = Array.from({ length: 6 }, (_, index) => session(String(index)));
+    render(<ArchivedTasksView />);
+    const alpha = await screen.findByRole('region', { name: 'owner/alpha' });
+    await within(alpha).findByRole('link', { name: /Session 4 / });
+    mocks.list.mockRejectedValueOnce(new Error('Network unavailable'));
+    await approachBoundary(alpha);
+    expect(await within(alpha).findByRole('alert')).toBeVisible();
+    expect(intersections.size).toBe(0);
+    fireEvent.click(within(alpha).getByRole('button', { name: 'Try again' }));
+    expect(await within(alpha).findByRole('link', { name: /Session 5 / })).toBeVisible();
+    expect(within(alpha).getAllByRole('link')).toHaveLength(6);
+    expect(intersections.size).toBe(0);
   });
 
   it('applies title, status, and repository filters on the server, including old history', async () => {

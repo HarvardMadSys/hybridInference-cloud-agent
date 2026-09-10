@@ -200,8 +200,6 @@ export const en = {
   'archive.emptyHint': 'Sessions you archive will appear here, ready to revisit.',
   'archive.groupEmpty': 'No archived sessions remain in this project.',
   'archive.clearFilters': 'Clear filters',
-  'archive.moreSessions': 'Show more sessions ({count} remaining)',
-  'archive.moreProjects': 'Show more projects ({count} remaining)',
   'archive.showing': 'Showing {count} of {total} sessions',
   'archive.order': 'Recently archived first',
 

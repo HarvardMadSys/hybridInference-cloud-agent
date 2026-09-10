@@ -16,6 +16,7 @@ import {
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { APIError } from '@/lib/utils/errors';
 import { ARCHIVE_FOCUS, ArchiveDeleteDialog, ArchiveIcon } from './ArchiveControls';
+import { ArchiveAutoLoad } from './ArchiveAutoLoad';
 import { ArchiveProjectSection, ARCHIVE_STATE_KEYS } from './ArchiveProjectSection';
 
 const GROUPS_PER_PAGE = 6;
@@ -145,6 +146,9 @@ export function ArchivedTasksView() {
   const controlsDisabled = Boolean(busy || pendingDelete || refreshing);
   const matchingProjects = projects.filter((project) => !repo || project.repo === repo);
   const displayedProjects = matchingProjects.slice(0, shownGroups);
+  const showNextProjects = useCallback(() => {
+    setShownGroups((count) => count + GROUPS_PER_PAGE);
+  }, []);
   const shownTotal = displayedProjects.reduce(
     (sum, project) => sum + (shownCounts[project.repo] ?? 0),
     0,
@@ -420,7 +424,7 @@ export function ArchivedTasksView() {
       ) : null}
 
       <div className="my-7 grid grid-cols-2 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(130px,auto)_minmax(140px,auto)]">
-        <label className="col-span-2 flex min-w-0 items-center gap-2 rounded-lg border border-gray-200 px-3 text-gray-400 focus-within:border-crimson/40 focus-within:ring-2 focus-within:ring-crimson/10 sm:col-span-1 dark:border-white/10 dark:text-gray-500">
+        <label className="col-span-2 flex min-w-0 items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 text-gray-400 focus-within:border-crimson/40 focus-within:ring-2 focus-within:ring-crimson/10 sm:col-span-1 dark:border-white/10 dark:bg-gray-900 dark:text-gray-500">
           <ArchiveIcon name="search" className="h-4 w-4 shrink-0" />
           <span className="sr-only">{t('archive.search')}</span>
           <input
@@ -432,14 +436,14 @@ export function ArchivedTasksView() {
             className="min-w-0 flex-1 bg-transparent py-2.5 text-xs text-gray-900 outline-none placeholder:text-gray-400 disabled:opacity-50 dark:text-gray-100 dark:placeholder:text-gray-500"
           />
         </label>
-        <label className="flex min-w-0 items-center gap-1.5 rounded-lg border border-gray-200 pl-2.5 text-gray-400 focus-within:ring-2 focus-within:ring-crimson/20 dark:border-white/10 dark:text-gray-500">
+        <label className="relative flex min-w-0 items-center gap-2 rounded-lg border border-gray-200 bg-white pl-3 text-gray-400 focus-within:border-crimson/40 focus-within:ring-2 focus-within:ring-crimson/10 dark:border-white/10 dark:bg-gray-900 dark:text-gray-500">
           <ArchiveIcon name="filter" className="h-4 w-4 shrink-0" />
           <span className="sr-only">{t('archive.statusFilter')}</span>
           <select
             value={state}
             disabled={controlsDisabled}
             onChange={(event) => setState(event.target.value as AgentSessionState | '')}
-            className="w-full min-w-0 cursor-pointer rounded-lg bg-white py-2.5 pr-2 text-xs text-gray-700 outline-none disabled:opacity-50 dark:bg-gray-900 dark:text-gray-200"
+            className="w-full min-w-0 cursor-pointer appearance-none bg-transparent py-2.5 pr-8 text-xs text-gray-700 outline-none disabled:opacity-50 dark:text-gray-200 dark:[color-scheme:dark]"
           >
             <option value="">{t('archive.allStates')}</option>
             {Object.entries(ARCHIVE_STATE_KEYS).map(([value, key]) => (
@@ -448,15 +452,19 @@ export function ArchivedTasksView() {
               </option>
             ))}
           </select>
+          <ArchiveIcon
+            name="chevron"
+            className="pointer-events-none absolute right-3 h-3 w-3 rotate-90"
+          />
         </label>
-        <label className="flex min-w-0 items-center gap-1.5 rounded-lg border border-gray-200 pl-2.5 text-gray-400 focus-within:ring-2 focus-within:ring-crimson/20 dark:border-white/10 dark:text-gray-500">
+        <label className="relative flex min-w-0 items-center gap-2 rounded-lg border border-gray-200 bg-white pl-3 text-gray-400 focus-within:border-crimson/40 focus-within:ring-2 focus-within:ring-crimson/10 dark:border-white/10 dark:bg-gray-900 dark:text-gray-500">
           <ArchiveIcon name="folder" className="h-4 w-4 shrink-0" />
           <span className="sr-only">{t('archive.projectFilter')}</span>
           <select
             value={repo}
             disabled={controlsDisabled}
             onChange={(event) => setRepo(event.target.value)}
-            className="w-full min-w-0 max-w-56 cursor-pointer rounded-lg bg-white py-2.5 pr-2 text-xs text-gray-700 outline-none disabled:opacity-50 dark:bg-gray-900 dark:text-gray-200"
+            className="w-full min-w-0 cursor-pointer appearance-none truncate bg-transparent py-2.5 pr-8 text-xs text-gray-700 outline-none disabled:opacity-50 dark:text-gray-200 dark:[color-scheme:dark]"
           >
             <option value="">{t('archive.allProjects')}</option>
             {repo && !projects.some((project) => project.repo === repo) ? (
@@ -468,6 +476,10 @@ export function ArchivedTasksView() {
               </option>
             ))}
           </select>
+          <ArchiveIcon
+            name="chevron"
+            className="pointer-events-none absolute right-3 h-3 w-3 rotate-90"
+          />
         </label>
       </div>
 
@@ -529,13 +541,7 @@ export function ArchivedTasksView() {
             ))}
           </div>
           {matchingProjects.length > shownGroups ? (
-            <button
-              type="button"
-              onClick={() => setShownGroups((count) => count + GROUPS_PER_PAGE)}
-              className={`mt-5 ${SOFT_BUTTON}`}
-            >
-              {t('archive.moreProjects', { count: matchingProjects.length - shownGroups })}
-            </button>
+            <ArchiveAutoLoad key={shownGroups} onLoad={showNextProjects} />
           ) : null}
           <div className="mt-6 flex flex-wrap justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-400">
             <span>{t('archive.showing', { count: shownTotal, total })}</span>
