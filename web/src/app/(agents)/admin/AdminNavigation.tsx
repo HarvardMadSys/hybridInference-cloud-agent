@@ -14,10 +14,10 @@ export function AdminNavigation({ current }: { current: 'servers' | 'runs' }) {
           key={item.key}
           href={item.href}
           aria-current={current === item.key ? 'page' : undefined}
-          className={`border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
+          className={`-mb-px border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
             current === item.key
               ? 'border-crimson text-crimson dark:border-crimson-light dark:text-crimson-light'
-              : 'border-transparent text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+              : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-900 dark:text-gray-400 dark:hover:border-white/20 dark:hover:text-gray-100'
           }`}
         >
           {item.label}
