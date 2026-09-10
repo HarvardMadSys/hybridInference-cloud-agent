@@ -52,6 +52,22 @@ async def test_an_html_proxy_403_is_unavailable():
     assert raised.value.status_code == 503
 
 
+@pytest.mark.parametrize("status", [401, 404])
+async def test_incompatible_or_misconfigured_gateway_is_reported_as_configuration(status):
+    with pytest.raises(HTTPException) as raised:
+        await resolve_agent_access(_client(_serves({}, status)), "user_1")
+    assert raised.value.status_code == 503
+    assert raised.value.detail["error"]["type"] == "agent_configuration_error"
+
+
+async def test_missing_gateway_configuration_is_not_a_temporary_failure(monkeypatch):
+    monkeypatch.delenv(ENV_BASE_URL, raising=False)
+    monkeypatch.delenv(ENV_DISPATCH_TOKEN, raising=False)
+    with pytest.raises(HTTPException) as raised:
+        await resolve_agent_access(GatewayClient(), "user_1")
+    assert raised.value.detail["error"]["type"] == "agent_configuration_error"
+
+
 def _client(handler) -> GatewayClient:
     return GatewayClient(
         BASE, TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler))

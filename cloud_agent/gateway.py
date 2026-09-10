@@ -118,7 +118,10 @@ class GatewayClient:
             GatewayError: If unconfigured, unreachable, refused, or unparsable.
         """
         if not self.configured:
-            raise GatewayError(f"{ENV_BASE_URL} and {ENV_DISPATCH_TOKEN} must both be set")
+            raise GatewayError(
+                f"{ENV_BASE_URL} and {ENV_DISPATCH_TOKEN} must both be set",
+                error_type="gateway_not_configured",
+            )
         headers = {"Authorization": f"Bearer {self._token}"}
         timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
         try:
@@ -318,7 +321,10 @@ class GatewayClient:
                 without a token.
         """
         if not self._base_url:
-            raise GatewayError(f"{ENV_BASE_URL} must be set to exchange authorization codes")
+            raise GatewayError(
+                f"{ENV_BASE_URL} must be set to exchange authorization codes",
+                error_type="gateway_not_configured",
+            )
         body = {
             "code": code,
             "code_verifier": verifier,

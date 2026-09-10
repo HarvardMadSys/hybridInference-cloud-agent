@@ -250,17 +250,17 @@ paths:
           description: The account is unknown or not active (subject_unavailable).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema: { $ref: "#/components/schemas/SubjectUnavailableError" }
         "404":
           description: Internal endpoints or the user database are not configured.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema: { $ref: "#/components/schemas/InternalApiNotConfiguredError" }
         "503":
           description: The policy failed or returned an invalid decision (agent_access_unavailable).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema: { $ref: "#/components/schemas/AgentAccessUnavailableError" }
 
 components:
   securitySchemes:
@@ -272,6 +272,33 @@ components:
         endpoints use. Never travels toward a sandbox or a browser.
 
   schemas:
+    SubjectUnavailableError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            error:
+              type: object
+              properties:
+                type: { type: string, enum: [subject_unavailable] }
+    InternalApiNotConfiguredError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            error:
+              type: object
+              properties:
+                type: { type: string, enum: [internal_api_not_configured] }
+    AgentAccessUnavailableError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            error:
+              type: object
+              properties:
+                type: { type: string, enum: [agent_access_unavailable] }
     Error:
       type: object
       required: [error]

@@ -31,6 +31,35 @@ original destination, clearing the consumed login-flow cookie. An account refusa
 uses a separate explanation. Only a 403 explicitly typed `subject_unavailable`
 is an account denial; an untyped or proxy-generated 403 is an operational failure.
 
+Missing local identity configuration, a missing Gateway endpoint, and a rejected
+dispatch credential return a typed `agent_configuration_error` (HTTP 503). The
+web app asks the operator to correct the deployment instead of offering a retry.
+Temporary transport/server failures retain the retry action. An invalid `/me`
+response is reported separately. Expired or invalid browser login flows return
+to the public login page with a fresh-start action; they never redeem an
+unverified state or reuse a consumed code. When no web destination is configured,
+the API keeps its HTTP error response.
+
+The lookup contract declares exact error-type enums for Agent access refusals.
+Unit tests exercise those declared types through the actual Agent client and
+permission resolver. To check the producer as well, run the read-only HTTP probe
+against an isolated or otherwise authorized Gateway:
+
+```bash
+# Supply these through the environment; do not commit or print the dispatch token.
+export AGENT_CONTRACT_GATEWAY_URL
+export AGENT_CONTRACT_DISPATCH_TOKEN
+uv run pytest -q -m external tests/external/test_gateway_access_contract.py
+```
+
+The probe queries a randomly named missing account and validates the Gateway's
+actual 403 response against the schema and consumer. It creates no accounts and
+does not access either database directly. This external test requires explicit
+Gateway credentials and is not part of default CI; ordinary CI runs the local
+schema/consumer agreement tests. It was exercised against the production Gateway
+router and error handler at `bd93e98fe`, using an isolated empty account-store
+fixture over loopback HTTP.
+
 The local `ADMIN_TOKEN` remains an infrastructure credential independent of
 Gateway availability. The dedicated on-call token must additionally pass the
 configured service account's `agent.use` check before creating jobs. Its existing

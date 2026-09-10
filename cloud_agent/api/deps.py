@@ -53,6 +53,7 @@ from fastapi import Depends, Header, HTTPException, Request
 
 from cloud_agent import identity
 from cloud_agent.agent_access import AgentAccessDecision
+from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 
@@ -144,6 +145,12 @@ async def resolve_agent_access(gateway: Any, user_id: str) -> AgentAccessDecisio
     except GatewayError as exc:
         if exc.status_code == 403 and exc.error_type == "subject_unavailable":
             return AgentAccessDecision(user_id=user_id, allowed=False, permissions=[])
+        if exc.status_code in (401, 404) or exc.error_type == "gateway_not_configured":
+            get_logger(__name__).warning(
+                "agent_access_configuration_error",
+                extra={"event": "agent_access_configuration_error", "status_code": exc.status_code},
+            )
+            raise AgentConfigurationError() from None
     except ValueError:
         pass
     get_logger(__name__).warning(
@@ -246,11 +253,11 @@ async def get_current_user(
 
     try:
         claims = identity.verify_session(token)
-    except identity.IdentityNotConfigured as exc:
+    except identity.IdentityNotConfigured:
         # A deployment with no session secret cannot verify anyone. 503, not
         # 401: the caller did nothing wrong and retrying with another
         # credential will not help.
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+        raise AgentConfigurationError() from None
     except identity.IdentityError as exc:
         cause = exc.__cause__ if exc.__cause__ is not None else exc
         if isinstance(cause, jwt.ExpiredSignatureError):
@@ -301,8 +308,8 @@ async def verify_admin_access(
     if token:
         try:
             claims = identity.verify_session(token)
-        except identity.IdentityNotConfigured as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from None
+        except identity.IdentityNotConfigured:
+            raise AgentConfigurationError() from None
         except identity.IdentityError:
             claims = None
         if claims is not None:

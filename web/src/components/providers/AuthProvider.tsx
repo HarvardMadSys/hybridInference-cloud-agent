@@ -10,6 +10,7 @@
 //
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { AUTH_EXPIRED_EVENT } from '@/lib/api/client';
+import { APIError } from '@/lib/utils/errors';
 import {
   endSession,
   getSessionUser,
@@ -30,7 +31,7 @@ interface AuthState {
   isAuthenticated: boolean;
   loading: boolean;
   user: User | null;
-  error?: 'unavailable' | null;
+  error?: 'unavailable' | 'configuration' | 'invalid_response' | null;
 }
 
 interface AuthContextValue {
@@ -86,9 +87,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           agent_access: me.agent_access,
         },
       });
-    } catch {
+    } catch (error) {
       // Do not retain permissions or mistake an outage for an expired session.
-      setState({ ...SIGNED_OUT, error: 'unavailable' });
+      const category =
+        error instanceof APIError &&
+        (error.code === 'agent_configuration_error' || error.statusCode === 404)
+          ? 'configuration'
+          : error instanceof APIError && error.code === 'invalid_session_response'
+            ? 'invalid_response'
+            : 'unavailable';
+      setState({ ...SIGNED_OUT, error: category });
     }
   }, []);
 

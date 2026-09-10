@@ -43,8 +43,8 @@ of AGENTS.md rule 4 — an unreachable authority means no permission, never
 assumed permission.
 
 **A 401 from ``/me`` means "not signed in".** A 503 means identity verification
-or current Agent admission cannot be resolved. The browser shows a retry page
-for that temporary failure instead of redirecting to sign-in.
+or current Agent admission cannot be resolved. Typed configuration failures
+require operator action; temporary failures offer retry without signing in again.
 """
 
 from __future__ import annotations
@@ -62,6 +62,7 @@ from cloud_agent.api.deps import (
     get_gateway_client,
     resolve_agent_access,
 )
+from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import SessionUserResponse
@@ -150,15 +151,6 @@ def _web_destination(return_to: str) -> str:
 SIGN_IN_ERROR_PARAM = "sign_in_error"
 
 
-def _sign_in_unavailable(reason: str) -> HTTPException:
-    """Refuse a sign-in this deployment is not configured to perform.
-
-    503 rather than 500: the caller did nothing wrong, and retrying with
-    another credential will not help.
-    """
-    return HTTPException(status_code=503, detail=reason)
-
-
 def _unavailable_response(reason: str) -> RedirectResponse:
     """Send an unsignable-in visitor back to the app with something to show.
 
@@ -180,23 +172,24 @@ def _unavailable_response(reason: str) -> RedirectResponse:
         "agent_sign_in_unconfigured",
         extra={"event": "agent_sign_in_unconfigured", "reason": reason},
     )
-    if not _env(ENV_WEB_BASE_URL):
-        raise _sign_in_unavailable(reason)
-    # `/login` rather than the app root: that page is the one that can say what
-    # is wrong, and it is reachable without a session. This is the one route of
-    # the web app this service names, and it names it for that reason.
-    return RedirectResponse(
-        f"{_web_destination('/login')}?{urlencode({SIGN_IN_ERROR_PARAM: 'unavailable'})}",
-        status_code=303,
-    )
+    return _callback_error_response(AgentConfigurationError())
 
 
-def _callback_error_response(error: HTTPException, return_to: str) -> RedirectResponse:
-    """Render account denial or temporary failure in the public login page."""
-    if error.status_code not in (403, 503) or not _env(ENV_WEB_BASE_URL):
+def _callback_error_response(
+    error: HTTPException, return_to: str | None = None
+) -> RedirectResponse:
+    """Render a refused sign-in with the appropriate recovery action."""
+    if error.status_code not in (400, 403, 503) or not _env(ENV_WEB_BASE_URL):
         raise error
-    reason = "account_unavailable" if error.status_code == 403 else "temporary"
-    query = urlencode({SIGN_IN_ERROR_PARAM: reason, "return_to": safe_return_to(return_to)})
+    reason = (
+        "unavailable"
+        if isinstance(error, AgentConfigurationError)
+        else {400: "expired", 403: "account_unavailable", 503: "temporary"}[error.status_code]
+    )
+    params = {SIGN_IN_ERROR_PARAM: reason}
+    if return_to is not None:
+        params["return_to"] = safe_return_to(return_to)
+    query = urlencode(params)
     response = RedirectResponse(f"{_web_destination('/login')}?{query}", status_code=303)
     response.delete_cookie(
         identity.LOGIN_FLOW_COOKIE,
@@ -230,6 +223,8 @@ async def session_login(
         return _unavailable_response(
             f"{ENV_AUTHORIZE_URL} and {ENV_REDIRECT_URI} must both be set to sign anyone in."
         )
+    if not _env(identity.ENV_JWKS_URL):
+        return _unavailable_response(f"{identity.ENV_JWKS_URL} must be set to sign anyone in.")
 
     verifier = identity.new_verifier()
     state = identity.new_state()
@@ -238,7 +233,7 @@ async def session_login(
             verifier=verifier, state=state, return_to=safe_return_to(return_to)
         )
     except identity.IdentityNotConfigured as exc:
-        raise _sign_in_unavailable(str(exc)) from None
+        return _unavailable_response(str(exc))
 
     query = urlencode(
         {
@@ -295,27 +290,31 @@ async def session_callback(
     """
     redirect_uri = _env(ENV_REDIRECT_URI)
     if not redirect_uri:
-        raise _sign_in_unavailable(f"{ENV_REDIRECT_URI} must be set to sign anyone in.")
+        return _unavailable_response(f"{ENV_REDIRECT_URI} must be set to sign anyone in.")
 
     try:
         flow = identity.verify_login_flow(request.cookies.get(identity.LOGIN_FLOW_COOKIE) or "")
     except identity.IdentityNotConfigured as exc:
-        raise _sign_in_unavailable(str(exc)) from None
+        return _unavailable_response(str(exc))
     except identity.IdentityError:
-        raise HTTPException(
-            status_code=400,
-            detail="This sign-in has expired. Please start again.",
-        ) from None
+        return _callback_error_response(
+            HTTPException(status_code=400, detail="This sign-in has expired. Please start again.")
+        )
 
     # Checked before the code is spent: a callback naming a state this service
     # did not mint is not a callback worth redeeming.
     if not identity.state_matches(state, str(flow.get("state") or "")):
-        raise HTTPException(
-            status_code=400,
-            detail="This sign-in response did not match the request that started it.",
+        return _callback_error_response(
+            HTTPException(
+                status_code=400,
+                detail="This sign-in response did not match the request that started it.",
+            )
         )
     if not code:
-        raise HTTPException(status_code=400, detail="The gateway returned no authorization code.")
+        return _callback_error_response(
+            HTTPException(status_code=400, detail="The gateway returned no authorization code."),
+            str(flow.get("return_to") or "/"),
+        )
 
     try:
         identity_token = await gateway.exchange_authorization_code(
@@ -330,6 +329,10 @@ async def session_callback(
             exc_info=True,
             extra={"event": "agent_session_code_exchange_failed"},
         )
+        if exc.status_code in (401, 404) or exc.error_type == "gateway_not_configured":
+            return _callback_error_response(
+                AgentConfigurationError(), str(flow.get("return_to") or "/")
+            )
         # Three different answers, because they ask for three different things.
         # A 403 is the gateway's verdict on the *account* — it re-reads status
         # at exchange time precisely so a suspension between consent and here
@@ -395,8 +398,8 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
     """
     try:
         claims = identity.verify_identity_token(identity_token)
-    except identity.IdentityNotConfigured as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except identity.IdentityNotConfigured:
+        raise AgentConfigurationError() from None
     except identity.IdentityError:
         # Deliberately not echoing the reason. "Signed by an unknown key" and
         # "expired" are the same answer to a browser, and the difference is
@@ -416,6 +419,8 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
             exc_info=True,
             extra={"event": "agent_session_status_unavailable", "user_id": user_id},
         )
+        if exc.status_code in (401, 404) or exc.error_type == "gateway_not_configured":
+            raise AgentConfigurationError() from None
         raise HTTPException(
             status_code=503,
             detail="Cannot confirm this account with the gateway; try again shortly.",
@@ -446,8 +451,8 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
         session = identity.mint_session(
             user_id=user_id, email=email, role=role, user_name=user_name
         )
-    except identity.IdentityNotConfigured as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except identity.IdentityNotConfigured:
+        raise AgentConfigurationError() from None
 
     return session, {
         "id": user_id,

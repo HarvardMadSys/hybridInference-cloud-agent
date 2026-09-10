@@ -10,6 +10,7 @@
 
 import { agentApiBase } from '@/config/env';
 import { jsonOrThrow, safeFetch } from './client';
+import { APIError } from '@/lib/utils/errors';
 
 export type AgentPermission = 'agent.use' | 'agent.admin';
 
@@ -33,7 +34,18 @@ export async function getSessionUser(): Promise<SessionUserApi | null> {
     cache: 'no-store',
   });
   if (resp.status === 401) return null;
-  return jsonOrThrow<SessionUserApi>(resp);
+  try {
+    const me = await jsonOrThrow<SessionUserApi>(resp);
+    if (!me || typeof me.id !== 'string' || !me.id) {
+      throw new APIError('invalid_session_response', 'Invalid session response', resp.status);
+    }
+    return me;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new APIError('invalid_session_response', 'Invalid session response', resp.status);
+    }
+    throw error;
+  }
 }
 
 /** Drop the session cookie. Best-effort: the UI signs out either way. */

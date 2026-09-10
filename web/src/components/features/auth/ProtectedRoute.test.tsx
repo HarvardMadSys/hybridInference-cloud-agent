@@ -28,6 +28,7 @@ vi.mock('@/lib/api/session', () => ({
 import { getSessionUser } from '@/lib/api/session';
 import { AuthProvider } from '@/components/providers/AuthProvider';
 import { ProtectedRoute } from './ProtectedRoute';
+import { APIError } from '@/lib/utils/errors';
 
 const assign = vi.fn();
 
@@ -56,6 +57,23 @@ describe('ProtectedRoute', () => {
     stubLocation();
   });
   afterEach(() => cleanup());
+
+  it.each([
+    [
+      new APIError('agent_configuration_error', 'Configuration error', 503),
+      'not configured correctly',
+    ],
+    [new APIError('UNKNOWN_ERROR', 'Not found', 404), 'not configured correctly'],
+    [new APIError('invalid_session_response', 'Invalid response', 200), 'unexpected response'],
+  ])('requires operator action for %s instead of offering a dead retry', async (error, message) => {
+    vi.mocked(getSessionUser).mockRejectedValue(error);
+    renderApp();
+    expect(await screen.findByRole('alert')).toHaveTextContent(message as string);
+    expect(assign).not.toHaveBeenCalled();
+    expect(screen.queryByText('task list')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    expect(getSessionUser).toHaveBeenCalledTimes(1);
+  });
 
   it('offers retry after an outage without redirecting or rendering protected content', async () => {
     vi.mocked(getSessionUser).mockRejectedValueOnce(new Error('Gateway unavailable'));
