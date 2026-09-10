@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -3245,57 +3247,75 @@ async def test_model_credential_dies_with_a_terminal_job(store: AgentJobStore):
     assert await store.resolve_model_credential(**fence) is None
 
 
-async def test_model_credential_carries_the_owner_role_and_dies_with_the_account(
-    store: AgentJobStore,
+@pytest.mark.parametrize("users_surface", ["absent", "unrelated", "unreadable", "other_profile"])
+async def test_model_credential_uses_only_agent_owned_metadata(
+    store: AgentJobStore, users_surface: str
 ):
-    """Model calls run at the owner's role, and stop when the account does.
-
-    The role decides which models the sandbox can call — it must be the
-    owner's, or the composer offers models whose first call 404s. The status
-    check is the other half: a suspended owner's running job must stop buying
-    inference without waiting for the reaper.
-    """
+    """Local objects named users cannot change or break fenced MCP resolution."""
+    job = await _create_job(store, mcp_servers=["github", "docs"])
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
     async with store._pool.acquire() as conn:
-        # Mirror the production schema's constrained columns; everything else
-        # is nullable or defaulted. IF NOT EXISTS keeps this compatible with a
-        # test database where the full auth schema already exists.
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'free',
-                status TEXT DEFAULT 'active'
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            # Expose the real Agent tables through temporary views. A private
+            # search path excludes any pre-existing public.users without
+            # creating, dropping, or changing another service's auth table.
+            await conn.execute(
+                "CREATE TEMP VIEW agent_attempts AS SELECT * FROM public.agent_attempts"
             )
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO users (id, email, password_hash, role, status)
-            VALUES ('user-1', 'agent-owner-role@test.invalid', 'x', 'internal', 'active')
-            ON CONFLICT (id) DO UPDATE SET role = 'internal', status = 'active'
-            """
-        )
-    try:
-        job = await _create_job(store)
-        claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-        fence = {
-            "job_id": job["id"],
-            "attempt_id": claim["attempt_id"],
-            "lease_generation": claim["lease_generation"],
-        }
+            await conn.execute("CREATE TEMP VIEW agent_jobs AS SELECT * FROM public.agent_jobs")
+            await conn.execute("SET LOCAL search_path = pg_temp, pg_catalog")
+            if users_surface == "unrelated":
+                await conn.execute("CREATE TEMP TABLE users (account_name TEXT)")
+            elif users_surface == "unreadable":
+                # A real PostgreSQL permission error, contained entirely in
+                # temporary objects and independent of the test user's role.
+                await conn.execute(
+                    """
+                    CREATE FUNCTION pg_temp.deny_users_lookup() RETURNS TEXT
+                    LANGUAGE plpgsql AS $$
+                    BEGIN
+                        RAISE insufficient_privilege USING MESSAGE = 'users is not accessible';
+                    END;
+                    $$;
+                    CREATE TEMP VIEW users AS
+                    SELECT 'user-1'::text AS id, pg_temp.deny_users_lookup() AS role,
+                           'active'::text AS status
+                    """
+                )
+            elif users_surface == "other_profile":
+                await conn.execute(
+                    """
+                    CREATE TEMP TABLE users (id TEXT, role TEXT, status TEXT);
+                    INSERT INTO users VALUES ('user-1', 'unrelated-role', 'suspended')
+                    """
+                )
+            else:
+                assert await conn.fetchval("SELECT to_regclass('users')") is None
 
-        identity = await store.resolve_model_credential(**fence)
-        assert identity is not None
-        assert identity["role"] == "internal"
+            @asynccontextmanager
+            async def borrow_connection():
+                yield conn
 
-        async with store._pool.acquire() as conn:
-            await conn.execute("UPDATE users SET status = 'suspended' WHERE id = 'user-1'")
-        assert await store.resolve_model_credential(**fence) is None
-    finally:
-        async with store._pool.acquire() as conn:
-            await conn.execute("DELETE FROM users WHERE id = 'user-1'")
+            scoped_store = AgentJobStore(SimpleNamespace(acquire=borrow_connection))
+            identity = await scoped_store.resolve_model_credential(**fence)
+            assert identity == {
+                "user_id": job["user_id"],
+                "job_id": job["id"],
+                "model": job["model"],
+                "mcp_servers": ["github", "docs"],
+            }
+            assert await conn.fetchval("SELECT 1") == 1
+        finally:
+            # Roll back even a passing test, including all temporary objects
+            # and session settings. The shared pool must remain unchanged.
+            await transaction.rollback()
 
 
 async def test_an_expired_lease_is_dead_before_the_reaper_runs(store: AgentJobStore):

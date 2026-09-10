@@ -54,7 +54,6 @@ class FakeJobStore:
             return None
         return {
             "user_id": "owner-1",
-            "role": "internal",
             "job_id": job_id,
             "mcp_servers": list(self.granted),
             "model": "glm-5.1",
@@ -161,7 +160,7 @@ async def client(monkeypatch, store, upstream):
 
 
 def _token() -> str:
-    """Mint the model-scoped token the sandbox actually carries."""
+    """Mint the MCP-scoped token the sandbox actually carries."""
     return mint_worker_token(**_FENCE, scope=SCOPE_MCP)
 
 
@@ -320,6 +319,7 @@ async def test_tools_resolve_against_the_job_owner_not_the_caller(monkeypatch, s
     a per-user registry asked about anyone else is one user's credential
     spending on another user's job.
     """
+    assert "role" not in await store.resolve_model_credential(**_FENCE)
     resolved_for: list[str] = []
     _patch_registry(monkeypatch, _registry(), resolved_for)
     monkeypatch.setattr(

@@ -38,9 +38,7 @@ import hashlib
 import json
 import secrets
 from datetime import datetime
-from typing import Any
-
-import asyncpg
+from typing import TYPE_CHECKING, Any
 
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
@@ -60,6 +58,9 @@ from cloud_agent.host_pool import (
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
+
+if TYPE_CHECKING:
+    import asyncpg
 
 logger = get_logger(__name__)
 
@@ -2256,26 +2257,16 @@ class AgentJobStore:
         attempt_id: int,
         lease_generation: int,
     ) -> dict[str, Any] | None:
-        """Resolve a worker token into the identity its model calls run as.
+        """Resolve Agent-owned job metadata for the MCP relay's live fence.
 
-        This is what lets the *same* capability token the sandbox already holds
-        also authorize model traffic, so no second credential ever enters the
-        sandbox. It returns ``None`` — meaning "reject" — unless the fence is
-        still live, which makes revocation automatic: the moment the reaper
-        supersedes the attempt or the job reaches a terminal state, the token
-        stops buying inference. There is no separate key to remember to revoke.
+        Return the job's owner, model and MCP server scope only while its
+        current attempt has a live lease and the job is running or publishing.
+        The relay uses that owner to resolve stored MCP connections and checks
+        the admitted server scope before forwarding a request.
 
-        Returns ``{"user_id", "role", "job_id", "model"}``; the caller bills
-        the job's owner. There is no per-task budget: a grant scopes what may
-        be called, and the gateway's per-user daily quota governs how much.
-
-        ``role`` is the owner's: the sandbox's model calls run with exactly the
-        model access the owner has — they pay for them and could make them
-        directly, so a narrower role here only produces 404s on models the
-        composer legitimately offered. A suspended owner's jobs stop buying
-        inference the moment the account does. The lookup tolerates a database
-        without the ``users`` table (unit fixtures build only the agent
-        schema); the caller treats a missing role as ``free``.
+        Only Agent job and attempt tables participate. Gateway account roles
+        and status do not belong to this database. Inference authorization
+        uses Gateway-issued grants separately from this MCP lookup.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -2298,26 +2289,10 @@ class AgentJobStore:
             )
             if row is None:
                 return None
-            role: str | None = None
-            try:
-                owner = await conn.fetchrow(
-                    "SELECT role, status FROM users WHERE id = $1", row["user_id"]
-                )
-            except asyncpg.UndefinedTableError:
-                owner = None
-            if owner is not None:
-                if owner["status"] not in (None, "active"):
-                    # The fence is live but the account behind it is not.
-                    return None
-                role = owner["role"]
         return {
             "user_id": row["user_id"],
-            "role": role,
             "job_id": row["job_id"],
-            # What this job may reach through this service's MCP relay. Carried on the same
-            # fenced lookup as the model credential so the two cannot disagree:
-            # the instant the token stops buying inference it also stops
-            # reaching tools.
+            # Read the MCP allowlist under the same fence as its owner metadata.
             "mcp_servers": list(row["mcp_servers"] or []),
             "model": row["model"],
         }
