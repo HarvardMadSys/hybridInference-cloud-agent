@@ -51,10 +51,11 @@ which is what let it stop being unindexable. The anchor job must be one of the
 included jobs, and that is a deferred foreign key from the snapshot back into
 the association table: circular by construction, checked at commit.
 
-A residency's ``thread_id`` is not a foreign key yet: a fork establishes the
+A residency's ``thread_id`` is not a foreign key here: a fork established the
 target chat's residency while materializing it, before the target thread row
-exists, and the residency table is due to fold into the membership row (which
-does carry the key) in a later change. ``sandbox_id`` on the same row is one.
+existed. Revision ``0004_residency_on_membership`` folds the residency into
+the membership row, which does carry the key, and gives a fork its target
+thread from preparation. ``sandbox_id`` on the residency row is one.
 
 **What deliberately stays loose.** ``user_id`` is an opaque identifier minted
 by the gateway's identity service, so no table here references a users table

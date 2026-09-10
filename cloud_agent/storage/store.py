@@ -1453,6 +1453,30 @@ class AgentJobStore:
             if target_slot is None:
                 return {"error": "resident_capacity_exhausted"}
 
+            # The child exists from here on: a thread with no turns, invisible
+            # to every owner-facing list until finalization copies the
+            # history in, and a membership that already owns its resident
+            # slot and can carry the residency the host is about to open.
+            source_thread = await conn.fetchrow(
+                "SELECT repo, title, setup_script, execution_profile, mcp_servers "
+                "FROM agent_threads WHERE id = $1",
+                source["thread_id"],
+            )
+            await conn.execute(
+                """
+                INSERT INTO agent_threads
+                    (id, user_id, repo, title, title_source,
+                     setup_script, execution_profile, mcp_servers)
+                VALUES ($1, $2, $3, $4, 'inherited', $5, $6, $7)
+                """,
+                target_thread_id,
+                user_id,
+                source_thread["repo"],
+                f"{source_thread['title']} (fork)"[:160],
+                source_thread["setup_script"],
+                source_thread["execution_profile"],
+                list(source_thread["mcp_servers"] or []),
+            )
             await conn.execute(
                 """
                 INSERT INTO agent_session_forks (
@@ -1480,6 +1504,21 @@ class AgentJobStore:
                 row["activation_generation"],
                 target_thread_id,
                 target_slot,
+            )
+            await conn.execute(
+                """
+                INSERT INTO agent_thread_sandbox_memberships (
+                    thread_id, user_id, sandbox_id, resident_slot_id,
+                    forked_from_thread_id, fork_anchor_job_id, fork_operation_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                target_thread_id,
+                user_id,
+                row["sandbox_id"],
+                target_slot,
+                source["thread_id"],
+                source_job_id,
+                operation_id,
             )
             await conn.execute(
                 """
@@ -1548,9 +1587,16 @@ class AgentJobStore:
                 return None
             for role, thread_id in thread_ids.items():
                 current = await conn.fetchrow(
-                    "SELECT * FROM agent_thread_residencies WHERE thread_id = $1 FOR UPDATE",
+                    """
+                    SELECT residency_grant_id FROM agent_thread_sandbox_memberships
+                    WHERE thread_id = $1 AND sandbox_id = $2
+                    FOR UPDATE
+                    """,
                     thread_id,
+                    operation["sandbox_id"],
                 )
+                if current is None:
+                    return None
                 # The grant token itself is deliberately never stored.  A
                 # retried HTTP fork therefore cannot safely reuse a residency
                 # whose token may already be inside an unacknowledged host
@@ -1558,34 +1604,27 @@ class AgentJobStore:
                 # old-token process as current.  Rotate the generation on every
                 # PREPARING attempt, revoke the prior linked grant, and make the
                 # supervisor restart only these two member processes.
-                previous[role] = (None if current is None else current["grant_id"]) or operation[
-                    f"previous_{role}_grant_id"
-                ]
+                previous[role] = (
+                    current["residency_grant_id"] or operation[f"previous_{role}_grant_id"]
+                )
                 created = await conn.fetchrow(
                     """
-                    INSERT INTO agent_thread_residencies (
-                        thread_id, host, sandbox_id, runtime_id, runtime_version,
-                        status, lease_expires_at, grant_id
-                    )
-                    SELECT $1, g.host, g.id, $3, $4, 'hot',
-                           NOW() + make_interval(secs => $5), NULL
+                    UPDATE agent_thread_sandbox_memberships m
+                    SET residency_generation = m.residency_generation + 1,
+                        residency_status = 'hot',
+                        residency_lease_expires_at = NOW() + make_interval(secs => $3),
+                        residency_grant_id = NULL,
+                        residency_binding_id = NULL,
+                        residency_established_at = NOW(),
+                        residency_last_active_at = NOW(),
+                        updated_at = NOW()
                     FROM agent_sandboxes g
-                    WHERE g.id = $2 AND g.generation = $6
-                    ON CONFLICT (thread_id) DO UPDATE SET
-                        generation = agent_thread_residencies.generation + 1,
-                        host = EXCLUDED.host,
-                        sandbox_id = EXCLUDED.sandbox_id,
-                        runtime_id = EXCLUDED.runtime_id,
-                        runtime_version = EXCLUDED.runtime_version,
-                        status = 'hot', lease_expires_at = EXCLUDED.lease_expires_at,
-                        grant_id = NULL, ledger_binding_id = NULL,
-                        established_at = NOW(), last_active_at = NOW()
-                    RETURNING *
+                    WHERE m.thread_id = $1 AND m.sandbox_id = $2
+                      AND g.id = m.sandbox_id AND g.generation = $4
+                    RETURNING m.residency_generation AS generation
                     """,
                     thread_id,
                     operation["sandbox_id"],
-                    operation["runtime_id"],
-                    operation["runtime_version"],
                     ttl_seconds,
                     operation["sandbox_generation"],
                 )
@@ -1612,9 +1651,9 @@ class AgentJobStore:
             await conn.execute(
                 """
                 UPDATE agent_thread_sandbox_memberships
-                SET residency_generation = $2, resident_state = 'restarting',
-                    updated_at = NOW()
-                WHERE thread_id = $1 AND fork_operation_id = $3
+                SET resident_state = 'restarting', updated_at = NOW()
+                WHERE thread_id = $1 AND residency_generation = $2
+                  AND fork_operation_id = $3
                 """,
                 operation["source_thread_id"],
                 generations["source"],
@@ -1868,21 +1907,6 @@ class AgentJobStore:
                     operation["source_thread_id"],
                     source["turn_no"],
                 )
-                await conn.execute(
-                    """
-                    INSERT INTO agent_threads
-                        (id, user_id, repo, title, title_source,
-                         setup_script, execution_profile, mcp_servers)
-                    VALUES ($1, $2, $3, $4, 'inherited', $5, $6, $7)
-                    """,
-                    operation["target_thread_id"],
-                    operation["user_id"],
-                    thread["repo"],
-                    f"{thread['title']} (fork)"[:160],
-                    thread["setup_script"],
-                    thread["execution_profile"],
-                    list(thread["mcp_servers"] or []),
-                )
                 copied: dict[str, str] = {}
                 previous_copy: str | None = None
                 for turn in turns:
@@ -1940,17 +1964,17 @@ class AgentJobStore:
                     ],
                 )
                 anchor_id = copied[str(source["id"])]
+                # Preparation made the member; finalization makes it live.
                 await conn.execute(
                     """
-                    INSERT INTO agent_thread_sandbox_memberships (
-                        thread_id, user_id, sandbox_id, native_session_id,
-                        native_state, context_status, process_generation,
-                        residency_generation, resident_state, resident_slot_id,
-                        last_settled_job_id, forked_from_thread_id, fork_anchor_job_id
-                    ) VALUES (
-                        $1, $10, $2, $3, 'ready', 'live', $4, $5, 'live', $6,
-                        $7, $8, $9
-                    )
+                    UPDATE agent_thread_sandbox_memberships
+                    SET native_session_id = $3, native_state = 'ready',
+                        context_status = 'live', process_generation = $4,
+                        residency_generation = $5, resident_state = 'live',
+                        resident_slot_id = $6, last_settled_job_id = $7,
+                        fork_operation_id = NULL, last_error = NULL,
+                        updated_at = NOW()
+                    WHERE thread_id = $1 AND sandbox_id = $2 AND fork_operation_id = $8
                     """,
                     operation["target_thread_id"],
                     operation["sandbox_id"],
@@ -1959,9 +1983,7 @@ class AgentJobStore:
                     operation["target_residency_generation"],
                     operation["target_resident_slot_id"],
                     anchor_id,
-                    operation["source_thread_id"],
-                    operation["source_job_id"],
-                    operation["user_id"],
+                    operation_id,
                 )
                 await conn.execute(
                     """
@@ -2134,11 +2156,14 @@ class AgentJobStore:
                         continue
                     residency = await conn.fetchrow(
                         """
-                        UPDATE agent_thread_residencies
-                        SET status = 'none', last_active_at = NOW()
-                        WHERE thread_id = $1 AND generation = $2
-                          AND host = $3 AND status <> 'none'
-                        RETURNING thread_id, generation, grant_id
+                        UPDATE agent_thread_sandbox_memberships m
+                        SET residency_status = 'none', residency_last_active_at = NOW()
+                        FROM agent_sandboxes g
+                        WHERE m.thread_id = $1 AND m.residency_generation = $2
+                          AND g.id = m.sandbox_id AND g.host = $3
+                          AND m.residency_status <> 'none'
+                        RETURNING m.thread_id, m.residency_generation AS generation,
+                                  m.residency_grant_id AS grant_id
                         """,
                         operation[thread_column],
                         generation,
@@ -2148,6 +2173,31 @@ class AgentJobStore:
                         member = dict(residency)
                         member["role"] = role
                         cleanup.append(member)
+                # The target existed only as the placeholder preparation made.
+                # No turn ever landed in it, so it is tombstoned the way an
+                # owner's delete tombstones a chat, and its resident slot is
+                # given back to the group.
+                await conn.execute(
+                    """
+                    UPDATE agent_thread_sandbox_memberships
+                    SET resident_slot_id = NULL, native_state = 'lost',
+                        context_status = 'lost', resident_state = 'lost',
+                        fork_operation_id = NULL, last_error = $3, updated_at = NOW()
+                    WHERE thread_id = $1 AND fork_operation_id = $2
+                    """,
+                    operation["target_thread_id"],
+                    operation["id"],
+                    changed["last_error"],
+                )
+                await conn.execute(
+                    """
+                    UPDATE agent_threads
+                    SET deleted_at = NOW(), updated_at = NOW()
+                    WHERE id = $1 AND deleted_at IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM agent_jobs WHERE thread_id = $1)
+                    """,
+                    operation["target_thread_id"],
+                )
                 item = dict(changed)
                 item["recovery_action"] = "cleanup"
                 item["cleanup_residencies"] = cleanup
@@ -5286,16 +5336,15 @@ class AgentJobStore:
             INSERT INTO agent_attempt_ledger (
                 attempt_id, grant_id, residency_generation, binding_id, window_since
             )
-            SELECT a.id, r.grant_id, r.generation, r.ledger_binding_id, a.started_at
+            SELECT a.id, m.residency_grant_id, m.residency_generation,
+                   m.residency_binding_id, a.started_at
             FROM agent_thread_sandbox_memberships m
-            JOIN agent_thread_residencies r ON r.thread_id = m.thread_id
-                AND r.generation = m.residency_generation
-                AND r.sandbox_id = m.sandbox_id
             JOIN agent_attempts a ON a.id = m.active_attempt_id
             JOIN agent_jobs j ON j.id = a.job_id AND j.thread_id = m.thread_id
             WHERE m.thread_id = $1 AND a.id = $2
-              AND r.grant_id IS NOT NULL AND r.grant_id <> ''
-              AND r.ledger_binding_id IS NOT NULL AND r.ledger_binding_id <> ''
+              AND m.residency_generation > 0
+              AND m.residency_grant_id IS NOT NULL AND m.residency_grant_id <> ''
+              AND m.residency_binding_id IS NOT NULL AND m.residency_binding_id <> ''
             ON CONFLICT (attempt_id, grant_id) DO NOTHING
             """,
             thread_id,
@@ -5329,13 +5378,13 @@ class AgentJobStore:
             shared = await conn.fetchval(
                 """
                 UPDATE agent_thread_sandbox_memberships m
-                SET residency_generation = $5,
-                    resident_state = CASE
+                SET resident_state = CASE
                         WHEN resident_state = 'live' THEN 'live' ELSE 'starting' END,
                     updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND m.sandbox_id = $4
                   AND g.id = m.sandbox_id
+                  AND m.residency_generation = $5 AND m.residency_status = 'hot'
                   AND m.active_attempt_id = $2
                   AND a.id = $2 AND a.lease_generation = $3
                   AND a.status = 'running' AND a.lease_expires_at > NOW()
@@ -6036,16 +6085,22 @@ class AgentJobStore:
         ttl_seconds: float,
         sandbox_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Take (or take over) a thread's residency; ``None`` = not earned.
+        """Take (or rotate) a chat's residency; ``None`` = not earned.
 
         Residency is something a host earns by *currently* running the
         thread's turn — attempt on this host, ``running``, lease unexpired —
         and the check shares a transaction and a row lock with the write, so
         a finish or a supersede cannot slip between them, and an expired
-        attempt the reaper has not reached yet earns nothing (review
-        finding 4). Atomic across racers: two hosts serialize on the row,
-        each gets a distinct generation, and the larger one owns the thread.
+        attempt the reaper has not reached yet earns nothing. The lease lives
+        on the chat's membership row: its generation only ever increments,
+        and every rotation clears the grant so the caller revokes the
+        predecessor's (``previous_grant_id``) and mints anew.
+
+        ``runtime_id`` and ``runtime_version`` are accepted for the worker
+        contract and not stored: the sandbox the membership belongs to is the
+        authority on what runs in it.
         """
+        del runtime_id, runtime_version
         async with self._pool.acquire() as conn, conn.transaction():
             earns = await conn.fetchrow(
                 """
@@ -6062,42 +6117,51 @@ class AgentJobStore:
             )
             if earns is None:
                 return None
-            # The predecessor's grant, captured under the same transaction: a
-            # takeover is a credential rotation, and the old generation's
-            # grant must be revocable by the caller that just superseded it.
-            previous_grant_id = await conn.fetchval(
-                "SELECT grant_id FROM agent_thread_residencies WHERE thread_id = $1 FOR UPDATE",
-                thread_id,
-            )
-            row = await conn.fetchrow(
+            # Attempt, then membership: the order every admission writer keeps.
+            member = await conn.fetchrow(
                 """
-                INSERT INTO agent_thread_residencies
-                    (thread_id, host, sandbox_id, runtime_id, runtime_version,
-                     status, lease_expires_at)
-                VALUES ($1, $2, $3, $4, $5, 'hot',
-                        NOW() + make_interval(secs => $6))
-                ON CONFLICT (thread_id) DO UPDATE SET
-                    generation = agent_thread_residencies.generation + 1,
-                    host = EXCLUDED.host,
-                    sandbox_id = EXCLUDED.sandbox_id,
-                    runtime_id = EXCLUDED.runtime_id,
-                    runtime_version = EXCLUDED.runtime_version,
-                    status = 'hot',
-                    grant_id = NULL, ledger_binding_id = NULL,
-                    lease_expires_at = EXCLUDED.lease_expires_at,
-                    established_at = NOW(),
-                    last_active_at = NOW()
-                RETURNING *
+                SELECT m.residency_grant_id, g.host, g.runtime_id, g.runtime_version
+                FROM agent_thread_sandbox_memberships m
+                JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                WHERE m.thread_id = $1 AND g.host = $2
+                  AND ($3::text IS NULL OR m.sandbox_id = $3)
+                FOR UPDATE OF m
                 """,
                 thread_id,
                 host,
                 sandbox_id,
-                runtime_id,
-                runtime_version,
+            )
+            if member is None:
+                return None
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET residency_generation = residency_generation + 1,
+                    residency_status = 'hot',
+                    residency_lease_expires_at = NOW() + make_interval(secs => $2),
+                    residency_grant_id = NULL,
+                    residency_binding_id = NULL,
+                    residency_established_at = NOW(),
+                    residency_last_active_at = NOW(),
+                    updated_at = NOW()
+                WHERE thread_id = $1
+                RETURNING thread_id, sandbox_id,
+                          residency_generation AS generation,
+                          residency_status AS status,
+                          residency_lease_expires_at AS lease_expires_at,
+                          residency_grant_id AS grant_id,
+                          residency_binding_id AS ledger_binding_id,
+                          residency_established_at AS established_at,
+                          residency_last_active_at AS last_active_at
+                """,
+                thread_id,
                 ttl_seconds,
             )
         result = dict(row)
-        result["previous_grant_id"] = previous_grant_id
+        result["host"] = member["host"]
+        result["runtime_id"] = member["runtime_id"]
+        result["runtime_version"] = member["runtime_version"]
+        result["previous_grant_id"] = member["residency_grant_id"]
         result["establishing_job_id"] = earns["job_id"]
         result["establishing_attempt_id"] = earns["attempt_id"]
         result["user_id"] = earns["user_id"]
@@ -6122,9 +6186,11 @@ class AgentJobStore:
             return bool(
                 await conn.fetchval(
                     """
-                    UPDATE agent_thread_residencies
-                    SET grant_id = $3, ledger_binding_id = $4
-                    WHERE thread_id = $1 AND generation = $2 AND status = 'hot'
+                    UPDATE agent_thread_sandbox_memberships
+                    SET residency_grant_id = $3, residency_binding_id = $4,
+                        updated_at = NOW()
+                    WHERE thread_id = $1 AND residency_generation = $2
+                      AND residency_status = 'hot'
                     RETURNING thread_id
                     """,
                     thread_id,
@@ -6148,12 +6214,14 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
                 """
-                UPDATE agent_thread_residencies
-                SET lease_expires_at = NOW() + make_interval(secs => $3),
-                    last_active_at = NOW()
-                WHERE thread_id = $1 AND generation = $2 AND status = 'hot'
-                  AND ($4::text IS NULL OR host = $4)
-                RETURNING COALESCE(grant_id, '')
+                UPDATE agent_thread_sandbox_memberships m
+                SET residency_lease_expires_at = NOW() + make_interval(secs => $3),
+                    residency_last_active_at = NOW()
+                FROM agent_sandboxes g
+                WHERE m.thread_id = $1 AND m.residency_generation = $2
+                  AND m.residency_status = 'hot'
+                  AND g.id = m.sandbox_id AND ($4::text IS NULL OR g.host = $4)
+                RETURNING COALESCE(m.residency_grant_id, '')
                 """,
                 thread_id,
                 generation,
@@ -6172,11 +6240,13 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
                 """
-                UPDATE agent_thread_residencies
-                SET status = 'none', last_active_at = NOW()
-                WHERE thread_id = $1 AND generation = $2 AND status <> 'none'
-                  AND ($3::text IS NULL OR host = $3)
-                RETURNING COALESCE(grant_id, '')
+                UPDATE agent_thread_sandbox_memberships m
+                SET residency_status = 'none', residency_last_active_at = NOW()
+                FROM agent_sandboxes g
+                WHERE m.thread_id = $1 AND m.residency_generation = $2
+                  AND m.residency_status <> 'none'
+                  AND g.id = m.sandbox_id AND ($3::text IS NULL OR g.host = $3)
+                RETURNING COALESCE(m.residency_grant_id, '')
                 """,
                 thread_id,
                 generation,
@@ -6206,30 +6276,18 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
                 """
-                UPDATE agent_thread_residencies r
-                SET status = 'none', last_active_at = NOW()
-                WHERE r.thread_id = $1 AND r.generation = $2
-                  AND r.host = $3 AND r.sandbox_id = $4
-                  AND r.status <> 'none'
-                  AND EXISTS (
-                      SELECT 1 FROM agent_thread_sandbox_memberships m
-                      WHERE m.thread_id = $1 AND m.sandbox_id = $4
-                        AND m.residency_generation = $2
-                        AND m.process_generation <= $5
-                        AND m.resident_state IN ('stopped', 'lost')
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM agent_sandboxes g
-                      WHERE g.id = $4
-                        AND (g.active_operation_count > 0
-                             OR g.snapshot_state = 'snapshotting')
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM agent_thread_sandbox_memberships m
-                      WHERE m.thread_id = $1 AND m.sandbox_id = $4
-                        AND m.active_attempt_id IS NOT NULL
-                  )
-                RETURNING COALESCE(r.grant_id, '')
+                UPDATE agent_thread_sandbox_memberships m
+                SET residency_status = 'none', residency_last_active_at = NOW()
+                FROM agent_sandboxes g
+                WHERE m.thread_id = $1 AND m.residency_generation = $2
+                  AND m.sandbox_id = $4 AND g.id = m.sandbox_id AND g.host = $3
+                  AND m.residency_status <> 'none'
+                  AND m.process_generation <= $5
+                  AND m.resident_state IN ('stopped', 'lost')
+                  AND m.active_attempt_id IS NULL
+                  AND g.active_operation_count = 0
+                  AND g.snapshot_state <> 'snapshotting'
+                RETURNING COALESCE(m.residency_grant_id, '')
                 """,
                 thread_id,
                 generation,
@@ -6248,8 +6306,16 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT * FROM agent_thread_residencies
-                WHERE thread_id = $1 AND status = 'hot' AND lease_expires_at > NOW()
+                SELECT m.thread_id, m.sandbox_id, g.host, g.runtime_id, g.runtime_version,
+                       m.residency_generation AS generation,
+                       m.residency_status AS status,
+                       m.residency_lease_expires_at AS lease_expires_at,
+                       m.residency_grant_id AS grant_id,
+                       m.residency_binding_id AS ledger_binding_id
+                FROM agent_thread_sandbox_memberships m
+                JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                WHERE m.thread_id = $1 AND m.residency_status = 'hot'
+                  AND m.residency_lease_expires_at > NOW()
                 """,
                 thread_id,
             )
@@ -6265,10 +6331,13 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                UPDATE agent_thread_residencies
-                SET status = 'none'
-                WHERE status = 'hot' AND lease_expires_at <= NOW()
-                RETURNING thread_id, generation, host, grant_id
+                UPDATE agent_thread_sandbox_memberships m
+                SET residency_status = 'none'
+                FROM agent_sandboxes g
+                WHERE m.residency_status = 'hot' AND m.residency_lease_expires_at <= NOW()
+                  AND g.id = m.sandbox_id
+                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
+                          m.residency_grant_id AS grant_id
                 """
             )
         return [dict(row) for row in rows]
@@ -7209,11 +7278,16 @@ class AgentJobStore:
                         if residency_generation > 0:
                             released = await conn.fetchrow(
                                 """
-                                UPDATE agent_thread_residencies
-                                SET status = 'none', last_active_at = NOW()
-                                WHERE thread_id = $1 AND generation = $2
-                                  AND status <> 'none'
-                                RETURNING thread_id, generation, host, grant_id
+                                UPDATE agent_thread_sandbox_memberships m
+                                SET residency_status = 'none',
+                                    residency_last_active_at = NOW()
+                                FROM agent_sandboxes g
+                                WHERE m.thread_id = $1 AND m.residency_generation = $2
+                                  AND m.residency_status <> 'none'
+                                  AND g.id = m.sandbox_id
+                                RETURNING m.thread_id,
+                                          m.residency_generation AS generation,
+                                          g.host, m.residency_grant_id AS grant_id
                                 """,
                                 sandbox_thread_id,
                                 residency_generation,

@@ -328,9 +328,9 @@ async def test_hot_followup_captures_same_grant_for_its_own_attempt(store):
     assert first["window_until"] <= rows[0]["window_since"]
 
 
-@pytest.mark.parametrize("missing", ["binding", "grant", "generation"])
+@pytest.mark.parametrize("missing", ["binding", "grant"])
 async def test_missing_historical_attribution_remains_untracked(store, missing):
-    """No grant/binding or a different generation must never become a false zero."""
+    """No grant or no binding must never become a false zero."""
     job, claim, sandbox = await _reserve_shared_chat(store)
     residency = await _residency(
         store, job, sandbox, binding_id=None if missing == "binding" else "gateway-binding-one"
@@ -338,11 +338,10 @@ async def test_missing_historical_attribution_remains_untracked(store, missing):
     if missing == "grant":
         async with store._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE agent_thread_residencies SET grant_id = NULL WHERE thread_id = $1",
+                "UPDATE agent_thread_sandbox_memberships SET residency_grant_id = NULL "
+                "WHERE thread_id = $1",
                 job["thread_id"],
             )
-    elif missing == "generation":
-        residency["generation"] += 1
     assert await _record(store, job, claim, sandbox, residency)
     assert await store.admit_thread_sandbox_turn(**_fence(job, claim, sandbox), job_id=job["id"])
     rows = await store.ledger_rows_for_job(job_id=job["id"])
@@ -352,6 +351,15 @@ async def test_missing_historical_attribution_remains_untracked(store, missing):
     assert rows[0]["refreshing"] is False
     assert await store.queue_job_ledger_refresh(job_id=job["id"]) == 0
     assert await store.claim_due_ledger_refresh() is None
+
+
+async def test_a_stale_residency_generation_is_refused_at_record(store):
+    """The lease has one row now; a host echoing another generation is fenced out."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    residency = await _residency(store, job, sandbox)
+    stale = {**residency, "generation": residency["generation"] + 1}
+    assert not await _record(store, job, claim, sandbox, stale)
+    assert await _record(store, job, claim, sandbox, residency)
 
 
 @pytest.mark.parametrize("write", ["startup", "admission"])

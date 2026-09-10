@@ -173,13 +173,12 @@ async def test_a_membership_names_only_its_own_threads_jobs_and_attempts(
     )
 
 
-async def test_a_residency_names_an_existing_sandbox(store: AgentJobStore) -> None:
-    job = await _create_job(store)
+async def test_a_hot_residency_carries_a_lease(store: AgentJobStore) -> None:
+    job, _claim_row, _sandbox = await _reserve_shared_chat(store)
     await _refused(
         store,
-        asyncpg.ForeignKeyViolationError,
-        "INSERT INTO agent_thread_residencies (thread_id, host, sandbox_id, runtime_id, "
-        "lease_expires_at) VALUES ($1, 'h', 'asbx_missing', 'codex', NOW())",
+        asyncpg.CheckViolationError,
+        "UPDATE agent_thread_sandbox_memberships SET residency_status = 'hot' WHERE thread_id = $1",
         job["thread_id"],
     )
 

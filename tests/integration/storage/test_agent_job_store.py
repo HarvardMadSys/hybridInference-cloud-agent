@@ -768,14 +768,29 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         "error": "fork_in_progress"
     }
     await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=False)
+    # The child exists from preparation — its membership already owns a
+    # resident slot and can carry a residency — but it has no turns, so the
+    # owner cannot see it anywhere until finalization copies the history in.
     async with store._pool.acquire() as conn:
         assert (
             await conn.fetchval(
-                "SELECT 1 FROM agent_threads WHERE id = $1",
+                "SELECT COUNT(*) FROM agent_jobs WHERE thread_id = $1",
                 operation["target_thread_id"],
             )
-            is None
+            == 0
         )
+        assert (
+            await conn.fetchval(
+                "SELECT fork_operation_id FROM agent_thread_sandbox_memberships "
+                "WHERE thread_id = $1",
+                operation["target_thread_id"],
+            )
+            == operation["id"]
+        )
+    visible = await store.list_conversations(user_id=job["user_id"], include_archived=True)
+    assert operation["target_thread_id"] not in {
+        item["job"]["thread_id"] for item in visible["conversations"]
+    }
 
     # The fork transaction cleared the durable group idle deadline. A
     # heartbeat sampled just before that transaction may still report the
@@ -2798,7 +2813,7 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
     async with store._pool.acquire() as conn:
         assert (
             await conn.fetchval(
-                "SELECT status FROM agent_thread_residencies WHERE thread_id = $1",
+                "SELECT residency_status FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
                 job["thread_id"],
             )
             == "none"
@@ -4080,9 +4095,11 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
         )
         await conn.execute(
             """
-            INSERT INTO agent_thread_residencies
-                (thread_id, host, sandbox_id, runtime_id, status, lease_expires_at, grant_id)
-            VALUES ($1, 'shared-runner', $2, 'claude-code', 'hot', NOW() + INTERVAL '1 hour', 'grant-history')
+            UPDATE agent_thread_sandbox_memberships
+            SET residency_generation = 1, residency_status = 'hot',
+                residency_lease_expires_at = NOW() + INTERVAL '1 hour',
+                residency_grant_id = 'grant-history'
+            WHERE thread_id = $1 AND sandbox_id = $2
             """,
             source["thread_id"],
             sandbox["sandbox_id"],
@@ -4118,7 +4135,7 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
         )
         assert (
             await conn.fetchval(
-                "SELECT grant_id FROM agent_thread_residencies WHERE thread_id = $1",
+                "SELECT residency_grant_id FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
                 source["thread_id"],
             )
             == "grant-history"
