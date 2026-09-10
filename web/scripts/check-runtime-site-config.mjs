@@ -1,117 +1,130 @@
 #!/usr/bin/env node
 //
-// P1's acceptance, executed rather than asserted in prose: build once, serve
-// the *same* standalone artifact twice under two different runtime
-// environments, and prove the rendered page follows the environment.
+// The acceptance for "one artifact, many deployments", executed rather than
+// asserted in prose: build each web variant once, serve the *same* artifact
+// under two different runtime environments, and read what it actually renders.
 //
 // A unit test cannot show this. The failure being guarded against is a value
-// that is resolved during `next build` and frozen into the bundle, and the
-// only way to see it is to boot the built server and read what it serves. A
-// suite that imported the layout would pass against a build-time read just as
-// happily as a runtime one.
+// resolved during `next build` and frozen into the bundle, and the only way to
+// see it is to boot the built server. A suite that imported the layout would
+// pass against a build-time read exactly as happily as a runtime one.
 //
-// Four things are checked:
+// Two variants are built, because they are two images and the paths differ:
 //
-//   1. Two environments produce two different documents from one artifact.
-//   2. Each document carries its own deployment's name, not the other's and
-//      not a neutral default.
-//   3. A secret-looking variable in the environment never reaches the HTML or
-//      the client bundle. The config reader is an allowlist; this is what
-//      proves a field that is not on it cannot be published.
-//   4. An illegal value fails the request instead of being read as "unset".
-//      Silent fallback is what this work removed; failing loud is the contract.
+//   web-root    basePath ""        browser API /api         (own hostname)
+//   web-agents  basePath "/agents" browser API /agents/api  (gateway hostname)
 //
-// Run from `web/` after `npm run build`.
+// For each variant and each of two deployments, this checks:
+//
+//   1. the document is served at the variant's own path, and not at a bare
+//      path when the variant is mounted under a prefix;
+//   2. `<title>` and the rendered `<h1>` are the *configured* name — the body,
+//      not only the head, so a document that merely echoes its own <title>
+//      cannot pass;
+//   3. the sign-in link and the asset URLs carry the variant's prefix. These
+//      are the two things a wrongly-built variant gets wrong, and the sign-in
+//      URL is the one string this app hands to another service;
+//   4. every configured identity value — name, organisation, organisation
+//      URL, status URL, gateway origin — reaches the document, and the
+//      feature switch has the configured value;
+//   5. no value from the *other* deployment appears anywhere, which is what a
+//      fallback to a build-time constant looks like;
+//   6. a secret-looking variable in the environment reaches neither the HTML
+//      nor the client bundle, and no deployment value is baked into the
+//      bundle at all;
+//   7. an illegal value fails the request instead of being read as "unset".
+//
+// Run from `web/`.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const WEB_ROOT = resolve(import.meta.dirname, '..');
-const STANDALONE = join(WEB_ROOT, '.next', 'standalone');
+const NEXT_BIN = join(WEB_ROOT, 'node_modules', 'next', 'dist', 'bin', 'next');
+const NEXT_DIR = join(WEB_ROOT, '.next');
+const STANDALONE = join(NEXT_DIR, 'standalone');
 const SERVER = join(STANDALONE, 'server.js');
-const STATIC_DIR = join(WEB_ROOT, '.next', 'static');
-const SENTINEL = 'sentinel-runtime-config-must-not-leak';
+const STATIC_DIR = join(NEXT_DIR, 'static');
 
+const SENTINEL = 'sentinel-runtime-config-must-not-leak';
 const STARTUP_TIMEOUT_MS = 60_000;
-const POLL_INTERVAL_MS = 500;
+const POLL_INTERVAL_MS = 400;
+
+let nextPort = 3411;
+
+const VARIANTS = [
+  { name: 'web-root', basePath: '', apiUrl: '/api', foreignPaths: [] },
+  {
+    name: 'web-agents',
+    basePath: '/agents',
+    apiUrl: '/agents/api',
+    // Mounted under a prefix, the app must not answer at the bare path: that
+    // would be a second, unprefixed copy of the same routes.
+    foreignPaths: ['/login'],
+  },
+];
+
+function deployment(spec) {
+  const gateway = new URL(spec.gatewayUrl);
+  return {
+    ...spec,
+    gatewayOrigin: gateway.origin,
+    gatewayHost: gateway.host,
+    env: {
+      AGENT_WEB_APP_NAME: spec.appName,
+      AGENT_WEB_ORG_NAME: spec.orgName,
+      AGENT_WEB_ORG_URL: spec.orgUrl,
+      AGENT_WEB_STATUS_URL: spec.statusUrl,
+      AGENT_WEB_GATEWAY_URL: spec.gatewayUrl,
+      AGENT_WEB_FEATURE_RAG: String(spec.rag),
+      // Not configuration. It is here to prove that an unrelated environment
+      // value cannot ride along with the allowlisted ones.
+      AGENT_SESSION_SECRET: SENTINEL,
+    },
+  };
+}
+
+const DEPLOYMENTS = [
+  deployment({
+    name: 'alpha',
+    appName: 'Alpha Agents',
+    orgName: 'Alpha Research',
+    orgUrl: 'https://alpha.example',
+    statusUrl: 'https://status.alpha.example/',
+    gatewayUrl: 'https://gateway-alpha.example/authorize',
+    rag: true,
+  }),
+  deployment({
+    name: 'beta',
+    appName: 'Beta Agents',
+    orgName: 'Beta Research',
+    orgUrl: 'https://beta.example',
+    statusUrl: 'https://status.beta.example/',
+    gatewayUrl: 'https://gateway-beta.example',
+    rag: false,
+  }),
+];
 
 function fail(message) {
   console.error(`::error title=Runtime site config::${message}`);
   process.exit(1);
 }
 
-/**
- * Mirror what the runtime image does with the standalone output.
- *
- * `next build` emits the static assets outside `.next/standalone`, and the
- * server looks for them inside its own directory. The Dockerfile copies them
- * across; doing the same here means this check exercises the same layout the
- * image ships, rather than a shape only the test has.
- */
-function prepareStandalone() {
-  if (!existsSync(SERVER)) {
-    fail(`no standalone server at ${SERVER}; run \`npm run build\` first`);
-  }
-  if (existsSync(STATIC_DIR)) {
-    cpSync(STATIC_DIR, join(STANDALONE, '.next', 'static'), { recursive: true });
-  }
-}
-
-function startServer(port, extraEnv) {
-  const child = spawn(process.execPath, [SERVER], {
-    cwd: STANDALONE,
-    env: {
-      ...process.env,
-      NODE_ENV: 'production',
-      HOSTNAME: '127.0.0.1',
-      PORT: String(port),
-      ...extraEnv,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  const logs = [];
-  child.stdout.on('data', (chunk) => logs.push(String(chunk)));
-  child.stderr.on('data', (chunk) => logs.push(String(chunk)));
-  child.on('error', (error) => logs.push(`spawn error: ${error.message}`));
-
-  return {
-    child,
-    logs,
-    stop() {
-      return new Promise((done) => {
-        if (child.exitCode !== null || child.signalCode !== null) return done();
-        child.once('exit', () => done());
-        child.kill('SIGTERM');
-        // The server closes its listener on SIGTERM, but a stuck process must
-        // not hang CI.
-        setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
-      });
-    },
-  };
-}
-
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
-async function waitForResponse(port) {
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  let lastError = 'no attempt made';
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/login`);
-      return response;
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      await sleep(POLL_INTERVAL_MS);
-    }
-  }
-  throw new Error(`server on port ${port} did not answer within ${STARTUP_TIMEOUT_MS}ms: ${lastError}`);
+function titleOf(html) {
+  return firstMatch(html, /<title[^>]*>([^<]*)<\/title>/i);
 }
 
-function titleOf(html) {
-  const match = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+function firstMatch(html, pattern) {
+  const match = html.match(pattern);
   return match ? match[1].trim() : null;
+}
+
+function textOf(html, tag) {
+  const inner = firstMatch(html, new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i'));
+  return inner === null ? null : inner.replace(/<[^>]*>/g, '').trim();
 }
 
 /** Every JavaScript chunk the browser would download for this build. */
@@ -128,110 +141,281 @@ function clientBundle() {
   return chunks.join('\n');
 }
 
-async function renderWith(port, env) {
-  const server = startServer(port, env);
+function buildVariant(variant) {
+  // A stale `.next` could serve the previous variant's inlined values, which
+  // is exactly the class of mistake this script exists to catch.
+  rmSync(NEXT_DIR, { recursive: true, force: true });
+
+  const env = {
+    ...process.env,
+    NODE_ENV: 'production',
+    NEXT_PUBLIC_BASE_PATH: variant.basePath,
+    NEXT_PUBLIC_AGENT_API_URL: variant.apiUrl,
+  };
+  // The build must never see a deployment identity. If it did, a build-time
+  // read would look like a runtime one and this whole check would be void.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('AGENT_WEB_')) delete env[key];
+  }
+
+  const result = spawnSync(process.execPath, [NEXT_BIN, 'build'], {
+    cwd: WEB_ROOT,
+    env,
+    encoding: 'utf8',
+  });
+  if (result.error) {
+    fail(`could not run \`next build\` for ${variant.name}: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    fail(
+      `\`next build\` failed for ${variant.name}:\n` +
+        `${(result.stdout ?? '') + (result.stderr ?? '')}`,
+    );
+  }
+
+  if (!existsSync(SERVER)) fail(`no standalone server at ${SERVER} after the build`);
+  // Mirror what the runtime image does: the static assets are emitted outside
+  // `.next/standalone` and have to be copied in.
+  rmSync(join(STANDALONE, '.next', 'static'), { recursive: true, force: true });
+  cpSync(STATIC_DIR, join(STANDALONE, '.next', 'static'), { recursive: true });
+}
+
+function startServer(env, port) {
+  const child = spawn(process.execPath, [SERVER], {
+    cwd: STANDALONE,
+    env: { ...process.env, NODE_ENV: 'production', HOSTNAME: '127.0.0.1', PORT: String(port), ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const logs = [];
+  child.stdout.on('data', (chunk) => logs.push(String(chunk)));
+  child.stderr.on('data', (chunk) => logs.push(String(chunk)));
+  child.on('error', (error) => logs.push(`spawn error: ${error.message}`));
+
+  return {
+    logs,
+    stop() {
+      return new Promise((done) => {
+        if (child.exitCode !== null || child.signalCode !== null) return done();
+        child.once('exit', () => done());
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
+      });
+    },
+  };
+}
+
+/**
+ * The first response the server gives, whatever its status.
+ *
+ * Any status means the process is up; the assertions decide whether the
+ * status and body are right. Waiting only for 200 would turn a wrongly-built
+ * variant into a timeout, which reads as a broken check rather than a broken
+ * build.
+ */
+async function waitForResponse(url) {
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  let lastError = 'no attempt made';
+  while (Date.now() < deadline) {
+    try {
+      return await fetch(url);
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      await sleep(POLL_INTERVAL_MS);
+    }
+  }
+  throw new Error(`${url} did not answer within ${STARTUP_TIMEOUT_MS}ms: ${lastError}`);
+}
+
+async function render(variant, env) {
+  const port = nextPort++;
+  const server = startServer(env, port);
   try {
-    const response = await waitForResponse(port);
-    const html = await response.text();
-    return { status: response.status, html, title: titleOf(html), logs: server.logs.join('') };
+    const url = `http://127.0.0.1:${port}${variant.basePath}/login`;
+    const response = await waitForResponse(url);
+    return { status: response.status, html: await response.text(), logs: server.logs.join('') };
   } finally {
     await server.stop();
   }
 }
 
-const ALPHA = {
-  AGENT_WEB_APP_NAME: 'Alpha Agents',
-  AGENT_WEB_ORG_NAME: 'Alpha Research',
-  AGENT_WEB_ORG_URL: 'https://alpha.example',
-  AGENT_WEB_STATUS_URL: 'https://status.alpha.example/',
-  AGENT_WEB_GATEWAY_URL: 'https://gateway-alpha.example/authorize',
-  AGENT_WEB_FEATURE_RAG: 'true',
-  // Not a configuration variable. It is here to prove that an unrelated
-  // environment value cannot ride along with the allowlisted ones.
-  AGENT_SESSION_SECRET: SENTINEL,
-};
-
-const BETA = {
-  AGENT_WEB_APP_NAME: 'Beta Agents',
-  AGENT_WEB_ORG_NAME: 'Beta Research',
-  AGENT_WEB_ORG_URL: 'https://beta.example',
-  AGENT_WEB_STATUS_URL: 'https://status.beta.example/',
-  AGENT_WEB_GATEWAY_URL: 'https://gateway-beta.example',
-  AGENT_WEB_FEATURE_RAG: 'false',
-  AGENT_SESSION_SECRET: SENTINEL,
-};
-
-async function main() {
-  prepareStandalone();
-
-  const alpha = await renderWith(3311, ALPHA);
-  if (alpha.status !== 200) {
-    fail(`the alpha deployment answered ${alpha.status}\n${alpha.logs}`);
+async function probePath(variant, path) {
+  const port = nextPort++;
+  const server = startServer(DEPLOYMENTS[0].env, port);
+  try {
+    const response = await waitForResponse(`http://127.0.0.1:${port}${path}`);
+    return response.status;
+  } finally {
+    await server.stop();
   }
-  if (alpha.title !== ALPHA.AGENT_WEB_APP_NAME) {
-    fail(`expected title "${ALPHA.AGENT_WEB_APP_NAME}", got ${JSON.stringify(alpha.title)}`);
-  }
-
-  const beta = await renderWith(3312, BETA);
-  if (beta.status !== 200) {
-    fail(`the beta deployment answered ${beta.status}\n${beta.logs}`);
-  }
-  if (beta.title !== BETA.AGENT_WEB_APP_NAME) {
-    fail(`expected title "${BETA.AGENT_WEB_APP_NAME}", got ${JSON.stringify(beta.title)}`);
-  }
-
-  // The core assertion. Equal documents from one artifact mean the value was
-  // resolved at build time, whatever the unit tests say.
-  if (alpha.title === beta.title || alpha.html === beta.html) {
-    fail(
-      'one built artifact rendered the same document under two runtime ' +
-        'environments — the configuration is still being resolved at build time',
-    );
-  }
-
-  // A component rendered outside the provider must not fall back to a real
-  // deployment's brand.
-  for (const [name, rendered] of [
-    ['alpha', alpha],
-    ['beta', beta],
-  ]) {
-    if (!rendered.html.includes(rendered.title)) {
-      fail(`the ${name} document does not contain its own configured name`);
-    }
-    if (rendered.html.includes(SENTINEL)) {
-      fail(`the ${name} HTML contains a variable that is not on the allowlist`);
-    }
-  }
-
-  const bundle = clientBundle();
-  if (bundle.includes(SENTINEL)) {
-    fail('a variable that is not on the allowlist reached the client bundle');
-  }
-  for (const name of [ALPHA.AGENT_WEB_APP_NAME, BETA.AGENT_WEB_APP_NAME]) {
-    if (bundle.includes(name)) {
-      fail(`the deployment name "${name}" is baked into the client bundle`);
-    }
-  }
-
-  // An illegal value must fail the request. Reading it as "unset" is the
-  // silent-fallback behaviour this work removed. Asserted as "not a normal
-  // render" rather than "exactly 500": the point is that the page does not
-  // quietly serve the deployment it was configured to be. The message that
-  // names the variable is pinned by the unit tests, where it is not at the
-  // mercy of how Next surfaces a server error.
-  const broken = await renderWith(3313, { ...ALPHA, AGENT_WEB_STATUS_URL: 'not-a-url' });
-  if (broken.status === 200 && broken.title === ALPHA.AGENT_WEB_APP_NAME) {
-    fail(
-      'an invalid AGENT_WEB_STATUS_URL rendered a normal page; it must fail ' +
-        'rather than be read as unset',
-    );
-  }
-
-  console.log('Runtime site config: one artifact, two deployments, both correct.');
 }
 
-// A leftover copy from a previous run would mask a broken Dockerfile copy
-// step, so start from a clean standalone tree.
-rmSync(join(STANDALONE, '.next', 'static'), { recursive: true, force: true });
+function assertRendered(variant, target, rendered) {
+  const where = `${variant.name} / ${target.name}`;
+  const { html } = rendered;
+
+  if (rendered.status !== 200) {
+    fail(`${where}: GET ${variant.basePath}/login answered ${rendered.status}\n${rendered.logs}`);
+  }
+
+  const title = titleOf(html);
+  if (title !== target.appName) {
+    fail(
+      `${where}: <title> is ${JSON.stringify(title)}, expected ${JSON.stringify(target.appName)}`,
+    );
+  }
+
+  // The body, not just the head. Checking `html.includes(title)` would pass on
+  // the <title> element alone, with every rendered name and link wrong.
+  const heading = textOf(html, 'h1');
+  if (heading !== target.appName) {
+    fail(
+      `${where}: the rendered <h1> is ${JSON.stringify(heading)}, expected the ` +
+        `configured name ${JSON.stringify(target.appName)}`,
+    );
+  }
+
+  // The one URL this app hands to another service, and the string the gateway
+  // matches as an exact redirect target.
+  const signIn = firstMatch(html, /href="([^"]*\/v1\/session\/login[^"]*)"/);
+  const expectedSignIn = `${variant.apiUrl}/v1/session/login`;
+  if (!signIn) fail(`${where}: no sign-in link in the document`);
+  if (!signIn.startsWith(expectedSignIn)) {
+    fail(
+      `${where}: the sign-in link is ${JSON.stringify(signIn)}, expected it to ` +
+        `start with ${JSON.stringify(expectedSignIn)}`,
+    );
+  }
+
+  // Assets carry the mount prefix; a /agents deployment that loads the root
+  // app's chunks renders unstyled and inert, or 404s outright.
+  const asset = firstMatch(html, /(?:src|href)="([^"]*\/_next\/static\/[^"]*)"/);
+  if (!asset) fail(`${where}: no asset URL in the document`);
+  if (!asset.startsWith(`${variant.basePath}/_next/static/`)) {
+    fail(
+      `${where}: an asset URL is ${JSON.stringify(asset)}, expected the ` +
+        `${variant.basePath || 'root'} prefix`,
+    );
+  }
+
+  // The identity crosses to the client as serialized props, so all of it must
+  // be in the document — not only the two fields this page happens to render.
+  for (const [field, value] of [
+    ['app name', target.appName],
+    ['organisation', target.orgName],
+    ['organisation URL', target.orgUrl],
+    ['status URL', target.statusUrl],
+    ['gateway origin', target.gatewayOrigin],
+  ]) {
+    if (!html.includes(value)) {
+      fail(`${where}: the ${field} ${JSON.stringify(value)} is not in the document`);
+    }
+  }
+
+  // The feature switch is a boolean, so it is asserted structurally rather
+  // than as a substring of the escaped flight payload.
+  const unescaped = html.replaceAll('\\"', '"');
+  if (!unescaped.includes(`"rag":${target.rag}`)) {
+    fail(`${where}: the feature switch is not ${target.rag} in the serialized config`);
+  }
+
+  // Anything belonging to the other deployment means a fallback to a
+  // build-time constant, which is the whole failure this work removed.
+  for (const other of DEPLOYMENTS) {
+    if (other.name === target.name) continue;
+    for (const [field, value] of [
+      ['app name', other.appName],
+      ['organisation', other.orgName],
+      ['organisation URL', other.orgUrl],
+      ['status URL', other.statusUrl],
+      ['gateway host', other.gatewayHost],
+    ]) {
+      if (html.includes(value)) {
+        fail(
+          `${where}: the document also contains the ${other.name} ${field} ` +
+            `${JSON.stringify(value)}`,
+        );
+      }
+    }
+  }
+
+  if (html.includes(SENTINEL)) {
+    fail(`${where}: a variable that is not on the allowlist reached the HTML`);
+  }
+}
+
+function assertBundleIsClean(variant) {
+  const bundle = clientBundle();
+  if (bundle.includes(SENTINEL)) {
+    fail(`${variant.name}: a variable that is not on the allowlist reached the client bundle`);
+  }
+  for (const target of DEPLOYMENTS) {
+    for (const [field, value] of [
+      ['app name', target.appName],
+      ['organisation', target.orgName],
+      ['organisation URL', target.orgUrl],
+      ['status URL', target.statusUrl],
+      ['gateway host', target.gatewayHost],
+    ]) {
+      if (bundle.includes(value)) {
+        fail(
+          `${variant.name}: the ${target.name} ${field} ${JSON.stringify(value)} is baked ` +
+            'into the client bundle',
+        );
+      }
+    }
+  }
+}
+
+async function main() {
+  for (const variant of VARIANTS) {
+    buildVariant(variant);
+
+    for (const target of DEPLOYMENTS) {
+      assertRendered(variant, target, await render(variant, target.env));
+    }
+
+    // One artifact, two environments, and the two documents must differ — the
+    // core assertion. Equal documents mean the value was resolved at build
+    // time, whatever the per-field checks above happen to say.
+    const alpha = await render(variant, DEPLOYMENTS[0].env);
+    const beta = await render(variant, DEPLOYMENTS[1].env);
+    if (alpha.html === beta.html) {
+      fail(
+        `${variant.name}: one artifact rendered the same document under two ` +
+          'runtime environments — the configuration is still resolved at build time',
+      );
+    }
+
+    for (const path of variant.foreignPaths) {
+      const status = await probePath(variant, path);
+      if (status !== 404) {
+        fail(
+          `${variant.name}: ${path} answered ${status}; a variant mounted at ` +
+            `${variant.basePath} must not serve the bare path`,
+        );
+      }
+    }
+
+    assertBundleIsClean(variant);
+  }
+
+  // An illegal value must be refused. Reading it as "unset" is the silent
+  // fallback this work removed, so a normal page is the failure.
+  const broken = await render(VARIANTS[0], {
+    ...DEPLOYMENTS[0].env,
+    AGENT_WEB_STATUS_URL: 'not-a-url',
+  });
+  if (broken.status < 500) {
+    fail(
+      `an invalid AGENT_WEB_STATUS_URL answered ${broken.status}; it must fail the ` +
+        'request rather than be read as unset',
+    );
+  }
+
+  console.log(
+    `Runtime site config: ${VARIANTS.length} variants, ${DEPLOYMENTS.length} deployments, all correct.`,
+  );
+}
 
 await main();
