@@ -115,7 +115,7 @@ services:
       AGENT_SESSION_COOKIE_SECURE: ${AGENT_SESSION_COOKIE_SECURE:-true}
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
-      AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-trusted-v1}
+      AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-untrusted-kata-v1}
       # --- Publishing and source control ------------------------------------
       # The only component that holds a git credential, which is precisely what
       # keeps the sandbox credential-free. Unset means this deployment never

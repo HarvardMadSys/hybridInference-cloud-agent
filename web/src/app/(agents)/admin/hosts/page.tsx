@@ -20,7 +20,6 @@ import { hasRole } from '@/components/providers/AuthProvider';
 import type { AgentRunnerHost, AgentRunnerHostPool } from '@/lib/api/admin';
 import {
   drainAgentRunnerHost,
-  forgetAgentRunnerHost,
   getAgentRunnerHosts,
   removeAgentRunnerHost,
   setActiveAgentRunnerHost,
@@ -29,7 +28,7 @@ import {
 } from '@/lib/api/admin';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import { executionEnvironment, formatAge, formatSlots, groupHosts, runtimeMenu } from './format';
+import { formatAge, formatSlots, runtimeMenu, serverInventory } from './format';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
 // easily as "gone". Carried over from the gateway's section along with the
@@ -65,6 +64,7 @@ function StatusBadge({ status }: { status: string }) {
 export default function AdminHostsPage() {
   const { state } = useAuth();
   const [hosts, setHosts] = useState<AgentRunnerHost[]>([]);
+  const [executionProfile, setExecutionProfile] = useState('untrusted-kata-v1');
   const [activeHost, setActiveHost] = useState<string | null>(null);
   const [runtimeVersions, setRuntimeVersions] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -82,6 +82,7 @@ export default function AdminHostsPage() {
       const next = await getAgentRunnerHosts();
       if (!mounted.current) return;
       setHosts(next.hosts);
+      setExecutionProfile(next.execution_profile ?? 'untrusted-kata-v1');
       setActiveHost(next.active_host);
       setRuntimeVersions(next.runtime_versions ?? {});
     } catch (e) {
@@ -124,6 +125,7 @@ export default function AdminHostsPage() {
       const next = await action();
       if (!mounted.current) return;
       setHosts(next.hosts);
+      setExecutionProfile(next.execution_profile ?? 'untrusted-kata-v1');
       setActiveHost(next.active_host);
       setRuntimeVersions(next.runtime_versions ?? {});
       setNotice(ok);
@@ -138,15 +140,34 @@ export default function AdminHostsPage() {
     run(
       () => setActiveAgentRunnerHost(host),
       host
-        ? `New chats now go to ${host}. Existing retained chats stay on their owning hosts.`
-        : 'New chats are unpinned — any runner may materialize one.',
+        ? `New chats now go to ${serverInventory(hosts, executionProfile).find((server) => server.host?.host === host)?.name ?? host}. Existing retained chats stay on their owning hosts.`
+        : 'New chats are assigned automatically. Existing retained chats stay on their owning hosts.',
     );
 
   // Unioned across the pool, because the selection is deployment-wide while
   // the menus are per-image. Derived on render rather than held in state: it is
   // a view of `hosts`, and a second copy could disagree with the table beside
   // it after a poll.
-  const menu = runtimeMenu(hosts);
+  const servers = serverInventory(hosts, executionProfile);
+  const availableServers = servers.filter((server) => server.available);
+  const visibleServers = servers.filter(
+    (server) => server.host && server.host.status !== 'disabled',
+  );
+  const inactiveServers = servers.filter(
+    (server) => !server.host || server.host.status === 'disabled',
+  );
+  const selectedServer = servers.find((server) => server.selected);
+  const selectionUnavailable = Boolean(
+    activeHost &&
+    !hosts.some(
+      (host) =>
+        host.host === activeHost &&
+        host.enrolled &&
+        host.status === 'online' &&
+        (executionProfile === 'trusted-v1' || host.sandbox_runtime === 'io.containerd.kata.v2'),
+    ),
+  );
+  const menu = runtimeMenu(visibleServers.flatMap((server) => (server.host ? [server.host] : [])));
 
   const handleVersion = (runtime: string, version: string) =>
     run(
@@ -232,9 +253,7 @@ export default function AdminHostsPage() {
         {staleActive && (
           <div className="mt-6 rounded-xl border border-amber-200 dark:border-amber-500/25 bg-amber-50 dark:bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
             {staleActive.host} last polled {formatAge(staleActive.seconds_since_seen)}. New chats
-            are pinned to it, so they will wait while its runners are down — pin another host or
-            choose Any host. Existing retained chats do not move. (A machine that is simply busy
-            also stops polling, so check before switching.)
+            may be unavailable. Existing retained chats stay on their owning server.
           </div>
         )}
 
@@ -309,169 +328,150 @@ export default function AdminHostsPage() {
         <div className="mt-10">
           <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">Servers</h2>
 
-          {/* Which hosts take work, stated where the hosts are.
-              This was a section of its own, and the split was the confusion:
-              the *state* sat in a card at the top while the only way to change
-              it — Pin — was a button in the table below, so reading it and
-              acting on it happened in two places. It is one sentence about the
-              list, so it belongs to the list.
-
-              Worth saying out loud rather than leaving to the badge: an absent
-              "pinned" chip is ambiguous (nothing pinned, or did I miss it?),
-              and pinning is not a drain — the machine that lost the pin keeps
-              running and resuming retained chats it already owns. */}
-          {activeHost && (
-            <div className="mt-2">
+          {availableServers.length > 1 && (
+            <div className="mt-3 flex items-center gap-3">
+              <label
+                htmlFor="server-placement"
+                className="text-sm text-gray-600 dark:text-gray-400"
+              >
+                New chats
+              </label>
+              <select
+                id="server-placement"
+                disabled={busy}
+                value={
+                  activeHost
+                    ? selectionUnavailable
+                      ? '__unavailable__'
+                      : (selectedServer?.name ?? '__unavailable__')
+                    : ''
+                }
+                onChange={(event) => {
+                  const chosen = availableServers.find(
+                    (server) => server.name === event.target.value,
+                  );
+                  void handlePin(chosen?.host?.host ?? null);
+                }}
+                className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm"
+              >
+                <option value="">Automatic</option>
+                {selectionUnavailable && (
+                  <option value="__unavailable__" disabled>
+                    Selected server unavailable
+                  </option>
+                )}
+                {availableServers.map((server) => (
+                  <option key={server.name} value={server.name}>
+                    {server.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {selectionUnavailable && (
+            <div role="alert" className="mt-3 text-sm text-amber-700 dark:text-amber-300">
+              The selected server cannot accept new chats.
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => void handlePin(null)}
-                className="inline-flex items-center rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                className="ml-2 underline"
               >
-                Any host
+                Clear unavailable selection
               </button>
             </div>
           )}
 
           {loading ? (
             <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">Loading…</p>
-          ) : hosts.length === 0 ? (
-            <div className="mt-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400 shadow-sm">
-              No runner has polled yet. Start one and it will appear here.
-            </div>
           ) : (
-            <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm">
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="border-b border-gray-100 dark:border-white/5 text-xs text-gray-500 dark:text-gray-400">
-                    <tr>
-                      <th className="px-6 py-3 font-medium">Server</th>
-                      <th className="px-6 py-3 font-medium">Execution environment</th>
-                      <th className="px-3 py-3 font-medium">Status</th>
-                      <th className="px-3 py-3 font-medium">Slots</th>
-                      <th className="px-3 py-3 font-medium whitespace-nowrap">Last polled</th>
-                      <th className="px-6 py-3 text-right font-medium">Actions</th>
-                    </tr>
-                  </thead>
-                  {groupHosts(hosts).map(([server, deployments]) => (
-                    <tbody
-                      key={server}
-                      aria-label={server}
-                      className="divide-y divide-gray-100 dark:divide-white/5 border-b border-gray-100 dark:border-white/5"
-                    >
-                      {deployments.map((host, index) => (
-                        <tr key={host.host} className="align-top">
-                          {index === 0 && (
-                            <th
-                              scope="rowgroup"
-                              rowSpan={deployments.length}
-                              className="px-6 py-4 font-medium text-gray-900 dark:text-gray-50"
-                            >
-                              {server}
-                            </th>
-                          )}
-                          <td className="px-6 py-4">
-                            <div className="flex items-center gap-2">
-                              <span className="font-medium text-gray-900 dark:text-gray-50">
-                                {executionEnvironment(host)}
-                              </span>
-                              {host.active && (
-                                <span className="rounded-full bg-crimson/[0.08] dark:bg-crimson/20 px-2 py-0.5 text-xs font-medium text-crimson dark:text-crimson-light">
-                                  pinned
-                                </span>
-                              )}
-                            </div>
-                            <div className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
-                              {host.host !== server ? host.host : null}
-                              {host.runner_version ? ` · runner ${host.runner_version}` : ''}
-                            </div>
-                          </td>
-                          <td className="px-3 py-4">
-                            <StatusBadge status={host.status} />
-                          </td>
-                          <td className="px-3 py-4 whitespace-nowrap text-gray-700 dark:text-gray-300">
-                            {formatSlots(host)}
-                          </td>
-                          <td className="px-3 py-4 whitespace-nowrap text-gray-700 dark:text-gray-300">
-                            {formatAge(host.seconds_since_seen)}
-                          </td>
-                          <td className="px-6 py-4">
-                            {/* One line, right-aligned, and the destructive pair
-                              carries no border: four equally-weighted buttons
-                              wrapping onto two ragged lines made Remove the
-                              loudest thing in the row. */}
-                            <div className="flex items-center justify-end gap-1">
-                              {!host.active && (
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => void handlePin(host.host)}
-                                  className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
-                                >
-                                  Pin
-                                </button>
-                              )}
-                              {host.status === 'draining' ? (
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    void run(
-                                      () => undrainAgentRunnerHost(host.host),
-                                      `${host.host} is taking work again.`,
-                                    )
-                                  }
-                                  className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
-                                >
-                                  Undrain
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    void run(
-                                      () => drainAgentRunnerHost(host.host),
-                                      `${host.host} stops taking new work; running attempts finish.`,
-                                    )
-                                  }
-                                  className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
-                                >
-                                  Drain
-                                </button>
-                              )}
-                              {!host.active && (
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    void run(
-                                      () => forgetAgentRunnerHost(host.host),
-                                      `Dropped ${host.host} from the list. A runner still polling there re-adds itself.`,
-                                    )
-                                  }
-                                  className="rounded-lg px-2.5 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
-                                >
-                                  Forget
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => handleRemove(host.host, host.slots_used)}
-                                className="rounded-lg px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-40"
+            <>
+              {visibleServers.length === 0 ? (
+                <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">
+                  No servers available.
+                </p>
+              ) : (
+                <div className="mt-4 overflow-x-auto rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="border-b border-gray-100 dark:border-white/5 text-xs text-gray-500 dark:text-gray-400">
+                      <tr>
+                        <th className="px-6 py-3 font-medium">Server</th>
+                        <th className="px-3 py-3 font-medium">Status</th>
+                        <th className="px-3 py-3 font-medium">Slots</th>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap">Last polled</th>
+                        <th className="px-6 py-3 text-right font-medium">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+                      {visibleServers.map(
+                        ({ name, host }) =>
+                          host && (
+                            <tr key={name} className="align-top">
+                              <th
+                                scope="row"
+                                className="px-6 py-4 font-medium text-gray-900 dark:text-gray-50"
                               >
-                                Remove
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
+                                {name}
+                              </th>
+                              <td className="px-3 py-4">
+                                <StatusBadge status={host.status} />
+                              </td>
+                              <td className="px-3 py-4 whitespace-nowrap">{formatSlots(host)}</td>
+                              <td className="px-3 py-4 whitespace-nowrap">
+                                {formatAge(host.seconds_since_seen)}
+                              </td>
+                              <td className="px-6 py-4">
+                                <div className="flex items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      void run(
+                                        () =>
+                                          host.status === 'draining'
+                                            ? undrainAgentRunnerHost(host.host)
+                                            : drainAgentRunnerHost(host.host),
+                                        host.status === 'draining'
+                                          ? `${name} is taking work again.`
+                                          : `${name} stops taking new work; running attempts finish.`,
+                                      )
+                                    }
+                                    className="rounded-lg border border-gray-200 dark:border-white/10 px-2.5 py-1 text-xs disabled:opacity-40"
+                                  >
+                                    {host.status === 'draining' ? 'Undrain' : 'Drain'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => handleRemove(host.host, host.slots_used)}
+                                    className="rounded-lg px-2.5 py-1 text-xs text-red-600 dark:text-red-400 disabled:opacity-40"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ),
+                      )}
                     </tbody>
-                  ))}
-                </table>
-              </div>
-            </div>
+                  </table>
+                </div>
+              )}
+              {inactiveServers.length > 0 && (
+                <details className="mt-4 text-sm text-gray-500 dark:text-gray-400">
+                  <summary className="cursor-pointer">
+                    Unavailable servers ({inactiveServers.length})
+                  </summary>
+                  <ul className="mt-2 space-y-1">
+                    {inactiveServers.map((server) => (
+                      <li key={server.name}>
+                        {server.name} — {server.host?.status ?? 'unavailable'}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </>
           )}
         </div>
       </section>

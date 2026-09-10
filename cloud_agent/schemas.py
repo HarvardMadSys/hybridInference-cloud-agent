@@ -1632,6 +1632,10 @@ class AgentRunnerHost(BaseModel):  # type: ignore[no-any-unimported]
 class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported]
     """Runner pool, new-chat placement, and selected CLI versions."""
 
+    execution_profile: str = Field(
+        "untrusted-kata-v1",
+        description="Server-owned policy for new chats; used to show eligible servers in admin.",
+    )
     hosts: list[AgentRunnerHost]
     active_host: str | None = Field(
         None,

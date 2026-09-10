@@ -314,3 +314,13 @@ async def test_clearing_a_selection_returns_the_runtime_to_the_image_default(adm
 
     assert response.status_code == 200
     assert response.json()["runtime_versions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_inventory_reports_the_server_owned_new_chat_policy(admin_client, monkeypatch):
+    client, _ = admin_client
+    for profile in ("untrusted-kata-v1", "trusted-v1"):
+        monkeypatch.setenv("AGENT_DEFAULT_EXECUTION_PROFILE", profile)
+        response = await client.get("/admin/agent/runner-hosts", headers=ADMIN)
+        assert response.status_code == 200
+        assert response.json()["execution_profile"] == profile

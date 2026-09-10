@@ -20,7 +20,7 @@ const HOSTS = '/admin/agent/runner-hosts';
 const RUNTIME_VERSIONS = '/admin/agent/runtime-versions';
 
 /** Status values the control plane stores; see `cloud_agent/host_pool.py`. */
-export type AgentHostStatus = 'enrolling' | 'online' | 'draining' | 'disabled';
+export type AgentHostStatus = 'enrolling' | 'online' | 'draining' | 'disabled' | 'offline';
 
 export interface AgentRunnerHost {
   host: string;
@@ -72,6 +72,7 @@ export interface AgentRunnerHost {
 }
 
 export interface AgentRunnerHostPool {
+  execution_profile?: string;
   hosts: AgentRunnerHost[];
   /** New-chat placement host, or null when any runner may materialize one. */
   active_host: string | null;
