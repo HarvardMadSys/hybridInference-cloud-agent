@@ -33,6 +33,13 @@ independent. Failure of the event endpoint must not skip the terminal request
 and leave the database recording a running attempt. If both control requests
 remain unavailable, the reaper is still the final backstop.
 
+Post-claim preparation outside the shared execution handler (for example,
+image inspection or manifest validation) also has an outer failure handler.
+It attempts a terminal failure before stopping heartbeat renewal, and records
+the exception class even if terminal reporting fails. An explicit lease
+rejection skips that write. This prevents an early setup error from silently
+becoming an expired running attempt; it does not repair the setup error itself.
+
 Runner logs now include:
 
 - `agent_attempt_claimed`: job, attempt, worker and host identifiers.

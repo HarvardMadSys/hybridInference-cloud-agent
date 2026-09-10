@@ -1969,6 +1969,20 @@ def run_once(
             agent_timeout_s=agent_timeout_s,
             finish_attempt=finish_attempt,
         )
+    except LeaseLost as exc:
+        _log_control_failure("attempt_dispatch_fenced", job.job_id, exc)
+        return 3
+    except Exception as exc:
+        # Preparation before the shared handler (image inspection, manifest
+        # validation, etc.) can fail after claim. Report a terminal outcome
+        # before finally stops renewal, instead of leaving a running attempt
+        # that will later be misreported as a lease failure.
+        _log_control_failure("attempt_dispatch", job.job_id, exc)
+        try:
+            finish_attempt("failed", f"attempt dispatch failed ({type(exc).__name__})")
+        except Exception as finish_exc:
+            _log_control_failure("finish", job.job_id, finish_exc)
+        return 2
     finally:
         heart.stop()
         control.close()

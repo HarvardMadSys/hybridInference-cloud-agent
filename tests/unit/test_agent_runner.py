@@ -293,6 +293,82 @@ def test_run_once_empty_queue_is_clean(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "error", [SandboxError("image inspection failed"), httpx.ReadTimeout("timeout")]
+)
+@pytest.mark.parametrize("finish_unavailable", [False, True])
+def test_preparation_error_outside_shared_handler_finishes_before_stopping_heartbeat(
+    monkeypatch, error, finish_unavailable, caplog
+):
+    """Post-claim setup errors must not leave a running lease with no heartbeater."""
+    _configure_host(monkeypatch)
+    backend = ContainerBackend(image="img")
+    # The first inspection builds claim attestation; the second is post-claim.
+    monkeypatch.setattr(backend, "version_stamp", Mock(side_effect=[_stamp(), error]))
+    monkeypatch.setattr(runner_mod, "claim", Mock(return_value=_JOB))
+    control = Mock()
+    heart = Mock()
+    order = []
+
+    def finish(*args, **kwargs):
+        order.append("finish")
+        if finish_unavailable:
+            raise httpx.ReadTimeout("finish unavailable")
+
+    control.finish.side_effect = finish
+    heart.stop.side_effect = lambda: order.append("stop")
+    monkeypatch.setattr(runner_mod, "ControlPlane", Mock(return_value=control))
+    monkeypatch.setattr(runner_mod, "Heartbeater", Mock(return_value=heart))
+
+    code = runner_mod.run_once(
+        base_url="http://control",
+        host_credential="host-credential",
+        worker_id="runner-1",
+        backend=backend,
+        host="host-a",
+    )
+
+    assert code == 2
+    assert order == ["finish", "stop"]
+    control.finish.assert_called_once()
+    assert control.finish.call_args.args[0] == "failed"
+    assert type(error).__name__ in control.finish.call_args.args[1]
+    assert "operation=attempt_dispatch" in caplog.text
+    if finish_unavailable:
+        assert "operation=finish" in caplog.text
+    heart.start.assert_called_once()
+    control.close.assert_called_once()
+
+
+def test_preparation_lease_rejection_does_not_attempt_terminal_write(monkeypatch):
+    """An already fenced preparation path cannot overwrite a newer owner."""
+    _configure_host(monkeypatch)
+    backend = ContainerBackend(image="img")
+    monkeypatch.setattr(
+        backend, "version_stamp", Mock(side_effect=[_stamp(), LeaseLost("expired")])
+    )
+    monkeypatch.setattr(runner_mod, "claim", Mock(return_value=_JOB))
+    control = Mock()
+    heart = Mock()
+    monkeypatch.setattr(runner_mod, "ControlPlane", Mock(return_value=control))
+    monkeypatch.setattr(runner_mod, "Heartbeater", Mock(return_value=heart))
+
+    assert (
+        runner_mod.run_once(
+            base_url="http://control",
+            host_credential="host-credential",
+            worker_id="runner-1",
+            backend=backend,
+            host="host-a",
+        )
+        == 3
+    )
+
+    control.finish.assert_not_called()
+    heart.stop.assert_called_once()
+    control.close.assert_called_once()
+
+
 def test_historical_one_to_one_sandbox_fails_closed():
     backend = ContainerBackend(image="img")
     backend.version_stamp = _stamp  # type: ignore[method-assign]
