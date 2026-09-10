@@ -749,7 +749,7 @@ describe('per-call resources, through both real adapters', () => {
       }),
     );
 
-    expect(screen.getAllByText('Processes').length).toBeGreaterThan(0);
+    expect(screen.getByRole('columnheader', { name: 'Program' })).toBeInTheDocument();
     expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
     expect(screen.getByText('+12ms')).toBeInTheDocument();
     expect(screen.queryByText(/Process data is incomplete/)).toBeNull();
@@ -798,7 +798,8 @@ describe('per-call resources, through both real adapters', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Process details' }));
 
-    expect(screen.getAllByText('Processes').length).toBeGreaterThan(0);
+    expect(screen.getByRole('columnheader', { name: 'Program' })).toBeInTheDocument();
+    expect(screen.queryByText('Processes')).toBeNull();
     expect(screen.getByText('/bin/tiny')).toBeInTheDocument();
   });
 

@@ -438,13 +438,12 @@ function ProcessObservationTable({
 }) {
   return (
     <div className="mt-3">
-      <p className="mb-1 text-[11px] font-medium text-gray-600 dark:text-gray-300">Processes</p>
       {processes.length > 0 ? (
         <div className="overflow-x-auto">
           <table className="w-full text-[11px]">
             <thead>
               <tr className="text-left text-gray-500 dark:text-gray-400">
-                <th className="py-1 font-medium">Process</th>
+                <th className="py-1 font-medium">Program</th>
                 <th className="py-1 text-right font-medium">PID</th>
                 <th className="py-1 text-right font-medium">Started</th>
                 <th className="py-1 text-right font-medium">Lifetime</th>
