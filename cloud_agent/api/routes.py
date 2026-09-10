@@ -54,6 +54,7 @@ from cloud_agent.api.deps import (
     get_host_pool,
     get_log_store,
     get_mcp_connections,
+    get_sandbox_repository,
     get_source_control_repository,
     looks_like_agent_token,
     require_attempts,
@@ -62,6 +63,7 @@ from cloud_agent.api.deps import (
     require_grants,
     require_host_pool,
     require_queries,
+    require_sandboxes,
     require_source_control,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
@@ -1391,7 +1393,8 @@ async def _create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
     *,
-    job_store: AgentJobStore,
+    commands: ConversationCommands,
+    source_control: SourceControlGrants,
     app_credentials: Any | None,
     gateway: Any,
     mcp_connections: McpConnectionRepository | None,
@@ -1452,7 +1455,7 @@ async def _create_job_as(
         await require_entitled_repo(
             body.repo,
             user["user_id"],
-            grants_repo=job_store,
+            grants_repo=source_control,
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
@@ -1507,7 +1510,7 @@ async def _create_job_as(
             status_code=503,
             detail={"error": {"type": "invalid_configuration", "message": str(exc)}},
         ) from exc
-    job = await job_store.create_job(
+    job = await commands.create_job(
         user_id=user["user_id"],
         repo=body.repo,
         task_prompt=body.task_prompt,
@@ -1540,7 +1543,8 @@ async def create_agent_job(
     body: AgentJobCreate,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
     mcp_connections: McpConnectionRepository | None = Depends(get_mcp_connections),
@@ -1551,11 +1555,11 @@ async def create_agent_job(
     key returns the job the first send created, and the same key under
     different content is a 409 ``idempotency_conflict``.
     """
-    job_store = _require_store(store)
     job = await _create_job_as(
         body,
         user,
-        job_store=job_store,
+        commands=require_conversation_commands(commands),
+        source_control=require_source_control(source_control),
         app_credentials=app_credentials,
         gateway=gateway,
         client_request_id=idempotency_key,
@@ -1652,10 +1656,10 @@ def _raise_session_mutation_error(result: dict[str, Any]) -> None:
 async def archive_agent_sessions(
     body: AgentSessionArchiveRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
 ) -> AgentSessionArchiveResponse:
     """Archive or unarchive an explicit owner-selected snapshot atomically."""
-    result = await _require_store(store).set_sessions_archived(
+    result = await require_conversation_commands(commands).set_sessions_archived(
         thread_ids=body.thread_ids, user_id=user["user_id"], archived=body.archived
     )
     _raise_session_mutation_error(result)
@@ -1675,10 +1679,10 @@ async def archive_agent_sessions(
 async def delete_agent_sessions(
     body: AgentSessionSelection,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
 ) -> AgentSessionDeleteResponse:
     """Permanently remove archived sessions from owner history, retaining audit data."""
-    result = await _require_store(store).delete_sessions(
+    result = await require_conversation_commands(commands).delete_sessions(
         thread_ids=body.thread_ids, user_id=user["user_id"]
     )
     _raise_session_mutation_error(result)
@@ -1833,10 +1837,10 @@ async def _set_agent_thread_archived(
     job_id: str,
     archived: bool,
     user: dict[str, Any],
-    store: AgentJobStore | None,
+    commands: ConversationCommands | None,
 ) -> AgentThreadArchiveResponse:
     """Set archive state without exposing whether another user's job exists."""
-    job_store = _require_store(store)
+    job_store = require_conversation_commands(commands)
     result = await job_store.set_thread_archived(
         job_id=job_id,
         user_id=user["user_id"],
@@ -1858,20 +1862,24 @@ async def _set_agent_thread_archived(
 async def archive_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
 ) -> AgentThreadArchiveResponse:
     """Archive the entire task thread containing an owned job."""
-    return await _set_agent_thread_archived(job_id=job_id, archived=True, user=user, store=store)
+    return await _set_agent_thread_archived(
+        job_id=job_id, archived=True, user=user, commands=commands
+    )
 
 
 @router.delete("/jobs/{job_id}/archive", response_model=AgentThreadArchiveResponse)
 async def restore_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
 ) -> AgentThreadArchiveResponse:
     """Restore the entire task thread containing an owned job."""
-    return await _set_agent_thread_archived(job_id=job_id, archived=False, user=user, store=store)
+    return await _set_agent_thread_archived(
+        job_id=job_id, archived=False, user=user, commands=commands
+    )
 
 
 @router.patch("/jobs/{job_id}/title", response_model=AgentThreadRenameResponse)
@@ -1879,10 +1887,10 @@ async def rename_agent_thread(
     job_id: str,
     body: AgentThreadRenameRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
 ) -> AgentThreadRenameResponse:
     """Rename the entire conversation containing an owned job."""
-    result = await _require_store(store).set_thread_title(
+    result = await require_conversation_commands(commands).set_thread_title(
         job_id=job_id, user_id=user["user_id"], title=body.title
     )
     if result is None:
@@ -1898,10 +1906,10 @@ async def _set_agent_thread_pinned(
     job_id: str,
     pinned: bool,
     user: dict[str, Any],
-    store: AgentJobStore | None,
+    commands: ConversationCommands | None,
 ) -> AgentThreadPinResponse:
     """Set pin state without exposing whether another user's job exists."""
-    job_store = _require_store(store)
+    job_store = require_conversation_commands(commands)
     result = await job_store.set_thread_pinned(
         job_id=job_id,
         user_id=user["user_id"],
@@ -1923,20 +1931,20 @@ async def _set_agent_thread_pinned(
 async def pin_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
 ) -> AgentThreadPinResponse:
     """Pin the entire task thread containing an owned job."""
-    return await _set_agent_thread_pinned(job_id=job_id, pinned=True, user=user, store=store)
+    return await _set_agent_thread_pinned(job_id=job_id, pinned=True, user=user, commands=commands)
 
 
 @router.delete("/jobs/{job_id}/pin", response_model=AgentThreadPinResponse)
 async def unpin_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
 ) -> AgentThreadPinResponse:
     """Unpin the entire task thread containing an owned job."""
-    return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, store=store)
+    return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, commands=commands)
 
 
 def _sandbox_context_lost_error() -> HTTPException:
@@ -1986,7 +1994,7 @@ async def create_agent_follow_up(
     body: AgentFollowUpRequest,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: ConversationCommands | None = Depends(get_conversation_commands),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
     mcp_connections: McpConnectionRepository | None = Depends(get_mcp_connections),
@@ -1997,7 +2005,7 @@ async def create_agent_follow_up(
     resend returns the turn the first send made, different content under the
     same key is a 409 ``idempotency_conflict``.
     """
-    job_store = _require_store(store)
+    job_store = require_conversation_commands(commands)
     parent = await _owned_job(job_store, job_id, user)
     # Ownership is proved above; the resend is answered next, before the checks
     # that can change between two sends of one submission. A first send whose
@@ -2126,7 +2134,7 @@ async def create_agent_follow_up(
     if job.get("error") == "session_archived":
         raise _session_archived_error()
     if job.get("error") == "sandbox_context_lost":
-        # The durable store repeats the check under its thread/sandbox locks.
+        # The durable commands repeats the check under its thread/sandbox locks.
         # It can legitimately disagree with the advisory read above when the
         # active attempt becomes indeterminate during entitlement/tool checks.
         raise _sandbox_context_lost_error()
@@ -3811,10 +3819,10 @@ async def worker_heartbeat(
     job_id: str,
     body: WorkerHeartbeatRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
 ) -> WorkerHeartbeatResponse:
     """Renew the attempt's lease and learn about pending cancellation."""
-    job_store = _require_store(store)
+    job_store = require_attempts(attempts)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     beat = await job_store.heartbeat(
@@ -3834,10 +3842,10 @@ async def worker_append_event(
     job_id: str,
     body: WorkerEventRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
 ) -> WorkerEventResponse:
     """Append one normalized event to the job's append-only log."""
-    job_store = _require_store(store)
+    job_store = require_attempts(attempts)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     event_id = await job_store.append_event(
@@ -3857,14 +3865,14 @@ async def worker_report_continuity(
     job_id: str,
     body: WorkerContinuityRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
 ) -> WorkerAckResponse:
     """Record which continuity rung this attempt runs on (design §9).
 
     Observability, deliberately fenced like every other worker write: a
     superseded attempt must not be able to relabel how the live one ran.
     """
-    job_store = _require_store(store)
+    job_store = require_attempts(attempts)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     recorded = await job_store.record_continuity_mode(
@@ -3895,13 +3903,14 @@ async def worker_reserve_thread_sandbox(
     job_id: str,
     body: WorkerSandboxReserveRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> WorkerThreadSandbox:
     """Reserve immutable one-chat/one-container identity before Docker create."""
-    job_store = _require_store(store)
+    job_store = require_sandboxes(sandboxes)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store, job_id)
+    thread_id = await _worker_thread_id(require_queries(conversations), job_id)
     try:
         row = await job_store.reserve_thread_sandbox(
             thread_id=thread_id,
@@ -3934,13 +3943,14 @@ async def worker_mark_thread_sandbox_running(
     job_id: str,
     body: WorkerSandboxRunningRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> WorkerThreadSandbox:
     """Confirm the exact retained container reached RUNNING."""
-    job_store = _require_store(store)
+    job_store = require_sandboxes(sandboxes)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store, job_id)
+    thread_id = await _worker_thread_id(require_queries(conversations), job_id)
     row = await job_store.mark_thread_sandbox_running(
         thread_id=thread_id,
         attempt_id=claims["attempt_id"],
@@ -4030,13 +4040,14 @@ async def worker_record_thread_sandbox_process(
     job_id: str,
     body: WorkerSandboxProcessRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> WorkerAckResponse:
     """Fence and record a replacement Agent CLI process generation."""
-    job_store = _require_store(store)
+    job_store = require_sandboxes(sandboxes)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store, job_id)
+    thread_id = await _worker_thread_id(require_queries(conversations), job_id)
     recorded = await job_store.record_thread_sandbox_process(
         thread_id=thread_id,
         attempt_id=claims["attempt_id"],
@@ -4058,13 +4069,14 @@ async def worker_admit_thread_sandbox_turn(
     job_id: str,
     body: WorkerSandboxAdmissionRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> WorkerAckResponse:
     """Persist at-most-once admission before the prompt reaches the CLI."""
-    job_store = _require_store(store)
+    job_store = require_sandboxes(sandboxes)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store, job_id)
+    thread_id = await _worker_thread_id(require_queries(conversations), job_id)
     recorded = await job_store.admit_thread_sandbox_turn(
         thread_id=thread_id,
         job_id=job_id,
@@ -4086,13 +4098,14 @@ async def worker_settle_thread_sandbox(
     job_id: str,
     body: WorkerSandboxSettleRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> WorkerThreadSandbox:
     """Persist the native context boundary before arming idle deactivation."""
-    job_store = _require_store(store)
+    job_store = require_sandboxes(sandboxes)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store, job_id)
+    thread_id = await _worker_thread_id(require_queries(conversations), job_id)
     row = await job_store.settle_thread_sandbox(
         thread_id=thread_id,
         attempt_id=claims["attempt_id"],
@@ -4159,7 +4172,7 @@ async def worker_report_resources(
     job_id: str,
     body: WorkerResourcesRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
 ) -> WorkerAckResponse:
     """Record one closed attempt's resource and timing telemetry.
 
@@ -4167,7 +4180,7 @@ async def worker_report_resources(
     describes an attempt that is already closed, so a retried post is the same
     report said twice rather than a second report to add.
     """
-    job_store = _require_store(store)
+    job_store = require_attempts(attempts)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     recorded = await job_store.record_attempt_resources(

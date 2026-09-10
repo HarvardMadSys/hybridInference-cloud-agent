@@ -177,6 +177,8 @@ def _build_app(store: FakeOnCallStore, *, app_credentials: Any | None = None) ->
         "source_control",
         "hosts",
         "grants",
+        "attempts",
+        "sandboxes",
     )
     app.dependency_overrides[get_gateway_client] = _FakeGateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: app_credentials

@@ -36,16 +36,23 @@ from __future__ import annotations
 
 import os
 import secrets
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_agent_job_store,
+    get_attempt_commands,
+    get_conversation_commands,
+    get_conversation_queries,
+    get_execution_queries,
     get_gateway_client,
     get_mcp_connections,
+    get_source_control_repository,
     require_agent_access,
+    require_attempts,
+    require_execution_queries,
+    require_queries,
     verify_admin_access,
 )
 from cloud_agent.api.routes import (
@@ -54,7 +61,6 @@ from cloud_agent.api.routes import (
     _event_response,
     _job_response,
     _owned_job,
-    _require_store,
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
@@ -63,9 +69,6 @@ from cloud_agent.schemas import (
     AgentJobEventsResponse,
     AgentJobResponse,
 )
-
-if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
 
@@ -136,7 +139,8 @@ def _oncall_owner() -> dict[str, Any]:
 async def create_oncall_job(
     body: AgentJobCreate,
     _caller: str = Depends(verify_oncall_dispatch),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    commands: Any = Depends(get_conversation_commands),
+    source_control: Any = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
     mcp_connections: Any = Depends(get_mcp_connections),
@@ -150,13 +154,13 @@ async def create_oncall_job(
     headless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and
     a ``base_ref`` is pinned to the commit it names right now.
     """
-    job_store = _require_store(store)
     user = _oncall_owner()
     await require_agent_access(gateway, user["user_id"])
     job = await _create_job_as(
         body,
         user,
-        job_store=job_store,
+        commands=commands,
+        source_control=source_control,
         app_credentials=app_credentials,
         gateway=gateway,
         mcp_connections=mcp_connections,
@@ -173,15 +177,14 @@ async def create_oncall_job(
 async def get_oncall_job(
     job_id: str,
     _caller: str = Depends(verify_oncall_dispatch),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: Any = Depends(get_conversation_queries),
 ) -> AgentJobResponse:
     """Return one on-call job's state, for the relay's poll loop.
 
     Fenced to the service account: a job owned by anyone else is 404 here, so
     the dispatch credential cannot be used to read other tenants' jobs.
     """
-    job_store = _require_store(store)
-    job = await _owned_job(job_store, job_id, _oncall_owner())
+    job = await _owned_job(require_queries(conversations), job_id, _oncall_owner())
     return _job_response(job)
 
 
@@ -191,7 +194,8 @@ async def list_oncall_job_events(
     after: int = Query(0, ge=0, description="Return events with a global id greater than this."),
     limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
     _caller: str = Depends(verify_oncall_dispatch),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: Any = Depends(get_conversation_queries),
+    execution: Any = Depends(get_execution_queries),
 ) -> AgentJobEventsResponse:
     """Page through an on-call job's event log, fenced like the job itself.
 
@@ -199,9 +203,10 @@ async def list_oncall_job_events(
     the analysis, and a ``tool_result`` with exit code 0 is what lets it call
     the analysis grounded rather than hallucinated.
     """
-    job_store = _require_store(store)
-    await _owned_job(job_store, job_id, _oncall_owner())
-    events = await job_store.list_events_after(job_id=job_id, after_id=after, limit=limit)
+    await _owned_job(require_queries(conversations), job_id, _oncall_owner())
+    events = await require_execution_queries(execution).list_events_after(
+        job_id=job_id, after_id=after, limit=limit
+    )
     return AgentJobEventsResponse(
         events=[_event_response(event) for event in events],
         next_cursor=events[-1]["id"] if events else after,
@@ -212,7 +217,8 @@ async def list_oncall_job_events(
 async def cancel_oncall_job(
     job_id: str,
     _caller: str = Depends(verify_oncall_dispatch),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: Any = Depends(get_conversation_queries),
+    attempts: Any = Depends(get_attempt_commands),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one on-call job.
 
@@ -227,11 +233,10 @@ async def cancel_oncall_job(
     settling here: on-call jobs open no interactive terminals, and reaching for
     the workspace broker would couple this door to a service it never needs.
     """
-    job_store = _require_store(store)
     user = _oncall_owner()
-    await _owned_job(job_store, job_id, user)
-    state = await job_store.request_cancel(job_id=job_id, user_id=user["user_id"])
-    job = await job_store.get_job(job_id)
+    await _owned_job(require_queries(conversations), job_id, user)
+    state = await require_attempts(attempts).request_cancel(job_id=job_id, user_id=user["user_id"])
+    job = await require_queries(conversations).get_job(job_id)
     return AgentJobCancelResponse(
         id=job_id,
         state=state or (job or {}).get("state", "unknown"),
