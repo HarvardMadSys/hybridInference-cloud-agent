@@ -691,6 +691,98 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
     assert group["idle_deadline"] is not None
 
 
+@pytest.mark.parametrize("next_action", ["follow_up", "fork"])
+async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
+    store: AgentJobStore, next_action: str
+):
+    """A failed hidden child remains history but cannot occupy the host manifest."""
+    from cloud_agent_host.runner import _shared_group_manifest
+    from cloud_agent_host.workspace_broker import SharedSandboxMemberRequest
+
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence, container_id="container-fork-recovery", context_status="new"
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-source",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    operation = await store.prepare_session_fork(
+        source_job_id=job["id"], user_id=job["user_id"], idempotency_key="stalled-fork"
+    )
+    assert operation is not None and operation.get("error") is None
+    actions = await store.reap_stalled_session_forks(stall_seconds=0)
+    assert [action["id"] for action in actions] == [operation["id"]]
+    async with store._pool.acquire() as conn:
+        tombstone = await conn.fetchrow(
+            "SELECT t.deleted_at, m.resident_slot_id FROM agent_threads t "
+            "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id WHERE t.id = $1",
+            operation["target_thread_id"],
+        )
+    assert tombstone is not None and tombstone["deleted_at"] is not None
+    assert tombstone["resident_slot_id"] is None
+
+    if next_action == "fork":
+        observed = await store.prepare_session_fork(
+            source_job_id=job["id"], user_id=job["user_id"], idempotency_key="replacement-fork"
+        )
+        assert observed is not None and observed.get("error") is None
+        assert observed["target_resident_slot_id"] == operation["target_resident_slot_id"]
+        expected_members = {job["thread_id"], observed["target_thread_id"]}
+    else:
+        follow = await store.create_follow_up(
+            parent_job_id=job["id"], user_id=job["user_id"], prompt="continue after failed Fork"
+        )
+        assert follow is not None and follow.get("error") is None
+        follow_claim = await _claim(
+            store,
+            worker_id="follow-worker",
+            lease_ttl_seconds=60,
+            host="shared-runner",
+            host_credential_hash="test-credential-hash",
+        )
+        assert follow_claim is not None and follow_claim["id"] == follow["id"]
+        observed = await store.reserve_thread_sandbox(
+            thread_id=job["thread_id"],
+            attempt_id=follow_claim["attempt_id"],
+            lease_generation=follow_claim["lease_generation"],
+            host="shared-runner",
+            sandbox_id=sandbox["sandbox_id"],
+            container_name=sandbox["container_name"],
+            runtime_id=sandbox["runtime_id"],
+            runtime_version=sandbox["runtime_version"],
+            sandbox_image_digest=sandbox["sandbox_image_digest"],
+            execution_profile=sandbox["execution_profile"],
+        )
+        assert observed is not None
+        expected_members = {job["thread_id"]}
+    # Exercise the strict runner projection and the host HTTP schema. Both
+    # reject the NULL slot that an unfiltered tombstone used to contribute.
+    manifest = _shared_group_manifest(observed, thread_id=job["thread_id"])
+    wire_members = [SharedSandboxMemberRequest.model_validate(member) for member in manifest]
+    assert {member.thread_id for member in wire_members} == expected_members
+    assert all(member.resident_slot_id is not None for member in wire_members)
+
+
 async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     store: AgentJobStore,
 ):
