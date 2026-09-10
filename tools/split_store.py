@@ -987,8 +987,10 @@ def emit_sql(
         ``self`` in the signature would bind the connection to it and fail on
         the first argument that matters.
         """
-        body = own(name) if name not in private else strip_decorators(
-            slice_node(source, private[name].node)
+        body = (
+            own(name)
+            if name not in private
+            else strip_decorators(slice_node(source, private[name].node))
         )
         return drop_self_parameter(body) if name in DROP_SELF else body
 
