@@ -132,7 +132,8 @@ class AdminRunQueries:
                 WHERE j.created_at >= $1 AND j.created_at < $2
                   AND ($3::text IS NULL OR j.user_id = $3)
                   AND ($4::text IS NULL OR t.repo = $4)
-                  AND ($5::text IS NULL OR j.state = $5)
+                  AND ($5::text IS NULL OR j.state = $5
+                       OR ($5 = 'queued' AND j.state = 'waiting'))
                   AND ($6::text IS NULL OR j.runtime = $6)
                   AND ($7::text IS NULL OR j.model = $7)
                   AND ($8::text IS NULL OR EXISTS (

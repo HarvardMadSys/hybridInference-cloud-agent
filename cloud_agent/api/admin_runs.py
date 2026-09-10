@@ -63,7 +63,12 @@ async def list_admin_runs(
     until: AwareDatetime | None = None,
     user_id: str | None = Query(None, max_length=256),
     repo: str | None = Query(None, max_length=256),
-    state: str | None = Query(None, max_length=64),
+    state: str | None = Query(
+        None,
+        max_length=64,
+        description="Run status: queued includes waiting. "
+        "Other values match the stored state exactly.",
+    ),
     runtime: str | None = Query(None, max_length=128),
     model: str | None = Query(None, max_length=256),
     host: str | None = Query(None, max_length=256),

@@ -131,7 +131,7 @@ def bounded_event_content(row: dict[str, Any]) -> AdminEventContent:
 
 
 class RunFilters(BaseModel):
-    """Exact-match selectors; none of them searches event or prompt content."""
+    """Metadata selectors; queued groups both runnable and waiting turns."""
 
     user_id: str | None = Field(None, max_length=256)
     repo: str | None = Field(None, max_length=256)

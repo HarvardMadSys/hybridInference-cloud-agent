@@ -59,16 +59,6 @@ const RUN_STATE_STYLES: Record<string, { badge: string; dot: string }> = {
       'bg-blue-50 text-blue-700 ring-blue-600/20 dark:bg-blue-500/10 dark:text-blue-400 dark:ring-blue-500/25',
     dot: 'bg-blue-500',
   },
-  publishing: {
-    badge:
-      'bg-blue-50 text-blue-700 ring-blue-600/20 dark:bg-blue-500/10 dark:text-blue-400 dark:ring-blue-500/25',
-    dot: 'bg-blue-500',
-  },
-  waiting: {
-    badge:
-      'bg-gray-100 text-gray-600 ring-gray-500/20 dark:bg-white/5 dark:text-gray-400 dark:ring-white/15',
-    dot: 'bg-gray-500 dark:bg-gray-400',
-  },
   queued: {
     badge:
       'bg-gray-100 text-gray-600 ring-gray-500/20 dark:bg-white/5 dark:text-gray-400 dark:ring-white/15',
@@ -81,16 +71,18 @@ const RUN_STATE_STYLES: Record<string, { badge: string; dot: string }> = {
   },
 };
 
-const RUN_STATE_FALLBACK = RUN_STATE_STYLES.waiting;
+const RUN_STATE_FALLBACK = RUN_STATE_STYLES.queued;
 
 export function RunState({ state }: { state: string }) {
-  const style = RUN_STATE_STYLES[state] ?? RUN_STATE_FALLBACK;
+  // Match the admin filters while keeping the raw scheduling state in the API.
+  const displayState = state === 'waiting' ? 'queued' : state === 'publishing' ? 'running' : state;
+  const style = RUN_STATE_STYLES[displayState] ?? RUN_STATE_FALLBACK;
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${style.badge}`}
     >
       <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
-      {state}
+      {displayState}
     </span>
   );
 }

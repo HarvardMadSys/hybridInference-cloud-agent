@@ -65,6 +65,7 @@ import {
 } from '@/lib/api/adminRuns';
 import AdminRunsPageComponent from './page';
 import AdminRunPage from './[jobId]/page';
+import { RunState } from './shared';
 
 function run(overrides: Partial<AdminRun> = {}): AdminRun {
   return {
@@ -302,6 +303,11 @@ describe('admin runs list', () => {
     expect(Date.parse(filters.until!) - Date.parse(filters.since!)).toBe(7 * 86_400_000);
     expect(screen.getByLabelText('Created')).toHaveValue('7');
     expect(screen.getByLabelText('Status')).toHaveValue('');
+    expect(
+      within(screen.getByLabelText('Status'))
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['All statuses', 'queued', 'running', 'succeeded', 'failed', 'cancelled']);
     const controls = within(screen.getByRole('group', { name: 'Run filters' }));
     expect(controls.getAllByRole('combobox')).toHaveLength(2);
     expect(controls.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
@@ -464,6 +470,39 @@ describe('admin runs list', () => {
     expect(screen.queryByText('Second run')).not.toBeInTheDocument();
   });
 
+  it('keeps the queued filter across pages and uses its badge for both scheduling states', async () => {
+    render(<AdminRunsPageComponent />);
+    await screen.findByRole('link', { name: 'job-1' });
+    vi.mocked(getAdminRuns)
+      .mockResolvedValueOnce(page([run({ state: 'waiting' })], 'group-cursor'))
+      .mockResolvedValueOnce(page([run({ id: 'job-2', state: 'queued' })]));
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'queued' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
+    await screen.findByRole('link', { name: 'job-2' });
+
+    expect(vi.mocked(getAdminRuns).mock.calls[1][0]).toEqual(
+      expect.objectContaining({ state: 'queued' }),
+    );
+    expect(getAdminRuns).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        state: 'queued',
+        cursor: 'group-cursor',
+        since: page().since,
+        until: page().until,
+      }),
+      expect.any(AbortSignal),
+    );
+    const table = within(screen.getByRole('table'));
+    expect(table.getAllByText('queued')).toHaveLength(2);
+    expect(table.queryByText('waiting')).not.toBeInTheDocument();
+  });
+
+  it('renders a legacy publishing badge as running', () => {
+    render(<RunState state="publishing" />);
+    expect(screen.getByText('running')).toBeInTheDocument();
+    expect(screen.queryByText('publishing')).not.toBeInTheDocument();
+  });
+
   it('applies Created and Status immediately and replaces previously paged rows', async () => {
     vi.mocked(getAdminRuns)
       .mockResolvedValueOnce(page([run()], 'cursor-2'))
@@ -573,6 +612,17 @@ describe('admin runs list', () => {
 });
 
 describe('admin run observation', () => {
+  it.each([
+    ['waiting', 'Waiting for previous turn'],
+    ['queued', 'Waiting for runner'],
+  ] as const)('explains the %s scheduling state under the queued badge', async (state, reason) => {
+    vi.mocked(getAdminRun).mockResolvedValue(detail({ run: run({ state }), attempts: [] }));
+    render(<AdminRunPage />);
+    expect(await screen.findByText(reason)).toBeInTheDocument();
+    expect(screen.getByText('queued')).toBeInTheDocument();
+    expect(screen.getByText('No execution has started.')).toBeInTheDocument();
+  });
+
   it('rejects an owner without admin permission before any detail, activity, resource or content read', () => {
     auth.access = { allowed: true, permissions: ['agent.use'] };
     render(<AdminRunPage />);

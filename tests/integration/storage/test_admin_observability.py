@@ -147,6 +147,49 @@ async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypa
     assert detail.json()["run"]["title"] == expected
 
 
+async def test_run_status_groups_filter_before_pagination_and_keep_raw_states(store, monkeypatch):
+    states = ("waiting", "queued", "running", "succeeded", "failed", "cancelled")
+    jobs = {}
+    for state in states:
+        job = await _create_job(store)
+        jobs[state] = job["id"]
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_jobs SET state = $2, created_at = $3, "
+                "native_turn_no = CASE WHEN $2 = 'succeeded' THEN 1 END WHERE id = $1",
+                job["id"],
+                state,
+                START,
+            )
+    monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
+    app = FastAPI()
+    app.include_router(admin_runs.router)
+    app.dependency_overrides[get_agent_job_store] = lambda: store
+    groups = {None: states, "queued": ("waiting", "queued")}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for selected in (None, *states):
+            expected = groups.get(selected, (selected,))
+            params = {"since": START.isoformat(), "until": END.isoformat(), "limit": 1}
+            if selected is not None:
+                params["state"] = selected
+            seen = []
+            for _ in range(len(states) + 1):
+                response = await client.get(
+                    "/admin/agent/runs",
+                    params=params,
+                    headers={"Authorization": "Bearer db-admin-observation-test"},
+                )
+                assert response.status_code == 200, response.text
+                page = response.json()
+                seen.extend((run["id"], run["state"]) for run in page["runs"])
+                if page["next_cursor"] is None:
+                    break
+                params["cursor"] = page["next_cursor"]
+            else:
+                pytest.fail("Run status pagination did not terminate")
+            assert seen == sorted(((jobs[state], state) for state in expected), reverse=True)
+
+
 async def test_run_cursor_keeps_tied_timestamps_and_the_original_filter_window(store):
     jobs = [await _create_job(store) for _ in range(4)]
     async with store._pool.acquire() as conn:

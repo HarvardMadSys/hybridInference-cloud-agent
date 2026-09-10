@@ -23,15 +23,7 @@ import {
   RunState,
 } from './shared';
 
-const STATES: AgentJobApiState[] = [
-  'waiting',
-  'queued',
-  'running',
-  'publishing',
-  'succeeded',
-  'failed',
-  'cancelled',
-];
+const STATES: AgentJobApiState[] = ['queued', 'running', 'succeeded', 'failed', 'cancelled'];
 
 // The column set is fixed: this list is metadata only, so every cell maps to a
 // field the runs endpoint already returns.
