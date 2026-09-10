@@ -548,7 +548,7 @@ describe('JobDetail', () => {
   });
 
   it.each(['done', 'needs_review'] as const)(
-    'keeps %s completion clear without exposing publication bookkeeping',
+    'keeps %s completion in run details without redundant conversation status',
     (state) => {
       const stateNote = 'agent completed (shared workspace; publication snapshot pending)';
       render(
@@ -562,6 +562,10 @@ describe('JobDetail', () => {
       );
       expect(screen.queryByText(stateNote)).not.toBeInTheDocument();
       expect(screen.queryByText('Needs review')).not.toBeInTheDocument();
+      expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+      expect(screen.queryByText('Done')).not.toBeInTheDocument();
+      expect(screen.queryByText('Run completed')).not.toBeInTheDocument();
+      expect(screen.queryByText('Run complete')).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
       const outcome = screen.getByRole('region', { name: 'Run outcome' });
       expect(
@@ -623,6 +627,13 @@ describe('JobDetail', () => {
 
   it('shows artifacts as shared workspace changes and reuses the Git action', async () => {
     const prUrl = 'https://github.com/owner/repository/pull/7';
+    vi.mocked(getAgentJobGit).mockResolvedValue({
+      available: true,
+      branch: 'agent/ajob_1',
+      changes: [],
+      patch: '',
+      commits: [],
+    });
     render(
       <JobDetail
         job={makeJob({
@@ -633,6 +644,8 @@ describe('JobDetail', () => {
         })}
       />,
     );
+    expect(screen.getByRole('button', { name: 'View changes' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
     fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
     const artifacts = screen.getByRole('region', { name: 'Workspace changes' });
     expect(within(artifacts).getByText('1 file changed')).toBeInTheDocument();
@@ -647,6 +660,11 @@ describe('JobDetail', () => {
     expect(screen.queryByRole('dialog', { name: 'Run details' })).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
     await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
+    const git = screen.getByLabelText('Git workspace');
+    await waitFor(() => expect(within(git).getByRole('button', { name: 'Refresh' })).toBeEnabled());
+    expect(git).toHaveTextContent('agent/ajob_1');
+    expect(git).not.toHaveTextContent('Live workspace');
+    expect(git).not.toHaveTextContent('Shared workspace');
   });
 
   it.each([true, false])(
@@ -1208,7 +1226,7 @@ describe('JobDetail', () => {
     await waitFor(() => expect(pane).toHaveTextContent('# Before'));
     // Writable is a fact about the workspace, not an invitation: the pane is a
     // reader, so nothing here can change the run's files.
-    expect(pane).toHaveTextContent('Live workspace');
+    expect(pane).not.toHaveTextContent('Live workspace');
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Edit README.md' })).not.toBeInTheDocument();

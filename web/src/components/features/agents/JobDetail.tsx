@@ -1011,25 +1011,27 @@ function DetailsDrawer({
 function OutcomeCard({ job, onOpenDiff }: { job: AgentJob; onOpenDiff: () => void }) {
   if (job.state === 'running' || job.state === 'queued') return null;
   const successful = job.state === 'done' || job.state === 'needs_review';
+  if (successful) {
+    const hasActions = job.diffFiles.length > 0 || Boolean(job.prUrl);
+    if (!hasActions && !hasLostContext(job)) return null;
+    return (
+      <div className="mt-6">
+        {hasActions ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <RunActions job={job} onOpenDiff={onOpenDiff} />
+          </div>
+        ) : null}
+        <RunGuidance job={job} />
+      </div>
+    );
+  }
   const runNote = ownerRunNote(job);
   return (
-    <div
-      className={`mt-6 rounded-xl border px-4 py-3 ${
-        successful
-          ? 'border-emerald-200 dark:border-emerald-500/25 bg-emerald-50/50 dark:bg-emerald-500/10'
-          : 'border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-gray-950'
-      }`}
-    >
+    <div className="mt-6 rounded-xl border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-gray-950 px-4 py-3">
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-gray-900 dark:text-gray-50">
-            {job.state === 'done'
-              ? 'Draft pull request ready'
-              : job.state === 'needs_review'
-                ? 'Run completed'
-                : job.state === 'failed'
-                  ? 'Run failed'
-                  : 'Run stopped'}
+            {job.state === 'failed' ? 'Run failed' : 'Run stopped'}
           </p>
           {runNote ? (
             <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400 [overflow-wrap:anywhere]">
@@ -1111,18 +1113,9 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
             {live?.available ? live.branch || 'detached HEAD' : job.branch}
           </p>
         </div>
-        <span className="rounded bg-gray-100 dark:bg-white/5 px-2 py-1 text-[11px] text-gray-500 dark:text-gray-400">
-          {error
-            ? 'Unavailable'
-            : live?.available
-              ? 'Live workspace'
-              : loading
-                ? 'Loading…'
-                : 'Unavailable'}
-        </span>
-        {job.workspaceShared ? (
-          <span className="rounded bg-amber-50 dark:bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-300">
-            Shared workspace
+        {error || !live?.available ? (
+          <span className="rounded bg-gray-100 dark:bg-white/5 px-2 py-1 text-[11px] text-gray-500 dark:text-gray-400">
+            {error ? 'Unavailable' : loading ? 'Loading…' : 'Unavailable'}
           </span>
         ) : null}
         {showWorkspacePublicationStatus ? (
@@ -1704,16 +1697,18 @@ export function JobDetail({
               </button>
             ))}
           </nav>
-          <span
-            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
-          >
-            {pill.dot ? (
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${pill.dot} ${isActive ? 'animate-pulse' : ''}`}
-              />
-            ) : null}
-            {job.state === 'queued' && job.parentJobId ? 'Queued after current run' : pill.label}
-          </span>
+          {!isSuccessful ? (
+            <span
+              className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
+            >
+              {pill.dot ? (
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${pill.dot} ${isActive ? 'animate-pulse' : ''}`}
+                />
+              ) : null}
+              {job.state === 'queued' && job.parentJobId ? 'Queued after current run' : pill.label}
+            </span>
+          ) : null}
           {job.diffFiles.length ? (
             <button
               type="button"
