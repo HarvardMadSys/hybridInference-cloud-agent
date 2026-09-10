@@ -6419,6 +6419,7 @@ class AgentJobStore:
                            )
                            FROM agent_thread_sandbox_memberships m
                            WHERE m.sandbox_id = g.id
+                             AND m.resident_slot_id IS NOT NULL
                        ), '[]'::jsonb) AS members
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
@@ -6753,6 +6754,7 @@ class AgentJobStore:
                            )
                            FROM agent_thread_sandbox_memberships member
                            WHERE member.sandbox_id = g.id
+                             AND member.resident_slot_id IS NOT NULL
                        ), '[]'::jsonb) AS members,
                        j.thread_id, j.parent_job_id, j.user_id, t.repo,
                        j.task_prompt, j.metadata,
@@ -7000,6 +7002,7 @@ class AgentJobStore:
                            )
                            FROM agent_thread_sandbox_memberships member
                            WHERE member.sandbox_id = g.id
+                             AND member.resident_slot_id IS NOT NULL
                        ), '[]'::jsonb) AS members
                 FROM agent_sandboxes g
                 JOIN LATERAL (

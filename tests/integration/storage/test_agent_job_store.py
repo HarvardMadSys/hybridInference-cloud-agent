@@ -691,7 +691,7 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
     assert group["idle_deadline"] is not None
 
 
-@pytest.mark.parametrize("next_action", ["follow_up", "fork"])
+@pytest.mark.parametrize("next_action", ["follow_up", "fork", "capture", "publish", "base_import"])
 async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
     store: AgentJobStore, next_action: str
 ):
@@ -748,7 +748,7 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         assert observed is not None and observed.get("error") is None
         assert observed["target_resident_slot_id"] == operation["target_resident_slot_id"]
         expected_members = {job["thread_id"], observed["target_thread_id"]}
-    else:
+    elif next_action == "follow_up":
         follow = await store.create_follow_up(
             parent_job_id=job["id"], user_id=job["user_id"], prompt="continue after failed Fork"
         )
@@ -775,9 +775,39 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         )
         assert observed is not None
         expected_members = {job["thread_id"]}
+    else:
+        observed = await store.claim_due_sandbox_snapshot()
+        assert observed is not None
+        if next_action in {"publish", "base_import"}:
+            patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
+            assert await store.record_sandbox_snapshot_capture(
+                snapshot_id=observed["snapshot_id"],
+                sandbox_id=observed["sandbox_id"],
+                sandbox_generation=observed["generation"],
+                container_id=observed["container_id"],
+                workspace_epoch=observed["workspace_epoch"],
+                base_sha=observed["base_sha"],
+                patch=patch,
+                content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+            )
+            observed = await store.claim_for_publish()
+            assert observed is not None
+        if next_action == "base_import":
+            assert await store.record_snapshot_publish(
+                snapshot_id=observed["snapshot_id"],
+                pr_url="https://example.invalid/pull/1",
+                commit_sha="b" * 40,
+            )
+            observed = await store.pending_snapshot_base_import()
+            assert observed is not None
+        expected_members = {job["thread_id"]}
     # Exercise the strict runner projection and the host HTTP schema. Both
     # reject the NULL slot that an unfiltered tombstone used to contribute.
-    manifest = _shared_group_manifest(observed, thread_id=job["thread_id"])
+    manifest = (
+        observed["members"]
+        if next_action in {"capture", "publish", "base_import"}
+        else _shared_group_manifest(observed, thread_id=job["thread_id"])
+    )
     wire_members = [SharedSandboxMemberRequest.model_validate(member) for member in manifest]
     assert {member.thread_id for member in wire_members} == expected_members
     assert all(member.resident_slot_id is not None for member in wire_members)
