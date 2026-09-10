@@ -840,6 +840,77 @@ succeeds. Once it does, the bootstrap peers belong to the desired target stack:
 a later final API/web probe failure leaves that stack running for diagnosis but
 does not write `.deployed-sha`.
 
+### Rebuilding the agent database
+
+The schema baseline was rewritten on 2026-09-10 (`0001_schema_baseline`), and
+a database stamped with any revision of the old chain fails
+`alembic upgrade head` with "can't locate revision". Such a database is
+rebuilt, not upgraded. The rebuild is **not** "drop the database and deploy":
+the runner keeps its host credential in a file
+(`AGENT_HOST_CREDENTIAL_FILE`, default
+`/var/lib/hybridinference/agent-host-credential`) and never re-enrols while
+that file exists, so an empty `agent_runner_hosts` turns every heartbeat into
+a 401, the runner logs `agent_host_credential_rejected` and stops claiming, and
+the control-plane deploy waits for a fresh heartbeat that never comes. The
+host's registration must survive the rebuild. So must the users' source
+control and MCP connections, which are credentials nobody can re-mint from
+the database side.
+
+Rehearsed on a copy of the old schema (2026-09-10); the compose project below
+is staging's (`cloudagent`). Run it on the control-plane host, with the
+target commit checked out in the deploy root.
+
+1. Stop the services that hold connections, leaving Postgres up:
+
+   ```bash
+   docker stop cloudagent-control-plane-1 cloudagent-mcp-relay-1 cloudagent-web-1
+   ```
+
+2. Take the forensic dump of everything, then the data-only dump of the state
+   that survives. `--column-inserts` is load-bearing: the rewritten baseline
+   orders some columns differently, and positional inserts land values in the
+   wrong columns.
+
+   ```bash
+   docker exec cloudagent-postgres-1 pg_dump -U cloudagent -Fc cloudagent > cloudagent-$(date +%F).dump
+   docker exec cloudagent-postgres-1 pg_dump -U cloudagent --data-only --column-inserts \
+     -t agent_runner_hosts -t agent_repo_grants -t agent_gitlab_connections -t agent_mcp_connections \
+     cloudagent > cloudagent-state-$(date +%F).sql
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
+     'SELECT active_host FROM agent_runner_policy'
+   ```
+
+3. Recreate the database and apply the baseline from the target checkout:
+
+   ```bash
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d postgres \
+     -c 'DROP DATABASE cloudagent' -c 'CREATE DATABASE cloudagent OWNER cloudagent'
+   docker compose run --rm --no-deps migrate
+   ```
+
+4. Restore the surviving state, then the placement pin recorded in step 2:
+
+   ```bash
+   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-state-$(date +%F).sql
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent \
+     -c "UPDATE agent_runner_policy SET active_host = '<the value from step 2>'"
+   ```
+
+5. Deploy the target commit as usual. `migrate` finds the database at head,
+   the control plane starts, and the runner's next heartbeat authenticates
+   against the restored `credential_hash`; readiness then sees a fresh
+   heartbeat and the deploy completes. If the host stack was restarted
+   meanwhile and died on `agent_host_credential_rejected`, restart it after
+   step 4 — the credential it holds is valid again.
+
+If the host registration cannot be restored, the fallback is a controlled
+re-enrolment: remove the credential file on the host, mint an enrolment token
+from the admin surface, set `AGENT_ENROLL_TOKEN` for one start, and confirm the
+first heartbeat before enabling retained chats.
+
+Conversation history is not carried over by design; the forensic dump is read
+with a throwaway `postgres:16-alpine` when needed and never imported back.
+
 ### Retained Docker storage on a host
 
 Retained chat state is the Docker container writable layer, so durable

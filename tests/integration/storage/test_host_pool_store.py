@@ -97,6 +97,22 @@ async def _create_job(store: AgentJobStore, **overrides) -> dict:
     return await store.create_job(**params)
 
 
+async def _settled(store: AgentJobStore, job_id: str) -> None:
+    """Stand in for the runner's settlement: a success carries its native ordinal.
+
+    The runner settles the shared workspace before it reports success and the
+    settlement assigns ``native_turn_no``; the schema refuses a succeeded row
+    without one. Tests that skip the sandbox protocol and finish a job
+    directly prepare that fact here, instead of the store guessing it.
+    """
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET native_turn_no = turn_no "
+            "WHERE id = $1 AND native_turn_no IS NULL",
+            job_id,
+        )
+
+
 async def _enrol(store: AgentJobStore, host: str, **overrides) -> dict:
     """Register a host and put it online, the way a real boot does."""
     row = await store.register_host(
@@ -826,6 +842,7 @@ async def test_finishing_a_job_gives_the_slot_back(store):
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
+    await _settled(store, claim["id"])
     await store.transition(
         job_id=claim["id"],
         attempt_id=claim["attempt_id"],
@@ -870,6 +887,7 @@ async def test_a_double_terminal_transition_releases_one_slot_not_two(store):
     await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
     for _ in range(3):
+        await _settled(store, first["id"])
         await store.transition(
             job_id=first["id"],
             attempt_id=first["attempt_id"],
@@ -890,6 +908,7 @@ async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(store):
     await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
     await store.reap_expired(max_attempts=3)
+    await _settled(store, first["id"])
     await store.transition(
         job_id=first["id"],
         attempt_id=first["attempt_id"],
@@ -924,6 +943,8 @@ async def test_slots_never_go_negative_under_concurrent_release(store):
     assert (await store.get_host(host="runner-a"))["slots_used"] == 4
 
     # Every exit path, several times each, all at once.
+    for claim in claims:
+        await _settled(store, claim["id"])
     await asyncio.gather(
         *[
             store.transition(
@@ -1055,6 +1076,7 @@ async def test_forgetting_a_host_does_not_break_its_attempts(store):
     await _enrol(store, "runner-a", slots_total=2)
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    await _settled(store, claim["id"])
     await store.transition(
         job_id=claim["id"],
         attempt_id=claim["attempt_id"],
@@ -1123,6 +1145,7 @@ async def test_residency_is_earned_by_the_running_attempt_only(store):
     assert row is not None and row["generation"] == 1
 
     # A finished attempt: nothing — even before any reaper pass.
+    await _settled(store, job["id"])
     await store.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],

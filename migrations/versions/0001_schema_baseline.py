@@ -202,6 +202,7 @@ _STATEMENTS: tuple[str, ...] = (
         WHERE state IN ('waiting', 'queued')
     """,
     "CREATE INDEX idx_agent_jobs_user ON agent_jobs (user_id, created_at DESC)",
+    "CREATE INDEX idx_agent_jobs_thread_activity ON agent_jobs (thread_id, updated_at DESC)",
     "CREATE INDEX idx_agent_jobs_user_repo ON agent_jobs (user_id, repo, created_at DESC)",
     """
     CREATE UNIQUE INDEX idx_agent_jobs_native_turn ON agent_jobs (thread_id, native_turn_no)

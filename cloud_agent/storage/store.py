@@ -38,7 +38,9 @@ import hashlib
 import json
 import secrets
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import asyncpg
 
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
@@ -59,9 +61,6 @@ from cloud_agent.host_pool import (
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.task_titles import fallback_title
 from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
-
-if TYPE_CHECKING:
-    import asyncpg
 
 logger = get_logger(__name__)
 
@@ -2531,11 +2530,14 @@ class AgentJobStore:
     ) -> dict[str, Any]:
         """Page complete owned conversations, searching their canonical title.
 
-        Activity is the thread's own update or its newest turn's, whichever is
-        later — one index probe per owned thread, never an aggregate over the
-        whole history — and the newest turn is fetched in full only for the
-        bounded result page. Messages and job transitions move a thread; lease
-        heartbeats do not. The unique thread id breaks ties.
+        Activity is the thread's own update or the most recently updated of
+        its turns, whichever is later. Any turn counts, not only the newest:
+        an earlier turn completes or is published after a later one was
+        cancelled, and that completion is the activity. It is one probe of the
+        ``(thread_id, updated_at)`` index per owned thread, never an aggregate
+        over the whole history, and the newest turn is fetched in full only
+        for the bounded result page. Messages and job transitions move a
+        thread; lease heartbeats do not. The unique thread id breaks ties.
         A cursor is scoped to its owner and filters, and is a pagination hint,
         never authority to read a thread. Updates may move a thread ahead of a
         previously issued cursor; refreshing starts again from the latest page.
@@ -2559,15 +2561,15 @@ class AgentJobStore:
                 WITH owned AS (
                     SELECT t.id AS thread_id, t.title, t.pinned_at,
                            t.archived_at IS NOT NULL AS archived,
-                           GREATEST(t.updated_at, newest.updated_at) AS last_activity_at
+                           GREATEST(t.updated_at, freshest.updated_at) AS last_activity_at
                     FROM agent_threads t
                     CROSS JOIN LATERAL (
                         SELECT j.updated_at
                         FROM agent_jobs j
                         WHERE j.thread_id = t.id AND j.user_id = $1
-                        ORDER BY j.turn_no DESC
+                        ORDER BY j.updated_at DESC
                         LIMIT 1
-                    ) newest
+                    ) freshest
                     WHERE t.user_id = $1 AND t.deleted_at IS NULL
                       AND ($2::text IS NULL OR t.repo = $2)
                       AND ($3::text = '' OR POSITION(LOWER($3) IN LOWER(t.title)) > 0
@@ -3970,6 +3972,46 @@ class AgentJobStore:
 
     # ── Fenced state transitions ───────────────────────────────────────
 
+    @staticmethod
+    async def _transition_job(
+        conn: Any,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        from_states: tuple[str, ...],
+        to_state: str,
+        detail: str | None,
+        base_sha: str | None,
+    ) -> Any:
+        """The fenced job UPDATE behind :meth:`transition`; ``None`` when fenced out."""
+        return await conn.fetchrow(
+            """
+            UPDATE agent_jobs j
+            SET state = $4,
+                detail = COALESCE($5, j.detail),
+                base_sha = COALESCE(j.base_sha, $7),
+                updated_at = NOW()
+            WHERE j.id = $1
+              AND j.state = ANY($3::text[])
+              AND j.current_attempt_id = $2
+              AND EXISTS (
+                    SELECT 1 FROM agent_attempts a
+                    WHERE a.id = $2 AND a.lease_generation = $6
+                      AND a.status = 'running'
+                      AND a.lease_expires_at > NOW()
+              )
+            RETURNING j.id, j.thread_id
+            """,
+            job_id,
+            attempt_id,
+            list(from_states),
+            to_state,
+            detail,
+            lease_generation,
+            base_sha,
+        )
+
     async def transition(
         self,
         *,
@@ -3991,6 +4033,10 @@ class AgentJobStore:
         job does not already have one: an owner who pinned a commit must get a
         patch against *that* commit, so a worker may report the base it used
         but never overwrite the base it was given.
+
+        Raises ``ValueError`` for a ``succeeded`` transition on a turn that
+        never settled its native context: the schema refuses the row, and the
+        caller — not this method — is what has to change.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             # Lock the attempt before its job, matching release_claim and the
@@ -4009,49 +4055,28 @@ class AgentJobStore:
             )
             if live_attempt is None:
                 return False
-            # A success carries its native turn ordinal: the runner settles the
-            # shared workspace first and settlement assigns it, and the schema
-            # refuses a succeeded row without one. A caller that reaches here
-            # unsettled (a test double standing in for a worker) is given the
-            # ordinal settlement would have assigned, under the same rule.
-            updated = await conn.fetchrow(
-                """
-                UPDATE agent_jobs j
-                SET state = $4,
-                    detail = COALESCE($5, j.detail),
-                    base_sha = COALESCE(j.base_sha, $7),
-                    native_turn_no = CASE
-                        WHEN $4 = 'succeeded' THEN COALESCE(
-                            j.native_turn_no,
-                            (
-                                SELECT COALESCE(MAX(previous.native_turn_no), 0) + 1
-                                FROM agent_jobs previous
-                                WHERE previous.thread_id = j.thread_id
-                                  AND previous.turn_no < j.turn_no
-                            )
-                        )
-                        ELSE j.native_turn_no
-                    END,
-                    updated_at = NOW()
-                WHERE j.id = $1
-                  AND j.state = ANY($3::text[])
-                  AND j.current_attempt_id = $2
-                  AND EXISTS (
-                        SELECT 1 FROM agent_attempts a
-                        WHERE a.id = $2 AND a.lease_generation = $6
-                          AND a.status = 'running'
-                          AND a.lease_expires_at > NOW()
-                  )
-                RETURNING j.id, j.thread_id
-                """,
-                job_id,
-                attempt_id,
-                list(from_states),
-                to_state,
-                detail,
-                lease_generation,
-                base_sha,
-            )
+            # A success carries its native turn ordinal. The runner settles the
+            # shared workspace before it reports success and settlement assigns
+            # the ordinal; the schema refuses a succeeded row without one, and
+            # nothing here guesses it on the caller's behalf — a success that
+            # skipped settlement is a protocol violation and fails loudly.
+            try:
+                updated = await self._transition_job(
+                    conn,
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                    lease_generation=lease_generation,
+                    from_states=from_states,
+                    to_state=to_state,
+                    detail=detail,
+                    base_sha=base_sha,
+                )
+            except asyncpg.CheckViolationError as exc:
+                if "native_turn" not in str(exc):
+                    raise
+                raise ValueError(
+                    "a succeeded turn must settle its native context before it finishes"
+                ) from exc
             if updated is None:
                 return False
             if to_state in TERMINAL_STATES:

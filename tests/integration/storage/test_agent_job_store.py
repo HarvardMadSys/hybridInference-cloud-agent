@@ -156,6 +156,22 @@ async def test_bounded_event_stays_bounded_in_postgres_and_marks_the_assistant_m
     assert content.endswith("[Content truncated: event payload exceeded 256 KiB.]")
 
 
+async def _settled(store: AgentJobStore, job_id: str) -> None:
+    """Stand in for the runner's settlement: a success carries its native ordinal.
+
+    The runner settles the shared workspace before it reports success and the
+    settlement assigns ``native_turn_no``; the schema refuses a succeeded row
+    without one. Tests that skip the sandbox protocol and finish a job
+    directly prepare that fact here, instead of the store guessing it.
+    """
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET native_turn_no = turn_no "
+            "WHERE id = $1 AND native_turn_no IS NULL",
+            job_id,
+        )
+
+
 async def _expire_attempt(store: AgentJobStore, attempt_id: int) -> None:
     """Force an attempt's lease into the past."""
     async with store._pool.acquire() as conn:
@@ -3087,6 +3103,7 @@ async def test_model_credential_dies_with_a_terminal_job(store: AgentJobStore):
     }
     assert await store.resolve_model_credential(**fence) is not None
 
+    await _settled(store, fence["job_id"])
     await store.transition(**fence, from_states=("running",), to_state="succeeded")
     assert await store.resolve_model_credential(**fence) is None
 
@@ -4300,6 +4317,7 @@ async def test_successful_short_task_accepts_delayed_title(store: AgentJobStore)
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
+    await _settled(store, fence["job_id"])
     assert await store.transition(**fence, from_states=("running",), to_state="succeeded")
     assert await store.set_generated_thread_title(**fence, title="Fix flaky test")
     saved = await store.get_job(job["id"])
@@ -4364,3 +4382,83 @@ async def test_the_sweep_recovers_a_child_stranded_by_a_crashed_terminal_write(
     await store.sweep_waiting_follow_ups()
 
     assert (await store.get_job(child["id"]))["state"] == "queued"
+
+
+async def test_a_success_that_skipped_settlement_is_refused_loudly(store: AgentJobStore):
+    """The store does not guess a native ordinal; a protocol slip fails, visibly."""
+    job = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    fence = {
+        "job_id": job["id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
+    with pytest.raises(ValueError, match="settle"):
+        await store.transition(**fence, from_states=("running",), to_state="succeeded")
+    assert (await store.get_job(job["id"]))["state"] == "running"
+    await _settled(store, job["id"])
+    assert await store.transition(**fence, from_states=("running",), to_state="succeeded")
+
+
+async def test_conversations_activity_counts_an_earlier_turn_finishing_last(
+    store: AgentJobStore,
+):
+    """A cancelled follow-up does not hide the parent's later completion.
+
+    The newest *turn* is the cancelled child; the newest *activity* is the
+    parent succeeding after it. The list must order by the latter.
+    """
+    parent = await _create_job(store, task_prompt="first conversation")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None and claim["id"] == parent["id"]
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
+    )
+    assert child is not None and child["state"] == "waiting"
+    assert await store.request_cancel(job_id=child["id"], user_id="user-1") == "cancelled"
+    other = await _create_job(store, task_prompt="second conversation")
+    before = await store.list_conversations(user_id="user-1")
+    assert [item["job"]["id"] for item in before["conversations"]] == [other["id"], child["id"]]
+
+    await _settled(store, parent["id"])
+    assert await store.transition(
+        job_id=parent["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+
+    after = await store.list_conversations(user_id="user-1")
+    assert [item["job"]["id"] for item in after["conversations"]] == [child["id"], other["id"]]
+    finished = await store.get_job(parent["id"])
+    assert after["conversations"][0]["last_activity_at"] == finished["updated_at"]
+
+
+async def test_conversations_activity_counts_a_publication_of_an_earlier_turn(
+    store: AgentJobStore,
+):
+    """Publication stamps the turns it included, and that is activity too."""
+    parent = await _create_job(store, task_prompt="first conversation")
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
+    )
+    assert child is not None
+    assert await store.request_cancel(job_id=child["id"], user_id="user-1") == "cancelled"
+    other = await _create_job(store, task_prompt="second conversation")
+    before = await store.list_conversations(user_id="user-1")
+    assert [item["job"]["id"] for item in before["conversations"]] == [other["id"], child["id"]]
+    # What ``record_snapshot_publish`` writes on every included, succeeded
+    # turn: the pull request, the commit, and a fresh ``updated_at``.
+    published_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1, "
+            "published_pr_url = 'https://example.test/pr/1', updated_at = $2 WHERE id = $1",
+            parent["id"],
+            published_at,
+        )
+
+    after = await store.list_conversations(user_id="user-1")
+    assert [item["job"]["id"] for item in after["conversations"]] == [child["id"], other["id"]]
+    assert after["conversations"][0]["last_activity_at"] == published_at
