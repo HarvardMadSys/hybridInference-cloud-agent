@@ -15,6 +15,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('personal sidebar preferences', () => {
+  it('persists explicitly added workspaces before manual order or any task exists', () => {
+    const { result, rerender } = renderHook(({ id }) => useSidebarPreferences(id), {
+      initialProps: { id: 'alice' },
+    });
+    act(() => result.current[1]((old) => ({ ...old, addedProjects: ['owner/empty'] })));
+    const stored = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
+    expect(stored.addedProjects).toEqual(['owner/empty']);
+    expect(stored.tasks).toBeUndefined();
+    expect(stored.projects).toBeUndefined();
+    rerender({ id: 'bob' });
+    expect(result.current[0].addedProjects).toEqual([]);
+    rerender({ id: 'alice' });
+    expect(result.current[0].addedProjects).toEqual(['owner/empty']);
+    expect(result.current[0].manualInitialized).toBe(false);
+  });
+  it('deduplicates added workspaces and discards malformed entries', () => {
+    localStorage.setItem(
+      sidebarPreferencesKey('alice'),
+      JSON.stringify({ addedProjects: ['owner/repo', null, 'owner/repo', 7] }),
+    );
+    expect(readSidebarPreferences('alice').addedProjects).toEqual(['owner/repo']);
+  });
   it('remembers separate account orders and restores without leaking the previous account', async () => {
     const { result, rerender } = renderHook(({ id }) => useSidebarPreferences(id), {
       initialProps: { id: 'alice' },

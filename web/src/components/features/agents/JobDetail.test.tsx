@@ -18,6 +18,7 @@ import {
   listAgentTerminals,
   resizeAgentTerminal,
   refreshAgentJobUsage,
+  restoreAgentJob,
   streamAgentTerminal,
   writeAgentTerminalInput,
   writeAgentJobFile,
@@ -48,6 +49,7 @@ vi.mock('@/lib/api/agents', () => ({
   listAgentTerminals: vi.fn(),
   resizeAgentTerminal: vi.fn(),
   refreshAgentJobUsage: vi.fn(),
+  restoreAgentJob: vi.fn(),
   streamAgentTerminal: vi.fn(),
   writeAgentTerminalInput: vi.fn(),
   writeAgentJobFile: vi.fn(),
@@ -135,6 +137,7 @@ describe('JobDetail', () => {
     vi.mocked(cancelAgentJob).mockReset();
     vi.mocked(followUpAgentJob).mockReset();
     vi.mocked(forkAgentJob).mockReset();
+    vi.mocked(restoreAgentJob).mockReset();
     vi.mocked(getAgentConfig).mockReset();
     vi.mocked(getAgentConfig).mockResolvedValue(AGENT_CONFIG);
     vi.mocked(getAgentJobFiles).mockReset();
@@ -168,6 +171,66 @@ describe('JobDetail', () => {
   });
 
   afterEach(() => cleanup());
+
+  it('keeps an archived conversation readable but requires unarchive before continuing', async () => {
+    const onReload = vi.fn();
+    const archived = makeJob({
+      state: 'done',
+      archivedAt: '2026-09-10T00:00:00Z',
+      sandboxId: 'sandbox',
+      workspaceShared: true,
+      nativeForkAvailable: true,
+    });
+    vi.mocked(restoreAgentJob).mockResolvedValue({
+      thread_id: 'thread-1',
+      archived: false,
+      archived_at: null,
+    });
+    const { rerender } = render(<JobDetail job={archived} onReload={onReload} />);
+    expect(screen.getByText('I found the', { exact: false })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Add a follow-up' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Fork from here/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Archived sessions' })).toHaveAttribute(
+      'href',
+      '/archived',
+    );
+    openWorkspace();
+    fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+    expect(screen.getByText(/Unarchive this session to use its terminal/)).toBeInTheDocument();
+    expect(listAgentTerminals).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Unarchive and continue' }));
+    await waitFor(() => expect(onReload).toHaveBeenCalledOnce());
+    expect(restoreAgentJob).toHaveBeenCalledWith('ajob_1');
+    // Only the refreshed server state reopens the composer.
+    expect(screen.queryByRole('textbox', { name: 'Add a follow-up' })).not.toBeInTheDocument();
+    rerender(<JobDetail job={{ ...archived, archivedAt: null }} onReload={onReload} />);
+    expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeEnabled();
+  });
+
+  it('keeps the archived view intact if unarchive fails', async () => {
+    vi.mocked(restoreAgentJob).mockRejectedValue(new Error('Connection lost'));
+    const onReload = vi.fn();
+    render(<JobDetail job={makeJob({ archivedAt: '2026-09-10T00:00:00Z' })} onReload={onReload} />);
+    expect(screen.getByText(/Archiving does not stop it/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unarchive and continue' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Connection lost');
+    expect(onReload).not.toHaveBeenCalled();
+    expect(screen.queryByRole('textbox', { name: 'Add a follow-up' })).not.toBeInTheDocument();
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('does not promise continuation when an archived session has lost native context', () => {
+    const archived = makeJob({
+      state: 'failed',
+      archivedAt: '2026-09-10T00:00:00Z',
+      nativeState: 'lost',
+    });
+    const { rerender } = render(<JobDetail job={archived} />);
+    expect(screen.getByRole('button', { name: 'Unarchive' })).toBeInTheDocument();
+    expect(screen.getByText(/native context is unavailable/)).toBeInTheDocument();
+    rerender(<JobDetail job={{ ...archived, archivedAt: null }} />);
+    expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeDisabled();
+  });
 
   it('renders the conversation first, including history and the full current prompt', () => {
     render(

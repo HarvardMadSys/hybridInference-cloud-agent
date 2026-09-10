@@ -1,6 +1,9 @@
 'use client';
 
 import Link from 'next/link';
+import { useEffect } from 'react';
+import { useAuth } from '@/components/providers';
+import { markConversationRead } from '@/components/features/agents/useConversationReadState';
 import { useParams } from 'next/navigation';
 import { JobDetail } from '@/components/features/agents/JobDetail';
 import { useAgentJob } from '@/components/features/agents/useAgentJobs';
@@ -8,7 +11,20 @@ import { useAgentJob } from '@/components/features/agents/useAgentJobs';
 export default function AgentJobPage() {
   const params = useParams<{ jobId: string }>();
   const jobId = params?.jobId ?? '';
+  const { state } = useAuth();
+  const userId = state.user?.id;
+  return <AgentJobContent key={userId ?? 'signed-out'} jobId={jobId} userId={userId} />;
+}
+
+function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) {
   const { job, events, loading, error, reload } = useAgentJob(jobId);
+  useEffect(() => {
+    if (!userId || !job || job.id !== jobId || loading || error) return;
+    markConversationRead(
+      { key: job.threadId ?? job.id, job, jobIds: [job.id], archived: false, lastActivityAt: null },
+      userId,
+    );
+  }, [job, jobId, loading, error, userId]);
 
   // Only the first load blanks the page. Sending a follow-up navigates to a
   // new turn of the same conversation, and replacing everything with a

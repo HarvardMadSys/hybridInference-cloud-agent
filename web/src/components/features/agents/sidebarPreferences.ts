@@ -5,6 +5,7 @@ export interface SidebarPreferences {
   order: 'manual' | 'updated';
   manualInitialized: boolean;
   projects: string[];
+  addedProjects: string[];
   tasks: Record<string, string[]>;
   expanded: Record<string, boolean>;
 }
@@ -13,6 +14,7 @@ export const DEFAULT_PREFERENCES: SidebarPreferences = {
   order: 'updated',
   manualInitialized: false,
   projects: [],
+  addedProjects: [],
   tasks: {},
   expanded: {},
 };
@@ -36,6 +38,7 @@ export function readSidebarPreferences(userId: string): SidebarPreferences {
       order: value.order === 'manual' ? 'manual' : 'updated',
       manualInitialized,
       projects: manualInitialized ? strings(value.projects) : [],
+      addedProjects: strings(value.addedProjects),
       tasks,
       expanded: Object.fromEntries(
         Object.entries(value.expanded ?? {}).filter(([, v]) => typeof v === 'boolean'),

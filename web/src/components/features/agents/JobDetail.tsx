@@ -15,12 +15,14 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 
 import { Markdown } from '@/components/ui/Markdown';
+import { useT } from '@/components/providers';
 import {
   cancelAgentJob,
   followUpAgentJob,
   forkAgentJob,
   getAgentConfig,
   getAgentJobGit,
+  restoreAgentJob,
   type AgentConfigApi,
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
@@ -1316,6 +1318,7 @@ export function JobDetail({
   onReload?: () => void;
 }) {
   const router = useRouter();
+  const t = useT();
   const liveAttempt = useMemo(
     () => (job.attempts.length > 0 ? job.attempts[job.attempts.length - 1].no : 0),
     [job.attempts],
@@ -1343,6 +1346,7 @@ export function JobDetail({
   const [submitting, setSubmitting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [forking, setForking] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const stopRequestedRef = useRef(false);
   const forkRequestedRef = useRef(false);
@@ -1427,6 +1431,7 @@ export function JobDetail({
     (event) => event.attemptNo === undefined || attemptNo === 0 || event.attemptNo === attemptNo,
   );
   const pill = STATE_PILL[job.state];
+  const isArchived = Boolean(job.archivedAt);
   const isActive = job.state === 'running' || job.state === 'queued';
   const isSuccessful = job.state === 'done' || job.state === 'needs_review';
   // `contextStatus` describes the selected attempt. `nativeState` is the
@@ -1531,7 +1536,7 @@ export function JobDetail({
   async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = followUp.trim();
-    if (!prompt || submitting || contextLost) return;
+    if (!prompt || submitting || contextLost || isArchived) return;
     setSubmitting(true);
     setActionError(null);
     try {
@@ -1563,7 +1568,7 @@ export function JobDetail({
   // Fork creates a second native session in this chat's shared workspace and
   // navigates to its copied display history; draft prefills Edit & rewind.
   async function forkFrom(anchorJobId: string, draft?: string) {
-    if (forkRequestedRef.current) return;
+    if (forkRequestedRef.current || isArchived) return;
     if (
       job.workspaceShared &&
       typeof globalThis.confirm === 'function' &&
@@ -1598,6 +1603,20 @@ export function JobDetail({
     }
   }
 
+  async function unarchive() {
+    if (restoring) return;
+    setRestoring(true);
+    setActionError(null);
+    try {
+      await restoreAgentJob(job.id);
+      onReload?.();
+    } catch (cause: unknown) {
+      setActionError(cause instanceof Error ? cause.message : t('sessionArchive.restoreFailed'));
+    } finally {
+      setRestoring(false);
+    }
+  }
+
   const allThreadMessages = job.threadMessages ?? [];
   const historyTurns = job.historyTurns;
   // A real API-backed job has reconstructed historical turns. Keep only this
@@ -1606,7 +1625,9 @@ export function JobDetail({
   const threadMessages = historyTurns
     ? allThreadMessages.filter((message) => message.jobId === job.id)
     : allThreadMessages;
-  const canForkWorkspace = Boolean(job.sandboxId && job.workspaceShared && !isActive);
+  const canForkWorkspace = Boolean(
+    job.sandboxId && job.workspaceShared && !isActive && !isArchived,
+  );
   const canForkCurrent = Boolean(canForkWorkspace && job.nativeForkAvailable);
   const selectedAttemptIsCurrent = attemptNo === 0 || attemptNo === liveAttempt;
   const lastThreadAssistantMessageId = [...threadMessages]
@@ -1622,6 +1643,18 @@ export function JobDetail({
   return (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
       <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
+        {isArchived ? (
+          <div className="flex items-center gap-2 pt-3 text-xs text-gray-500 dark:text-gray-400">
+            <Link
+              href="/archived"
+              className="hover:text-crimson hover:underline dark:hover:text-crimson-light"
+            >
+              {t('sessionArchive.back')}
+            </Link>
+            <span aria-hidden="true">/</span>
+            <span>{t('sessionArchive.badge')}</span>
+          </div>
+        ) : null}
         <div className="flex w-full items-center gap-3 py-3.5 pr-14">
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-base font-semibold tracking-[-0.01em] text-gray-950 dark:text-gray-50">
@@ -1906,96 +1939,129 @@ export function JobDetail({
             )}
 
             <div className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95">
-              <form
-                onSubmit={(event) => void submitFollowUp(event)}
-                className="rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
-              >
-                <textarea
-                  rows={2}
-                  value={followUp}
-                  onChange={(event) => setFollowUp(event.target.value)}
-                  disabled={contextLost}
-                  onKeyDown={(event) => {
-                    if (!isComposerSubmit(event)) return;
-                    event.preventDefault();
-                    // Through the form, so the keyboard and the button take the
-                    // same path and cannot drift apart.
-                    event.currentTarget.form?.requestSubmit();
-                  }}
-                  placeholder={contextLost ? 'Native context unavailable' : 'Add a follow-up'}
-                  aria-label="Add a follow-up"
-                  className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
-                />
-                <div className="flex items-center gap-1.5 px-3 pb-2.5">
-                  {modelOptions.length > 0 ? (
-                    <>
-                      {/* The harness stays the thread's; the model is offered
-                          again. A model change restarts this member's CLI and
-                          native-resumes it in the same retained workspace; it
-                          does not replace or clone the sandbox. */}
-                      <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
-                        {contextLost
-                          ? 'Start a new chat ·'
-                          : job.state === 'cancelled'
-                            ? `Restores any saved changes · ${job.runtime} ·`
-                            : `Inherits ${job.runtime} ·`}
-                      </span>
-                      <Picker
-                        label="Model for this turn"
-                        value={model}
-                        options={modelOptions}
-                        onChange={setModel}
-                      />
-                      <Picker
-                        label="Reasoning for this turn"
-                        value={effort}
-                        options={efforts}
-                        onChange={setEffort}
-                      />
-                      {isActive ? (
-                        <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                          · queued after this run
-                        </span>
-                      ) : null}
-                    </>
-                  ) : (
-                    <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                      {contextLost
-                        ? `Start a new chat · ${job.runtime} · ${job.model}`
-                        : job.state === 'cancelled'
-                          ? `Restores any saved changes · ${job.runtime} · ${job.model}`
-                          : `Inherits ${job.runtime} · ${job.model}`}
-                      {isActive ? ' · queued after this run' : ''}
-                    </span>
-                  )}
+              {isArchived ? (
+                <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-gray-900">
+                  <div className="min-w-0 flex-1 basis-64">
+                    <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                      {t('sessionArchive.title')}
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                      {t(
+                        contextLost
+                          ? 'sessionArchive.contextLost'
+                          : isActive
+                            ? 'sessionArchive.running'
+                            : 'sessionArchive.body',
+                      )}
+                    </p>
+                  </div>
                   <button
-                    type="submit"
-                    disabled={contextLost || !followUp.trim() || submitting}
-                    className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
-                    aria-label="Send follow-up"
-                    title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
+                    type="button"
+                    disabled={restoring}
+                    onClick={() => void unarchive()}
+                    className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
                   >
-                    {submitting ? (
-                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                    ) : (
-                      <svg
-                        aria-hidden="true"
-                        className="h-4 w-4"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M12 19V5m0 0-6 6m6-6 6 6"
-                        />
-                      </svg>
+                    {t(
+                      restoring
+                        ? 'sessionArchive.restoring'
+                        : contextLost
+                          ? 'sessionArchive.restore'
+                          : 'sessionArchive.continue',
                     )}
                   </button>
                 </div>
-              </form>
+              ) : (
+                <form
+                  onSubmit={(event) => void submitFollowUp(event)}
+                  className="rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
+                >
+                  <textarea
+                    rows={2}
+                    value={followUp}
+                    onChange={(event) => setFollowUp(event.target.value)}
+                    disabled={contextLost}
+                    onKeyDown={(event) => {
+                      if (!isComposerSubmit(event)) return;
+                      event.preventDefault();
+                      // Through the form, so the keyboard and the button take the
+                      // same path and cannot drift apart.
+                      event.currentTarget.form?.requestSubmit();
+                    }}
+                    placeholder={contextLost ? 'Native context unavailable' : 'Add a follow-up'}
+                    aria-label="Add a follow-up"
+                    className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
+                  />
+                  <div className="flex items-center gap-1.5 px-3 pb-2.5">
+                    {modelOptions.length > 0 ? (
+                      <>
+                        {/* The harness stays the thread's; the model is offered
+                          again. A model change restarts this member's CLI and
+                          native-resumes it in the same retained workspace; it
+                          does not replace or clone the sandbox. */}
+                        <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
+                          {contextLost
+                            ? 'Start a new chat ·'
+                            : job.state === 'cancelled'
+                              ? `Restores any saved changes · ${job.runtime} ·`
+                              : `Inherits ${job.runtime} ·`}
+                        </span>
+                        <Picker
+                          label="Model for this turn"
+                          value={model}
+                          options={modelOptions}
+                          onChange={setModel}
+                        />
+                        <Picker
+                          label="Reasoning for this turn"
+                          value={effort}
+                          options={efforts}
+                          onChange={setEffort}
+                        />
+                        {isActive ? (
+                          <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
+                            · queued after this run
+                          </span>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400 dark:text-gray-500">
+                        {contextLost
+                          ? `Start a new chat · ${job.runtime} · ${job.model}`
+                          : job.state === 'cancelled'
+                            ? `Restores any saved changes · ${job.runtime} · ${job.model}`
+                            : `Inherits ${job.runtime} · ${job.model}`}
+                        {isActive ? ' · queued after this run' : ''}
+                      </span>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={contextLost || !followUp.trim() || submitting}
+                      className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
+                      aria-label="Send follow-up"
+                      title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
+                    >
+                      {submitting ? (
+                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                      ) : (
+                        <svg
+                          aria-hidden="true"
+                          className="h-4 w-4"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                          strokeWidth={2}
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M12 19V5m0 0-6 6m6-6 6 6"
+                          />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
               <ThreadStatsBar job={job} />
               {actionError ? (
                 <p className="mt-2 text-center text-xs text-red-600 dark:text-red-400" role="alert">
@@ -2070,12 +2136,18 @@ export function JobDetail({
             hidden={workspaceTab !== 'terminal'}
             className="min-h-0 flex-1 p-3"
           >
-            <TerminalWorkspace
-              key={job.id}
-              jobId={job.id}
-              active={workspaceOpen && workspaceTab === 'terminal'}
-              ready={terminalWorkspaceReady}
-            />
+            {isArchived ? (
+              <p className="p-4 text-sm text-gray-500 dark:text-gray-400">
+                {t('sessionArchive.terminal')}
+              </p>
+            ) : (
+              <TerminalWorkspace
+                key={job.id}
+                jobId={job.id}
+                active={workspaceOpen && workspaceTab === 'terminal'}
+                ready={terminalWorkspaceReady}
+              />
+            )}
           </div>
           <div
             id="workspace-panel-files"

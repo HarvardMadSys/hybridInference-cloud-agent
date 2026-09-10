@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
+import { SettingsSidebar } from '@/components/features/settings/SettingsSidebar';
 import { useAuth, useT } from '@/components/providers';
 import { hasRole } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
@@ -160,6 +161,7 @@ function AgentsShell({
   const { state } = useAuth();
   const { branding } = useSiteConfig();
   const t = useT();
+  const pathname = usePathname();
 
   // Admin-only: the same bar `require_agent_owner` enforces server-side. The
   // two must agree — a UI that lets someone in only to 403 every request they
@@ -187,7 +189,11 @@ function AgentsShell({
 
   return (
     <div className="flex min-h-0 flex-1">
-      <AgentsSidebar collapsed={sidebarCollapsed} />
+      {pathname === '/archived' ? (
+        <SettingsSidebar collapsed={sidebarCollapsed} />
+      ) : (
+        <AgentsSidebar collapsed={sidebarCollapsed} />
+      )}
       <main className="min-w-0 flex-1 overflow-y-auto bg-gray-50/40 dark:bg-gray-950">
         {children}
       </main>

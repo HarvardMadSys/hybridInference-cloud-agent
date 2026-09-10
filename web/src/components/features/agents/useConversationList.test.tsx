@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
+import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 const api = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock('@/lib/api/agents', () => ({ listAgentConversations: api.list }));
 import { useConversationList } from './useConversationList';
@@ -58,6 +59,36 @@ describe('conversation navigation queries', () => {
     expect(api.list).toHaveBeenLastCalledWith(
       expect.objectContaining({ pinned: true, cursor: undefined }),
     );
+  });
+
+  it('invalidates an in-flight search when a session is deleted', async () => {
+    let resolveOld!: (value: unknown) => void;
+    api.list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    api.list.mockResolvedValue({ conversations: [], next_cursor: null });
+    const { result } = renderHook(() =>
+      useConversationList({ includeArchived: true, q: 'deleted' }),
+    );
+    act(() => announceAgentSessionsChanged({ threadIds: ['deleted'], deleted: true }));
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    await act(async () =>
+      resolveOld({ conversations: [{ ...row('deleted'), archived: true }], next_cursor: null }),
+    );
+    expect(result.current.rows).toEqual([]);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('restores an older conversation into the active list after unarchive', async () => {
+    api.list.mockResolvedValueOnce({ conversations: [], next_cursor: null });
+    const { result } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    api.list.mockResolvedValue({ conversations: [row('restored')], next_cursor: null });
+    act(() => announceAgentSessionsChanged({ threadIds: ['restored'], archived: false }));
+    await waitFor(() => expect(result.current.rows[0]?.key).toBe('restored'));
   });
 
   it('refreshes four loaded pages in one bounded request and retains the next cursor', async () => {

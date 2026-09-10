@@ -22,6 +22,7 @@ import type {
   AgentThreadEventApi,
 } from '@/lib/api/agents';
 import { toDisplayJob } from './adapt';
+import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
@@ -117,22 +118,40 @@ export function useAgentJobList(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const generation = useRef(0);
 
-  const reload = useCallback(() => setTick((value) => value + 1), []);
+  const reload = useCallback(() => {
+    generation.current += 1;
+    setTick((value) => value + 1);
+  }, []);
+
+  useEffect(
+    () =>
+      onAgentSessionsChanged((change) => {
+        if (change.deleted || change.archived !== archived) {
+          const changed = new Set(change.threadIds);
+          setJobs((current) => current.filter((job) => !changed.has(job.threadId ?? job.id)));
+        }
+        reload();
+      }),
+    [archived, reload],
+  );
 
   useEffect(() => {
     let cancelled = false;
+    const requestGeneration = generation.current;
     listAgentJobs(50, archived)
       .then((api: AgentJobApi[]) => {
-        if (cancelled) return;
+        if (cancelled || requestGeneration !== generation.current) return;
         setJobs(api.map((job) => toDisplayJob(job)));
         setError(null);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'could not load jobs');
+        if (!cancelled && requestGeneration === generation.current)
+          setError(cause instanceof Error ? cause.message : 'could not load jobs');
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && requestGeneration === generation.current) setLoading(false);
       });
     return () => {
       cancelled = true;
@@ -168,23 +187,30 @@ export function useAgentProjects(archived = false): {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const generation = useRef(0);
 
-  const reload = useCallback(() => setTick((value) => value + 1), []);
+  const reload = useCallback(() => {
+    generation.current += 1;
+    setTick((value) => value + 1);
+  }, []);
+
+  useEffect(() => onAgentSessionsChanged(reload), [reload]);
 
   useEffect(() => {
     let cancelled = false;
+    const requestGeneration = generation.current;
     listAgentProjects(archived)
       .then((api) => {
-        if (cancelled) return;
+        if (cancelled || requestGeneration !== generation.current) return;
         setProjects(api);
         setError(null);
       })
       .catch((cause: unknown) => {
-        if (!cancelled)
+        if (!cancelled && requestGeneration === generation.current)
           setError(cause instanceof Error ? cause.message : 'could not load projects');
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && requestGeneration === generation.current) setLoading(false);
       });
     return () => {
       cancelled = true;
@@ -210,15 +236,19 @@ export function useProjectJobs(limit = 200): {
   const [jobsByRepo, setJobsByRepo] = useState<Map<string, AgentJob[]>>(new Map());
   const [loadingRepos, setLoadingRepos] = useState<Set<string>>(new Set());
   const [errorRepos, setErrorRepos] = useState<Map<string, string>>(new Map());
-  const inFlight = useRef<Set<string>>(new Set());
+  const inFlight = useRef<Map<string, symbol>>(new Map());
+  const requestedRepos = useRef<Set<string>>(new Set());
 
   const load = useCallback(
     (repo: string) => {
       if (inFlight.current.has(repo)) return;
-      inFlight.current.add(repo);
+      requestedRepos.current.add(repo);
+      const request = Symbol(repo);
+      inFlight.current.set(repo, request);
       setLoadingRepos((current) => new Set(current).add(repo));
       listAgentJobs(limit, false, repo)
         .then((api: AgentJobApi[]) => {
+          if (inFlight.current.get(repo) !== request) return;
           setJobsByRepo((current) =>
             new Map(current).set(
               repo,
@@ -233,6 +263,7 @@ export function useProjectJobs(limit = 200): {
           });
         })
         .catch((cause: unknown) => {
+          if (inFlight.current.get(repo) !== request) return;
           setErrorRepos((current) =>
             new Map(current).set(
               repo,
@@ -241,6 +272,7 @@ export function useProjectJobs(limit = 200): {
           );
         })
         .finally(() => {
+          if (inFlight.current.get(repo) !== request) return;
           inFlight.current.delete(repo);
           setLoadingRepos((current) => {
             const next = new Set(current);
@@ -250,6 +282,27 @@ export function useProjectJobs(limit = 200): {
         });
     },
     [limit],
+  );
+
+  // Completed project pages do not poll. Invalidate both cached rows and any
+  // older request, then refresh every folder the reader has already opened.
+  useEffect(
+    () =>
+      onAgentSessionsChanged(() => {
+        inFlight.current.clear();
+        setJobsByRepo(new Map());
+        setLoadingRepos(new Set());
+        setErrorRepos(new Map());
+        requestedRepos.current.forEach(load);
+      }),
+    [load],
+  );
+
+  useEffect(
+    () => () => {
+      inFlight.current.clear();
+    },
+    [],
   );
 
   return { jobsByRepo, loadingRepos, errorRepos, load };
@@ -273,19 +326,37 @@ export function useAgentJob(jobId: string): {
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const seen = useRef<Set<number>>(new Set());
+  const generation = useRef(0);
 
-  const reload = useCallback(() => setTick((value) => value + 1), []);
+  const reload = useCallback(() => {
+    generation.current += 1;
+    setTick((value) => value + 1);
+  }, []);
+
+  useEffect(
+    () =>
+      onAgentSessionsChanged((change) => {
+        // Until this job resolves, its conversation identity is unknown. A job
+        // ID cannot be compared with thread IDs, so invalidate any pending load.
+        const threadId = api?.id === jobId ? api.thread_id : undefined;
+        if (threadId && !change.threadIds.includes(threadId)) return;
+        if (change.deleted) setApi(null);
+        reload();
+      }),
+    [api?.id, api?.thread_id, jobId, reload],
+  );
 
   useEffect(() => {
     if (!jobId) return undefined;
     let cancelled = false;
+    const requestGeneration = generation.current;
     seen.current = new Set();
     setPatch(null);
     setLoading(true);
 
     Promise.all([getAgentJob(jobId), getAgentJobThread(jobId), listAllAgentThreadEvents(jobId)])
       .then(([job, foundThread, foundEvents]) => {
-        if (cancelled) return;
+        if (cancelled || requestGeneration !== generation.current) return;
         const ownEvents = foundEvents.filter((event) => event.job_id === jobId);
         setApi(job);
         setEvents(ownEvents);
@@ -295,10 +366,11 @@ export function useAgentJob(jobId: string): {
         setError(null);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'could not load the job');
+        if (!cancelled && requestGeneration === generation.current)
+          setError(cause instanceof Error ? cause.message : 'could not load the job');
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && requestGeneration === generation.current) setLoading(false);
       });
 
     return () => {

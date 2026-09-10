@@ -37,6 +37,14 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('the settings entry', () => {
+  it('links to archive management from settings', async () => {
+    renderSettings();
+    await openDialog();
+    expect(screen.getByRole('link', { name: 'Archived sessions' })).toHaveAttribute(
+      'href',
+      '/archived',
+    );
+  });
   it('shows who is signed in, and opens settings when the row is clicked', async () => {
     renderSettings();
     const trigger = await screen.findByRole('button', { name: /Ada/ });

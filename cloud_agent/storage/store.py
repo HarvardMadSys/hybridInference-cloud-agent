@@ -296,6 +296,8 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "pinned_at": row.get("pinned_at"),
+        "archived_at": row.get("archived_at"),
+        "deleted_at": row.get("deleted_at"),
         "thread_sandbox": _load_json(row.get("thread_sandbox")),
     }
 
@@ -309,6 +311,118 @@ _JOB_COLUMNS = (
     "created_at, updated_at"
 )
 _QUALIFIED_JOB_COLUMNS = ", ".join(f"j.{column.strip()}" for column in _JOB_COLUMNS.split(","))
+
+
+def _session_query(*, filter_repo: bool = False) -> str:
+    """Filter project rows before looking up each conversation's latest turn."""
+    repo_filter = "AND ($5::text IS NULL OR t.repo = $5)" if filter_repo else ""
+    return f"""
+WITH latest AS (
+    SELECT {_QUALIFIED_JOB_COLUMNS}, t.id AS session_id, t.title AS session_title,
+           t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
+           CASE
+               WHEN j.state IN ('queued', 'waiting') THEN 'queued'
+               WHEN j.state IN ('running', 'publishing') THEN 'running'
+               WHEN j.state = 'succeeded' AND NULLIF(j.published_pr_url, '') IS NOT NULL THEN 'done'
+               WHEN j.state = 'succeeded' THEN 'needs_review'
+               ELSE j.state
+           END AS display_state
+    FROM agent_threads t
+    CROSS JOIN LATERAL (
+        SELECT * FROM agent_jobs latest_job
+        WHERE latest_job.thread_id = t.id AND latest_job.user_id = $1
+        ORDER BY latest_job.turn_no DESC, latest_job.id DESC
+        LIMIT 1
+    ) j
+    WHERE t.user_id = $1 AND t.deleted_at IS NULL
+      AND (($2 AND t.archived_at IS NOT NULL) OR (NOT $2 AND t.archived_at IS NULL))
+      AND ($3::text IS NULL OR STRPOS(LOWER(t.title), LOWER($3)) > 0)
+      {repo_filter}
+), matched AS (
+    SELECT * FROM latest WHERE $4::text IS NULL OR display_state = $4
+)
+"""
+
+
+# An idle native process and its HOT credential lease outlive the completed
+# turn. Removing a chat from owner history must not tear down that process or
+# its shared workspace. Actual work and unfinished publication remain visible
+# until they settle; the retained rows keep lineage and billing attributable.
+_SESSION_DELETE_BLOCK_SQL = """
+CASE
+    WHEN t.archived_at IS NULL THEN 'not_archived'
+    WHEN EXISTS (
+        SELECT 1 FROM agent_jobs busy_job
+        WHERE busy_job.thread_id = t.session_id
+          AND busy_job.state NOT IN ('succeeded', 'failed', 'cancelled')
+    ) OR EXISTS (
+        SELECT 1 FROM agent_attempts a
+        JOIN agent_jobs busy_job ON busy_job.id = a.job_id
+        WHERE busy_job.thread_id = t.session_id
+          AND a.status = 'running' AND a.lease_expires_at > NOW()
+    ) OR EXISTS (
+        SELECT 1 FROM agent_thread_sandbox_memberships m
+        WHERE m.thread_id = t.session_id
+          AND (m.active_attempt_id IS NOT NULL OR m.resident_state IN ('starting', 'restarting'))
+    ) THEN 'session_active'
+    WHEN EXISTS (
+        SELECT 1 FROM agent_session_forks f
+        WHERE (f.source_thread_id = t.session_id OR f.target_thread_id = t.session_id)
+          AND f.state IN ('preparing', 'materialized')
+    ) OR EXISTS (
+        SELECT 1 FROM agent_thread_sandbox_memberships m
+        WHERE m.thread_id = t.session_id AND m.fork_operation_id IS NOT NULL
+    ) THEN 'fork_in_progress'
+    WHEN EXISTS (
+        SELECT 1 FROM agent_sandbox_snapshots snapshot
+        JOIN agent_jobs included_job
+          ON snapshot.anchor_job_id = included_job.id
+          OR snapshot.included_job_ids @> jsonb_build_array(included_job.id)
+        WHERE included_job.thread_id = t.session_id
+          AND snapshot.state IN ('pending', 'capturing', 'captured', 'publishing')
+    ) THEN 'publication_pending'
+    ELSE NULL
+END
+"""
+
+
+def _session_cursor_scope(
+    user_id: str, archived: bool, search: str | None, repo: str | None, state: str | None
+) -> str:
+    """Bind pagination to the same owner's filter selection."""
+    return hashlib.sha256(json.dumps([user_id, archived, search, repo, state]).encode()).hexdigest()
+
+
+def _decode_session_cursor(cursor: str | None, scope: str) -> tuple[datetime | None, str | None]:
+    """Validate a bounded keyset cursor before sending its values to SQL."""
+    if cursor is None:
+        return None, None
+    try:
+        if len(cursor) > 1024:
+            raise ValueError
+        payload = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
+        if not isinstance(payload, dict) or payload.get("scope") != scope:
+            raise ValueError
+        sort_at = datetime.fromisoformat(payload["at"])
+        thread_id = payload["id"]
+        if (
+            sort_at.tzinfo is None
+            or not isinstance(thread_id, str)
+            or not thread_id
+            or len(thread_id) > 128
+            or "\x00" in thread_id
+        ):
+            raise ValueError
+        return sort_at, thread_id
+    except (ValueError, TypeError, KeyError, binascii.Error) as exc:
+        raise ValueError("Invalid session cursor for these filters") from exc
+
+
+def _encode_session_cursor(sort_at: datetime, thread_id: str, scope: str) -> str:
+    """Encode the last conversation key, not an offset into a moving list."""
+    return base64.urlsafe_b64encode(
+        json.dumps({"at": sort_at.isoformat(), "id": thread_id, "scope": scope}).encode()
+    ).decode()
 
 
 def _decode_conversation_cursor(
@@ -875,12 +989,15 @@ class AgentJobStore:
             if requested is None:
                 return None
             thread = await conn.fetchrow(
-                "SELECT id, pinned_at FROM agent_threads WHERE id = $1 AND user_id = $2 FOR UPDATE",
+                "SELECT id, pinned_at, archived_at FROM agent_threads "
+                "WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
                 requested["thread_id"],
                 user_id,
             )
             if thread is None:
                 return None
+            if thread["archived_at"] is not None:
+                return {"error": "session_archived"}
             thread_id = thread["id"]
             parent = await conn.fetchrow(
                 f"SELECT {_JOB_COLUMNS} FROM agent_jobs WHERE thread_id = $1 "
@@ -1049,6 +1166,9 @@ class AgentJobStore:
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                 json.dumps([user_id, idempotency_key], separators=(",", ":")),
             )
+            # Finalization holds the operation before the source thread. An
+            # idempotent retry must use that same order before checking the
+            # owner-history tombstone, or it could deadlock with finalization.
             existing = await conn.fetchrow(
                 """
                 SELECT * FROM agent_session_forks
@@ -1058,6 +1178,19 @@ class AgentJobStore:
                 user_id,
                 idempotency_key,
             )
+            thread_id = await conn.fetchval(
+                "SELECT thread_id FROM agent_jobs WHERE id = $1 AND user_id = $2",
+                source_job_id,
+                user_id,
+            )
+            owned_thread = await conn.fetchval(
+                "SELECT id FROM agent_threads "
+                "WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
+                thread_id,
+                user_id,
+            )
+            if owned_thread is None:
+                return None
             if existing is not None:
                 result = await self._session_fork_details(conn, str(existing["id"]))
                 if result is not None and existing["source_job_id"] != source_job_id:
@@ -1888,7 +2021,7 @@ class AgentJobStore:
                        t.pinned_at, t.archived_at
                 FROM agent_threads t
                 JOIN agent_jobs j ON j.thread_id = t.id
-                WHERE j.id = $1 AND j.user_id = $2
+                WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
                 """,
                 job_id,
                 user_id,
@@ -1916,6 +2049,7 @@ class AgentJobStore:
             job_rows = [_job_row_to_dict(job) for job in jobs]
             for job in job_rows:
                 job["pinned_at"] = thread["pinned_at"]
+                job["archived_at"] = thread["archived_at"]
                 if sandbox is not None:
                     job["thread_sandbox"] = _sandbox_row_to_dict(sandbox)
         return {
@@ -1953,7 +2087,9 @@ class AgentJobStore:
         """
         async with self._pool.acquire() as conn:
             thread_id = await conn.fetchval(
-                "SELECT thread_id FROM agent_jobs WHERE id = $1 AND user_id = $2",
+                "SELECT j.thread_id FROM agent_jobs j "
+                "JOIN agent_threads t ON t.id = j.thread_id "
+                "WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL",
                 job_id,
                 user_id,
             )
@@ -1996,7 +2132,9 @@ class AgentJobStore:
         """
         async with self._pool.acquire() as conn:
             thread_id = await conn.fetchval(
-                "SELECT thread_id FROM agent_jobs WHERE id = $1 AND user_id = $2",
+                "SELECT j.thread_id FROM agent_jobs j "
+                "JOIN agent_threads t ON t.id = j.thread_id "
+                "WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL",
                 job_id,
                 user_id,
             )
@@ -2336,7 +2474,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, t.pinned_at,
+                SELECT {_QUALIFIED_JOB_COLUMNS}, t.pinned_at, t.archived_at, t.deleted_at,
                        to_jsonb(s) AS thread_sandbox
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
@@ -2363,10 +2501,11 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, t.pinned_at
+                SELECT {_QUALIFIED_JOB_COLUMNS}, t.pinned_at, t.archived_at
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
+                  AND t.deleted_at IS NULL
                   AND ($4::text IS NULL OR j.repo = $4)
                   AND (($3 AND t.archived_at IS NOT NULL)
                        OR (NOT $3 AND t.archived_at IS NULL))
@@ -2423,7 +2562,7 @@ class AgentJobStore:
                            GREATEST(t.updated_at, MAX(j.updated_at)) AS last_activity_at
                     FROM agent_threads t
                     JOIN agent_jobs j ON j.thread_id = t.id AND j.user_id = $1
-                    WHERE t.user_id = $1
+                    WHERE t.user_id = $1 AND t.deleted_at IS NULL
                       AND ($2::text IS NULL OR t.repo = $2)
                       AND ($3::text = '' OR POSITION(LOWER($3) IN LOWER(t.title)) > 0
                            OR POSITION(LOWER($3) IN LOWER(t.repo)) > 0)
@@ -2514,6 +2653,7 @@ class AgentJobStore:
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
+                  AND t.deleted_at IS NULL
                   AND (($2 AND t.archived_at IS NOT NULL)
                        OR (NOT $2 AND t.archived_at IS NULL))
                 GROUP BY j.repo
@@ -2534,6 +2674,160 @@ class AgentJobStore:
             for row in rows
         ]
 
+    async def list_sessions(
+        self,
+        *,
+        user_id: str,
+        archived: bool = False,
+        limit: int = 50,
+        cursor: str | None = None,
+        search: str | None = None,
+        repo: str | None = None,
+        state: str | None = None,
+        include_summary: bool = True,
+    ) -> dict[str, Any]:
+        """Page complete conversations independently of their number of turns.
+
+        Project facets apply search/state/archive filters before the selected
+        repo. The page and its counts share a database snapshot; the opaque
+        keyset remains valid when earlier rows are unarchived or deleted.
+        Row-only requests skip the full-history aggregate and return null counts.
+        """
+        scope = _session_cursor_scope(user_id, archived, search, repo, state)
+        after_at, after_id = _decode_session_cursor(cursor, scope)
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            projects = (
+                await conn.fetch(
+                    _session_query()
+                    + "SELECT repo, COUNT(*) AS count FROM matched GROUP BY repo ORDER BY repo",
+                    user_id,
+                    archived,
+                    search,
+                    state,
+                )
+                if include_summary
+                else None
+            )
+            rows = await conn.fetch(
+                _session_query(filter_repo=True)
+                + f"""
+                SELECT t.*, {_SESSION_DELETE_BLOCK_SQL} AS delete_block_reason
+                FROM matched t
+                WHERE ($6::timestamptz IS NULL OR (t.sort_at, t.session_id) < ($6, $7::text))
+                ORDER BY t.sort_at DESC, t.session_id DESC
+                LIMIT $8
+                """,
+                user_id,
+                archived,
+                search,
+                state,
+                repo,
+                after_at,
+                after_id,
+                limit + 1,
+            )
+        page = rows[:limit]
+        return {
+            "sessions": [
+                {
+                    "thread_id": row["session_id"],
+                    "title": row["session_title"],
+                    "archived_at": row["archived_at"],
+                    "job": _job_row_to_dict(row),
+                    "can_delete": row["delete_block_reason"] is None,
+                    "delete_block_reason": row["delete_block_reason"],
+                }
+                for row in page
+            ],
+            "total": (
+                sum(int(item["count"]) for item in projects if repo is None or item["repo"] == repo)
+                if projects is not None
+                else None
+            ),
+            "projects": (
+                [{"repo": item["repo"], "count": int(item["count"])} for item in projects]
+                if projects is not None
+                else None
+            ),
+            "next_cursor": (
+                _encode_session_cursor(page[-1]["sort_at"], page[-1]["session_id"], scope)
+                if len(rows) > limit
+                else None
+            ),
+        }
+
+    async def set_sessions_archived(
+        self, *, thread_ids: list[str], user_id: str, archived: bool
+    ) -> dict[str, Any]:
+        """Set every owned selected thread's archive state, or change none."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                "SELECT id FROM agent_threads "
+                "WHERE id = ANY($1::text[]) AND user_id = $2 AND deleted_at IS NULL "
+                "ORDER BY id FOR UPDATE",
+                thread_ids,
+                user_id,
+            )
+            if len(rows) != len(thread_ids):
+                return {"error": "not_found"}
+            updated = await conn.fetch(
+                """
+                UPDATE agent_threads
+                SET archived_at = CASE WHEN $3 THEN COALESCE(archived_at, NOW()) ELSE NULL END
+                WHERE id = ANY($1::text[]) AND user_id = $2
+                RETURNING id AS thread_id, archived_at
+                """,
+                thread_ids,
+                user_id,
+                archived,
+            )
+        return {"sessions": [dict(row) for row in updated]}
+
+    async def delete_sessions(self, *, thread_ids: list[str], user_id: str) -> dict[str, Any]:
+        """Irreversibly hide settled archived history while retaining audit rows.
+
+        The thread lock serializes owner deletion against follow-up insertion,
+        native-fork preparation and archive changes. Worker lifecycle access
+        deliberately keeps the immutable job, residency and sandbox ledgers.
+        A fork's shared workspace is never removed by a chat-history action.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                "SELECT id FROM agent_threads "
+                "WHERE id = ANY($1::text[]) AND user_id = $2 AND deleted_at IS NULL "
+                "ORDER BY id FOR UPDATE",
+                thread_ids,
+                user_id,
+            )
+            if len(rows) != len(thread_ids):
+                return {"error": "not_found"}
+            blocked = await conn.fetchrow(
+                f"""
+                WITH selected AS (
+                    SELECT id AS session_id, archived_at FROM agent_threads
+                    WHERE id = ANY($1::text[]) AND user_id = $2
+                ), checked AS (
+                    SELECT t.session_id, {_SESSION_DELETE_BLOCK_SQL} AS reason
+                    FROM selected t
+                )
+                SELECT reason FROM checked WHERE reason IS NOT NULL ORDER BY session_id LIMIT 1
+                """,
+                thread_ids,
+                user_id,
+            )
+            if blocked is not None:
+                return {"error": blocked["reason"]}
+            await conn.execute(
+                "UPDATE agent_threads SET deleted_at = NOW() "
+                "WHERE id = ANY($1::text[]) AND user_id = $2",
+                thread_ids,
+                user_id,
+            )
+        return {"thread_ids": thread_ids}
+
     async def set_thread_archived(
         self, *, job_id: str, user_id: str, archived: bool
     ) -> dict[str, Any] | None:
@@ -2547,6 +2841,7 @@ class AgentJobStore:
                     ELSE NULL
                 END
                 WHERE t.user_id = $2
+                  AND t.deleted_at IS NULL
                   AND EXISTS (
                       SELECT 1
                       FROM agent_jobs j
@@ -2577,6 +2872,7 @@ class AgentJobStore:
                     ELSE NULL
                 END
                 WHERE t.user_id = $2
+                  AND t.deleted_at IS NULL
                   AND EXISTS (
                       SELECT 1
                       FROM agent_jobs j

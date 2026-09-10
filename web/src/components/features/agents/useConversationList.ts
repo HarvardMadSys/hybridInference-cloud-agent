@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listAgentConversations, type AgentConversationApi } from '@/lib/api/agents';
+import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { toDisplayJob } from './adapt';
 import type { ConversationRow } from './conversations';
 
@@ -50,7 +51,25 @@ export function useConversationList({
   const generation = useRef(0);
   const busy = useRef(false);
   const [tick, setTick] = useState(0);
-  const reload = useCallback(() => setTick((v) => v + 1), []);
+  const reload = useCallback(() => {
+    generation.current += 1;
+    setTick((v) => v + 1);
+  }, []);
+  useEffect(
+    () =>
+      onAgentSessionsChanged((change) => {
+        setData((current) => ({
+          ...current,
+          rows: current.rows.flatMap((row) => {
+            if (!change.threadIds.includes(row.key)) return [row];
+            if (change.deleted || (change.archived && !includeArchived)) return [];
+            return [{ ...row, archived: change.archived ?? row.archived }];
+          }),
+        }));
+        reload();
+      }),
+    [includeArchived, reload],
+  );
   const fetchPage = useCallback(
     async (next?: string, version = generation.current) => {
       busy.current = true;

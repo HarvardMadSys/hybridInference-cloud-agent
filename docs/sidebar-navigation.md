@@ -12,13 +12,20 @@ outside both project folders and the ordinary flat list. Unpinning returns a
 conversation to its project or flat list. The section is hidden when empty and
 has its own **Show more** control. Search remains one unified result list.
 
+The folder-plus button beside the search and view controls adds a workspace.
+Choose a repository from the same authorized list used by the task composer;
+it appears immediately even without conversations. Added workspaces are saved
+per account in this browser independently of manual ordering. The picker links
+to Integrations when repository access needs configuring.
+
 The view menu has two independent choices:
 
 - Group: **By project** (default) or **In one list**.
 - Order: **Last updated** (default) or **Manual**.
 
-Manual mode shows drag grips on projects and task rows. Drop above or below a
-row’s midpoint to insert before or after it; an insertion line previews the result.
+Manual mode supports dragging the project name or task row directly, without
+visible drag handles. Drop above or below a row’s midpoint to insert before or
+after it; an insertion line previews the result.
 It also supports **Alt+ArrowUp/ArrowDown**
 while a row is focused. Reordering changes display order, never repository
 ownership. Pinned tasks have their own manual order, shared by both grouping modes. Manual order, grouping,
@@ -35,6 +42,13 @@ Enter opens a result, and Escape closes search. “Show more” loads further re
 Search results use the original conversation title and open its latest turn.
 Restoring an archived conversation invalidates its sidebar state immediately,
 including conversations outside the first page, without changing its activity time.
+
+While a task is queued or running, its row shows a spinner. A completed turn
+shows a blue unread dot until the conversation is opened; a completed turn
+already being viewed is marked read automatically. Read receipts are remembered
+per signed-in user in the current browser. New turns or retried completions can
+show a new dot, while pinning and archiving do not reset read status. Detailed
+success and failure states remain in the conversation view.
 
 ## API
 

@@ -314,6 +314,7 @@ class AgentJobResponse(BaseModel):
     created_at: str | None = None
     updated_at: str | None = None
     pinned_at: str | None = None
+    archived_at: str | None = None
     # Read from the billing ledger, never from anything the agent reports
     # about itself. Attribution only: there is no per-task cap to compare it
     # against, and the account's daily quota is what actually governs spend.
@@ -379,6 +380,67 @@ class AgentJobListResponse(BaseModel):
     """A page of agent jobs."""
 
     jobs: list[AgentJobResponse]
+
+
+AgentSessionState = Literal["running", "queued", "needs_review", "done", "failed", "cancelled"]
+AgentSessionDeleteBlockReason = Literal[
+    "not_archived", "session_active", "fork_in_progress", "publication_pending"
+]
+
+
+class AgentSessionResponse(BaseModel):
+    """One conversation with its stable title and latest turn."""
+
+    thread_id: str
+    title: str
+    archived_at: str | None = None
+    job: AgentJobResponse
+    can_delete: bool
+    delete_block_reason: AgentSessionDeleteBlockReason | None = None
+
+
+class AgentSessionProjectCount(BaseModel):
+    """A project facet after archive, title and state filters, before repo."""
+
+    repo: str
+    count: int
+
+
+class AgentSessionListResponse(BaseModel):
+    """A cursor page of conversations, with optional complete filtered counts."""
+
+    sessions: list[AgentSessionResponse]
+    total: int | None
+    next_cursor: str | None = None
+    projects: list[AgentSessionProjectCount] | None
+
+
+class AgentSessionSelection(BaseModel):
+    """An explicit bounded snapshot of conversations selected by their owner."""
+
+    thread_ids: list[str] = Field(..., min_length=1, max_length=1000)
+
+    @field_validator("thread_ids")
+    @classmethod
+    def validate_thread_ids(cls, values: list[str]) -> list[str]:
+        """Reject ambiguous selections and invalid database text values."""
+        if any(not value or len(value) > 128 or "\x00" in value for value in values):
+            raise ValueError("thread ids must contain between 1 and 128 valid characters")
+        if len(values) != len(set(values)):
+            raise ValueError("thread ids must be unique")
+        return values
+
+
+class AgentSessionArchiveRequest(AgentSessionSelection):
+    """Set archive state for every selected conversation atomically."""
+
+    archived: bool
+
+
+class AgentSessionDeleteResponse(BaseModel):
+    """Conversations permanently removed from owner-visible history."""
+
+    thread_ids: list[str]
 
 
 class AgentConversation(BaseModel):
@@ -467,6 +529,12 @@ class AgentThreadArchiveResponse(BaseModel):
     thread_id: str
     archived: bool
     archived_at: str | None = None
+
+
+class AgentSessionArchiveResponse(BaseModel):
+    """Archive state for the complete selected conversation snapshot."""
+
+    sessions: list[AgentThreadArchiveResponse]
 
 
 class AgentThreadPinResponse(BaseModel):
