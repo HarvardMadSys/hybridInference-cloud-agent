@@ -1,5 +1,16 @@
 # Migration record
 
+> **Status: the extraction is complete.** Production cut over on 2026-08-07 and
+> the gateway's own agent code was deleted on 2026-08-09. This document is the
+> **historical record** of how the move was run, plus the register of follow-ups
+> it deliberately left open — see "Deferred behaviour register" and "Open
+> decisions". It is no longer a live task list.
+>
+> The rules that governed the move are retired; [AGENTS.md](AGENTS.md) § 5 says
+> which of them are permanent. The "Landed here" table at the bottom is the
+> answer to "what is actually done" — the plan describes intent, this describes
+> reality.
+
 This repository is a **clean snapshot** of the cloud agent feature extracted
 from `HarvardMadSys/hybridInference`. It does not import that repository's git
 history.
@@ -388,11 +399,17 @@ a running gateway, because the value of a contract is that it says what was
 *agreed*, so a gateway that stops honouring it produces a visible disagreement
 rather than a client that quietly breaks.
 
-Each document names the branch and files it was written from in `info.x-source`,
+~~Each document names the branch and files it was written from in `info.x-source`,
 because none of them had merged when they were written. **When those branches
 land, re-verify each document against the merge commit** — a review can change a
 contract, and these describe the version proposed rather than the version
-accepted.
+accepted.~~ ✅ **Landed.** Re-checked 2026-09-10: the identity and inference-grant
+routers are on the gateway's `main`, and the internal lookups'
+`/internal/users/{user_id}/agent-access` is on its `dev` — its `main` still
+serves `/internal/users/{user_id}/status`. That was a path check, not a
+line-by-line re-review of the schemas. `info.x-source` is now a historical
+"written from" marker; the live status, and what to do when the gateway changes
+a router, is in [`contracts/README.md`](contracts/README.md).
 
 `tests/unit/test_contracts.py` goes past C8's stated acceptance ("YAMLs lint").
 It also checks every cited consumer test exists — two plausible-looking test

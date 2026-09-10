@@ -32,13 +32,44 @@ it would invite someone to treat this directory as a mirror of the gateway.
 
 ## Source commits
 
-Each document names, in `info.x-source`, the branch and file it was written
-from. The identity, grant and lookup routers were all still on unmerged
-branches when these were written (see MIGRATION.md, "Cross-repo readiness"), so
-the reference is a branch rather than a commit on `dev`. **When those land,
-re-verify each document against the merge commit** — a review can change a
-contract, and these were written against the version proposed rather than the
-version accepted.
+Each document names, in `info.x-source`, the branch and file it was **written
+from**. That is a historical record, not a claim about where the code lives now,
+and it is kept because a contract's value is that it says what was *agreed* at a
+known point — a later reader can diff the two.
+
+Two of the three have landed on the gateway's `main`; the third is in flight:
+
+| Document | Status |
+|---|---|
+| `identity.openapi.yaml` | Landed — `apps/backend/serving/servers/routers/identity.py` serves `/v1/identity/{jwks,code,token}` on the gateway's `main`. |
+| `inference-grants.openapi.yaml` | Landed — `apps/backend/serving/servers/routers/agent_grants.py` serves mint / renew / revoke / usage on the gateway's `main`. |
+| `internal-lookups.openapi.yaml` | **In flight** — the gateway's `main` still serves `/internal/users/{user_id}/status`; the `/internal/users/{user_id}/agent-access` endpoint this document describes is on its `dev`. See [`docs/agent-access-policy.md`](../docs/agent-access-policy.md) for the rollout, the compatibility path, and the fail-closed behaviour against an older gateway. |
+
+**When the gateway changes one of these routers, re-verify the document against
+the merged source.** A review can change a contract, and a document describing
+the version proposed rather than the version accepted is exactly the silent
+drift this directory exists to prevent. Nothing here checks that for you —
+`tests/unit/test_contracts.py` pins this repository's side only.
+
+## What these do not cover
+
+Two dependencies are deliberately absent, because neither travels on the wire
+and a document could not check them against anything:
+
+- **The gateway's own clamps.** `grants.py` mirrors `GATEWAY_MAX_TTL_S` (900)
+  and `GATEWAY_RENEWAL_STEP_S` (300) from the gateway's `serving/grants.py`. A
+  request for more than the maximum is clamped *down* silently, and every
+  renewal re-times the grant to the gateway's step — so either one would shorten
+  a live grant without any call failing.
+- **Which refusals mean "this grant is dead".** `DEAD_GRANT_REFUSALS`
+  (`unknown_grant`, `grant_not_live`, `subject_unavailable`) mirrors the
+  gateway's error *types*. The status code alone is not enough: the gateway
+  answers 404 for both a dead grant and an unconfigured internal API, and 401
+  for a rotated dispatch token.
+
+`tests/unit/test_grant_lifecycle.py` is the actual guard for both. If either
+drifts, the symptom is a sandbox losing its authorization mid-run — far from the
+constant that moved.
 
 ## Checking them
 
