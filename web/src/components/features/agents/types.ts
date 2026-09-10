@@ -204,6 +204,9 @@ export interface AgentJob {
   id: string;
   /** Used to group conversation rows in the recent-tasks sidebar. */
   createdAt?: string | null;
+  /** Execution timestamps, never the job's submission or last-update time. */
+  startedAt?: string | null;
+  finishedAt?: string | null;
   /** Conversation-level pin time. Every turn in the same thread shares it. */
   pinnedAt?: string | null;
   title: string;
@@ -248,6 +251,8 @@ export interface AgentJob {
   liveNote?: string;
   eventCount: number;
   diffFiles: string[];
+  /** Whether the current shared workspace diff was actually readable. */
+  workspaceDiffAvailable?: boolean;
   diffFileDetails?: AgentDiffFile[];
   diffStat?: { add: number; del: number };
   diffLines: DiffLine[];

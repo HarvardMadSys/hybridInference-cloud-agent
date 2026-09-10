@@ -171,11 +171,27 @@ export interface AgentJobUsageApi {
     input_tokens: number | null;
     output_tokens: number | null;
     cache_read_tokens: number | null;
+    /** Cache-inclusive input, null when the harness counters cannot establish it. */
+    normalized_input_tokens?: number | null;
   };
+  conversation?: {
+    totals: AgentLedgerTotalsApi | null;
+    unknown_rows: AgentLedgerUnknownRowsApi | null;
+    estimated_calls: number;
+    queried_at: string | null;
+    turn_count: number;
+    incomplete: boolean;
+    refreshing: boolean;
+    next_refresh_at?: string | null;
+    active?: boolean;
+  } | null;
 }
 
 export interface AgentJobApi {
   id: string;
+  /** Actual execution timestamps, matching duration_ms's selected attempt. */
+  started_at?: string | null;
+  finished_at?: string | null;
   repo: string;
   task_prompt: string;
   runtime: string;

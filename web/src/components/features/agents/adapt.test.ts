@@ -177,7 +177,7 @@ describe('toDisplayJob', () => {
     expect(job.branch).toBe('agent/thread_7');
   });
 
-  it('shows trusted sandbox metadata for the current attempt', () => {
+  it('names the isolation boundary from the current attempt without exposing runtime internals', () => {
     const events = [
       event(1, 'lifecycle', { phase: 'started', sandbox_backend: 'process' }, 10),
       event(
@@ -194,7 +194,58 @@ describe('toDisplayJob', () => {
     ];
     const job = toDisplayJob({ ...JOB, current_attempt_id: 11 }, { events });
 
-    expect(job.sandbox).toBe('container (io.containerd.kata.v2) · registry.example/agent:1');
+    expect(job.sandbox).toBe('Isolated VM');
+    expect(job.rawLines[1]).toContain('registry.example/agent:1');
+  });
+
+  it.each([
+    ['container', 'runc', 'Container'],
+    ['process', '', 'Host process'],
+    ['kata', '', 'Isolated VM'],
+    ['io.containerd.kata.v2', '', 'Isolated VM'],
+    ['', 'io.containerd.kata.v2', 'Isolated VM'],
+  ])('describes the %s boundary accurately', (backend, runtime, label) => {
+    const job = toDisplayJob(JOB, {
+      events: [
+        event(1, 'lifecycle', {
+          phase: 'started',
+          sandbox_backend: backend,
+          sandbox_runtime: runtime,
+        }),
+      ],
+    });
+    expect(job.sandbox).toBe(label);
+  });
+
+  it('uses execution timestamps independently of submission and metadata update times', () => {
+    const job = toDisplayJob({
+      ...JOB,
+      created_at: '2026-09-10T10:00:00Z',
+      updated_at: '2026-09-10T10:12:00Z',
+      started_at: '2026-09-10T10:05:00Z',
+      finished_at: '2026-09-10T10:06:00Z',
+    });
+    expect(job.startedAt).toBe('2026-09-10T10:05:00Z');
+    expect(job.finishedAt).toBe('2026-09-10T10:06:00Z');
+    const legacy = toDisplayJob({ ...JOB, created_at: '2026-09-10T10:00:00Z' });
+    expect(legacy.startedAt).toBeUndefined();
+    expect(legacy.finishedAt).toBeUndefined();
+  });
+
+  it('distinguishes a readable empty workspace from an unavailable diff', () => {
+    expect(toDisplayJob(JOB, { patch: '' }).workspaceDiffAvailable).toBe(true);
+    expect(toDisplayJob(JOB, { patch: null }).workspaceDiffAvailable).toBe(false);
+    expect(toDisplayJob(JOB).workspaceDiffAvailable).toBe(false);
+  });
+
+  it('counts blocked requests inside aggregated denial records', () => {
+    const job = toDisplayJob(JOB, {
+      events: [
+        event(1, 'error', { host: 'first.example', attempts: 3 }),
+        event(2, 'error', { host: 'second.example' }),
+      ],
+    });
+    expect(job.egressDenials).toBe(4);
   });
 
   it('marks a superseded attempt rather than showing it live', () => {

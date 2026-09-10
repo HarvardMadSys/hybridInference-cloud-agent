@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -450,12 +450,247 @@ describe('JobDetail', () => {
     expect(getAgentJobUsage).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
     expect(screen.getByRole('dialog', { name: 'Run details' })).toBeInTheDocument();
-    expect(screen.getByText('Input tokens')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Loading usage' })).toBeInTheDocument();
     expect(screen.getByText('Sandbox')).toBeInTheDocument();
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole('button', { name: /Raw events/ }));
     expect(screen.getByText('{"event_type":"message"}')).toBeInTheDocument();
+  });
+
+  it('leads run details with outcome, actual execution time and the turn number', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          createdAt: '2026-09-10T10:00:00Z',
+          startedAt: '2026-09-10T10:05:00Z',
+          finishedAt: '2026-09-10T10:06:05Z',
+          turnNo: 3,
+          sandbox: 'Isolated VM',
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const drawer = screen.getByRole('dialog', { name: 'Run details' });
+    const outcome = within(drawer).getByRole('region', { name: 'Run outcome' });
+    expect(within(outcome).getByText('Done')).toBeInTheDocument();
+    expect(within(outcome).getByText('3')).toBeInTheDocument();
+    expect(within(outcome).getByText('1m 5s')).toBeInTheDocument();
+    expect(outcome.querySelector('time')).toHaveAttribute('dateTime', '2026-09-10T10:05:00Z');
+    expect(within(drawer).getByText('Isolated VM')).toBeInTheDocument();
+    for (const label of ['Attempts', 'Setup network', 'Agent network', 'Egress denials']) {
+      expect(within(drawer).queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
+  it.each(['done', 'needs_review'] as const)(
+    'keeps %s completion clear without exposing publication bookkeeping',
+    (state) => {
+      const stateNote = 'agent completed (shared workspace; publication snapshot pending)';
+      render(
+        <JobDetail
+          job={makeJob({
+            state,
+            stateNote,
+            sandbox: 'io.containerd.kata.v2',
+          })}
+        />,
+      );
+      expect(screen.queryByText(stateNote)).not.toBeInTheDocument();
+      expect(screen.queryByText('Needs review')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+      const outcome = screen.getByRole('region', { name: 'Run outcome' });
+      expect(
+        within(outcome).getByText(state === 'needs_review' ? 'Completed' : 'Done'),
+      ).toBeInTheDocument();
+      expect(screen.getByText('Isolated VM')).toBeInTheDocument();
+      expect(screen.queryByText('io.containerd.kata.v2')).not.toBeInTheDocument();
+      expect(screen.queryByText(stateNote)).not.toBeInTheDocument();
+    },
+  );
+
+  it('shows queued work as not started without relabeling its submission time', () => {
+    render(
+      <JobDetail
+        job={makeJob({ state: 'queued', createdAt: '2026-09-10T10:00:00Z', attempts: [] })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const outcome = screen.getByRole('region', { name: 'Run outcome' });
+    expect(within(outcome).getByText('Not started')).toBeInTheDocument();
+    expect(within(outcome).queryByText('Elapsed')).not.toBeInTheDocument();
+    expect(outcome.querySelector('time')).toBeNull();
+  });
+
+  it('keeps missing terminal timing unknown instead of counting through today', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'failed',
+          createdAt: '2026-09-10T09:00:00Z',
+          startedAt: '2026-09-10T10:00:00Z',
+          finishedAt: null,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const row = screen.getByText('Elapsed').parentElement!;
+    expect(within(row).getByText('Not recorded')).toBeInTheDocument();
+  });
+
+  it('updates elapsed time while a run is active and stops when it finishes', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-10T10:00:10Z'));
+    try {
+      const job = makeJob({ startedAt: '2026-09-10T10:00:00Z', finishedAt: null });
+      const { rerender, unmount } = render(<JobDetail job={job} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+      expect(screen.getByText('10s')).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(2000));
+      expect(screen.getByText('12s')).toBeInTheDocument();
+      rerender(<JobDetail job={{ ...job, state: 'done', finishedAt: '2026-09-10T10:00:11Z' }} />);
+      act(() => vi.advanceTimersByTime(2000));
+      expect(screen.getByText('11s')).toBeInTheDocument();
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows artifacts as shared workspace changes and reuses the Git action', async () => {
+    const prUrl = 'https://github.com/owner/repository/pull/7';
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          workspaceShared: true,
+          prUrl,
+          prLabel: 'draft PR 7',
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const artifacts = screen.getByRole('region', { name: 'Workspace changes' });
+    expect(within(artifacts).getByText('1 file changed')).toBeInTheDocument();
+    expect(within(artifacts).getByText('+1')).toBeInTheDocument();
+    expect(within(artifacts).getByText('−0')).toBeInTheDocument();
+    expect(within(artifacts).getByText(/other turns and chats sharing/)).toBeInTheDocument();
+    expect(within(artifacts).getByRole('link', { name: 'Open draft PR' })).toHaveAttribute(
+      'href',
+      prUrl,
+    );
+    fireEvent.click(within(artifacts).getByRole('button', { name: 'View changes' }));
+    expect(screen.queryByRole('dialog', { name: 'Run details' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+    await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
+  });
+
+  it.each([true, false])(
+    'distinguishes an empty workspace from missing changes (%s)',
+    (available) => {
+      render(
+        <JobDetail
+          job={makeJob({
+            state: 'needs_review',
+            workspaceDiffAvailable: available,
+            diffFiles: [],
+            diffLines: [],
+            diffStat: undefined,
+          })}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+      const artifacts = screen.getByRole('region', { name: 'Workspace changes' });
+      expect(
+        within(artifacts).getByText(
+          available ? '0 files changed' : 'Workspace changes unavailable',
+        ),
+      ).toBeInTheDocument();
+      expect(within(artifacts).getByRole('button', { name: 'View changes' })).toBeInTheDocument();
+      expect(within(artifacts).queryByRole('button', { name: /Publish/ })).not.toBeInTheDocument();
+      expect(
+        within(artifacts).queryByRole('link', { name: 'Open draft PR' }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it('shows a warning only when the sandbox actually blocked a request', () => {
+    const { rerender } = render(<JobDetail job={makeJob()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const drawer = screen.getByRole('dialog', { name: 'Run details' });
+    expect(within(drawer).queryByRole('note')).not.toBeInTheDocument();
+    rerender(<JobDetail job={makeJob({ egressDenials: 3 })} />);
+    expect(within(drawer).getByRole('note')).toHaveTextContent(
+      '3 network requests were blocked by the sandbox.',
+    );
+  });
+
+  it('requires a new chat only when context loss is confirmed', () => {
+    const job = makeJob({ state: 'cancelled' });
+    const { rerender } = render(<JobDetail job={job} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const outcome = screen.getByRole('region', { name: 'Run outcome' });
+    expect(within(outcome).getByText(/Send a follow-up to continue/)).toBeInTheDocument();
+    expect(within(outcome).queryByRole('link', { name: 'New chat' })).not.toBeInTheDocument();
+    rerender(<JobDetail job={{ ...job, nativeState: 'lost' }} />);
+    expect(within(outcome).getByText(/This chat can no longer be resumed/)).toBeInTheDocument();
+    expect(within(outcome).getByRole('link', { name: 'New chat' })).toHaveAttribute('href', '/');
+    expect(within(outcome).queryByText(/Send a follow-up to continue/)).not.toBeInTheDocument();
+  });
+
+  it('links a failure to its matching raw event and focuses it', () => {
+    const failure = JSON.stringify({ event_type: 'error', payload: { detail: 'Agent exited 1' } });
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'failed',
+          stateNote: 'Agent exited 1',
+          rawLines: [
+            JSON.stringify({ event_type: 'tool_result', payload: { is_error: true } }),
+            failure,
+          ],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    fireEvent.click(screen.getByRole('button', { name: 'View failure event' }));
+    const selected = screen.getByLabelText('Failure event');
+    expect(selected).toHaveTextContent(failure);
+    expect(selected).toHaveFocus();
+    expect(screen.getByRole('button', { name: /Raw events/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('does not point a failure at an unrelated error or an earlier execution', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'failed',
+          stateNote: 'Agent exited 1',
+          currentAttemptNo: 2,
+          attempts: [{ id: 2, no: 2, status: 'finished' }],
+          rawLines: [
+            JSON.stringify({
+              attempt_id: 1,
+              event_type: 'error',
+              payload: { detail: 'Agent exited 1' },
+            }),
+            JSON.stringify({
+              attempt_id: 2,
+              event_type: 'error',
+              payload: { detail: 'Temporary tool failure' },
+            }),
+          ],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    expect(screen.queryByRole('button', { name: 'View failure event' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect raw events' }));
+    expect(screen.queryByLabelText('Failure event')).not.toBeInTheDocument();
   });
 
   it.each([null, 0])('preserves an absent or zero Gateway model-call count (%s)', async (turns) => {
@@ -492,9 +727,11 @@ describe('JobDetail', () => {
     render(<JobDetail job={{ ...job, usage: { ...job.usage, turns: 999 } }} />);
     fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
     await waitFor(() => expect(screen.queryByText('Loading usage…')).not.toBeInTheDocument());
-    const row = screen.getByText('Model calls').parentElement!;
-    expect(within(row).getByText(turns === null ? '—' : '0')).toBeInTheDocument();
-    expect(within(row).queryByText('999')).not.toBeInTheDocument();
+    const usage = screen.getByRole('region', { name: 'Usage' });
+    expect(
+      within(usage).getByText(turns === null ? 'Usage temporarily unavailable.' : '0 model calls'),
+    ).toBeInTheDocument();
+    expect(within(usage).queryByText(/999/)).not.toBeInTheDocument();
   });
 
   it('wraps unbroken failure details inside the outcome card', () => {
@@ -1063,7 +1300,7 @@ describe('JobDetail', () => {
   it('does not offer a follow-up after an admitted turn lost native context', () => {
     render(<JobDetail job={makeJob({ state: 'cancelled', contextStatus: 'lost' })} />);
 
-    expect(screen.getByText(/context can no longer be resumed/i)).toBeInTheDocument();
+    expect(screen.getByText(/This chat can no longer be resumed/i)).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Send follow-up' })).toBeDisabled();
     expect(screen.queryByText(/restores any saved changes/i)).toBeNull();
@@ -1075,8 +1312,9 @@ describe('JobDetail', () => {
     );
 
     expect(screen.getByLabelText('Add a follow-up')).toBeDisabled();
-    expect(screen.getByText(/Agent CLI context can no longer be resumed/)).toBeInTheDocument();
-    expect(screen.getByText(/Start a new chat/)).toBeInTheDocument();
+    expect(screen.getByText(/This chat can no longer be resumed/)).toBeInTheDocument();
+    expect(screen.getByText(/Start a new chat ·/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'New chat' })).toHaveAttribute('href', '/');
   });
 
   it('forks the settled current native session', async () => {

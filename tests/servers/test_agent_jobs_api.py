@@ -5138,7 +5138,68 @@ async def test_an_unmeasured_turn_reports_nothing_rather_than_zero(
     assert job["telemetry_attempt_id"] is None
     assert job["resources"] is None
     assert job["continuity_mode"] is None
+    assert job["started_at"] is None
+    assert job["finished_at"] is None
     assert job["duration_ms"] is None
+
+
+@pytest.mark.parametrize("state", ["running", "failed"])
+async def test_job_timing_does_not_invent_a_missing_attempt_finish(
+    client: AsyncClient, store: FakeAgentJobStore, state: str
+):
+    """A job update or terminal state cannot supply an unrecorded end time."""
+    job_id = await _create_job(client)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    store.jobs[job_id].update(
+        state=state,
+        created_at=started - timedelta(minutes=1),
+        updated_at=started + timedelta(minutes=5),
+    )
+    store.attempt_telemetry[job_id] = [
+        {
+            "attempt_id": 100,
+            "attempt_no": 1,
+            "started_at": started,
+            "finished_at": None,
+        }
+    ]
+
+    for query in ("", "?include_resources=false"):
+        response = await client.get(f"/v1/agent/jobs/{job_id}{query}")
+        assert response.status_code == 200
+        job = response.json()
+        assert job["started_at"] == started.isoformat()
+        assert job["finished_at"] is None
+        assert job["duration_ms"] is None
+
+
+async def test_job_list_and_thread_do_not_substitute_job_dates_for_execution_timing(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Paths without a telemetry read leave the execution window unknown."""
+    job_id = await _create_job(client)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    store.jobs[job_id].update(
+        state="succeeded",
+        created_at=started - timedelta(minutes=1),
+        updated_at=started + timedelta(minutes=5),
+    )
+    store.attempt_telemetry[job_id] = [
+        {
+            "attempt_id": 100,
+            "attempt_no": 1,
+            "started_at": started,
+            "finished_at": started + timedelta(seconds=9),
+        }
+    ]
+
+    for path in ("/v1/agent/jobs", f"/v1/agent/jobs/{job_id}/thread"):
+        response = await client.get(path)
+        assert response.status_code == 200
+        job = response.json()["jobs"][0]
+        assert job["started_at"] is None
+        assert job["finished_at"] is None
+        assert job["duration_ms"] is None
 
 
 async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
@@ -5147,6 +5208,7 @@ async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
     """Selecting an old transcript must never show the retry's measurements."""
     job_id = await _create_job(client)
     started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    newest_started = started + timedelta(seconds=5)
     store.attempt_telemetry = {
         job_id: [
             {
@@ -5166,8 +5228,8 @@ async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
                 "attempt_no": 2,
                 "continuity_mode": "warm_native",
                 "context_status": "restored",
-                "started_at": started,
-                "finished_at": started + timedelta(seconds=9),
+                "started_at": newest_started,
+                "finished_at": newest_started + timedelta(seconds=9),
                 "sampler_version": "2",
                 "cpu_usec": 7_000_000,
                 "sample_count": 9,
@@ -5185,8 +5247,15 @@ async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
     assert "resources" not in first and "resources" not in second
     # Existing clients still receive the newest attempt at the top level.
     assert job["telemetry_attempt_id"] == 101
+    assert job["started_at"] == newest_started.isoformat()
+    assert job["finished_at"] == (newest_started + timedelta(seconds=9)).isoformat()
     assert job["duration_ms"] == 9_000
     assert job["resources"]["cpu_usec"] == 7_000_000
+
+    lightweight = (await client.get(f"/v1/agent/jobs/{job_id}?include_resources=false")).json()
+    assert lightweight["started_at"] == job["started_at"]
+    assert lightweight["finished_at"] == job["finished_at"]
+    assert lightweight["duration_ms"] == job["duration_ms"]
 
     old = (await client.get(f"/v1/agent/jobs/{job_id}/attempts/100/telemetry")).json()
     assert old["attempt_id"] == 100

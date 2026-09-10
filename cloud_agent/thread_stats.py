@@ -231,6 +231,36 @@ class _TokenTotals:
         return self.cache_read_tokens / total
 
 
+def normalized_runtime_input_tokens(
+    *, runtime: str | None, events: Iterable[Mapping[str, Any]]
+) -> int | None:
+    """Return cache-inclusive input only when the runtime's counters establish it.
+
+    Claude and pi report uncached input, cache reads and cache writes as
+    disjoint counters. Codex input already includes cache hits. Missing cache
+    counters cannot be assumed to be zero, and unknown harnesses have no
+    verified input convention. Keep the original counters alongside this
+    nullable projection for diagnostics.
+    """
+    if runtime not in {"claude-code", "pi", "codex"}:
+        return None
+    usages = list(_distinct_usage(sorted(events, key=_event_sort_key)))
+    if not usages:
+        return None
+    total = 0
+    for usage in usages:
+        keys = (
+            (_INPUT_KEYS, _CACHE_READ_KEYS, _CACHE_WRITE_KEYS)
+            if runtime in {"claude-code", "pi"}
+            else (_INPUT_KEYS,)
+        )
+        values = [_first_int(usage, group) for group in keys]
+        if any(value is None for value in values):
+            return None
+        total += sum(value for value in values if value is not None)
+    return total
+
+
 def _distinct_usage(events: Sequence[Mapping[str, Any]]) -> Iterable[Mapping[str, Any]]:
     """Prefer completed attempt totals; otherwise count each response once.
 

@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import toast from 'react-hot-toast';
 
 import { Markdown } from '@/components/ui/Markdown';
@@ -24,7 +25,7 @@ import {
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
 
-import { lifecyclePhaseLabel, toDiffFileDetails } from './adapt';
+import { lifecyclePhaseLabel, sandboxDisplayLabel, toDiffFileDetails } from './adapt';
 import { isComposerSubmit } from './composerKeys';
 import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage } from './LedgerUsage';
@@ -70,9 +71,11 @@ const STATE_PILL: Record<AgentJob['state'], { label: string; className: string; 
     dot: 'bg-gray-400 dark:bg-gray-600',
   },
   needs_review: {
-    label: 'Needs review',
+    // This display enum means API succeeded without a published PR. A run
+    // that produced no patch needs no review, so completion is the truth.
+    label: 'Completed',
     className:
-      'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-1 ring-inset ring-amber-100 dark:ring-amber-500/25',
+      'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-100 dark:ring-emerald-500/25',
   },
   done: {
     label: 'Done',
@@ -517,25 +520,205 @@ function HistoryTurn({
   );
 }
 
-function DetailStat({ label, value }: { label: string; value: string }) {
+function DetailStat({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-4 py-1.5 text-[13px]">
       <dt className="text-gray-500 dark:text-gray-400">{label}</dt>
-      <dd className="break-all text-right text-gray-800 dark:text-gray-200">{value || '—'}</dd>
+      <dd className="break-all text-right text-gray-800 dark:text-gray-200">
+        {value === '' || value === null || value === undefined ? '—' : value}
+      </dd>
     </div>
   );
+}
+
+function hasLostContext(job: AgentJob): boolean {
+  return job.nativeState === 'lost' || job.contextStatus === 'lost';
+}
+
+function ownerRunNote(job: AgentJob): string | undefined {
+  // Success detail contains runner/publication bookkeeping, not the answer.
+  // The transcript carries the result; publication has its own status row.
+  return job.state === 'done' || job.state === 'needs_review' ? undefined : job.stateNote;
+}
+
+function RunGuidance({ job }: { job: AgentJob }) {
+  if (hasLostContext(job)) {
+    return (
+      <div className="mt-2 space-y-2 text-xs text-gray-600 dark:text-gray-400">
+        <p>
+          This chat can no longer be resumed. Files already written remain in the workspace. Start a
+          new chat to continue.
+        </p>
+        <Link
+          href="/"
+          className="inline-flex rounded-md bg-white px-3 py-1.5 font-medium text-gray-700 ring-1 ring-gray-200 hover:bg-gray-50 dark:bg-gray-900 dark:text-gray-300 dark:ring-white/10 dark:hover:bg-white/5"
+        >
+          New chat
+        </Link>
+      </div>
+    );
+  }
+  if (job.state === 'cancelled') {
+    return (
+      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        Send a follow-up to continue from any saved intermediate changes.
+      </p>
+    );
+  }
+  if (job.state === 'failed') {
+    return (
+      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        Review the failure details, then send a follow-up to try again.
+      </p>
+    );
+  }
+  return null;
+}
+
+function RunActions({
+  job,
+  onOpenDiff,
+  showChanges = job.diffFiles.length > 0,
+}: {
+  job: AgentJob;
+  onOpenDiff: () => void;
+  showChanges?: boolean;
+}) {
+  return (
+    <>
+      {showChanges ? (
+        <button
+          type="button"
+          onClick={onOpenDiff}
+          className="rounded-md bg-white dark:bg-gray-900 px-3 py-1.5 text-[13px] font-medium text-gray-700 dark:text-gray-300 shadow-sm ring-1 ring-inset ring-gray-200 dark:ring-white/10 hover:bg-gray-50 dark:hover:bg-white/5"
+        >
+          View changes
+        </button>
+      ) : null}
+      {job.prUrl ? (
+        <a
+          href={job.prUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
+        >
+          Open draft PR
+        </a>
+      ) : null}
+    </>
+  );
+}
+
+function timestamp(value: string | null | undefined): number | null {
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function elapsedTime(ms: number): string {
+  const seconds = Math.floor(Math.max(0, ms) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function RunTiming({ job }: { job: AgentJob }) {
+  const [now, setNow] = useState(() => Date.now());
+  const start = timestamp(job.startedAt);
+  const end = timestamp(job.finishedAt);
+  useEffect(() => {
+    if (job.state !== 'running' || start === null || end !== null) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [job.id, job.state, start, end]);
+  const duration =
+    start !== null && end !== null && end >= start
+      ? end - start
+      : start !== null && job.state === 'running' && end === null
+        ? Math.max(0, now - start)
+        : job.state !== 'running' &&
+            job.state !== 'queued' &&
+            typeof job.durationMs === 'number' &&
+            Number.isFinite(job.durationMs)
+          ? job.durationMs
+          : null;
+  return (
+    <dl className="mt-3 divide-y divide-gray-100 dark:divide-white/5">
+      {job.turnNo !== undefined ? <DetailStat label="Turn" value={job.turnNo} /> : null}
+      <DetailStat
+        label="Started"
+        value={
+          start !== null ? (
+            <time dateTime={job.startedAt!}>
+              {new Date(start).toLocaleString(undefined, {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                timeZoneName: 'short',
+              })}
+            </time>
+          ) : job.state === 'queued' ? (
+            'Not started'
+          ) : (
+            'Not recorded'
+          )
+        }
+      />
+      {job.state !== 'queued' ? (
+        <DetailStat
+          label="Elapsed"
+          value={duration !== null ? elapsedTime(duration) : 'Not recorded'}
+        />
+      ) : null}
+    </dl>
+  );
+}
+
+/** Link a failure only to its matching error, never a transient tool failure. */
+function failureRawIndex(job: AgentJob): number | null {
+  if (job.state !== 'failed' || !job.stateNote?.trim()) return null;
+  const currentAttemptId = job.attempts.find((attempt) => attempt.no === job.currentAttemptNo)?.id;
+  for (let index = job.rawLines.length - 1; index >= 0; index -= 1) {
+    try {
+      const event = JSON.parse(job.rawLines[index]) as AgentJobEventApi;
+      if (currentAttemptId !== undefined && event.attempt_id !== currentAttemptId) continue;
+      if (event.event_type !== 'error' || event.payload?.host) continue;
+      const detail = event.payload?.detail ?? event.payload?.text ?? event.payload?.message;
+      if (typeof detail === 'string' && detail.trim() === job.stateNote.trim()) return index;
+    } catch {
+      // Older fixtures and unavailable raw records do not provide an anchor.
+    }
+  }
+  return null;
 }
 
 function DetailsDrawer({
   job,
   initialView,
   onClose,
+  onOpenDiff,
 }: {
   job: AgentJob;
   initialView: DrawerView;
   onClose: () => void;
+  onOpenDiff: () => void;
 }) {
   const [view, setView] = useState(initialView);
+  const [highlightedRawIndex, setHighlightedRawIndex] = useState<number | null>(null);
+  const highlightedRawRef = useRef<HTMLSpanElement | null>(null);
+  const failureIndex = useMemo(() => failureRawIndex(job), [job]);
+  const pill = STATE_PILL[job.state];
+  const runNote = ownerRunNote(job);
+  const hasDiff = job.workspaceDiffAvailable ?? job.diffFiles.length > 0;
+  useEffect(() => {
+    if (view !== 'raw' || highlightedRawIndex === null) return;
+    highlightedRawRef.current?.scrollIntoView?.({ block: 'center' });
+    highlightedRawRef.current?.focus({ preventScroll: true });
+  }, [view, highlightedRawIndex]);
   return (
     <div className="fixed inset-0 z-[70] flex justify-end" role="dialog" aria-label="Run details">
       <button
@@ -577,6 +760,7 @@ function DetailsDrawer({
             <button
               key={key}
               type="button"
+              aria-pressed={view === key}
               onClick={() => setView(key)}
               className={`border-b-2 px-3 py-2 ${
                 view === key
@@ -592,15 +776,98 @@ function DetailsDrawer({
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           {view === 'overview' ? (
             <div className="space-y-6">
-              <section>
+              <section aria-label="Run outcome">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                    Outcome
+                  </h3>
+                  <span
+                    className={`rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
+                  >
+                    {pill.label}
+                  </span>
+                </div>
+                <RunTiming job={job} />
+                {runNote && runNote.length > 240 ? (
+                  <details className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
+                    <summary className="cursor-pointer">{runNote.slice(0, 240)}…</summary>
+                    <p className="mt-2 whitespace-pre-wrap">{runNote}</p>
+                  </details>
+                ) : runNote ? (
+                  <p className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
+                    {runNote}
+                  </p>
+                ) : job.state === 'failed' ? (
+                  <p className="mt-3 text-[13px] text-gray-600 dark:text-gray-400">
+                    The run stopped before it could finish. No failure details were recorded.
+                  </p>
+                ) : null}
+                <RunGuidance job={job} />
+                {job.state === 'failed' && job.rawLines.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHighlightedRawIndex(failureIndex);
+                      setView('raw');
+                    }}
+                    className="mt-2 text-xs font-medium text-blue-700 underline underline-offset-2 dark:text-blue-400"
+                  >
+                    {failureIndex !== null ? 'View failure event' : 'Inspect raw events'}
+                  </button>
+                ) : null}
+              </section>
+              <section aria-label="Workspace changes">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                  Outcome
+                  Workspace changes
                 </h3>
+                <p className="mt-2 text-sm font-medium text-gray-800 dark:text-gray-200">
+                  {hasDiff
+                    ? `${job.diffFiles.length} file${job.diffFiles.length === 1 ? '' : 's'} changed`
+                    : 'Workspace changes unavailable'}
+                  {hasDiff && job.diffStat ? (
+                    <span className="ml-2 whitespace-nowrap font-mono text-xs">
+                      <span className="text-emerald-600 dark:text-emerald-400">
+                        +{job.diffStat.add}
+                      </span>{' '}
+                      <span className="text-red-500 dark:text-red-400">−{job.diffStat.del}</span>
+                    </span>
+                  ) : null}
+                </p>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Current workspace compared with the base. It may include changes from other turns
+                  {job.workspaceShared ? ' and chats sharing this workspace' : ''}.
+                </p>
                 <dl className="mt-2 divide-y divide-gray-100 dark:divide-white/5">
                   <DetailStat label="Branch" value={job.branch} />
-                  <DetailStat label="Base" value={job.baseSha} />
-                  <DetailStat label="Draft PR" value={job.prLabel ?? 'Not published'} />
+                  <DetailStat
+                    label="Pull request"
+                    value={
+                      job.prUrl ? (
+                        <a
+                          href={job.prUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-700 underline underline-offset-2 dark:text-blue-400"
+                        >
+                          {job.prLabel ?? 'Draft PR'}
+                        </a>
+                      ) : job.workspacePublicationState === 'failed' ? (
+                        'Could not publish changes'
+                      ) : job.workspacePublicationState === 'publishing' ? (
+                        'Publishing changes…'
+                      ) : (
+                        'No pull request yet'
+                      )
+                    }
+                  />
                 </dl>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <RunActions
+                    job={job}
+                    onOpenDiff={onOpenDiff}
+                    showChanges={hasDiff || job.state !== 'queued'}
+                  />
+                </div>
               </section>
               <LedgerUsage job={job} />
               <section>
@@ -616,11 +883,30 @@ function DetailsDrawer({
                   {job.reasoningEffort ? (
                     <DetailStat label="Reasoning" value={job.reasoningEffort} />
                   ) : null}
-                  <DetailStat label="Sandbox" value={job.sandbox} />
-                  <DetailStat label="Setup network" value={job.networkSetup} />
-                  <DetailStat label="Agent network" value={job.networkAgent} />
-                  <DetailStat label="Egress denials" value={String(job.egressDenials)} />
+                  <DetailStat label="Repository" value={job.repo} />
+                  <DetailStat
+                    label="Base"
+                    value={
+                      job.baseRef && job.baseSha
+                        ? `${job.baseRef} · ${job.baseSha}`
+                        : job.baseRef || job.baseSha
+                    }
+                  />
+                  <DetailStat
+                    label="Sandbox"
+                    value={sandboxDisplayLabel(job.sandbox) || 'Not recorded'}
+                  />
                 </dl>
+                {job.egressDenials > 0 ? (
+                  <p
+                    role="note"
+                    className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
+                  >
+                    {job.egressDenials} network request{job.egressDenials === 1 ? ' was' : 's were'}{' '}
+                    blocked by the sandbox. This may have prevented part of your task from
+                    completing.
+                  </p>
+                ) : null}
               </section>
               {job.gates.length ? (
                 <section>
@@ -650,28 +936,6 @@ function DetailsDrawer({
                             </span>
                           ) : null}
                         </span>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              ) : null}
-              {job.attempts.length ? (
-                <section>
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                    Attempts
-                  </h3>
-                  <ul className="mt-2 space-y-2 text-[13px] text-gray-600 dark:text-gray-400">
-                    {job.attempts.map((attempt) => (
-                      <li
-                        key={attempt.no}
-                        className="rounded-lg bg-gray-50 dark:bg-gray-950 px-3 py-2"
-                      >
-                        Attempt {attempt.no} · {attempt.status}
-                        {attempt.note ? (
-                          <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
-                            {attempt.note}
-                          </p>
-                        ) : null}
                       </li>
                     ))}
                   </ul>
@@ -707,14 +971,30 @@ function DetailsDrawer({
                 </pre>
               </div>
             ) : (
-              <p className="text-sm text-gray-400 dark:text-gray-500">No changes yet.</p>
+              <p className="text-sm text-gray-400 dark:text-gray-500">
+                {hasDiff ? 'No workspace changes.' : 'Workspace changes are not available.'}
+              </p>
             )
           ) : null}
 
           {view === 'raw' ? (
             job.rawLines.length ? (
-              <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg bg-gray-950 p-4 font-mono text-[11px] leading-relaxed text-gray-300 dark:text-gray-600">
-                {job.rawLines.join('\n')}
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg bg-gray-950 p-4 font-mono text-[11px] leading-relaxed text-gray-300">
+                {job.rawLines.map((line, index) => (
+                  <span
+                    key={index}
+                    ref={index === highlightedRawIndex ? highlightedRawRef : undefined}
+                    tabIndex={index === highlightedRawIndex ? -1 : undefined}
+                    aria-label={index === highlightedRawIndex ? 'Failure event' : undefined}
+                    className={
+                      index === highlightedRawIndex
+                        ? 'block rounded bg-red-500/20 px-1 text-red-100 dark:text-red-100 ring-1 ring-red-400/60'
+                        : 'block'
+                    }
+                  >
+                    {line}
+                  </span>
+                ))}
               </pre>
             ) : (
               <p className="text-sm text-gray-400 dark:text-gray-500">No raw events yet.</p>
@@ -729,6 +1009,7 @@ function DetailsDrawer({
 function OutcomeCard({ job, onOpenDiff }: { job: AgentJob; onOpenDiff: () => void }) {
   if (job.state === 'running' || job.state === 'queued') return null;
   const successful = job.state === 'done' || job.state === 'needs_review';
+  const runNote = ownerRunNote(job);
   return (
     <div
       className={`mt-6 rounded-xl border px-4 py-3 ${
@@ -748,41 +1029,14 @@ function OutcomeCard({ job, onOpenDiff }: { job: AgentJob; onOpenDiff: () => voi
                   ? 'Run failed'
                   : 'Run stopped'}
           </p>
-          {job.stateNote ? (
+          {runNote ? (
             <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400 [overflow-wrap:anywhere]">
-              {job.stateNote}
+              {runNote}
             </p>
           ) : null}
-          {job.nativeState === 'lost' || job.contextStatus === 'lost' ? (
-            <p className="mt-1 text-xs text-red-600 dark:text-red-400">
-              This Agent CLI context can no longer be resumed. Files already written remain in the
-              retained workspace, but continuing requires a new chat.
-            </p>
-          ) : job.state === 'cancelled' ? (
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Send a follow-up to continue from any saved intermediate changes.
-            </p>
-          ) : null}
+          <RunGuidance job={job} />
         </div>
-        {job.diffFiles.length ? (
-          <button
-            type="button"
-            onClick={onOpenDiff}
-            className="rounded-md bg-white dark:bg-gray-900 px-3 py-1.5 text-[13px] font-medium text-gray-700 dark:text-gray-300 shadow-sm ring-1 ring-inset ring-gray-200 dark:ring-white/10 hover:bg-gray-50 dark:hover:bg-white/5"
-          >
-            View changes
-          </button>
-        ) : null}
-        {job.prUrl ? (
-          <a
-            href={job.prUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
-          >
-            Open draft PR
-          </a>
-        ) : null}
+        <RunActions job={job} onOpenDiff={onOpenDiff} />
       </div>
     </div>
   );
@@ -1168,6 +1422,7 @@ export function JobDetail({
   }, [job.id]);
 
   const selectedAttempt = job.attempts.find((attempt) => attempt.no === attemptNo);
+  const runNote = ownerRunNote(job);
   const visibleEvents = job.events.filter(
     (event) => event.attemptNo === undefined || attemptNo === 0 || event.attemptNo === attemptNo,
   );
@@ -1177,7 +1432,7 @@ export function JobDetail({
   // `contextStatus` describes the selected attempt. `nativeState` is the
   // current membership truth, so it also closes the composer when someone is
   // viewing an older successful turn after a later admitted turn was lost.
-  const contextLost = job.nativeState === 'lost' || job.contextStatus === 'lost';
+  const contextLost = hasLostContext(job);
   const latestTerminalEvent = [...job.events]
     .reverse()
     .find(
@@ -1583,8 +1838,8 @@ export function JobDetail({
                   </div>
                 )}
 
-                {job.stateNote && job.state !== 'failed' ? (
-                  <p className="mb-2 text-xs text-gray-400 dark:text-gray-500">{job.stateNote}</p>
+                {runNote && job.state !== 'failed' ? (
+                  <p className="mb-2 text-xs text-gray-400 dark:text-gray-500">{runNote}</p>
                 ) : null}
 
                 {job.attempts.length > 1 ? (
@@ -1835,7 +2090,16 @@ export function JobDetail({
       </div>
 
       {drawer ? (
-        <DetailsDrawer job={job} initialView={drawer} onClose={() => setDrawer(null)} />
+        <DetailsDrawer
+          key={job.id}
+          job={job}
+          initialView={drawer}
+          onClose={() => setDrawer(null)}
+          onOpenDiff={() => {
+            setDrawer(null);
+            openWorkspace('git');
+          }}
+        />
       ) : null}
     </section>
   );

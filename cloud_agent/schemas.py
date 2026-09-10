@@ -351,6 +351,13 @@ class AgentJobResponse(BaseModel):
         Literal["pending", "capturing", "captured", "publishing", "published", "failed"] | None
     ) = None
     workspace_epoch: int | None = None
+    # These clocks and duration describe the newest execution attempt, not
+    # queue time or a sum across historical attempts. They are populated from
+    # that attempt's recorded timestamps on the single-job read only; null
+    # also covers an unavailable/unfetched record, not just a turn yet to run.
+    # In particular, updated_at is never a substitute for a missing finish.
+    started_at: str | None = None
+    finished_at: str | None = None
     duration_ms: int | None = None
     resources: AttemptResources | None = None
     # Only summaries are repeated in job reads; resource details are fetched

@@ -156,7 +156,12 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     // "the sandbox tried to reach X" is a different story from "it failed".
     const host = asText(payload, 'host');
     if (host) {
-      const attempts = typeof payload.attempts === 'number' ? payload.attempts : 1;
+      const attempts =
+        typeof payload.attempts === 'number' &&
+        Number.isSafeInteger(payload.attempts) &&
+        payload.attempts > 0
+          ? payload.attempts
+          : 1;
       return { kind: 'egress_denied', host, attempts };
     }
     return { kind: 'lifecycle', text: asText(payload, 'detail', 'text') || 'error' };
@@ -280,11 +285,22 @@ function sandboxLabel(events: AgentJobEventApi[], currentAttemptId: number | nul
   if (!started) return '';
 
   const backend = asText(started.payload, 'sandbox_backend');
-  if (!backend) return '';
   const runtime = asText(started.payload, 'sandbox_runtime');
-  const image = asText(started.payload, 'sandbox_image');
-  const boundary = runtime ? `${backend} (${runtime})` : backend;
-  return image ? `${boundary} · ${image}` : boundary;
+  return sandboxDisplayLabel(backend || runtime, runtime);
+}
+
+/** Keep older runtime identifiers readable when they reach the display model. */
+export function sandboxDisplayLabel(backend: string, runtime?: string): string {
+  if (
+    backend === 'kata' ||
+    backend === 'io.containerd.kata.v2' ||
+    runtime === 'io.containerd.kata.v2'
+  ) {
+    return 'Isolated VM';
+  }
+  if (backend === 'container' || backend === 'docker') return 'Container';
+  if (backend === 'process') return 'Host process';
+  return backend;
 }
 
 /** Render a token count compactly, or empty when there is no ledger. */
@@ -602,7 +618,10 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     };
   });
 
-  const egressDenials = renderedEvents.filter((event) => event.kind === 'egress_denied').length;
+  const egressDenials = renderedEvents.reduce(
+    (total, event) => total + (event.kind === 'egress_denied' ? event.attempts : 0),
+    0,
+  );
   const currentTurn =
     job.turn_no ?? options.thread?.jobs.find((threadJob) => threadJob.id === job.id)?.turn_no;
   let priorJobIds: Set<string> | null = null;
@@ -666,6 +685,8 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
   return {
     id: job.id,
     createdAt: job.created_at,
+    startedAt: job.started_at,
+    finishedAt: job.finished_at,
     pinnedAt: job.pinned_at,
     title: (options.thread?.title ?? job.task_prompt.split('\n')[0]).slice(0, 80),
     prompt: job.task_prompt,
@@ -708,6 +729,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     events: renderedEvents,
     eventCount: events.length,
     diffFiles: toDiffFiles(patch),
+    workspaceDiffAvailable: typeof options.patch === 'string',
     diffFileDetails: toDiffFileDetails(patch),
     diffStat: diffStat(patch),
     diffLines: toDiffLines(patch),
