@@ -416,7 +416,14 @@ class FakeAgentJobStore:
             },
         }
 
-    async def link_residency_grant(self, *, thread_id: str, generation: int, grant_id: str) -> bool:
+    async def link_residency_grant(
+        self,
+        *,
+        thread_id: str,
+        generation: int,
+        grant_id: str,
+        binding_id: str | None = None,
+    ) -> bool:
         return True
 
     async def release_residency(self, *, thread_id: str, generation: int, host: str) -> str | None:

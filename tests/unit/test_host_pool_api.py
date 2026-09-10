@@ -58,7 +58,7 @@ class FakeHostPoolStore:
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
         self.establish_answer: dict[str, Any] | None = None
-        self.linked: list[tuple[str, int, str]] = []
+        self.linked: list[tuple[str, int, str, str | None]] = []
         self.link_ok = True
         self.beat_answers: dict[tuple[str, int], str | None] = {}
         self.release_answer: str | None = None
@@ -236,8 +236,15 @@ class FakeHostPoolStore:
     async def establish_residency(self, **_kwargs: Any) -> dict[str, Any] | None:
         return self.establish_answer
 
-    async def link_residency_grant(self, *, thread_id: str, generation: int, grant_id: str) -> bool:
-        self.linked.append((thread_id, generation, grant_id))
+    async def link_residency_grant(
+        self,
+        *,
+        thread_id: str,
+        generation: int,
+        grant_id: str,
+        binding_id: str | None = None,
+    ) -> bool:
+        self.linked.append((thread_id, generation, grant_id, binding_id))
         return self.link_ok
 
     async def heartbeat_residency(
