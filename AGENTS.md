@@ -22,6 +22,10 @@ work tracks in this repository's issues and pull requests.
 ```text
 cloud_agent/            control plane (FastAPI): API, auth adapter, scheduler,
                         source-control integrations, publishing, storage
+  ports/                the persistence interfaces the control plane depends
+                        on, one Protocol per domain — declared here, so the
+                        dependency points inward
+  storage/repositories/ the Postgres implementations of those ports
 cloud_agent_host/       host agent: runner, sandbox, runtimes, workspace broker
 web/                    Next.js user UI + admin dashboard
 contracts/              OpenAPI mirrors of the gateway contracts we consume

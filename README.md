@@ -105,6 +105,9 @@ Three deployment units, one repository:
 
 ```text
 cloud_agent/           control plane: API, auth adapter, scheduler, publishing
+  ports/               persistence ports (Protocols) the control plane needs
+  storage/             Postgres: repositories implementing those ports, and
+                       AgentJobStore, which composes them
 cloud_agent_host/      runner, sandbox, runtimes, workspace broker
 web/                   Next.js app (user UI + admin dashboard)
 contracts/             OpenAPI documents for the three gateway contracts
