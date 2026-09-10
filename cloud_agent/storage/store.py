@@ -947,7 +947,7 @@ class AgentJobStore:
         if execution_profile is None:
             execution_profile = default_execution_profile().value
         if client_request_id is not None:
-            replayed = await self._replayed_submission(
+            replayed = await self.replayed_submission(
                 user_id=user_id,
                 client_request_id=client_request_id,
                 fingerprint=client_request_fingerprint,
@@ -1007,7 +1007,7 @@ class AgentJobStore:
             # Two sends of one submission racing: the loser reads the winner.
             if exc.constraint_name != "uq_agent_jobs_client_request":
                 raise
-            replayed = await self._replayed_submission(
+            replayed = await self.replayed_submission(
                 user_id=user_id,
                 client_request_id=client_request_id,
                 fingerprint=client_request_fingerprint,
@@ -1052,7 +1052,7 @@ class AgentJobStore:
         """
         _check_client_request(client_request_id, client_request_fingerprint)
         if client_request_id is not None:
-            replayed = await self._replayed_submission(
+            replayed = await self.replayed_submission(
                 user_id=user_id,
                 client_request_id=client_request_id,
                 fingerprint=client_request_fingerprint,
@@ -1074,7 +1074,7 @@ class AgentJobStore:
         except asyncpg.UniqueViolationError as exc:
             if exc.constraint_name != "uq_agent_jobs_client_request":
                 raise
-            replayed = await self._replayed_submission(
+            replayed = await self.replayed_submission(
                 user_id=user_id,
                 client_request_id=client_request_id,
                 fingerprint=client_request_fingerprint,
@@ -1082,10 +1082,20 @@ class AgentJobStore:
             assert replayed is not None
             return replayed
 
-    async def _replayed_submission(
+    async def replayed_submission(
         self, *, user_id: str, client_request_id: str, fingerprint: str | None
     ) -> dict[str, Any] | None:
-        """The job an owner's key already made, a conflict, or ``None`` for a new key."""
+        """The job an owner's key already made, a conflict, or ``None`` for a new key.
+
+        Public because the routes ask it *before* their checks that can change
+        between two sends of one submission — model resolution, repo
+        entitlement, tool-server connections, whether the session is still
+        open. A resend must reach the job the first send made whatever has
+        happened since; only a key that has never been used runs those checks.
+        :meth:`create_job` and :meth:`create_follow_up` still ask it
+        themselves, so a race that slips past the route is still resolved by
+        the unique index rather than by a second task.
+        """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id, client_request_fingerprint FROM agent_jobs "

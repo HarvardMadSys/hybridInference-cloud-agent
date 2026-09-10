@@ -992,6 +992,73 @@ first heartbeat before enabling retained chats.
 Conversation history is not carried over by design; the forensic dump is read
 with a throwaway `postgres:16-alpine` when needed and never imported back.
 
+### Applying migrations that are not backwards-compatible
+
+`deploy.sh` migrates before it replaces the API, so a revision it applies has to
+keep the still-running API working for the length of that window — the script
+says so where it runs `migrate`. The revisions that follow the rewritten
+baseline do not, and are applied in a maintenance window instead of by a rolling
+deploy. (`0003_thread_level_config` and `0004_residency_on_membership` arrive in
+the revisions stacked on this one; the window covers them as well.)
+
+- `0002_request_keys_and_actors` drops the default on
+  `agent_admin_audit_log.actor_id`. The API that predates it inserts audit rows
+  without the column, and `log_admin_action` swallows the failure by design, so
+  the window would silently lose administrator audit rows rather than fail.
+- `0003_thread_level_config` drops `agent_jobs.repo`, `setup_script`,
+  `execution_profile` and `mcp_servers`, which the older API selects on every
+  job read.
+- `0004_residency_on_membership` drops `agent_thread_residencies`, which the
+  older API writes on every residency heartbeat.
+
+The runner holds no database connection — its heartbeats are HTTP calls to the
+control plane — so stopping the control plane, the MCP relay and the web tier
+leaves the database with no writer.
+
+1. Drain the hosts, keep the generated `cloudagent-undrain-*.sql`, and wait for
+   two counts to reach zero. Neither can be settled once the writers stop, so
+   both are waited out here, as in step 1 of the rebuild above:
+
+   ```bash
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
+     "SELECT count(*) FROM agent_attempts WHERE status = 'running'; \
+      SELECT count(*) FROM agent_session_forks WHERE state IN ('preparing', 'materialized')"
+   ```
+
+   A fork still `preparing` or `materialized` is one its coordinator has not
+   finished. `0004` refuses to run over it rather than tombstone a fork the
+   reaper might still finalize, and the reaper runs inside the API — so it has
+   to settle before anything is stopped. A stale `preparing` operation is failed
+   after the stall window (15 minutes by default).
+
+2. Stop the writers:
+
+   ```bash
+   docker stop cloudagent-control-plane-1 cloudagent-mcp-relay-1 cloudagent-web-1
+   ```
+
+3. Build and run the target's `migrate` image with nothing writing. As in step 3
+   of the rebuild above, this runs in the deploy root with the target commit
+   checked out, and the image is built before the database is touched:
+
+   ```bash
+   export AGENT_DEPLOYMENT_SHA="$(git rev-parse HEAD)"
+   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml build migrate
+   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml \
+     run --rm --no-deps migrate
+   ```
+
+4. Undrain the hosts recorded in step 1, then deploy the target commit as usual.
+   Its migration is a no-op, and readiness can now see a host that is allowed to
+   claim:
+
+   ```bash
+   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-undrain-$(date +%F).sql
+   deploy/control-plane/deploy.sh "${AGENT_DEPLOYMENT_SHA}"
+   ```
+
+5. Run the acceptance sweep in step 7 of the rebuild above.
+
 ### Retained Docker storage on a host
 
 Retained chat state is the Docker container writable layer, so durable

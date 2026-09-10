@@ -149,6 +149,25 @@ class FakeAgentJobStore:
         )
         return job
 
+    async def replayed_submission(
+        self, *, user_id: str, client_request_id: str, fingerprint: str | None
+    ) -> dict[str, Any] | None:
+        """The job this owner's key already made, a conflict, or ``None``.
+
+        The routes ask this before their mutable checks, so a fake that did
+        not answer it would send every resend down an ``AttributeError``
+        instead of the replay the test is about.
+        """
+        for job in self.jobs.values():
+            if job.get("user_id") != user_id:
+                continue
+            if job.get("client_request_id") != client_request_id:
+                continue
+            if job.get("client_request_fingerprint") != fingerprint:
+                return {"error": "client_request_conflict"}
+            return job
+        return None
+
     async def create_follow_up(
         self,
         *,
@@ -208,6 +227,10 @@ class FakeAgentJobStore:
             "created_at": None,
             "updated_at": None,
             "pinned_at": self.pinned_threads.get(parent["thread_id"]),
+            # The child is its own submission, so it carries its own key
+            # rather than inheriting the parent's.
+            "client_request_id": client_request_id,
+            "client_request_fingerprint": client_request_fingerprint,
         }
         self.jobs[job_id] = job
         self.messages.append(
@@ -6024,3 +6047,98 @@ async def test_a_reused_key_under_different_content_is_a_409(
     )
     assert response.status_code == 409
     assert response.json()["detail"]["error"]["type"] == "idempotency_conflict"
+
+
+async def test_a_follow_up_resend_after_archiving_returns_the_first_turn(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """The replay wins over a check that changed after the first send.
+
+    The first send succeeded and its response was lost; the session was then
+    archived. A retry under the same key and content is that same submission,
+    so it must return the turn the first send made rather than the 409 the
+    archive would give a genuinely new turn.
+    """
+    parent_id = await _create_job(client)
+    body = {"prompt": "and then"}
+    headers = {"Idempotency-Key": "turn-2"}
+
+    first = await client.post(f"/v1/agent/jobs/{parent_id}/follow-ups", json=body, headers=headers)
+    assert first.status_code == 201, first.text
+
+    await store.set_thread_archived(job_id=parent_id, user_id=_OWNER, archived=True)
+
+    again = await client.post(f"/v1/agent/jobs/{parent_id}/follow-ups", json=body, headers=headers)
+    assert again.status_code == 201, again.text
+    assert again.json()["id"] == first.json()["id"]
+    assert len(store.jobs) == 2
+
+
+async def test_a_follow_up_resend_after_the_sandbox_is_lost_returns_the_first_turn(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Same rule for the other advisory check the handler runs before the store."""
+    parent_id = await _create_job(client)
+    body = {"prompt": "and then"}
+    headers = {"Idempotency-Key": "turn-2"}
+
+    first = await client.post(f"/v1/agent/jobs/{parent_id}/follow-ups", json=body, headers=headers)
+    assert first.status_code == 201, first.text
+
+    store.jobs[parent_id]["thread_sandbox"] = {"shared_live": True, "context_status": "lost"}
+
+    again = await client.post(f"/v1/agent/jobs/{parent_id}/follow-ups", json=body, headers=headers)
+    assert again.status_code == 201, again.text
+    assert again.json()["id"] == first.json()["id"]
+
+
+async def test_a_create_resend_after_a_tool_server_disconnects_returns_the_first_job(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """A tool the first send was allowed to use is not re-authorised on a resend."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    body = {
+        "repo": "owner/name",
+        "task_prompt": "fix it",
+        "model": "glm-5.1",
+        "mcp_servers": ["github"],
+    }
+    headers = {"Idempotency-Key": "submit-1"}
+
+    first = await client.post("/v1/agent/jobs", json=body, headers=headers)
+    assert first.status_code == 201, first.text
+
+    await store.delete_mcp_connection(user_id=_OWNER, server="github")
+
+    again = await client.post("/v1/agent/jobs", json=body, headers=headers)
+    assert again.status_code == 201, again.text
+    assert again.json()["id"] == first.json()["id"]
+    assert len(store.jobs) == 1
+
+
+async def test_a_new_key_still_runs_the_checks_that_can_refuse_it(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """Answering the resend first must not turn the mutable checks off.
+
+    A different key is a different submission: the disconnected tool server
+    that a replay may ignore still refuses a job that has not been created.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    body = {
+        "repo": "owner/name",
+        "task_prompt": "fix it",
+        "model": "glm-5.1",
+        "mcp_servers": ["github"],
+    }
+
+    first = await client.post("/v1/agent/jobs", json=body, headers={"Idempotency-Key": "submit-1"})
+    assert first.status_code == 201, first.text
+
+    await store.delete_mcp_connection(user_id=_OWNER, server="github")
+
+    fresh = await client.post("/v1/agent/jobs", json=body, headers={"Idempotency-Key": "submit-2"})
+    assert fresh.status_code == 400, fresh.text
+    assert len(store.jobs) == 1

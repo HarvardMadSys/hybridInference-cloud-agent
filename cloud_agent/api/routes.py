@@ -1352,6 +1352,26 @@ async def _create_job_as(
     same reason ``BASE_REF_METADATA_KEY`` is popped first: a display fact the
     platform asserts must not be spoofable by the request body.
     """
+    # A resend is answered before the checks below, every one of which can
+    # change between two sends of one submission: a model can be retired, an
+    # entitlement revoked, a tool server disconnected. They held when the first
+    # send created the job, and running them again on the resend is how a lost
+    # response became a 4xx instead of the job it had already made.
+    fingerprint = (
+        request_fingerprint("create", body.model_dump(mode="json"))
+        if client_request_id is not None
+        else None
+    )
+    if client_request_id is not None:
+        replayed = await job_store.replayed_submission(
+            user_id=user["user_id"],
+            client_request_id=client_request_id,
+            fingerprint=fingerprint,
+        )
+        if replayed is not None:
+            if replayed.get("error") == "client_request_conflict":
+                raise _idempotency_conflict()
+            return replayed
     # Fail here, not at claim time. An unregistered runtime used to travel all
     # the way into a queued row and burn a claim before anything noticed —
     # the composer only offers registered ids, so an arbitrary string can only
@@ -1443,12 +1463,10 @@ async def _create_job_as(
         mcp_servers=mcp_servers,
         client_request_id=client_request_id,
         # Over the request as sent, not as resolved: a branch that moved
-        # between two sends of one submission is still one submission.
-        client_request_fingerprint=(
-            request_fingerprint("create", body.model_dump(mode="json"))
-            if client_request_id is not None
-            else None
-        ),
+        # between two sends of one submission is still one submission. The
+        # same value the replay lookup above used, so the pre-check and the
+        # unique index cannot disagree about what was sent.
+        client_request_fingerprint=fingerprint,
     )
     if job.get("error") == "client_request_conflict":
         raise _idempotency_conflict()
@@ -1919,6 +1937,26 @@ async def create_agent_follow_up(
     """
     job_store = _require_store(store)
     parent = await _owned_job(job_store, job_id, user)
+    # Ownership is proved above; the resend is answered next, before the checks
+    # that can change between two sends of one submission. A first send whose
+    # response was lost, followed by the session being archived or its sandbox
+    # context going indeterminate, must still return the turn that send made —
+    # otherwise the retry is refused for a reason the first send never saw.
+    fingerprint = (
+        request_fingerprint("follow_up", {"parent_job_id": job_id, **body.model_dump(mode="json")})
+        if idempotency_key is not None
+        else None
+    )
+    if idempotency_key is not None:
+        replayed = await job_store.replayed_submission(
+            user_id=user["user_id"],
+            client_request_id=idempotency_key,
+            fingerprint=fingerprint,
+        )
+        if replayed is not None:
+            if replayed.get("error") == "client_request_conflict":
+                raise _idempotency_conflict()
+            return _job_response(replayed)
     if parent.get("archived_at") is not None:
         raise _session_archived_error()
     retained = parent.get("thread_sandbox")
@@ -2012,13 +2050,9 @@ async def create_agent_follow_up(
         reasoning_effort=reasoning_effort,
         reset_reasoning_effort=reset_effort,
         client_request_id=idempotency_key,
-        client_request_fingerprint=(
-            request_fingerprint(
-                "follow_up", {"parent_job_id": job_id, **body.model_dump(mode="json")}
-            )
-            if idempotency_key is not None
-            else None
-        ),
+        # The same value the replay lookup above used, so the pre-check and the
+        # unique index cannot disagree about what was submitted.
+        client_request_fingerprint=fingerprint,
     )
     if job is None:
         raise HTTPException(
