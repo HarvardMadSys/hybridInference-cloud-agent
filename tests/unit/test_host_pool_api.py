@@ -149,6 +149,7 @@ class FakeHostPoolStore:
         self,
         *,
         host: str,
+        physical_host: str | None = None,
         slots_total: int | None = None,
         runner_version: str | None = None,
         broker_url: str | None = None,
@@ -177,6 +178,8 @@ class FakeHostPoolStore:
         ):
             if value is not None:
                 row[field] = value
+        if physical_host is not None:
+            row["labels"]["physical_host"] = physical_host
         if capabilities is not None:
             row["capabilities"] = normalize_capabilities(capabilities)
         return dict(row)
@@ -702,6 +705,24 @@ async def test_a_heartbeat_carries_the_version_stamp_to_the_admin_page(client):
     assert shown["sandbox_runtime"] == ""
     assert shown["sandbox_image_digest"] == "sha256:abc123"
     assert shown["runtime_versions"] == {"claude-code": "1.2.3"}
+
+
+async def test_physical_server_metadata_round_trips_without_changing_identity(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    auth = {"Authorization": f"Bearer {credential}"}
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat", json={"physical_host": "gpu-box"}, headers=auth
+    )
+    assert response.status_code == 200
+    await async_client.post("/v1/agent/host/heartbeat", json={}, headers=auth)
+    listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+    (shown,) = [h for h in listed["hosts"] if h["host"] == "runner-a"]
+    assert shown["labels"]["physical_host"] == "gpu-box"
+    assert (
+        await store.authenticate_host(host="gpu-box", credential_hash=hash_secret(credential))
+        is None
+    )
 
 
 async def test_a_stampless_heartbeat_keeps_the_last_stamp(client):

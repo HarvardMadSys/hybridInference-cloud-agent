@@ -96,7 +96,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
       },
       { kind: 'message', text: 'I found the **cause**.', attemptNo: 1 },
     ],
-    eventCount: 3,
     diffFiles: ['src/example.ts'],
     diffFileDetails: [
       {
@@ -108,7 +107,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     ],
     diffStat: { add: 1, del: 0 },
     diffLines: [{ marker: 'add', text: '+fixed' }],
-    rawLines: ['{"event_type":"message"}'],
     gates: [],
     usage: { tokensIn: '1.2k', tokensOut: '80', cachePct: 0, turns: 2 },
     egressDenials: 0,
@@ -505,7 +503,7 @@ describe('JobDetail', () => {
     );
   });
 
-  it('moves diff, raw events, usage, and sandbox data into a secondary drawer', () => {
+  it('keeps changes, usage, and sandbox data in a secondary drawer without raw events', () => {
     render(<JobDetail job={makeJob()} />);
 
     expect(screen.queryByText('Input tokens')).not.toBeInTheDocument();
@@ -517,8 +515,9 @@ describe('JobDetail', () => {
     expect(screen.getByText('Sandbox')).toBeInTheDocument();
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole('button', { name: /Raw events/ }));
-    expect(screen.getByText('{"event_type":"message"}')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Raw events/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Overview' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Changes · 1' })).toBeInTheDocument();
   });
 
   it('leads run details with outcome, actual execution time and the turn number', () => {
@@ -548,7 +547,7 @@ describe('JobDetail', () => {
   });
 
   it.each(['done', 'needs_review'] as const)(
-    'keeps %s completion clear without exposing publication bookkeeping',
+    'keeps %s completion in run details without redundant conversation status',
     (state) => {
       const stateNote = 'agent completed (shared workspace; publication snapshot pending)';
       render(
@@ -562,6 +561,10 @@ describe('JobDetail', () => {
       );
       expect(screen.queryByText(stateNote)).not.toBeInTheDocument();
       expect(screen.queryByText('Needs review')).not.toBeInTheDocument();
+      expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+      expect(screen.queryByText('Done')).not.toBeInTheDocument();
+      expect(screen.queryByText('Run completed')).not.toBeInTheDocument();
+      expect(screen.queryByText('Run complete')).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
       const outcome = screen.getByRole('region', { name: 'Run outcome' });
       expect(
@@ -623,6 +626,13 @@ describe('JobDetail', () => {
 
   it('shows artifacts as shared workspace changes and reuses the Git action', async () => {
     const prUrl = 'https://github.com/owner/repository/pull/7';
+    vi.mocked(getAgentJobGit).mockResolvedValue({
+      available: true,
+      branch: 'agent/ajob_1',
+      changes: [],
+      patch: '',
+      commits: [],
+    });
     render(
       <JobDetail
         job={makeJob({
@@ -633,6 +643,8 @@ describe('JobDetail', () => {
         })}
       />,
     );
+    expect(screen.getByRole('button', { name: 'View changes' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
     fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
     const artifacts = screen.getByRole('region', { name: 'Workspace changes' });
     expect(within(artifacts).getByText('1 file changed')).toBeInTheDocument();
@@ -647,6 +659,11 @@ describe('JobDetail', () => {
     expect(screen.queryByRole('dialog', { name: 'Run details' })).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
     await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
+    const git = screen.getByLabelText('Git workspace');
+    await waitFor(() => expect(within(git).getByRole('button', { name: 'Refresh' })).toBeEnabled());
+    expect(git).toHaveTextContent('agent/ajob_1');
+    expect(git).not.toHaveTextContent('Live workspace');
+    expect(git).not.toHaveTextContent('Shared workspace');
   });
 
   it.each([true, false])(
@@ -702,58 +719,13 @@ describe('JobDetail', () => {
     expect(within(outcome).queryByText(/Send a follow-up to continue/)).not.toBeInTheDocument();
   });
 
-  it('links a failure to its matching raw event and focuses it', () => {
-    const failure = JSON.stringify({ event_type: 'error', payload: { detail: 'Agent exited 1' } });
-    render(
-      <JobDetail
-        job={makeJob({
-          state: 'failed',
-          stateNote: 'Agent exited 1',
-          rawLines: [
-            JSON.stringify({ event_type: 'tool_result', payload: { is_error: true } }),
-            failure,
-          ],
-        })}
-      />,
-    );
+  it('keeps the failure reason in run details without raw-event navigation', () => {
+    render(<JobDetail job={makeJob({ state: 'failed', stateNote: 'Agent exited 1' })} />);
     fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
-    fireEvent.click(screen.getByRole('button', { name: 'View failure event' }));
-    const selected = screen.getByLabelText('Failure event');
-    expect(selected).toHaveTextContent(failure);
-    expect(selected).toHaveFocus();
-    expect(screen.getByRole('button', { name: /Raw events/ })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
-  });
-
-  it('does not point a failure at an unrelated error or an earlier execution', () => {
-    render(
-      <JobDetail
-        job={makeJob({
-          state: 'failed',
-          stateNote: 'Agent exited 1',
-          currentAttemptNo: 2,
-          attempts: [{ id: 2, no: 2, status: 'finished' }],
-          rawLines: [
-            JSON.stringify({
-              attempt_id: 1,
-              event_type: 'error',
-              payload: { detail: 'Agent exited 1' },
-            }),
-            JSON.stringify({
-              attempt_id: 2,
-              event_type: 'error',
-              payload: { detail: 'Temporary tool failure' },
-            }),
-          ],
-        })}
-      />,
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Run details' }));
+    const outcome = screen.getByRole('region', { name: 'Run outcome' });
+    expect(within(outcome).getByText('Agent exited 1')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'View failure event' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Inspect raw events' }));
-    expect(screen.queryByLabelText('Failure event')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Inspect raw events' })).not.toBeInTheDocument();
   });
 
   it.each([null, 0])('preserves an absent or zero Gateway model-call count (%s)', async (turns) => {
@@ -1208,7 +1180,7 @@ describe('JobDetail', () => {
     await waitFor(() => expect(pane).toHaveTextContent('# Before'));
     // Writable is a fact about the workspace, not an invitation: the pane is a
     // reader, so nothing here can change the run's files.
-    expect(pane).toHaveTextContent('Live workspace');
+    expect(pane).not.toHaveTextContent('Live workspace');
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Edit README.md' })).not.toBeInTheDocument();

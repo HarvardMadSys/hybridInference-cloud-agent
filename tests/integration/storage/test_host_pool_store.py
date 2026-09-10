@@ -1630,3 +1630,32 @@ async def test_a_selection_the_image_lost_falls_back_instead_of_parking(store):
 
     assert claim is not None, "an unservable selection must not park the queue"
     assert claim["runtime_version"] == "2.1.220"
+
+
+async def test_physical_server_grouping_preserves_deployment_identity_and_labels(store):
+    """Display metadata cannot merge credentials, brokers, capacity or placement."""
+    for name in ("gpu-box", "gpu-box-kata"):
+        await store.register_host(
+            host=name,
+            credential_hash=hash_secret(name),
+            broker_url=f"http://{name}:8092",
+            slots_total=3,
+            labels={"zone": "test"},
+        )
+        await store.record_host_heartbeat(host=name, physical_host="gpu-box")
+    await store.set_active_runner_host(host="gpu-box-kata")
+    await store.set_host_status(host="gpu-box-kata", status=HOST_DRAINING)
+    # Old replicas omitting the new field must not erase it.
+    await store.record_host_heartbeat(host="gpu-box-kata")
+    rows, active, _ = await store.runner_pool()
+    assert active == "gpu-box-kata"
+    assert len(rows) == 2
+    for row in rows:
+        assert row["labels"] == {"zone": "test", "physical_host": "gpu-box"}
+        assert row["broker_url"] == f"http://{row['host']}:8092"
+        assert row["slots_total"] == 3
+        assert row["status"] == (HOST_DRAINING if row["host"] == active else HOST_ONLINE)
+    assert (
+        await store.authenticate_host(host="gpu-box", credential_hash=hash_secret("gpu-box-kata"))
+        is None
+    )

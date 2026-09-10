@@ -219,6 +219,7 @@ async def heartbeat_host(
     job_store = _require_store(store)
     updated = await job_store.record_host_heartbeat(
         host=host["host"],
+        physical_host=body.physical_host,
         slots_total=body.slots_total,
         runner_version=body.runner_version,
         broker_url=_checked_broker_url(body.broker_url),

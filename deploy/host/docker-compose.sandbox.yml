@@ -364,6 +364,7 @@ services:
       # sandbox_host.sh from the host's own name — the whole reason a
       # second machine is worth adding is being able to select it.
       AGENT_RUNNER_HOST: ${AGENT_RUNNER_HOST:-}
+      AGENT_PHYSICAL_HOST: ${AGENT_PHYSICAL_HOST:-}
     command:
       - python
       - -m

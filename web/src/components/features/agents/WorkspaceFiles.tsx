@@ -498,7 +498,7 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
   const sourceLabel = root?.error
     ? 'Unavailable'
     : (file?.source ?? source) === 'workspace'
-      ? 'Live workspace'
+      ? null
       : 'Loading…';
 
   return (
@@ -546,9 +546,11 @@ export function WorkspaceFiles({ job, active }: { job: AgentJob; active: boolean
           <span className="text-[13px] text-gray-500 dark:text-gray-400">Files</span>
         )}
 
-        <span className="ml-auto shrink-0 rounded bg-white dark:bg-gray-900 px-2 py-0.5 text-[11px] text-gray-400 dark:text-gray-500 ring-1 ring-gray-200 dark:ring-white/10">
-          {sourceLabel}
-        </span>
+        {sourceLabel ? (
+          <span className="ml-auto shrink-0 rounded bg-white dark:bg-gray-900 px-2 py-0.5 text-[11px] text-gray-400 dark:text-gray-500 ring-1 ring-gray-200 dark:ring-white/10">
+            {sourceLabel}
+          </span>
+        ) : null}
       </div>
 
       <div className="flex min-h-0 flex-1">

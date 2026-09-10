@@ -221,6 +221,9 @@ def register(
             "slots_total": slots_total,
             "capabilities": capabilities or [],
             "runner_version": runner_version,
+            "labels": {"physical_host": physical_host}
+            if (physical_host := os.environ.get("AGENT_PHYSICAL_HOST", "").strip())
+            else {},
         },
     )
     credential = str(answer.get("credential") or "")
@@ -320,6 +323,7 @@ def heartbeat(
             "runtime_versions_available": runtime_versions_available,
             "residencies": residencies,
             "retained_sandboxes": retained_sandboxes,
+            "physical_host": os.environ.get("AGENT_PHYSICAL_HOST", "").strip() or None,
         },
         bearer=identity.credential,
     )

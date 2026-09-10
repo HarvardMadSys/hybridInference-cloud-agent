@@ -46,3 +46,22 @@ export function runtimeMenu(hosts: AgentRunnerHost[]): [string, string[]][] {
   }
   return [...menu.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
+
+/** Physical inventory only. Deployment IDs remain the targets for every action. */
+export function groupHosts(hosts: AgentRunnerHost[]): [string, AgentRunnerHost[]][] {
+  const groups = new Map<string, AgentRunnerHost[]>();
+  for (const host of hosts) {
+    const reported = host.labels?.physical_host;
+    const server = typeof reported === 'string' && reported.trim() ? reported.trim() : host.host;
+    const deployments = groups.get(server) ?? [];
+    deployments.push(host);
+    groups.set(server, deployments);
+  }
+  return [...groups.entries()];
+}
+
+export function executionEnvironment(host: AgentRunnerHost): string {
+  if (host.sandbox_runtime === 'io.containerd.kata.v2') return 'Kata';
+  if (host.sandbox_runtime === '' || host.sandbox_runtime === 'runc') return 'Standard (runc)';
+  return host.sandbox_runtime ?? 'Runtime unreported';
+}

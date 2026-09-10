@@ -24,6 +24,7 @@ export function useConversationList({
   q = '',
   repo,
   includeArchived = false,
+  pinned,
   enabled = true,
   userId,
   refresh = 0,
@@ -31,16 +32,18 @@ export function useConversationList({
   q?: string;
   repo?: string;
   includeArchived?: boolean;
+  pinned?: boolean;
   enabled?: boolean;
   userId?: string;
   refresh?: number;
 } = {}) {
-  const identity = JSON.stringify([q, repo, includeArchived, userId]);
+  const identity = JSON.stringify([q, repo, includeArchived, pinned, userId]);
   const [data, setData] = useState<{
     identity: string;
     rows: SidebarConversation[];
     cursor: string | null;
-  }>({ identity, rows: [], cursor: null });
+    loadedRefresh: number | null;
+  }>({ identity, rows: [], cursor: null, loadedRefresh: null });
   const dataRef = useRef(data);
   dataRef.current = data;
   const [loading, setLoading] = useState(false);
@@ -87,13 +90,25 @@ export function useConversationList({
           // Each request recomputes conversation activity. Use the API's larger
           // batch size when refreshing history instead of repeating 50-row scans.
           const limit = next ? 50 : Math.min(200, Math.max(50, targetCount - merged.size));
-          const result = await listAgentConversations({ q, repo, includeArchived, cursor, limit });
+          const result = await listAgentConversations({
+            q,
+            repo,
+            includeArchived,
+            pinned,
+            cursor,
+            limit,
+          });
           if (generation.current !== version) return;
           result.conversations.map(conversationRow).forEach((row) => merged.set(row.key, row));
           following = result.next_cursor;
           cursor = following ?? undefined;
         } while (!next && following && merged.size < targetCount);
-        setData({ identity, rows: [...merged.values()], cursor: following });
+        setData({
+          identity,
+          rows: [...merged.values()],
+          cursor: following,
+          loadedRefresh: refresh,
+        });
       } catch (cause) {
         if (generation.current === version)
           setError(cause instanceof Error ? cause.message : 'Could not load conversations');
@@ -104,7 +119,7 @@ export function useConversationList({
         }
       }
     },
-    [q, repo, includeArchived, identity],
+    [q, repo, includeArchived, pinned, identity, refresh],
   );
   useEffect(() => {
     const version = ++generation.current;
@@ -118,8 +133,9 @@ export function useConversationList({
   }, [fetchPage, enabled, refresh, tick]);
   const rows = data.identity === identity ? data.rows : EMPTY_ROWS;
   const cursor = data.identity === identity ? data.cursor : null;
+  const loadedRefresh = data.identity === identity ? data.loadedRefresh : null;
   const loadMore = useCallback(() => {
     if (cursor && !busy.current) void fetchPage(cursor);
   }, [cursor, fetchPage]);
-  return { rows, cursor, loading, error, loadMore, reload };
+  return { rows, cursor, loadedRefresh, loading, error, loadMore, reload };
 }

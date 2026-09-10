@@ -19,6 +19,8 @@ import { announcePaneResize, useResizablePane } from './useResizablePane';
 import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
 import { SidebarViewMenu } from './SidebarViewMenu';
 import { SearchControls } from './SearchControls';
+import { AddWorkspace } from './AddWorkspace';
+import { useConversationReadState } from './useConversationReadState';
 import {
   useConversationList,
   conversationRow,
@@ -28,6 +30,8 @@ import {
   TaskRow,
   ProjectFolder,
   ListStatus,
+  reconcileSidebarPins,
+  type SidebarPinUpdate,
   type RowActions,
   type SidebarReorderProps,
 } from './SidebarRows';
@@ -41,23 +45,34 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const { state } = useAuth();
   const userId = state.user?.id;
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
+  const { isUnread, markRead } = useConversationReadState(userId);
   const knownRows = useMemo(
     () => ({ userId, rows: new Map<string, SidebarConversation>() }),
     [userId],
   ).rows;
+  const pinUpdates = useMemo(
+    () => ({ userId, updates: new Map<string, SidebarPinUpdate>() }),
+    [userId],
+  ).updates;
   const [refresh, setRefresh] = useState(0);
-  const reload = useCallback(() => setRefresh((v) => v + 1), []);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const reload = useCallback(() => {
+    refreshRef.current += 1;
+    setRefresh(refreshRef.current);
+  }, []);
   const {
     projects,
     loading: projectsLoading,
     error: projectsError,
     reload: reloadProjects,
   } = useAgentProjects();
-  const list = useConversationList({ userId, refresh, enabled: preferences.group === 'flat' });
+
   const [selected, setSelected] = useState<{
     path: string;
     userId?: string;
     row: SidebarConversation;
+    refresh: number;
   } | null>(null);
   const sessionGeneration = useRef(0);
   const [sessionRefresh, setSessionRefresh] = useState(0);
@@ -70,6 +85,15 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const [debounced, setDebounced] = useState('');
   const [scope, setScope] = useState('all');
   const [includeArchived, setIncludeArchived] = useState(false);
+  const searching = searchOpen && (query.trim() !== '' || scope !== 'all' || includeArchived);
+  const list = useConversationList({
+    userId,
+    refresh,
+    pinned: false,
+    enabled: !searching && preferences.group === 'flat',
+  });
+  const pinnedList = useConversationList({ userId, refresh, pinned: true, enabled: !searching });
+  const [pinnedShown, setPinnedShown] = useState(15);
   const searchInput = useRef<HTMLInputElement>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
   const resultList = useRef<HTMLDivElement>(null);
@@ -81,14 +105,17 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     side: 'start',
     maxViewportFraction: 0.4,
   });
-  const current =
+  const selectedRow =
     selected?.path === pathname && selected.userId === userId
-      ? selected.row
-      : (list.rows.find((row) => row.jobIds.some((id) => pathname === `/${id}`)) ??
-        [...knownRows.values()].find((row) => row.jobIds.some((id) => pathname === `/${id}`)));
+      ? reconcileSidebarPins([selected.row], pinUpdates, selected.refresh)[0]
+      : undefined;
+  const loadedCurrent =
+    [...pinnedList.rows, ...list.rows].find((row) =>
+      row.jobIds.some((id) => pathname === `/${id}`),
+    ) ?? [...knownRows.values()].find((row) => row.jobIds.some((id) => pathname === `/${id}`));
+  const current = selectedRow ?? loadedCurrent;
   const activeKey = current?.key ?? null;
   const activeRepo = pathname === '/' ? params.get('repo') : (current?.job.repo ?? null);
-  const searching = searchOpen && (query.trim() !== '' || scope !== 'all' || includeArchived);
   const search = useConversationList({
     q: debounced,
     repo: scope === 'current' ? (activeRepo ?? undefined) : undefined,
@@ -109,6 +136,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   }, [collapsed]);
   useEffect(() => {
     setHiddenThreads(new Set());
+    setPinnedShown(15);
   }, [userId]);
   useEffect(
     () =>
@@ -147,6 +175,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   }, [userId, reload, reloadProjects]);
   useEffect(() => {
     let cancelled = false;
+    const detailRefresh = refreshRef.current;
     const generation = sessionGeneration.current;
     setSelected(null);
     const id = /^\/([^/]+)$/.exec(pathname)?.[1];
@@ -164,7 +193,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         });
         row.jobIds = [...new Set([id, ...(thread?.jobs.map((turn) => turn.id) ?? [])])];
         knownRows.set(row.key, row);
-        setSelected({ path: pathname, userId, row });
+        setSelected({ path: pathname, userId, row, refresh: detailRefresh });
         updatePreferences((old) => ({
           ...old,
           expanded: { ...old.expanded, [row.job.repo]: true },
@@ -212,7 +241,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     return () => document.removeEventListener('keydown', keydown);
   }, [collapsed]);
   const registerRows = useCallback(
-    (rows: SidebarConversation[]) => {
+    (sourceRows: SidebarConversation[], loadedRefresh: number | null) => {
+      const rows = reconcileSidebarPins(sourceRows, pinUpdates, loadedRefresh);
       if (!rows.length) return;
       rows.forEach((row) => {
         const previous = knownRows.get(row.key);
@@ -221,12 +251,22 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
           jobIds: [...new Set([...(previous?.jobIds ?? []), ...row.jobIds])],
         });
       });
+      setSelected((old) => {
+        if (!old || loadedRefresh === null || loadedRefresh < old.refresh) return old;
+        const row = rows.find((item) => item.key === old.row.key);
+        if (!row) return old;
+        return {
+          ...old,
+          row: { ...row, jobIds: [...new Set([...old.row.jobIds, ...row.jobIds])] },
+          refresh: loadedRefresh,
+        };
+      });
       updatePreferences((old) => {
         if (!old.manualInitialized && old.order !== 'manual') return old;
         const tasks = { ...old.tasks };
         let changed = false;
         for (const row of rows)
-          for (const group of ['flat', `repo:${row.job.repo}`]) {
+          for (const group of row.job.pinnedAt ? ['pinned'] : ['flat', `repo:${row.job.repo}`]) {
             const ids = tasks[group] ?? [];
             if (!ids.includes(row.key)) {
               tasks[group] = [...ids, row.key];
@@ -236,13 +276,19 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         return changed ? { ...old, tasks } : old;
       });
     },
-    [updatePreferences, knownRows],
+    [updatePreferences, knownRows, pinUpdates],
   );
   useEffect(() => {
-    registerRows(list.rows);
-  }, [list.rows, registerRows]);
+    registerRows(list.rows, list.loadedRefresh);
+  }, [list.rows, list.loadedRefresh, registerRows]);
+  useEffect(() => {
+    registerRows(pinnedList.rows, pinnedList.loadedRefresh);
+  }, [pinnedList.rows, pinnedList.loadedRefresh, registerRows]);
   const baseFolders = useMemo(() => {
     const repos = new Map(projects.map((project) => [project.repo, project]));
+    for (const repo of preferences.addedProjects)
+      if (!repos.has(repo))
+        repos.set(repo, { repo, task_count: 0, active_count: 0, last_activity_at: null });
     for (const row of preferences.group === 'flat' ? list.rows : [])
       if (!repos.has(row.job.repo))
         repos.set(row.job.repo, {
@@ -263,7 +309,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         (Date.parse(b.pinned_at ?? '') || 0) - (Date.parse(a.pinned_at ?? '') || 0) ||
         (Date.parse(b.last_activity_at ?? '') || 0) - (Date.parse(a.last_activity_at ?? '') || 0),
     );
-  }, [projects, list.rows, activeRepo, preferences.group]);
+  }, [projects, list.rows, activeRepo, preferences.group, preferences.addedProjects]);
   useEffect(() => {
     updatePreferences((old) => {
       if (!old.manualInitialized && old.order !== 'manual') return old;
@@ -315,12 +361,14 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       'data-drop-position':
         dropTarget?.group === group && dropTarget.id === id ? dropTarget.position : undefined,
       onPointerDownCapture: (event) => {
-        pointerAllowsDrag.current = !(event.target as Element).closest('button, [data-row-action]');
+        pointerAllowsDrag.current = !(event.target as Element).closest(
+          'button:not([data-reorder-project]), [data-row-action]',
+        );
       },
       onDragStart: (event) => {
         if (
           !pointerAllowsDrag.current ||
-          (event.target as Element).closest('button, [data-row-action]')
+          (event.target as Element).closest('button:not([data-reorder-project]), [data-row-action]')
         ) {
           event.preventDefault();
           event.stopPropagation();
@@ -383,21 +431,19 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       },
     };
   }
-  function orderedRows(rows: SidebarConversation[], flat = false) {
+  function orderedRows(rows: SidebarConversation[], group = `repo:${rows[0]?.job.repo}`) {
     if (preferences.order !== 'manual') return rows;
-    const result = manualOrder(
-      rows,
-      preferences.tasks[flat ? 'flat' : `repo:${rows[0]?.job.repo}`] ?? [],
-      (row) => row.key,
-    );
-    return result.sort((a, b) => Number(Boolean(b.job.pinnedAt)) - Number(Boolean(a.job.pinnedAt)));
+    const result = manualOrder(rows, preferences.tasks[group] ?? [], (row) => row.key);
+    return result;
   }
-  function taskReorder(rows: SidebarConversation[], row: SidebarConversation, flat = false) {
-    // Flat ordering changes position only. Pins stay in their own partition.
-    const peers = rows.filter((peer) => Boolean(peer.job.pinnedAt) === Boolean(row.job.pinnedAt));
+  function taskReorder(
+    rows: SidebarConversation[],
+    row: SidebarConversation,
+    group = `repo:${row.job.repo}`,
+  ) {
     return reorderProps(
-      flat ? 'flat' : `repo:${row.job.repo}`,
-      peers.map((peer) => peer.key),
+      group,
+      rows.map((peer) => peer.key),
       row.key,
     );
   }
@@ -420,7 +466,21 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     setPinning(key);
     setActionError(null);
     try {
-      await (pinned ? pinAgentJob(jobId) : unpinAgentJob(jobId));
+      const result = await (pinned ? pinAgentJob(jobId) : unpinAgentJob(jobId));
+      const previous = knownRows.get(key) ?? search.rows.find((row) => row.key === key) ?? current;
+      if (previous?.key === key) {
+        const row = {
+          ...previous,
+          job: {
+            ...previous.job,
+            pinnedAt: pinned ? (result?.pinned_at ?? new Date().toISOString()) : undefined,
+          },
+        };
+        const revision = refreshRef.current + 1;
+        pinUpdates.set(key, { row, refresh: revision });
+        knownRows.set(key, row);
+        setSelected((old) => (old?.row.key === key ? { ...old, row, refresh: revision } : old));
+      }
       reload();
       reloadProjects();
     } catch (cause) {
@@ -431,31 +491,51 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   }
   const actions: RowActions = {
     activeKey,
+    isUnread,
+    onRead: markRead,
     archiving,
     pinning,
     onArchive: archiveConversation,
     onSetPinned: setConversationPinned,
   };
-  useEffect(() => {
-    setHiddenThreads((old) => {
-      const next = new Set([...old].filter((key) => !list.rows.some((row) => row.key === key)));
-      return next.size === old.size ? old : next;
-    });
-  }, [list.rows]);
   const visible = (rows: SidebarConversation[]) =>
     rows.filter((row) => row.archived || !hiddenThreads.has(row.key));
-  const flatSource =
-    current && !current.archived && !list.rows.some((row) => row.key === current.key)
-      ? [...list.rows, current]
-      : list.rows;
+  const flatSource = reconcileSidebarPins(list.rows, pinUpdates, list.loadedRefresh, true);
+  if (current && !current.archived && !flatSource.some((row) => row.key === current.key))
+    flatSource.push(current);
   const flatRows = orderedRows(
-    visible(flatSource).sort(
-      (a, b) =>
-        (Date.parse(b.job.pinnedAt ?? '') || 0) - (Date.parse(a.job.pinnedAt ?? '') || 0) ||
-        (Date.parse(b.lastActivityAt ?? '') || 0) - (Date.parse(a.lastActivityAt ?? '') || 0),
-    ),
+    visible(flatSource)
+      .filter((row) => !row.job.pinnedAt && !row.archived)
+      .sort(
+        (a, b) =>
+          (Date.parse(b.lastActivityAt ?? '') || 0) - (Date.parse(a.lastActivityAt ?? '') || 0),
+      ),
+    'flat',
+  );
+  const pinnedSource = reconcileSidebarPins(
+    pinnedList.rows,
+    pinUpdates,
+    pinnedList.loadedRefresh,
     true,
   );
+  if (
+    current?.job.pinnedAt &&
+    !current.archived &&
+    !pinnedSource.some((row) => row.key === current.key)
+  )
+    pinnedSource.push(current);
+  const pinnedRows = orderedRows(
+    visible(pinnedSource)
+      .filter((row) => row.job.pinnedAt && !row.archived)
+      .sort(
+        (a, b) =>
+          (Date.parse(b.job.pinnedAt ?? '') || 0) - (Date.parse(a.job.pinnedAt ?? '') || 0) ||
+          (Date.parse(b.lastActivityAt ?? '') || 0) - (Date.parse(a.lastActivityAt ?? '') || 0),
+      ),
+    'pinned',
+  );
+  const pinnedSelectedIndex = pinnedRows.findIndex((row) => row.key === activeKey);
+  const visiblePinned = pinnedRows.slice(0, Math.max(pinnedShown, pinnedSelectedIndex + 1));
   if (collapsed) return null;
   return (
     <>
@@ -488,6 +568,39 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
             </svg>
             {t('sidebar.newTask')}
           </Link>
+
+          {!searching && (pinnedRows.length > 0 || pinnedList.error) && (
+            <section aria-labelledby="sidebar-pinned-heading" className="mt-5">
+              <h2
+                id="sidebar-pinned-heading"
+                className="mb-2 px-2 text-[13px] font-normal text-gray-500 dark:text-gray-400"
+              >
+                {t('sidebar.pinned')}
+              </h2>
+              <div className="space-y-0.5">
+                {visiblePinned.map((row) => (
+                  <TaskRow
+                    key={row.key}
+                    row={row}
+                    flat
+                    {...actions}
+                    reorderProps={taskReorder(pinnedRows, row, 'pinned')}
+                  />
+                ))}
+                <ListStatus
+                  loading={pinnedList.loading}
+                  error={pinnedList.error}
+                  empty={false}
+                  more={pinnedRows.length > visiblePinned.length || Boolean(pinnedList.cursor)}
+                  onMore={() => {
+                    setPinnedShown((value) => value + 15);
+                    if (pinnedRows.length <= visiblePinned.length + 15) pinnedList.loadMore();
+                  }}
+                  onRetry={pinnedList.reload}
+                />
+              </div>
+            </section>
+          )}
 
           <div className="mb-2 mt-5 flex items-center justify-between px-2 text-[13px] text-gray-500 dark:text-gray-400">
             <span>{t('sidebar.projects')}</span>
@@ -533,8 +646,12 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                         (Date.parse(b.lastActivityAt ?? '') || 0) -
                           (Date.parse(a.lastActivityAt ?? '') || 0),
                     );
-                    const tasks: Record<string, string[]> = { flat: rows.map((row) => row.key) };
-                    for (const row of rows) (tasks[`repo:${row.job.repo}`] ??= []).push(row.key);
+                    const tasks: Record<string, string[]> = {
+                      flat: rows.filter((row) => !row.job.pinnedAt).map((row) => row.key),
+                      pinned: rows.filter((row) => row.job.pinnedAt).map((row) => row.key),
+                    };
+                    for (const row of rows)
+                      if (!row.job.pinnedAt) (tasks[`repo:${row.job.repo}`] ??= []).push(row.key);
                     return {
                       ...old,
                       order: 'manual',
@@ -544,6 +661,19 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                     };
                   })
                 }
+              />
+              <AddWorkspace
+                userId={userId}
+                existing={baseFolders.map((folder) => folder.repo)}
+                onSelect={(repo) => {
+                  closeSearch();
+                  updatePreferences((old) => ({
+                    ...old,
+                    group: 'project',
+                    addedProjects: [...new Set([...old.addedProjects, repo])],
+                    expanded: { ...old.expanded, [repo]: true },
+                  }));
+                }}
               />
             </div>
           </div>
@@ -602,9 +732,11 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
               }}
             >
               {debounced === query.trim() &&
-                visible(search.rows).map((row) => (
-                  <TaskRow key={row.key} row={row} flat search query={debounced} {...actions} />
-                ))}
+                visible(reconcileSidebarPins(search.rows, pinUpdates, search.loadedRefresh)).map(
+                  (row) => (
+                    <TaskRow key={row.key} row={row} flat search query={debounced} {...actions} />
+                  ),
+                )}
               <ListStatus
                 loading={search.loading || debounced !== query.trim()}
                 error={search.error}
@@ -623,7 +755,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                   row={row}
                   flat
                   {...actions}
-                  reorderProps={taskReorder(flatRows, row, true)}
+                  reorderProps={taskReorder(flatRows, row, 'flat')}
                 />
               ))}
               <ListStatus
@@ -659,6 +791,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                   refresh={refresh}
                   {...actions}
                   hiddenThreads={hiddenThreads}
+                  pinUpdates={pinUpdates}
                   registerRows={registerRows}
                   orderRows={orderedRows}
                   taskReorder={taskReorder}

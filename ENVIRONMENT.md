@@ -144,7 +144,7 @@ are all about *reaching* the relay, never about what it may reach.
 | `AGENT_HOST_CREDENTIAL` | **NEW** | What `/v1/agent/host/register` hands back. Authenticates this machine's heartbeats and claims and names it; there is no shared claim credential or request-body host fallback. Revoked by removing the host. The runner normally reads the persisted file instead of setting this variable. |
 | `AGENT_LEASE_TTL` | existing | Attempt lease horizon. Grant TTL is derived from this (task E9) — changing one without the other creates either dead grants or grants outliving their attempt. |
 | `AGENT_TIMEOUT_S` | existing | Hard watchdog for one actively executing Agent CLI turn (default 3600 seconds). Hitting it fails/fences that turn; it does not mean the chat was idle and is not an alternate sandbox lifecycle timeout. |
-| `AGENT_RUNNER_HOST` | existing | Name redeemed by `AGENT_ENROLL_TOKEN` on first registration and shared by all runner replicas on the machine. After enrollment, the credential is authoritative; changing this value does not rename the host. Re-enroll under the new name instead. |
+| `AGENT_RUNNER_HOST` | existing | Execution environment name redeemed by `AGENT_ENROLL_TOKEN` on first registration and shared by its runner replicas. After enrollment, the credential is authoritative; changing this value does not rename the environment. Use `AGENT_PHYSICAL_HOST` to group environments for display without changing existing identities. |
 
 ## Host agent (`cloud_agent_host`)
 
@@ -331,3 +331,28 @@ Recorded here as *what has to be decided*, not as anyone's actual answer.
 2. Note who provisions it and whether it differs per environment.
 3. If it is a secret, say where it is stored — never the value itself.
 4. The PR checklist enforces this; a new variable without a row is a review stop.
+
+### Physical servers and execution environments
+
+`AGENT_RUNNER_HOST` identifies one enrolled execution environment. When two
+stacks on the same physical server talk to one control plane, they need distinct
+names, credentials, state roots and broker URLs. Do not rename or re-enroll an
+existing environment to combine its retained chats with another one.
+
+`AGENT_PHYSICAL_HOST` names the physical server for the admin inventory. Give
+all environments on that server the same name, unique within the control plane.
+`deploy/host/sandbox_host.sh` defaults it to the host's short hostname; direct
+Compose deployments must set it explicitly. Runners send it at registration and
+on each heartbeat, stored as `labels.physical_host`. Older runners can omit it
+without erasing existing metadata. No database migration is required.
+
+The Servers table groups environments by this reported value. Each environment
+keeps its own runtime, status, slots and Pin/Drain/Remove controls. Slots are
+execution concurrency limits per environment, not physical GPU counts or an
+additive hardware capacity. Grouping never changes scheduling, isolation,
+credentials, broker routing, or retained sandbox ownership. Unreported servers
+remain separate under their existing IDs; runtime suffixes are never guessed.
+
+For an existing deployment, update the control plane and web first, then set
+`AGENT_PHYSICAL_HOST` and roll each runner environment when its active turns
+have settled. Existing host credentials and retained sandboxes stay in place.

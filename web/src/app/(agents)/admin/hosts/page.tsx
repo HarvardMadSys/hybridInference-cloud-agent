@@ -29,7 +29,7 @@ import {
 } from '@/lib/api/admin';
 import { getErrorMessage } from '@/lib/utils/errors';
 
-import { formatAge, formatSlots, runtimeMenu } from './format';
+import { executionEnvironment, formatAge, formatSlots, groupHosts, runtimeMenu } from './format';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
 // easily as "gone". Carried over from the gateway's section along with the
@@ -304,27 +304,10 @@ export default function AdminHostsPage() {
           </div>
         )}
 
-        {/* ── The pool ─────────────────────────────────────────────────
-            Six columns, not nine. `Capabilities` and `Runner` were empty on
-            every real row and still took a column each; they now sit in the
-            host's own meta line and appear only when there is something to
-            say. What a machine will *run* — CLI versions and the image they
-            came from — is one question, so it is one cell. */}
+        {/* Physical inventory groups independently enrolled execution environments.
+            Actions still target the original deployment identity. */}
         <div className="mt-10">
-          {/* Six columns became four. `Runs` listed the CLI versions each host
-              holds and the digest they came from; with one runner it restated
-              the section above, and it was the widest, most-wrapping cell in
-              the table.
-
-              The cost, recorded because it is real: nothing in the UI now
-              shows a host running a *different* image from its neighbour. The
-              data is still on the host row and still in the admin response, so
-              the column comes back as markup alone the day two hosts diverge.
-
-              The caveat that used to sit above the table — a host appears once
-              its runner polled, which is not a claim it is reachable now — is
-              what the "Last polled" column is called. */}
-          <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">Runner hosts</h2>
+          <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">Servers</h2>
 
           {/* Which hosts take work, stated where the hosts are.
               This was a section of its own, and the split was the confusion:
@@ -362,125 +345,130 @@ export default function AdminHostsPage() {
                 <table className="min-w-full text-left text-sm">
                   <thead className="border-b border-gray-100 dark:border-white/5 text-xs text-gray-500 dark:text-gray-400">
                     <tr>
-                      <th className="px-6 py-3 font-medium">Host</th>
+                      <th className="px-6 py-3 font-medium">Server</th>
+                      <th className="px-6 py-3 font-medium">Execution environment</th>
                       <th className="px-3 py-3 font-medium">Status</th>
                       <th className="px-3 py-3 font-medium">Slots</th>
                       <th className="px-3 py-3 font-medium whitespace-nowrap">Last polled</th>
                       <th className="px-6 py-3 text-right font-medium">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-100 dark:divide-white/5">
-                    {hosts.map((host) => (
-                      <tr key={host.host} className="align-top">
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium text-gray-900 dark:text-gray-50">
-                              {host.host}
-                            </span>
-                            {host.active && (
-                              <span className="rounded-full bg-crimson/[0.08] dark:bg-crimson/20 px-2 py-0.5 text-xs font-medium text-crimson dark:text-crimson-light">
-                                pinned
+                  {groupHosts(hosts).map(([server, deployments]) => (
+                    <tbody
+                      key={server}
+                      aria-label={server}
+                      className="divide-y divide-gray-100 dark:divide-white/5 border-b border-gray-100 dark:border-white/5"
+                    >
+                      {deployments.map((host, index) => (
+                        <tr key={host.host} className="align-top">
+                          {index === 0 && (
+                            <th
+                              scope="rowgroup"
+                              rowSpan={deployments.length}
+                              className="px-6 py-4 font-medium text-gray-900 dark:text-gray-50"
+                            >
+                              {server}
+                            </th>
+                          )}
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-gray-900 dark:text-gray-50">
+                                {executionEnvironment(host)}
                               </span>
-                            )}
-                          </div>
-                          <div className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
-                            {/* Deliberately not "enrolled" / "self-reported
-                                name". That distinction is about whether a
-                                machine could be lying about which machine it
-                                is, and every host in this pool is one of ours —
-                                it answered a question nobody operating this
-                                page is asking. The mechanism is untouched; the
-                                credential still binds drain and remove to a
-                                machine. It is just not a thing to read here. */}
-                            {host.last_worker_id ?? '—'}
-                            {host.runner_version ? ` · runner ${host.runner_version}` : ''}
-                            {host.capabilities.length > 0
-                              ? ` · ${host.capabilities.join(', ')}`
-                              : ''}
-                          </div>
-                        </td>
-                        <td className="px-3 py-4">
-                          <StatusBadge status={host.status} />
-                        </td>
-                        <td className="px-3 py-4 whitespace-nowrap text-gray-700 dark:text-gray-300">
-                          {formatSlots(host)}
-                        </td>
-                        <td className="px-3 py-4 whitespace-nowrap text-gray-700 dark:text-gray-300">
-                          {formatAge(host.seconds_since_seen)}
-                        </td>
-                        <td className="px-6 py-4">
-                          {/* One line, right-aligned, and the destructive pair
+                              {host.active && (
+                                <span className="rounded-full bg-crimson/[0.08] dark:bg-crimson/20 px-2 py-0.5 text-xs font-medium text-crimson dark:text-crimson-light">
+                                  pinned
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
+                              {host.host !== server ? host.host : null}
+                              {host.runner_version ? ` · runner ${host.runner_version}` : ''}
+                            </div>
+                          </td>
+                          <td className="px-3 py-4">
+                            <StatusBadge status={host.status} />
+                          </td>
+                          <td className="px-3 py-4 whitespace-nowrap text-gray-700 dark:text-gray-300">
+                            {formatSlots(host)}
+                          </td>
+                          <td className="px-3 py-4 whitespace-nowrap text-gray-700 dark:text-gray-300">
+                            {formatAge(host.seconds_since_seen)}
+                          </td>
+                          <td className="px-6 py-4">
+                            {/* One line, right-aligned, and the destructive pair
                               carries no border: four equally-weighted buttons
                               wrapping onto two ragged lines made Remove the
                               loudest thing in the row. */}
-                          <div className="flex items-center justify-end gap-1">
-                            {!host.active && (
+                            <div className="flex items-center justify-end gap-1">
+                              {!host.active && (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => void handlePin(host.host)}
+                                  className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                                >
+                                  Pin
+                                </button>
+                              )}
+                              {host.status === 'draining' ? (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void run(
+                                      () => undrainAgentRunnerHost(host.host),
+                                      `${host.host} is taking work again.`,
+                                    )
+                                  }
+                                  className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                                >
+                                  Undrain
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void run(
+                                      () => drainAgentRunnerHost(host.host),
+                                      `${host.host} stops taking new work; running attempts finish.`,
+                                    )
+                                  }
+                                  className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                                >
+                                  Drain
+                                </button>
+                              )}
+                              {!host.active && (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void run(
+                                      () => forgetAgentRunnerHost(host.host),
+                                      `Dropped ${host.host} from the list. A runner still polling there re-adds itself.`,
+                                    )
+                                  }
+                                  className="rounded-lg px-2.5 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                                >
+                                  Forget
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 disabled={busy}
-                                onClick={() => void handlePin(host.host)}
-                                className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
+                                onClick={() => handleRemove(host.host, host.slots_used)}
+                                className="rounded-lg px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-40"
                               >
-                                Pin
+                                Remove
                               </button>
-                            )}
-                            {host.status === 'draining' ? (
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() =>
-                                  void run(
-                                    () => undrainAgentRunnerHost(host.host),
-                                    `${host.host} is taking work again.`,
-                                  )
-                                }
-                                className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
-                              >
-                                Undrain
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() =>
-                                  void run(
-                                    () => drainAgentRunnerHost(host.host),
-                                    `${host.host} stops taking new work; running attempts finish.`,
-                                  )
-                                }
-                                className="rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-200 shadow-sm hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
-                              >
-                                Drain
-                              </button>
-                            )}
-                            {!host.active && (
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() =>
-                                  void run(
-                                    () => forgetAgentRunnerHost(host.host),
-                                    `Dropped ${host.host} from the list. A runner still polling there re-adds itself.`,
-                                  )
-                                }
-                                className="rounded-lg px-2.5 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40"
-                              >
-                                Forget
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleRemove(host.host, host.slots_used)}
-                              className="rounded-lg px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-40"
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  ))}
                 </table>
               </div>
             </div>

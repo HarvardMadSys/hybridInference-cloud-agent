@@ -7,6 +7,7 @@ import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 const api = vi.hoisted(() => ({
   list: vi.fn(),
   projects: vi.fn(),
+  config: vi.fn(),
   get: vi.fn(),
   thread: vi.fn(),
   archive: vi.fn(),
@@ -41,6 +42,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/agents')>()),
   listAgentConversations: api.list,
   listAgentProjects: api.projects,
+  getAgentConfig: api.config,
   getAgentJob: api.get,
   getAgentJobThread: api.thread,
   archiveAgentJob: api.archive,
@@ -95,6 +97,63 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('adds an empty authorized workspace, exits flat search and restores it without duplicates', async () => {
+    localStorage.setItem(
+      sidebarPreferencesKey('alice'),
+      JSON.stringify({ ...DEFAULT_PREFERENCES, group: 'flat' }),
+    );
+    api.config.mockResolvedValue({ repos: ['owner/empty', 'owner/repo'], github_connected: true });
+    api.list.mockImplementation(async ({ repo }: { repo?: string }) => ({
+      conversations: repo === 'owner/empty' ? [] : base,
+      next_cursor: null,
+    }));
+    const view = render(<AgentsSidebar />);
+    await screen.findByRole('link', { name: 'Task a · owner/repo' });
+    fireEvent.click(screen.getByRole('button', { name: 'Search tasks' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search tasks' }), {
+      target: { value: 'anything' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'owner/empty' }));
+    expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+    expect(screen.getByTitle('owner/empty')).toHaveAttribute('aria-expanded', 'true');
+    const saved = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
+    expect(saved.group).toBe('project');
+    expect(saved.addedProjects).toEqual(['owner/empty']);
+    expect(saved.manualInitialized).toBe(false);
+    view.unmount();
+    render(<AgentsSidebar />);
+    expect(await screen.findByTitle('owner/empty')).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'owner/empty · Already added' }));
+    expect(screen.getAllByTitle('owner/empty')).toHaveLength(1);
+    expect(JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!).addedProjects).toEqual(
+      ['owner/empty'],
+    );
+  });
+  it('shows a spinner while running and clears completion unread dots when opened', async () => {
+    const running = conversation('a');
+    running.job.state = 'running';
+    api.list.mockResolvedValue({ conversations: [running, base[1]], next_cursor: null });
+    const { rerender } = render(<AgentsSidebar />);
+    await screen.findByRole('link', { name: 'Task a' });
+    expect(screen.getAllByLabelText('In progress')).toHaveLength(1);
+    expect(screen.getAllByLabelText('Unread result')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('link', { name: 'Task b' }));
+    await waitFor(() => expect(screen.queryByLabelText('Unread result')).not.toBeInTheDocument());
+    api.list.mockResolvedValue({ conversations: base, next_cursor: null });
+    api.pathname = '/integrations';
+    rerender(<AgentsSidebar />);
+    await waitFor(() => expect(screen.queryByLabelText('In progress')).not.toBeInTheDocument());
+    expect(screen.getAllByLabelText('Unread result')).toHaveLength(1);
+    api.pathname = '/a';
+    rerender(<AgentsSidebar />);
+    await waitFor(() => expect(screen.queryByLabelText('Unread result')).not.toBeInTheDocument());
+    api.pathname = '/';
+    rerender(<AgentsSidebar />);
+    expect(screen.queryByLabelText('Unread result')).not.toBeInTheDocument();
+  });
+
   it('keeps the project highlighted when a loaded sibling session is awaiting detail', async () => {
     api.pathname = '/a';
     api.get.mockImplementation((id: string) =>
@@ -378,11 +437,18 @@ describe('sidebar navigation interactions', () => {
       await screen.findByRole('link', { name: 'Task a · owner/repo · Archived' }),
     ).toHaveAttribute('href', '/a');
   });
-  it('loads only expanded project pages and records no history IDs before manual order', async () => {
+  it('loads pins and only expanded project pages, and records no history IDs before manual order', async () => {
     render(<AgentsSidebar />);
     await screen.findByText('Task a');
     expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
-    expect(api.list.mock.calls.every(([options]) => options.repo === 'owner/repo')).toBe(true);
+    expect(
+      api.list.mock.calls.every(
+        ([options]) => options.pinned === true || options.repo === 'owner/repo',
+      ),
+    ).toBe(true);
+    expect(api.list).toHaveBeenCalledWith(
+      expect.objectContaining({ pinned: true, repo: undefined }),
+    );
     expect(localStorage.getItem(sidebarPreferencesKey('alice'))).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'View options' }));
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'In one list' }));

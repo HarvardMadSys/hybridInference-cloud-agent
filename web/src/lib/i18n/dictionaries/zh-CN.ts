@@ -28,7 +28,14 @@ export const zhCN: Record<TranslationKey, string> = {
   'shell.accessRequired.back': '返回控制台',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
+  'sidebar.pinned': '已置顶',
   'sidebar.projects': '项目',
+  'sidebar.addWorkspace': '添加工作区',
+  'sidebar.closeWorkspacePicker': '关闭工作区选择',
+  'sidebar.searchRepositories': '搜索仓库…',
+  'sidebar.workspaceAdded': '已添加',
+  'sidebar.noRepositories': '没有匹配的仓库。',
+  'sidebar.manageRepositories': '管理仓库访问权限',
   'sidebar.viewOptions': '视图选项',
   'sidebar.groupBy': '分组方式',
   'sidebar.orderBy': '排序方式',
@@ -49,6 +56,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.loadMore': '显示更多',
   'sidebar.retry': '重试',
   'sidebar.closeSearch': '关闭搜索',
+  'sidebar.inProgress': '进行中',
+  'sidebar.unread': '有未读结果',
   'sidebar.reorderHint': '拖动排序，或按 Alt + 上 / 下方向键',
   'sidebar.moved': '顺序已更新',
   'sidebar.newTask': '新建任务',

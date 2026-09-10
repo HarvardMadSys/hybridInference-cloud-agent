@@ -1472,6 +1472,47 @@ async def test_conversations_page_all_history_with_pins_and_equal_activity(store
     assert seen == expected
 
 
+@pytest.mark.parametrize("pinned", [True, False, None])
+async def test_conversations_filter_pins_before_paginating_owned_active_threads(
+    store: AgentJobStore, pinned: bool | None
+):
+    """Each sidebar section pages its own rows without duplicates or omissions."""
+    jobs = [await _create_job(store, task_prompt=f"Sidebar task {i}") for i in range(7)]
+    for job in jobs[:3]:
+        await store.set_thread_pinned(job_id=job["id"], user_id="user-1", pinned=True)
+    archived = await _create_job(store, task_prompt="Sidebar archived")
+    await store.set_thread_pinned(job_id=archived["id"], user_id="user-1", pinned=True)
+    await store.set_thread_archived(job_id=archived["id"], user_id="user-1", archived=True)
+    foreign = await _create_job(store, user_id="user-2", task_prompt="Sidebar foreign")
+    await store.set_thread_pinned(job_id=foreign["id"], user_id="user-2", pinned=True)
+
+    seen = []
+    cursor = None
+    while True:
+        page = await store.list_conversations(
+            user_id="user-1", pinned=pinned, q="Sidebar", limit=2, cursor=cursor
+        )
+        seen.extend(item["job"]["id"] for item in page["conversations"])
+        if pinned is not None:
+            assert all(
+                (item["job"]["pinned_at"] is not None) is pinned for item in page["conversations"]
+            )
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    expected = jobs[:3] if pinned is True else jobs[3:] if pinned is False else jobs
+    assert len(seen) == len(expected)
+    assert set(seen) == {job["id"] for job in expected}
+
+    with_archive = await store.list_conversations(
+        user_id="user-1", pinned=pinned, include_archived=True
+    )
+    expected_ids = {job["id"] for job in expected}
+    if pinned is not False:
+        expected_ids.add(archived["id"])
+    assert {item["job"]["id"] for item in with_archive["conversations"]} == expected_ids
+
+
 async def test_conversations_search_canonical_title_and_repo_with_literal_unicode(
     store: AgentJobStore,
 ):
@@ -1568,16 +1609,20 @@ async def test_conversations_latest_job_and_activity_ignore_foreign_turn(store: 
     assert (await store.list_conversations(user_id="user-2"))["conversations"] == []
 
 
+@pytest.mark.parametrize("pinned", [None, True, False])
 async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
     store: AgentJobStore,
+    pinned: bool | None,
 ):
     """Cursor data never broadens owner, repo, archive, or text search scope."""
     import base64
     import json
 
-    await _create_job(store)
-    await _create_job(store)
-    page = await store.list_conversations(user_id="user-1", limit=1)
+    for _ in range(2):
+        job = await _create_job(store)
+        if pinned:
+            await store.set_thread_pinned(job_id=job["id"], user_id="user-1", pinned=True)
+    page = await store.list_conversations(user_id="user-1", limit=1, pinned=pinned)
     cursor = page["next_cursor"]
     assert cursor
     for changed in [
@@ -1585,9 +1630,11 @@ async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
         {"q": "different"},
         {"repo": "different/repo"},
         {"include_archived": True},
-    ]:
+    ] + [{"pinned": value} for value in [None, True, False] if value is not pinned]:
         with pytest.raises(ValueError, match="Invalid conversation cursor"):
-            await store.list_conversations(**{"user_id": "user-1", "cursor": cursor, **changed})
+            await store.list_conversations(
+                **{"user_id": "user-1", "cursor": cursor, "pinned": pinned, **changed}
+            )
     data = json.loads(base64.urlsafe_b64decode(cursor))
     malformed = ["", "not-base64", "x" * 2049, base64.urlsafe_b64encode(b"[]").decode()]
     for field, value in [("v", 2), ("activity", "2026-01-01"), ("pin", 17), ("thread", "\x00")]:
@@ -1596,7 +1643,7 @@ async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
         )
     for invalid in malformed:
         with pytest.raises(ValueError, match="Invalid conversation cursor"):
-            await store.list_conversations(user_id="user-1", cursor=invalid)
+            await store.list_conversations(user_id="user-1", cursor=invalid, pinned=pinned)
     with pytest.raises(ValueError, match="Invalid conversation search"):
         await store.list_conversations(user_id="user-1", q="\x00")
 
