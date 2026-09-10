@@ -647,6 +647,15 @@ async def reap_expired_attempts(
             await _reap_lapsed_residencies(store, grants)
         except Exception:
             logger.warning("Residency reaper pass failed", exc_info=True)
+        # Waiting follow-ups after residencies, before the attempt pass: the
+        # terminal writers promote their own children in-transaction, and
+        # this is the safety net for a child stranded between a parent's
+        # terminal write and that promotion. Cheap — it walks the partial
+        # waiting/queued indexes, not the job history.
+        try:
+            await store.sweep_waiting_follow_ups()
+        except Exception:
+            logger.warning("Waiting follow-up sweep failed", exc_info=True)
         try:
             actions = await store.reap_expired(max_attempts=max_attempts)
             await _cleanup_reaped_shared_residencies(store, actions, grants)

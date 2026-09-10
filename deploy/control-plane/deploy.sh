@@ -25,7 +25,7 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT:-cloudagent}"
 COMPOSE_FILE="deploy/control-plane/docker-compose.yml"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 SHARED_READY_TIMEOUT="${SHARED_READY_TIMEOUT:-900}"
-DEPLOY_PROTOCOL="shared-live-exact-sha-v2"
+DEPLOY_PROTOCOL="shared-live-exact-sha-v3"
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }

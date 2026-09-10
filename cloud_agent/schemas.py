@@ -1048,11 +1048,10 @@ class WorkerContinuityRequest(BaseModel):
     is the product-facing context contract.
     """
 
-    # ``replay`` is accepted only for rolling compatibility with an already
-    # admitted previous-generation attempt. No current scheduler or runner
-    # selects it, but rejecting its final telemetry during a parallel deploy
-    # would turn a diagnostic field into an avoidable attempt failure.
-    mode: Literal["hot", "warm_native", "cold_native", "replay"] | None = None
+    # The two rungs the retained topology can actually run on. The schema
+    # CHECK admits exactly these, so accepting more here would only turn a
+    # diagnostic field into a database error.
+    mode: Literal["hot", "warm_native"] | None = None
     context_status: Literal["new", "live", "restored", "lost"] | None = None
 
 

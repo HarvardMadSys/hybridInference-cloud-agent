@@ -814,9 +814,10 @@ Both Actions jobs use the workflow commit's deployment orchestrator against a
 separate target checkout. Online rollback therefore cannot execute a
 pre-fence target's old scripts; commits without the current
 `deploy/DEPLOY_PROTOCOL`, or with an incompatible protocol value, are refused
-before changing Docker state. Protocol `shared-live-exact-sha-v2` deliberately
-excludes ancestors whose Alembic revision identifiers predate the merged
-`0021`–`0025` chain; those commits are not schema-compatible rollback targets.
+before changing Docker state. The current protocol deliberately excludes
+ancestors that predate the rewritten schema baseline (`0001_schema_baseline`,
+2026-09-10): their Alembic chain is one the database no longer records, so
+they are not schema-compatible rollback targets.
 Database changes are expand-first. Never downgrade columns underneath a
 still-running new API; roll code back to a schema-compatible commit first and
 treat any later contract migration as a separate reviewed operation.

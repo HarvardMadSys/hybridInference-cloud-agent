@@ -205,9 +205,10 @@ Alembic runs forward on every deploy. Do **not** downgrade a schema while the
 newer API is still serving: it may immediately read columns that the downgrade
 removed. The supported emergency sequence is code rollback to a
 schema-compatible commit first, verify it is serving, and only then perform a
-separately reviewed contract migration if one is genuinely required. The
-native-turn migrations in this rollout are expand-first and may remain in place
-during code rollback.
+separately reviewed contract migration if one is genuinely required. Commits
+that predate the rewritten schema baseline (`0001_schema_baseline`, 2026-09-10)
+carry a revision chain the database no longer records, so they are not
+schema-compatible rollback targets at all.
 
 Control and host rollback jobs also start in parallel, but the control script
 will not replace the API until a host advertises the rollback SHA. A missing or

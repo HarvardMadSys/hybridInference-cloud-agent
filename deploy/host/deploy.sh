@@ -27,7 +27,7 @@ set -euo pipefail
 SHA="${1:-${DEPLOY_SHA:-}}"
 SOURCE_REPO="${SOURCE_REPO:-${GITHUB_WORKSPACE:-}}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-}"
-DEPLOY_PROTOCOL="shared-live-exact-sha-v2"
+DEPLOY_PROTOCOL="shared-live-exact-sha-v3"
 
 log() { printf '[deploy-host] %s\n' "$*"; }
 die() { printf '[deploy-host] ERROR: %s\n' "$*" >&2; exit 1; }

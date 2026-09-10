@@ -29,7 +29,8 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from tests.support.migrations import apply_migrations, run_baseline_statements
+from tests.support.db import reset_agent_tables
+from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -39,24 +40,6 @@ _SHARED_HOST_CAPABILITIES = [
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     shared_deployment_capability("test-deployment"),
 ]
-_TABLES_IN_FK_ORDER = (
-    "agent_native_session_edges",
-    "agent_thread_sandbox_memberships",
-    "agent_sandbox_snapshots",
-    "agent_session_forks",
-    "agent_sandboxes",
-    "agent_thread_residencies",
-    "agent_thread_messages",
-    "agent_job_artifacts",
-    "agent_job_events",
-    "agent_thread_sandboxes",
-    "agent_attempts",
-    "agent_jobs",
-    "agent_threads",
-    # No FK, but every claim writes here now: a host left active by one test
-    # would gate the claims of the next one.
-    "agent_runner_hosts",
-)
 
 
 @pytest_asyncio.fixture
@@ -94,23 +77,13 @@ async def store():
     apply_migrations(db_config)
 
     async with pool.acquire() as conn:
-        for table in _TABLES_IN_FK_ORDER:
-            await conn.execute(f"DELETE FROM {table}")
-        # Reset rather than delete: the policy is a singleton row, and a test
-        # that left a host pinned would otherwise gate every later claim.
-        await conn.execute(
-            "UPDATE agent_runner_policy SET active_host = NULL, runtime_versions = NULL"
-        )
+        await reset_agent_tables(conn)
 
     try:
         yield job_store
     finally:
         async with pool.acquire() as conn:
-            for table in _TABLES_IN_FK_ORDER:
-                await conn.execute(f"DELETE FROM {table}")
-            await conn.execute(
-                "UPDATE agent_runner_policy SET active_host = NULL, runtime_versions = NULL"
-            )
+            await reset_agent_tables(conn)
         await pool.close()
 
 
@@ -336,73 +309,6 @@ async def _reserve_shared_chat(
     )
     assert sandbox is not None and sandbox["shared_live"] is True
     return job, claim, sandbox
-
-
-async def test_native_turn_migration_catches_previous_generation_writers(
-    store: AgentJobStore,
-) -> None:
-    """The parallel rollout window cannot leave historical Fork ordinals blank."""
-    # A previous control plane can still finish a turn after migration 0023's
-    # one-time backfill. Its UPDATE does not name the newly added column.
-    succeeded = await _create_job(store, task_prompt="old API success")
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_jobs SET state = 'succeeded' WHERE id = $1",
-            succeeded["id"],
-        )
-        assert (
-            await conn.fetchval(
-                "SELECT native_turn_no FROM agent_jobs WHERE id = $1",
-                succeeded["id"],
-            )
-            == 1
-        )
-
-    # The old immediate-latest Fork copied display jobs without naming the
-    # column either. A copied provider-native source retains the same ordinal
-    # semantics in its new thread even when the display shell is not SUCCEEDED.
-    copied = await _create_job(store, task_prompt="old API fork copy")
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            """
-            UPDATE agent_jobs
-            SET state = 'failed', fork_source_job_id = $2
-            WHERE id = $1
-            """,
-            copied["id"],
-            succeeded["id"],
-        )
-        assert (
-            await conn.fetchval(
-                "SELECT native_turn_no FROM agent_jobs WHERE id = $1",
-                copied["id"],
-            )
-            == 1
-        )
-
-    # Native context settlement precedes final job state. The previous API
-    # records that boundary by adding the job to a publication snapshot, so the
-    # snapshot trigger must cover a lease loss before SUCCEEDED is written.
-    job, _claim_row, sandbox = await _reserve_shared_chat(store)
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO agent_sandbox_snapshots (
-                sandbox_id, workspace_epoch, anchor_job_id,
-                included_job_ids, base_sha
-            ) VALUES ($1, 1, $2, jsonb_build_array($2::text), $3)
-            """,
-            sandbox["sandbox_id"],
-            job["id"],
-            job["base_sha"],
-        )
-        assert (
-            await conn.fetchval(
-                "SELECT native_turn_no FROM agent_jobs WHERE id = $1",
-                job["id"],
-            )
-            == 1
-        )
 
 
 async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
@@ -1212,119 +1118,6 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
     assert operation["source_native_turn_no"] == 2
 
 
-async def test_native_turn_migration_backfills_existing_fork_prefixes(
-    store: AgentJobStore,
-):
-    """An upgrade preserves the native ordinal of already-copied history."""
-    from tests.support.migrations import apply_migrations, downgrade_to
-
-    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
-    db_config = {
-        "host": os.getenv("TEST_DB_HOST", "localhost"),
-        "port": int(os.getenv("TEST_DB_PORT", "5432")),
-        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
-        "user": os.getenv("TEST_DB_USER", "postgres"),
-        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
-    }
-    try:
-        downgrade_to(db_config, "0020_session_fork_coordinator")
-        async with store._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agent_threads (id, user_id, repo, title)
-                VALUES ('athr_migration_source', 'user-1', 'owner/repo', 'source'),
-                       ('athr_migration_child', 'user-1', 'owner/repo', 'child')
-                """
-            )
-            await conn.execute(
-                """
-                INSERT INTO agent_jobs (
-                    id, thread_id, turn_no, user_id, repo, task_prompt,
-                    runtime, model, state, fork_source_job_id
-                ) VALUES
-                    ('ajob_migration_source', 'athr_migration_source', 1,
-                     'user-1', 'owner/repo', 'settled source',
-                     'claude-code', 'model', 'succeeded', NULL),
-                    ('ajob_migration_unsettled', 'athr_migration_source', 2,
-                     'user-1', 'owner/repo', 'never settled',
-                     'claude-code', 'model', 'failed', NULL),
-                    ('ajob_migration_copy', 'athr_migration_child', 1,
-                     'user-1', 'owner/repo', 'copied source',
-                     'claude-code', 'model', 'failed', 'ajob_migration_source')
-                """
-            )
-        apply_migrations(db_config)
-        async with store._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, native_turn_no FROM agent_jobs
-                WHERE id LIKE 'ajob_migration_%' ORDER BY id
-                """
-            )
-        assert {row["id"]: row["native_turn_no"] for row in rows} == {
-            "ajob_migration_copy": 1,
-            "ajob_migration_source": 1,
-            "ajob_migration_unsettled": None,
-        }
-    finally:
-        apply_migrations(db_config)
-
-
-async def test_native_turn_schema_guards_previous_writer_before_backfill(
-    store: AgentJobStore,
-):
-    """An old API write is anchored as soon as 0023 exposes the column."""
-    from tests.support.migrations import apply_migrations, downgrade_to
-
-    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
-    db_config = {
-        "host": os.getenv("TEST_DB_HOST", "localhost"),
-        "port": int(os.getenv("TEST_DB_PORT", "5432")),
-        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
-        "user": os.getenv("TEST_DB_USER", "postgres"),
-        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
-    }
-    try:
-        downgrade_to(db_config, "0023_native_turn_anchors")
-        async with store._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agent_threads (id, user_id, repo, title)
-                VALUES ('athr_rollout_gap', 'user-1', 'owner/repo', 'rollout gap')
-                """
-            )
-            await conn.execute(
-                """
-                INSERT INTO agent_jobs (
-                    id, thread_id, turn_no, user_id, repo, task_prompt,
-                    runtime, model, state
-                ) VALUES (
-                    'ajob_rollout_gap', 'athr_rollout_gap', 1,
-                    'user-1', 'owner/repo', 'old writer after backfill',
-                    'claude-code', 'model', 'succeeded'
-                )
-                """
-            )
-            assert (
-                await conn.fetchval(
-                    "SELECT native_turn_no FROM agent_jobs WHERE id = 'ajob_rollout_gap'"
-                )
-                == 1
-            )
-        apply_migrations(db_config)
-        async with store._pool.acquire() as conn:
-            assert (
-                await conn.fetchval(
-                    "SELECT native_turn_no FROM agent_jobs WHERE id = 'ajob_rollout_gap'"
-                )
-                == 1
-            )
-    finally:
-        apply_migrations(db_config)
-
-
 async def test_create_get_list_round_trip(store: AgentJobStore):
     """create -> get -> list returns the queued job with its fields."""
     job = await _create_job(store, metadata={"origin": "test"})
@@ -1365,78 +1158,6 @@ async def test_execution_profile_persists_and_is_inherited_by_follow_up(store, m
     assert follow_up is not None
     assert follow_up["execution_profile"] == "untrusted-kata-v1"
     assert (await store.get_job(source["id"]))["execution_profile"] == "untrusted-kata-v1"
-
-
-async def test_disposable_era_terminal_chat_cannot_be_silently_reactivated(store):
-    historical = await _create_job(store, task_prompt="historical disposable failure")
-    async with store._pool.acquire() as conn:
-        assert historical["retained_followup_eligible"] is True
-        assert (
-            await conn.fetchval(
-                "SELECT column_default FROM information_schema.columns "
-                "WHERE table_schema = 'public' AND table_name = 'agent_jobs' "
-                "AND column_name = 'retained_followup_eligible'"
-            )
-            is None
-        )
-        await conn.execute(
-            "UPDATE agent_jobs "
-            "SET state = 'failed', retained_followup_eligible = NULL "
-            "WHERE id = $1",
-            historical["id"],
-        )
-
-    assert await store.create_follow_up(
-        parent_job_id=historical["id"],
-        user_id=historical["user_id"],
-        prompt="must not fabricate native continuity",
-    ) == {"error": "sandbox_context_lost"}
-
-
-async def test_disposable_era_inflight_chat_cannot_queue_a_retained_follow_up(store):
-    historical = await _create_job(store, task_prompt="in-flight disposable turn")
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_jobs "
-            "SET state = 'running', retained_followup_eligible = NULL "
-            "WHERE id = $1",
-            historical["id"],
-        )
-
-    assert await store.create_follow_up(
-        parent_job_id=historical["id"],
-        user_id=historical["user_id"],
-        prompt="must not wait and later fabricate continuity",
-    ) == {"error": "sandbox_context_lost"}
-
-
-async def test_cutover_waiting_tail_is_failed_instead_of_promoted(store):
-    parent = await _create_job(store, task_prompt="old API parent")
-    child = await store.create_follow_up(
-        parent_job_id=parent["id"],
-        user_id=parent["user_id"],
-        prompt="old API waiting child",
-    )
-    assert child is not None and child["state"] == "waiting"
-    async with store._pool.acquire() as conn:
-        # Model a child inserted by the old API while its disposable parent
-        # was still running across migration 0025.
-        await conn.execute(
-            "UPDATE agent_jobs "
-            "SET state = 'failed', retained_followup_eligible = NULL "
-            "WHERE id = $1",
-            parent["id"],
-        )
-        await conn.execute(
-            "UPDATE agent_jobs SET retained_followup_eligible = NULL WHERE id = $1",
-            child["id"],
-        )
-
-    assert await _claim(store, worker_id="cutover-worker", lease_ttl_seconds=60) is None
-    failed = await store.get_job(child["id"])
-    assert failed is not None
-    assert failed["state"] == "failed"
-    assert "predates retained-session continuity" in failed["detail"]
 
 
 async def test_conversations_page_all_history_with_pins_and_equal_activity(store: AgentJobStore):
@@ -1571,44 +1292,45 @@ async def test_conversations_archive_repo_and_tenant_filters_are_independent(sto
     assert (await store.list_conversations(user_id="user-1", repo="missing/repo"))[
         "conversations"
     ] == []
-    # Even a malformed historical owner association cannot leak a job via
-    # an owned thread, or a thread title via an owned job.
+    # A job cannot be re-owned apart from its thread, nor a thread apart from
+    # its jobs: the composite owner keys refuse the malformed association the
+    # list read used to have to defend against.
+    import asyncpg
+
     async with store._pool.acquire() as conn:
-        await conn.execute("UPDATE agent_jobs SET user_id = 'user-2' WHERE id = $1", active["id"])
-        await conn.execute(
-            "UPDATE agent_threads SET user_id = 'user-2' WHERE id = $1", elsewhere["thread_id"]
-        )
-    only_archive = await store.list_conversations(user_id="user-1", include_archived=True)
-    assert [item["job"]["id"] for item in only_archive["conversations"]] == [archived["id"]]
+        with pytest.raises(asyncpg.ForeignKeyViolationError):
+            await conn.execute(
+                "UPDATE agent_jobs SET user_id = 'user-2' WHERE id = $1", active["id"]
+            )
+        with pytest.raises(asyncpg.ForeignKeyViolationError):
+            await conn.execute(
+                "UPDATE agent_threads SET user_id = 'user-2' WHERE id = $1",
+                elsewhere["thread_id"],
+            )
+    everything = await store.list_conversations(user_id="user-1", include_archived=True)
+    assert {item["job"]["id"] for item in everything["conversations"]} == {
+        active["id"],
+        archived["id"],
+        elsewhere["id"],
+    }
 
 
-async def test_conversations_latest_job_and_activity_ignore_foreign_turn(store: AgentJobStore):
-    """Both the activity aggregate and bounded latest-job read enforce ownership."""
+async def test_conversations_cannot_hold_a_foreign_turn(store: AgentJobStore):
+    """A turn's owner is its thread's owner; the schema refuses any other row."""
     parent = await _create_job(store)
     child = await store.create_follow_up(
-        parent_job_id=parent["id"], user_id="user-1", prompt="foreign turn body"
+        parent_job_id=parent["id"], user_id="user-1", prompt="turn body"
     )
     assert child is not None
-    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    import asyncpg
+
     async with store._pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_threads SET updated_at = $2 WHERE id = $1",
-            parent["thread_id"],
-            timestamp,
-        )
-        await conn.execute(
-            "UPDATE agent_jobs SET updated_at = $2 WHERE id = $1", parent["id"], timestamp
-        )
-        await conn.execute(
-            "UPDATE agent_jobs SET user_id = 'user-2', updated_at = $2 WHERE id = $1",
-            child["id"],
-            datetime(2030, 1, 1, tzinfo=timezone.utc),
-        )
+        with pytest.raises(asyncpg.ForeignKeyViolationError):
+            await conn.execute(
+                "UPDATE agent_jobs SET user_id = 'user-2' WHERE id = $1", child["id"]
+            )
     page = await store.list_conversations(user_id="user-1")
-    assert len(page["conversations"]) == 1
-    conversation = page["conversations"][0]
-    assert conversation["job"]["id"] == parent["id"]
-    assert conversation["last_activity_at"] == timestamp
+    assert [item["job"]["id"] for item in page["conversations"]] == [child["id"]]
     assert (await store.list_conversations(user_id="user-2"))["conversations"] == []
 
 
@@ -1716,7 +1438,8 @@ async def test_projects_sort_by_message_and_job_activity_preserving_pins(store: 
     # A completion advances the job timestamp, without another user turn.
     async with store._pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_jobs SET updated_at = $2, state = 'succeeded' WHERE id = $1",
+            "UPDATE agent_jobs SET updated_at = $2, state = 'succeeded', native_turn_no = 1 "
+            "WHERE id = $1",
             newer["id"],
             dates[3],
         )
@@ -1769,38 +1492,6 @@ async def test_archived_threads_leave_the_active_project_tree(store: AgentJobSto
     assert await store.list_projects(user_id="user-1") == []
     archived = await store.list_projects(user_id="user-1", archived=True)
     assert [project["repo"] for project in archived] == ["example-org/example-repo"]
-
-
-async def test_the_baseline_idempotently_migrates_legacy_threads(store: AgentJobStore):
-    """A pre-existing agent_threads table gains the thread-state columns.
-
-    The behaviour is unchanged; its owner is not. This used to be `initialize`
-    running on every boot, and the ADD COLUMN trail it left behind is exactly
-    why: creating the table "if not exists" does nothing when the table exists
-    with the wrong columns. Running the migration twice pins that it is still
-    idempotent, because the source ran it on every single startup.
-    """
-    async with store._pool.acquire() as conn:
-        await conn.execute("ALTER TABLE agent_threads DROP COLUMN archived_at")
-        await conn.execute("ALTER TABLE agent_threads DROP COLUMN pinned_at")
-
-    await run_baseline_statements(store._pool)
-    await run_baseline_statements(store._pool)
-
-    async with store._pool.acquire() as conn:
-        columns = await conn.fetch(
-            """
-            SELECT column_name, data_type
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'agent_threads'
-              AND column_name IN ('archived_at', 'pinned_at')
-            """
-        )
-    assert {row["column_name"]: row["data_type"] for row in columns} == {
-        "archived_at": "timestamp with time zone",
-        "pinned_at": "timestamp with time zone",
-    }
 
 
 async def test_archive_and_restore_filter_owned_threads_without_cancelling(
@@ -1966,33 +1657,6 @@ async def test_pin_and_unpin_owned_threads_are_idempotent_and_reorder_lists(
     assert [project["repo"] for project in await store.list_projects(user_id="user-1")] == [
         "example-org/newer-repo",
         "example-org/example-repo",
-    ]
-
-
-async def test_initialize_backfills_assistant_messages_from_legacy_events(store: AgentJobStore):
-    """Existing job transcripts survive the conversation-table migration."""
-    job = await _create_job(store)
-    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    await store.append_event(
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        event_type="message",
-        payload={"text": "legacy answer"},
-    )
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM agent_thread_messages WHERE job_id = $1 AND role = 'assistant'", job["id"]
-        )
-
-    # The message backfill moved into the baseline migration with the rest
-    # of what initialize() used to do on every boot.
-    await run_baseline_statements(store._pool)
-
-    thread = await store.get_thread_for_job(job_id=job["id"], user_id="user-1")
-    assert thread is not None
-    assert [(message["role"], message["content"]) for message in thread["messages"]] == [
-        ("user", "fix the flaky test"),
-        ("assistant", "legacy answer"),
     ]
 
 
@@ -3076,10 +2740,10 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
         await conn.execute(
             """
             INSERT INTO agent_thread_sandbox_memberships (
-                thread_id, sandbox_id, native_session_id, native_state,
+                thread_id, user_id, sandbox_id, native_session_id, native_state,
                 context_status, process_generation, resident_state,
                 resident_slot_id
-            ) VALUES ($1, $2, 'native-sibling', 'ready', 'live', 7, 'live', 1)
+            ) VALUES ($1, (SELECT user_id FROM agent_threads WHERE id = $1), $2, 'native-sibling', 'ready', 'live', 7, 'live', 1)
             """,
             sibling["thread_id"],
             sandbox["sandbox_id"],
@@ -4168,7 +3832,10 @@ async def test_session_search_state_and_project_facets_apply_before_pagination(
     for job in (target, other_project, needs_review, foreign):
         await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=True)
     async with store._pool.acquire() as conn:
-        await conn.execute("UPDATE agent_jobs SET state = 'succeeded'")
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'succeeded', "
+            "native_turn_no = COALESCE(native_turn_no, turn_no)"
+        )
         await conn.execute(
             "UPDATE agent_jobs SET published_pr_url = 'https://example.test/pr/1' "
             "WHERE id = ANY($1::text[])",
@@ -4231,66 +3898,6 @@ async def test_session_pages_can_skip_summary_without_changing_rows_or_cursor(st
     assert next_rows["sessions"][0]["thread_id"] != rows["sessions"][0]["thread_id"]
     assert next_rows["sessions"][0]["job"]["repo"] == "acme/api"
     assert next_rows["next_cursor"] is None
-
-
-async def test_session_index_migration_recovers_a_cancelled_build_and_retains_tombstones(
-    store: AgentJobStore,
-):
-    import asyncpg
-
-    from tests.support.migrations import downgrade_to
-
-    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
-    db_config = {
-        "host": os.getenv("TEST_DB_HOST", "localhost"),
-        "port": int(os.getenv("TEST_DB_PORT", "5432")),
-        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
-        "user": os.getenv("TEST_DB_USER", "postgres"),
-        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
-    }
-    job = await _create_job(store)
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
-        )
-    try:
-        downgrade_to(db_config, "0026_attempt_ledger")
-        # An open writer makes the concurrent build wait after registering its
-        # index. Cancelling then leaves the real INVALID-index retry scenario.
-        async with store._pool.acquire() as writer, writer.transaction():
-            await writer.execute(
-                "UPDATE agent_threads SET title = title WHERE id = $1", job["thread_id"]
-            )
-            async with store._pool.acquire() as conn:
-                await conn.execute("SET statement_timeout = '100ms'")
-                try:
-                    with pytest.raises(asyncpg.QueryCanceledError):
-                        await conn.execute(
-                            "CREATE INDEX CONCURRENTLY idx_agent_threads_archive_history "
-                            "ON agent_threads(user_id, archived_at DESC, id DESC) WHERE deleted_at IS NULL"
-                        )
-                finally:
-                    await conn.execute("RESET statement_timeout")
-        async with store._pool.acquire() as conn:
-            assert (
-                await conn.fetchval(
-                    "SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_agent_threads_archive_history'::regclass"
-                )
-                is False
-            )
-        apply_migrations(db_config)
-        async with store._pool.acquire() as conn:
-            assert (
-                await conn.fetchval(
-                    "SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_agent_threads_archive_history'::regclass"
-                )
-                is True
-            )
-        assert (await store.get_job(job["id"]))["deleted_at"] is not None
-        assert (await store.list_sessions(user_id="user-1"))["total"] == 0
-    finally:
-        apply_migrations(db_config)
 
 
 async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(store: AgentJobStore):
@@ -4432,16 +4039,17 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
     async with store._pool.acquire() as conn:
         await conn.execute("UPDATE agent_sandbox_snapshots SET state = 'published'")
         await conn.execute(
-            "UPDATE agent_jobs SET state = 'succeeded', fork_source_job_id = $2 WHERE id = $1",
+            "UPDATE agent_jobs SET state = 'succeeded', "
+            "native_turn_no = COALESCE(native_turn_no, turn_no), fork_source_job_id = $2 WHERE id = $1",
             sibling["id"],
             source["id"],
         )
         await conn.execute(
             """
             INSERT INTO agent_thread_sandbox_memberships (
-                thread_id, sandbox_id, native_session_id, native_state, context_status,
+                thread_id, user_id, sandbox_id, native_session_id, native_state, context_status,
                 resident_state, last_settled_job_id, forked_from_thread_id, fork_anchor_job_id
-            ) VALUES ($1, $2, 'native-sibling-history', 'ready', 'live', 'live', $3, $4, $5)
+            ) VALUES ($1, (SELECT user_id FROM agent_threads WHERE id = $1), $2, 'native-sibling-history', 'ready', 'live', 'live', $3, $4, $5)
             """,
             sibling["thread_id"],
             sandbox["sandbox_id"],
@@ -4682,46 +4290,6 @@ async def test_title_generation_is_not_repeated_on_retry(store: AgentJobStore):
         )
 
 
-async def test_title_migration_preserves_existing_names(store: AgentJobStore):
-    """Upgrade protects existing names and names inserted by an older control plane."""
-    from tests.support.migrations import apply_migrations, downgrade_to
-
-    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
-    db_config = {
-        "host": os.getenv("TEST_DB_HOST", "localhost"),
-        "port": int(os.getenv("TEST_DB_PORT", "5432")),
-        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
-        "user": os.getenv("TEST_DB_USER", "postgres"),
-        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
-    }
-    try:
-        downgrade_to(db_config, "0027_session_history")
-        async with store._pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO agent_threads (id, user_id, repo, title) "
-                "VALUES ('athr_old_title', 'user-1', 'owner/repo', 'My carefully chosen title')"
-            )
-        apply_migrations(db_config)
-        async with store._pool.acquire() as conn:
-            old = await conn.fetchrow(
-                "SELECT title, title_source FROM agent_threads WHERE id = 'athr_old_title'"
-            )
-            assert dict(old) == {
-                "title": "My carefully chosen title",
-                "title_source": "manual",
-            }
-            # Rolling-deploy old writers omit the new column and must also be safe.
-            source = await conn.fetchval(
-                "INSERT INTO agent_threads (id, user_id, repo, title) "
-                "VALUES ('athr_rolling_title', 'user-1', 'owner/repo', 'Rolling title') "
-                "RETURNING title_source"
-            )
-            assert source == "manual"
-    finally:
-        apply_migrations(db_config)
-
-
 async def test_successful_short_task_accepts_delayed_title(store: AgentJobStore):
     """A fast task can finish before its independent title request returns."""
     job = await _create_job(store)
@@ -4737,3 +4305,62 @@ async def test_successful_short_task_accepts_delayed_title(store: AgentJobStore)
     saved = await store.get_job(job["id"])
     assert saved is not None and saved["title"] == "Fix flaky test"
     assert saved["title_source"] == "generated"
+
+
+async def test_a_cancelled_parent_released_by_the_platform_promotes_its_waiting_child(
+    store: AgentJobStore,
+):
+    """A platform-side release that lands as ``cancelled`` is a turn boundary too.
+
+    The waiting child moves in the same transaction as the parent's terminal
+    write — not on the next claim poll, which no longer sweeps, and not on the
+    reaper's periodic safety net.
+    """
+    parent = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None and claim["id"] == parent["id"]
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
+    )
+    assert child is not None and child["state"] == "waiting"
+
+    assert await store.request_cancel(job_id=parent["id"], user_id="user-1") == "running"
+    assert await store.release_claim(job_id=parent["id"], attempt_id=claim["attempt_id"])
+
+    assert (await store.get_job(parent["id"]))["state"] == "cancelled"
+    assert (await store.get_job(child["id"]))["state"] == "queued"
+    # And it is the next thing a runner is handed.
+    promoted = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert promoted is not None and promoted["id"] == child["id"]
+
+
+async def test_the_sweep_recovers_a_child_stranded_by_a_crashed_terminal_write(
+    store: AgentJobStore,
+):
+    """The periodic sweep is the safety net for a promotion that never ran."""
+    parent = await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
+    )
+    assert child is not None and child["state"] == "waiting"
+    # A parent that reached its terminal state without the scoped promotion
+    # that every store writer performs — the shape a crash between the two
+    # writes would leave behind.
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'failed', current_attempt_id = NULL WHERE id = $1",
+            parent["id"],
+        )
+        await conn.execute(
+            "UPDATE agent_attempts SET status = 'finished', finished_at = NOW() WHERE id = $1",
+            claim["attempt_id"],
+        )
+    # Claiming no longer promotes on the runner's behalf.
+    assert await _claim(store, worker_id="w1", lease_ttl_seconds=60) is None
+    assert (await store.get_job(child["id"]))["state"] == "waiting"
+
+    await store.sweep_waiting_follow_ups()
+
+    assert (await store.get_job(child["id"]))["state"] == "queued"

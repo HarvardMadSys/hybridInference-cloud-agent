@@ -71,7 +71,6 @@ logger = get_logger(__name__)
 QUEUED = "queued"
 WAITING = "waiting"
 RUNNING = "running"
-PUBLISHING = "publishing"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
 CANCELLED = "cancelled"
@@ -111,11 +110,9 @@ def _new_session_fork_id() -> str:
     return f"asfork_{secrets.token_hex(16)}"
 
 
-# Every runnable chat is a member of a retained shared-live group. Historical
-# ``agent_thread_sandboxes`` rows remain in the migration history so an
-# upgraded database is readable, but they are deliberately absent from this
-# executable read shape: old rows cannot be resumed, forked, or silently
-# upgraded into a different topology.
+# Every runnable chat is a member of a retained shared-live group: one
+# ``agent_sandboxes`` row per container, one membership row per chat. This is
+# the read shape the worker and owner routes see for a thread's sandbox.
 _NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
 
 # Bound a shared grant to one attempt's execution interval. A subsequent
@@ -193,7 +190,6 @@ _THREAD_SANDBOX_SOURCE = f"""
         ), '[]'::jsonb) AS group_members
     FROM agent_thread_sandbox_memberships m
     JOIN agent_sandboxes g ON g.id = m.sandbox_id
-    WHERE g.mode = 'shared_live'
 ) AS s
 """
 
@@ -284,7 +280,6 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "state": row["state"],
         "cancel_requested": row["cancel_requested"],
         "terminal_resume_pending": row["terminal_resume_pending"],
-        "retained_followup_eligible": row["retained_followup_eligible"],
         "current_attempt_id": row["current_attempt_id"],
         "published_pr_url": row["published_pr_url"],
         "published_commit_sha": row["published_commit_sha"],
@@ -308,7 +303,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
 _JOB_COLUMNS = (
     "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, repo, base_sha, task_prompt, "
     "setup_script, runtime, model, execution_profile, reasoning_effort, state, "
-    "cancel_requested, terminal_resume_pending, retained_followup_eligible, current_attempt_id, "
+    "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
     "metadata, fork_source_job_id, mcp_servers, "
     "created_at, updated_at"
@@ -325,7 +320,7 @@ WITH latest AS (
            t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
            CASE
                WHEN j.state IN ('queued', 'waiting') THEN 'queued'
-               WHEN j.state IN ('running', 'publishing') THEN 'running'
+               WHEN j.state = 'running' THEN 'running'
                WHEN j.state = 'succeeded' AND NULLIF(j.published_pr_url, '') IS NOT NULL THEN 'done'
                WHEN j.state = 'succeeded' THEN 'needs_review'
                ELSE j.state
@@ -378,9 +373,8 @@ CASE
     ) THEN 'fork_in_progress'
     WHEN EXISTS (
         SELECT 1 FROM agent_sandbox_snapshots snapshot
-        JOIN agent_jobs included_job
-          ON snapshot.anchor_job_id = included_job.id
-          OR snapshot.included_job_ids @> jsonb_build_array(included_job.id)
+        JOIN agent_snapshot_jobs included ON included.snapshot_id = snapshot.id
+        JOIN agent_jobs included_job ON included_job.id = included.job_id
         WHERE included_job.thread_id = t.session_id
           AND snapshot.state IN ('pending', 'capturing', 'captured', 'publishing')
     ) THEN 'publication_pending'
@@ -530,12 +524,18 @@ class AgentJobStore:
     ) -> None:
         """Release only descendants whose retained continuity is provable.
 
-        During the cutover, an old API can leave a waiting child behind an
-        in-flight disposable parent. Once that parent becomes terminal, the
-        child must not be promoted into a fresh retained sandbox and presented
-        as continuous. Fail the whole pending tail first, then release only a
-        child backed by a usable shared membership or by an explicitly
-        post-cutover parent that failed before producing native context.
+        A waiting child follows a parent that settled with a usable shared
+        membership, or a parent that failed or was cancelled before it ever
+        produced native context. A child whose parent succeeded but whose
+        membership is since lost cannot be continuous, so the whole pending
+        tail of that thread fails first and nothing is released into a fresh
+        sandbox presented as continuity.
+
+        Every terminal writer — ``transition``, ``release_claim``,
+        ``request_cancel`` and the reaper — calls this for the job it just
+        closed, so a chain advances one turn at a time inside the transaction
+        that closed the previous one. :meth:`sweep_waiting_follow_ups` runs
+        the unscoped form periodically as the safety net.
         """
         await conn.execute(
             """
@@ -547,16 +547,12 @@ class AgentJobStore:
                   AND parent.state = ANY($2::text[])
                   AND ($1::text IS NULL OR parent.id = $1)
                   AND NOT (
-                        (
-                            parent.state IN ('failed', 'cancelled')
-                            AND parent.retained_followup_eligible IS TRUE
-                        )
+                        parent.state IN ('failed', 'cancelled')
                         OR EXISTS (
                             SELECT 1
                             FROM agent_thread_sandbox_memberships m
                             JOIN agent_sandboxes g ON g.id = m.sandbox_id
                             WHERE m.thread_id = child.thread_id
-                              AND g.mode = 'shared_live'
                               AND m.context_status <> 'lost'
                               AND m.native_state <> 'lost'
                               AND g.state NOT IN ('stopped_dirty', 'lost')
@@ -583,16 +579,12 @@ class AgentJobStore:
               AND parent.state = ANY($2::text[])
               AND ($1::text IS NULL OR parent.id = $1)
               AND (
-                    (
-                        parent.state IN ('failed', 'cancelled')
-                        AND parent.retained_followup_eligible IS TRUE
-                    )
+                    parent.state IN ('failed', 'cancelled')
                     OR EXISTS (
                         SELECT 1
                         FROM agent_thread_sandbox_memberships m
                         JOIN agent_sandboxes g ON g.id = m.sandbox_id
                         WHERE m.thread_id = child.thread_id
-                          AND g.mode = 'shared_live'
                           AND m.context_status <> 'lost'
                           AND m.native_state <> 'lost'
                           AND g.state NOT IN ('stopped_dirty', 'lost')
@@ -602,6 +594,19 @@ class AgentJobStore:
             parent_job_id,
             list(TERMINAL_STATES),
         )
+
+    async def sweep_waiting_follow_ups(self) -> None:
+        """Promote or fail every waiting follow-up whose parent already settled.
+
+        The scoped calls in the terminal writers are what keep a chat moving;
+        this pass exists so a child stranded by a crash between a parent's
+        terminal write and its scoped promotion is picked up on the next
+        reaper tick rather than never. It touches only rows the partial
+        ``waiting``/``queued`` indexes point at, so its cost follows the
+        number of pending follow-ups, not the size of the history.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._advance_waiting_follow_ups(conn)
 
     async def initialize(self) -> None:
         """No-op: schema and backfills are Alembic's now, not startup's.
@@ -928,9 +933,9 @@ class AgentJobStore:
                 INSERT INTO agent_jobs
                     (id, thread_id, turn_no, user_id, repo, base_sha, task_prompt,
                      setup_script, runtime, model, execution_profile, reasoning_effort,
-                     metadata, mcp_servers, retained_followup_eligible)
+                     metadata, mcp_servers)
                 VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                        $12::jsonb, $13, TRUE)
+                        $12::jsonb, $13)
                 RETURNING {_JOB_COLUMNS}
                 """,
                 job_id,
@@ -1036,29 +1041,14 @@ class AgentJobStore:
                 SELECT g.state, m.context_status, TRUE AS shared_live
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                WHERE m.thread_id = $1
                 FOR UPDATE OF g
                 """,
                 thread_id,
             )
-            if sandbox is None:
-                historical_sandbox = await conn.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM agent_thread_sandboxes WHERE thread_id = $1)",
-                    thread_id,
-                )
-                if historical_sandbox:
-                    return {"error": "sandbox_context_lost"}
             if sandbox is not None and (
                 sandbox["context_status"] == "lost" or sandbox["state"] in {"stopped_dirty", "lost"}
             ):
-                return {"error": "sandbox_context_lost"}
-            if sandbox is None and parent["retained_followup_eligible"] is not True:
-                # Migration 0025 leaves every pre-cutover row NULL. It may
-                # still be in flight on a disposable runner, so accepting a
-                # waiting child now could later promote that child into a new
-                # retained group and silently fabricate continuity. Only an
-                # explicit post-cutover TRUE may proceed without an existing
-                # retained membership.
                 return {"error": "sandbox_context_lost"}
             if sandbox is None and parent["state"] == SUCCEEDED:
                 # A successful native turn must have settled inside its group.
@@ -1075,10 +1065,9 @@ class AgentJobStore:
                 INSERT INTO agent_jobs
                     (id, thread_id, parent_job_id, turn_no, user_id, repo, base_sha,
                      task_prompt, setup_script, runtime, model, execution_profile,
-                     reasoning_effort, state, metadata, mcp_servers,
-                     retained_followup_eligible)
+                     reasoning_effort, state, metadata, mcp_servers)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                        $14, $15::jsonb, $16, TRUE)
+                        $14, $15::jsonb, $16)
                 RETURNING {_JOB_COLUMNS}
                 """,
                 job_id,
@@ -1246,7 +1235,7 @@ class AgentJobStore:
                        ) AS native_fork_capable
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                WHERE m.thread_id = $1
                 FOR UPDATE OF g
                 """,
                 source["thread_id"],
@@ -1756,12 +1745,12 @@ class AgentJobStore:
                             base_sha, task_prompt, setup_script, runtime, model,
                             execution_profile, reasoning_effort, state,
                             published_pr_url, published_commit_sha, detail, metadata,
-                            fork_source_job_id, mcp_servers, retained_followup_eligible,
+                            fork_source_job_id, mcp_servers,
                             created_at, updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                             $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21,
-                            TRUE, clock_timestamp(), clock_timestamp()
+                            clock_timestamp(), clock_timestamp()
                         )
                         """,
                         copy_id,
@@ -1810,12 +1799,12 @@ class AgentJobStore:
                 await conn.execute(
                     """
                     INSERT INTO agent_thread_sandbox_memberships (
-                        thread_id, sandbox_id, native_session_id, native_state,
-                        context_status, process_generation, residency_generation,
-                        resident_state, resident_slot_id, last_settled_job_id,
-                        forked_from_thread_id, fork_anchor_job_id
+                        thread_id, user_id, sandbox_id, native_session_id,
+                        native_state, context_status, process_generation,
+                        residency_generation, resident_state, resident_slot_id,
+                        last_settled_job_id, forked_from_thread_id, fork_anchor_job_id
                     ) VALUES (
-                        $1, $2, $3, 'ready', 'live', $4, $5, 'live', $6,
+                        $1, $10, $2, $3, 'ready', 'live', $4, $5, 'live', $6,
                         $7, $8, $9
                     )
                     """,
@@ -1828,6 +1817,7 @@ class AgentJobStore:
                     anchor_id,
                     operation["source_thread_id"],
                     operation["source_job_id"],
+                    operation["user_id"],
                 )
                 await conn.execute(
                     """
@@ -2462,7 +2452,7 @@ class AgentJobStore:
                   AND a.lease_expires_at > NOW()
                   AND j.id = $3
                   AND j.current_attempt_id = a.id
-                  AND j.state IN ('running', 'publishing')
+                  AND j.state = 'running'
                 """,
                 attempt_id,
                 lease_generation,
@@ -2541,10 +2531,11 @@ class AgentJobStore:
     ) -> dict[str, Any]:
         """Page complete owned conversations, searching their canonical title.
 
-        One SQL read aggregates thread-wide activity, then uses the thread-turn
-        index to fetch the latest job only for the bounded result page.
-        Activity includes messages and job transitions;
-        lease heartbeats do not change it. The unique thread id breaks ties.
+        Activity is the thread's own update or its newest turn's, whichever is
+        later — one index probe per owned thread, never an aggregate over the
+        whole history — and the newest turn is fetched in full only for the
+        bounded result page. Messages and job transitions move a thread; lease
+        heartbeats do not. The unique thread id breaks ties.
         A cursor is scoped to its owner and filters, and is a pagination hint,
         never authority to read a thread. Updates may move a thread ahead of a
         previously issued cursor; refreshing starts again from the latest page.
@@ -2568,16 +2559,21 @@ class AgentJobStore:
                 WITH owned AS (
                     SELECT t.id AS thread_id, t.title, t.pinned_at,
                            t.archived_at IS NOT NULL AS archived,
-                           GREATEST(t.updated_at, MAX(j.updated_at)) AS last_activity_at
+                           GREATEST(t.updated_at, newest.updated_at) AS last_activity_at
                     FROM agent_threads t
-                    JOIN agent_jobs j ON j.thread_id = t.id AND j.user_id = $1
+                    CROSS JOIN LATERAL (
+                        SELECT j.updated_at
+                        FROM agent_jobs j
+                        WHERE j.thread_id = t.id AND j.user_id = $1
+                        ORDER BY j.turn_no DESC
+                        LIMIT 1
+                    ) newest
                     WHERE t.user_id = $1 AND t.deleted_at IS NULL
                       AND ($2::text IS NULL OR t.repo = $2)
                       AND ($3::text = '' OR POSITION(LOWER($3) IN LOWER(t.title)) > 0
                            OR POSITION(LOWER($3) IN LOWER(t.repo)) > 0)
                       AND ($4::boolean OR t.archived_at IS NULL)
                       AND ($10::boolean IS NULL OR (t.pinned_at IS NOT NULL) = $10)
-                    GROUP BY t.id
                 ), page AS (
                     SELECT * FROM owned
                     WHERE ($6::boolean IS NULL OR (
@@ -2652,7 +2648,7 @@ class AgentJobStore:
                 SELECT j.repo,
                        COUNT(DISTINCT j.thread_id) AS task_count,
                        COUNT(*) FILTER (
-                           WHERE j.state IN ('queued', 'waiting', 'running', 'publishing')
+                           WHERE j.state IN ('queued', 'waiting', 'running')
                        ) AS active_count,
                        MAX(GREATEST(t.updated_at, j.updated_at)) AS last_activity_at,
                        COUNT(DISTINCT j.thread_id) FILTER (
@@ -3038,7 +3034,7 @@ class AgentJobStore:
                 """
                 SELECT DISTINCT host
                 FROM agent_sandboxes
-                WHERE mode = 'shared_live' AND state <> 'lost'
+                WHERE state <> 'lost'
                 """
             )
         active = None if policy is None else policy["active_host"]
@@ -3684,10 +3680,6 @@ class AgentJobStore:
                 and bool(guest_kernel.strip())
                 and host_kernel.strip() != guest_kernel.strip()
             )
-            # Follow-ups may be submitted while a run is active. Promote only
-            # those whose direct parent has settled; a chain therefore
-            # advances one turn at a time even with multiple waiting messages.
-            await self._advance_waiting_follow_ups(conn)
             job_row = await conn.fetchrow(
                 f"""
                 SELECT {_QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox,
@@ -3790,11 +3782,11 @@ class AgentJobStore:
             attempt = await conn.fetchrow(
                 """
                 INSERT INTO agent_attempts
-                    (job_id, attempt_no, lease_owner, lease_generation,
+                    (job_id, thread_id, attempt_no, lease_owner, lease_generation,
                      lease_expires_at, base_sha, host_id,
                      sandbox_runtime, sandbox_image_digest, runtime_version,
                      host_kernel, guest_kernel)
-                VALUES ($1, $2, $3, $4, NOW() + make_interval(secs => $5), $6, $7,
+                VALUES ($1, $13, $2, $3, $4, NOW() + make_interval(secs => $5), $6, $7,
                         $8, $9, $10, $11, $12)
                 RETURNING id, attempt_no, lease_generation,
                           sandbox_runtime, sandbox_image_digest, runtime_version
@@ -3811,6 +3803,7 @@ class AgentJobStore:
                 runtime_version,
                 host_kernel,
                 guest_kernel,
+                job_row["thread_id"],
             )
             await conn.execute(
                 "UPDATE agent_jobs SET state = 'running', current_attempt_id = $2, "
@@ -3909,7 +3902,7 @@ class AgentJobStore:
             # queued rows with `cancel_requested`, and the reaper only reaches
             # jobs with a *running* attempt — which this no longer has — so the
             # job sat in `queued` that nothing could ever move again.
-            await conn.execute(
+            released_state = await conn.fetchval(
                 """
                 UPDATE agent_jobs
                 SET state = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'queued' END,
@@ -3917,6 +3910,7 @@ class AgentJobStore:
                     current_attempt_id = NULL,
                     updated_at = NOW()
                 WHERE id = $1 AND current_attempt_id = $2 AND state = 'running'
+                RETURNING state
                 """,
                 released,
                 attempt_id,
@@ -3928,6 +3922,11 @@ class AgentJobStore:
             # UPDATE above, this still runs once and cannot double-count even
             # when the job UPDATE changed no row.
             await self._release_host_slot(conn, released_row["host_id"])
+            if released_state == CANCELLED:
+                # A cancelled parent is a turn boundary like any other
+                # terminal outcome: its waiting child must move in this same
+                # transaction, not wait for the periodic sweep to notice.
+                await self._advance_waiting_follow_ups(conn, parent_job_id=released)
         return True
 
     async def heartbeat(
@@ -4010,12 +4009,29 @@ class AgentJobStore:
             )
             if live_attempt is None:
                 return False
+            # A success carries its native turn ordinal: the runner settles the
+            # shared workspace first and settlement assigns it, and the schema
+            # refuses a succeeded row without one. A caller that reaches here
+            # unsettled (a test double standing in for a worker) is given the
+            # ordinal settlement would have assigned, under the same rule.
             updated = await conn.fetchrow(
                 """
                 UPDATE agent_jobs j
                 SET state = $4,
                     detail = COALESCE($5, j.detail),
                     base_sha = COALESCE(j.base_sha, $7),
+                    native_turn_no = CASE
+                        WHEN $4 = 'succeeded' THEN COALESCE(
+                            j.native_turn_no,
+                            (
+                                SELECT COALESCE(MAX(previous.native_turn_no), 0) + 1
+                                FROM agent_jobs previous
+                                WHERE previous.thread_id = j.thread_id
+                                  AND previous.turn_no < j.turn_no
+                            )
+                        )
+                        ELSE j.native_turn_no
+                    END,
                     updated_at = NOW()
                 WHERE j.id = $1
                   AND j.state = ANY($3::text[])
@@ -4095,7 +4111,6 @@ class AgentJobStore:
                             updated_at = NOW()
                         FROM agent_sandboxes g
                         WHERE m.thread_id = $3 AND g.id = m.sandbox_id
-                          AND g.mode = 'shared_live'
                           AND (
                                 m.active_attempt_id = $2
                                 OR m.admitted_job_id = $1
@@ -4580,7 +4595,7 @@ class AgentJobStore:
                     )
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                WHERE m.thread_id = $1
                 """,
                 thread_id,
             )
@@ -4832,10 +4847,6 @@ class AgentJobStore:
         """Reserve one independently fenced member in a shared-live group."""
         if not 2 <= resident_slot_capacity <= 128:
             raise ValueError("shared sandbox resident slot capacity must be between 2 and 128")
-        historical = await conn.fetchval(
-            "SELECT 1 FROM agent_thread_sandboxes WHERE thread_id = $1",
-            thread_id,
-        )
         # Lock membership first everywhere; Docker reconciliation uses the
         # same order before it fences the shared group row.
         await conn.fetchval(
@@ -4852,13 +4863,11 @@ class AgentJobStore:
             SELECT m.*, g.origin_thread_id
             FROM agent_thread_sandbox_memberships m
             JOIN agent_sandboxes g ON g.id = m.sandbox_id
-            WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+            WHERE m.thread_id = $1
             FOR UPDATE OF g
             """,
             thread_id,
         )
-        if historical is not None and membership is None:
-            raise ValueError("this historical chat has no runnable shared sandbox")
         if membership is None:
             capability = await conn.fetchval(
                 """
@@ -4897,10 +4906,11 @@ class AgentJobStore:
             await conn.execute(
                 """
                 INSERT INTO agent_thread_sandbox_memberships (
-                    thread_id, sandbox_id, resident_slot_id
-                ) VALUES ($1, $2, 0)
+                    thread_id, user_id, sandbox_id, resident_slot_id
+                ) VALUES ($1, $2, $3, 0)
                 """,
                 thread_id,
+                user_id,
                 sandbox_id,
             )
             membership = await conn.fetchrow(
@@ -5020,7 +5030,7 @@ class AgentJobStore:
                     JOIN agent_attempts a ON a.id = m.active_attempt_id
                     JOIN agent_jobs j ON j.id = a.job_id
                     WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                      AND g.mode = 'shared_live' AND g.generation = $4
+                      AND g.generation = $4
                       AND m.activation_generation = $5
                       AND m.active_attempt_id = $2
                       AND (g.container_id IS NULL OR g.container_id = $6)
@@ -5072,7 +5082,7 @@ class AgentJobStore:
                 SET process_generation = $6, resident_state = 'live', updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                  AND g.mode = 'shared_live' AND g.generation = $4
+                  AND g.generation = $4
                   AND m.activation_generation = $5
                   AND m.active_attempt_id = $2
                   AND a.id = $2 AND a.lease_generation = $3
@@ -5153,7 +5163,7 @@ class AgentJobStore:
                     updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND m.sandbox_id = $4
-                  AND g.id = m.sandbox_id AND g.mode = 'shared_live'
+                  AND g.id = m.sandbox_id
                   AND m.active_attempt_id = $2
                   AND a.id = $2 AND a.lease_generation = $3
                   AND a.status = 'running' AND a.lease_expires_at > NOW()
@@ -5208,7 +5218,7 @@ class AgentJobStore:
                     updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a, agent_jobs j
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                  AND g.mode = 'shared_live' AND g.generation = $4
+                  AND g.generation = $4
                   AND m.activation_generation = $5
                   AND m.active_attempt_id = $2
                   AND a.id = $2 AND a.lease_generation = $3
@@ -5318,7 +5328,7 @@ class AgentJobStore:
                     last_error = NULL, updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                  AND g.mode = 'shared_live' AND g.generation = $4
+                  AND g.generation = $4
                   AND m.activation_generation = $5
                   AND m.active_attempt_id = $2
                   AND m.admitted_job_id = $6
@@ -5404,37 +5414,44 @@ class AgentJobStore:
                     """,
                 shared["sandbox_id"],
             )
+            # The anchor must be one of the included jobs — a deferred foreign
+            # key checks that at commit, so the snapshot row and its
+            # membership row land in this same transaction, in either order.
             if pending is None:
-                await conn.execute(
+                snapshot_id = await conn.fetchval(
                     """
-                        INSERT INTO agent_sandbox_snapshots (
-                            sandbox_id, workspace_epoch, anchor_job_id,
-                            included_job_ids, base_sha
-                        )
-                        VALUES ($1, $2, $3, jsonb_build_array($3::text), $4)
-                        """,
+                    INSERT INTO agent_sandbox_snapshots (
+                        sandbox_id, workspace_epoch, anchor_job_id, base_sha
+                    )
+                    VALUES ($1, $2, $3, $4)
+                    RETURNING id
+                    """,
                     shared["sandbox_id"],
                     group["workspace_epoch"],
                     job_id,
                     group["published_base_sha"],
                 )
             else:
+                snapshot_id = pending["id"]
                 await conn.execute(
                     """
-                        UPDATE agent_sandbox_snapshots
-                        SET workspace_epoch = $2, anchor_job_id = $3,
-                            included_job_ids = CASE
-                                WHEN included_job_ids @> jsonb_build_array($3::text)
-                                    THEN included_job_ids
-                                ELSE included_job_ids || jsonb_build_array($3::text)
-                            END,
-                            updated_at = NOW()
-                        WHERE id = $1 AND state = 'pending'
-                        """,
-                    pending["id"],
+                    UPDATE agent_sandbox_snapshots
+                    SET workspace_epoch = $2, anchor_job_id = $3, updated_at = NOW()
+                    WHERE id = $1 AND state = 'pending'
+                    """,
+                    snapshot_id,
                     group["workspace_epoch"],
                     job_id,
                 )
+            await conn.execute(
+                """
+                INSERT INTO agent_snapshot_jobs (snapshot_id, job_id)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
+                """,
+                snapshot_id,
+                job_id,
+            )
             row = await conn.fetchrow(
                 f"SELECT s.* FROM {_THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread_id,
@@ -5502,7 +5519,7 @@ class AgentJobStore:
                 """
                 SELECT * FROM agent_sandboxes
                 WHERE id = $1 AND origin_thread_id = $2 AND host = $3
-                  AND generation = $4 AND mode = 'shared_live'
+                  AND generation = $4
                 FOR UPDATE
                 """,
                 sandbox_id,
@@ -5729,7 +5746,7 @@ class AgentJobStore:
                     last_error = $7, updated_at = NOW()
                 FROM agent_sandboxes g, agent_attempts a
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
-                  AND g.mode = 'shared_live' AND g.generation = $4
+                  AND g.generation = $4
                   AND m.activation_generation = $5
                   AND m.active_attempt_id = $2
                   AND (
@@ -6089,7 +6106,7 @@ class AgentJobStore:
     async def request_cancel(self, *, job_id: str, user_id: str | None = None) -> str | None:
         """Request cancellation; returns the job's resulting state.
 
-        Queued jobs cancel immediately. Running/publishing jobs get the flag
+        Queued jobs cancel immediately. Running jobs get the flag
         set — the worker observes it on its next heartbeat and performs the
         fenced transition. Terminal jobs are a no-op. ``user_id`` scopes the
         cancel to the owner. Returns ``None`` for an unknown job.
@@ -6112,7 +6129,7 @@ class AgentJobStore:
                 )
                 await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
                 return CANCELLED
-            if state in (RUNNING, PUBLISHING):
+            if state == RUNNING:
                 await conn.execute(
                     "UPDATE agent_jobs SET cancel_requested = TRUE, updated_at = NOW() "
                     "WHERE id = $1",
@@ -6159,7 +6176,6 @@ class AgentJobStore:
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
                 WHERE s.state = 'pending'
-                  AND g.mode = 'shared_live'
                   AND g.state IN ('running', 'stopped')
                   AND g.snapshot_state = 'pending'
                   AND g.active_operation_count = 0
@@ -6170,9 +6186,10 @@ class AgentJobStore:
                   )
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM jsonb_array_elements_text(s.included_job_ids) included(job_id)
+                      FROM agent_snapshot_jobs included
                       JOIN agent_jobs included_job ON included_job.id = included.job_id
-                      WHERE included_job.state NOT IN ('succeeded', 'failed', 'cancelled')
+                      WHERE included.snapshot_id = s.id
+                        AND included_job.state NOT IN ('succeeded', 'failed', 'cancelled')
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_sandbox_snapshots prior
@@ -6460,7 +6477,15 @@ class AgentJobStore:
                 """
                 SELECT s.id AS snapshot_id, s.sandbox_id, s.workspace_epoch,
                        s.anchor_job_id AS id, s.base_sha, s.patch_content AS patch,
-                       s.included_job_ids, g.origin_thread_id,
+                       (
+                           SELECT COALESCE(
+                               jsonb_agg(included.job_id ORDER BY included.created_at, included.job_id),
+                               '[]'::jsonb
+                           )
+                           FROM agent_snapshot_jobs included
+                           WHERE included.snapshot_id = s.id
+                       ) AS included_job_ids,
+                       g.origin_thread_id,
                        g.generation, g.container_id, g.runtime_id,
                        g.runtime_version, g.sandbox_image_digest,
                        g.memory_limit, g.cpu_limit, g.stop_timeout_seconds,
@@ -6590,7 +6615,7 @@ class AgentJobStore:
                     published_commit_sha = $3, published_at = NOW(),
                     last_error = NULL, updated_at = NOW()
                 WHERE id = $1 AND state = 'publishing'
-                RETURNING sandbox_id, anchor_job_id, included_job_ids
+                RETURNING sandbox_id, anchor_job_id
                 """,
                 snapshot_id,
                 pr_url,
@@ -6624,10 +6649,10 @@ class AgentJobStore:
                     published_commit_sha = COALESCE(published_commit_sha, $3),
                     updated_at = NOW()
                 WHERE id IN (
-                    SELECT jsonb_array_elements_text($1::jsonb)
+                    SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1
                 ) AND state = 'succeeded'
                 """,
-                json.dumps(_load_json(row["included_job_ids"]) or []),
+                snapshot_id,
                 pr_url,
                 commit_sha,
             )
@@ -6739,7 +6764,7 @@ class AgentJobStore:
                     LIMIT 1
                 ) latest ON TRUE
                 JOIN agent_jobs j ON j.id = latest.anchor_job_id
-                WHERE g.mode = 'shared_live' AND g.snapshot_state = 'importing'
+                WHERE g.snapshot_state = 'importing'
                 ORDER BY g.updated_at
                 LIMIT 1
                 """
@@ -6853,10 +6878,9 @@ class AgentJobStore:
         For each expired ``running`` attempt: mark it ``superseded``, append an
         ``attempt_superseded`` control event, then decide the job's fate —
         requeue while attempts remain, ``cancelled`` if cancellation was
-        pending, ``failed`` once ``max_attempts`` is exhausted. Jobs caught in
-        ``publishing`` are failed rather than requeued: the publisher may have
-        already created the branch/PR, and a second publish must never happen
-        automatically. Returns a summary per reaped attempt.
+        pending, ``failed`` once ``max_attempts`` is exhausted. Publication is
+        a snapshot's lifecycle, not the job's, so no job is ever caught
+        mid-publish here. Returns a summary per reaped attempt.
         """
         actions: list[dict[str, Any]] = []
         async with self._pool.acquire() as conn, conn.transaction():
@@ -6876,7 +6900,6 @@ class AgentJobStore:
                     agent_thread_sandbox_memberships member
                     JOIN agent_sandboxes sandbox
                       ON sandbox.id = member.sandbox_id
-                     AND sandbox.mode = 'shared_live'
                 ) ON member.thread_id = j.thread_id
                 WHERE a.status = 'running' AND a.lease_expires_at < NOW()
                 ORDER BY a.id
@@ -7108,14 +7131,6 @@ class AgentJobStore:
                                 "the prompt was not replayed"
                             )
                         ),
-                    )
-                elif row["state"] == PUBLISHING:
-                    action = FAILED
-                    await conn.execute(
-                        "UPDATE agent_jobs SET state = 'failed', detail = $2, "
-                        "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
-                        job_id,
-                        "publish attempt lease expired; manual review required",
                     )
                 elif row["cancel_requested"]:
                     action = CANCELLED

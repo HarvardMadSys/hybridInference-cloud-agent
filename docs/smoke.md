@@ -193,8 +193,8 @@ sandbox in it.
 
 **Verified**
 
-- `alembic upgrade head` against an empty database reaches `0005_grants_and_audit`
-  and creates 14 tables. The bare `postgresql://` DSN the compose file produces
+- `alembic upgrade head` against an empty database reaches `0001_schema_baseline`
+  and creates 24 tables (re-verified on the rewritten baseline, 2026-09-10). The bare `postgresql://` DSN the compose file produces
   is the one that was used, which is what the driver rewrite exists for.
 - The process starts and `GET /healthz` answers 200.
 - **It stays up with the gateway completely unreachable** — `GATEWAY_BASE_URL`

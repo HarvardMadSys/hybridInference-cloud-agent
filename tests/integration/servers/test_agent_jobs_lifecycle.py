@@ -39,29 +39,12 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
+from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _ALLOWED_TEST_DB_PATTERN = "_test_"
-_TABLES_IN_FK_ORDER = (
-    "agent_native_session_edges",
-    "agent_thread_sandbox_memberships",
-    "agent_sandbox_snapshots",
-    "agent_session_forks",
-    "agent_sandboxes",
-    "agent_thread_messages",
-    "agent_job_artifacts",
-    "agent_job_events",
-    "agent_thread_sandboxes",
-    "agent_thread_residencies",
-    "agent_attempts",
-    "agent_jobs",
-    "agent_threads",
-    # No FK, but every claim writes here: a host left active by one test would
-    # gate the claims of the next one.
-    "agent_runner_hosts",
-)
 _OWNER = "user-owner"
 _TEST_MODEL = "glm-5.1"
 
@@ -154,8 +137,7 @@ async def api(monkeypatch):
     # baseline migration's, and a deploy applies them the same way.
     apply_migrations(db_config)
     async with pool.acquire() as conn:
-        for table in _TABLES_IN_FK_ORDER:
-            await conn.execute(f"DELETE FROM {table}")
+        await reset_agent_tables(conn)
         await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
     await store.register_host(
         host="runner-test",
@@ -203,8 +185,7 @@ async def api(monkeypatch):
         yield client, store, pool
 
     async with pool.acquire() as conn:
-        for table in _TABLES_IN_FK_ORDER:
-            await conn.execute(f"DELETE FROM {table}")
+        await reset_agent_tables(conn)
         await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
     await pool.close()
 

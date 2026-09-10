@@ -780,3 +780,22 @@ request), a mid-run cancel, and the fail-closed cases in smoke.md § 6.
 
 Update this table as tasks land. It is the answer to "what is actually done" —
 the plan describes intent, this describes reality.
+
+## Schema baseline rewrite (2026-09-10)
+
+The Alembic chain this record describes — `0001_baseline` through
+`0028_task_titles` — was replaced by a single `0001_schema_baseline` before the
+service took real traffic. The pre-launch schema review found the database
+enforcing almost none of the store's invariants (a job whose thread does not
+exist, a `current_attempt_id` from another job, a membership across tenants,
+a snapshot naming a job that does not exist were all accepted) and carrying
+rolling-deploy compatibility for writers that no longer existed: the
+`agent_thread_sandboxes` and `agent_job_artifacts` tables, the `legacy_1to1`
+sandbox mode, the `retained_followup_eligible` cutover flag and the two
+`native_turn_no` triggers. The rewritten baseline adds the composite foreign
+keys and CHECKs, replaces `included_job_ids` with `agent_snapshot_jobs`, and
+drops the residue; its module docstring is the design record. Every database
+that had been stamped with the old chain was rebuilt from it — staging held one
+internal user's test runs and production the retired on-call bot's — so the
+rows above that mention `0001_baseline`, `0002_host_pool`, `0023`–`0025` or
+`0026_attempt_ledger` now describe history, not files in the tree.

@@ -368,7 +368,7 @@ def test_online_rollback_to_an_old_protocol_is_refused_before_docker(tmp_path: P
     )
 
     assert result.returncode != 0
-    assert "does not implement shared-live-exact-sha-v2" in result.stderr
+    assert "does not implement shared-live-exact-sha-v3" in result.stderr
     assert docker_calls == ""
 
 

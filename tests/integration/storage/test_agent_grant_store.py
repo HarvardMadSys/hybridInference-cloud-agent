@@ -35,27 +35,12 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
+from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _ALLOWED_TEST_DB_PATTERN = "_test_"
-_TABLES_IN_FK_ORDER = (
-    "agent_native_session_edges",
-    "agent_thread_sandbox_memberships",
-    "agent_sandbox_snapshots",
-    "agent_session_forks",
-    "agent_sandboxes",
-    "agent_thread_messages",
-    "agent_job_artifacts",
-    "agent_job_events",
-    "agent_thread_sandboxes",
-    "agent_thread_residencies",
-    "agent_attempts",
-    "agent_jobs",
-    "agent_threads",
-    "agent_runner_hosts",
-)
 
 
 @pytest_asyncio.fixture
@@ -85,15 +70,13 @@ async def store():
     job_store = AgentJobStore(pool)
     apply_migrations(db_config)
     async with pool.acquire() as conn:
-        for table in _TABLES_IN_FK_ORDER:
-            await conn.execute(f"DELETE FROM {table}")
+        await reset_agent_tables(conn)
         await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
     try:
         yield job_store
     finally:
         async with pool.acquire() as conn:
-            for table in _TABLES_IN_FK_ORDER:
-                await conn.execute(f"DELETE FROM {table}")
+            await reset_agent_tables(conn)
             await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
         await pool.close()
 
@@ -221,7 +204,8 @@ async def test_a_grant_is_handed_over_exactly_once(store: AgentJobStore) -> None
     )
     async with store._pool.acquire() as conn:
         await conn.execute(
-            "UPDATE agent_attempts SET status = 'superseded' WHERE id = $1", claim["attempt_id"]
+            "UPDATE agent_attempts SET status = 'superseded', finished_at = NOW() WHERE id = $1",
+            claim["attempt_id"],
         )
 
     assert len(await store.take_revocable_grants()) == 1

@@ -433,25 +433,17 @@ parallel rollout does not understand the new exact-SHA claim field; relying
 only on the target API's gate would leave a window in which the old API could
 assign work to an as-yet-unverified replacement.
 
-Migration `0023_native_turn_anchors` adds `native_turn_no` and its old-writer
-triggers in one short transaction, so the previous API can keep settling
-success/snapshot/fork writes as soon as the column exists. Migration
-`0024_native_turn_rollout_guard` then performs the historical backfill,
-validates the positive-number constraint, and builds the unique partial index
-concurrently after the schema lock has committed. Migration
-`0025_retained_followup_gate` leaves every pre-cutover row `NULL` and
-leaves the database default `NULL`; only the new API explicitly marks its own
-inserts eligible. The previous API can therefore keep inserting during the
-parallel migration window without accidentally upgrading disposable work.
-A disposable-era job without an actual retained membership cannot accept a new
-follow-up, even when that old job is still queued or running when the new API
-arrives. This prevents an old in-flight runner from leaving a waiting child
-that the new scheduler would later materialize as a fresh native session. If an
-old API already inserted such a waiting tail before cutover, the new scheduler
-fails that pending tail when its parent settles instead of promoting it. An
-actual retained membership is the independent proof that the chat remains
-runnable; an explicit `TRUE` written by the new API is sufficient only for a
-new failed/cancelled parent that never established a retained group.
+The schema baseline (`0001_schema_baseline`) carries `native_turn_no` with a
+unique partial index per thread and a CHECK that a `succeeded` job has one.
+The settlement transaction assigns the ordinal explicitly before the job's
+terminal transition — for a turn that settled its native context and then
+failed as much as for a successful one — so no trigger reconstructs it and no
+rolling-deploy guard remains. A waiting follow-up is promoted only when its
+parent failed or was cancelled before producing native context, or when the
+thread's retained membership is still usable; a child whose parent succeeded
+but whose membership is since lost fails instead of being materialized as a
+fresh native session. An actual retained membership is the only proof that a
+chat remains runnable.
 
 When either the old API or the MCP relay is absent, readiness cannot complete
 (a true cold start has neither). The control script starts Postgres, migrates,

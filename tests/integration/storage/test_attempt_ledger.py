@@ -15,11 +15,11 @@ from cloud_agent.ledger import summarize_conversation
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent.thread_stats import summarize_thread
 from tests.integration.storage.test_agent_job_store import (
-    _TABLES_IN_FK_ORDER,
     _claim,
     _create_job,
     _reserve_shared_chat,
 )
+from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 from tests.unit.test_ledger_snapshots import report_payload
 
@@ -53,11 +53,7 @@ async def store(monkeypatch):
 
     async def clean():
         async with pool.acquire() as conn:
-            for table in _TABLES_IN_FK_ORDER:
-                await conn.execute(f"DELETE FROM {table}")
-            await conn.execute(
-                "UPDATE agent_runner_policy SET active_host = NULL, runtime_versions = NULL"
-            )
+            await reset_agent_tables(conn)
 
     await clean()
     try:
@@ -129,9 +125,9 @@ async def _seed_attempt(
         attempt_id = await conn.fetchval(
             """
             INSERT INTO agent_attempts (
-                job_id, attempt_no, lease_owner, lease_generation, lease_expires_at,
-                started_at, finished_at, status
-            ) VALUES ($1, $2, 'ledger-test', $2::integer, NOW() + INTERVAL '1 hour', $3, $4, $5)
+                job_id, thread_id, attempt_no, lease_owner, lease_generation,
+                lease_expires_at, started_at, finished_at, status
+            ) VALUES ($1, $6, $2, 'ledger-test', $2::integer, NOW() + INTERVAL '1 hour', $3, $4, $5)
             RETURNING id
             """,
             job["id"],
@@ -139,6 +135,7 @@ async def _seed_attempt(
             started_at,
             finished_at,
             "running" if finished_at is None else "finished",
+            job["thread_id"],
         )
         ledger_id = None
         if grant_id is not None:
@@ -166,19 +163,23 @@ async def _force_due(store: AgentJobStore, ledger_id: int) -> None:
 
 async def test_conversation_usage_is_owner_scoped_and_does_not_include_other_threads(store):
     """One read includes sibling turns, keeps unstarted ones, and excludes forks."""
+    # Real turns of one thread: the schema ties a job's parent, messages and
+    # owner to its thread, so a conversation is built the way the API builds
+    # one rather than by re-pointing rows. Another owner's job cannot be
+    # placed in this thread at all any more; owner scoping is still asserted
+    # on the read below.
     first, first_attempt, first_ledger = await _seed_attempt(store)
-    second, second_attempt, second_ledger = await _seed_attempt(store)
-    queued = await _create_job(store)
+    second = await store.create_follow_up(
+        parent_job_id=first["id"], user_id="user-1", prompt="second turn"
+    )
+    assert second is not None and second.get("error") is None
+    _, second_attempt, second_ledger = await _seed_attempt(store, job=second)
+    queued = await store.create_follow_up(
+        parent_job_id=second["id"], user_id="user-1", prompt="unstarted turn"
+    )
+    assert queued is not None and queued.get("error") is None
     other_thread, _, _ = await _seed_attempt(store)
-    other_user = await _create_job(store, user_id="another-user")
     async with store._pool.acquire() as conn:
-        for turn_no, job in enumerate((second, queued, other_user), start=2):
-            await conn.execute(
-                "UPDATE agent_jobs SET thread_id = $2, turn_no = $3 WHERE id = $1",
-                job["id"],
-                first["thread_id"],
-                turn_no,
-            )
         await conn.execute(
             "UPDATE agent_attempt_ledger SET snapshot = $2::jsonb, queried_at = NOW() "
             "WHERE id = ANY($1::bigint[])",
@@ -727,13 +728,12 @@ async def test_job_runtime_usage_includes_retries_but_excludes_other_turns(store
     """Comparison data retains usage identities and output detection without transcript text."""
     job, first, _ = await _seed_attempt(store, grant_id=None)
     _, retry, _ = await _seed_attempt(store, job=job, attempt_no=2, grant_id=None)
-    sibling = await _create_job(store, task_prompt="a sibling turn")
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_jobs SET thread_id = $2, turn_no = 2 WHERE id = $1",
-            sibling["id"],
-            job["thread_id"],
-        )
+    # A real second turn of the same thread: the schema ties a job's messages
+    # and parent to its thread, so a job cannot simply be re-pointed.
+    sibling = await store.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="a sibling turn"
+    )
+    assert sibling is not None and sibling.get("error") is None
     _, sibling_attempt, _ = await _seed_attempt(store, job=sibling, grant_id=None)
     async with store._pool.acquire() as conn:
         for event_job, attempt_id, tokens, text in [

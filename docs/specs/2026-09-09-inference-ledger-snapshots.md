@@ -9,7 +9,7 @@ tokens remain separate sources.
 
 The credential a retained CLI uses belongs to its residency. The temporary
 `agent_attempts.grant_id` is not that credential and can be cleared during
-cleanup. Migration `0026_attempt_ledger` adds an immutable reference for each
+cleanup. `agent_attempt_ledger` holds an immutable reference for each
 attempt and actual grant, including its residency generation and Gateway
 binding identity. References are copied inside the fenced residency/admission
 transaction, before the CLI receives the prompt. A new grant within the same

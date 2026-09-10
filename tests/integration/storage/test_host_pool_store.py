@@ -35,28 +35,12 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
+from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 _ALLOWED_TEST_DB_PATTERN = "_test_"
-_TABLES_IN_FK_ORDER = (
-    "agent_native_session_edges",
-    "agent_thread_sandbox_memberships",
-    "agent_sandbox_snapshots",
-    "agent_session_forks",
-    "agent_sandboxes",
-    "agent_thread_messages",
-    "agent_job_artifacts",
-    "agent_job_events",
-    "agent_thread_sandboxes",
-    "agent_attempts",
-    "agent_jobs",
-    "agent_thread_residencies",
-    "agent_threads",
-    "agent_host_enroll_tokens",
-    "agent_runner_hosts",
-)
 
 
 @pytest_asyncio.fixture
@@ -91,11 +75,7 @@ async def store():
 
     async def _reset() -> None:
         async with pool.acquire() as conn:
-            for table in _TABLES_IN_FK_ORDER:
-                await conn.execute(f"DELETE FROM {table}")
-            await conn.execute(
-                "UPDATE agent_runner_policy SET active_host = NULL, runtime_versions = NULL"
-            )
+            await reset_agent_tables(conn)
 
     await _reset()
     try:
@@ -1464,60 +1444,6 @@ async def test_each_claim_keeps_its_own_image_stamp_across_a_rolling_upgrade(sto
 
     assert claim_two["sandbox_image_digest"] == "sandbox@sha256:image-v2"
     assert claim_one["sandbox_image_digest"] == "sandbox@sha256:image-v1"
-
-
-async def test_warm_native_survives_a_downgrade_by_folding_into_cold_native(store):
-    """Migration 0011 must be able to leave with its data (review, round 3).
-
-    A downgrade with real warm_native rows maps them to cold_native before
-    restoring the three-value CHECK — and the constraint it restores actually
-    enforces. The database is returned to head before the test ends.
-    """
-    import os as _os
-
-    import asyncpg
-
-    from tests.support.migrations import apply_migrations, downgrade_to
-
-    await _enrol(store, "runner-a")
-    _job, claim = await _running_claim(store, "runner-a")
-    assert await store.record_continuity_mode(
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        mode="warm_native",
-    )
-
-    base_db_name = _os.getenv("TEST_DB_NAME", "hybridinference_test_db")
-    worker_id = _os.environ.get("PYTEST_XDIST_WORKER", "master")
-    db_config = {
-        "host": _os.getenv("TEST_DB_HOST", "localhost"),
-        "port": int(_os.getenv("TEST_DB_PORT", "5432")),
-        "database": base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}",
-        "user": _os.getenv("TEST_DB_USER", "postgres"),
-        "password": _os.getenv("TEST_DB_PASSWORD", "postgres"),
-    }
-    try:
-        downgrade_to(db_config, "0010_continuity_mode")
-        async with store._pool.acquire() as conn:
-            folded = await conn.fetchval(
-                "SELECT continuity_mode FROM agent_attempts WHERE id = $1",
-                claim["attempt_id"],
-            )
-            assert folded == "cold_native"
-            with pytest.raises(asyncpg.CheckViolationError):
-                await conn.execute(
-                    "UPDATE agent_attempts SET continuity_mode = 'warm_native' WHERE id = $1",
-                    claim["attempt_id"],
-                )
-    finally:
-        apply_migrations(db_config)
-
-    # Back at head: the four-value vocabulary holds again.
-    assert await store.record_continuity_mode(
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        mode="warm_native",
-    )
 
 
 # ── Choosing which version the pool runs ─────────────────────────────────

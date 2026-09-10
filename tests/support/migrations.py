@@ -1,44 +1,17 @@
 """Applying the agent schema in tests, the way production will.
 
-Two entry points, because two different properties are under test.
-
-``apply_migrations`` runs Alembic exactly as a deploy does. That is E1's
-acceptance: a fresh database plus ``upgrade head`` must leave every store test
-passing, with no application-startup DDL anywhere.
-
-``run_baseline_statements`` executes the baseline's statements directly,
-bypassing Alembic's version table. Alembic will not re-run a revision it has
-already recorded, so it cannot be used to test that the statements are
-*themselves* idempotent — and they must be, because the source ran them on
-every single boot.
+``apply_migrations`` runs Alembic exactly as a deploy does: a fresh database
+plus ``upgrade head`` must leave every store test passing, with no
+application-startup DDL anywhere. ``downgrade_to`` exists for round-trip
+tests of the (single) baseline revision.
 """
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
-BASELINE = REPO / "migrations/versions/0001_baseline.py"
-
-
-def baseline_statements() -> tuple[str, ...]:
-    """Return the baseline migration's statements, read without importing it.
-
-    Read as data rather than imported: importing pulls in ``alembic.op``, which
-    is only bound inside a migration context.
-    """
-    tree = ast.parse(BASELINE.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        target = None
-        if isinstance(node, ast.AnnAssign):
-            target = getattr(node.target, "id", None)
-        elif isinstance(node, ast.Assign):
-            target = getattr(node.targets[0], "id", None)
-        if target == "_STATEMENTS":
-            return tuple(ast.literal_eval(node.value))
-    raise AssertionError("_STATEMENTS not found in the baseline migration")
 
 
 def dsn_from(db_config: dict[str, Any]) -> str:
@@ -74,10 +47,3 @@ def downgrade_to(db_config: dict[str, Any], revision: str) -> None:
     from alembic import command
 
     command.downgrade(_alembic_config(db_config), revision)
-
-
-async def run_baseline_statements(pool: Any) -> None:
-    """Execute the baseline's statements directly, for idempotency tests."""
-    async with pool.acquire() as conn:
-        for statement in baseline_statements():
-            await conn.execute(statement)
