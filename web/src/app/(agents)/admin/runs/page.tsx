@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -43,22 +43,12 @@ const COLUMNS = [
   { label: 'Created', width: '15%' },
 ] as const;
 
-const EXTRA_FILTERS = [
-  ['user_id', 'User ID'],
-  ['repo', 'Repository'],
-  ['runtime', 'Agent'],
-  ['model', 'Model'],
-  ['host', 'Host'],
-] as const;
-
-type ExtraFilters = Pick<AdminRunFilters, (typeof EXTRA_FILTERS)[number][0]>;
-
 const SKELETON_ROWS = 6;
 
-function windowFilters(days: number, filters: AdminRunFilters = {}): AdminRunFilters {
+function windowFilters(days: number, state?: AgentJobApiState): AdminRunFilters {
   const until = new Date();
   return {
-    ...filters,
+    state,
     since: new Date(until.getTime() - days * 86_400_000).toISOString(),
     until: until.toISOString(),
     limit: 50,
@@ -73,8 +63,6 @@ export default function AdminRunsPage() {
 
 function RunsList() {
   const [days, setDays] = useState(7);
-  const [draft, setDraft] = useState<ExtraFilters>({});
-  const [moreFilters, setMoreFilters] = useState(false);
   const [filters, setFilters] = useState<AdminRunFilters>(() => windowFilters(7));
   const [page, setPage] = useState<AdminRunsPage | null>(null);
   const [loading, setLoading] = useState(true);
@@ -82,8 +70,6 @@ function RunsList() {
   const [error, setError] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
   const moreRequest = useRef<AbortController | null>(null);
-  const extraFilterButton = useRef<HTMLButtonElement | null>(null);
-  const extraFilterCount = EXTRA_FILTERS.filter(([key]) => filters[key]).length;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -137,24 +123,6 @@ function RunsList() {
     }
   }
 
-  function apply(event: FormEvent) {
-    event.preventDefault();
-    const nextDraft: ExtraFilters = {};
-    for (const [key] of EXTRA_FILTERS) {
-      const value = draft[key]?.trim();
-      if (value) nextDraft[key] = value;
-    }
-    setDraft(nextDraft);
-    setFilters((current) => windowFilters(days, { state: current.state, ...nextDraft }));
-    setMoreFilters(false);
-    extraFilterButton.current?.focus();
-  }
-
-  function clearExtraFilters() {
-    setDraft({});
-    setFilters((current) => windowFilters(days, { state: current.state }));
-  }
-
   if (denied) return <AdminRequired />;
   return (
     <div className="flex-1 overflow-y-auto">
@@ -171,114 +139,58 @@ function RunsList() {
           </p>
         </div>
 
-        <form onSubmit={apply} aria-label="Run filters" className="mt-5">
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="w-40 shrink-0">
-              <span className="sr-only">Created</span>
-              <select
-                className={INPUT}
-                value={days}
-                onChange={(e) => {
-                  const nextDays = Number(e.target.value);
-                  setDays(nextDays);
-                  setFilters((current) => windowFilters(nextDays, current));
-                }}
-              >
-                <option value={7}>Last 7 days</option>
-                <option value={30}>Last 30 days</option>
-                <option value={90}>Last 90 days</option>
-              </select>
-            </label>
-            <label className="w-40 shrink-0">
-              <span className="sr-only">Status</span>
-              <select
-                className={INPUT}
-                value={filters.state ?? ''}
-                onChange={(e) =>
-                  setFilters((current) =>
-                    windowFilters(days, {
-                      ...current,
-                      state: (e.target.value || undefined) as AgentJobApiState | undefined,
-                    }),
-                  )
-                }
-              >
-                <option value="">All statuses</option>
-                {STATES.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              ref={extraFilterButton}
-              type="button"
-              className={`${BUTTON} inline-flex h-10 shrink-0 items-center gap-2`}
-              aria-expanded={moreFilters}
-              aria-controls="extra-run-filters"
-              aria-label={
-                extraFilterCount > 0 ? `More filters (${extraFilterCount} active)` : 'More filters'
+        <div
+          role="group"
+          aria-label="Run filters"
+          className="mt-5 flex flex-wrap items-center gap-2"
+        >
+          <label className="w-40 shrink-0">
+            <span className="sr-only">Created</span>
+            <select
+              className={INPUT}
+              value={days}
+              onChange={(e) => {
+                const nextDays = Number(e.target.value);
+                setDays(nextDays);
+                setFilters((current) => windowFilters(nextDays, current.state));
+              }}
+            >
+              <option value={7}>Last 7 days</option>
+              <option value={30}>Last 30 days</option>
+              <option value={90}>Last 90 days</option>
+            </select>
+          </label>
+          <label className="w-40 shrink-0">
+            <span className="sr-only">Status</span>
+            <select
+              className={INPUT}
+              value={filters.state ?? ''}
+              onChange={(e) =>
+                setFilters(
+                  windowFilters(
+                    days,
+                    (e.target.value || undefined) as AgentJobApiState | undefined,
+                  ),
+                )
               }
-              onClick={() => setMoreFilters((current) => !current)}
             >
-              More filters
-              {extraFilterCount > 0 && (
-                <span
-                  aria-hidden
-                  className="rounded-full bg-gray-100 px-1.5 text-xs tabular-nums dark:bg-white/10"
-                >
-                  {extraFilterCount}
-                </span>
-              )}
-              <svg
-                aria-hidden
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={1.5}
-                className={`h-3.5 w-3.5 transition-transform ${moreFilters ? 'rotate-180' : ''}`}
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="m4 6 4 4 4-4" />
-              </svg>
-            </button>
-            <button
-              className={`${BUTTON} ml-auto h-10`}
-              type="button"
-              disabled={loading}
-              onClick={() => setFilters((current) => windowFilters(days, current))}
-            >
-              Refresh
-            </button>
-          </div>
-          {moreFilters && (
-            <div id="extra-run-filters" className={`${CARD} mt-3 p-4`}>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {EXTRA_FILTERS.map(([key, label]) => (
-                  <label key={key} className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                    {label}
-                    <input
-                      className={`${INPUT} mt-1.5`}
-                      value={draft[key] ?? ''}
-                      placeholder="Any"
-                      onChange={(e) =>
-                        setDraft((current) => ({ ...current, [key]: e.target.value }))
-                      }
-                    />
-                  </label>
-                ))}
-              </div>
-              <div className="mt-4 flex justify-end gap-2">
-                <button type="button" className={BUTTON} onClick={clearExtraFilters}>
-                  Clear filters
-                </button>
-                <button type="submit" className={BUTTON}>
-                  Apply filters
-                </button>
-              </div>
-            </div>
-          )}
-        </form>
+              <option value="">All statuses</option>
+              {STATES.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className={`${BUTTON} ml-auto h-10`}
+            type="button"
+            disabled={loading}
+            onClick={() => setFilters((current) => windowFilters(days, current.state))}
+          >
+            Refresh
+          </button>
+        </div>
 
         {error && (
           <ErrorNotice>
