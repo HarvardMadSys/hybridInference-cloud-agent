@@ -14,7 +14,7 @@
 //   web-root    basePath ""        browser API /api         (own hostname)
 //   web-agents  basePath "/agents" browser API /agents/api  (gateway hostname)
 //
-// For each variant and each of two deployments, this checks:
+// For each variant, and each of two configured deployments, this checks:
 //
 //   1. the document is served at the variant's own path, and not at a bare
 //      path when the variant is mounted under a prefix;
@@ -31,12 +31,31 @@
 //      fallback to a build-time constant looks like;
 //   6. a secret-looking variable in the environment reaches neither the HTML
 //      nor the client bundle, and no deployment value is baked into the
-//      bundle at all;
-//   7. an illegal value fails the request instead of being read as "unset".
+//      bundle at all.
+//
+// and then three things that are not per-deployment:
+//
+//   7. the RSC payload the client hydrates from carries the same identity the
+//      markup does, exactly. The document proves the *server* rendered the
+//      runtime values; the payload is the half a client component reads, so a
+//      tree that would hydrate from the neutral default is only visible here;
+//   8. `return_to` survives the mount prefix — asked to return to a path that
+//      carries the prefix, the link hands the control plane a path that
+//      carries it once. Applied twice it returned to `/agents/agents`;
+//   9. a deployment that configures nothing renders the neutral identity, with
+//      no `AGENT_WEB_*` in the environment at all. "The image carries no
+//      deployment's brand" is shown rather than inferred, and a fallback that
+//      named a real site is what this fails on;
+//  10. an illegal value fails the request instead of being read as "unset";
+//  11. the artifact itself is unchanged by any of it — a digest over the
+//      standalone server and the static chunks is taken before the first
+//      render and after the last, so "one image, many deployments" is checked
+//      rather than inferred from the shape of the loop.
 //
 // Run from `web/`.
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -106,6 +125,22 @@ const DEPLOYMENTS = [
   }),
 ];
 
+// What a deployment that configured nothing renders.
+//
+// The literal is a copy of `NEUTRAL_SITE_CONFIG` in `web/src/config/site.ts`:
+// this script cannot import TypeScript, and the unit test there is what pins
+// that object. Written down twice on purpose — if the default changes, this
+// check fails on the next run rather than agreeing with itself.
+const NEUTRAL = {
+  name: 'unconfigured',
+  appName: 'Cloud Agent',
+  orgName: '',
+  orgUrl: '',
+  statusUrl: '',
+  gatewayUrl: '',
+  rag: false,
+};
+
 function fail(message) {
   console.error(`::error title=Runtime site config::${message}`);
   process.exit(1);
@@ -127,6 +162,99 @@ function textOf(html, tag) {
   return inner === null ? null : inner.replace(/<[^>]*>/g, '').trim();
 }
 
+/**
+ * The configured identity, as the pairs the assertions iterate.
+ *
+ * One list rather than a literal repeated per check: the document assertions,
+ * the payload assertions and the foreign-deployment scan all have to agree on
+ * what "the deployment's identity" is, and a field present in one copy but not
+ * the others is a field that quietly stops being asserted anywhere.
+ */
+function identityValues(target) {
+  return [
+    ['app name', target.appName],
+    ['organisation', target.orgName],
+    ['organisation URL', target.orgUrl],
+    ['status URL', target.statusUrl],
+    ['gateway origin', target.gatewayOrigin],
+  ];
+}
+
+/** No other deployment's identity, wherever it is being looked for. */
+function assertNoForeignIdentity(where, subject, text, target) {
+  for (const other of DEPLOYMENTS) {
+    if (other.name === target.name) continue;
+    for (const [field, value] of identityValues(other)) {
+      if (text.includes(value)) {
+        fail(
+          `${where}: ${subject} also contains the ${other.name} ${field} ${JSON.stringify(value)}`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * The RSC payload the client hydrates from, decoded.
+ *
+ * `self.__next_f.push([1, "..."])` is the flight data Next inlines into the
+ * document, and it is what the client tree is built from. The document and the
+ * payload come from one render, so this is not a second opinion about the
+ * markup — it is the half a Client Component reads, and the place a tree that
+ * hydrates from the neutral default instead of the configured identity shows
+ * up.
+ *
+ * A document carrying no payload fails rather than skipping the assertions: a
+ * guard whose premise has silently disappeared reads as a pass.
+ */
+function flightPayload(html) {
+  const chunks = [...html.matchAll(/self\.__next_f\.push\(\[\d+,\s*"((?:[^"\\]|\\.)*)"\]\)/g)];
+  if (chunks.length === 0) {
+    fail('the document carries no RSC payload, so the hydration assertions would pass vacuously');
+  }
+  return chunks.map((chunk) => JSON.parse(`"${chunk[1]}"`)).join('');
+}
+
+/** The identity object the client tree receives, read out of the payload. */
+function serializedIdentity(payload) {
+  const match = payload.match(/"branding":\{[^{}]*\}/);
+  if (!match) {
+    fail(
+      'the RSC payload carries no serialized identity, so the client has nothing to hydrate from',
+    );
+  }
+  return JSON.parse(match[0].slice('"branding":'.length));
+}
+
+/** The same object as it should have been serialized for this deployment. */
+function expectedIdentity(target) {
+  return {
+    appName: target.appName,
+    orgName: target.orgName,
+    // Through `URL`, the way the parser keeps them: `https://alpha.example` is
+    // serialized as `https://alpha.example/`, and comparing the literals would
+    // report that normalization as a mismatch.
+    orgUrl: new URL(target.orgUrl).toString(),
+    statusUrl: new URL(target.statusUrl).toString(),
+    gatewayUrl: target.gatewayOrigin,
+  };
+}
+
+/** The sign-in link the document offers, as an absolute path or URL. */
+function signInHref(html) {
+  return firstMatch(html, /href="([^"]*\/v1\/session\/login[^"]*)"/);
+}
+
+/**
+ * The same-site path the sign-in link asks the control plane to return to.
+ *
+ * Read back through `URL`, not matched as text: `return_to` is escaped in the
+ * link, and the property under test is the value the control plane receives.
+ */
+function returnToOf(href) {
+  return new URL(href, 'http://127.0.0.1').searchParams.get('return_to');
+}
+
 /** Every JavaScript chunk the browser would download for this build. */
 function clientBundle() {
   const chunks = [];
@@ -139,6 +267,41 @@ function clientBundle() {
   };
   if (existsSync(STATIC_DIR)) walk(STATIC_DIR);
   return chunks.join('\n');
+}
+
+/** A digest over one directory tree, by relative path and content. */
+function hashTree(root) {
+  const hash = createHash('sha256');
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir).sort()) {
+      const path = join(dir, entry);
+      if (entry === 'cache') continue;
+      if (statSync(path).isDirectory()) walk(path);
+      else {
+        hash.update(path.slice(root.length));
+        hash.update(readFileSync(path));
+      }
+    }
+  };
+  if (existsSync(root)) walk(root);
+  return hash.digest('hex');
+}
+
+/**
+ * Everything a deployment is served from: the standalone server and the static
+ * chunks it references.
+ *
+ * The acceptance's first criterion is that the *same* artifact serves both
+ * configurations. Nothing here rebuilds between renders — but that is a fact
+ * about the shape of this file, and a later change that moved `next build`
+ * inside the deployment loop would break the property silently. Two digests,
+ * one before and one after, make it a checked property instead.
+ *
+ * `cache` is skipped: it is the running server's scratch space, not the
+ * artifact.
+ */
+function artifactDigest() {
+  return `${hashTree(STANDALONE)}:${hashTree(STATIC_DIR)}`;
 }
 
 function buildVariant(variant) {
@@ -181,9 +344,20 @@ function buildVariant(variant) {
 }
 
 function startServer(env, port) {
+  // The deployment's identity is given, never inherited: a shell or CI job that
+  // happens to export one of these must not decide what any render below shows.
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith('AGENT_WEB_')),
+  );
   const child = spawn(process.execPath, [SERVER], {
     cwd: STANDALONE,
-    env: { ...process.env, NODE_ENV: 'production', HOSTNAME: '127.0.0.1', PORT: String(port), ...env },
+    env: {
+      ...inherited,
+      NODE_ENV: 'production',
+      HOSTNAME: '127.0.0.1',
+      PORT: String(port),
+      ...env,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -227,11 +401,11 @@ async function waitForResponse(url) {
   throw new Error(`${url} did not answer within ${STARTUP_TIMEOUT_MS}ms: ${lastError}`);
 }
 
-async function render(variant, env) {
+async function render(variant, env, suffix = '/login') {
   const port = nextPort++;
   const server = startServer(env, port);
   try {
-    const url = `http://127.0.0.1:${port}${variant.basePath}/login`;
+    const url = `http://127.0.0.1:${port}${variant.basePath}${suffix}`;
     const response = await waitForResponse(url);
     return { status: response.status, html: await response.text(), logs: server.logs.join('') };
   } finally {
@@ -277,7 +451,7 @@ function assertRendered(variant, target, rendered) {
 
   // The one URL this app hands to another service, and the string the gateway
   // matches as an exact redirect target.
-  const signIn = firstMatch(html, /href="([^"]*\/v1\/session\/login[^"]*)"/);
+  const signIn = signInHref(html);
   const expectedSignIn = `${variant.apiUrl}/v1/session/login`;
   if (!signIn) fail(`${where}: no sign-in link in the document`);
   if (!signIn.startsWith(expectedSignIn)) {
@@ -300,13 +474,7 @@ function assertRendered(variant, target, rendered) {
 
   // The identity crosses to the client as serialized props, so all of it must
   // be in the document — not only the two fields this page happens to render.
-  for (const [field, value] of [
-    ['app name', target.appName],
-    ['organisation', target.orgName],
-    ['organisation URL', target.orgUrl],
-    ['status URL', target.statusUrl],
-    ['gateway origin', target.gatewayOrigin],
-  ]) {
+  for (const [field, value] of identityValues(target)) {
     if (!html.includes(value)) {
       fail(`${where}: the ${field} ${JSON.stringify(value)} is not in the document`);
     }
@@ -319,28 +487,37 @@ function assertRendered(variant, target, rendered) {
     fail(`${where}: the feature switch is not ${target.rag} in the serialized config`);
   }
 
+  // The half the client hydrates from. Compared as an object rather than
+  // searched for as substrings: a payload carrying one field of this
+  // deployment and the rest of another's is also a document that renders
+  // correctly and hydrates into someone else's site.
+  const payload = flightPayload(html);
+  const identity = serializedIdentity(payload);
+  if (JSON.stringify(identity) !== JSON.stringify(expectedIdentity(target))) {
+    fail(
+      `${where}: the RSC payload serializes ${JSON.stringify(identity)}, expected ` +
+        `${JSON.stringify(expectedIdentity(target))}`,
+    );
+  }
+
+  const rag = payload.match(/"features":\{"rag":(true|false)\}/);
+  if (!rag) {
+    fail(`${where}: the RSC payload carries no serialized feature switch`);
+  }
+  if (rag[1] !== String(target.rag)) {
+    fail(`${where}: the RSC payload's feature switch is ${rag[1]}, expected ${target.rag}`);
+  }
+
   // Anything belonging to the other deployment means a fallback to a
   // build-time constant, which is the whole failure this work removed.
-  for (const other of DEPLOYMENTS) {
-    if (other.name === target.name) continue;
-    for (const [field, value] of [
-      ['app name', other.appName],
-      ['organisation', other.orgName],
-      ['organisation URL', other.orgUrl],
-      ['status URL', other.statusUrl],
-      ['gateway host', other.gatewayHost],
-    ]) {
-      if (html.includes(value)) {
-        fail(
-          `${where}: the document also contains the ${other.name} ${field} ` +
-            `${JSON.stringify(value)}`,
-        );
-      }
-    }
-  }
+  assertNoForeignIdentity(where, 'the document', html, target);
+  assertNoForeignIdentity(where, 'the RSC payload', payload, target);
 
   if (html.includes(SENTINEL)) {
     fail(`${where}: a variable that is not on the allowlist reached the HTML`);
+  }
+  if (payload.includes(SENTINEL)) {
+    fail(`${where}: a variable that is not on the allowlist reached the RSC payload`);
   }
 }
 
@@ -367,13 +544,113 @@ function assertBundleIsClean(variant) {
   }
 }
 
+/**
+ * The mount prefix reaches the control plane once.
+ *
+ * `return_to` is captured from `window.location.pathname`, which already
+ * carries the prefix, and the control plane appends it back when it builds the
+ * landing URL. Handed over unchanged it is applied twice: signing in at
+ * `/agents` returned to `/agents/agents`, which this app resolved as a job
+ * whose id was `agents` and rendered as "No such agent job". The unit tests pin
+ * `safeReturnTo`; this pins what the built page actually links to.
+ */
+async function assertReturnTo(variant) {
+  const landing = '/jobs/abc';
+  const asked = `${variant.basePath}${landing}`;
+  const where = `${variant.name} / return_to`;
+  const rendered = await render(
+    variant,
+    DEPLOYMENTS[0].env,
+    `/login?return_to=${encodeURIComponent(asked)}`,
+  );
+  if (rendered.status !== 200) {
+    fail(`${where}: the page answered ${rendered.status}\n${rendered.logs}`);
+  }
+
+  const href = signInHref(rendered.html);
+  if (!href) fail(`${where}: no sign-in link in the document`);
+
+  const returnTo = returnToOf(href);
+  if (returnTo !== landing) {
+    fail(
+      `${where}: asked to return to ${JSON.stringify(asked)}, the sign-in link asks the control ` +
+        `plane for ${JSON.stringify(returnTo)}, expected ${JSON.stringify(landing)}`,
+    );
+  }
+}
+
+/**
+ * A deployment that configured nothing.
+ *
+ * The design asks for an image that is built and run without any of this
+ * configuration, still starts, and shows a generic site — with no real
+ * deployment's name as what it falls back to. The unit tests cover the parser;
+ * this covers the built artifact, which is where a module-level default would
+ * live.
+ */
+async function assertNeutralDeployment(variant) {
+  const where = `${variant.name} / ${NEUTRAL.name}`;
+  const rendered = await render(variant, { AGENT_SESSION_SECRET: SENTINEL });
+  if (rendered.status !== 200) {
+    fail(`${where}: GET ${variant.basePath}/login answered ${rendered.status}\n${rendered.logs}`);
+  }
+
+  const title = titleOf(rendered.html);
+  if (title !== NEUTRAL.appName) {
+    fail(
+      `${where}: <title> is ${JSON.stringify(title)}, expected the neutral ` +
+        `${JSON.stringify(NEUTRAL.appName)}`,
+    );
+  }
+
+  const heading = textOf(rendered.html, 'h1');
+  if (heading !== NEUTRAL.appName) {
+    fail(
+      `${where}: the rendered <h1> is ${JSON.stringify(heading)}, expected the neutral ` +
+        `${JSON.stringify(NEUTRAL.appName)}`,
+    );
+  }
+
+  const payload = flightPayload(rendered.html);
+  const identity = serializedIdentity(payload);
+  const expected = {
+    appName: NEUTRAL.appName,
+    orgName: NEUTRAL.orgName,
+    orgUrl: NEUTRAL.orgUrl,
+    statusUrl: NEUTRAL.statusUrl,
+    gatewayUrl: NEUTRAL.gatewayUrl,
+  };
+  if (JSON.stringify(identity) !== JSON.stringify(expected)) {
+    fail(
+      `${where}: the RSC payload serializes ${JSON.stringify(identity)}, expected the neutral ` +
+        `identity ${JSON.stringify(expected)}`,
+    );
+  }
+
+  const rag = payload.match(/"features":\{"rag":(true|false)\}/);
+  if (!rag || rag[1] !== String(NEUTRAL.rag)) {
+    fail(`${where}: the feature switch is ${rag ? rag[1] : 'absent'}, expected ${NEUTRAL.rag}`);
+  }
+
+  assertNoForeignIdentity(where, 'the document', rendered.html, NEUTRAL);
+  assertNoForeignIdentity(where, 'the RSC payload', payload, NEUTRAL);
+
+  if (rendered.html.includes(SENTINEL) || payload.includes(SENTINEL)) {
+    fail(`${where}: a variable that is not on the allowlist reached an unconfigured deployment`);
+  }
+}
+
 async function main() {
   for (const variant of VARIANTS) {
     buildVariant(variant);
+    const built = artifactDigest();
 
     for (const target of DEPLOYMENTS) {
       assertRendered(variant, target, await render(variant, target.env));
     }
+
+    await assertReturnTo(variant);
+    await assertNeutralDeployment(variant);
 
     // One artifact, two environments, and the two documents must differ — the
     // core assertion. Equal documents mean the value was resolved at build
@@ -398,6 +675,17 @@ async function main() {
     }
 
     assertBundleIsClean(variant);
+
+    // The artifact served every deployment above, unchanged. A digest that
+    // moved means something rebuilt or rewrote it, and "the same image serves
+    // both configurations" would no longer be what was checked.
+    const served = artifactDigest();
+    if (served !== built) {
+      fail(
+        `${variant.name}: the artifact changed while it served the deployments ` +
+          `(${built} -> ${served}) — the digest is not fixed`,
+      );
+    }
   }
 
   // An illegal value must be refused. Reading it as "unset" is the silent
@@ -414,7 +702,8 @@ async function main() {
   }
 
   console.log(
-    `Runtime site config: ${VARIANTS.length} variants, ${DEPLOYMENTS.length} deployments, all correct.`,
+    `Runtime site config: ${VARIANTS.length} variants, ${DEPLOYMENTS.length} configured ` +
+      `deployments, 1 unconfigured deployment, all correct.`,
   );
 }
 

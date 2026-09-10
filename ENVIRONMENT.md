@@ -281,6 +281,16 @@ variable an operator can set everywhere and change nothing. Every row names its
 compose argument, and `test_web_build_arguments_are_wired` fails on a row that
 has none. Changing one is a rebuild.
 
+The two are not independent. Every deployment that serves the app and the API
+from one origin has `AGENT_WEB_API_URL` equal to `<AGENT_WEB_BASE_PATH>/api`,
+and `next build` refuses a *relative* value that disagrees with the mount point
+rather than shipping an image whose every request misses the reverse proxy —
+a 404 on a page that looks correct. An absolute value is the cross-origin shape
+(a deployment's own CORS decision) and is left alone, as is an empty one, which
+is the same-origin shape for a deployment that owns its hostname; compose is
+what requires the value under a mount prefix. `web/src/config/variantPairing.test.ts`
+runs the real config file, so the rule is pinned where it is written.
+
 | Variable | New? | Compose build argument | Notes |
 |---|---|---|---|
 | `NEXT_PUBLIC_BASE_PATH` | | `AGENT_WEB_BASE_PATH` | Prefix the app is mounted under. `/agents` serves it inside the gateway's own hostname — same origin, so the session cookie needs no CORS and no DNS record is involved, and a rollback is a reverse-proxy edit rather than a DNS change waiting out a TTL. Empty for a deployment that owns its hostname. The redirect URI the gateway allowlists is no longer derived from this: sign-in returns to the control plane's `AGENT_SESSION_REDIRECT_URI`, not to a page in this app. This value still has to match `AGENT_WEB_BASE_URL`, which is where the control plane sends the browser afterwards. |
