@@ -2383,8 +2383,9 @@ class AgentJobStore:
     ) -> dict[str, Any]:
         """Page complete owned conversations, searching their canonical title.
 
-        One SQL read returns the latest turn and thread-wide activity, without
-        hydrating each thread. Activity includes messages and job transitions;
+        One SQL read aggregates thread-wide activity, then uses the thread-turn
+        index to fetch the latest job only for the bounded result page.
+        Activity includes messages and job transitions;
         lease heartbeats do not change it. The unique thread id breaks ties.
         A cursor is scoped to its owner and filters, and is a pagination hint,
         never authority to read a thread. Updates may move a thread ahead of a
@@ -2405,14 +2406,9 @@ class AgentJobStore:
             rows = await conn.fetch(
                 f"""
                 WITH owned AS (
-                    SELECT j.id, j.thread_id, t.title, t.pinned_at,
+                    SELECT t.id AS thread_id, t.title, t.pinned_at,
                            t.archived_at IS NOT NULL AS archived,
-                           GREATEST(t.updated_at, MAX(j.updated_at) OVER (
-                               PARTITION BY t.id
-                           )) AS last_activity_at,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY t.id ORDER BY j.turn_no DESC, j.id DESC
-                           ) AS turn_rank
+                           GREATEST(t.updated_at, MAX(j.updated_at)) AS last_activity_at
                     FROM agent_threads t
                     JOIN agent_jobs j ON j.thread_id = t.id AND j.user_id = $1
                     WHERE t.user_id = $1
@@ -2420,10 +2416,10 @@ class AgentJobStore:
                       AND ($3::text = '' OR POSITION(LOWER($3) IN LOWER(t.title)) > 0
                            OR POSITION(LOWER($3) IN LOWER(t.repo)) > 0)
                       AND ($4::boolean OR t.archived_at IS NULL)
+                    GROUP BY t.id
                 ), page AS (
                     SELECT * FROM owned
-                    WHERE turn_rank = 1
-                      AND ($6::boolean IS NULL OR (
+                    WHERE ($6::boolean IS NULL OR (
                           pinned_at IS NOT NULL,
                           COALESCE(pinned_at, '-infinity'::timestamptz),
                           last_activity_at, thread_id
@@ -2436,7 +2432,13 @@ class AgentJobStore:
                 )
                 SELECT {_QUALIFIED_JOB_COLUMNS}, page.title, page.pinned_at,
                        page.archived, page.last_activity_at
-                FROM page JOIN agent_jobs j ON j.id = page.id AND j.user_id = $1
+                FROM page
+                JOIN LATERAL (
+                    SELECT * FROM agent_jobs latest
+                    WHERE latest.thread_id = page.thread_id AND latest.user_id = $1
+                    ORDER BY latest.turn_no DESC
+                    LIMIT 1
+                ) j ON TRUE
                 ORDER BY page.pinned_at DESC NULLS LAST,
                          page.last_activity_at DESC, page.thread_id DESC
                 """,

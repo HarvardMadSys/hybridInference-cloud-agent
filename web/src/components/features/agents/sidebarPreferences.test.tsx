@@ -30,7 +30,7 @@ describe('personal sidebar preferences', () => {
     expect(readSidebarPreferences('alice').tasks).toEqual({ 'repo:owner/repo': ['b', 'a'] });
     rerender({ id: 'bob' });
     await waitFor(() => expect(result.current[0]).toEqual(DEFAULT_PREFERENCES));
-    act(() => result.current[1]((old) => ({ ...old, projects: ['other/repo'] })));
+    act(() => result.current[1]((old) => ({ ...old, order: 'manual', projects: ['other/repo'] })));
     expect(readSidebarPreferences('alice').group).toBe('flat');
     expect(readSidebarPreferences('bob').projects).toEqual(['other/repo']);
     rerender({ id: 'alice' });
@@ -41,7 +41,7 @@ describe('personal sidebar preferences', () => {
     expect(readSidebarPreferences('bad')).toEqual(DEFAULT_PREFERENCES);
     localStorage.setItem(
       sidebarPreferencesKey('bad'),
-      JSON.stringify({ group: 'invalid', tasks: { repo: ['a', 3, 'a'] } }),
+      JSON.stringify({ group: 'invalid', manualInitialized: true, tasks: { repo: ['a', 3, 'a'] } }),
     );
     expect(readSidebarPreferences('bad').tasks.repo).toEqual(['a']);
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
@@ -58,5 +58,44 @@ describe('personal sidebar preferences', () => {
     expect(moveBefore(['a', 'b', 'c'], 'c', 'a')).toEqual(['c', 'a', 'b']);
     expect(moveBefore(['a', 'b'], 'other-repo', 'a')).toEqual(['a', 'b']);
     expect(manualOrder(['new', 'b', 'a'], ['a', 'b'], (id) => id)).toEqual(['a', 'b', 'new']);
+  });
+  it('retires unowned fold storage and removes default-order history without migrating it', () => {
+    localStorage.setItem('agents.sidebar.projects', JSON.stringify({ 'private/old-owner': true }));
+    localStorage.setItem(
+      sidebarPreferencesKey('alice'),
+      JSON.stringify({
+        ...DEFAULT_PREFERENCES,
+        group: 'flat',
+        projects: ['owner/repo'],
+        tasks: { flat: ['old-thread'] },
+        expanded: { 'alice/repo': false },
+      }),
+    );
+    const { result } = renderHook(() => useSidebarPreferences('alice'));
+    expect(result.current[0]).toEqual({
+      ...DEFAULT_PREFERENCES,
+      group: 'flat',
+      expanded: { 'alice/repo': false },
+    });
+    expect(localStorage.getItem('agents.sidebar.projects')).toBeNull();
+    const saved = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
+    expect(saved.projects).toBeUndefined();
+    expect(saved.tasks).toBeUndefined();
+    expect(saved.expanded).not.toHaveProperty('private/old-owner');
+  });
+  it('preserves saved manual positions while displaying last updated', () => {
+    const value = {
+      ...DEFAULT_PREFERENCES,
+      manualInitialized: true,
+      projects: ['b/repo', 'a/repo'],
+      tasks: { flat: ['b', 'a'] },
+    };
+    localStorage.setItem(sidebarPreferencesKey('alice'), JSON.stringify(value));
+    const { result } = renderHook(() => useSidebarPreferences('alice'));
+    expect(result.current[0]).toEqual(value);
+    expect(JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!).tasks.flat).toEqual([
+      'b',
+      'a',
+    ]);
   });
 });

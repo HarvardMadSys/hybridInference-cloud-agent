@@ -9,6 +9,8 @@ const api = vi.hoisted(() => ({
   get: vi.fn(),
   thread: vi.fn(),
   archive: vi.fn(),
+  restore: vi.fn(),
+  archivedJobs: vi.fn(),
   pin: vi.fn(),
   pathname: '/',
   params: '',
@@ -36,10 +38,14 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJob: api.get,
   getAgentJobThread: api.thread,
   archiveAgentJob: api.archive,
+  restoreAgentJob: api.restore,
+  listAgentJobs: api.archivedJobs,
   pinAgentJob: api.pin,
   unpinAgentJob: api.pin,
 }));
 import { AgentsSidebar } from './AgentsSidebar';
+import { ArchivedTasksView } from './ArchivedTasksView';
+import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
 function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
   return {
@@ -271,5 +277,84 @@ describe('sidebar navigation interactions', () => {
     expect(
       await screen.findByRole('link', { name: 'Task a · owner/repo · Archived' }),
     ).toHaveAttribute('href', '/a');
+  });
+  it('loads only expanded project pages and records no history IDs before manual order', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
+    expect(api.list.mock.calls.every(([options]) => options.repo === 'owner/repo')).toBe(true);
+    expect(localStorage.getItem(sidebarPreferencesKey('alice'))).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'View options' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'In one list' }));
+    await screen.findByRole('link', { name: 'Task a · owner/repo' });
+    const saved = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
+    expect(saved.tasks).toBeUndefined();
+    expect(saved.projects).toBeUndefined();
+    fireEvent.click(screen.getByRole('button', { name: 'View options' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Manual' }));
+    const manual = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
+    expect(manual.tasks.flat).toEqual(['thread-a', 'thread-b']);
+    expect(manual.projects).toEqual(['owner/repo']);
+  });
+  it('restores an old hidden thread directly into search and its project without a global-page hit', async () => {
+    let archived = false;
+    const old = conversation('old');
+    old.job.task_prompt = old.title;
+    old.last_activity_at = '2025-01-01T00:00:00Z';
+    api.archive.mockImplementation(async () => {
+      archived = true;
+    });
+    api.restore.mockImplementation(async () => {
+      archived = false;
+    });
+    api.archivedJobs.mockImplementation(async () => (archived ? [old.job] : []));
+    api.list.mockImplementation(async ({ q, repo }: { q?: string; repo?: string }) => ({
+      // This old task never belongs to the unscoped first page.
+      conversations: q
+        ? archived
+          ? []
+          : [old]
+        : repo
+          ? [...base, ...(archived ? [] : [old])]
+          : base,
+      next_cursor: null,
+    }));
+    const { rerender } = render(
+      <>
+        <AgentsSidebar />
+      </>,
+    );
+    await screen.findByText('Task old');
+    fireEvent.click(screen.getByRole('button', { name: 'Archive Task old' }));
+    await waitFor(() => expect(screen.queryByText('Task old')).not.toBeInTheDocument());
+    rerender(
+      <>
+        <AgentsSidebar />
+        <ArchivedTasksView />
+      </>,
+    );
+    await screen.findByRole('button', { name: 'Restore' });
+    fireEvent.click(screen.getByRole('button', { name: 'Search tasks' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Task old' } });
+    await screen.findByText('No matching tasks. Try another title or repository.');
+    const queriesBeforeRestore = api.projects.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    await screen.findByRole('link', { name: 'Task old · owner/repo' });
+    expect(api.projects.mock.calls.length).toBeGreaterThan(queriesBeforeRestore);
+    fireEvent.click(screen.getByRole('button', { name: 'Close search' }));
+    expect(await screen.findByRole('link', { name: 'Task old' })).toHaveAttribute('href', '/old');
+    expect(old.last_activity_at).toBe('2025-01-01T00:00:00Z');
+  });
+  it('ignores restore invalidation from a different signed-in account', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    api.list.mockClear();
+    api.projects.mockClear();
+    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'bob' }));
+    expect(api.list).not.toHaveBeenCalled();
+    expect(api.projects).not.toHaveBeenCalled();
+    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'alice' }));
+    await waitFor(() => expect(api.projects).toHaveBeenCalledOnce());
+    expect(api.list).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo' }));
   });
 });

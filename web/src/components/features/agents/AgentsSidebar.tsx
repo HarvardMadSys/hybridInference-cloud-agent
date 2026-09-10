@@ -11,6 +11,7 @@ import {
   getAgentJob,
   getAgentJobThread,
 } from '@/lib/api/agents';
+import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
@@ -24,7 +25,6 @@ import {
 import { TaskRow, ProjectFolder, ListStatus, type RowActions } from './SidebarRows';
 export { groupJobsByConversation, groupJobsByProject } from './conversations';
 export const SIDEBAR_WIDTH_STORAGE_KEY = 'agents.sidebar.width';
-export const SIDEBAR_PROJECTS_STORAGE_KEY = 'agents.sidebar.projects';
 export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const pathname = usePathname() ?? '';
   const params = useSearchParams();
@@ -41,7 +41,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     error: projectsError,
     reload: reloadProjects,
   } = useAgentProjects();
-  const list = useConversationList({ userId, refresh });
+  const list = useConversationList({ userId, refresh, enabled: preferences.group === 'flat' });
   const [selected, setSelected] = useState<{ path: string; row: SidebarConversation } | null>(null);
   const [hiddenThreads, setHiddenThreads] = useState<Set<string>>(new Set());
   const [archiving, setArchiving] = useState<string | null>(null);
@@ -91,6 +91,24 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   useEffect(() => {
     setHiddenThreads(new Set());
   }, [userId]);
+  useEffect(() => {
+    const restored = (event: Event) => {
+      const detail = (event as CustomEvent<ConversationRestoredDetail>).detail;
+      if (!detail || detail.userId !== userId || typeof detail.threadId !== 'string') return;
+      setHiddenThreads((old) => {
+        const next = new Set(old);
+        next.delete(detail.threadId);
+        return next;
+      });
+      setSelected((old) =>
+        old?.row.key === detail.threadId ? { ...old, row: { ...old.row, archived: false } } : old,
+      );
+      reload();
+      reloadProjects();
+    };
+    window.addEventListener(CONVERSATION_RESTORED_EVENT, restored);
+    return () => window.removeEventListener(CONVERSATION_RESTORED_EVENT, restored);
+  }, [userId, reload, reloadProjects]);
   useEffect(() => {
     let cancelled = false;
     setSelected(null);
@@ -164,6 +182,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       if (!rows.length) return;
       rows.forEach((row) => knownRows.current.set(row.key, row));
       updatePreferences((old) => {
+        if (!old.manualInitialized && old.order !== 'manual') return old;
         const tasks = { ...old.tasks };
         let changed = false;
         for (const row of rows)
@@ -184,7 +203,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   }, [list.rows, registerRows]);
   const baseFolders = useMemo(() => {
     const repos = new Map(projects.map((project) => [project.repo, project]));
-    for (const row of list.rows)
+    for (const row of preferences.group === 'flat' ? list.rows : [])
       if (!repos.has(row.job.repo))
         repos.set(row.job.repo, {
           repo: row.job.repo,
@@ -204,9 +223,10 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         (Date.parse(b.pinned_at ?? '') || 0) - (Date.parse(a.pinned_at ?? '') || 0) ||
         (Date.parse(b.last_activity_at ?? '') || 0) - (Date.parse(a.last_activity_at ?? '') || 0),
     );
-  }, [projects, list.rows, activeRepo]);
+  }, [projects, list.rows, activeRepo, preferences.group]);
   useEffect(() => {
     updatePreferences((old) => {
+      if (!old.manualInitialized && old.order !== 'manual') return old;
       const added = baseFolders.map((p) => p.repo).filter((repo) => !old.projects.includes(repo));
       return added.length ? { ...old, projects: [...old.projects, ...added] } : old;
     });
@@ -577,7 +597,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                       },
                     }))
                   }
-                  initial={visible(list.rows.filter((row) => row.job.repo === folder.repo))}
+                  initial={[]}
                   selected={current?.job.repo === folder.repo ? current : undefined}
                   userId={userId}
                   refresh={refresh}

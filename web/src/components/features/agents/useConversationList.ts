@@ -18,7 +18,7 @@ export function conversationRow(row: AgentConversationApi): SidebarConversation 
 }
 const EMPTY_ROWS: SidebarConversation[] = [];
 
-/** Refresh the already loaded window; polling must not discard earlier pages. */
+/** Refresh loaded rows in batches; polling must not discard earlier pages. */
 export function useConversationList({
   q = '',
   repo,
@@ -65,7 +65,10 @@ export function useConversationList({
         let cursor = next;
         let following: string | null = null;
         do {
-          const result = await listAgentConversations({ q, repo, includeArchived, cursor });
+          // Each request recomputes conversation activity. Use the API's larger
+          // batch size when refreshing history instead of repeating 50-row scans.
+          const limit = next ? 50 : Math.min(200, Math.max(50, targetCount - merged.size));
+          const result = await listAgentConversations({ q, repo, includeArchived, cursor, limit });
           if (generation.current !== version) return;
           result.conversations.map(conversationRow).forEach((row) => merged.set(row.key, row));
           following = result.next_cursor;

@@ -2,6 +2,8 @@
 
 import Link from 'next/link';
 import { useState } from 'react';
+import { useAuth } from '@/components/providers';
+import { announceConversationRestored } from './conversationEvents';
 import { restoreAgentJob } from '@/lib/api/agents';
 import { groupJobsByConversation } from './conversations';
 import { useAgentJobList } from './useAgentJobs';
@@ -17,6 +19,8 @@ const STATE_LABEL: Record<AgentJobState, string> = {
 };
 
 export function ArchivedTasksView() {
+  const { state } = useAuth();
+  const userId = state.user?.id;
   const { jobs, loading, error, reload } = useAgentJobList(10_000, true);
   const [hiddenThreads, setHiddenThreads] = useState<Set<string>>(new Set());
   const [restoring, setRestoring] = useState<string | null>(null);
@@ -32,6 +36,7 @@ export function ArchivedTasksView() {
       await restoreAgentJob(jobId);
       setHiddenThreads((current) => new Set(current).add(key));
       reload();
+      announceConversationRestored({ threadId: key, userId });
     } catch (cause: unknown) {
       setRestoreError(cause instanceof Error ? cause.message : 'Could not restore the task.');
     } finally {

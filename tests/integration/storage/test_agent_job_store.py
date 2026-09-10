@@ -1507,6 +1507,36 @@ async def test_conversations_archive_repo_and_tenant_filters_are_independent(sto
     assert [item["job"]["id"] for item in only_archive["conversations"]] == [archived["id"]]
 
 
+async def test_conversations_latest_job_and_activity_ignore_foreign_turn(store: AgentJobStore):
+    """Both the activity aggregate and bounded latest-job read enforce ownership."""
+    parent = await _create_job(store)
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="foreign turn body"
+    )
+    assert child is not None
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET updated_at = $2 WHERE id = $1",
+            parent["thread_id"],
+            timestamp,
+        )
+        await conn.execute(
+            "UPDATE agent_jobs SET updated_at = $2 WHERE id = $1", parent["id"], timestamp
+        )
+        await conn.execute(
+            "UPDATE agent_jobs SET user_id = 'user-2', updated_at = $2 WHERE id = $1",
+            child["id"],
+            datetime(2030, 1, 1, tzinfo=timezone.utc),
+        )
+    page = await store.list_conversations(user_id="user-1")
+    assert len(page["conversations"]) == 1
+    conversation = page["conversations"][0]
+    assert conversation["job"]["id"] == parent["id"]
+    assert conversation["last_activity_at"] == timestamp
+    assert (await store.list_conversations(user_id="user-2"))["conversations"] == []
+
+
 async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
     store: AgentJobStore,
 ):

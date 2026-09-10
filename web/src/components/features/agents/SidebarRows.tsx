@@ -17,19 +17,21 @@ export function Highlight({ text, query }: { text: string; query: string }) {
   if (!query) return <>{text}</>;
   const pieces = [];
   let offset = 0;
-  const lower = text.toLocaleLowerCase();
-  const needle = query.toLocaleLowerCase();
-  for (let index = lower.indexOf(needle); index >= 0; index = lower.indexOf(needle, offset)) {
+  // Match against the original string: Unicode case conversion can change its length.
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(escaped, 'giu');
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index;
     pieces.push(
       text.slice(offset, index),
       <mark
         key={index}
         className="rounded bg-crimson/10 text-crimson-dark dark:bg-crimson/30 dark:text-rose-300"
       >
-        {text.slice(index, index + query.length)}
+        {match[0]}
       </mark>,
     );
-    offset = index + query.length;
+    offset = index + match[0].length;
   }
   pieces.push(text.slice(offset));
   return <>{pieces}</>;

@@ -57,6 +57,7 @@ vi.mock('./useAgentJobs', () => ({
 
 import { ArchivedTasksView } from './ArchivedTasksView';
 import { AgentsSidebar } from './AgentsSidebar';
+import { CONVERSATION_RESTORED_EVENT } from './conversationEvents';
 
 function job(overrides: Partial<AgentJob> = {}): AgentJob {
   return {
@@ -101,7 +102,7 @@ beforeEach(() => {
     loadMore: vi.fn(),
   });
   mocks.useAgentProjects.mockReturnValue({
-    projects: [],
+    projects: [{ repo: 'owner/repo', task_count: 1, active_count: 0, last_activity_at: null }],
     loading: false,
     error: null,
     reload: mocks.reloadProjects,
@@ -159,6 +160,8 @@ describe('agent task archiving', () => {
       archived_at: null,
     });
 
+    const restored = vi.fn();
+    window.addEventListener(CONVERSATION_RESTORED_EVENT, restored);
     render(<ArchivedTasksView />);
 
     expect(mocks.useAgentJobList).toHaveBeenCalledWith(10_000, true);
@@ -166,6 +169,12 @@ describe('agent task archiving', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
 
     await waitFor(() => expect(mocks.restore).toHaveBeenCalledWith('job-1'));
+    expect(restored).toHaveBeenCalledOnce();
+    expect((restored.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      threadId: 'thread-1',
+      userId: undefined,
+    });
+    window.removeEventListener(CONVERSATION_RESTORED_EVENT, restored);
     expect(mocks.reload).toHaveBeenCalledOnce();
     expect(screen.queryByText('Development environment setup')).not.toBeInTheDocument();
   });

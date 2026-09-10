@@ -187,7 +187,7 @@ describe('AgentsSidebar project tree', () => {
             }),
           ];
         }
-        if (repo) return [];
+        if (repo && repo !== 'murphy/hybridInference') return [];
         return [
           apiJob({ id: 'hi-1', thread_id: 'hi-1', task_prompt: 'Explain this repo' }),
           apiJob({

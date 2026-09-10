@@ -24,14 +24,19 @@ export function readSidebarPreferences(userId: string): SidebarPreferences {
   try {
     const value = JSON.parse(localStorage.getItem(sidebarPreferencesKey(userId)) ?? 'null');
     if (!value || typeof value !== 'object' || Array.isArray(value)) return DEFAULT_PREFERENCES;
+    const manualInitialized = value.manualInitialized === true || value.order === 'manual';
+    const tasks = Object.fromEntries(
+      Object.entries(manualInitialized ? (value.tasks ?? {}) : {}).map(([key, list]) => [
+        key,
+        strings(list),
+      ]),
+    );
     return {
       group: value.group === 'flat' ? 'flat' : 'project',
       order: value.order === 'manual' ? 'manual' : 'updated',
-      manualInitialized: value.manualInitialized === true || value.order === 'manual',
-      projects: strings(value.projects),
-      tasks: Object.fromEntries(
-        Object.entries(value.tasks ?? {}).map(([key, list]) => [key, strings(list)]),
-      ),
+      manualInitialized,
+      projects: manualInitialized ? strings(value.projects) : [],
+      tasks,
       expanded: Object.fromEntries(
         Object.entries(value.expanded ?? {}).filter(([, v]) => typeof v === 'boolean'),
       ) as Record<string, boolean>,
@@ -40,12 +45,28 @@ export function readSidebarPreferences(userId: string): SidebarPreferences {
     return DEFAULT_PREFERENCES;
   }
 }
+function serializedPreferences(value: SidebarPreferences): string {
+  if (value.manualInitialized || value.order === 'manual') return JSON.stringify(value);
+  const { projects: _projects, tasks: _tasks, ...display } = value;
+  return JSON.stringify(display);
+}
 export function useSidebarPreferences(userId: string | undefined) {
   const [saved, setSaved] = useState<{ userId?: string; value: SidebarPreferences }>({
     value: DEFAULT_PREFERENCES,
   });
   useEffect(() => {
-    setSaved({ userId, value: userId ? readSidebarPreferences(userId) : DEFAULT_PREFERENCES });
+    const value = userId ? readSidebarPreferences(userId) : DEFAULT_PREFERENCES;
+    try {
+      // The former shared key has no account owner, so it must never be migrated.
+      localStorage.removeItem('agents.sidebar.projects');
+      if (userId && localStorage.getItem(sidebarPreferencesKey(userId)) !== null) {
+        // Remove any history IDs previously recorded before manual order was enabled.
+        localStorage.setItem(sidebarPreferencesKey(userId), serializedPreferences(value));
+      }
+    } catch {
+      /* Blocked storage must not prevent navigation. */
+    }
+    setSaved({ userId, value });
   }, [userId]);
   const value = saved.userId === userId ? saved.value : DEFAULT_PREFERENCES;
   const update = useCallback(
@@ -55,7 +76,7 @@ export function useSidebarPreferences(userId: string | undefined) {
         if (current.userId === userId && next === current.value) return current;
         if (userId) {
           try {
-            localStorage.setItem(sidebarPreferencesKey(userId), JSON.stringify(next));
+            localStorage.setItem(sidebarPreferencesKey(userId), serializedPreferences(next));
           } catch {
             /* Storage is optional. */
           }
