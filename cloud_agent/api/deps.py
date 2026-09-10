@@ -245,6 +245,18 @@ def require_host_pool(capability: HostPoolRepository | None) -> HostPoolReposito
     return require_capability(capability, "host lookups")
 
 
+def require_source_control(
+    capability: SourceControlRepository | None,
+) -> SourceControlRepository:
+    """Require the source-control grants."""
+    return require_capability(capability, "repository entitlements")
+
+
+def require_attempts(capability: AttemptCommands | None) -> AttemptCommands:
+    """Require the attempt commands."""
+    return require_capability(capability, "attempt writes")
+
+
 def require_execution_queries(
     capability: ExecutionQueries | None,
 ) -> ExecutionQueries:

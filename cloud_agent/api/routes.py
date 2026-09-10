@@ -572,7 +572,9 @@ async def get_agent_config(
     setup_tier, agent_tier = _egress_tiers()
     # This user's repositories, not the deployment's: what the picker offers
     # has to be what the create endpoint will accept for *them*.
-    repos = await repos_for_user(user["user_id"], store=store, app_credentials=app_credentials)
+    repos = await repos_for_user(
+        user["user_id"], grants_repo=store, app_credentials=app_credentials
+    )
     return AgentConfigResponse(
         repos=repos,
         runtimes=registered_runtimes(),
@@ -667,7 +669,7 @@ async def _connect_github_for_user(
     )
     return GitHubConnectionResponse(
         connections=await store.list_repo_grants(user_id=user_id),
-        repos=await repos_for_user(user_id, store=store, app_credentials=app_credentials),
+        repos=await repos_for_user(user_id, grants_repo=store, app_credentials=app_credentials),
         install_url=install_url,
     )
 
@@ -720,7 +722,10 @@ async def _source_control_providers(
             )
 
     github_repos = await repos_for_user(
-        user_id, store=store, app_credentials=app_credentials, env={"AGENT_REPO_ALLOWLIST": ""}
+        user_id,
+        grants_repo=store,
+        app_credentials=app_credentials,
+        env={"AGENT_REPO_ALLOWLIST": ""},
     )
     providers = [
         SourceControlProviderResponse(
@@ -1033,7 +1038,7 @@ async def disconnect_github_integration(
     return GitHubConnectionResponse(
         connections=await job_store.list_repo_grants(user_id=user["user_id"]),
         repos=await repos_for_user(
-            user["user_id"], store=job_store, app_credentials=app_credentials
+            user["user_id"], grants_repo=job_store, app_credentials=app_credentials
         ),
     )
 
@@ -1090,7 +1095,7 @@ async def disconnect_github(
     return GitHubConnectionResponse(
         connections=await job_store.list_repo_grants(user_id=user["user_id"]),
         repos=await repos_for_user(
-            user["user_id"], store=job_store, app_credentials=app_credentials
+            user["user_id"], grants_repo=job_store, app_credentials=app_credentials
         ),
     )
 
@@ -1111,7 +1116,7 @@ async def list_repo_branches(
     job_store = _require_store(store)
     try:
         await require_entitled_repo(
-            repo, user["user_id"], store=job_store, app_credentials=app_credentials
+            repo, user["user_id"], grants_repo=job_store, app_credentials=app_credentials
         )
     except RepoNotAllowed as exc:
         raise HTTPException(
@@ -1415,7 +1420,7 @@ async def _create_job_as(
         await require_entitled_repo(
             body.repo,
             user["user_id"],
-            store=job_store,
+            grants_repo=job_store,
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
@@ -2036,7 +2041,7 @@ async def create_agent_follow_up(
         await require_entitled_repo(
             parent["repo"],
             user["user_id"],
-            store=job_store,
+            grants_repo=job_store,
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
@@ -2690,7 +2695,7 @@ async def _require_workspace_entitlement(
         await require_entitled_repo(
             job["repo"],
             user["user_id"],
-            store=store,
+            grants_repo=store,
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
@@ -3649,7 +3654,7 @@ async def worker_claim(
         await require_entitled_repo(
             claim["repo"],
             claim["user_id"],
-            store=job_store,
+            grants_repo=job_store,
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:

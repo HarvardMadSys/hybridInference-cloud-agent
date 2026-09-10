@@ -234,7 +234,7 @@ async def retry_snapshot_base_import(
         await require_entitled_repo(
             snapshot["repo"],
             snapshot.get("user_id", ""),
-            store=store,
+            grants_repo=store,
             app_credentials=app_credentials,
         )
         if app_credentials is not None:
@@ -307,7 +307,7 @@ async def publish_one(
         await require_entitled_repo(
             job["repo"],
             job.get("user_id", ""),
-            store=store,
+            grants_repo=store,
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:

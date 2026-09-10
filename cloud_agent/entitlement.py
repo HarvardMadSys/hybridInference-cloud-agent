@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # `owner/name`, the only shape GitHub uses and the only one the publisher and
 # runner know how to handle. Also keeps a leading `-` out of git's argv.
@@ -83,7 +83,7 @@ def require_allowed_repo(repo: str, env: dict[str, str] | None = None) -> None:
 async def repos_for_user(
     user_id: str,
     *,
-    store: Any = None,
+    grants_repo: SourceControlRepository | None = None,
     app_credentials: Any = None,
     env: dict[str, str] | None = None,
 ) -> list[str]:
@@ -105,10 +105,10 @@ async def repos_for_user(
     # Only concrete entries seed the list a picker shows; a wildcard is a rule,
     # not a repository, and `require_entitled_repo` matches it separately.
     repos: set[str] = {entry for entry in allowed_repos(env) if not entry.endswith("/*")}
-    if store is None or app_credentials is None:
+    if grants_repo is None or app_credentials is None:
         return sorted(repos)
     try:
-        grants = await store.list_repo_grants(user_id=user_id)
+        grants = await grants_repo.list_repo_grants(user_id=user_id)
     except Exception:
         return sorted(repos)
     for grant in grants:
@@ -126,7 +126,7 @@ async def require_entitled_repo(
     repo: str,
     user_id: str,
     *,
-    store: Any = None,
+    grants_repo: SourceControlRepository | None = None,
     app_credentials: Any = None,
     env: dict[str, str] | None = None,
 ) -> None:
@@ -137,12 +137,18 @@ async def require_entitled_repo(
     # to enumerate every repository under that owner.
     if repo_is_allowed(repo, env):
         return
-    entitled = await repos_for_user(user_id, store=store, app_credentials=app_credentials, env=env)
+    entitled = await repos_for_user(
+        user_id, grants_repo=grants_repo, app_credentials=app_credentials, env=env
+    )
     if not any(entry.lower() == repo.lower() for entry in entitled):
         raise RepoNotAllowed(
             f"You have not connected {repo!r}. Connect the GitHub App on that "
             "repository, or ask an operator to add it to this deployment's allowlist."
         )
+
+
+if TYPE_CHECKING:
+    from cloud_agent.ports.source_control import SourceControlRepository
 
 
 __all__ = [
