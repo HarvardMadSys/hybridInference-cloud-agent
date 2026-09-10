@@ -27,10 +27,10 @@ import {
   type AgentGitWorkspaceApi,
 } from '@/lib/api/agents';
 
-import { lifecyclePhaseLabel, sandboxDisplayLabel, toDiffFileDetails } from './adapt';
+import { lifecyclePhaseLabel, toDiffFileDetails } from './adapt';
 import { isComposerSubmit } from './composerKeys';
 import { highestEffort, offeredEfforts } from './effort';
-import { LedgerUsage } from './LedgerUsage';
+import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
 import { TerminalWorkspace } from './TerminalWorkspace';
@@ -317,17 +317,35 @@ function MessageActions({
   );
 }
 
-function AssistantMessage({ text, extraActions }: { text: string; extraActions?: ReactNode }) {
+function AssistantMessage({
+  text,
+  extraActions,
+  footer,
+}: {
+  text: string;
+  extraActions?: ReactNode;
+  footer?: ReactNode;
+}) {
+  const actions = (
+    <MessageActions>
+      <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
+        <CopyIcon />
+        Copy
+      </MessageActionButton>
+      {extraActions}
+    </MessageActions>
+  );
   return (
     <div className="group py-3 text-gray-800 dark:text-gray-200">
       <Markdown text={text} />
-      <MessageActions>
-        <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
-          <CopyIcon />
-          Copy
-        </MessageActionButton>
-        {extraActions}
-      </MessageActions>
+      {footer ? (
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+          {footer}
+          {actions}
+        </div>
+      ) : (
+        actions
+      )}
     </div>
   );
 }
@@ -337,8 +355,10 @@ function ThreadTurn({
   busy,
   onFork,
   onRewind,
+  footer,
 }: {
   message: AgentThreadMessage;
+  footer?: ReactNode;
   busy?: boolean;
   onFork?: () => void;
   onRewind?: () => void;
@@ -347,6 +367,7 @@ function ThreadTurn({
     return (
       <AssistantMessage
         text={message.content}
+        footer={footer}
         extraActions={
           onFork ? (
             <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
@@ -383,10 +404,12 @@ function EventRow({
   event,
   onFork,
   busy,
+  footer,
 }: {
   event: AgentEvent;
   onFork?: () => void;
   busy?: boolean;
+  footer?: ReactNode;
 }) {
   if (event.kind === 'lifecycle') return <LifecycleRow text={event.text} />;
   if (event.kind === 'thinking') {
@@ -404,6 +427,7 @@ function EventRow({
     return (
       <AssistantMessage
         text={event.text}
+        footer={footer}
         extraActions={
           onFork ? (
             <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
@@ -522,17 +546,6 @@ function HistoryTurn({
   );
 }
 
-function DetailStat({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="flex items-start justify-between gap-4 py-1.5 text-[13px]">
-      <dt className="text-gray-500 dark:text-gray-400">{label}</dt>
-      <dd className="break-all text-right text-gray-800 dark:text-gray-200">
-        {value === '' || value === null || value === undefined ? '—' : value}
-      </dd>
-    </div>
-  );
-}
-
 function hasLostContext(job: AgentJob): boolean {
   return job.nativeState === 'lost' || job.contextStatus === 'lost';
 }
@@ -540,7 +553,13 @@ function hasLostContext(job: AgentJob): boolean {
 function ownerRunNote(job: AgentJob): string | undefined {
   // Success detail contains runner/publication bookkeeping, not the answer.
   // The transcript carries the result; publication has its own status row.
-  return job.state === 'done' || job.state === 'needs_review' ? undefined : job.stateNote;
+  if (job.state === 'done' || job.state === 'needs_review') return undefined;
+  return (
+    job.stateNote ||
+    (job.state === 'failed'
+      ? 'The run stopped before it could finish. No failure details were recorded.'
+      : undefined)
+  );
 }
 
 function RunGuidance({ job }: { job: AgentJob }) {
@@ -611,100 +630,7 @@ function RunActions({
   );
 }
 
-function timestamp(value: string | null | undefined): number | null {
-  const parsed = value ? Date.parse(value) : NaN;
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function elapsedTime(ms: number): string {
-  const seconds = Math.floor(Math.max(0, ms) / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
-function RunTiming({ job }: { job: AgentJob }) {
-  const [now, setNow] = useState(() => Date.now());
-  const start = timestamp(job.startedAt);
-  const end = timestamp(job.finishedAt);
-  useEffect(() => {
-    if (job.state !== 'running' || start === null || end !== null) return undefined;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [job.id, job.state, start, end]);
-  const duration =
-    start !== null && end !== null && end >= start
-      ? end - start
-      : start !== null && job.state === 'running' && end === null
-        ? Math.max(0, now - start)
-        : job.state !== 'running' &&
-            job.state !== 'queued' &&
-            typeof job.durationMs === 'number' &&
-            Number.isFinite(job.durationMs)
-          ? job.durationMs
-          : null;
-  const started = start === null ? null : new Date(start);
-  const today = new Date(now);
-  const sameDay = started?.toDateString() === today.toDateString();
-  return (
-    <div>
-      <dl className="flex flex-wrap gap-x-6 gap-y-2 text-[13px]">
-        {job.turnNo !== undefined ? (
-          <div className="flex items-baseline gap-2">
-            <dt className="text-gray-500 dark:text-gray-400">Turn</dt>
-            <dd className="font-medium tabular-nums text-gray-900 dark:text-gray-100">
-              {job.turnNo}
-            </dd>
-          </div>
-        ) : null}
-        {job.state !== 'queued' ? (
-          <div className="flex items-baseline gap-2">
-            <dt className="text-gray-500 dark:text-gray-400">Elapsed</dt>
-            <dd className="font-medium tabular-nums text-gray-900 dark:text-gray-100">
-              {duration !== null ? elapsedTime(duration) : 'Not recorded'}
-            </dd>
-          </div>
-        ) : null}
-      </dl>
-      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        <span>Started</span>{' '}
-        {started ? (
-          <time
-            dateTime={job.startedAt!}
-            title={started.toLocaleString('en-US', { timeZoneName: 'short' })}
-          >
-            {sameDay ? 'Today, ' : ''}
-            {started.toLocaleString('en-US', {
-              ...(sameDay ? {} : { month: 'short', day: 'numeric' }),
-              ...(started.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
-              hour: '2-digit',
-              minute: '2-digit',
-              hourCycle: 'h23',
-            })}
-          </time>
-        ) : (
-          <span>{job.state === 'queued' ? 'Not started' : 'Not recorded'}</span>
-        )}
-      </p>
-    </div>
-  );
-}
-
-function DetailsDrawer({
-  job,
-  onClose,
-  onOpenDiff,
-}: {
-  job: AgentJob;
-  onClose: () => void;
-  onOpenDiff: () => void;
-}) {
-  const runNote = ownerRunNote(job);
-  const hasDiff = job.workspaceDiffAvailable ?? job.diffFiles.length > 0;
-  const hasChanges = hasDiff && job.diffFiles.length > 0;
-  const needsAttention = job.state === 'failed' || job.state === 'cancelled' || hasLostContext(job);
+function RunNotices({ job, showNetworkWarning }: { job: AgentJob; showNetworkWarning: boolean }) {
   const publicationNote =
     job.workspacePublicationState === 'failed'
       ? 'Could not publish changes'
@@ -712,184 +638,20 @@ function DetailsDrawer({
         ? 'Publishing changes…'
         : null;
   return (
-    <div className="fixed inset-0 z-[70] flex justify-end" role="dialog" aria-label="Run details">
-      <button
-        type="button"
-        aria-label="Close run details"
-        onClick={onClose}
-        className="absolute inset-0 bg-gray-950/15 dark:bg-black/50"
-      />
-      <aside className="relative flex h-full w-full max-w-lg flex-col border-l border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-2xl">
-        <div className="flex items-center border-b border-gray-200 dark:border-white/10 px-5 py-4">
-          <h2 className="font-semibold text-gray-900 dark:text-gray-50">Run details</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="ml-auto rounded-md p-1 text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200"
-            aria-label="Close"
-          >
-            <svg
-              aria-hidden="true"
-              className="h-5 w-5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto p-5">
-          <div className="space-y-6">
-            <section aria-label="Run outcome">
-              <RunTiming job={job} />
-              {needsAttention ? (
-                <h3 className="mt-4 text-[13px] font-medium text-gray-900 dark:text-gray-100">
-                  {job.state === 'failed'
-                    ? 'Run failed'
-                    : job.state === 'cancelled'
-                      ? 'Run stopped'
-                      : 'Chat unavailable'}
-                </h3>
-              ) : null}
-              {runNote && runNote.length > 240 ? (
-                <details className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
-                  <summary className="cursor-pointer">{runNote.slice(0, 240)}…</summary>
-                  <p className="mt-2 whitespace-pre-wrap">{runNote}</p>
-                </details>
-              ) : runNote ? (
-                <p className="mt-3 text-[13px] text-gray-600 dark:text-gray-400 [overflow-wrap:anywhere]">
-                  {runNote}
-                </p>
-              ) : job.state === 'failed' ? (
-                <p className="mt-3 text-[13px] text-gray-600 dark:text-gray-400">
-                  The run stopped before it could finish. No failure details were recorded.
-                </p>
-              ) : null}
-              <RunGuidance job={job} />
-            </section>
-            <LedgerUsage job={job} />
-            <section aria-label="Workspace changes">
-              <h3 className="text-[13px] font-medium text-gray-900 dark:text-gray-100">
-                Workspace
-              </h3>
-              <p className="mt-2 text-sm font-medium text-gray-800 dark:text-gray-200">
-                {hasChanges
-                  ? `${job.diffFiles.length} file${job.diffFiles.length === 1 ? '' : 's'} changed`
-                  : hasDiff
-                    ? 'No workspace changes'
-                    : 'Workspace changes unavailable'}
-                {hasChanges && job.diffStat ? (
-                  <span className="ml-2 whitespace-nowrap font-mono text-xs">
-                    <span className="text-emerald-600 dark:text-emerald-400">
-                      +{job.diffStat.add}
-                    </span>{' '}
-                    <span className="text-red-500 dark:text-red-400">−{job.diffStat.del}</span>
-                  </span>
-                ) : null}
-              </p>
-              {hasChanges ? (
-                <p className="mt-1 break-words text-xs text-gray-500 dark:text-gray-400">
-                  Current {job.workspaceShared ? 'shared ' : ''}workspace compared with{' '}
-                  {job.baseRef || 'the base'}.
-                </p>
-              ) : null}
-              {!job.prUrl && publicationNote ? (
-                <p className="mt-2 text-xs text-gray-600 dark:text-gray-400">{publicationNote}</p>
-              ) : null}
-              {hasChanges || job.prUrl ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <RunActions job={job} onOpenDiff={onOpenDiff} showChanges={hasChanges} />
-                </div>
-              ) : null}
-            </section>
-            <section>
-              <h3 className="text-[13px] font-medium text-gray-900 dark:text-gray-100">
-                Environment
-              </h3>
-              <p className="mt-2 break-words text-[13px] text-gray-800 dark:text-gray-200">
-                {job.runtime} <span className="text-gray-400 dark:text-gray-500">·</span>{' '}
-                {job.model}
-              </p>
-              <p className="mt-1 break-words text-xs text-gray-500 dark:text-gray-400">
-                {job.repo}
-                {job.baseRef ? ` · ${job.baseRef}` : ''}
-              </p>
-              <details className="mt-3">
-                <summary className="cursor-pointer text-xs font-medium text-gray-600 dark:text-gray-400">
-                  Configuration details
-                </summary>
-                <dl className="mt-2">
-                  {/* Only when a depth was chosen. An absent row is the honest
-                      rendering of Auto: nobody picked, so there is nothing to
-                      report. */}
-                  {job.reasoningEffort ? (
-                    <DetailStat label="Reasoning" value={job.reasoningEffort} />
-                  ) : null}
-                  <DetailStat label="Branch" value={job.branch} />
-                  <DetailStat
-                    label="Base"
-                    value={
-                      job.baseRef && job.baseSha
-                        ? `${job.baseRef} · ${job.baseSha}`
-                        : job.baseRef || job.baseSha
-                    }
-                  />
-                  <DetailStat
-                    label="Sandbox"
-                    value={sandboxDisplayLabel(job.sandbox) || 'Not recorded'}
-                  />
-                </dl>
-              </details>
-              {job.egressDenials > 0 ? (
-                <p
-                  role="note"
-                  className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
-                >
-                  {job.egressDenials} network request{job.egressDenials === 1 ? ' was' : 's were'}{' '}
-                  blocked by the sandbox. This may have prevented part of your task from completing.
-                </p>
-              ) : null}
-            </section>
-            {job.gates.length ? (
-              <section>
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-                  Publish checks
-                </h3>
-                <ul className="mt-2 space-y-2 text-[13px]">
-                  {job.gates.map((gate) => (
-                    <li
-                      key={gate.label}
-                      className="flex items-start gap-2 text-gray-600 dark:text-gray-400"
-                    >
-                      <span
-                        className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
-                          gate.state === 'pass'
-                            ? 'bg-emerald-500'
-                            : gate.state === 'hold'
-                              ? 'bg-amber-400'
-                              : 'bg-gray-300 dark:bg-gray-600'
-                        }`}
-                      />
-                      <span>
-                        {gate.label}
-                        {gate.detail ? (
-                          <span className="ml-1 text-gray-400 dark:text-gray-500">
-                            {gate.detail}
-                          </span>
-                        ) : null}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            ) : null}
-          </div>
-        </div>
-      </aside>
-    </div>
+    <>
+      {!job.prUrl && publicationNote ? (
+        <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{publicationNote}</p>
+      ) : null}
+      {showNetworkWarning && job.egressDenials > 0 ? (
+        <p
+          role="note"
+          className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
+        >
+          {job.egressDenials} network request{job.egressDenials === 1 ? ' was' : 's were'} blocked
+          by the sandbox. This may have prevented part of your task from completing.
+        </p>
+      ) : null}
+    </>
   );
 }
 
@@ -1197,6 +959,7 @@ export function JobDetail({
 }) {
   const router = useRouter();
   const t = useT();
+  const usage = useLedgerUsage(job);
   const liveAttempt = useMemo(
     () => (job.attempts.length > 0 ? job.attempts[job.attempts.length - 1].no : 0),
     [job.attempts],
@@ -1214,7 +977,6 @@ export function JobDetail({
   }, [job.id]);
   const [title, setTitle] = useState(job.title);
   useEffect(() => setTitle(job.title), [job.title, job.threadId]);
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('git');
@@ -1510,6 +1272,12 @@ export function JobDetail({
   );
   const canForkCurrent = Boolean(canForkWorkspace && job.nativeForkAvailable);
   const selectedAttemptIsCurrent = attemptNo === 0 || attemptNo === liveAttempt;
+  const usageFooter = selectedAttemptIsCurrent ? (
+    <LedgerUsage job={job} usage={usage} />
+  ) : undefined;
+  const currentReplyId = [...threadMessages]
+    .reverse()
+    .find((message) => message.role === 'assistant' && message.jobId === job.id)?.id;
   const lastThreadAssistantMessageId = [...threadMessages]
     .reverse()
     .find((message) => message.role === 'assistant')?.id;
@@ -1564,7 +1332,6 @@ export function JobDetail({
             canFork={canForkCurrent}
             forking={forking}
             onFork={() => void forkFrom(job.id)}
-            onDetails={() => setDetailsOpen(true)}
             onRename={setTitle}
           />
           <nav aria-label="Run views" className="mr-3 flex shrink-0 items-center gap-1 text-[13px]">
@@ -1708,6 +1475,11 @@ export function JobDetail({
                     <ThreadTurn
                       key={message.id}
                       message={message}
+                      footer={
+                        lastVisibleMessageIndex < 0 && message.id === currentReplyId
+                          ? usageFooter
+                          : undefined
+                      }
                       busy={forking}
                       onFork={
                         message.role === 'assistant' &&
@@ -1789,6 +1561,7 @@ export function JobDetail({
                       key={`${event.attemptNo ?? 0}-${index}`}
                       event={event}
                       busy={forking}
+                      footer={index === lastVisibleMessageIndex ? usageFooter : undefined}
                       onFork={
                         event.kind === 'message' &&
                         index === lastVisibleMessageIndex &&
@@ -1817,6 +1590,17 @@ export function JobDetail({
                 <AttemptTurnFooter job={job} attemptNo={attemptNo} />
 
                 <OutcomeCard job={job} onOpenDiff={() => openWorkspace('git')} />
+                {selectedAttemptIsCurrent ? (
+                  <RunNotices
+                    job={job}
+                    showNetworkWarning={
+                      !visibleEvents.some((event) => event.kind === 'egress_denied')
+                    }
+                  />
+                ) : null}
+                {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
+                  <div className="mt-4">{usageFooter}</div>
+                ) : null}
               </div>
             )}
 
@@ -2042,18 +1826,6 @@ export function JobDetail({
           </div>
         </aside>
       </div>
-
-      {detailsOpen ? (
-        <DetailsDrawer
-          key={job.id}
-          job={job}
-          onClose={() => setDetailsOpen(false)}
-          onOpenDiff={() => {
-            setDetailsOpen(false);
-            openWorkspace('git');
-          }}
-        />
-      ) : null}
     </section>
   );
 }

@@ -13,14 +13,12 @@ export function ThreadActions({
   canFork,
   forking,
   onFork,
-  onDetails,
   onRename,
 }: {
   job: AgentJob;
   canFork: boolean;
   forking: boolean;
   onFork: () => void;
-  onDetails: () => void;
   onRename: (title: string) => void;
 }) {
   const t = useT();
@@ -206,18 +204,6 @@ export function ThreadActions({
             }}
           >
             {t('taskActions.fork')}
-          </button>
-          <div className="my-1 border-t border-gray-200 dark:border-white/10" />
-          <button
-            role="menuitem"
-            tabIndex={-1}
-            className={itemClass}
-            onClick={() => {
-              close();
-              onDetails();
-            }}
-          >
-            {t('taskActions.details')}
           </button>
           {error && (
             <p role="alert" className="px-3 py-2 text-xs text-red-600 dark:text-red-400">

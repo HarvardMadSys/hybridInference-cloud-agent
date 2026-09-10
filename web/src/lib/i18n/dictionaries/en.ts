@@ -17,7 +17,6 @@ export const en = {
   'taskActions.pin': 'Pin',
   'taskActions.unpin': 'Unpin',
   'taskActions.fork': 'Fork',
-  'taskActions.details': 'Run details',
   'taskActions.cancel': 'Cancel',
   'taskActions.save': 'Save',
   'taskActions.saving': 'Saving…',
