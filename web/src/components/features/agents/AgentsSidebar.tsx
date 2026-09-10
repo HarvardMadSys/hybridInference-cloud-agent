@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
 import { SettingsLauncher } from '@/components/features/settings/SettingsLauncher';
 import {
@@ -17,12 +17,19 @@ import { useAgentProjects } from './useAgentJobs';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
 import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
 import { SidebarViewMenu } from './SidebarViewMenu';
+import { SearchControls } from './SearchControls';
 import {
   useConversationList,
   conversationRow,
   type SidebarConversation,
 } from './useConversationList';
-import { TaskRow, ProjectFolder, ListStatus, type RowActions } from './SidebarRows';
+import {
+  TaskRow,
+  ProjectFolder,
+  ListStatus,
+  type RowActions,
+  type SidebarReorderProps,
+} from './SidebarRows';
 export { groupJobsByConversation, groupJobsByProject } from './conversations';
 export const SIDEBAR_WIDTH_STORAGE_KEY = 'agents.sidebar.width';
 export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
@@ -33,6 +40,10 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const { state } = useAuth();
   const userId = state.user?.id;
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
+  const knownRows = useMemo(
+    () => ({ userId, rows: new Map<string, SidebarConversation>() }),
+    [userId],
+  ).rows;
   const [refresh, setRefresh] = useState(0);
   const reload = useCallback(() => setRefresh((v) => v + 1), []);
   const {
@@ -42,7 +53,11 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     reload: reloadProjects,
   } = useAgentProjects();
   const list = useConversationList({ userId, refresh, enabled: preferences.group === 'flat' });
-  const [selected, setSelected] = useState<{ path: string; row: SidebarConversation } | null>(null);
+  const [selected, setSelected] = useState<{
+    path: string;
+    userId?: string;
+    row: SidebarConversation;
+  } | null>(null);
   const [hiddenThreads, setHiddenThreads] = useState<Set<string>>(new Set());
   const [archiving, setArchiving] = useState<string | null>(null);
   const [pinning, setPinning] = useState<string | null>(null);
@@ -64,9 +79,10 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     maxViewportFraction: 0.4,
   });
   const current =
-    selected?.path === pathname
+    selected?.path === pathname && selected.userId === userId
       ? selected.row
-      : list.rows.find((row) => row.jobIds.some((id) => pathname === `/${id}`));
+      : (list.rows.find((row) => row.jobIds.some((id) => pathname === `/${id}`)) ??
+        [...knownRows.values()].find((row) => row.jobIds.some((id) => pathname === `/${id}`)));
   const activeKey = current?.key ?? null;
   const activeRepo = pathname === '/' ? params.get('repo') : (current?.job.repo ?? null);
   const searching = searchOpen && (query.trim() !== '' || scope !== 'all' || includeArchived);
@@ -125,8 +141,9 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
           archived: Boolean(thread?.archived_at),
           last_activity_at: thread?.updated_at ?? latest.created_at ?? null,
         });
-        row.jobIds = thread?.jobs.map((turn) => turn.id) ?? [id];
-        setSelected({ path: pathname, row });
+        row.jobIds = [...new Set([id, ...(thread?.jobs.map((turn) => turn.id) ?? [])])];
+        knownRows.set(row.key, row);
+        setSelected({ path: pathname, userId, row });
         updatePreferences((old) => ({
           ...old,
           expanded: { ...old.expanded, [row.job.repo]: true },
@@ -138,7 +155,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [pathname, userId, updatePreferences]);
+  }, [pathname, userId, updatePreferences, knownRows]);
   const mountPath = useRef(pathname);
   useEffect(() => {
     if (mountPath.current === pathname) return;
@@ -173,14 +190,16 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     document.addEventListener('keydown', keydown);
     return () => document.removeEventListener('keydown', keydown);
   }, [collapsed]);
-  const knownRows = useRef(new Map<string, SidebarConversation>());
-  useEffect(() => {
-    knownRows.current.clear();
-  }, [userId]);
   const registerRows = useCallback(
     (rows: SidebarConversation[]) => {
       if (!rows.length) return;
-      rows.forEach((row) => knownRows.current.set(row.key, row));
+      rows.forEach((row) => {
+        const previous = knownRows.get(row.key);
+        knownRows.set(row.key, {
+          ...row,
+          jobIds: [...new Set([...(previous?.jobIds ?? []), ...row.jobIds])],
+        });
+      });
       updatePreferences((old) => {
         if (!old.manualInitialized && old.order !== 'manual') return old;
         const tasks = { ...old.tasks };
@@ -196,7 +215,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         return changed ? { ...old, tasks } : old;
       });
     },
-    [updatePreferences],
+    [updatePreferences, knownRows],
   );
   useEffect(() => {
     registerRows(list.rows);
@@ -238,6 +257,12 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const defaultRepo = activeRepo ?? folders[0]?.repo;
   const drag = useRef<{ group: string; id: string } | null>(null);
   const [announcement, setAnnouncement] = useState('');
+  const pointerAllowsDrag = useRef(true);
+  const [dropTarget, setDropTarget] = useState<{
+    group: string;
+    id: string;
+    position: 'before' | 'after';
+  } | null>(null);
   function reorder(group: string, ids: string[], source: string, target: string, after = false) {
     let next = moveBefore(ids, source, target);
     if (after && source !== target && ids.includes(source) && ids.includes(target)) {
@@ -255,31 +280,77 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
     });
     setAnnouncement(t('sidebar.moved'));
   }
-  function reorderProps(group: string, ids: string[], id: string): HTMLAttributes<HTMLDivElement> {
+  function reorderProps(group: string, ids: string[], id: string): SidebarReorderProps {
     if (preferences.order !== 'manual' || searching) return {};
+    const canDrop = () =>
+      drag.current?.group === group && drag.current.id !== id && ids.includes(drag.current.id);
+    const positionAt = (element: HTMLElement, y: number): 'before' | 'after' => {
+      const rect = element.getBoundingClientRect();
+      return y > rect.top + rect.height / 2 ? 'after' : 'before';
+    };
     return {
       draggable: true,
       title: t('sidebar.reorderHint'),
+      'data-drop-position':
+        dropTarget?.group === group && dropTarget.id === id ? dropTarget.position : undefined,
+      onPointerDownCapture: (event) => {
+        pointerAllowsDrag.current = !(event.target as Element).closest('button, [data-row-action]');
+      },
       onDragStart: (event) => {
+        if (
+          !pointerAllowsDrag.current ||
+          (event.target as Element).closest('button, [data-row-action]')
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         drag.current = { group, id };
+        setDropTarget(null);
         event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.clearData?.();
         event.dataTransfer.setData('text/plain', id);
         event.stopPropagation();
       },
       onDragEnd: () => {
         drag.current = null;
+        setDropTarget(null);
+        pointerAllowsDrag.current = true;
       },
       onDragOver: (event) => {
-        if (drag.current?.group === group) {
-          event.preventDefault();
-          event.stopPropagation();
+        if (!canDrop()) {
+          setDropTarget(null);
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        const position = positionAt(event.currentTarget, event.clientY);
+        setDropTarget((old) =>
+          old?.group === group && old.id === id && old.position === position
+            ? old
+            : { group, id, position },
+        );
+      },
+      onDragLeave: (event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setDropTarget((old) => (old?.group === group && old.id === id ? null : old));
         }
       },
       onDrop: (event) => {
         event.preventDefault();
         event.stopPropagation();
-        if (drag.current?.group === group) reorder(group, ids, drag.current.id, id);
+        if (canDrop())
+          reorder(
+            group,
+            ids,
+            drag.current!.id,
+            id,
+            positionAt(event.currentTarget, event.clientY) === 'after',
+          );
         drag.current = null;
+        setDropTarget(null);
+        pointerAllowsDrag.current = true;
       },
       onKeyDown: (event) => {
         if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
@@ -434,7 +505,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                   updatePreferences((old) => {
                     if (field !== 'order' || value !== 'manual' || old.manualInitialized)
                       return { ...old, [field]: value };
-                    const rows = [...knownRows.current.values()].sort(
+                    const rows = [...knownRows.values()].sort(
                       (a, b) =>
                         (Date.parse(b.job.pinnedAt ?? '') || 0) -
                           (Date.parse(a.job.pinnedAt ?? '') || 0) ||
@@ -456,62 +527,26 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
             </div>
           </div>
           {searchOpen && (
-            <div
-              className="mb-3 space-y-2 px-1 text-[12px]"
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') {
+            <SearchControls
+              inputRef={searchInput}
+              query={query}
+              onQueryChange={setQuery}
+              scope={scope}
+              onScopeChange={setScope}
+              activeRepo={activeRepo}
+              includeArchived={includeArchived}
+              onIncludeArchivedChange={setIncludeArchived}
+              onClose={closeSearch}
+              onInputKeyDown={(event) => {
+                if (['ArrowDown', 'Enter'].includes(event.key)) {
                   event.preventDefault();
-                  closeSearch();
+                  const first =
+                    resultList.current?.querySelector<HTMLAnchorElement>('[data-search-result]');
+                  if (event.key === 'Enter') first?.click();
+                  else first?.focus();
                 }
               }}
-            >
-              <input
-                ref={searchInput}
-                value={query}
-                aria-label={t('sidebar.search')}
-                placeholder={t('sidebar.searchPlaceholder')}
-                onChange={(event) => setQuery(event.target.value)}
-                className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-[13px] outline-none focus:border-crimson dark:border-white/10 dark:bg-gray-800"
-                onKeyDown={(event) => {
-                  if (['ArrowDown', 'Enter'].includes(event.key)) {
-                    event.preventDefault();
-                    const first =
-                      resultList.current?.querySelector<HTMLAnchorElement>('[data-search-result]');
-                    if (event.key === 'Enter') first?.click();
-                    else first?.focus();
-                  }
-                }}
-              />
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  aria-label={t('sidebar.currentProject')}
-                  value={scope}
-                  onChange={(event) => setScope(event.target.value)}
-                  className="min-w-0 rounded border border-gray-200 bg-transparent p-1 dark:border-white/10"
-                >
-                  <option value="all">{t('sidebar.allProjects')}</option>
-                  <option value="current" disabled={!activeRepo}>
-                    {t('sidebar.currentProject')}
-                  </option>
-                </select>
-                <button
-                  type="button"
-                  onClick={closeSearch}
-                  className="ml-auto text-gray-500 dark:text-gray-400"
-                  aria-label={t('sidebar.closeSearch')}
-                >
-                  ×
-                </button>
-              </div>
-              <label className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
-                <input
-                  type="checkbox"
-                  checked={includeArchived}
-                  onChange={(event) => setIncludeArchived(event.target.checked)}
-                />
-                {t('sidebar.includeArchived')}
-              </label>
-            </div>
+            />
           )}
           {actionError && (
             <p role="alert" className="px-2 text-[12px] text-red-500">

@@ -2,7 +2,8 @@
 
 The project heading identifies the repository containing the open conversation, or
 selected for a new task. Its crimson highlight is independent of running-task
-indicators. Opening a historical turn keeps the conversation selected and links
+indicators, with no extra “Current” badge. Switching between loaded conversations
+in the same project preserves the highlight while details load. Opening a historical turn keeps the conversation selected and links
 back to its latest turn.
 
 The view menu has two independent choices:
@@ -10,7 +11,9 @@ The view menu has two independent choices:
 - Group: **By project** (default) or **In one list**.
 - Order: **Last updated** (default) or **Manual**.
 
-Manual mode supports dragging projects or task rows, and **Alt+ArrowUp/ArrowDown**
+Manual mode shows drag grips on projects and task rows. Drop above or below a
+row’s midpoint to insert before or after it; an insertion line previews the result.
+It also supports **Alt+ArrowUp/ArrowDown**
 while a row is focused. Reordering changes display order, never repository
 ownership. Pinned and unpinned tasks remain separate. Manual order, grouping,
 sorting, and expanded projects are remembered for each signed-in user in the
@@ -20,7 +23,8 @@ shared project preference key is removed without assigning it to any account.
 
 Use the search icon or **Command+K / Ctrl+K** to search conversation titles and full
 repository names across all history. Search can be restricted to the current
-project and can include archived conversations. Arrow keys navigate results,
+project and can include archived conversations using the two compact filter
+buttons below the input. The inline close button resets search and filters. Arrow keys navigate results,
 Enter opens a result, and Escape closes search. “Show more” loads further results.
 Search results use the original conversation title and open its latest turn.
 Restoring an archived conversation invalidates its sidebar state immediately,

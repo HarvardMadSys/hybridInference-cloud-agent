@@ -87,6 +87,52 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 describe('sidebar navigation interactions', () => {
+  it('keeps the project highlighted when a loaded sibling session is awaiting detail', async () => {
+    api.pathname = '/a';
+    api.get.mockImplementation((id: string) =>
+      id === 'a' ? Promise.resolve(base[0].job) : new Promise(() => {}),
+    );
+    const { rerender } = render(<AgentsSidebar />);
+    await waitFor(() => expect(screen.getByTitle('owner/repo')).toHaveClass('border-crimson'));
+    await screen.findByRole('link', { name: 'Task b' });
+    api.pathname = '/b';
+    rerender(<AgentsSidebar />);
+    expect(screen.getByTitle('owner/repo')).toHaveClass('border-crimson');
+    expect(screen.getByRole('link', { name: 'Task b' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('switches projects immediately for a known session without guessing unknown or other-owner routes', async () => {
+    const other = conversation('c', 'owner/other');
+    api.projects.mockResolvedValue([
+      { repo: 'owner/repo', task_count: 2, active_count: 0 },
+      { repo: 'owner/other', task_count: 1, active_count: 0 },
+    ]);
+    api.list.mockImplementation(async ({ repo }: { repo?: string }) => ({
+      conversations: repo === 'owner/other' ? [other] : base,
+      next_cursor: null,
+    }));
+    api.get.mockImplementation(() => new Promise(() => {}));
+    const { rerender } = render(<AgentsSidebar />);
+    await screen.findByRole('link', { name: 'Task a' });
+    fireEvent.click(screen.getByTitle('owner/other'));
+    await screen.findByRole('link', { name: 'Task c' });
+    api.pathname = '/a';
+    rerender(<AgentsSidebar />);
+    expect(screen.getByTitle('owner/repo')).toHaveAttribute('aria-current', 'true');
+    api.pathname = '/c';
+    rerender(<AgentsSidebar />);
+    expect(screen.getByTitle('owner/other')).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByTitle('owner/repo')).not.toHaveAttribute('aria-current');
+    api.pathname = '/unloaded';
+    rerender(<AgentsSidebar />);
+    expect(screen.getByTitle('owner/other')).not.toHaveAttribute('aria-current');
+    api.user = 'bob';
+    api.pathname = '/c';
+    api.list.mockImplementation(() => new Promise(() => {}));
+    rerender(<AgentsSidebar />);
+    expect(screen.getByTitle('owner/other')).not.toHaveAttribute('aria-current');
+  });
+
   it('has exactly four menu options, applies immediately, and returns keyboard focus', async () => {
     render(<AgentsSidebar />);
     await screen.findByText('Task a');
@@ -120,9 +166,11 @@ describe('sidebar navigation interactions', () => {
     expect(screen.queryByText('Current')).not.toBeInTheDocument();
     api.params = 'repo=owner%2Frepo';
     rerender(<AgentsSidebar />);
-    expect(screen.getByText('Current')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'repo Current' }));
-    expect(screen.getByText('Current')).toBeInTheDocument();
+    expect(screen.getByTitle('owner/repo')).toHaveAttribute('aria-current', 'true');
+    expect(screen.queryByText('Current')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'repo' }));
+    expect(screen.getByTitle('owner/repo')).toHaveAttribute('aria-current', 'true');
+    expect(screen.queryByText('Current')).not.toBeInTheDocument();
   });
   it('resolves historical turns through detail and selects canonical latest thread in flat mode', async () => {
     localStorage.setItem(
@@ -160,7 +208,9 @@ describe('sidebar navigation interactions', () => {
       messages: [],
     });
     render(<AgentsSidebar />);
-    await screen.findByText('Current');
+    await waitFor(() =>
+      expect(screen.getByTitle('owner/repo')).toHaveAttribute('aria-current', 'true'),
+    );
     expect(screen.queryByText('Archived only')).not.toBeInTheDocument();
   });
   it('searches server history including archived results, escapes highlights, and restores grouping', async () => {
@@ -177,7 +227,7 @@ describe('sidebar navigation interactions', () => {
     const input = screen.getByRole('textbox', { name: 'Search tasks' });
     fireEvent.change(input, { target: { value: '<img>' } });
     await screen.findByText('No matching tasks. Try another title or repository.');
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Include archived' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Include archived' }));
     const match = await screen.findByText('<img>');
     expect(match.tagName).toBe('MARK');
     expect(document.querySelector('img')).not.toBeInTheDocument();
@@ -273,7 +323,7 @@ describe('sidebar navigation interactions', () => {
     await waitFor(() => expect(screen.queryByText('Task a')).not.toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Search tasks' }));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Task a' } });
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Include archived' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Include archived' }));
     expect(
       await screen.findByRole('link', { name: 'Task a · owner/repo · Archived' }),
     ).toHaveAttribute('href', '/a');

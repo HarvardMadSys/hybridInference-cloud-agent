@@ -36,6 +36,37 @@ export function Highlight({ text, query }: { text: string; query: string }) {
   pieces.push(text.slice(offset));
   return <>{pieces}</>;
 }
+export type SidebarReorderProps = HTMLAttributes<HTMLDivElement> & {
+  'data-drop-position'?: 'before' | 'after';
+};
+function DragGrip({ task = false }: { task?: boolean }) {
+  const t = useT();
+  return (
+    <span
+      data-drag-handle
+      title={t('sidebar.reorderHint')}
+      aria-hidden="true"
+      className={`flex h-6 w-3 shrink-0 cursor-grab items-center justify-center text-gray-400 active:cursor-grabbing dark:text-gray-500 ${task ? 'absolute left-0 top-1/2 z-10 -translate-y-1/2' : ''}`}
+    >
+      <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor">
+        <circle cx="3" cy="3" r="1" />
+        <circle cx="7" cy="3" r="1" />
+        <circle cx="3" cy="7" r="1" />
+        <circle cx="7" cy="7" r="1" />
+        <circle cx="3" cy="11" r="1" />
+        <circle cx="7" cy="11" r="1" />
+      </svg>
+    </span>
+  );
+}
+function DropIndicator({ position }: { position?: 'before' | 'after' }) {
+  return position ? (
+    <span
+      aria-hidden="true"
+      className={`pointer-events-none absolute inset-x-0 z-10 h-px bg-crimson dark:bg-rose-400 ${position === 'after' ? 'bottom-0' : 'top-0'}`}
+    />
+  ) : null;
+}
 export interface RowActions {
   activeKey: string | null;
   archiving: string | null;
@@ -59,13 +90,15 @@ export function TaskRow({
   flat?: boolean;
   query?: string;
   search?: boolean;
-  reorderProps?: HTMLAttributes<HTMLDivElement>;
+  reorderProps?: SidebarReorderProps;
 }) {
   const t = useT();
   const { key, job, jobIds } = row;
   const isActive = key === activeKey;
   return (
     <div className="group relative" {...reorderProps}>
+      {reorderProps?.draggable && <DragGrip task />}
+      <DropIndicator position={reorderProps?.['data-drop-position']} />
       <Link
         href={`/${job.id}`}
         aria-label={
@@ -232,11 +265,8 @@ export function ProjectFolder({
   hiddenThreads: Set<string>;
   registerRows: (rows: SidebarConversation[]) => void;
   orderRows: (rows: SidebarConversation[]) => SidebarConversation[];
-  taskReorder: (
-    rows: SidebarConversation[],
-    row: SidebarConversation,
-  ) => HTMLAttributes<HTMLDivElement>;
-  reorderProps: HTMLAttributes<HTMLDivElement>;
+  taskReorder: (rows: SidebarConversation[], row: SidebarConversation) => SidebarReorderProps;
+  reorderProps: SidebarReorderProps;
 }) {
   const t = useT();
   const list = useConversationList({ repo, enabled: expanded, userId, refresh });
@@ -261,12 +291,14 @@ export function ProjectFolder({
   const listId = `project-${encodeURIComponent(repo)}`;
   return (
     <div className="mt-3">
-      <div className="group flex items-center gap-0.5" {...reorderProps}>
+      <div className="group relative flex items-center gap-0.5" {...reorderProps}>
+        {reorderProps.draggable && <DragGrip />}
+        <DropIndicator position={reorderProps['data-drop-position']} />
         <button
           type="button"
           aria-expanded={expanded}
           aria-controls={listId}
-          aria-label={active ? `${projectLabel(repo)} ${t('sidebar.current')}` : undefined}
+          aria-current={active ? 'true' : undefined}
           title={repo}
           onClick={onToggle}
           className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border-l-2 px-2 py-2 text-left text-[13px] font-medium ${active ? 'border-crimson bg-crimson/[0.07] text-crimson-dark dark:bg-crimson/15 dark:text-rose-300' : 'border-transparent text-gray-700 hover:bg-white/80 dark:text-gray-300 dark:hover:bg-white/5'}`}
@@ -292,9 +324,6 @@ export function ProjectFolder({
             <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17V7.5Z" />
           </svg>
           <span className="min-w-0 flex-1 truncate">{projectLabel(repo)}</span>
-          {active && (
-            <span className="shrink-0 text-[10px] font-normal">{t('sidebar.current')}</span>
-          )}
           {!expanded && activeCount > 0 && (
             <span
               className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-blue-500"
@@ -304,6 +333,8 @@ export function ProjectFolder({
         </button>
         <Link
           href={`/?repo=${encodeURIComponent(repo)}`}
+          draggable={reorderProps.draggable ? false : undefined}
+          data-row-action
           aria-label={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
           title={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:bg-white focus:ring-2 focus:ring-crimson/30 dark:hover:bg-white/10"

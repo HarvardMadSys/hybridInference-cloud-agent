@@ -29,7 +29,6 @@ export const zhCN: Record<TranslationKey, string> = {
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.projects': '项目',
-  'sidebar.current': '当前',
   'sidebar.viewOptions': '视图选项',
   'sidebar.groupBy': '分组方式',
   'sidebar.orderBy': '排序方式',
@@ -37,6 +36,10 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.inOneList': '平铺列表',
   'sidebar.manual': '手动',
   'sidebar.lastUpdated': '最近更新',
+  'sidebar.searchScope': '搜索范围',
+  'sidebar.searchScopeUnavailable': '打开项目后可仅搜索该项目',
+  'sidebar.searchAllProjects': '搜索所有项目',
+  'sidebar.searchCurrentProject': '仅搜索 {repo}',
   'sidebar.search': '搜索任务',
   'sidebar.searchPlaceholder': '搜索任务标题或仓库…',
   'sidebar.allProjects': '所有项目',
