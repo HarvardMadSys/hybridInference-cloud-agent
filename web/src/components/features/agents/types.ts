@@ -244,6 +244,8 @@ export interface AgentJob {
   attemptTelemetryAvailable?: boolean;
   /** Display number for the server-authoritative current attempt, when it has emitted an event. */
   currentAttemptNo?: number;
+  /** Durable attempt identity shared by list and detail projections. */
+  currentAttemptId?: number | null;
   /** Display number whose continuity/resources came from the telemetry read. */
   telemetryAttemptNo?: number;
   events: AgentEvent[];

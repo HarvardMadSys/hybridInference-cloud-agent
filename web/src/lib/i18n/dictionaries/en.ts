@@ -28,6 +28,12 @@ export const en = {
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.projects': 'Projects',
+  'sidebar.addWorkspace': 'Add workspace',
+  'sidebar.closeWorkspacePicker': 'Close workspace picker',
+  'sidebar.searchRepositories': 'Search repositories…',
+  'sidebar.workspaceAdded': 'Already added',
+  'sidebar.noRepositories': 'No matching repositories.',
+  'sidebar.manageRepositories': 'Manage repository access',
   'sidebar.viewOptions': 'View options',
   'sidebar.groupBy': 'Group by',
   'sidebar.orderBy': 'Order by',
@@ -48,6 +54,8 @@ export const en = {
   'sidebar.loadMore': 'Show more',
   'sidebar.retry': 'Retry',
   'sidebar.closeSearch': 'Close search',
+  'sidebar.inProgress': 'In progress',
+  'sidebar.unread': 'Unread result',
   'sidebar.reorderHint': 'Drag to reorder, or press Alt + Arrow Up / Down',
   'sidebar.moved': 'Order updated',
   'sidebar.newTask': 'New task',

@@ -18,6 +18,8 @@ import { announcePaneResize, useResizablePane } from './useResizablePane';
 import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
 import { SidebarViewMenu } from './SidebarViewMenu';
 import { SearchControls } from './SearchControls';
+import { AddWorkspace } from './AddWorkspace';
+import { useConversationReadState } from './useConversationReadState';
 import {
   useConversationList,
   conversationRow,
@@ -40,6 +42,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   const { state } = useAuth();
   const userId = state.user?.id;
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
+  const { isUnread, markRead } = useConversationReadState(userId);
   const knownRows = useMemo(
     () => ({ userId, rows: new Map<string, SidebarConversation>() }),
     [userId],
@@ -222,6 +225,9 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   }, [list.rows, registerRows]);
   const baseFolders = useMemo(() => {
     const repos = new Map(projects.map((project) => [project.repo, project]));
+    for (const repo of preferences.addedProjects)
+      if (!repos.has(repo))
+        repos.set(repo, { repo, task_count: 0, active_count: 0, last_activity_at: null });
     for (const row of preferences.group === 'flat' ? list.rows : [])
       if (!repos.has(row.job.repo))
         repos.set(row.job.repo, {
@@ -242,7 +248,7 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
         (Date.parse(b.pinned_at ?? '') || 0) - (Date.parse(a.pinned_at ?? '') || 0) ||
         (Date.parse(b.last_activity_at ?? '') || 0) - (Date.parse(a.last_activity_at ?? '') || 0),
     );
-  }, [projects, list.rows, activeRepo, preferences.group]);
+  }, [projects, list.rows, activeRepo, preferences.group, preferences.addedProjects]);
   useEffect(() => {
     updatePreferences((old) => {
       if (!old.manualInitialized && old.order !== 'manual') return old;
@@ -294,12 +300,14 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
       'data-drop-position':
         dropTarget?.group === group && dropTarget.id === id ? dropTarget.position : undefined,
       onPointerDownCapture: (event) => {
-        pointerAllowsDrag.current = !(event.target as Element).closest('button, [data-row-action]');
+        pointerAllowsDrag.current = !(event.target as Element).closest(
+          'button:not([data-reorder-project]), [data-row-action]',
+        );
       },
       onDragStart: (event) => {
         if (
           !pointerAllowsDrag.current ||
-          (event.target as Element).closest('button, [data-row-action]')
+          (event.target as Element).closest('button:not([data-reorder-project]), [data-row-action]')
         ) {
           event.preventDefault();
           event.stopPropagation();
@@ -410,6 +418,8 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
   }
   const actions: RowActions = {
     activeKey,
+    isUnread,
+    onRead: markRead,
     archiving,
     pinning,
     onArchive: archiveConversation,
@@ -523,6 +533,19 @@ export function AgentsSidebar({ collapsed = false }: { collapsed?: boolean }) {
                     };
                   })
                 }
+              />
+              <AddWorkspace
+                userId={userId}
+                existing={baseFolders.map((folder) => folder.repo)}
+                onSelect={(repo) => {
+                  closeSearch();
+                  updatePreferences((old) => ({
+                    ...old,
+                    group: 'project',
+                    addedProjects: [...new Set([...old.addedProjects, repo])],
+                    expanded: { ...old.expanded, [repo]: true },
+                  }));
+                }}
               />
             </div>
           </div>

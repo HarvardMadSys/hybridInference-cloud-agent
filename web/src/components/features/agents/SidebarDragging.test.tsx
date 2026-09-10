@@ -105,7 +105,7 @@ describe('manual pointer reordering', () => {
     expect(taskOrder()).toEqual(['second', 'first']);
     expect(second).not.toHaveAttribute('data-drop-position');
   });
-  it('moves upward from a grip and clears the insertion indicator after cancellation', async () => {
+  it('moves upward from a task title and clears the insertion indicator after cancellation', async () => {
     render(<AgentsSidebar />);
     const first = (await screen.findByRole('link', { name: 'first' })).parentElement!;
     const second = screen.getByRole('link', { name: 'second' }).parentElement!;
@@ -114,17 +114,17 @@ describe('manual pointer reordering', () => {
       height: 32,
       bottom: 132,
     } as DOMRect);
-    const grip = second.querySelector<HTMLElement>('[data-drag-handle]')!;
-    expect(grip).toHaveAttribute('title', 'Drag to reorder, or press Alt + Arrow Up / Down');
+    const title = screen.getByRole('link', { name: 'second' });
+    expect(document.querySelector('[data-drag-handle]')).toBeNull();
     const dataTransfer = transfer();
-    fireEvent.pointerDown(grip);
+    fireEvent.pointerDown(title);
     fireEvent.dragStart(second, { dataTransfer });
     over(first, 'dragOver', 105, dataTransfer);
     expect(first).toHaveAttribute('data-drop-position', 'before');
     fireEvent.dragEnd(second);
     expect(first).not.toHaveAttribute('data-drop-position');
     expect(taskOrder()).toEqual(['first', 'second']);
-    fireEvent.pointerDown(grip);
+    fireEvent.pointerDown(title);
     fireEvent.dragStart(second, { dataTransfer });
     over(first, 'drop', 105, dataTransfer);
     expect(taskOrder()).toEqual(['second', 'first']);
@@ -164,13 +164,13 @@ describe('manual pointer reordering', () => {
     over(second, 'drop', 125, dataTransfer);
     expect(taskOrder()).toEqual(['first', 'second']);
   });
-  it('moves projects after a lower target using the same midpoint rule', async () => {
+  it('drags projects directly by their name and preserves click to expand', async () => {
     api.projects.mockResolvedValue([
       { repo: 'owner/repo', task_count: 2, active_count: 0, last_activity_at: null },
       { repo: 'other/project', task_count: 0, active_count: 0, last_activity_at: null },
     ]);
     render(<AgentsSidebar />);
-    const first = (await screen.findByRole('button', { name: 'repo' })).parentElement!;
+    await screen.findByRole('button', { name: 'repo' });
     const second = screen.getByRole('button', { name: 'project' }).parentElement!;
     vi.spyOn(second, 'getBoundingClientRect').mockReturnValue({
       top: 100,
@@ -178,8 +178,12 @@ describe('manual pointer reordering', () => {
       bottom: 132,
     } as DOMRect);
     const dataTransfer = transfer();
-    fireEvent.pointerDown(first.querySelector('[data-drag-handle]')!);
-    fireEvent.dragStart(first, { dataTransfer });
+    const heading = screen.getByRole('button', { name: 'repo' });
+    fireEvent.pointerDown(heading);
+    const start = createEvent.dragStart(heading, { dataTransfer });
+    fireEvent(heading, start);
+    expect(start.defaultPrevented).toBe(false);
+    expect(heading).toHaveAttribute('draggable', 'true');
     over(second, 'dragOver', 125, dataTransfer);
     expect(second).toHaveAttribute('data-drop-position', 'after');
     over(second, 'drop', 125, dataTransfer);
@@ -187,6 +191,9 @@ describe('manual pointer reordering', () => {
       'other/project',
       'owner/repo',
     ]);
+    const expanded = heading.getAttribute('aria-expanded');
+    fireEvent.click(heading);
+    expect(heading.getAttribute('aria-expanded')).not.toBe(expanded);
     expect(screen.getByRole('link', { name: 'New task in project' })).toHaveAttribute(
       'draggable',
       'false',
