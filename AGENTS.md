@@ -22,6 +22,11 @@ work tracks in this repository's issues and pull requests.
 ```text
 cloud_agent/            control plane (FastAPI): API, auth adapter, scheduler,
                         source-control integrations, publishing, storage
+  domain/               business values with no persistence dependency
+  ports/                one Protocol per storage capability
+  storage/_sql/         conn-level SQL shared by more than one repository
+  storage/repositories/ Postgres implementations, one per port
+  bootstrap.py          the one place the runtime objects are assembled
 cloud_agent_host/       host agent: runner, sandbox, runtimes, workspace broker
 web/                    Next.js user UI + admin dashboard
 contracts/              OpenAPI mirrors of the gateway contracts we consume
@@ -55,16 +60,32 @@ database stamped with the chain that predates it.
 | `cloud_agent_host/egress.py`, `egress_proxy.py` | The two egress phases and the setup allowlist proxy |
 | `cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
 
+**The storage boundary.** A business function depends on the Protocol it needs,
+never on a pool, a connection or a concrete repository. `bootstrap.py` builds the
+implementations once; `cloud_agent/api/deps.py` hands them to routes. The rules
+that keep the arrows pointing one way are asserted in
+`tests/unit/test_storage_boundaries.py` — read that file before adding an import
+across the boundary, because it is where the intent is written down.
+
 ## 3. Quality gates
 
 ```bash
 make setup-dev   # uv venv + uv sync
-make check       # format + lint + test — must be green before every PR
+make check       # format + lint + typecheck + test — green before every PR
 ```
 
 `make test` runs everything except the `external` and `dbtest` markers.
 Database-backed tests are opt-in: `make test-db` (needs Postgres; see
 [ENVIRONMENT.md](ENVIRONMENT.md)).
+
+`make typecheck` runs mypy over the persistence boundary — `cloud_agent/domain`,
+`cloud_agent/ports`, `cloud_agent/storage`, `cloud_agent/bootstrap.py` and
+`tools/` — configured in `pyproject.toml` under `[tool.mypy]`. The scope is
+deliberately narrow and grows as callers are narrowed to capabilities: a checker
+switched on across a codebase that never had one reports findings faster than
+anyone can triage them, and the ignore list that silences the noise is worse than
+no checker. A module joins the list when its callers stop reaching past the
+ports.
 
 ## 4. Workflow
 
