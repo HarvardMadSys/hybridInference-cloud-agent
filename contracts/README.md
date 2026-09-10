@@ -37,13 +37,23 @@ from**. That is a historical record, not a claim about where the code lives now,
 and it is kept because a contract's value is that it says what was *agreed* at a
 known point — a later reader can diff the two.
 
-Two of the three have landed on the gateway's `main`; the third is in flight:
+All three are served by the gateway's `main`. Checked 2026-09-10 by reading the
+route decorators at `origin/main`, not by a schema re-review:
 
-| Document | Status |
+| Document | Served by |
 |---|---|
-| `identity.openapi.yaml` | Landed — `apps/backend/serving/servers/routers/identity.py` serves `/v1/identity/{jwks,code,token}` on the gateway's `main`. |
-| `inference-grants.openapi.yaml` | Landed — `apps/backend/serving/servers/routers/agent_grants.py` serves mint / renew / revoke / usage on the gateway's `main`. |
-| `internal-lookups.openapi.yaml` | **In flight** — the gateway's `main` still serves `/internal/users/{user_id}/status`; the `/internal/users/{user_id}/agent-access` endpoint this document describes is on its `dev`. See [`docs/agent-access-policy.md`](../docs/agent-access-policy.md) for the rollout, the compatibility path, and the fail-closed behaviour against an older gateway. |
+| `identity.openapi.yaml` | `apps/backend/serving/servers/routers/identity.py` — `/v1/identity/{jwks,code,token}`. |
+| `inference-grants.openapi.yaml` | `apps/backend/serving/servers/routers/agent_grants.py` — mint / renew / revoke / usage. |
+| `internal-lookups.openapi.yaml` | `apps/backend/serving/servers/routers/internal_lookups.py` — `/internal/model-catalog` and `/internal/users/{user_id}/agent-access`; it also still serves `/internal/users/{user_id}/status`, which this document does not describe. |
+
+**Which branch a router is on is not the durable question.** `main` is a
+fast-forward mirror of `dev` (`.github/workflows/sync-main.yml`), so an endpoint
+that is on `dev` alone is a lag of hours to days rather than a state worth
+recording — a table that says so goes stale between writing and review. What a
+reader needs is whether *the gateway they are pointing at* serves the route: an
+older deployment may not, and
+[`docs/agent-access-policy.md`](../docs/agent-access-policy.md) carries the
+rollout, the compatibility path, and the fail-closed behaviour in that case.
 
 **When the gateway changes one of these routers, re-verify the document against
 the merged source.** A review can change a contract, and a document describing
@@ -61,19 +71,21 @@ them:
   request for more than the maximum is clamped *down* silently, and every
   renewal re-times the grant to the gateway's step — so either one would shorten
   a live grant without any call failing. The document declares both under
-  `x-constants`, but that is a declaration rather than a check: the number also
-  lives in the gateway and in `grants.py`, and comparing the copies is left to
-  tests rather than to anything in this directory.
+  `x-constants` — as `MAX_GRANT_TTL_S` and `DEFAULT_GRANT_TTL_S`, deliberately
+  not under this client's names — but that is a declaration rather than a check:
+  each number also lives in the gateway and in `grants.py`, and comparing the
+  copies is left to tests rather than to anything in this directory.
 - **Which refusals mean "this grant is dead".** `DEAD_GRANT_REFUSALS`
   (`unknown_grant`, `grant_not_live`, `subject_unavailable`) mirrors the
   gateway's error *types*. The status code alone is not enough: the gateway
   answers 404 for both a dead grant and an unconfigured internal API, and 401
   for a rotated dispatch token.
 
-`tests/unit/test_grant_lifecycle.py` pins `grants.py`'s copies against each
-other. It cannot reach the gateway, so it would not notice the gateway changing
-one of them: the symptom is a sandbox losing its authorization mid-run — far
-from the constant that moved.
+`tests/unit/test_grant_lifecycle.py` pins both mirrors against this service's
+own cadence — the requested lifetime must fit under the maximum, and the renewal
+loop and the give-up must fit inside the step. It cannot reach the gateway, so it
+would not notice the gateway changing one of them: the symptom is a sandbox
+losing its authorization mid-run — far from the constant that moved.
 
 ## Checking them
 
