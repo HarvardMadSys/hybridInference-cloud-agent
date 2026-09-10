@@ -854,39 +854,56 @@ a 401, the runner logs `agent_host_credential_rejected` and stops claiming, and
 the control-plane deploy waits for a fresh heartbeat that never comes. The
 host's registration must survive the rebuild. So must the users' source
 control and MCP connections, which are credentials nobody can re-mint from
-the database side.
+the database side, and the identity-namespace binding, which says which
+Gateway minted the `user_id`s those rows are keyed by: `deploy.sh` runs
+`python -m cloud_agent.identity_namespace --check` before either listener
+starts, and that check refuses to start an API over owner data with no issuer
+to attribute it to.
 
-Rehearsed on a copy of the old schema (2026-09-10), including the two ways
-the naive version fails: a positional insert lands values in the wrong
-columns because the rewritten baseline orders some differently, and a host
-row restored with its old `slots_used` never claims again because the
-attempts that held those slots are gone. Every `docker compose` below is the
+Rehearsed on a copy of the old schema (2026-09-10), including the ways the
+naive version fails: a positional insert lands values in the wrong columns
+because the rewritten baseline orders some differently, a host row restored
+with its old `slots_used` never claims again because the attempts that held
+those slots are gone, a restore that leaves the identity binding behind stops
+the API at startup, and a restored `draining` host never claims again because
+nothing undoes the drain. Every `docker compose` below is the
 invocation `deploy/control-plane/deploy.sh` makes — project, env file,
 compose file — and it runs in the deploy root with the target commit checked
 out. The compose project below is staging's (`cloudagent`).
 
-1. Let the host finish. Drain it from the admin page (or
-   `POST /admin/agent/runner-hosts/<host>/drain`), wait until it holds no
-   running attempts, and only then stop the services that hold database
+1. Record which hosts are taking work, then let them finish. The drain below
+   is this rebuild's own and has to be undone in step 5, but only for the
+   hosts it is applied to: a host that was already `draining`, `offline` or
+   `disabled` before the rebuild must stay that way, and the heartbeat will
+   not put one back online. So write the undo before making the change, then
+   drain from the admin page (or
+   `POST /admin/agent/runner-hosts/<host>/drain`), wait until the host holds
+   no running attempts, and only then stop the services that hold database
    connections, leaving Postgres up:
 
    ```bash
    docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     "SELECT host, slots_used FROM agent_runner_hosts; \
+     "SELECT format('UPDATE agent_runner_hosts SET status = ''online'' WHERE host = %L;', host) \
+      FROM agent_runner_hosts WHERE status = 'online'" \
+     > cloudagent-undrain-$(date +%F).sql
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
+     "SELECT host, status, slots_used FROM agent_runner_hosts; \
       SELECT count(*) FROM agent_attempts WHERE status = 'running'"
    docker stop cloudagent-control-plane-1 cloudagent-mcp-relay-1 cloudagent-web-1
    ```
 
 2. Take the forensic dump of everything, then the data-only dump of the state
-   that survives, then the placement policy as one statement. `--column-inserts`
-   is load-bearing (see above), and `format('%L')` is what keeps an unpinned
-   `active_host` a SQL `NULL` rather than an empty string the new foreign key
-   would refuse:
+   that survives — the host registrations, the three user connection tables,
+   and the identity-namespace binding those `user_id`s belong to — then the
+   placement policy as one statement. `--column-inserts` is load-bearing (see
+   above), and `format('%L')` is what keeps an unpinned `active_host` a SQL
+   `NULL` rather than an empty string the new foreign key would refuse:
 
    ```bash
    docker exec cloudagent-postgres-1 pg_dump -U cloudagent -Fc cloudagent > cloudagent-$(date +%F).dump
    docker exec cloudagent-postgres-1 pg_dump -U cloudagent --data-only --column-inserts \
-     -t agent_runner_hosts -t agent_repo_grants -t agent_gitlab_connections -t agent_mcp_connections \
+     -t agent_runner_hosts -t agent_repo_grants -t agent_gitlab_connections \
+     -t agent_mcp_connections -t agent_identity_namespace \
      cloudagent > cloudagent-state-$(date +%F).sql
    docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
      "SELECT format('UPDATE agent_runner_policy SET active_host = %L, runtime_versions = %L::jsonb;', \
@@ -922,18 +939,38 @@ out. The compose project below is staging's (`cloudagent`).
    the wrong image.
 
 5. Restore the surviving state, reset the counter that described attempts
-   that no longer exist, then restore the policy:
+   that no longer exist, undo this rebuild's drain, restore the policy, and
+   read back the identity binding:
 
    ```bash
    docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-state-$(date +%F).sql
    docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -c 'UPDATE agent_runner_hosts SET slots_used = 0'
+   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-undrain-$(date +%F).sql
    docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-policy-$(date +%F).sql
+   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
+     'SELECT gateway_issuer FROM agent_identity_namespace'
    ```
 
    `slots_used` counts running attempts on the host, and the rebuild kept
    none; a restored non-zero value would park every new task at "queued"
    once it reached `slots_total`, with a runner that authenticates and
    heartbeats normally.
+
+   The drain needs the same treatment for the same reason. `draining` is
+   written to the row and the heartbeat deliberately never clears it, so the
+   restored host authenticates, heartbeats, and still claims nothing; step 6
+   then fails readiness with `pinned host ... is not shared-live ready: ...
+   status is draining`. Replaying step 1's generated statements puts back
+   exactly the hosts that were online, and leaves a host that was already
+   drained or disabled alone.
+
+   The last statement must print the issuer the old database was bound to. If
+   it prints nothing, the old database had no binding: verify the original
+   Gateway issuer before the rebuild, then adopt it with
+   `python -m cloud_agent.identity_namespace --adopt-existing --issuer
+   <original-issuer>`. Do not adopt the currently configured issuer without
+   that check, and do not drop the check — it is what stops the rebuild from
+   silently handing one Gateway's `user_id`s to another.
 
 6. Deploy the target commit as usual. `migrate` finds the database at head,
    the control plane starts, and the runner's next heartbeat authenticates
