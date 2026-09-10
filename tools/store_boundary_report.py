@@ -58,10 +58,18 @@ def survey(path: pathlib.Path) -> tuple[dict[str, set[str]], dict[str, list[str]
             continue
         methods: set[str] = set()
         for node in ast.walk(func):
-            if (
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id in STORE_PARAMS
+            if not isinstance(node, ast.Attribute):
+                continue
+            # ``store.method`` and ``_require_store(store).method`` are the same
+            # call written two ways. Missing the second is how this report once
+            # claimed three handlers were already moved when they were not.
+            value = node.value
+            if (isinstance(value, ast.Name) and value.id in STORE_PARAMS) or (
+                isinstance(value, ast.Call)
+                and getattr(value.func, "id", None) == "_require_store"
+                and value.args
+                and isinstance(value.args[0], ast.Name)
+                and value.args[0].id in STORE_PARAMS
             ):
                 methods.add(node.attr)
         if not methods:

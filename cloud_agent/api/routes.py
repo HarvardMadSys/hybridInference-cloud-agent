@@ -45,7 +45,9 @@ from cloud_agent.api.deps import (
     get_agent_job_store,
     get_attempt_commands,
     get_conversation_commands,
+    get_conversation_queries,
     get_current_user,
+    get_execution_queries,
     get_gateway_client,
     get_grant_client,
     get_grant_repository,
@@ -56,8 +58,10 @@ from cloud_agent.api.deps import (
     looks_like_agent_token,
     require_attempts,
     require_conversation_commands,
+    require_execution_queries,
     require_grants,
     require_host_pool,
+    require_queries,
     require_source_control,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
@@ -211,6 +215,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports.attempts import AttemptCommands
     from cloud_agent.ports.conversation_queries import ConversationQueries
     from cloud_agent.ports.conversations import ConversationCommands
+    from cloud_agent.ports.execution_queries import ExecutionQueries
     from cloud_agent.ports.grants import GrantRepository
     from cloud_agent.ports.host_pool import HostPoolRepository
     from cloud_agent.ports.mcp import McpConnectionRepository
@@ -1565,7 +1570,7 @@ async def list_agent_jobs(
     archived: bool = Query(False),
     repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentJobListResponse:
     """List jobs from the authenticated user's active or archived threads.
 
@@ -1573,8 +1578,8 @@ async def list_agent_jobs(
     caller already owns, not an access grant, so an unentitled repo is not an
     error here — it simply matches none of their rows.
     """
-    job_store = _require_store(store)
-    jobs = await job_store.list_jobs(
+    conversations = require_queries(conversations)
+    jobs = await conversations.list_jobs(
         user_id=user["user_id"], limit=limit, archived=archived, repo=repo
     )
     return AgentJobListResponse(jobs=[_job_response(job) for job in jobs])
@@ -1590,12 +1595,12 @@ async def list_agent_sessions(
     repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
     state: AgentSessionState | None = Query(None),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentSessionListResponse:
     """Search complete conversations by stable title, project and display state."""
-    job_store = _require_store(store)
+    conversations = require_queries(conversations)
     try:
-        result = await job_store.list_sessions(
+        result = await conversations.list_sessions(
             user_id=user["user_id"],
             archived=archived,
             limit=limit,
@@ -1689,12 +1694,12 @@ async def list_agent_conversations(
     limit: int = Query(50, ge=1, le=200),
     cursor: str | None = Query(None, min_length=1, max_length=2048),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentConversationListResponse:
     """Search owned conversation titles and repositories across all history."""
-    job_store = _require_store(store)
+    conversations = require_queries(conversations)
     try:
-        page = await job_store.list_conversations(
+        page = await conversations.list_conversations(
             user_id=user["user_id"],
             q=q.strip(),
             repo=repo,
@@ -1723,11 +1728,11 @@ async def list_agent_conversations(
 async def list_agent_projects(
     archived: bool = Query(False),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentProjectListResponse:
     """Summarize the caller's projects for the sidebar's task tree."""
-    job_store = _require_store(store)
-    projects = await job_store.list_projects(user_id=user["user_id"], archived=archived)
+    conversations = require_queries(conversations)
+    projects = await conversations.list_projects(user_id=user["user_id"], archived=archived)
     return AgentProjectListResponse(
         projects=[
             AgentProject(
@@ -1748,18 +1753,18 @@ async def get_agent_job(
     job_id: str,
     include_resources: bool = Query(True),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    execution: ExecutionQueries | None = Depends(get_execution_queries),
     log_store=Depends(get_log_store),
 ) -> AgentJobResponse:
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store, job_id, user)
-    attempt_telemetry = await job_store.job_attempts_telemetry(job_id=job_id)
+    execution = require_execution_queries(execution)
+    job = await _owned_job(execution, job_id, user)
+    attempt_telemetry = await execution.job_attempts_telemetry(job_id=job_id)
     telemetry = attempt_telemetry[-1] if attempt_telemetry else None
     # Existing clients keep the newest detail. The retry-aware client opts out
     # and requests heavy rows only for the attempt currently selected.
     if telemetry and include_resources:
-        telemetry = await job_store.job_turn_telemetry(
+        telemetry = await execution.job_turn_telemetry(
             job_id=job_id, attempt_id=attempt_telemetry[-1]["attempt_id"]
         )
     return _job_response(
@@ -1775,12 +1780,12 @@ async def get_agent_attempt_telemetry(
     job_id: str,
     attempt_id: int = Path(..., ge=1),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    execution: ExecutionQueries | None = Depends(get_execution_queries),
 ) -> AgentAttemptTelemetry:
     """Read measurements for one attempt belonging to the caller's job."""
-    job_store = _require_store(store)
-    await _owned_job(job_store, job_id, user)
-    telemetry = await job_store.job_turn_telemetry(job_id=job_id, attempt_id=attempt_id)
+    execution = require_execution_queries(execution)
+    await _owned_job(execution, job_id, user)
+    telemetry = await execution.job_turn_telemetry(job_id=job_id, attempt_id=attempt_id)
     if telemetry is None:
         raise HTTPException(status_code=404, detail="Attempt not found")
     return AgentAttemptTelemetry(
@@ -2512,12 +2517,12 @@ async def fork_agent_job(
 async def get_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentThreadResponse:
     """Return the durable conversation containing one of the caller's jobs."""
-    job_store = _require_store(store)
-    await _owned_job(job_store, job_id, user)
-    thread = await job_store.get_thread_for_job(job_id=job_id, user_id=user["user_id"])
+    conversations = require_queries(conversations)
+    await _owned_job(conversations, job_id, user)
+    thread = await conversations.get_thread_for_job(job_id=job_id, user_id=user["user_id"])
     if thread is None:
         raise HTTPException(
             status_code=404,
@@ -2548,7 +2553,7 @@ async def get_agent_thread(
 async def get_agent_thread_stats(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    execution: ExecutionQueries | None = Depends(get_execution_queries),
 ) -> AgentThreadStatsResponse:
     """Summarize the thread containing a job: turns, timings, tokens.
 
@@ -2556,9 +2561,9 @@ async def get_agent_thread_stats(
     thread that predates this endpoint answers it in full. Measures the
     thread's runtime does not report come back ``null`` rather than zero.
     """
-    job_store = _require_store(store)
-    await _owned_job(job_store, job_id, user)
-    inputs = await job_store.thread_stats_inputs(job_id=job_id, user_id=user["user_id"])
+    execution = require_execution_queries(execution)
+    await _owned_job(execution, job_id, user)
+    inputs = await execution.thread_stats_inputs(job_id=job_id, user_id=user["user_id"])
     if inputs is None:
         raise HTTPException(
             status_code=404,
@@ -2578,12 +2583,12 @@ async def list_agent_thread_events(
     after: int = Query(0, ge=0, description="Return events with a global id greater than this."),
     limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    execution: ExecutionQueries | None = Depends(get_execution_queries),
 ) -> AgentThreadEventsResponse:
     """Page every turn's event log, with payloads and turn labels intact."""
-    job_store = _require_store(store)
-    await _owned_job(job_store, job_id, user)
-    events = await job_store.list_thread_events_after(
+    execution = require_execution_queries(execution)
+    await _owned_job(execution, job_id, user)
+    events = await execution.list_thread_events_after(
         job_id=job_id, user_id=user["user_id"], after_id=after, limit=limit
     )
     if events is None:
@@ -2612,12 +2617,12 @@ async def list_agent_job_events(
     after: int = Query(0, ge=0, description="Return events with a global id greater than this."),
     limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    execution: ExecutionQueries | None = Depends(get_execution_queries),
 ) -> AgentJobEventsResponse:
     """Page through a job's append-only event log (non-streaming)."""
-    job_store = _require_store(store)
-    await _owned_job(job_store, job_id, user)
-    events = await job_store.list_events_after(job_id=job_id, after_id=after, limit=limit)
+    execution = require_execution_queries(execution)
+    await _owned_job(execution, job_id, user)
+    events = await execution.list_events_after(job_id=job_id, after_id=after, limit=limit)
     return AgentJobEventsResponse(
         events=[_event_response(event) for event in events],
         next_cursor=events[-1]["id"] if events else after,
@@ -3164,7 +3169,7 @@ async def stream_agent_job_events(
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     after: int = Query(0, ge=0),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    execution: ExecutionQueries | None = Depends(get_execution_queries),
 ) -> StreamingResponse:
     """Stream a job's events as SSE, resumable via ``Last-Event-ID``.
 
@@ -3173,8 +3178,8 @@ async def stream_agent_job_events(
     makes the finite stream cap (applied by the timeout middleware to
     ``text/event-stream``) safe for jobs that outlive one connection.
     """
-    job_store = _require_store(store)
-    await _owned_job(job_store, job_id, user)
+    execution = require_execution_queries(execution)
+    await _owned_job(execution, job_id, user)
 
     cursor = after
     if last_event_id:
@@ -3188,7 +3193,7 @@ async def stream_agent_job_events(
             while True:
                 if await request.is_disconnected():
                     return
-                events = await job_store.list_events_after(
+                events = await execution.list_events_after(
                     job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
                 )
                 if events:
@@ -3203,7 +3208,7 @@ async def stream_agent_job_events(
                         # connection without polluting the event sequence.
                         yield ": keepalive\n\n"
 
-                job = await job_store.get_job(job_id)
+                job = await execution.get_job(job_id)
                 if job is None:
                     return
                 if job["state"] in TERMINAL_STATES:
@@ -3212,7 +3217,7 @@ async def stream_agent_job_events(
                     # finished job with more than two pages of backlog would
                     # see job_finished, close, and lose the rest forever.
                     while True:
-                        tail = await job_store.list_events_after(
+                        tail = await execution.list_events_after(
                             job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
                         )
                         if not tail:
