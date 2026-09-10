@@ -53,23 +53,26 @@ drift this directory exists to prevent. Nothing here checks that for you —
 
 ## What these do not cover
 
-Two dependencies are deliberately absent, because neither travels on the wire
-and a document could not check them against anything:
+Two dependencies never appear in a response body, so no schema here can check
+them:
 
 - **The gateway's own clamps.** `grants.py` mirrors `GATEWAY_MAX_TTL_S` (900)
   and `GATEWAY_RENEWAL_STEP_S` (300) from the gateway's `serving/grants.py`. A
   request for more than the maximum is clamped *down* silently, and every
   renewal re-times the grant to the gateway's step — so either one would shorten
-  a live grant without any call failing.
+  a live grant without any call failing. The document declares both under
+  `x-constants`, but nothing reads that field: the number exists in three places
+  (the gateway, this document, `grants.py`) and nothing compares them.
 - **Which refusals mean "this grant is dead".** `DEAD_GRANT_REFUSALS`
   (`unknown_grant`, `grant_not_live`, `subject_unavailable`) mirrors the
   gateway's error *types*. The status code alone is not enough: the gateway
   answers 404 for both a dead grant and an unconfigured internal API, and 401
   for a rotated dispatch token.
 
-`tests/unit/test_grant_lifecycle.py` is the actual guard for both. If either
-drifts, the symptom is a sandbox losing its authorization mid-run — far from the
-constant that moved.
+`tests/unit/test_grant_lifecycle.py` pins `grants.py`'s copies against each
+other. It cannot reach the gateway, so it would not notice the gateway changing
+one of them: the symptom is a sandbox losing its authorization mid-run — far
+from the constant that moved.
 
 ## Checking them
 
