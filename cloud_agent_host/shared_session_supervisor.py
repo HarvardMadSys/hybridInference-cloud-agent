@@ -821,6 +821,39 @@ class SharedChatSessionSupervisor:
                 transport.close()
         return self.complete_turn(thread_id, token, turn)
 
+    def _replayed_settlement(
+        self,
+        member: _Member,
+        token: str,
+        *,
+        job_id: str,
+        context_status: ContextStatus,
+        native_session_id: str | None,
+    ) -> SharedSessionDescriptor | None:
+        """Return the last acknowledged boundary when this exact request is replayed.
+
+        Only the most recent completed activation can replay, and only while no
+        successor owns the member. Every field the caller fenced on must still
+        match, so a replayed acknowledgement can never describe a different
+        activation, job, context or native session.
+        """
+        receipt = member.settlement_receipt
+        if (
+            receipt is None
+            or not secrets.compare_digest(receipt[0], token)
+            or receipt[1].last_settled_job_id != job_id
+            or receipt[1].context_status != context_status
+            or member.lease_token is not None
+            or member.current_turn is not None
+            or member.context_status == "lost"
+            or member.last_settled_job_id != job_id
+            or member.activation_generation != receipt[1].activation_generation
+            or member.native_session_id != receipt[1].native_session_id
+            or (native_session_id is not None and native_session_id != receipt[1].native_session_id)
+        ):
+            return None
+        return receipt[1]
+
     def settle(
         self,
         thread_id: str,
@@ -833,21 +866,15 @@ class SharedChatSessionSupervisor:
         """Settle one member while retaining its healthy live process."""
         with self._lock:
             group, member = self._member(thread_id)
-            receipt = member.settlement_receipt
-            if (
-                receipt is not None
-                and secrets.compare_digest(receipt[0], token)
-                and receipt[1].last_settled_job_id == job_id
-                and receipt[1].context_status == context_status
-                and member.lease_token is None
-                and member.current_turn is None
-                and member.context_status != "lost"
-                and member.last_settled_job_id == job_id
-                and member.activation_generation == receipt[1].activation_generation
-                and member.native_session_id == receipt[1].native_session_id
-                and (native_session_id is None or native_session_id == receipt[1].native_session_id)
-            ):
-                return receipt[1]
+            replay = self._replayed_settlement(
+                member,
+                token,
+                job_id=job_id,
+                context_status=context_status,
+                native_session_id=native_session_id,
+            )
+            if replay is not None:
+                return replay
             group, member = self._leased_member(thread_id, token)
             if member.current_turn is not None:
                 raise SessionBusy("cannot settle a member while its turn is running")
@@ -928,6 +955,9 @@ class SharedChatSessionSupervisor:
             member.tool_mark_reader = None
             member.lease_token = None
             member.lease_owner = None
+            # Teardown owns the member now, so a stale acknowledgement must not
+            # replay against whatever state the restart leaves behind.
+            member.settlement_receipt = None
             member.context_status = "lost" if lost else member.context_status
             member.resident_state = "lost" if lost else "restarting"
             self._arm_idle_if_quiescent(group)

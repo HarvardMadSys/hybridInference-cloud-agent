@@ -366,6 +366,26 @@ export function lifecyclePhaseLabel(value: string): { text: string; milestone: b
   return { text: value.replaceAll('_', ' '), milestone: false };
 }
 
+/** Infrastructure detail shapes the control plane emits for recoverable failures.
+ * Listed individually so adding a new backend message is an explicit edit here
+ * rather than a silent leak of infrastructure jargon into the owner-facing UI.
+ */
+const INFRASTRUCTURE_FAILURE_PATTERNS = [
+  /lease[ _](?:expired|lost)/i,
+  /lease[^.\n]*expir/i,
+  /activation lease/i,
+  /indeterminate.*(?:turn|admission)/i,
+  /turn.*indeterminate/i,
+  /context[ _](?:lost|marked lost)/i,
+  /native(?: Agent CLI)?[- _](?:context|session|state)/i,
+  /finalization expired/i,
+  /Session Supervisor/i,
+  /resident transport/i,
+  /attempt dispatch failed/i,
+  /retained (?:sandbox|Agent CLI|chat|session)/i,
+  /shared (?:live|chat|supervisor|Agent CLI|member)/i,
+];
+
 /** Translate infrastructure failures only; keep task errors and transcripts intact.
  * The original detail remains in the API and operator logs for diagnosis.
  */
@@ -376,14 +396,10 @@ export function ownerFailureMessage(detail: string): string {
   if (/^cancelled (?:after|by owner)/i.test(detail)) {
     return 'This response was stopped at your request.';
   }
-  if (/context settled, but job finalization expired/i.test(detail)) {
+  if (/finalization expired/i.test(detail)) {
     return 'The response finished, but its completion could not be confirmed. Review the response before continuing.';
   }
-  if (
-    /lease[ _](expired|lost)|lease[^.\n]*expir|indeterminate.*(?:turn|admission)|turn.*indeterminate|context[ _](?:lost|marked lost)|native(?: Agent CLI)?[- _](?:context|session|state)|Session Supervisor|shared (?:live|chat|supervisor|Agent CLI)/i.test(
-      detail,
-    )
-  ) {
+  if (INFRASTRUCTURE_FAILURE_PATTERNS.some((pattern) => pattern.test(detail))) {
     return 'The connection was interrupted before this response could be confirmed.';
   }
   return detail;

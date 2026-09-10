@@ -66,7 +66,8 @@ Runner logs now include:
   exception class and HTTP status when available. Request URLs, tokens,
   response bodies and exception messages are excluded from these diagnostics.
 - `agent_heartbeat_retry`: consecutive failures, time since the last
-  acknowledgement (or heartbeat start) and the next retry delay.
+  acknowledgement (or heartbeat start) and the next retry delay. The exception
+  detail is recorded once per outage; this line carries the per-retry count.
 - `agent_heartbeat_recovered`: a previously failing renewal succeeded.
 
 Correlate these records with the attempt's persisted `lease_owner`,
@@ -87,6 +88,16 @@ conversation usable: the runner abandons the activation and reports a failed
 turn, allowing the next message to resume the retained native session. This
 requires a known retained container; failure before its identity was recorded
 is not equivalent proof. Error-event availability must not gate this report.
+
+Losing an admission acknowledgement outright is not the same as failing before
+admission. A retried admission that never receives an acknowledgement can still
+have committed, and the prompt is only sent after that acknowledgement. The
+membership then records the job as admitted while no prompt ever reached the
+CLI. `abandon` only releases a pre-admission turn (`admitted_job_id IS NULL`),
+so that request does not take effect and the terminal transition marks the
+context LOST. This is deliberate: an admitted-but-unconfirmed turn is
+ambiguous, and the runner never replays it. Only the pre-admission case above
+can keep a conversation usable.
 
 The owner UI describes interrupted responses and unavailable conversations in
 plain language. Original infrastructure details remain in API records and

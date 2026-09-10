@@ -94,7 +94,8 @@ DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
 # Heartbeats use a short per-request timeout and retry promptly, so a slow
 # control request cannot consume the remaining lease in normal cadence sleeps.
-_HEARTBEAT_RETRY_INTERVAL_S = 5.0
+# Idempotent lifecycle receipts reuse the same short retry interval.
+_CONTROL_RETRY_INTERVAL_S = 5.0
 _HEARTBEAT_TIMEOUT_S = 10.0
 DEFAULT_AGENT_TIMEOUT_S = 3600.0
 # How often the control checks run while the agent is silent.
@@ -137,7 +138,7 @@ def _retry_lifecycle_receipt(operation: str, job_id: str, call: Callable[[], Any
             if attempt == 2 or (status is not None and status not in {408, 502, 503, 504}):
                 raise
             _log_control_failure(operation, job_id, exc)
-            time.sleep(5.0)
+            time.sleep(_CONTROL_RETRY_INTERVAL_S)
     raise AssertionError("lifecycle retry exhausted without a result")
 
 
@@ -601,8 +602,12 @@ class Heartbeater:
                 # A transient control-plane blip must not kill a healthy run;
                 # the next request still has to fit inside the original lease.
                 failures += 1
-                delay = min(self._interval, _HEARTBEAT_RETRY_INTERVAL_S)
-                _log_control_failure("heartbeat", self._control.job_id, exc)
+                delay = min(self._interval, _CONTROL_RETRY_INTERVAL_S)
+                # The aggregate retry line below already carries the count and
+                # timing, so log the exception detail once per outage instead of
+                # once per retry.
+                if failures == 1:
+                    _log_control_failure("heartbeat", self._control.job_id, exc)
                 logger.warning(
                     "agent_heartbeat_retry job_id=%s consecutive_failures=%s "
                     "seconds_since_ack=%.3f retry_in_seconds=%.3f",

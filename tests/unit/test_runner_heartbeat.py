@@ -77,6 +77,36 @@ def test_heartbeat_recovery_restores_normal_cadence_and_logs_no_credentials(monk
     assert "PRIVATE_" not in caplog.text
 
 
+def test_repeated_heartbeat_failures_record_the_detail_once(monkeypatch, caplog):
+    """A sustained outage logs one exception detail, not one per retry."""
+    clock = SimpleNamespace(now=0.0)
+    waits = []
+    control = Mock(job_id="ajob_outage")
+    control.heartbeat.side_effect = [
+        httpx.ReadTimeout("first"),
+        httpx.ReadTimeout("second"),
+        {"cancel_requested": True},
+    ]
+
+    class Stop:
+        def wait(self, delay):
+            waits.append(delay)
+            clock.now += delay
+            assert len(waits) <= 3
+            return False
+
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
+    caplog.set_level("INFO", logger=runner.__name__)
+    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    heart._stop = Stop()
+    heart._run()
+
+    assert waits == [30, 5, 5]
+    assert caplog.text.count("agent_control_failure") == 1
+    assert caplog.text.count("agent_heartbeat_retry") == 2
+    assert "consecutive_failures=2" in caplog.text
+
+
 def test_fenced_heartbeat_never_retries_or_claims_a_replacement(caplog):
     """A 409 terminates renewal even when fast retries are enabled."""
     control = Mock(job_id="ajob_fenced")

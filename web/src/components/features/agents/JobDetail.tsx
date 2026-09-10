@@ -554,8 +554,10 @@ function ownerRunNote(job: AgentJob): string | undefined {
   // Success detail contains runner/publication bookkeeping, not the answer.
   // The transcript carries the result; publication has its own status row.
   if (job.state === 'done' || job.state === 'needs_review') return undefined;
+  // `stateNote` is already owner-facing: toDisplayJob translates `job.detail`
+  // through ownerFailureMessage before it reaches this display model.
   return (
-    (job.stateNote ? ownerFailureMessage(job.stateNote) : undefined) ||
+    job.stateNote ||
     (job.state === 'failed'
       ? 'The run stopped before it could finish. No failure details were recorded.'
       : undefined)

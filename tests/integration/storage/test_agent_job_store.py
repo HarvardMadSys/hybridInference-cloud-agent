@@ -2518,6 +2518,12 @@ async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_
     assert replay is not None
     assert replay["native_session_id"] == original["native_session_id"]
     assert await snapshot_state() == before
+    # A retry that cannot restate the locator still replays the recorded one;
+    # the attempt, lease and activation fences already pin the boundary.
+    locator_free = await store.settle_thread_sandbox(**(request | {"native_session_id": None}))
+    assert locator_free is not None
+    assert locator_free["native_session_id"] == original["native_session_id"]
+    assert await snapshot_state() == before
     for change in [
         {"activation_generation": fence["activation_generation"] + 1},
         {"lease_generation": fence["lease_generation"] + 1},

@@ -24,7 +24,12 @@ describe('owner failure wording', () => {
     'retained Agent CLI turn became indeterminate after prompt admission',
     'attempt lease lost during shared live execution',
     'native context unavailable',
+    'native Agent CLI session locator is missing',
     'shared Session Supervisor is unavailable',
+    'cannot settle without a live resident transport',
+    'shared member resident transport is unavailable before settlement',
+    'attempt dispatch failed (SandboxError)',
+    'shared live chat failed unexpectedly: connection reset',
   ])('explains infrastructure failure without exposing internal terms: %s', (detail) => {
     const expected = 'The connection was interrupted before this response could be confirmed.';
     expect(ownerFailureMessage(detail)).toBe(expected);
@@ -43,12 +48,13 @@ describe('owner failure wording', () => {
     ).toEqual({ kind: 'message', text: 'Investigate why the lease expired.' });
   });
 
-  it('distinguishes a finished response from an interrupted response', () => {
-    expect(
-      ownerFailureMessage(
-        'Agent CLI context settled, but job finalization expired; the prompt was not replayed',
-      ),
-    ).toContain('The response finished');
+  it('treats a settled boundary as finished, not interrupted', () => {
+    for (const detail of [
+      'Agent CLI context settled, but job finalization expired; the prompt was not replayed',
+      'job finalization expired after context settlement',
+    ]) {
+      expect(ownerFailureMessage(detail)).toContain('The response finished');
+    }
   });
 
   it('distinguishes execution timeout and cancellation from connection failure', () => {
