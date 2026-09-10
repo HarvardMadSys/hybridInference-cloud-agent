@@ -559,5 +559,7 @@ x-pinned-by:
     - tests/unit/test_grant_usage_client.py
     - tests/unit/test_grant_usage_contract.py
     - tests/unit/test_grant_lifecycle.py
+    - tests/unit/test_grant_constants_match_contract.py
     - tests/servers/test_grant_at_claim.py
     - tests/integration/storage/test_agent_grant_store.py
+    - tests/external/test_gateway_contracts_live.py

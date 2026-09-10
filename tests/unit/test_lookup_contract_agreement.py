@@ -41,6 +41,7 @@ CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "internal-lookups
 CATALOG_READS = {
     "models": "GatewayClient.model_catalog_with_aliases",
     "aliases": "GatewayClient.model_catalog_with_aliases",
+    "reasoning_efforts": "GatewayClient.model_reasoning_efforts — effort levels per model",
 }
 
 

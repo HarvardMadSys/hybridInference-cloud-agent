@@ -103,6 +103,28 @@ paths:
                       alias that shadowed a real model, or pointed outside the
                       caller's catalog, is dropped here rather than sent for
                       the consumer to puzzle over.
+                  reasoning_efforts:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items: { type: string }
+                    description: |
+                      Which models can be told how hard to think, and with which
+                      words: model id to the effort levels it accepts. A model
+                      that takes no effort is absent rather than present with an
+                      empty list, so a consumer reaches "no knob here" by finding
+                      nothing — the same thing it finds against a gateway too old
+                      to answer this at all.
+
+                      **Additive, and deliberately not in `required`.** A
+                      consumer that predates this key offers no such control,
+                      which is the behaviour it had before the key existed;
+                      declaring it optional keeps this document true of both
+                      gateways. It reached the response without ever being
+                      declared here, which no local test could see — the
+                      consumer half was pinned, the producer half was not, and
+                      `tests/external/test_gateway_contracts_live.py` is what
+                      closes that.
         "401":
           description: Wrong or missing dispatch token.
           content:
@@ -248,3 +270,4 @@ x-pinned-by:
     - tests/unit/test_gateway_client.py
     - tests/unit/test_lookup_contract_agreement.py
     - tests/unit/test_agent_visible_models.py
+    - tests/external/test_gateway_contracts_live.py

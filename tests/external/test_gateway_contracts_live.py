@@ -29,8 +29,11 @@ to the other three contract families:
 validation cannot see that: JSON Schema ignores properties it does not know, so
 a response that grew a field passes while the document and the client stay silent
 about the addition. `_assert_only_declared_keys` is what makes that an error,
-and it is the check that would have caught `reasoning_efforts` reaching the
-catalog — read by the client, never declared, every test on both sides green.
+and it is the check that caught `reasoning_efforts` reaching the catalog — read
+by the client, never declared, every test on both sides green. The catalog now
+declares that field and `tests/unit/test_lookup_contract_agreement.py` lists the
+read, so this suite runs green against a current gateway and the next field to
+arrive that way fails here rather than being triaged as a known failure.
 
 Set `AGENT_CONTRACT_GATEWAY_URL` and `AGENT_CONTRACT_DISPATCH_TOKEN`, then run
 with ``pytest -m external``.
