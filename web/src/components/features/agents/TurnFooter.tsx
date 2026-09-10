@@ -1,7 +1,7 @@
 'use client';
 
-// The per-turn account: how this turn was continued, how long it took, and
-// what it consumed on a machine its owner cannot see.
+// The per-turn account: how long it took and what it consumed on a machine
+// its owner cannot see.
 //
 // Two rules run through every line of this file, both from the observability
 // design's §11, and both are the reason it is worth showing numbers at all:
@@ -33,59 +33,6 @@ export interface ToolTiming {
   /** Joins this row to the host's measurement of the same call, when there is one. */
   toolUseId: string | null;
 }
-
-const CONTINUITY_LABEL: Record<string, { text: string; tone: string; title: string }> = {
-  hot: {
-    text: 'hot',
-    tone: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-emerald-600/20 dark:ring-emerald-500/25',
-    title:
-      'Continued in the same live process as the previous turn. The agent kept everything it had in mind, and its workspace was never rebuilt.',
-  },
-  warm_native: {
-    text: 'warm',
-    tone: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-emerald-600/20 dark:ring-emerald-500/25',
-    title:
-      'Reopened the agent\u2019s own saved session in the workspace this thread already had. Its memory of earlier turns and the files it was working on are both intact; only its process was restarted.',
-  },
-  cold_native: {
-    text: 'cold',
-    tone: 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-amber-600/20 dark:ring-amber-500/25',
-    title:
-      'Rebuilt in a fresh sandbox from the saved session and the saved code. The agent still remembers earlier turns, but anything it had installed or generated outside version control is gone.',
-  },
-  replay: {
-    text: 'replay',
-    tone: 'bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-400 ring-rose-600/20 dark:ring-rose-500/25',
-    title:
-      'The agent\u2019s working memory of earlier turns was not available for this turn, so it was given the written transcript instead. It can read what was said, but it may not recall why it did something, and it will not know about anything it set up that the transcript does not mention. This happens when the previous turn\u2019s session could not be saved, or when the thread moved to another machine.',
-  },
-};
-
-const CONTEXT_LABEL: Record<string, { text: string; tone: string; title: string }> = {
-  new: {
-    text: 'new',
-    tone: 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-300 ring-gray-500/20 dark:ring-white/10',
-    title: 'This is the first turn in the chat, so there is no earlier agent context to restore.',
-  },
-  live: {
-    text: 'context live',
-    tone: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400 ring-sky-600/20 dark:ring-sky-500/25',
-    title:
-      'The supervisor still held the live native agent session and workspace, so it could continue without reconstructing the session. Process ids are deliberately not part of the public contract.',
-  },
-  restored: {
-    text: 'restored',
-    tone: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400 ring-sky-600/20 dark:ring-sky-500/25',
-    title:
-      'The Agent CLI process was reopened and loaded its exact native session from the same retained sandbox. The container may have been restarted, or only this member process may have been re-keyed; the prior transcript was not pasted in as a substitute.',
-  },
-  lost: {
-    text: 'context lost',
-    tone: 'bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-400 ring-rose-600/20 dark:ring-rose-500/25',
-    title:
-      'The platform could not verify the retained native session. It did not silently start a blank session and call that a continuation.',
-  },
-};
 
 /**
  * Round the way the reader will see it, so callers can branch on the printed
@@ -625,15 +572,11 @@ function ProcessObservationTable({
   );
 }
 
-type Explained = 'continuity' | 'context' | 'partial' | 'unmeasured' | null;
+type Explained = 'partial' | 'unmeasured' | null;
 
 export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: number }) {
   const [open, setOpen] = useState(false);
-  // Which chip the reader asked about. A native `title` was the first
-  // delivery for these, and it is the wrong one: it wants a second of
-  // motionless hover, cannot be read on a touch screen, and holds three
-  // sentences badly. The one thing this footer most needs to explain — why a
-  // turn forgot — was the least likely to be seen.
+  // Resource explanations can be opened with a click or tap.
   const [explained, setExplained] = useState<Explained>(null);
   const selectedTelemetry =
     attemptNo !== undefined && attemptNo > 0
@@ -643,17 +586,6 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // switches with the attempt picker, and a footer that did not would label
   // one attempt's transcript with another's numbers.
   const timings = useMemo(() => toolTimings(job.events, attemptNo), [job.events, attemptNo]);
-  const contextBadge = selectedTelemetry?.contextStatus
-    ? CONTEXT_LABEL[selectedTelemetry.contextStatus]
-    : undefined;
-  // NEW/LIVE/RESTORED/LOST is the user-facing correctness contract. The old
-  // HOT/WARM/COLD/REPLAY remains useful attempt telemetry and for historical
-  // rows, but showing both on one turn made one fact look like two independent
-  // states. Fall back to it only for rows that predate context status.
-  const badge =
-    !contextBadge && selectedTelemetry?.continuityMode
-      ? CONTINUITY_LABEL[selectedTelemetry.continuityMode]
-      : undefined;
   const duration = formatDuration(selectedTelemetry?.durationMs);
   const resources = selectedTelemetry?.resources;
   const sharedMemberAccounting = resources?.samplerVersion === 'shared-member-v1';
@@ -671,35 +603,29 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   // Missing a tenth of a turn is worth saying; missing two percent is not.
   const partial = Boolean(resources && resources.coverage < 0.9 && stats.length > 0);
   const explanation =
-    explained === 'continuity'
-      ? badge?.title
-      : explained === 'context'
-        ? contextBadge?.title
-        : explained === 'partial'
-          ? `Only ${Math.round((resources?.coverage ?? 0) * 100)}% of this turn was sampled, so the ` +
-            'numbers above are lower bounds rather than totals. This happens when the sandbox ' +
-            'took a while to appear, or ended before the turn did.'
-          : explained === 'unmeasured'
-            ? sharedMemberAccounting
-              ? hasProcessObservation
-                ? 'Whole-container totals are not assigned to one chat in a shared workspace. ' +
-                  'The guest process lifecycle events below are separate, member-scoped measurements.'
-                : 'Whole-container totals are not assigned to one chat because fork siblings can ' +
-                  'run concurrently. Unavailable data is not the same as a turn that consumed nothing.'
-              : hasProcessObservation
-                ? 'The historical periodic sandbox counters were unavailable. The guest process ' +
-                  'events below are a separate measurement.'
-                : 'The historical sampler could not read this turn\u2019s sandbox counters. ' +
-                  'Unavailable data is not the same as a turn that consumed nothing.'
-            : null;
+    explained === 'partial'
+      ? `Only ${Math.round((resources?.coverage ?? 0) * 100)}% of this turn was sampled, so the ` +
+        'numbers above are lower bounds rather than totals. This happens when the sandbox ' +
+        'took a while to appear, or ended before the turn did.'
+      : explained === 'unmeasured'
+        ? sharedMemberAccounting
+          ? hasProcessObservation
+            ? 'Whole-container totals are not assigned to one chat in a shared workspace. ' +
+              'The guest process lifecycle events below are separate, member-scoped measurements.'
+            : 'Whole-container totals are not assigned to one chat because fork siblings can ' +
+              'run concurrently. Unavailable data is not the same as a turn that consumed nothing.'
+          : hasProcessObservation
+            ? 'The historical periodic sandbox counters were unavailable. The guest process ' +
+              'events below are a separate measurement.'
+            : 'The historical sampler could not read this turn\u2019s sandbox counters. ' +
+              'Unavailable data is not the same as a turn that consumed nothing.'
+        : null;
   const unmeasured = Boolean(resources && stats.length === 0);
 
   // `unmeasured` counts as something to say: current shared turns intentionally
   // omit group-wide totals, while old rows with no resource object predate the
   // reporting contract entirely.
   if (
-    !badge &&
-    !contextBadge &&
     !duration &&
     stats.length === 0 &&
     timings.length === 0 &&
@@ -712,28 +638,6 @@ export function TurnFooter({ job, attemptNo }: { job: AgentJob; attemptNo?: numb
   return (
     <section className="mt-3 rounded-lg border border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-gray-900/60 px-3 py-2 text-[12px]">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-600 dark:text-gray-400">
-        {badge ? (
-          <button
-            type="button"
-            onClick={() => setExplained(explained === 'continuity' ? null : 'continuity')}
-            aria-expanded={explained === 'continuity'}
-            title={badge.title}
-            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset transition-opacity hover:opacity-80 ${badge.tone}`}
-          >
-            {badge.text}
-          </button>
-        ) : null}
-        {contextBadge ? (
-          <button
-            type="button"
-            onClick={() => setExplained(explained === 'context' ? null : 'context')}
-            aria-expanded={explained === 'context'}
-            title={contextBadge.title}
-            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset transition-opacity hover:opacity-80 ${contextBadge.tone}`}
-          >
-            {contextBadge.text}
-          </button>
-        ) : null}
         {duration ? <span className="tabular-nums">{duration}</span> : null}
         {stats.map((stat) => (
           <span key={stat.label} className="tabular-nums">

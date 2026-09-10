@@ -178,76 +178,50 @@ describe('TurnFooter', () => {
       />,
     );
 
-    expect(screen.getByRole('button', { name: 'context lost' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'context lost' })).toBeNull();
     expect(screen.getByText('3s')).toBeInTheDocument();
     expect(screen.getByText('1s')).toBeInTheDocument();
     expect(screen.queryByText('9s')).toBeNull();
     expect(screen.queryByText('7s')).toBeNull();
   });
 
-  it('shows the continuity rung and what the turn consumed', () => {
-    render(
-      <TurnFooter job={job({ continuityMode: 'hot', durationMs: 42_000, resources: RESOURCES })} />,
+  it.each<Partial<AgentJob>>([
+    { contextStatus: 'new' },
+    { contextStatus: 'live' },
+    { contextStatus: 'restored', continuityMode: 'warm_native' },
+    { contextStatus: 'lost', continuityMode: 'replay' },
+    { continuityMode: 'hot' },
+    { continuityMode: 'warm_native' },
+    { continuityMode: 'cold_native' },
+    { continuityMode: 'replay' },
+  ])('keeps duration and resources without internal session badges: %j', (telemetry) => {
+    const { container, rerender } = render(
+      <TurnFooter job={job({ ...telemetry, durationMs: 42_000, resources: RESOURCES })} />,
     );
-    expect(screen.getByText('hot')).toBeInTheDocument();
+
     expect(screen.getByText('42s')).toBeInTheDocument();
     expect(screen.getByText('18.2s')).toBeInTheDocument();
     expect(screen.getByText('1.2GB')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(container.querySelector('[title]')).toBeNull();
+    expect(
+      screen.queryByText(/^(new|context live|restored|context lost|hot|warm|cold|replay)$/),
+    ).toBeNull();
+
+    // Session telemetry alone must not leave an empty footer behind.
+    rerender(<TurnFooter job={job(telemetry)} />);
+    expect(container).toBeEmptyDOMElement();
   });
 
-  it('shows one canonical context status instead of duplicating the legacy rung', () => {
-    render(<TurnFooter job={job({ continuityMode: 'warm_native', contextStatus: 'restored' })} />);
-
-    expect(screen.queryByRole('button', { name: 'warm' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'restored' }));
-    expect(screen.getByText(/native session/i)).toBeInTheDocument();
-    expect(screen.getByText(/was not pasted/i)).toBeInTheDocument();
-  });
-
-  it('surfaces context loss without relabelling it as replay', () => {
-    render(<TurnFooter job={job({ contextStatus: 'lost' })} />);
-
-    expect(screen.queryByRole('button', { name: 'replay' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'context lost' }));
-    expect(screen.getByText(/could not verify/i)).toBeInTheDocument();
-  });
-
-  it('explains a replay turn on demand, which is why the badge exists', () => {
-    // A native `title` was the first delivery and it was the wrong one: it
-    // wants a second of motionless hover and cannot be read on a touch
-    // screen, so the footer's most important explanation was the least
-    // likely to be seen. Clicking always works.
-    render(<TurnFooter job={job({ continuityMode: 'replay' })} />);
-
-    expect(screen.queryByText(/working memory/i)).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'replay' }));
-
-    expect(screen.getByText(/working memory/i)).toBeInTheDocument();
-    expect(screen.getByText(/written transcript/i)).toBeInTheDocument();
-  });
-
-  it('closes an explanation when its chip is clicked again', () => {
-    render(<TurnFooter job={job({ continuityMode: 'replay' })} />);
-    const badge = screen.getByRole('button', { name: 'replay' });
+  it('closes a resource explanation when its chip is clicked again', () => {
+    render(<TurnFooter job={job({ resources: { ...RESOURCES, coverage: 0.4 } })} />);
+    const badge = screen.getByRole('button', { name: 'partial' });
 
     fireEvent.click(badge);
-    fireEvent.click(badge);
-
-    expect(screen.queryByText(/working memory/i)).toBeNull();
-  });
-
-  it('shows one explanation at a time', () => {
-    render(
-      <TurnFooter
-        job={job({ continuityMode: 'replay', resources: { ...RESOURCES, coverage: 0.4 } })}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'replay' }));
-    fireEvent.click(screen.getByRole('button', { name: 'partial' }));
-
     expect(screen.getByText(/40% of this turn was sampled/)).toBeInTheDocument();
-    expect(screen.queryByText(/working memory/i)).toBeNull();
+    fireEvent.click(badge);
+
+    expect(screen.queryByText(/40% of this turn was sampled/)).toBeNull();
   });
 
   it('calls a partly sampled turn a floor, not a total', () => {
@@ -1090,7 +1064,7 @@ describe('attempt scoping', () => {
     );
 
     expect(screen.queryByText('hot')).not.toBeInTheDocument();
-    expect(screen.queryByText('live')).not.toBeInTheDocument();
+    expect(screen.queryByText('context live')).not.toBeInTheDocument();
     expect(screen.queryByText('42s')).not.toBeInTheDocument();
     expect(screen.queryByText('18.2s')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '1 tool call' }));
