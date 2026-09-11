@@ -1075,6 +1075,58 @@ async def test_touching_a_session_keeps_a_live_one_visible(store: AgentJobStore)
     assert not await store.touch_mcp_transport_session(handle="mcp1.gone")
 
 
+async def test_a_per_service_timeout_is_stored_without_moving_the_versions(
+    store: AgentJobStore,
+) -> None:
+    """Patience is not a target change, so nothing a decision is fenced on moves.
+
+    The design asks for a bounded timeout per service rather than one constant
+    for all of them -- a repository search and a single-record fetch are not the
+    same wait -- and lists the security-relevant fields as the command, the
+    mount, the connector and the auth method. A timeout is none of those, so
+    raising it must not invalidate the sessions a user already approved.
+    """
+    connection = await store.create_mcp_connection(
+        user_id=_OWNER,
+        label="Slow search",
+        transport="streamable-http",
+        location="remote",
+        url=_URL,
+        launch_spec=None,
+        auth_kind="none",
+        auth_config={},
+        request_timeout_s=45.0,
+    )
+    assert connection["request_timeout_s"] == 45.0
+
+    updated = await store.update_mcp_connection(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        expected_config_revision=int(connection["config_revision"]),
+        request_timeout_s=300.0,
+    )
+    assert updated is not None
+    assert updated["request_timeout_s"] == 300.0
+    assert updated["config_revision"] == connection["config_revision"]
+    assert updated["authorization_epoch"] == connection["authorization_epoch"]
+
+    # And an edit that does not mention it leaves it alone, like every other
+    # COALESCE field.
+    relabelled = await store.update_mcp_connection(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        expected_config_revision=int(updated["config_revision"]),
+        label="Renamed",
+    )
+    assert relabelled is not None
+    assert relabelled["request_timeout_s"] == 300.0
+
+    # A connection that never set one has none, which is what every existing
+    # row got from the migration.
+    plain = await _connect(store, _OWNER)
+    assert plain["request_timeout_s"] is None
+
+
 async def test_the_0005_migration_maps_legacy_server_names_onto_bindings() -> None:
     """Build the pre-0005 shape, upgrade over it, and read what it decided.
 

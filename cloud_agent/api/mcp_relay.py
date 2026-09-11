@@ -81,7 +81,7 @@ router = APIRouter(prefix="/v1/agent/mcp")
 # An MCP call is a tool call: it can be a repository search or an issue fetch,
 # and it is not a token stream. Generous, but bounded -- a sandbox waiting on a
 # hung upstream is a job burning its wall-clock timeout for nothing.
-_UPSTREAM_TIMEOUT_S = 120.0
+_DEFAULT_UPSTREAM_TIMEOUT_S = 120.0
 _CONNECT_TIMEOUT_S = 10.0
 
 # Forwarded from the agent to the upstream. Everything else -- Authorization
@@ -564,14 +564,16 @@ def _response_headers(upstream: httpx.Response) -> dict[str, str]:
     }
 
 
-def build_upstream_client() -> httpx.AsyncClient:
+def build_upstream_client(request_timeout_s: float | None = None) -> httpx.AsyncClient:
     """Build the client the proxy dials upstream with.
 
     Redirects are not followed: a redirect would re-send this deployment's
     credential to whatever host the response named.
     """
     return httpx.AsyncClient(
-        timeout=httpx.Timeout(_UPSTREAM_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S),
+        timeout=httpx.Timeout(
+            request_timeout_s or _DEFAULT_UPSTREAM_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S
+        ),
         follow_redirects=False,
     )
 
@@ -585,7 +587,7 @@ async def _proxy(
     body: bytes = b"",
 ) -> Any:
     """Forward one request upstream and stream or filter the reply back."""
-    client = build_upstream_client()
+    client = build_upstream_client(server.request_timeout_s)
     upstream_request = client.build_request(
         method,
         server.url,

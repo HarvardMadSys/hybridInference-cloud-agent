@@ -91,6 +91,7 @@ class FakeStore:
             "auth_kind": kwargs["auth_kind"],
             "auth_config": kwargs.get("auth_config") or {},
             "connector_id": kwargs.get("connector_id"),
+            "request_timeout_s": kwargs.get("request_timeout_s"),
             "status": "draft",
             "error_kind": "none",
             "error_detail": None,
@@ -123,7 +124,7 @@ class FakeStore:
         row = self.connections.get(kwargs["connection_id"])
         if row is None or row["config_revision"] != kwargs["expected_config_revision"]:
             return None
-        for key in ("label", "url", "auth_kind", "account_label"):
+        for key in ("label", "url", "auth_kind", "account_label", "request_timeout_s"):
             if kwargs.get(key) is not None:
                 row[key] = kwargs[key]
         if kwargs.get("launch_spec") is not None:
@@ -1128,6 +1129,65 @@ class TestTheDeploymentSwitch:
 
         monkeypatch.setenv("AGENT_MCP_ENABLED", value)
         assert mcp_enabled() is True
+
+
+class TestPerServiceTimeouts:
+    """One service's patience is not every service's limit."""
+
+    def test_a_timeout_round_trips_and_has_bounds(self) -> None:
+        """A bound that cannot be set is a constant with extra steps."""
+        store = FakeStore()
+        with _client(store) as client:
+            created = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "Slow search",
+                    "transport": "streamable-http",
+                    "location": "remote",
+                    "url": "https://mcp.example.com/mcp",
+                    "auth_kind": "none",
+                    "request_timeout_s": 45,
+                },
+            )
+            assert created.status_code == 201, created.text
+            assert created.json()["request_timeout_s"] == 45
+
+            listed = client.get("/v1/agent/mcp/connections").json()
+            assert listed["connections"][0]["request_timeout_s"] == 45
+
+            # Below the floor and above the ceiling are both refused: a five
+            # second bound fails every real server, and a day-long one holds a
+            # job open past any attempt.
+            for value in (1, 3600):
+                refused = client.post(
+                    "/v1/agent/mcp/connections",
+                    json={
+                        "label": "No",
+                        "transport": "streamable-http",
+                        "location": "remote",
+                        "url": "https://mcp.example.com/mcp",
+                        "auth_kind": "none",
+                        "request_timeout_s": value,
+                    },
+                )
+                assert refused.status_code == 422, value
+
+    def test_omitting_it_leaves_the_default(self) -> None:
+        """Which is what every connection had before this was a choice."""
+        store = FakeStore()
+        with _client(store) as client:
+            created = client.post(
+                "/v1/agent/mcp/connections",
+                json={
+                    "label": "Ordinary",
+                    "transport": "streamable-http",
+                    "location": "remote",
+                    "url": "https://mcp.example.com/mcp",
+                    "auth_kind": "none",
+                },
+            )
+            assert created.status_code == 201, created.text
+            assert created.json()["request_timeout_s"] is None
 
 
 class TestCapabilitySelectionSemantics:

@@ -175,6 +175,7 @@ class ConnectionView(BaseModel):
     config_revision: int = 1
     authorization_epoch: int = 1
     capability_revision: int = 1
+    request_timeout_s: float | None = None
     server_name: str | None = None
     server_version: str | None = None
     protocol_version: str | None = None
@@ -206,6 +207,9 @@ class CreateConnectionRequest(BaseModel):
     auth_kind: str = AuthKind.NONE.value
     template: str | None = None
     connector_id: int | None = None
+    #: Seconds one call to this server may take. Omitted means the relay's
+    #: default, which is what every connection had before this was a choice.
+    request_timeout_s: float | None = Field(default=None, ge=5, le=900)
     #: The static credential, when the auth kind is ``static``. Write-only.
     secret: str | None = None
     header_name: str | None = None
@@ -256,6 +260,7 @@ class UpdateConnectionRequest(BaseModel):
     launch: dict[str, Any] | None = None
     auth_kind: str | None = None
     account_label: str | None = None
+    request_timeout_s: float | None = Field(default=None, ge=5, le=900)
 
 
 class SecretRequest(BaseModel):
@@ -440,6 +445,7 @@ async def _view(store: AgentJobStore, row: Mapping[str, Any]) -> ConnectionView:
         config_revision=connection.config_revision,
         authorization_epoch=connection.authorization_epoch,
         capability_revision=connection.capability_revision,
+        request_timeout_s=connection.request_timeout_s,
         server_name=str(snapshot.get("server_name") or "") or None if snapshot else None,
         server_version=str(snapshot.get("server_version") or "") or None if snapshot else None,
         protocol_version=str(snapshot.get("protocol_version") or "") or None if snapshot else None,
@@ -570,6 +576,7 @@ async def create_connection(
         template=template,
         connector_id=body.connector_id,
         account_label=body.account_label,
+        request_timeout_s=body.request_timeout_s,
     )
     if body.secret:
         await _store_static_secret(
@@ -726,6 +733,7 @@ async def update_connection(
         launch_spec=body.launch,
         auth_kind=auth_kind,
         account_label=body.account_label,
+        request_timeout_s=body.request_timeout_s,
     )
     if updated is None:
         raise _conflict("this connection changed since you loaded it; reload and try again")

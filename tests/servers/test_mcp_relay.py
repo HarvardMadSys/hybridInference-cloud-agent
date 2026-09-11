@@ -266,7 +266,11 @@ async def _relay(monkeypatch, store: FakeJobStore, upstream: Upstream):
     monkeypatch.setattr(
         agent_mcp_router,
         "build_upstream_client",
-        lambda: httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler)),
+        # The timeout argument is what a per-connection bound travels in, so the
+        # stub takes it even though the mock ignores it.
+        lambda request_timeout_s=None: httpx.AsyncClient(
+            transport=httpx.MockTransport(upstream.handler)
+        ),
     )
     app = FastAPI()
     app.include_router(agent_mcp_router.router)

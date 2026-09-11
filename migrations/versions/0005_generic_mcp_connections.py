@@ -137,6 +137,11 @@ def _widen_connections() -> None:
     op.execute("ALTER TABLE agent_mcp_connections ADD COLUMN credential_version BIGINT NOT NULL DEFAULT 1")
     op.execute("ALTER TABLE agent_mcp_connections ADD COLUMN capability_revision BIGINT NOT NULL DEFAULT 1")
     op.execute("ALTER TABLE agent_mcp_connections ADD COLUMN last_checked_at TIMESTAMPTZ")
+    # One service's patience is not every service's limit: a repository search
+    # and a single-record fetch are not the same wait, and a platform-wide
+    # constant makes the slower one fail and the faster one wait. NULL means the
+    # relay's default, which is what every existing row gets.
+    op.execute("ALTER TABLE agent_mcp_connections ADD COLUMN request_timeout_s DOUBLE PRECISION")
     op.execute("ALTER TABLE agent_mcp_connections ADD COLUMN deleted_at TIMESTAMPTZ")
 
     # Existing rows: a reviewed provider with a bearer token, which is exactly
@@ -488,6 +493,7 @@ def downgrade() -> None:
         "credential_version",
         "capability_revision",
         "last_checked_at",
+        "request_timeout_s",
         "deleted_at",
     ):
         op.execute(f"ALTER TABLE agent_mcp_connections DROP COLUMN {column}")

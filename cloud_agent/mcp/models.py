@@ -349,6 +349,11 @@ class McpConnection:
     oauth_generation: int = 0
     credential_version: int = 1
     capability_revision: int = 1
+    #: How long one call to this server may take, in seconds. ``None`` means the
+    #: platform's default. Per connection because a repository search and a
+    #: single-record fetch are not the same wait, and the design is explicit
+    #: that one service's patience must not be every service's limit.
+    request_timeout_s: float | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -640,6 +645,8 @@ class McpServer:
     tools: frozenset[str] = frozenset()
     description: str = ""
     protocol_version: str = PREFERRED_PROTOCOL_VERSION
+    #: The bound on one call, in seconds, or ``None`` for the relay's default.
+    request_timeout_s: float | None = None
     #: Where a stdio server runs, for the relay's routing decision.
     location: ExecutionLocation = ExecutionLocation.REMOTE
     launch: LaunchSpec | None = None

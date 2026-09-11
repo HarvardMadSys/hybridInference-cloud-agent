@@ -50,7 +50,7 @@ are outside this repository.
 | Rebuild the protocol session when the owner is superseded, without resending dispatched work | Done | the key includes the lease generation, so a takeover produces a new session; `McpHost.reap_superseded` closes the superseded one, deletes its record and clears any record another instance left under that member. The map no longer grows for the lifetime of the process |
 | Bounded request, frame, cumulative response and events | Done | `jsonrpc.MAX_MESSAGE_BYTES`, `sse.MAX_EVENT_BYTES`, `transports.MAX_RESPONSE_BYTES` |
 | SSE handles LF / CRLF and fragmentation, and closes on overflow | Done | `mcp/sse.py`; 6 cases |
-| Separate finite timeouts for execution, confirmation and subscription | **Partial** | a held call has the four-clock contract in `mcp/invocations.py`. Execution uses one relay constant (`_UPSTREAM_TIMEOUT_S = 120`) for every server, which the design explicitly says not to do |
+| Separate finite timeouts for execution, confirmation and subscription | Done | a held call has the four-clock contract in `mcp/invocations.py`, and execution takes a per-connection `request_timeout_s` (5-900s) that both the relay's client and the host's transport honour. Unset means the 120-second default, which is what every existing row got from the migration |
 
 ### Optional capabilities (design §8.1, second table)
 
@@ -98,12 +98,10 @@ are outside this repository.
 4. **Elicitation**: a user form, a persisted request, and a continuation that
    carries the answers back — which the merged endpoint can already express
    (`inputResponses` / `requestState` are implemented on the client side).
-5. **Per-service timeouts**: make the relay's execution timeout a property of
-   the connection rather than one constant.
-6. **Cancellation and progress on the merged endpoint**: the surface would have
+5. **Cancellation and progress on the merged endpoint**: the surface would have
    to hold a call open across HTTP requests, or report them as unsupported
    rather than accepting the notification silently.
-7. **Deployment acceptance**: a staging run, a real OAuth round trip, and
+6. **Deployment acceptance**: a staging run, a real OAuth round trip, and
    interoperation with two real third-party servers and one real stdio server.
 
 ## How to check this document

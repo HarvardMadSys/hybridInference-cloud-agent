@@ -898,7 +898,7 @@ class AgentJobStore:
         "revocation_endpoint, registration_endpoint, client_auth_method, "
         "registration, credential_version, config_revision, authorization_epoch, "
         "oauth_generation, capability_revision, account_label, last_checked_at, "
-        "created_at, updated_at, deleted_at"
+        "request_timeout_s, created_at, updated_at, deleted_at"
     )
 
     @staticmethod
@@ -960,6 +960,7 @@ class AgentJobStore:
         template: str | None = None,
         connector_id: int | None = None,
         account_label: str | None = None,
+        request_timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Insert a connection and return it, at revision one.
 
@@ -973,8 +974,10 @@ class AgentJobStore:
                 f"""
                 INSERT INTO agent_mcp_connections
                     (user_id, label, template, transport, location, url, launch_spec,
-                     auth_kind, auth_config, connector_id, account_label, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, 'draft')
+                     auth_kind, auth_config, connector_id, account_label, status,
+                     request_timeout_s)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, 'draft',
+                        $12)
                 RETURNING {self._MCP_CONNECTION_COLUMNS}
                 """,
                 user_id,
@@ -988,6 +991,7 @@ class AgentJobStore:
                 json.dumps(auth_config),
                 connector_id,
                 account_label,
+                request_timeout_s,
             )
         return self._mcp_connection(row)
 
@@ -1005,6 +1009,7 @@ class AgentJobStore:
         auth_kind: str | None = None,
         auth_config: dict[str, Any] | None = None,
         account_label: str | None = None,
+        request_timeout_s: float | None = None,
         reset_status: bool = False,
     ) -> dict[str, Any] | None:
         """Apply a configuration edit, refusing a stale revision.
@@ -1032,6 +1037,7 @@ class AgentJobStore:
                     auth_kind = COALESCE($10, auth_kind),
                     auth_config = CASE WHEN $11::boolean THEN $12::jsonb ELSE auth_config END,
                     account_label = COALESCE($13, account_label),
+                    request_timeout_s = COALESCE($17, request_timeout_s),
                     status = CASE WHEN $14::boolean THEN 'draft' ELSE status END,
                     error_kind = CASE WHEN $14::boolean THEN 'none' ELSE error_kind END,
                     error_detail = CASE WHEN $14::boolean THEN NULL ELSE error_detail END,
@@ -1057,6 +1063,7 @@ class AgentJobStore:
                 reset_status,
                 security_relevant,
                 expected_config_revision,
+                request_timeout_s,
             )
         return self._mcp_connection(row) if row is not None else None
 

@@ -201,6 +201,9 @@ def connection_from_row(row: Mapping[str, Any]) -> McpConnection:
         oauth_generation=int(row.get("oauth_generation") or 0),
         credential_version=int(row.get("credential_version") or 1),
         capability_revision=int(row.get("capability_revision") or 1),
+        request_timeout_s=(
+            float(row["request_timeout_s"]) if row.get("request_timeout_s") else None
+        ),
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
@@ -487,6 +490,7 @@ def server_for(
         headers=headers,
         tools=frozenset(capability.name for capability in allowed),
         description=connection.label,
+        request_timeout_s=connection.request_timeout_s,
         location=connection.config.location,
         launch=connection.config.launch,
         connector_id=connection.connector_id,
