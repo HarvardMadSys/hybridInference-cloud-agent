@@ -11,6 +11,15 @@ import { buildTrajectorySteps, type StoredEvent } from './trajectorySteps';
 
 afterEach(cleanup);
 
+/** A pointer event built from a mouse event, for a jsdom without PointerEvent. */
+function fallbackPointer(type: string, init: PointerEventInit): PointerEvent {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true });
+  for (const [key, value] of Object.entries(init)) {
+    Object.defineProperty(event, key, { value, configurable: true });
+  }
+  return event as PointerEvent;
+}
+
 function event(over: Partial<AgentThreadEventApi> & { id: number }): AgentThreadEventApi {
   return {
     attempt_id: 1,
@@ -225,56 +234,85 @@ describe('TrajectoryView', () => {
   });
 });
 
-describe('TrajectoryView zoom', () => {
-  /** The track is the zoomed surface: fitted it sets a minimum, zoomed a width. */
-  function trackWidth(): number {
-    const scroller = screen.getByRole('group', { name: /execution overview/i });
-    const track = scroller.firstElementChild as HTMLElement;
-    return Number.parseFloat(track.style.width || track.style.minWidth);
+/** Eight distinct assistant messages: eight steps, with no pairing to reason about. */
+const MANY = Array.from({ length: 8 }, (_, index) =>
+  event({ id: index + 1, payload: { text: `step ${index + 1}` } }),
+);
+
+describe('TrajectoryView overview', () => {
+  /** The projected layer: its width against the track is the zoom. */
+  function domain(): HTMLElement {
+    const node = document.querySelector<HTMLElement>('[data-timeline-domain]');
+    if (node === null) throw new Error('the overview rendered no domain layer');
+    return node;
+  }
+
+  function track(): HTMLElement {
+    return screen.getByRole('group', { name: /execution overview/i });
+  }
+
+  /** jsdom lays nothing out, so the track is given the width a card would have. */
+  function withTrackWidth(width = 400): void {
+    track().getBoundingClientRect = () =>
+      ({ left: 0, right: width, top: 0, bottom: 40, width, height: 40, x: 0, y: 0 }) as DOMRect;
   }
 
   /** Dispatch a wheel step and report whether the overview took it. */
   function wheel(deltaY: number): boolean {
-    const scroller = screen.getByRole('group', { name: /execution overview/i });
     const event = new WheelEvent('wheel', { deltaY, bubbles: true, cancelable: true });
     act(() => {
-      scroller.dispatchEvent(event);
+      track().dispatchEvent(event);
     });
     return event.defaultPrevented;
   }
 
-  it('lays the overview out at the pitch it has always used while fitted', () => {
-    render(<Harness events={EVENTS} />);
-    const scroller = screen.getByRole('group', { name: /execution overview/i });
-    const track = scroller.firstElementChild as HTMLElement;
+  /** A pointer event, whether or not the environment has a PointerEvent class. */
+  function pointer(type: string, init: PointerEventInit): void {
+    const event =
+      typeof PointerEvent === 'function'
+        ? new PointerEvent(type, { bubbles: true, cancelable: true, ...init })
+        : fallbackPointer(type, init);
+    act(() => {
+      track().dispatchEvent(event);
+    });
+  }
 
-    // Two steps at twelve pixels each, plus the track's padding. A minimum and
-    // not a width: the card decides how wide it ends up, and the server paints
-    // that same layout before anything is measured.
-    expect(track.style.minWidth).toBe('30px');
-    expect(track.style.width).toBe('');
+  /** A left-button drag across the track, in client pixels. */
+  function drag(fromX: number, toX: number): void {
+    pointer('pointerdown', { button: 0, pointerId: 1, clientX: fromX, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: toX, clientY: 10 });
+    pointer('pointerup', { pointerId: 1, clientX: toX, clientY: 10 });
+  }
+
+  it('projects the whole run into the track while nothing is zoomed', () => {
+    render(<Harness events={EVENTS} />);
+
+    expect(domain().style.left).toBe('0%');
+    expect(domain().style.width).toBe('100%');
+    // Two steps are already the narrowest window the overview allows.
+    expect(screen.getByRole('button', { name: 'Zoom in' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Zoom out' })).toBeDisabled();
   });
 
   it('gives the wheel to the page when there is nothing left to zoom out to', () => {
-    render(<Harness events={EVENTS} />);
+    render(<Harness events={MANY} />);
 
     expect(wheel(100)).toBe(false);
-    expect(trackWidth()).toBe(30);
+    expect(domain().style.width).toBe('100%');
   });
 
-  it('opens the columns apart on a wheel-up and closes them again', () => {
-    render(<Harness events={EVENTS} />);
+  it('zooms in around the pointer, and back out to the whole run', () => {
+    render(<Harness events={MANY} />);
 
     expect(wheel(-100)).toBe(true);
-    const zoomed = trackWidth();
-    expect(zoomed).toBeGreaterThan(30);
+    expect(Number.parseFloat(domain().style.width)).toBeGreaterThan(100);
 
     expect(wheel(100)).toBe(true);
-    expect(trackWidth()).toBe(30);
+    expect(domain().style.width).toBe('100%');
   });
 
   it('steps with the buttons, and fits every step again', () => {
-    render(<Harness events={EVENTS} />);
+    render(<Harness events={MANY} />);
     const zoomIn = screen.getByRole('button', { name: 'Zoom in' });
     const zoomOut = screen.getByRole('button', { name: 'Zoom out' });
     const fit = screen.getByRole('button', { name: 'Fit every step' });
@@ -283,37 +321,79 @@ describe('TrajectoryView zoom', () => {
     expect(fit).toBeDisabled();
 
     fireEvent.click(zoomIn);
-    const zoomed = trackWidth();
-    expect(zoomed).toBeGreaterThan(30);
+    expect(Number.parseFloat(domain().style.width)).toBeGreaterThan(100);
     expect(zoomOut).toBeEnabled();
     expect(fit).toBeEnabled();
 
-    fireEvent.click(zoomIn);
-    expect(trackWidth()).toBeGreaterThan(zoomed);
-
     fireEvent.click(fit);
-    expect(trackWidth()).toBe(30);
+    expect(domain().style.width).toBe('100%');
     expect(zoomOut).toBeDisabled();
   });
 
-  it('fits every step again on Escape and on a double click', () => {
-    render(<Harness events={EVENTS} />);
-    const scroller = screen.getByRole('group', { name: /execution overview/i });
+  it('selects an interval on a drag and steps the rows outside it back', () => {
+    const { container } = render(<Harness events={MANY} />);
+    withTrackWidth();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
-    expect(trackWidth()).toBeGreaterThan(30);
-    fireEvent.keyDown(scroller, { key: 'Escape' });
-    expect(trackWidth()).toBe(30);
+    drag(0, 100);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
-    expect(trackWidth()).toBeGreaterThan(30);
-    fireEvent.doubleClick(scroller);
-    expect(trackWidth()).toBe(30);
+    expect(container.querySelectorAll('[data-timeline-focus="inside"]').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('[data-timeline-focus="outside"]').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /of 8 · Clear/ })).toBeInTheDocument();
   });
 
-  it('keeps the step a mark names selected while the columns move', () => {
+  it('clears the interval on Escape, and from the control that counts it', () => {
+    const { container } = render(<Harness events={MANY} />);
+    withTrackWidth();
+
+    drag(0, 100);
+    expect(container.querySelector('[data-timeline-focus="outside"]')).not.toBeNull();
+
+    fireEvent.keyDown(track(), { key: 'Escape' });
+    expect(container.querySelector('[data-timeline-focus="outside"]')).toBeNull();
+
+    drag(0, 100);
+    fireEvent.click(screen.getByRole('button', { name: /of 8 · Clear/ }));
+    expect(container.querySelector('[data-timeline-focus="outside"]')).toBeNull();
+  });
+
+  it('draws a boundary where a turn starts', () => {
+    const twoTurns = [
+      event({ id: 1, job_id: 'ajob_0', turn_no: 1, payload: { text: 'first turn' } }),
+      event({ id: 2, job_id: 'ajob_1', turn_no: 2, payload: { text: 'second turn' } }),
+    ];
+    const { container } = render(<Harness events={twoTurns} />);
+
+    expect(container.querySelectorAll('[data-turn-boundary]')).toHaveLength(2);
+  });
+
+  it('projects recorded time when the reader asks for it', () => {
     render(<Harness events={EVENTS} />);
-    const mark = screen.getByRole('button', { name: 'Bash (tool, step 1)' });
+
+    const steps = screen.getByRole('button', { name: 'Steps' });
+    const time = screen.getByRole('button', { name: 'Time' });
+    expect(steps).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(time);
+
+    expect(time).toHaveAttribute('aria-pressed', 'true');
+    expect(steps).toHaveAttribute('aria-pressed', 'false');
+    // A recorded interval is as wide as it was long, so the mark is a share of
+    // the domain rather than one operation. (The width itself is a `max()`
+    // expression jsdom's CSS parser drops, hence the data attribute.)
+    const bash = screen.getByRole('button', { name: 'Bash (tool, step 1)' });
+    expect(bash).toHaveAttribute('data-recorded-width', 'true');
+    expect(bash).not.toHaveAttribute('data-equal-duration');
+  });
+
+  it('says so when the run recorded no timing to project', () => {
+    render(<Harness events={MANY.map((item) => ({ ...item, created_at: '' }))} />);
+
+    expect(screen.getByRole('button', { name: 'Time' })).toBeDisabled();
+  });
+
+  it('keeps the step a mark names selected while the window moves', () => {
+    render(<Harness events={MANY} />);
+    const mark = screen.getByRole('button', { name: 'Assistant message (assistant, step 1)' });
 
     fireEvent.click(mark);
     fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
