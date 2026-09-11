@@ -804,10 +804,32 @@ cmd_up() {
     done
 
     log "building the sandbox image (${SANDBOX_IMAGE})"
+    # `--provenance=false` is load-bearing, not tidiness. Buildx attaches a
+    # provenance attestation by default and regenerates it on *every* build, so
+    # rebuilding an unchanged image yields the same config layer and a different
+    # manifest index. On a daemon with the containerd image store — this host,
+    # Docker 29.2.1 — that index digest is the image's identity, which makes two
+    # consequences follow from a build that changed nothing:
+    #
+    #   * Compose sees every image it rebuilt as new and replaces every container
+    #     built from it. Measured before this flag: all eight containers of the
+    #     sandbox stack replaced on every deploy, 10.3s of it the egress proxy
+    #     sitting out Docker's stop timeout.
+    #   * `sandbox_image_digest` — which the runner attests and a retained group
+    #     records immutably — moves, and the previous value stops resolving.
+    #     Verified on staging: the index a deploy produced at 14:07 was
+    #     `No such image` eight minutes later.
+    #
+    # It has to be this flag on this command line. The compose file's
+    # `build.provenance` is accepted by `docker compose config` and ignored by
+    # `docker compose build`; `SOURCE_DATE_EPOCH` and `BUILDKIT_PROVENANCE` were
+    # both measured and change nothing. With the flag, two builds of the real
+    # runner image, every layer CACHED, return the same id.
+    #
     # The `+` guard is load-bearing under `set -u`: with no overrides at all,
     # a bare `"${build_args[@]}"` is an unbound reference on bash before 4.4,
     # and this script also runs on developer machines.
-    docker build ${build_args[@]+"${build_args[@]}"} \
+    docker build ${build_args[@]+"${build_args[@]}"} --provenance=false \
       -f deploy/sandbox/Dockerfile.agent-sandbox -t "$SANDBOX_IMAGE" .
   fi
 
@@ -821,9 +843,12 @@ cmd_up() {
     log "pulling host release images"
     compose pull
   else
+    # `--provenance=false` for the reason written out at the sandbox image
+    # above: a regenerated attestation makes an unchanged rebuild a new image as
+    # far as Compose is concerned, and it then replaces every container it built.
     log "building host services"
     AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
-      compose build
+      compose build --provenance=false
   fi
   prepare_shared_live_marker
   if [[ -n "$(compose ps -q runner 2>/dev/null || true)" ]]; then

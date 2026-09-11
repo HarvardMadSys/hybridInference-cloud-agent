@@ -208,7 +208,15 @@ if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
   compose pull
 else
   log "building images"
-  compose build
+  # `--provenance=false` keeps a rebuild of an unchanged image the image Compose
+  # already has. Buildx regenerates the provenance attestation on every build, so
+  # its manifest *index* changes even when every layer is cached; a daemon using
+  # the containerd image store identifies an image by that index, and Compose then
+  # replaces every container it just rebuilt. This machine still uses the classic
+  # store, where the identity is the config digest and the churn is invisible —
+  # but the flag costs nothing here and the host's stack is not so lucky.
+  # Artifact mode pulls a published digest and never builds at all.
+  compose build --provenance=false
 fi
 
 # Readiness itself uses the agent-owned database. Bring up only that durable

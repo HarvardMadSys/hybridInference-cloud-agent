@@ -1549,3 +1549,46 @@ def test_the_egress_proxy_does_not_inherit_the_docker_stop_timeout(compose: dict
         f"a stateless egress proxy does not need {default.group(1)} to drain; "
         "the runners it serves are already stopped by then"
     )
+
+
+def test_deployment_builds_disable_provenance_attestations() -> None:
+    """A regenerated attestation makes an unchanged rebuild a new image.
+
+    Buildx attaches provenance by default and rewrites it on every build, so an
+    image's manifest index moves while the image itself does not. A daemon with
+    the containerd image store identifies an image by that index, and Compose
+    then treats every image it just rebuilt as changed: it replaces all eight
+    containers of the sandbox stack on every deploy — 10.3s of that the egress
+    proxy sitting out Docker's stop timeout — and the digest a retained group
+    pinned stops resolving. Measured on the real runner image with every layer
+    CACHED: two builds with the default give two ids, two with the flag give one.
+
+    Asserted on the command lines because the flag changes nothing until it is
+    missing on a host with that store, and because the compose file's
+    `build.provenance` is the obvious place someone will move it to — a place
+    `docker compose config` accepts and `docker compose build` ignores.
+    """
+    host = (REPO_ROOT / "deploy/host/sandbox_host.sh").read_text()
+    control = _CONTROL_PLANE_DEPLOY.read_text()
+
+    compose_builds = [
+        line.strip()
+        for line in (host + control).splitlines()
+        if line.strip().startswith("compose build")
+    ]
+    assert compose_builds, "no compose build command found — has it moved?"
+    for line in compose_builds:
+        assert "--provenance=false" in line, f"compose build without the flag: {line!r}"
+
+    sandbox_builds = [
+        line.strip() for line in host.splitlines() if line.strip().startswith("docker build")
+    ]
+    assert sandbox_builds, "no sandbox image build found — has it moved?"
+    for line in sandbox_builds:
+        assert "--provenance=false" in line, f"sandbox image build without the flag: {line!r}"
+
+    for compose in (_COMPOSE, _CONTROL_PLANE_COMPOSE):
+        assert "provenance" not in compose.read_text(), (
+            f"{compose.name} sets build.provenance, which compose accepts and then ignores; "
+            "the flag has to be on the build command"
+        )
