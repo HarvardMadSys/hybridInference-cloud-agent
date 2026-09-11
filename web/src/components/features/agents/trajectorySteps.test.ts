@@ -369,6 +369,8 @@ describe('buildTrajectorySteps', () => {
     expect(steps).toHaveLength(1);
     expect(steps[0].ambiguity).toBe('duplicate_call');
     expect(steps[0].sourceEvents.map((item) => item.id)).toEqual([1, 2]);
+    // Which record is "the" call is unverified, so no status is claimed.
+    expect(steps[0].status).toBe('unknown');
   });
 
   it('flags two results for one call rather than picking the last', () => {
@@ -572,5 +574,106 @@ describe('buildTrajectorySteps', () => {
     );
 
     expect(steps.map((step) => step.stepNo)).toEqual([1, 2, 1]);
+  });
+
+  it('leaves an ordinary call unflagged and keeps its recorded span', () => {
+    const steps = buildTrajectorySteps(
+      [
+        event({
+          id: 1,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: 't1', name: 'Bash', input: { command: 'pwd' } },
+          created_at: '2026-08-19T10:00:00.000Z',
+        }),
+        event({
+          id: 2,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_result',
+          payload: { tool_use_id: 't1', content: '/repo' },
+          created_at: '2026-08-19T10:00:05.000Z',
+        }),
+      ],
+      idle,
+    );
+
+    expect(steps).toHaveLength(1);
+    // A call id seen once is the ordinary case, not an ambiguity.
+    expect(steps[0].ambiguity).toBeUndefined();
+    expect(steps[0].status).toBe('completed');
+    expect(steps[0].timing.durationMs).toBe(5_000);
+  });
+
+  it('keeps calls with no recorded id as steps of their own', () => {
+    const steps = buildTrajectorySteps(
+      [
+        event({
+          id: 1,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: null, name: 'Bash', input: 'pwd' },
+        }),
+        event({
+          id: 2,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: null, name: 'Read', input: 'README.md' },
+        }),
+      ],
+      idle,
+    );
+
+    // With no id to share, the record's own identity is all there is: both
+    // calls stay readable instead of the second folding into the first.
+    expect(steps.map((step) => step.label)).toEqual(['Bash', 'Read']);
+    expect(steps.map((step) => step.payloadValue)).toEqual(['pwd', 'README.md']);
+    expect(steps.map((step) => step.ambiguity)).toEqual([undefined, undefined]);
+    expect(new Set(steps.map((step) => step.key)).size).toBe(2);
+  });
+
+  it('claims no status or duration when one call was answered twice', () => {
+    const steps = buildTrajectorySteps(
+      [
+        event({
+          id: 1,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: 't1', name: 'Bash' },
+          created_at: '2026-08-19T10:00:00.000Z',
+        }),
+        event({
+          id: 2,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_result',
+          payload: { tool_use_id: 't1', content: 'ok', is_error: false },
+          created_at: '2026-08-19T10:00:01.000Z',
+        }),
+        event({
+          id: 3,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_result',
+          payload: { tool_use_id: 't1', content: 'failed', is_error: true },
+          created_at: '2026-08-19T10:00:02.000Z',
+        }),
+      ],
+      idle,
+    );
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].ambiguity).toBe('duplicate_result');
+    // Every record is kept, but the pairing is unverified, so the step reports
+    // no outcome and no span rather than the first result's.
+    expect(steps[0].status).toBe('unknown');
+    expect(steps[0].timing.durationMs).toBeNull();
+    expect(steps[0].timing.source).toBeNull();
+    expect(steps[0].result?.eventIds).toEqual([2, 3]);
+    expect(steps[0].result?.isError).toBe(true);
   });
 });

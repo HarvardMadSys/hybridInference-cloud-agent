@@ -1055,6 +1055,21 @@ export function JobDetail({
     maxViewportFraction: 0.6,
     siblingMinWidth: TRAJECTORY_MIN_WIDTH,
   });
+  // Both panes size themselves against the region that holds them: only that
+  // element knows how much is left once the sidebar has taken its share. The
+  // workspace and the inspector never open together, but they share the
+  // container, so both refs are attached to it. Without the inspector's, its
+  // floor for the list has nothing to measure against, and a drag can squeeze
+  // the list past the width it needs to stay readable.
+  const { containerRef: workspaceContainerRef } = workspacePane;
+  const { containerRef: inspectorContainerRef } = inspectorPane;
+  const layoutContainerRef = useCallback(
+    (node: HTMLElement | null) => {
+      workspaceContainerRef(node);
+      inspectorContainerRef(node);
+    },
+    [inspectorContainerRef, workspaceContainerRef],
+  );
 
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);
 
@@ -1566,7 +1581,7 @@ export function JobDetail({
       </header>
 
       <div
-        ref={workspacePane.containerRef}
+        ref={layoutContainerRef}
         className={`min-h-0 flex-1 overflow-hidden ${panelOpen ? 'block lg:flex' : 'flex'}`}
       >
         <div
@@ -1921,7 +1936,7 @@ export function JobDetail({
           style={{ '--job-workspace-width': `${workspacePane.width}px` } as CSSProperties}
           className={`${
             workspaceOpen ? 'flex' : 'hidden'
-          } min-h-0 min-w-0 flex-col overflow-hidden bg-white dark:bg-gray-900 lg:w-[var(--job-workspace-width)] lg:shrink-0`}
+          } h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white dark:bg-gray-900 lg:w-[var(--job-workspace-width)] lg:shrink-0`}
         >
           <nav
             aria-label="Workspace views"
@@ -2009,7 +2024,7 @@ export function JobDetail({
           style={{ '--job-inspector-width': `${inspectorPane.width}px` } as CSSProperties}
           className={`${
             inspector ? 'flex' : 'hidden'
-          } min-h-0 min-w-0 flex-col overflow-hidden border-l border-gray-200 bg-white dark:border-white/10 dark:bg-gray-900 lg:w-[var(--job-inspector-width)] lg:shrink-0`}
+          } h-full min-h-0 min-w-0 flex-col overflow-hidden border-l border-gray-200 bg-white dark:border-white/10 dark:bg-gray-900 lg:w-[var(--job-inspector-width)] lg:shrink-0`}
         >
           {inspector ? (
             <TrajectoryInspector

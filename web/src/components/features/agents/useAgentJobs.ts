@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getAgentJob,
   getAgentJobFiles,
@@ -509,10 +509,23 @@ export function useAgentJob(jobId: string): {
   }, [jobId, publicationActive]);
 
   const job = api ? toDisplayJob(api, { events, patch, thread, threadEvents }) : null;
+  // The turn rows come from the thread read, which is a snapshot: a live
+  // attempt replacement updates `api` and would otherwise leave the inspector
+  // reading the attempt that is already gone. The current turn is therefore
+  // read from the live row, and only the other turns come from the snapshot.
+  const threadJobs = useMemo(() => {
+    const rows = thread?.jobs ?? [];
+    if (!api) return rows;
+    const index = rows.findIndex((row) => row.id === api.id);
+    if (index === -1) return rows;
+    const merged = [...rows];
+    merged[index] = api;
+    return merged;
+  }, [api, thread]);
   // Both shapes, deliberately: `job.events` is the chat view's *reading* of
   // the stream — folded, deduplicated, unknown kinds dropped — while the
   // trajectory needs the rows the platform actually stored.
-  return { job, events: threadEvents, threadJobs: thread?.jobs ?? [], loading, error, reload };
+  return { job, events: threadEvents, threadJobs, loading, error, reload };
 }
 
 /** One directory of the workspace tree, as far as it has been loaded. */

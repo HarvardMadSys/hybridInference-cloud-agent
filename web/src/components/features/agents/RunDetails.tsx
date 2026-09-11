@@ -7,7 +7,7 @@
 // a specific turn and reads that job only: its own status, its own attempts,
 // its own ledger snapshot.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   getAgentJobUsage,
@@ -63,10 +63,27 @@ const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
  * One cached snapshot per job.
  *
  * The Chat transcript polls its own usage for the turn it is showing; the
- * inspector must not start a second loop for the same resource, so it reads a
- * snapshot once and refreshes only when the reader asks.
+ * inspector reads the same resource only when it has a reason to: the snapshot
+ * is unknown, the reader asked for a refresh, or the ledger still has queued
+ * work. A settled snapshot is reused, so opening the panel repeatedly is free.
  */
 const usageCache = new Map<string, AgentJobUsageApi | null>();
+
+/** How long to wait before reading a ledger that has not settled yet. */
+const LEDGER_POLL_MS = 15_000;
+/** Reads to spend on a queued refresh before leaving its state as it is. */
+const MAX_LEDGER_POLLS = 8;
+
+/**
+ * Whether the ledger still has work queued for it.
+ *
+ * A refresh request only queues the work, and the answer to that request is the
+ * snapshot from before the worker ran. Reading again — and again, until the
+ * ledger settles — is what turns the queued answer into the finished one.
+ */
+function ledgerUnsettled(usage: AgentJobUsageApi | null): boolean {
+  return Boolean(usage && (usage.ledger.refreshing || usage.ledger.status === 'pending'));
+}
 
 function useJobUsage(jobId: string): {
   usage: AgentJobUsageApi | null;
@@ -80,20 +97,35 @@ function useJobUsage(jobId: string): {
   const [loaded, setLoaded] = useState(cached !== undefined);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
+  const [read, setRead] = useState(0);
+  const requested = useRef(false);
+  const polls = useRef(0);
+  const currentJob = useRef(jobId);
 
   useEffect(() => {
+    if (currentJob.current !== jobId) {
+      currentJob.current = jobId;
+      requested.current = false;
+      polls.current = 0;
+    }
     const known = usageCache.get(jobId);
+    const mustRead = requested.current || known === undefined || ledgerUnsettled(known);
+    requested.current = false;
     setUsage(known ?? null);
     setLoaded(known !== undefined);
-    setError(null);
-    if (known !== undefined && tick === 0) return undefined;
+    if (!mustRead) return undefined;
     const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
     getAgentJobUsage(jobId, controller.signal)
       .then((result) => {
         if (controller.signal.aborted) return;
         usageCache.set(jobId, result);
         setUsage(result);
+        setError(null);
+        if (ledgerUnsettled(result) && polls.current < MAX_LEDGER_POLLS) {
+          polls.current += 1;
+          timer = setTimeout(() => setRead((value) => value + 1), LEDGER_POLL_MS);
+        }
       })
       .catch((cause: unknown) => {
         if (!controller.signal.aborted) {
@@ -103,11 +135,15 @@ function useJobUsage(jobId: string): {
       .finally(() => {
         if (!controller.signal.aborted) setLoaded(true);
       });
-    return () => controller.abort();
-  }, [jobId, tick]);
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [jobId, read]);
 
   const refresh = useCallback(() => {
     setRefreshing(true);
+    polls.current = 0;
     refreshAgentJobUsage(jobId)
       .then((result) => {
         usageCache.set(jobId, result);
@@ -118,7 +154,10 @@ function useJobUsage(jobId: string): {
       })
       .finally(() => {
         setRefreshing(false);
-        setTick((value) => value + 1);
+        // The queued refresh has not run yet, so read the ledger again. Further
+        // reads follow while it still reports work in flight.
+        requested.current = true;
+        setRead((value) => value + 1);
       });
   }, [jobId]);
 

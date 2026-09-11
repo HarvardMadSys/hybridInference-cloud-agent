@@ -185,4 +185,42 @@ describe('TrajectoryView', () => {
     const row = screen.getByText('raw').closest('button');
     expect(within(row as HTMLElement).getByText('x=1')).toBeInTheDocument();
   });
+
+  it('scrolls to a new selection without dragging a reader back on later events', () => {
+    const steps = buildTrajectorySteps(EVENTS);
+    const props = {
+      query: '',
+      onQueryChange: vi.fn(),
+      selectedKey: steps[0].key,
+      onSelectStep: vi.fn(),
+      onOpenRun: vi.fn(),
+    };
+    const view = render(<TrajectoryView {...props} events={EVENTS} steps={steps} />);
+    const selected = screen.getByText('Bash').closest('button') as HTMLElement;
+    const moved = screen.getByText('the build passes').closest('button') as HTMLElement;
+    const firstScroll = vi.fn();
+    const secondScroll = vi.fn();
+    selected.scrollIntoView = firstScroll;
+    moved.scrollIntoView = secondScroll;
+
+    // A selection made from the minimap, a hierarchy link or a chat footer has
+    // to reach the row it names.
+    view.rerender(
+      <TrajectoryView {...props} selectedKey={steps[1].key} events={EVENTS} steps={steps} />,
+    );
+    expect(secondScroll).toHaveBeenCalledTimes(1);
+
+    // A live event appends a row; the reader keeps the place they scrolled to.
+    const grown = [...EVENTS, event({ id: 4, payload: { text: 'and still passing' } })];
+    view.rerender(
+      <TrajectoryView
+        {...props}
+        selectedKey={steps[1].key}
+        events={grown}
+        steps={buildTrajectorySteps(grown)}
+      />,
+    );
+    expect(secondScroll).toHaveBeenCalledTimes(1);
+    expect(firstScroll).not.toHaveBeenCalled();
+  });
 });

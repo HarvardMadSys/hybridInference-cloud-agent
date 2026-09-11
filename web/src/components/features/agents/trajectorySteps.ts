@@ -230,7 +230,11 @@ function assistantKeyOf(event: StoredEvent, usageId: string): string {
 }
 
 function toolKeyOf(event: StoredEvent, callId: string): string {
-  return `tool:${jobIdOf(event)}:${event.attempt_id}:${callId}`;
+  const scope = `tool:${jobIdOf(event)}:${event.attempt_id}`;
+  // A call with no recorded id has no identity to share, so the record's own
+  // event id keeps it a step of its own instead of folding it into the call
+  // that happened to be stored before it.
+  return callId ? `${scope}:${callId}` : `${scope}:event:${event.id}`;
 }
 
 function timingOf(call: StoredEvent | undefined, result: StoredEvent | undefined): StepTiming {
@@ -366,6 +370,12 @@ export function buildTrajectorySteps(
     const key = toolKeyOf(event, callId);
     const hasInput = Object.prototype.hasOwnProperty.call(payload, 'input');
     const resultEvents = resultsByCall.get(`${scopeOf(event)}:${callId}`) ?? [];
+    // A call id stored twice, or a call answered more than once, leaves the
+    // pairing unverified. The records are all kept, but a status and a duration
+    // would be claims about a pairing the platform cannot prove, so neither is
+    // computed: the step reports what it can, which is that the records exist.
+    const repeatedCall = callId !== '' && (callCounts.get(`${scopeOf(event)}:${callId}`) ?? 0) > 1;
+    const ambiguous = repeatedCall || resultEvents.length > 1;
     const step: TrajectoryStep = {
       key,
       kind: 'tool',
@@ -383,11 +393,13 @@ export function buildTrajectorySteps(
       detail: preview(hasInput ? payload.input : (payload.detail ?? payload.text)),
       at: event.created_at ?? null,
       isError: false,
-      status: statusOfTool(event, resultEvents[0], context),
+      status: ambiguous ? 'unknown' : statusOfTool(event, resultEvents[0], context),
       truncated:
         isTruncatedPayload(payload) ||
         resultEvents.some((item) => isTruncatedPayload(asRecord(item.payload))),
-      timing: timingOf(event, resultEvents[0]),
+      timing: ambiguous
+        ? { source: null, startedAt: event.created_at ?? null, finishedAt: null, durationMs: null }
+        : timingOf(event, resultEvents[0]),
       callId,
       toolName: asText(payload.name || payload.tool) || 'tool',
       ...(hasInput ? { payloadValue: payload.input } : {}),
@@ -395,9 +407,7 @@ export function buildTrajectorySteps(
         ? { payloadPreview: preview(payload.detail, 200) }
         : {}),
       ...(resultEvents.length ? { result: resultView(resultEvents) } : {}),
-      ...((callCounts.get(`${scopeOf(event)}:${callId}`) ?? 0 > 1)
-        ? { ambiguity: 'duplicate_call' as const }
-        : {}),
+      ...(repeatedCall ? { ambiguity: 'duplicate_call' as const } : {}),
       ...(resultEvents.length > 1 ? { ambiguity: 'duplicate_result' as const } : {}),
     };
     toolStepByKey.set(key, step);

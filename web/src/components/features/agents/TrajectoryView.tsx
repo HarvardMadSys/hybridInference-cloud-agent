@@ -8,7 +8,7 @@
 // Selecting a row no longer opens an inline panel: the detail goes to the
 // right-hand inspector, so the list keeps its place while a step is read.
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { filterSteps, type TrajectoryStep } from './trajectorySteps';
@@ -128,15 +128,27 @@ export function TrajectoryView({
   }, [focusJobId]);
 
   // A selection can come from the minimap, from a hierarchy link, or from the
-  // chat's "View execution"; in every case the row must end up on screen.
+  // chat's "View execution"; in every case the row must end up on screen once.
+  // The filter is a dependency only so a row the search was hiding is reached
+  // when it comes back: a step arriving over SSE must not drag a reader who has
+  // scrolled somewhere else back to the selection.
+  const scrolledKey = useRef<string | null>(null);
   useEffect(() => {
-    if (!selectedKey) return;
+    if (!selectedKey) {
+      scrolledKey.current = null;
+      return;
+    }
+    if (scrolledKey.current === selectedKey) return;
     const escaped =
       typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
         ? CSS.escape(selectedKey)
         : selectedKey.replace(/["\\]/g, '\\$&');
     const node = document.querySelector<HTMLElement>(`[data-step-key="${escaped}"]`);
-    node?.scrollIntoView?.({ block: 'nearest' });
+    // Not in the list right now: a search is hiding it. Leave the record unset
+    // so the row is still brought into view if the filter stops hiding it.
+    if (!node) return;
+    node.scrollIntoView?.({ block: 'nearest' });
+    scrolledKey.current = selectedKey;
   }, [selectedKey, visible]);
 
   function download() {

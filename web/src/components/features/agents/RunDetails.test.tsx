@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   getAgentJobUsage,
+  refreshAgentJobUsage,
   type AgentJobApi,
   type AgentJobUsageApi,
   type AgentThreadEventApi,
@@ -21,9 +22,13 @@ vi.mock('@/lib/api/agents', () => ({
 
 beforeEach(() => {
   vi.mocked(getAgentJobUsage).mockReset();
+  vi.mocked(refreshAgentJobUsage).mockReset();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 function event(over: Partial<AgentThreadEventApi> & { id: number }): AgentThreadEventApi {
   return {
@@ -110,6 +115,11 @@ function usage(overrides: Partial<AgentJobUsageApi['ledger']> = {}): AgentJobUsa
     },
     runtime: { source: 'runtime', input_tokens: 900, output_tokens: null, cache_read_tokens: null },
   };
+}
+
+/** The ledger as it reads while a queued refresh has not run yet. */
+function pendingUsage(): AgentJobUsageApi {
+  return usage({ status: 'pending', refreshing: true, totals: null });
 }
 
 describe('RunDetails', () => {
@@ -243,5 +253,59 @@ describe('RunDetails', () => {
     expect(screen.getByText('2 stored events for Turn 2, grouped by attempt.')).toBeInTheDocument();
     expect(screen.getByText('Attempt 4 · 2 events')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
+  });
+
+  it('reads the finished ledger instead of stopping at the queued snapshot', async () => {
+    vi.useFakeTimers();
+    vi.mocked(getAgentJobUsage).mockResolvedValue(pendingUsage());
+    vi.mocked(refreshAgentJobUsage).mockResolvedValue(pendingUsage());
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ledger-refresh"
+          turnNo={2}
+          tab="usage"
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('Pending')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    });
+    // Asking for a refresh only queues it. The read that follows is the one
+    // that can see what the worker wrote.
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(screen.queryByText('Available')).toBeInTheDocument();
+  });
+
+  it('revalidates an unfinished cached ledger when the panel is reopened', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(pendingUsage());
+    const element = (
+      <RunDetails
+        jobId="ledger-reopen"
+        turnNo={2}
+        tab="usage"
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />
+    );
+    const first = render(element);
+    await waitFor(() => expect(screen.getByText('Pending')).toBeInTheDocument());
+    first.unmount();
+
+    // A settled snapshot is worth reusing; one still waiting for the worker is
+    // not, or reopening the panel would show yesterday's state for good.
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
+    render(element);
+    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument());
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
   });
 });

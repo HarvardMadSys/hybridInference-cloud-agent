@@ -192,8 +192,8 @@ export function ToolStepDetails({
             </DetailRows>
             {step.ambiguity === 'duplicate_result' ? (
               <p role="note" className="text-[11px] text-amber-700 dark:text-amber-300">
-                More than one result was stored for this call. All of them are kept below; the
-                pairing is not verified.
+                More than one result was stored for this call. All of them are kept below, so the
+                pairing is not verified and neither a status nor a duration is claimed.
               </p>
             ) : null}
             {resultEvents.map((event) => (
@@ -294,6 +294,12 @@ export function ToolStepDetails({
         <p role="note" className="text-[11px] text-amber-700 dark:text-amber-300">
           This call id was stored more than once in the same attempt. Every record is kept, and the
           pairing below is not verified.
+        </p>
+      ) : null}
+      {step.ambiguity === 'duplicate_result' ? (
+        <p role="note" className="text-[11px] text-amber-700 dark:text-amber-300">
+          More than one result was stored for this call. Every record is kept, so neither the status
+          nor the duration above is claimed.
         </p>
       ) : null}
 
