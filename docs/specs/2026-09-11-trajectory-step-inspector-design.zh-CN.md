@@ -4,6 +4,7 @@
 - 状态：交互方向已确认，并已按本文实现；实现与本文档在同一个 PR。
 - 代码基线：`dev`，`b7a24c6`。实现前重新检查最新 `dev` 的相关变更。
 - 目标仓库：`HarvardMadSys/hybridInference-cloud-agent`，本地目录名也可能为 `freeinference-cloud-agent`。
+- 修订 2026-09-11：Tool 的 Payload / Result 不再内嵌已存事件记录（见 §6.2、§6.3）。原始记录由 Run 的 Raw 页签与 Session log 统一提供，step 不再各带一份。
 
 ## 1. 已确认的产品决定
 
@@ -212,12 +213,12 @@ Timing ›
 - 对象/数组格式化并高亮；字符串按原文展示，不强制解析成 JSON。
 - 空字符串、空对象、`false`、`0` 均是合法值，不用 `||` 误判成未记录。
 - `detail` / `text` 只有在特定 runtime 的契约确认它就是实参时才可作为实参；否则标为预览或降级信息。
-- 缺失显示 `Payload was not recorded.`。提供复制实参与查看已存调用事件的展开区，后者不增加 Tool 的 Raw 页签。
+- 缺失显示 `Payload was not recorded.`。只提供复制实参，不增加 Tool 的 Raw 页签，也不在 Payload 内重复调用事件本身。
 
 ### 6.3 Result
 
 - 通过第 8 节的配对规则找到结果。支持 `content`、`output`、`aggregated_output`、`text` 等已验证的 runtime 结果字段。
-- 显示可读输出；同时保留退出码、错误标志以及“Stored result event”折叠区，允许检查原始结果记录。
+- 显示可读输出、退出码与错误标志，不内嵌原始结果记录；重复结果时只保留歧义提示，不列出记录本身。
 - `is_error = true` 或有效非零退出码表示失败，不能只根据父 run 成功而显示 Completed。
 - 已收到空结果时显示 `Tool completed with no output.`；没有结果记录是另一个状态。
 - 尚在等待结果时显示 `Waiting for result…`；已结束的 attempt 缺结果时显示 `Result was not recorded.`。
@@ -504,7 +505,7 @@ npm run build
 
 纯投影规则在 `trajectory.test.ts` 或新增数据测试中验证，页签/选择/历史范围在 `TrajectoryView.test.tsx` 和相关组件测试中验证。
 
-保留 `toSessionLog` 的原始事件完整性测试。新增 UI 使用 step 数量时，不能继续把它叫 event count；可显示 `N steps · M events`。工具结果被纳入对应 Tool 后，证明它仍能在 Result、Stored event 和日志中读取。
+保留 `toSessionLog` 的原始事件完整性测试。新增 UI 使用 step 数量时，不能继续把它叫 event count；可显示 `N steps · M events`。工具结果被纳入对应 Tool 后，证明它仍能在 Result、Run 的 Raw 页签和 Session log 中读取。
 
 浏览器人工验收浅色/深色、宽屏/窄屏、一个 Assistant、一个成功工具、一个失败或缺结果工具、一个历史 Turn。模拟数据检查与实际部署检查分别记录，不能将原型截图当成真实 API 验证。
 
