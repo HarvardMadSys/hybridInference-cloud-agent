@@ -1118,7 +1118,6 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     capability_overrides(
         app,
         store,
-        "store",
         "conversation_commands",
         "conversation_queries",
         "execution_queries",

@@ -313,7 +313,6 @@ def _build_app(store: FakeHostPoolStore) -> FastAPI:
         "sandboxes",
         "residencies",
         "audit",
-        "store",
     )
     # Supplied rather than left real because the subject here is the pool, not
     # the admin gate; ``test_api_auth_deps.py`` is where the gate is pinned.
@@ -893,7 +892,6 @@ async def claim_client(monkeypatch):
         "sandboxes",
         "residencies",
         "audit",
-        "store",
     )
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
 

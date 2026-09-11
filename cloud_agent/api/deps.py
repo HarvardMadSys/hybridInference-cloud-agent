@@ -77,7 +77,6 @@ if TYPE_CHECKING:
     from cloud_agent.ports.snapshots import SnapshotRepository
     from cloud_agent.ports.source_control import SourceControlRepository
     from cloud_agent.storage.admin_queries import AdminRunQueries
-    from cloud_agent.storage.store import AgentJobStore
 
 
 # ── Wiring this service owns ───────────────────────────────────────────
@@ -97,16 +96,11 @@ def get_persistence(request: Request) -> Persistence | None:
 def _port(request: Request, attribute: str) -> Any | None:
     """Return one capability, falling back to the store it is being split from.
 
-    The fallback is the migration, not the design. While callers are moved one
-    at a time, the modules that have not moved yet still override
-    ``get_agent_job_store`` in the test suite, and a route asking only for its
-    own port would see ``None`` under those tests. Every fallback line here is
-    deleted with ``get_agent_job_store`` when the last caller moves.
+    The container is the only source. It is built once by bootstrap, over the
+    pool the lifespan owns, and every getter below reads its own attribute.
     """
     persistence = getattr(request.app.state, "persistence", None)
-    if persistence is not None:
-        return getattr(persistence, attribute)
-    return getattr(request.app.state, "store", None)
+    return None if persistence is None else getattr(persistence, attribute)
 
 
 def get_conversation_commands(request: Request) -> ConversationCommands | None:
@@ -307,16 +301,6 @@ def require_queries(capability: ConversationQueries | None) -> ConversationQueri
 def require_ledger(capability: LedgerRepository | None) -> LedgerRepository:
     """Require the usage-ledger reads."""
     return require_capability(capability, "usage")
-
-
-def get_agent_job_store(request: Request) -> AgentJobStore | None:
-    """Dependency to obtain the agent job store (if configured).
-
-    Deprecated: a caller should depend on the capability it uses. Kept while the
-    remaining routes are migrated, and deleted with them — see
-    docs/storage/method-attribution.txt.
-    """
-    return getattr(request.app.state, "store", None)
 
 
 def get_gateway_client(request: Request) -> GatewayClient:

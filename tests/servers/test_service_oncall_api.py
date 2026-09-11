@@ -167,7 +167,6 @@ def _build_app(store: FakeOnCallStore, *, app_credentials: Any | None = None) ->
     capability_overrides(
         app,
         store,
-        "store",
         "conversation_commands",
         "conversation_queries",
         "execution_queries",

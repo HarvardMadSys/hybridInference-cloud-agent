@@ -1749,11 +1749,12 @@ async def get_agent_job(
     include_resources: bool = Query(True),
     user: dict[str, Any] = Depends(require_agent_owner),
     execution: ExecutionQueries | None = Depends(get_execution_queries),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
     log_store=Depends(get_log_store),
 ) -> AgentJobResponse:
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
     execution = require_execution_queries(execution)
-    job = await _owned_job(execution, job_id, user)
+    job = await _owned_job(require_queries(conversations), job_id, user)
     attempt_telemetry = await execution.job_attempts_telemetry(job_id=job_id)
     telemetry = attempt_telemetry[-1] if attempt_telemetry else None
     # Existing clients keep the newest detail. The retry-aware client opts out
@@ -1776,10 +1777,11 @@ async def get_agent_attempt_telemetry(
     attempt_id: int = Path(..., ge=1),
     user: dict[str, Any] = Depends(require_agent_owner),
     execution: ExecutionQueries | None = Depends(get_execution_queries),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentAttemptTelemetry:
     """Read measurements for one attempt belonging to the caller's job."""
     execution = require_execution_queries(execution)
-    await _owned_job(execution, job_id, user)
+    await _owned_job(require_queries(conversations), job_id, user)
     telemetry = await execution.job_turn_telemetry(job_id=job_id, attempt_id=attempt_id)
     if telemetry is None:
         raise HTTPException(status_code=404, detail="Attempt not found")
@@ -2561,6 +2563,7 @@ async def get_agent_thread_stats(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
     execution: ExecutionQueries | None = Depends(get_execution_queries),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentThreadStatsResponse:
     """Summarize the thread containing a job: turns, timings, tokens.
 
@@ -2569,7 +2572,7 @@ async def get_agent_thread_stats(
     thread's runtime does not report come back ``null`` rather than zero.
     """
     execution = require_execution_queries(execution)
-    await _owned_job(execution, job_id, user)
+    await _owned_job(require_queries(conversations), job_id, user)
     inputs = await execution.thread_stats_inputs(job_id=job_id, user_id=user["user_id"])
     if inputs is None:
         raise HTTPException(
@@ -2591,10 +2594,11 @@ async def list_agent_thread_events(
     limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
     user: dict[str, Any] = Depends(require_agent_owner),
     execution: ExecutionQueries | None = Depends(get_execution_queries),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentThreadEventsResponse:
     """Page every turn's event log, with payloads and turn labels intact."""
     execution = require_execution_queries(execution)
-    await _owned_job(execution, job_id, user)
+    await _owned_job(require_queries(conversations), job_id, user)
     events = await execution.list_thread_events_after(
         job_id=job_id, user_id=user["user_id"], after_id=after, limit=limit
     )
@@ -2625,10 +2629,11 @@ async def list_agent_job_events(
     limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
     user: dict[str, Any] = Depends(require_agent_owner),
     execution: ExecutionQueries | None = Depends(get_execution_queries),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> AgentJobEventsResponse:
     """Page through a job's append-only event log (non-streaming)."""
     execution = require_execution_queries(execution)
-    await _owned_job(execution, job_id, user)
+    await _owned_job(require_queries(conversations), job_id, user)
     events = await execution.list_events_after(job_id=job_id, after_id=after, limit=limit)
     return AgentJobEventsResponse(
         events=[_event_response(event) for event in events],
@@ -3216,6 +3221,7 @@ async def stream_agent_job_events(
     after: int = Query(0, ge=0),
     user: dict[str, Any] = Depends(require_agent_owner),
     execution: ExecutionQueries | None = Depends(get_execution_queries),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
 ) -> StreamingResponse:
     """Stream a job's events as SSE, resumable via ``Last-Event-ID``.
 
@@ -3225,7 +3231,7 @@ async def stream_agent_job_events(
     ``text/event-stream``) safe for jobs that outlive one connection.
     """
     execution = require_execution_queries(execution)
-    await _owned_job(execution, job_id, user)
+    await _owned_job(require_queries(conversations), job_id, user)
 
     cursor = after
     if last_event_id:

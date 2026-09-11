@@ -19,11 +19,16 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
 
-from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.bootstrap import build_persistence
+
+if TYPE_CHECKING:
+    from cloud_agent.ports.mcp import McpConnectionRepository
+    from cloud_agent.ports.source_control import SourceControlRepository
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -35,7 +40,11 @@ _OTHER = "user-other"
 
 @pytest_asyncio.fixture
 async def store():
-    """Provide a clean AgentJobStore over the shared test database."""
+    """The MCP connection repository over the shared test database.
+
+    The fixture is a capability rather than a container: this file needs exactly
+    one, and a test that reaches for a second asks for it by name.
+    """
     import asyncpg
 
     base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
@@ -57,13 +66,13 @@ async def store():
         pytest.skip(f"PostgreSQL not available: {exc}")
         return  # unreachable
 
-    job_store = AgentJobStore(pool)
+    repositories = build_persistence(pool)
     apply_migrations(db_config)
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM agent_mcp_connections")
         await conn.execute("DELETE FROM agent_oauth_states")
     try:
-        yield job_store
+        yield repositories.mcp
     finally:
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM agent_mcp_connections")
@@ -71,7 +80,7 @@ async def store():
         await pool.close()
 
 
-async def _connect(store: AgentJobStore, user_id: str, server: str, token: str) -> int:
+async def _connect(store: McpConnectionRepository, user_id: str, server: str, token: str) -> int:
     """Store one connection the way the OAuth flow will."""
     return await store.upsert_mcp_connection(
         user_id=user_id,
@@ -83,7 +92,41 @@ async def _connect(store: AgentJobStore, user_id: str, server: str, token: str) 
     )
 
 
-async def test_a_connection_is_only_ever_read_by_its_owner(store: AgentJobStore) -> None:
+@pytest_asyncio.fixture
+async def source_control():
+    """The source-control repository, for the one case that also writes state.
+
+    A separate fixture rather than a field on the other one: this file needs the
+    MCP connection rows everywhere and the OAuth state in exactly one test, and
+    a container handed to both would hide that.
+    """
+    import asyncpg
+
+    base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    test_db_name = base_db_name if worker_id == "master" else f"{base_db_name}_{worker_id}"
+    if _ALLOWED_TEST_DB_PATTERN not in (test_db_name or ""):
+        pytest.fail(f"SAFETY: TEST_DB_NAME='{test_db_name}' is not a test database.")
+    db_config = {
+        "host": os.getenv("TEST_DB_HOST", "localhost"),
+        "port": int(os.getenv("TEST_DB_PORT", "5432")),
+        "database": test_db_name,
+        "user": os.getenv("TEST_DB_USER", "postgres"),
+        "password": os.getenv("TEST_DB_PASSWORD", "postgres"),
+    }
+    try:
+        pool = await asyncpg.create_pool(**db_config, min_size=1, max_size=5)
+    except Exception as exc:
+        pytest.skip(f"PostgreSQL not available: {exc}")
+        return  # unreachable
+    apply_migrations(db_config)
+    try:
+        yield build_persistence(pool).source_control
+    finally:
+        await pool.close()
+
+
+async def test_a_connection_is_only_ever_read_by_its_owner(store: McpConnectionRepository) -> None:
     """Two users, the same server: the query must not blur them together."""
     await _connect(store, _OWNER, "github", "ciphertext-owner")
     await _connect(store, _OTHER, "github", "ciphertext-other")
@@ -100,7 +143,7 @@ async def test_a_connection_is_only_ever_read_by_its_owner(store: AgentJobStore)
 
 
 async def test_reconnecting_replaces_the_credential_rather_than_adding_one(
-    store: AgentJobStore,
+    store: McpConnectionRepository,
 ) -> None:
     """One row per user per server, or which credential is used is row order."""
     first = await _connect(store, _OWNER, "github", "ciphertext-old")
@@ -111,7 +154,9 @@ async def test_reconnecting_replaces_the_credential_rather_than_adding_one(
     assert [row["access_token_ciphertext"] for row in rows] == ["ciphertext-new"]
 
 
-async def test_reconnecting_does_not_disturb_another_users_row(store: AgentJobStore) -> None:
+async def test_reconnecting_does_not_disturb_another_users_row(
+    store: McpConnectionRepository,
+) -> None:
     """The uniqueness constraint is on the pair, not on the server alone."""
     await _connect(store, _OTHER, "github", "ciphertext-other")
     await _connect(store, _OWNER, "github", "ciphertext-owner")
@@ -121,7 +166,7 @@ async def test_reconnecting_does_not_disturb_another_users_row(store: AgentJobSt
     assert [row["access_token_ciphertext"] for row in theirs] == ["ciphertext-other"]
 
 
-async def test_disconnecting_removes_only_the_callers_row(store: AgentJobStore) -> None:
+async def test_disconnecting_removes_only_the_callers_row(store: McpConnectionRepository) -> None:
     """A delete without its user scope would disconnect everyone at once."""
     await _connect(store, _OWNER, "github", "ciphertext-owner")
     await _connect(store, _OTHER, "github", "ciphertext-other")
@@ -132,12 +177,16 @@ async def test_disconnecting_removes_only_the_callers_row(store: AgentJobStore) 
     assert len(await store.list_mcp_connections(user_id=_OTHER)) == 1
 
 
-async def test_disconnecting_something_not_connected_reports_it(store: AgentJobStore) -> None:
+async def test_disconnecting_something_not_connected_reports_it(
+    store: McpConnectionRepository,
+) -> None:
     """Distinguishable from a successful delete, so the API can 404."""
     assert await store.delete_mcp_connection(user_id=_OWNER, server="github") is False
 
 
-async def test_a_connection_may_carry_no_refresh_token_or_expiry(store: AgentJobStore) -> None:
+async def test_a_connection_may_carry_no_refresh_token_or_expiry(
+    store: McpConnectionRepository,
+) -> None:
     """Providers vary, and a NULL here means "nothing to refresh".
 
     GitLab's columns are NOT NULL; these deliberately are not. A schema that
@@ -150,7 +199,9 @@ async def test_a_connection_may_carry_no_refresh_token_or_expiry(store: AgentJob
     assert row["expires_at"] is None
 
 
-async def test_a_stored_expiry_round_trips_as_an_aware_timestamp(store: AgentJobStore) -> None:
+async def test_a_stored_expiry_round_trips_as_an_aware_timestamp(
+    store: McpConnectionRepository,
+) -> None:
     """Resolution compares this against ``now``; a naive value there raises.
 
     The column is ``TIMESTAMPTZ`` and asyncpg gives back an aware datetime, so
@@ -174,7 +225,9 @@ async def test_a_stored_expiry_round_trips_as_an_aware_timestamp(store: AgentJob
     assert row["refresh_token_ciphertext"] == "refresh-ciphertext"
 
 
-async def test_oauth_state_accepts_an_mcp_provider_name(store: AgentJobStore) -> None:
+async def test_oauth_state_accepts_an_mcp_provider_name(
+    store: McpConnectionRepository, source_control: SourceControlRepository
+) -> None:
     """The widened check, tested against the constraint rather than its name.
 
     The baseline's ``CHECK (provider IN ('github','gitlab'))`` was unnamed, so
@@ -182,7 +235,7 @@ async def test_oauth_state_accepts_an_mcp_provider_name(store: AgentJobStore) ->
     the connect flow would have been dead on arrival — with every other test in
     the suite still green.
     """
-    await store.create_oauth_state(
+    await source_control.create_oauth_state(
         state_hash="mcp-state-hash",
         user_id=_OWNER,
         provider="github-mcp",
@@ -190,7 +243,7 @@ async def test_oauth_state_accepts_an_mcp_provider_name(store: AgentJobStore) ->
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
 
-    consumed = await store.consume_oauth_state(
+    consumed = await source_control.consume_oauth_state(
         state_hash="mcp-state-hash", user_id=_OWNER, provider="github-mcp"
     )
     assert consumed is not None

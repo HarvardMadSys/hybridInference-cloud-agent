@@ -25,11 +25,11 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_agent_job_store,
     get_gateway_client,
     get_grant_client,
     get_log_store,
 )
+from cloud_agent.bootstrap import build_persistence
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -152,7 +152,10 @@ async def api(monkeypatch):
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The routes take injected capabilities rather than a store, so the app is
+    # assembled the way bootstrap does it: the real implementations behind the
+    # real getters, over this fixture's own pool.
+    app.state.persistence = build_persistence(store._pool)
     app.dependency_overrides[get_gateway_client] = _FakeGateway
     app.dependency_overrides[get_grant_client] = _FakeGrants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None

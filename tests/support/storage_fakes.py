@@ -43,9 +43,7 @@ GETTERS: dict[str, Any] = {
     "credentials": deps.get_credential_queries,
     "ledger": deps.get_ledger_repository,
     "audit": deps.get_audit_repository,
-    # The pre-split entry point. Named here so the migration stays visible: a
-    # test that still uses it is a test whose routes have not moved yet.
-    "store": deps.get_agent_job_store,
+    "admin_queries": deps.get_admin_queries,
 }
 
 
