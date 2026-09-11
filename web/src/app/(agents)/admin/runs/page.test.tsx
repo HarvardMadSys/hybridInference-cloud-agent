@@ -470,11 +470,11 @@ describe('admin runs list', () => {
     expect(screen.queryByText('Second run')).not.toBeInTheDocument();
   });
 
-  it('keeps the queued filter across pages and uses its badge for both scheduling states', async () => {
+  it('keeps the queued filter and badge across pages', async () => {
     render(<AdminRunsPageComponent />);
     await screen.findByRole('link', { name: 'job-1' });
     vi.mocked(getAdminRuns)
-      .mockResolvedValueOnce(page([run({ state: 'waiting' })], 'group-cursor'))
+      .mockResolvedValueOnce(page([run({ state: 'queued' })], 'group-cursor'))
       .mockResolvedValueOnce(page([run({ id: 'job-2', state: 'queued' })]));
     fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'queued' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Load more runs' }));
@@ -494,7 +494,6 @@ describe('admin runs list', () => {
     );
     const table = within(screen.getByRole('table'));
     expect(table.getAllByText('queued')).toHaveLength(2);
-    expect(table.queryByText('waiting')).not.toBeInTheDocument();
   });
 
   it('renders a legacy publishing badge as running', () => {
@@ -612,13 +611,12 @@ describe('admin runs list', () => {
 });
 
 describe('admin run observation', () => {
-  it.each([
-    ['waiting', 'Waiting for previous turn'],
-    ['queued', 'Waiting for runner'],
-  ] as const)('explains the %s scheduling state under the queued badge', async (state, reason) => {
-    vi.mocked(getAdminRun).mockResolvedValue(detail({ run: run({ state }), attempts: [] }));
+  it('explains queued runs without assuming why execution has not started', async () => {
+    vi.mocked(getAdminRun).mockResolvedValue(
+      detail({ run: run({ state: 'queued' }), attempts: [] }),
+    );
     render(<AdminRunPage />);
-    expect(await screen.findByText(reason)).toBeInTheDocument();
+    expect(await screen.findByText('Waiting to start')).toBeInTheDocument();
     expect(screen.getByText('queued')).toBeInTheDocument();
     expect(screen.getByText('No execution has started.')).toBeInTheDocument();
   });

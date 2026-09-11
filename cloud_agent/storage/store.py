@@ -68,7 +68,6 @@ logger = get_logger(__name__)
 # delivered to the running worker via the heartbeat response, and the worker
 # performs the fenced transition to ``cancelled``.
 QUEUED = "queued"
-WAITING = "waiting"
 RUNNING = "running"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
@@ -355,7 +354,7 @@ WITH latest AS (
     SELECT {_QUALIFIED_JOB_COLUMNS}, t.id AS session_id, t.title AS session_title, t.title_source,
            t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
            CASE
-               WHEN j.state IN ('queued', 'waiting') THEN 'queued'
+               WHEN j.state = 'queued' THEN 'queued'
                WHEN j.state = 'running' THEN 'running'
                WHEN j.state = 'succeeded' AND NULLIF(j.published_pr_url, '') IS NOT NULL THEN 'done'
                WHEN j.state = 'succeeded' THEN 'needs_review'
@@ -537,8 +536,8 @@ class AgentJobStore:
         """Give queued descendants a terminal answer when continuity is LOST.
 
         A retained chat cannot be claimed again after its context becomes
-        indeterminate. Leaving already-submitted turns in ``waiting`` or
-        ``queued`` would therefore create a permanent queue entry rather than
+        indeterminate. Leaving already-submitted turns in ``queued`` would
+        therefore create a permanent queue entry rather than
         a recoverable retry. Every LOST transition calls this helper in the
         same transaction that fences the sandbox row.
         """
@@ -546,32 +545,25 @@ class AgentJobStore:
             """
             UPDATE agent_jobs
             SET state = 'failed', detail = $2, updated_at = NOW()
-            WHERE thread_id = $1 AND state IN ('waiting', 'queued')
+            WHERE thread_id = $1 AND state = 'queued'
             """,
             thread_id,
             detail[:2000],
         )
 
     @staticmethod
-    async def _advance_waiting_follow_ups(
+    async def _fail_discontinuous_follow_ups(
         conn: Any,
         *,
         parent_job_id: str | None = None,
     ) -> None:
-        """Release only descendants whose retained continuity is provable.
+        """Fail queued descendants that cannot preserve native continuity.
 
-        A waiting child follows a parent that settled with a usable shared
-        membership, or a parent that failed or was cancelled before it ever
-        produced native context. A child whose parent succeeded but whose
-        membership is since lost cannot be continuous, so the whole pending
-        tail of that thread fails first and nothing is released into a fresh
-        sandbox presented as continuity.
-
-        Every terminal writer — ``transition``, ``release_claim``,
-        ``request_cancel`` and the reaper — calls this for the job it just
-        closed, so a chain advances one turn at a time inside the transaction
-        that closed the previous one. :meth:`sweep_waiting_follow_ups` runs
-        the unscoped form periodically as the safety net.
+        A successful parent requires a usable shared membership. The whole
+        pending tail fails if that membership is missing or lost. Terminal
+        writers scope this cleanup to the parent they just changed; the
+        periodic sweep handles legacy rows. Scheduling itself only checks
+        eligibility and never needs to promote a queued turn.
         """
         await conn.execute(
             """
@@ -579,44 +571,10 @@ class AgentJobStore:
                 SELECT DISTINCT child.thread_id
                 FROM agent_jobs child
                 JOIN agent_jobs parent ON parent.id = child.parent_job_id
-                WHERE child.state IN ('waiting', 'queued')
-                  AND parent.state = ANY($2::text[])
+                WHERE child.state = 'queued'
+                  AND parent.state = 'succeeded'
                   AND ($1::text IS NULL OR parent.id = $1)
-                  AND NOT (
-                        parent.state IN ('failed', 'cancelled')
-                        OR EXISTS (
-                            SELECT 1
-                            FROM agent_thread_sandbox_memberships m
-                            JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                            WHERE m.thread_id = child.thread_id
-                              AND m.context_status <> 'lost'
-                              AND m.native_state <> 'lost'
-                              AND g.state NOT IN ('stopped_dirty', 'lost')
-                        )
-                  )
-            )
-            UPDATE agent_jobs pending
-            SET state = 'failed',
-                detail = 'not run because its parent predates retained-session continuity',
-                updated_at = NOW()
-            WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
-              AND pending.state IN ('waiting', 'queued')
-            """,
-            parent_job_id,
-            list(TERMINAL_STATES),
-        )
-        await conn.execute(
-            """
-            UPDATE agent_jobs child
-            SET state = 'queued', updated_at = NOW()
-            FROM agent_jobs parent
-            WHERE child.state = 'waiting'
-              AND child.parent_job_id = parent.id
-              AND parent.state = ANY($2::text[])
-              AND ($1::text IS NULL OR parent.id = $1)
-              AND (
-                    parent.state IN ('failed', 'cancelled')
-                    OR EXISTS (
+                  AND NOT EXISTS (
                         SELECT 1
                         FROM agent_thread_sandbox_memberships m
                         JOIN agent_sandboxes g ON g.id = m.sandbox_id
@@ -624,25 +582,27 @@ class AgentJobStore:
                           AND m.context_status <> 'lost'
                           AND m.native_state <> 'lost'
                           AND g.state NOT IN ('stopped_dirty', 'lost')
-                    )
-              )
+                  )
+            )
+            UPDATE agent_jobs pending
+            SET state = 'failed',
+                detail = 'not run because its parent predates retained-session continuity',
+                updated_at = NOW()
+            WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
+              AND pending.state = 'queued'
             """,
             parent_job_id,
-            list(TERMINAL_STATES),
         )
 
-    async def sweep_waiting_follow_ups(self) -> None:
-        """Promote or fail every waiting follow-up whose parent already settled.
+    async def sweep_queued_follow_ups(self) -> None:
+        """Fail queued follow-ups whose earlier native context is unavailable.
 
-        The scoped calls in the terminal writers are what keep a chat moving;
-        this pass exists so a child stranded by a crash between a parent's
-        terminal write and its scoped promotion is picked up on the next
-        reaper tick rather than never. It touches only rows the partial
-        ``waiting``/``queued`` indexes point at, so its cost follows the
-        number of pending follow-ups, not the size of the history.
+        Claiming already excludes these rows. This periodic safety net gives
+        legacy pending turns a terminal answer using the partial queued
+        indexes, without a cleanup scan on every claim poll.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._advance_waiting_follow_ups(conn)
+            await self._fail_discontinuous_follow_ups(conn)
 
     async def initialize(self) -> None:
         """No-op: schema and backfills are Alembic's now, not startup's.
@@ -1056,8 +1016,8 @@ class AgentJobStore:
         clears it back to Auto — the one thing a null override cannot express,
         since null is what "inherit" already sends.
 
-        A follow-up submitted while the latest turn is active is stored as
-        ``waiting``. The thread row is locked before selecting that turn, so
+        Every follow-up is ``queued`` until all earlier turns have finished.
+        The thread row is locked before selecting the latest turn, so
         concurrent submissions form one linear chain instead of siblings that
         could later mutate the same branch at once. A request made from an old
         turn also appends to the current tip, matching chat semantics.
@@ -1206,10 +1166,6 @@ class AgentJobStore:
                 # source from which the new runtime can fabricate continuity.
                 return {"error": "sandbox_context_lost"}
             turn_no = parent["turn_no"] + 1
-            parent_ready = parent["state"] in (FAILED, CANCELLED) or (
-                parent["state"] == SUCCEEDED and sandbox is not None
-            )
-            state = QUEUED if parent_ready else WAITING
             # Repo, setup script, execution profile and tool servers are the
             # thread's, not copied per turn: the next turn of a conversation
             # runs with the surface the thread has been running with, and a
@@ -1234,7 +1190,7 @@ class AgentJobStore:
                 None
                 if reset_reasoning_effort
                 else (reasoning_effort or parent["reasoning_effort"]),
-                state,
+                QUEUED,
                 json.dumps(_load_json(parent["metadata"]))
                 if parent["metadata"] is not None
                 else None,
@@ -2850,7 +2806,7 @@ class AgentJobStore:
                 SELECT t.repo,
                        COUNT(DISTINCT j.thread_id) AS task_count,
                        COUNT(*) FILTER (
-                           WHERE j.state IN ('queued', 'waiting', 'running')
+                           WHERE j.state IN ('queued', 'running')
                        ) AS active_count,
                        MAX(GREATEST(t.updated_at, j.updated_at)) AS last_activity_at,
                        COUNT(DISTINCT j.thread_id) FILTER (
@@ -3637,7 +3593,7 @@ class AgentJobStore:
         until their leases lapsed. ``force`` accepts exactly that — the lease
         expiry *is* the recovery path. A retained activation cannot be replayed
         safely after its host disappears, so its expiry marks that chat LOST
-        and fails already-waiting descendants instead.
+        and fails already-queued descendants instead.
 
         Disabling rather than deleting. The row is what
         ``agent_attempts.host_id`` points at, and what an operator reads when
@@ -3792,6 +3748,12 @@ class AgentJobStore:
         ``lease_generation``, or ``None`` when the queue is empty. Concurrent
         workers are safe via ``FOR UPDATE SKIP LOCKED``.
 
+        A queued follow-up becomes eligible only after every earlier turn in
+        its thread is terminal. Checking all unfinished earlier turns also
+        prevents a cancelled intermediate turn from letting its descendants
+        overtake an active ancestor. The indexed eligibility check precedes
+        the limit, so a blocked thread cannot hide runnable work behind it.
+
         The caller is always an enrolled host whose exact credential hash is
         re-checked while its capacity slot is taken. An operator pin chooses
         the host for chats that do not have a sandbox yet. A retained chat is
@@ -3890,6 +3852,12 @@ class AgentJobStore:
                 JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN {_THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
+                  AND NOT EXISTS (
+                        SELECT 1 FROM agent_jobs earlier
+                        WHERE earlier.thread_id = j.thread_id
+                          AND earlier.turn_no < j.turn_no
+                          AND earlier.state IN ('queued', 'running')
+                  )
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
                   AND (
                         t.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
@@ -3899,11 +3867,20 @@ class AgentJobStore:
                         )
                   )
                   AND (
-                        (s.thread_id IS NULL AND $5::boolean AND $4::boolean)
+                        (
+                            s.thread_id IS NULL AND $5::boolean AND $4::boolean
+                            AND NOT EXISTS (
+                                SELECT 1 FROM agent_jobs parent
+                                WHERE parent.id = j.parent_job_id
+                                  AND parent.state = 'succeeded'
+                            )
+                        )
                         OR (
                             s.host = $2
                             AND $6::boolean
                             AND s.fork_operation_id IS NULL
+                            AND s.context_status <> 'lost'
+                            AND s.native_state <> 'lost'
                             AND s.state IN (
                                 'provisioning', 'starting', 'running', 'stopped'
                             )
@@ -4126,9 +4103,9 @@ class AgentJobStore:
             await self._release_host_slot(conn, released_row["host_id"])
             if released_state == CANCELLED:
                 # A cancelled parent is a turn boundary like any other
-                # terminal outcome: its waiting child must move in this same
-                # transaction, not wait for the periodic sweep to notice.
-                await self._advance_waiting_follow_ups(conn, parent_job_id=released)
+                # terminal outcome: fail any child that cannot preserve
+                # continuity in this transaction.
+                await self._fail_discontinuous_follow_ups(conn, parent_job_id=released)
         return True
 
     async def heartbeat(
@@ -4438,7 +4415,7 @@ class AgentJobStore:
                     sandbox_transition is not None
                     and sandbox_transition["context_status"] == "lost"
                 ):
-                    await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                    await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
         return True
 
     async def append_event(
@@ -6368,13 +6345,13 @@ class AgentJobStore:
             if row is None:
                 return None
             state = row["state"]
-            if state in (WAITING, QUEUED):
+            if state == QUEUED:
                 await conn.execute(
                     "UPDATE agent_jobs SET state = 'cancelled', cancel_requested = TRUE, "
                     "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
                     job_id,
                 )
-                await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 return CANCELLED
             if state == RUNNING:
                 await conn.execute(
@@ -7415,7 +7392,7 @@ class AgentJobStore:
                     # boundary as ``transition``. Keep the linear chat moving
                     # when the context is usable; the LOST branch above has
                     # already failed every unrunnable descendant instead.
-                    await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                    await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 action_result: dict[str, Any] = {
                     "job_id": job_id,
                     "attempt_id": attempt_id,

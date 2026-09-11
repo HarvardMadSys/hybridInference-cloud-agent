@@ -74,8 +74,7 @@ const RUN_STATE_STYLES: Record<string, { badge: string; dot: string }> = {
 const RUN_STATE_FALLBACK = RUN_STATE_STYLES.queued;
 
 export function RunState({ state }: { state: string }) {
-  // Match the admin filters while keeping the raw scheduling state in the API.
-  const displayState = state === 'waiting' ? 'queued' : state === 'publishing' ? 'running' : state;
+  const displayState = state === 'publishing' ? 'running' : state;
   const style = RUN_STATE_STYLES[displayState] ?? RUN_STATE_FALLBACK;
   return (
     <span

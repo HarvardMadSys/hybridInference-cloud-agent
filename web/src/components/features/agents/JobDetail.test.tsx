@@ -181,6 +181,15 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it.each([undefined, 'previous-job'])(
+    'uses the same queue message with parent %s',
+    async (parentJobId) => {
+      render(<JobDetail job={makeJob({ state: 'queued', events: [], parentJobId })} />);
+      expect(await screen.findByText('Waiting to start')).toBeInTheDocument();
+      expect(screen.queryByText('Queued after the current run')).not.toBeInTheDocument();
+    },
+  );
+
   beforeEach(() => {
     navigation.push.mockReset();
     vi.mocked(cancelAgentJob).mockReset();

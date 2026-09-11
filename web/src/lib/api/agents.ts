@@ -19,7 +19,6 @@ const API_BASE = config.apiBase;
 
 /** Server-side job states. The UI maps these onto its own display states. */
 export type AgentJobApiState =
-  | 'waiting'
   | 'queued'
   | 'running'
   | 'publishing'

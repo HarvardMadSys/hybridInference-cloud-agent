@@ -400,8 +400,7 @@ export function useAgentJob(jobId: string): {
 
   // Live events. Terminal jobs have nothing more to say, so no stream is
   // opened for them at all.
-  const isLive =
-    state === 'waiting' || state === 'running' || state === 'queued' || state === 'publishing';
+  const isLive = state === 'running' || state === 'queued' || state === 'publishing';
   const currentTurnNo =
     api?.turn_no ?? thread?.jobs.find((threadJob) => threadJob.id === jobId)?.turn_no ?? 1;
   useEffect(() => {
@@ -419,7 +418,7 @@ export function useAgentJob(jobId: string): {
           ...current,
           { ...event, job_id: jobId, turn_no: currentTurnNo },
         ]);
-        // The stream is also the fastest authority for a waiting/queued child
+        // The stream is also the fastest authority for a queued child
         // becoming active; keep the status pill in step without polling.
         setApi((current) => (current ? applyAgentLifecycleEvent(current, event) : current));
       },

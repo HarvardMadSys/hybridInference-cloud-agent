@@ -40,7 +40,7 @@ import type {
  * still wants a human.
  */
 export function toDisplayState(job: AgentJobApi): AgentJobState {
-  if (job.state === 'waiting' || job.state === 'queued') return 'queued';
+  if (job.state === 'queued') return 'queued';
   if (job.state === 'running' || job.state === 'publishing') return 'running';
   // `succeeded` splits in two because those are different things to a user: a
   // job whose patch is already a draft PR is done, while one that finished
@@ -731,11 +731,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     title: job.title ?? options.thread?.title ?? job.task_prompt.split('\n')[0].slice(0, 80),
     prompt: job.task_prompt,
     state: toDisplayState(job),
-    stateNote: job.detail
-      ? ownerFailureMessage(job.detail)
-      : job.state === 'waiting'
-        ? 'Queued after the current run'
-        : undefined,
+    stateNote: job.detail ? ownerFailureMessage(job.detail) : undefined,
     repo: job.repo,
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),

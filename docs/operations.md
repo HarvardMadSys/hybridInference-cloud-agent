@@ -712,6 +712,12 @@ in-flight parent observed during rollout. A waiting tail inserted by the old
 API before cutover is failed when that parent settles; it is never promoted
 into a newly fabricated native session.
 
+All submitted turns that have not started use `queued`, including messages
+sent while an earlier turn is still running. A runner can claim a queued
+turn only after every earlier turn in the same chat is terminal. Cancelling
+an intermediate queued turn does not let later messages overtake an active
+earlier turn. There is no separate promotion step or `waiting` job state.
+
 ### One sandbox-group inactivity clock (and separate safety watchdogs)
 
 `AGENT_CHAT_IDLE_TIMEOUT_S` is the sandbox group's sole lifecycle timeout and
@@ -1052,6 +1058,16 @@ the revisions stacked on this one; the window covers them as well.)
   job read.
 - `0004_residency_on_membership` drops `agent_thread_residencies`, which the
   older API writes on every residency heartbeat.
+- `0005_queued_follow_ups` converts `waiting` jobs to `queued` and removes
+  `waiting` from the job-state constraint. The new scheduler leaves queued
+  turns unclaimed until all earlier turns in the same chat are terminal.
+  An older API can still insert `waiting` and claim queued turns without
+  checking their predecessors, so it must be stopped before this migration.
+  Downgrades also require stopped writers; the downgrade restores dependent
+  queued turns to `waiting`. If a terminal intermediate turn hides an
+  unfinished ancestor, it refuses the downgrade until those queued follow-ups
+  are drained or cancelled because the older scheduler cannot preserve their
+  execution order.
 
 The runner holds no database connection — its heartbeats are HTTP calls to the
 control plane — so stopping the control plane, the MCP relay and the web tier

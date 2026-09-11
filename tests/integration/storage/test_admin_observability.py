@@ -147,8 +147,8 @@ async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypa
     assert detail.json()["run"]["title"] == expected
 
 
-async def test_run_status_groups_filter_before_pagination_and_keep_raw_states(store, monkeypatch):
-    states = ("waiting", "queued", "running", "succeeded", "failed", "cancelled")
+async def test_run_status_filters_exact_states_before_pagination(store, monkeypatch):
+    states = ("queued", "running", "succeeded", "failed", "cancelled")
     jobs = {}
     for state in states:
         job = await _create_job(store)
@@ -165,10 +165,9 @@ async def test_run_status_groups_filter_before_pagination_and_keep_raw_states(st
     app = FastAPI()
     app.include_router(admin_runs.router)
     app.dependency_overrides[get_agent_job_store] = lambda: store
-    groups = {None: states, "queued": ("waiting", "queued")}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         for selected in (None, *states):
-            expected = groups.get(selected, (selected,))
+            expected = states if selected is None else (selected,)
             params = {"since": START.isoformat(), "until": END.isoformat(), "limit": 1}
             if selected is not None:
                 params["state"] = selected

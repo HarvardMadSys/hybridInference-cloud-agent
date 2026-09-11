@@ -1587,7 +1587,7 @@ export function JobDetail({
                   {job.state === 'queued' && visibleEvents.length === 0 ? (
                     <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
                       <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
-                      {job.parentJobId ? 'Queued after the current run' : 'Waiting to start'}
+                      Waiting to start
                     </div>
                   ) : null}
                 </div>
