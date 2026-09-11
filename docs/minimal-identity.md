@@ -19,10 +19,11 @@ request. Cookies missing the new issuer field, carrying old profile fields, or
 belonging to another issuer are rejected. Users sign in again after upgrading.
 There is no session version, revocation table or copied account profile.
 
-`/v1/session/me` returns only `id` and `agent_access`. The web account controls
-show a generic account icon and link back to the configured Gateway. Tasks,
-messages, Git/MCP connection identifiers and encrypted business credentials
-remain Agent-owned data; this change does not filter user-authored content.
+`/v1/session/me` returns only `id` and `agent_access`. The web settings contain
+theme and interface-language preferences; account profiles are managed on the
+Gateway. Tasks, messages, Git/MCP connection identifiers and encrypted business
+credentials remain Agent-owned data; this change does not filter user-authored
+content.
 
 ## Database identity boundary
 

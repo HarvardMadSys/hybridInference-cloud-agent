@@ -2,16 +2,12 @@
 import '@testing-library/jest-dom/vitest';
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { ThemeProvider } from '@/components/providers/ThemeProvider';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { DARK_CLASS, THEME_STORAGE_KEY } from '@/lib/theme';
 import { SettingsLauncher } from './SettingsLauncher';
-
-vi.mock('@/components/providers/SiteConfigProvider', () => ({
-  useSiteConfig: () => ({ branding: { gatewayUrl: 'https://gateway.example' } }),
-}));
 
 function renderSettings() {
   return render(
@@ -24,7 +20,7 @@ function renderSettings() {
 }
 
 async function openDialog() {
-  fireEvent.click(await screen.findByRole('button', { name: /My account|我的账户/ }));
+  fireEvent.click(await screen.findByRole('button', { name: /Settings|设置/ }));
   return screen.findByRole('dialog');
 }
 
@@ -37,17 +33,9 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('the settings entry', () => {
-  it('links to archive management from settings', async () => {
+  it('opens settings when the sidebar row is clicked', async () => {
     renderSettings();
-    await openDialog();
-    expect(screen.getByRole('link', { name: 'Archived sessions' })).toHaveAttribute(
-      'href',
-      '/archived',
-    );
-  });
-  it('shows who is signed in, and opens settings when the row is clicked', async () => {
-    renderSettings();
-    const trigger = await screen.findByRole('button', { name: /My account|我的账户/ });
+    const trigger = await screen.findByRole('button', { name: /Settings|设置/ });
     expect(trigger).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
@@ -59,7 +47,7 @@ describe('the settings entry', () => {
 
   it('hands focus back to the row when the dialog closes', async () => {
     renderSettings();
-    const trigger = await screen.findByRole('button', { name: /My account|我的账户/ });
+    const trigger = await screen.findByRole('button', { name: /Settings|设置/ });
     fireEvent.click(trigger);
     fireEvent.click(await screen.findByRole('button', { name: 'Done' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
@@ -145,19 +133,7 @@ describe('language', () => {
   it('starts in the stored language', async () => {
     window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     renderSettings();
-    fireEvent.click(await screen.findByRole('button', { name: /My account|我的账户/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Settings|设置/ }));
     expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
   });
-});
-
-it('shows only an account-management link, without a copied profile', async () => {
-  renderSettings();
-  await openDialog();
-  expect(screen.getByText('Your account is managed by the Gateway.')).toBeInTheDocument();
-  expect(screen.getByRole('link', { name: 'Manage account' })).toHaveAttribute(
-    'href',
-    'https://gateway.example/dashboard',
-  );
-  expect(screen.queryByText('Ada')).not.toBeInTheDocument();
-  expect(screen.queryByText('ada@example.com')).not.toBeInTheDocument();
 });

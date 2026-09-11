@@ -96,17 +96,12 @@ export const en = {
   'sidebar.dateOtherYear': '{month}/{day}/{year}',
 
   // ── Settings ────────────────────────────────────────────────────────────
-  'settings.account': 'My account',
-  'settings.accountManaged': 'Your account is managed by the Gateway.',
-  'settings.manageAccount': 'Manage account',
   'settings.title': 'Settings',
   'settings.close': 'Close settings',
   'settings.done': 'Done',
   'settings.signedInAs': 'Signed in as',
   'settings.backToWorkspace': 'Back to workspace',
   'settings.preferences': 'Preferences',
-  'settings.conversations': 'Conversations',
-  'settings.archived': 'Archived sessions',
 
   'sessionArchive.badge': 'Archived',
   'sessionArchive.back': 'Archived sessions',
@@ -126,15 +121,12 @@ export const en = {
 
   'settings.appearance.title': 'Appearance',
   'settings.appearance.theme': 'Theme',
-  'settings.appearance.themeHint': 'System follows your operating system setting.',
   'settings.appearance.light': 'Light',
   'settings.appearance.dark': 'Dark',
   'settings.appearance.system': 'System',
 
   'settings.language.title': 'Language',
   'settings.language.label': 'Display language',
-  'settings.language.hint':
-    'Changes the interface only. Agents keep answering in whatever language you write to them in.',
 
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': 'Archived sessions',

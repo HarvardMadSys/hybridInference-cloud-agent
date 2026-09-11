@@ -1,12 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useRef } from 'react';
-import Link from 'next/link';
-import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { useLocale, useTheme } from '@/components/providers';
 import { LOCALES, LOCALE_LABELS, isLocale } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
-import { AccountIcon, CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
+import { CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
 
 const THEME_ICONS: Record<ThemePreference, typeof SunIcon> = {
   light: SunIcon,
@@ -23,7 +21,6 @@ const THEME_LABEL_KEYS = {
 const SECTION_TITLE =
   'text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500';
 const FIELD_LABEL = 'text-[13px] font-medium text-gray-800 dark:text-gray-200';
-const FIELD_HINT = 'mt-1.5 text-[12px] leading-relaxed text-gray-500 dark:text-gray-400';
 
 /** Elements that can hold focus, for the tab cycle below. */
 const FOCUSABLE =
@@ -32,7 +29,6 @@ const FOCUSABLE =
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const { t, locale, setLocale } = useLocale();
   const { preference, setPreference } = useTheme();
-  const { branding } = useSiteConfig();
 
   const panel = useRef<HTMLDivElement>(null);
   const titleId = 'settings-dialog-title';
@@ -113,28 +109,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          <div className="mb-5 flex items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-crimson/[0.08] text-crimson dark:bg-crimson/20 dark:text-crimson-light">
-              <AccountIcon />
-            </span>
-            <div className="min-w-0 text-[13px]">
-              <p className="font-medium text-gray-900 dark:text-gray-100">
-                {t('settings.account')}
-              </p>
-              <p className="mt-1 text-gray-500 dark:text-gray-400">
-                {t('settings.accountManaged')}
-              </p>
-              {branding.gatewayUrl && (
-                <a
-                  href={`${branding.gatewayUrl}/dashboard`}
-                  className="mt-1 inline-block text-crimson dark:text-crimson-light"
-                >
-                  {t('settings.manageAccount')}
-                </a>
-              )}
-            </div>
-          </div>
-
           <section aria-labelledby="settings-appearance">
             <h3 id="settings-appearance" className={SECTION_TITLE}>
               {t('settings.appearance.title')}
@@ -174,7 +148,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   })}
                 </div>
               </fieldset>
-              <p className={FIELD_HINT}>{t('settings.appearance.themeHint')}</p>
             </div>
           </section>
 
@@ -199,21 +172,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   ))}
                 </select>
               </label>
-              <p className={FIELD_HINT}>{t('settings.language.hint')}</p>
             </div>
-          </section>
-          <section aria-labelledby="settings-conversations" className="mt-6">
-            <h3 id="settings-conversations" className={SECTION_TITLE}>
-              {t('settings.conversations')}
-            </h3>
-            <Link
-              href="/archived"
-              onClick={onClose}
-              className="mt-3 flex items-center justify-between rounded-lg border border-gray-200 px-3 py-2.5 text-[13px] font-medium text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5"
-            >
-              {t('settings.archived')}
-              <span aria-hidden="true">→</span>
-            </Link>
           </section>
         </div>
 

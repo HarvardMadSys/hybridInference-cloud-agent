@@ -98,17 +98,12 @@ export const zhCN: Record<TranslationKey, string> = {
   'sidebar.dateOtherYear': '{year}/{month}/{day}',
 
   // ── Settings ────────────────────────────────────────────────────────────
-  'settings.account': '我的账户',
-  'settings.accountManaged': '账号由主站管理。',
-  'settings.manageAccount': '管理账号',
   'settings.title': '设置',
   'settings.close': '关闭设置',
   'settings.done': '完成',
   'settings.signedInAs': '当前登录',
   'settings.backToWorkspace': '返回工作区',
   'settings.preferences': '偏好设置',
-  'settings.conversations': '会话',
-  'settings.archived': '已归档会话',
 
   'sessionArchive.badge': '已归档',
   'sessionArchive.back': '已归档会话',
@@ -125,14 +120,12 @@ export const zhCN: Record<TranslationKey, string> = {
 
   'settings.appearance.title': '外观',
   'settings.appearance.theme': '主题',
-  'settings.appearance.themeHint': '「跟随系统」会使用你操作系统的深浅色设置。',
   'settings.appearance.light': '浅色',
   'settings.appearance.dark': '深色',
   'settings.appearance.system': '跟随系统',
 
   'settings.language.title': '语言',
   'settings.language.label': '界面语言',
-  'settings.language.hint': '只影响界面显示。你用什么语言跟 Agent 说话,它就用什么语言回答。',
 
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': '已归档会话',
