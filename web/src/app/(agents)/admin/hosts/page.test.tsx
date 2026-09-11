@@ -475,6 +475,12 @@ describe('capacity columns', () => {
     expect(within(row).getByText('12s ago')).toBeInTheDocument();
     // The poll-time column it replaced is gone.
     expect(screen.queryByText('Last polled')).not.toBeInTheDocument();
+    // Each load figure carries a bar on the chart's own 0-100 scale, so the
+    // fleet is read down the column without reading the numbers. The bar is
+    // the unrounded reading, which is why it is not 37.
+    expect(
+      within(row).getByText('37%').closest('div')!.querySelector('span[aria-hidden] > span'),
+    ).toHaveStyle({ width: '37.24%' });
   });
 
   it('names the reason a value is missing instead of printing zero', async () => {
@@ -492,6 +498,15 @@ describe('capacity columns', () => {
     const warm = (await screen.findByRole('rowheader', { name: 'warm' })).closest('tr')!;
     expect(within(warm).getByText('Warming up')).toBeInTheDocument();
     expect(within(warm).queryByText('0%')).not.toBeInTheDocument();
+    // No reading, no bar: an empty track beside "Warming up" would draw the
+    // zero this cell exists to refuse. The memory reading beside it is real,
+    // so its bar is still there.
+    expect(
+      within(warm).getByText('Warming up').closest('div')!.querySelector('[aria-hidden]'),
+    ).toBeNull();
+    expect(
+      within(warm).getByText('33% · 42 / 128 GiB').closest('div')!.querySelector('[aria-hidden]'),
+    ).not.toBeNull();
     const silent = screen.getByRole('rowheader', { name: 'silent' }).closest('tr')!;
     // Both load cells say so, and the sandbox cell does not claim zero.
     expect(within(silent).getAllByText('Not measured').length).toBeGreaterThanOrEqual(2);

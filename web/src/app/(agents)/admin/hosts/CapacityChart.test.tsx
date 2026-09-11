@@ -112,6 +112,9 @@ describe('CapacityChart', () => {
     expect(screen.getByText('UTC')).toBeInTheDocument();
     expect(screen.getByText('12:00')).toBeInTheDocument();
     expect(screen.getByText('12:05')).toBeInTheDocument();
+    // Only the two ends: the middle of the window is where the axis title
+    // sits, and a tick there put the title on a second line under it.
+    expect(screen.queryByText('12:02')).not.toBeInTheDocument();
     expect(CHART_PLOT_HEIGHT).toBeGreaterThan(0);
   });
 
@@ -211,6 +214,25 @@ describe('CapacityChart', () => {
     );
   });
 
+  it('keeps the reading inside the plot at either end of the axis', () => {
+    render(<CapacityChart {...props()} />);
+    const slider = screen.getByRole('slider', { name: 'CPU usage (%) point selector' });
+    const bubble = (text: string): Element => screen.getByText(text);
+
+    // Centred on the oldest point, half the bubble was outside the panel and
+    // the panel clipped it mid-word — it read "026-09-11 08:58 UTC".
+    fireEvent.keyDown(slider, { key: 'Home' });
+    expect(bubble('2026-09-11 12:00 UTC · CPU 10.0%').className).toContain('translate-x-0');
+
+    fireEvent.keyDown(slider, { key: 'End' });
+    expect(bubble('2026-09-11 12:05 UTC · CPU 60.0%').className).toContain('-translate-x-full');
+
+    // Away from the ends it still points at its own minute.
+    fireEvent.keyDown(slider, { key: 'ArrowLeft' });
+    fireEvent.keyDown(slider, { key: 'ArrowLeft' });
+    expect(bubble('2026-09-11 12:03 UTC · CPU 40.0%').className).toContain('-translate-x-1/2');
+  });
+
   it('keeps a gap out of the line even when both of its edges are observed', () => {
     const { container } = render(
       <CapacityChart
@@ -234,5 +256,15 @@ describe('CapacityChart', () => {
     const xs = lines.map((line) => (line.getAttribute('points') ?? '').split(' '));
     expect(Number(xs[0].at(-1)?.split(',')[0])).toBe(xOf(1));
     expect(Number(xs[1][0].split(',')[0])).toBe(xOf(3));
+
+    // One wash per run, drawn from the run's own points down to the baseline,
+    // so the fill breaks with the line. A single wash across both runs would
+    // shade the minute nobody observed as though something had been measured.
+    const washes = [...container.querySelectorAll('polygon')].map((wash) =>
+      (wash.getAttribute('points') ?? '').split(' '),
+    );
+    expect(washes).toHaveLength(2);
+    expect(Number(washes[0][washes[0].length - 2].split(',')[0])).toBe(xOf(1));
+    expect(Number(washes[1][0].split(',')[0])).toBe(xOf(3));
   });
 });
