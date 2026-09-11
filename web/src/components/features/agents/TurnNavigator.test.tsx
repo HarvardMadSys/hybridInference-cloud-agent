@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ConversationTurnNavigationEntry } from './conversationTurnNavigation';
@@ -148,7 +148,8 @@ describe('TurnRail', () => {
     }
   });
 
-  it('does not claim Escape when no preview is open', () => {
+  it('does not claim Escape once the preview has gone', () => {
+    vi.useFakeTimers();
     const onStop = vi.fn();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented) onStop();
@@ -156,14 +157,42 @@ describe('TurnRail', () => {
     window.addEventListener('keydown', onKeyDown);
     try {
       render(<TurnRail entries={ENTRIES} activeKey="t1" onNavigate={vi.fn()} />);
-      fireEvent.pointerOver(screen.getByRole('button', { name: 'Go to turn 2' }));
-      fireEvent.pointerOut(screen.getByRole('button', { name: 'Go to turn 2' }), {
-        relatedTarget: document.body,
+      const mark = screen.getByRole('button', { name: 'Go to turn 2' });
+      fireEvent.pointerOver(mark);
+      fireEvent.pointerOut(mark, { relatedTarget: document.body });
+      act(() => {
+        vi.advanceTimersByTime(500);
       });
+      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+
       fireEvent.keyDown(document, { key: 'Escape' });
       expect(onStop).toHaveBeenCalledTimes(1);
     } finally {
       window.removeEventListener('keydown', onKeyDown);
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the preview while the pointer crosses to the card', () => {
+    // The card is not a child of the mark, so reaching it is a leave followed
+    // by an enter. Closing on the leave alone is what made the card unreadable
+    // with a mouse.
+    vi.useFakeTimers();
+    try {
+      render(<TurnRail entries={ENTRIES} activeKey="t1" onNavigate={vi.fn()} />);
+      const mark = screen.getByRole('button', { name: 'Go to turn 2' });
+      fireEvent.pointerOver(mark);
+      fireEvent.pointerOut(mark, { relatedTarget: document.body });
+
+      const card = screen.getByRole('tooltip');
+      fireEvent.pointerOver(card);
+      act(() => {
+        vi.advanceTimersByTime(500);
+      });
+
+      expect(screen.getByRole('tooltip')).toHaveTextContent('Question 2');
+    } finally {
+      vi.useRealTimers();
     }
   });
 

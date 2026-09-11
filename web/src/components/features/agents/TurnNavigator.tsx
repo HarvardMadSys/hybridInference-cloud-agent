@@ -26,8 +26,14 @@ const TURN_PITCH_PX = 24;
 const FADE_PX = 24;
 /** Tallest the rail may grow; the band it sits in can still be shorter. */
 const RAIL_MAX_HEIGHT_PX = 420;
-/** Gap between the rail and the card that previews a mark. */
+/** Visual gap between the rail and the card that previews a mark. */
 const PREVIEW_GAP_PX = 8;
+/**
+ * Grace period for the pointer to travel from a mark to the card. The card is
+ * not a child of the mark, so any movement between them is a leave followed by
+ * an enter, and closing on the leave alone makes the card impossible to reach.
+ */
+const PREVIEW_CLOSE_DELAY_MS = 150;
 const MARK_HIT_WIDTH_PX = 32;
 const PREVIEW_WIDTH_PX = 300;
 
@@ -130,6 +136,7 @@ function TurnRailRail({
   const frameRef = useRef<HTMLElement | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const markRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const closeTimerRef = useRef<number | null>(null);
   /** While the pointer works the rail, the active mark must not move under it. */
   const pointerInsideRef = useRef(false);
   const focusInsideRef = useRef(false);
@@ -141,9 +148,35 @@ function TurnRailRail({
   const [interacting, setInteracting] = useState(false);
   const previewId = useId();
 
-  const syncInteraction = () => {
+  const syncInteraction = useCallback(() => {
     setInteracting(pointerInsideRef.current || focusInsideRef.current);
-  };
+  }, []);
+
+  const cancelPreviewClose = useCallback(() => {
+    if (closeTimerRef.current === null) return;
+    window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  }, []);
+
+  /**
+   * Let go of the preview, and of the rail's interaction, after a beat.
+   *
+   * Closing on the leave itself would end the preview in the gap between the
+   * rail and the card, which is the one place the pointer has to cross to read
+   * it. Keeping the interaction until the delay elapses also keeps the rail
+   * from sliding the current mark under a pointer that is still on the card.
+   */
+  const schedulePreviewClose = useCallback(() => {
+    cancelPreviewClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      pointerInsideRef.current = false;
+      syncInteraction();
+      setPreviewKey(null);
+    }, PREVIEW_CLOSE_DELAY_MS);
+  }, [cancelPreviewClose, syncInteraction]);
+
+  useEffect(() => cancelPreviewClose, [cancelPreviewClose]);
 
   const syncScrollState = useCallback(() => {
     const scroller = scrollerRef.current;
@@ -241,14 +274,11 @@ function TurnRailRail({
       className="pointer-events-auto relative w-8 shrink-0"
       style={{ height: Math.min(naturalHeight, maxHeightPx) }}
       onPointerEnter={() => {
+        cancelPreviewClose();
         pointerInsideRef.current = true;
         syncInteraction();
       }}
-      onPointerLeave={() => {
-        pointerInsideRef.current = false;
-        syncInteraction();
-        setPreviewKey(null);
-      }}
+      onPointerLeave={schedulePreviewClose}
       onFocus={() => {
         focusInsideRef.current = true;
         syncInteraction();
@@ -346,15 +376,22 @@ function TurnRailRail({
         <div
           id={previewId}
           role="tooltip"
-          className="pointer-events-auto absolute rounded-[10px] border border-gray-200 bg-white px-3 py-2 text-left shadow-card dark:border-white/10 dark:bg-gray-900"
+          // Flush with the rail and padded on the side facing it: the padding
+          // is a bridge the pointer can cross, where a positional gap belongs
+          // to neither the rail nor the card and ends the preview in transit.
+          className="pointer-events-auto absolute"
           style={{
-            right: `calc(100% + ${PREVIEW_GAP_PX}px)`,
-            width: PREVIEW_WIDTH_PX,
-            maxWidth: PREVIEW_WIDTH_PX,
+            right: '100%',
             top: previewOffset(previewIndex, scrollTop, railHeight),
+            paddingRight: PREVIEW_GAP_PX,
           }}
         >
-          <TurnPreview entry={preview} />
+          <div
+            className="rounded-[10px] border border-gray-200 bg-white px-3 py-2 text-left shadow-card dark:border-white/10 dark:bg-gray-900"
+            style={{ width: PREVIEW_WIDTH_PX, maxWidth: PREVIEW_WIDTH_PX }}
+          >
+            <TurnPreview entry={preview} />
+          </div>
         </div>
       )}
     </nav>

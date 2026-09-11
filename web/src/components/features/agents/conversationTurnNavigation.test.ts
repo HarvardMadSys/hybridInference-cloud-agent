@@ -12,11 +12,10 @@ import {
   describeCurrentTurn,
   describeHistoryTurns,
   eventBlockKey,
-  historyTurnsDigest,
   messageBlockKey,
-  navigationEntryDigest,
   previewText,
   PROMPT_PREVIEW_LIMIT,
+  sameNavigationEntries,
   toNavigationEntry,
 } from './conversationTurnNavigation';
 import type { AgentEvent, AgentHistoryTurn, AgentJob, AgentThreadMessage } from './types';
@@ -360,74 +359,56 @@ describe('DOM identity', () => {
   });
 });
 
-describe('historyTurnsDigest', () => {
-  it('ignores everything the newest turn does', () => {
-    // A stored turn is append-only, so the page can hold onto the derived
-    // stored turns while a run streams into the newest one.
-    const stored = historyTurn('ajob_0', 1, [message(1, 'user', 'q', 'ajob_0')], []);
-    const before = makeJob({ historyTurns: [stored], turnNo: 2 });
-    const after = makeJob({
-      historyTurns: [stored],
-      turnNo: 2,
-      state: 'done',
-      events: [{ kind: 'message', text: 'the answer', attemptNo: 1, sourceEventId: 5 }],
-    });
-    expect(historyTurnsDigest(after)).toBe(historyTurnsDigest(before));
+describe('sameNavigationEntries', () => {
+  const entry = (
+    key: string,
+    promptPreview: string,
+    overrides: Partial<ReturnType<typeof toNavigationEntry>> = {},
+  ) => ({
+    ...toNavigationEntry(describeCurrentTurn(makeJob({ id: key }))),
+    key,
+    promptPreview,
+    ...overrides,
   });
 
-  it('changes when a stored turn is added or records more', () => {
-    const one = makeJob({ historyTurns: [historyTurn('ajob_0', 1, [], [])] });
-    const two = makeJob({
-      historyTurns: [
-        historyTurn('ajob_0', 1, [], []),
-        historyTurn('ajob_1', 2, [], [{ kind: 'message', text: 'a', sourceEventId: 1 }]),
-      ],
-    });
-    expect(historyTurnsDigest(two)).not.toBe(historyTurnsDigest(one));
-    expect(historyTurnsDigest(makeJob())).toBe('');
-  });
-});
-
-describe('navigationEntryDigest', () => {
-  it('stays equal while a running turn only appends events', () => {
-    const before = describeCurrentTurn(makeJob({ turnNo: 2 }));
-    const after = describeCurrentTurn(
-      makeJob({
-        turnNo: 2,
-        events: [
-          { kind: 'tool_use', tool: 'Bash', detail: 'pytest', attemptNo: 1, sourceEventId: 3 },
-          { kind: 'thinking', text: '', attemptNo: 1, sourceEventId: 4 },
-        ],
-      }),
-    );
-    expect(navigationEntryDigest(after)).toBe(navigationEntryDigest(before));
+  it('accepts the marks it was already showing', () => {
+    const one = [entry('ajob_1', 'Do the thing')];
+    const other = [entry('ajob_1', 'Do the thing')];
+    expect(one).not.toBe(other);
+    expect(sameNavigationEntries(one, other)).toBe(true);
+    expect(sameNavigationEntries([], [])).toBe(true);
   });
 
-  it('changes when the turn settles into a reply', () => {
-    const settled = makeJob({
-      turnNo: 2,
-      state: 'done',
-      events: [{ kind: 'message', text: 'the answer', attemptNo: 1, sourceEventId: 5 }],
-    });
-    expect(navigationEntryDigest(describeCurrentTurn(settled))).not.toBe(
-      navigationEntryDigest(describeCurrentTurn(makeJob({ turnNo: 2 }))),
-    );
+  it('rejects any mark that would render differently', () => {
+    const base = [entry('ajob_1', 'Do the thing')];
+    expect(sameNavigationEntries(base, [entry('ajob_1', 'Do another thing')])).toBe(false);
+    expect(
+      sameNavigationEntries(base, [entry('ajob_1', 'Do the thing', { state: 'failed' })]),
+    ).toBe(false);
+    expect(
+      sameNavigationEntries(base, [entry('ajob_1', 'Do the thing', { previewAttemptNo: 1 })]),
+    ).toBe(false);
+    expect(sameNavigationEntries(base, [entry('ajob_2', 'Do the thing')])).toBe(false);
+    expect(sameNavigationEntries(base, [...base, entry('ajob_2', 'And then')])).toBe(false);
   });
 
-  it('changes when an older run is the one on screen', () => {
-    const retried = makeJob({
-      turnNo: 2,
-      state: 'failed',
-      currentAttemptNo: 2,
-      events: [
-        { kind: 'message', text: 'first try', attemptNo: 1, sourceEventId: 6 },
-        { kind: 'message', text: 'second try', attemptNo: 2, sourceEventId: 7 },
-      ],
-    });
-    const newest = { attemptNo: 2, currentAttemptNo: 2 };
-    const older = { attemptNo: 1, currentAttemptNo: 2 };
-    expect(navigationEntryDigest(describeCurrentTurn(retried, older), older)).not.toBe(
-      navigationEntryDigest(describeCurrentTurn(retried, newest), newest),
-    );
+  it('rejects a mark whose reply arrived while its turn was running', () => {
+    // The one field that changes without the turn list moving: a running turn
+    // settles and its reply becomes previewable.
+    const running = [
+      toNavigationEntry(describeCurrentTurn(makeJob({ id: 'ajob_1', state: 'running' }))),
+    ];
+    const settled = [
+      toNavigationEntry(
+        describeCurrentTurn(
+          makeJob({
+            id: 'ajob_1',
+            state: 'done',
+            events: [{ kind: 'message', text: 'the answer', attemptNo: 1, sourceEventId: 3 }],
+          }),
+        ),
+      ),
+    ];
+    expect(sameNavigationEntries(running, settled)).toBe(false);
   });
 });

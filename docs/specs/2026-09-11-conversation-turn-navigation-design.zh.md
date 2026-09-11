@@ -374,7 +374,7 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 与设计相比的两点实现细节：
 
 1. 轮次描述层同时决定正文渲染哪些行与目录预览什么内容，`HistoryTurn` 的 fallback 规则（无事件消息时使用 durable assistant 消息）已从组件内移入该层，两处不再各写一套。
-2. 目录条目的引用稳定性使用 `navigationEntriesDigest`（对条目本身的摘要）而非对 `job` 或描述结果 memo：`toDisplayJob()` 在每个流式事件上都会重建整个展示模型，只有按条目摘要才能让运行中追加事件不重渲染几百个刻度。
+2. 描述层每个渲染都重新派生（正确性优先），刻度列表的引用稳定性来自 `sameNavigationEntries`：把刚派生出的条目与上一批逐字段比较，相同则沿用旧数组。§8.1 的目标是"不因每个 token 重建几百个刻度"，这一点由引用稳定保证；而摘要式缓存需要预判刻度依赖的每个字段，漏一个（例如历史轮次后来才可 Fork）就会长期供出旧刻度，所以不采用。预览截断对 ASCII 走直接切片、只对含组合字符的文本启用 `Intl.Segmenter`，这是上述"每 token 全量派生"的主要开销来源。
 
 ### 13.2 已执行的自动化检查
 
@@ -385,12 +385,12 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 | `npm run lint`             | 0 error，0 warning            |
 | `npm run format:check`     | 全部文件符合 Prettier         |
 | `npm run type-check`       | 通过                          |
-| `npm test`                 | 63 个文件、879 个用例全部通过 |
+| `npm test`                 | 66 个文件、944 个用例全部通过 |
 | `npm run build`            | 通过                          |
 | `node scripts/check-server-only-guard.mjs` | 通过             |
 | `node scripts/check-runtime-site-config.mjs` | 通过           |
 
-新增用例：`conversationTurnNavigation.test.ts`（30）、`useConversationScroll.test.ts`（15，纯算术）、`useConversationScroll.dom.test.tsx`（12，注入盒模型的控制器行为）、`TurnNavigator.test.tsx`（18）、`JobDetail.test.tsx` 的对话导航用例（5），另在 `adapt.test.ts` 增加 1 例（历史轮次状态映射）。
+新增用例：`conversationTurnNavigation.test.ts`（28）、`useConversationScroll.test.ts`（20，纯算术与 attempt 判定）、`useConversationScroll.dom.test.tsx`（14，注入盒模型的控制器行为）、`TurnNavigator.test.tsx`（19）、`JobDetail.test.tsx` 的对话导航用例（7），另在 `adapt.test.ts` 增加 1 例（历史轮次状态映射）。
 
 ### 13.3 两轮对抗性评审后的修正
 
@@ -413,9 +413,21 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 | 当前轮的 durable 回复被 `historyIncludesPrompt` 一并门控                   | 该标记只决定 prompt 卡片是否让位，不再决定正文是否渲染 durable 行                          |
 | 滚动容器没有 `tabIndex`，纯键盘无法直接翻正文                             | 容器加入 tab 顺序（WAI-ARIA 可滚动区域惯例）                                              |
 
-四项需要真实浏览器才能定论的问题（预览卡与目录面板的实际遮挡、输入区真实高度下的落点像素、ResizeObserver 时序、触摸与指针行为）仍在 13.4 的人工清单里。
+四项需要真实浏览器才能定论的问题（预览卡与目录面板的实际遮挡、输入区真实高度下的落点像素、ResizeObserver 时序、触摸与指针行为）仍在 13.5 的人工清单里。
 
-### 13.4 尚未执行
+### 13.4 第二轮评审（针对已推送提交）后的修正
+
+| 问题                                                                       | 修正                                                                                     |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 排队中的轮次开始运行、自动产生首个 attempt 时被当成"读者切换了历史 attempt"，被切成 `reading`，后续输出不再跟随 | 只有读者自己点选、且选的不是最新 attempt 时才 `holdReading`；判定抽成 `shouldHoldReading` 并有单测覆盖四种来源 |
+| 历史轮次的目录缓存键只含状态与数组长度：轮次变为可 Fork 后按钮不出现；工具结果折叠进同一行（行数不变）时正文保留旧内容 | 取消按计数记忆化历史轮次，描述每渲染重新派生；刻度列表的引用稳定改为对刚派生结果的逐字段比较 |
+| 补偿写即使没有移动位置也置位"本次写入是本控制器所为"，浏览器不产生事件，下一次真实滚动被误判为程序滚动，读者回到底部后不再跟随 | 只有真正改变位置的写入才置位；另外任何用户手势都直接清除该标记 |
+| 判断"变化前是否在底部"时用了变化后的视口高度，窗口变矮会把正在跟随的读者切成 `reading` | 记录并用变化前的 `clientHeight` 判断 |
+| 刻度与预览卡之间 8px 的空隙不属于任何一方，指针一旦移入卡片就触发 leave 并立即关闭，卡片实际上无法用鼠标阅读 | 卡片改为紧贴导航条、用自身 padding 充当可命中的"桥"，并给关闭加 150ms 宽限；指针移入卡片会取消关闭 |
+
+五个问题各自补了回归用例，并逐个验证过"把修复改回去则用例变红"。
+
+### 13.5 尚未执行
 
 - 真实布局下的滚动行为。`useConversationScroll.dom.test.tsx` 用注入的盒模型覆盖了控制器的判断（落点、阅读轮次、布局补偿、跟随恢复、目标缺失），但那是给定的几何，不是浏览器算出来的：Markdown 换行重排、sticky 输入区的实际遮挡、ResizeObserver 的真实时序、指针与触摸事件，以及跳转落点的像素级误差（±4px）都仍未验证。可复现的人工步骤见 [conversation-navigation.md](../conversation-navigation.md#verifying-it-in-a-browser)。
 - 100+ 轮、两种 Chat 宽度、Fork 复制历史在真实数据下的表现。

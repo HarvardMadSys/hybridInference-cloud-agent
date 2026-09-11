@@ -296,6 +296,45 @@ describe('the hook and the reader together', () => {
   });
 });
 
+describe('a stale write flag', () => {
+  it('still resumes following when the compensation moved nothing', async () => {
+    const region = renderConversation();
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'jump-last' }));
+    await settle();
+
+    // Output arrives below the reader, so holding their place writes the offset
+    // it already has. That write produces no scroll event, and the flag it left
+    // behind must not swallow the reader's own next scroll.
+    layout = { ...layout, contentHeight: layout.contentHeight + 300 };
+    FakeResizeObserver.instances.forEach((observer) => observer.trigger());
+    await settle();
+    expect(screen.getByTestId('mode')).toHaveTextContent('reading');
+
+    region.scrollTop = layout.contentHeight - layout.containerHeight;
+    fireEvent.wheel(region);
+    fireEvent.scroll(region);
+    await waitFor(() => expect(screen.getByTestId('mode')).toHaveTextContent('following'));
+  });
+});
+
+describe('a viewport that shrinks', () => {
+  it('keeps following when the reader was at the end', async () => {
+    const region = renderConversation();
+    await settle();
+    expect(region.scrollTop).toBe(layout.contentHeight - layout.containerHeight);
+
+    // A shorter window is not the reader leaving the end: the bottom of the
+    // page is still what they were looking at.
+    layout = { ...layout, containerHeight: 400 };
+    FakeResizeObserver.instances.forEach((observer) => observer.trigger());
+    await settle();
+
+    expect(screen.getByTestId('mode')).toHaveTextContent('following');
+    expect(region.scrollTop).toBe(layout.contentHeight - layout.containerHeight);
+  });
+});
+
 describe('going back to the bottom', () => {
   it('returns to the end and resumes following', async () => {
     const region = renderConversation();

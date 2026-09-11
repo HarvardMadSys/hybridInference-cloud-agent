@@ -14,6 +14,7 @@ import {
   readingAnchorOf,
   readingLine,
   restoreScrollTop,
+  shouldHoldReading,
   turnScrollTop,
   TURN_SCROLL_OFFSET_PX,
   type BlockBox,
@@ -121,5 +122,48 @@ describe('reading anchors', () => {
   it('has nothing to anchor without turns', () => {
     expect(readingAnchorOf([], blocks, 0, 100)).toBeNull();
     expect(restoreScrollTop({ turnKey: 'gone', turnIndex: 0, offset: 0 }, [], [], 100)).toBeNull();
+  });
+});
+
+describe('shouldHoldReading', () => {
+  const turn = 'ajob_1';
+
+  it('holds the position when the reader picks an older run', () => {
+    expect(
+      shouldHoldReading({ jobId: turn, attemptNo: 2 }, { jobId: turn, attemptNo: 1 }, 1, 2),
+    ).toBe(true);
+  });
+
+  it('does not hold it when a queued turn starts and gains its first attempt', () => {
+    // Nothing the reader did: the turn moved on by itself, and the output that
+    // follows must still be followed.
+    expect(
+      shouldHoldReading({ jobId: turn, attemptNo: 0 }, { jobId: turn, attemptNo: 1 }, null, 1),
+    ).toBe(false);
+  });
+
+  it('does not hold it when a retry arrives and becomes the live run', () => {
+    expect(
+      shouldHoldReading({ jobId: turn, attemptNo: 1 }, { jobId: turn, attemptNo: 2 }, null, 2),
+    ).toBe(false);
+  });
+
+  it('does not hold it when the reader asks for the live run', () => {
+    // Choosing the newest attempt is not settling on a fixed older one.
+    expect(
+      shouldHoldReading({ jobId: turn, attemptNo: 1 }, { jobId: turn, attemptNo: 2 }, 2, 2),
+    ).toBe(false);
+    expect(
+      shouldHoldReading({ jobId: turn, attemptNo: 0 }, { jobId: turn, attemptNo: 0 }, 0, 1),
+    ).toBe(false);
+  });
+
+  it('does not carry a choice across to the next turn', () => {
+    expect(
+      shouldHoldReading({ jobId: 'ajob_0', attemptNo: 1 }, { jobId: 'ajob_1', attemptNo: 1 }, 1, 2),
+    ).toBe(false);
+    expect(
+      shouldHoldReading({ jobId: turn, attemptNo: 1 }, { jobId: turn, attemptNo: 1 }, 1, 2),
+    ).toBe(false);
   });
 });

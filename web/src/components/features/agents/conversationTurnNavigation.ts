@@ -118,6 +118,9 @@ function isTerminal(state: AgentJobState): boolean {
   return state !== 'queued' && state !== 'running';
 }
 
+/** Text with no clusters to protect: one code unit per character. */
+const ASCII_ONLY = /^[\u0020-\u007e]*$/;
+
 const GRAPHEME_SEGMENTER =
   typeof Intl === 'undefined' || typeof Intl.Segmenter !== 'function'
     ? null
@@ -146,6 +149,11 @@ function graphemes(text: string): string[] {
 export function previewText(text: string, limit: number): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
   if (collapsed === '') return '';
+  if (collapsed.length <= limit) return collapsed;
+  // Most previews are ASCII, and an ASCII string has no cluster to split:
+  // slicing it directly costs a comparison where segmentation costs an
+  // iterator, and the comparison is what proves the difference.
+  if (ASCII_ONLY.test(collapsed)) return `${collapsed.slice(0, limit - 1).trimEnd()}…`;
   const parts = graphemes(collapsed);
   if (parts.length <= limit) return collapsed;
   // The ellipsis is part of the budget, so a clipped preview can never be
@@ -355,45 +363,37 @@ export function buildConversationTurnNavigation(
 }
 
 /**
- * Compact identity of the conversation's stored turns.
+ * Whether two entry lists would render the same marks.
  *
- * A page memoizes the stored turns on this rather than on the job object, which
- * `toDisplayJob()` rebuilds on every streamed event. It hashes structure —
- * which turns exist, what each recorded, how much of it — because a stored turn
- * is append-only: a count cannot change without the content behind it changing.
+ * A page memoizes the rail on this. It re-renders and re-derives on every
+ * streamed event, while the rail draws two host elements per turn, so a new
+ * array identity would rebuild hundreds of marks for a delta that only ever
+ * reaches the newest turn's body. Comparing the marks that were just derived is
+ * cheaper than rendering them, and — unlike a digest — it cannot serve a stale
+ * mark: there is no key that has to predict every field a mark depends on.
  */
-export function historyTurnsDigest(job: AgentJob): string {
-  return (job.historyTurns ?? [])
-    .map(
-      (turn) =>
-        `${turn.jobId}/${turn.turnNo}/${turn.state ?? ''}/${turn.messages.length}/${turn.events.length}`,
-    )
-    .join('|');
-}
-
-/**
- * Identity of one mark, cheap enough to compute on every streamed event.
- *
- * The rail renders one host element per turn while the page re-renders per
- * delta, so a memo keyed on this keeps the marks' identity — without rescanning
- * the conversation behind them. The reply being streamed is left out of the
- * previews until its turn settles, so what this hashes does not change per
- * token.
- */
-export function navigationEntryDigest(
-  turn: ConversationTurnDescription,
-  options: ConversationTurnOptions = {},
-): string {
-  const entry = toNavigationEntry(turn, options);
-  return [
-    entry.key,
-    entry.displayNo,
-    `${entry.turnNo ?? ''}`,
-    entry.promptPreview,
-    entry.responsePreview,
-    entry.state ?? '',
-    `${entry.previewAttemptNo ?? ''}`,
-  ].join('\u0001');
+export function sameNavigationEntries(
+  left: readonly ConversationTurnNavigationEntry[],
+  right: readonly ConversationTurnNavigationEntry[],
+): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const one = left[index];
+    const other = right[index];
+    if (
+      one.key !== other.key ||
+      one.displayNo !== other.displayNo ||
+      one.turnNo !== other.turnNo ||
+      one.promptPreview !== other.promptPreview ||
+      one.responsePreview !== other.responsePreview ||
+      one.state !== other.state ||
+      one.previewAttemptNo !== other.previewAttemptNo
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** The identity a scroll position belongs to. */

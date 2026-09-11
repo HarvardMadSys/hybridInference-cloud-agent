@@ -201,6 +201,37 @@ export function restoreScrollTop(
   return turnScrollTop(nearest.top, maxScroll);
 }
 
+/** Which attempt the transcript is showing, and for which turn. */
+export interface AttemptSelection {
+  jobId: string;
+  /** Display number of the selected attempt; 0 means "every attempt". */
+  attemptNo: number;
+}
+
+/**
+ * Whether a change of attempt should hold the reader's position.
+ *
+ * Only the reader choosing an older run is a reading position. The selection
+ * also moves on its own — a queued turn starts and gains its first attempt, a
+ * retry arrives and becomes the live one — and that must not stop the newest
+ * output from being followed, which is what counting every change did.
+ */
+export function shouldHoldReading(
+  previous: AttemptSelection,
+  next: AttemptSelection,
+  /** Attempt the reader last asked for, or null if they never chose one. */
+  chosenAttemptNo: number | null,
+  /** Display number of the newest attempt; 0 when the turn has none yet. */
+  liveAttemptNo: number,
+): boolean {
+  if (previous.jobId !== next.jobId) return false;
+  if (previous.attemptNo === next.attemptNo) return false;
+  // Not something the reader asked for: the turn moved on by itself.
+  if (chosenAttemptNo !== next.attemptNo) return false;
+  // Asking for the newest run is not settling on a fixed older one.
+  return next.attemptNo !== 0 && next.attemptNo !== liveAttemptNo;
+}
+
 /** Distance from the top of the container to an element inside it, in content coordinates. */
 function contentTop(element: HTMLElement, container: HTMLElement): number {
   return (
@@ -290,6 +321,7 @@ export function useConversationScroll({
   /** Set by every write this hook makes, consumed by the scroll event it causes. */
   const wroteScrollRef = useRef(false);
   const lastContentHeightRef = useRef(0);
+  const lastClientHeightRef = useRef(0);
   const lastWidthRef = useRef(0);
   const lastComposerHeightRef = useRef(0);
   const landAtEndRef = useRef(false);
@@ -369,6 +401,10 @@ export function useConversationScroll({
    * read as the reader asking to follow the end again.
    */
   const writeScrollTop = useCallback((target: HTMLElement, top: number) => {
+    // A write that moves nothing produces no scroll event to consume the flag,
+    // and the reader's next real scroll would then be mistaken for this hook's
+    // own — which is how landing at the end failed to resume following.
+    if (Math.abs(target.scrollTop - top) < 1) return;
     wroteScrollRef.current = true;
     applyScrollTop(target, top);
   }, []);
@@ -446,6 +482,7 @@ export function useConversationScroll({
         readingAnchorRef.current = null;
       }
       lastContentHeightRef.current = target.scrollHeight;
+      lastClientHeightRef.current = target.clientHeight;
     },
     [measureComposerOcclusion, publishViewport, readGeometry, setActive, writeScrollTop],
   );
@@ -614,10 +651,15 @@ export function useConversationScroll({
       const width = container.clientWidth;
       const occlusion = measureComposerOcclusion(container);
       const maxScroll = maxScrollTop(height, container.clientHeight);
-      // Whether the reader was at the end *before* this layout change. Asking
-      // afterwards would answer about a page that has already grown, so every
-      // streamed token would read as "the reader is no longer at the end".
-      const previousMaxScroll = maxScrollTop(lastContentHeightRef.current, container.clientHeight);
+      // Whether the reader was at the end *before* this layout change, judged
+      // against the page and the viewport that were there at the time. Asking
+      // afterwards answers about a page that has already grown or a window that
+      // has already shrunk, so a streamed token would read as "no longer at the
+      // end" and a shorter window would silently stop following.
+      const previousMaxScroll = maxScrollTop(
+        lastContentHeightRef.current,
+        lastClientHeightRef.current,
+      );
       const wasAtEnd = container.scrollTop >= previousMaxScroll - BOTTOM_EPSILON_PX;
       // Growth that came from a reflow, or from the composer itself, is not
       // something the reader has not been shown. The composer is a sibling of
@@ -628,6 +670,7 @@ export function useConversationScroll({
         width === lastWidthRef.current &&
         occlusion === lastComposerHeightRef.current;
       lastContentHeightRef.current = height;
+      lastClientHeightRef.current = container.clientHeight;
       lastWidthRef.current = width;
       lastComposerHeightRef.current = occlusion;
 
@@ -669,6 +712,9 @@ export function useConversationScroll({
     if (container === null || !active) return undefined;
     const noteGesture = () => {
       lastGestureAtRef.current = performance.now();
+      // A gesture is proof that what follows is the reader's own scroll, so any
+      // flag an earlier write left behind is stale by definition.
+      wroteScrollRef.current = false;
       // The reader's hand outranks a queued jump: cancel it now, not after the
       // delayed scroll sample it would otherwise arrive on.
       generationRef.current += 1;

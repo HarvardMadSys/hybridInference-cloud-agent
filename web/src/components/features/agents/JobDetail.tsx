@@ -34,11 +34,11 @@ import {
   describeCurrentTurn,
   describeHistoryTurns,
   eventBlockKey,
-  historyTurnsDigest,
   messageBlockKey,
-  navigationEntryDigest,
+  sameNavigationEntries,
   toNavigationEntry,
   type ConversationTurnDescription,
+  type ConversationTurnNavigationEntry,
 } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
@@ -52,7 +52,7 @@ import type { AgentEvent, AgentJob, AgentThreadMessage } from './types';
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
 import { TrajectoryView } from './TrajectoryView';
-import { useConversationScroll } from './useConversationScroll';
+import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
@@ -1339,14 +1339,9 @@ export function JobDetail({
   // body does not draw. The stored turns are memoized because they are
   // immutable; the newest one is rebuilt every commit because its rows are what
   // the transcript is drawing right now.
-  const navigationOptions = { attemptNo, currentAttemptNo: job.currentAttemptNo };
-  const historyTurns = useMemo(
-    () => describeHistoryTurns(job),
-    // The digest covers everything a stored turn's mark or body reads.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [historyTurnsDigest(job)],
-  );
-  const currentTurn = describeCurrentTurn(job, navigationOptions);
+  const currentAttemptNo = job.currentAttemptNo;
+  const historyTurns = describeHistoryTurns(job);
+  const currentTurn = describeCurrentTurn(job, { attemptNo, currentAttemptNo });
   const threadMessages = currentTurn.messages;
   const visibleEvents = currentTurn.events;
   const currentRewindAnchor = job.historyTurns
@@ -1354,17 +1349,20 @@ export function JobDetail({
     : undefined;
 
   // The rail renders two host elements per turn while `toDisplayJob()` hands
-  // the page a rebuilt job per streamed event. Keyed on the stored turns and on
-  // the newest mark's own digest, its props keep their identity while only the
-  // running turn's log grows.
-  const navigationEntries = useMemo(
-    () => [
+  // the page a rebuilt job per streamed event. Handing it the entries it was
+  // already showing keeps those marks from being rebuilt for a delta that only
+  // reaches the newest turn's body.
+  const previousEntriesRef = useRef<ConversationTurnNavigationEntry[]>([]);
+  const navigationEntries = useMemo(() => {
+    const fresh = [
       ...historyTurns.map((turn) => toNavigationEntry(turn)),
-      toNavigationEntry(currentTurn, navigationOptions),
-    ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [historyTurns, navigationEntryDigest(currentTurn, navigationOptions)],
-  );
+      toNavigationEntry(currentTurn, { attemptNo, currentAttemptNo }),
+    ];
+    const previous = previousEntriesRef.current;
+    if (sameNavigationEntries(previous, fresh)) return previous;
+    previousEntriesRef.current = fresh;
+    return fresh;
+  }, [attemptNo, currentAttemptNo, currentTurn, historyTurns]);
   const turnKeys = useMemo(() => navigationEntries.map((entry) => entry.key), [navigationEntries]);
   const conversationKey = conversationNavigationScope(job).conversationKey;
   const scroll = useConversationScroll({
@@ -1398,17 +1396,24 @@ export function JobDetail({
   const composerHeight = scroll.viewport.composerHeight;
 
   // Switching to an older run changes what the body shows, so it is a reading
-  // position, not a live one: the reader chose a fixed snapshot to look at.
+  // position, not a live one: the reader settled on a fixed snapshot. The
+  // selection also moves by itself — a queued turn starts, a retry arrives —
+  // and that must not stop the newest output from being followed.
   const attemptSelection = useRef({ jobId: job.id, attemptNo });
+  const chosenAttemptRef = useRef<number | null>(null);
   useEffect(() => {
     const previous = attemptSelection.current;
     attemptSelection.current = { jobId: job.id, attemptNo };
-    if (previous.jobId !== job.id || previous.attemptNo === attemptNo) return;
+    if (
+      !shouldHoldReading(previous, attemptSelection.current, chosenAttemptRef.current, liveAttempt)
+    )
+      return;
+    chosenAttemptRef.current = null;
     scroll.holdReading();
-    // `scroll` changes identity on every measurement; the guard above is what
-    // decides whether this is an attempt switch at all.
+    // `scroll` changes identity on every measurement; the judgement above is
+    // what decides whether this is the reader's choice at all.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attemptNo, job.id]);
+  }, [attemptNo, job.id, liveAttempt]);
 
   const currentReplyId = [...threadMessages]
     .reverse()
@@ -1699,7 +1704,10 @@ export function JobDetail({
                           <button
                             key={attempt.no}
                             type="button"
-                            onClick={() => setAttemptNo(attempt.no)}
+                            onClick={() => {
+                              chosenAttemptRef.current = attempt.no;
+                              setAttemptNo(attempt.no);
+                            }}
                             className={`rounded-md px-2 py-1 ${
                               attempt.no === attemptNo
                                 ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900'

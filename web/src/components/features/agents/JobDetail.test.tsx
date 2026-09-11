@@ -2048,8 +2048,19 @@ describe('conversation turn navigation', () => {
   };
 
   // Turn two of a conversation that already has turn one behind it.
-  function multiTurnJob() {
-    return makeJob({ turnNo: 2, historyTurns: [EARLIER_TURN] });
+  function multiTurnJob(overrides: Partial<AgentJob> = {}) {
+    return makeJob({ turnNo: 2, historyTurns: [EARLIER_TURN], ...overrides });
+  }
+
+  // A settled, shared conversation, where the stored turns offer actions.
+  function forkableJob(historyForkable: boolean) {
+    return multiTurnJob({
+      state: 'done',
+      sandboxId: 'asbx_1',
+      workspaceShared: true,
+      nativeForkAvailable: true,
+      historyTurns: [{ ...EARLIER_TURN, forkable: historyForkable }],
+    });
   }
 
   it('offers a directory only once there is more than one turn to navigate', () => {
@@ -2075,6 +2086,52 @@ describe('conversation turn navigation', () => {
     await waitFor(() =>
       expect(within(panel).getAllByRole('button')[1]).toHaveAttribute('aria-current', 'true'),
     );
+  });
+
+  it('offers forking on a stored turn as soon as the API says it is ready', () => {
+    // Nothing about the turn's structure changes when the platform finishes
+    // preparing its native session; a cache keyed on counts would keep serving
+    // the stored turn it derived before that, with no Fork button on it.
+    const { container, rerender } = render(<JobDetail job={forkableJob(false)} />);
+    const storedTurn = () => {
+      const section = container.querySelector('[data-turn-key="ajob_0"]');
+      if (section === null) throw new Error('the stored turn is not rendered');
+      return within(section as HTMLElement);
+    };
+    expect(storedTurn().queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
+
+    rerender(<JobDetail job={forkableJob(true)} />);
+    expect(storedTurn().getByRole('button', { name: 'Fork from here' })).toBeInTheDocument();
+  });
+
+  it('renders a stored row that changed without the list growing', () => {
+    // A tool result folding into its call leaves the row count alone and
+    // rewrites the row's content; the body must show what the events say now.
+    const withOutput = {
+      ...EARLIER_TURN,
+      events: [
+        {
+          kind: 'tool_use' as const,
+          tool: 'Bash',
+          detail: 'pytest -q',
+          output: ['711 tests passed in the stored turn'],
+          attemptNo: 1,
+          sourceEventId: 11,
+        },
+      ],
+    };
+    const withoutOutput = {
+      ...withOutput,
+      events: [{ ...withOutput.events[0], output: undefined }],
+    };
+    const { rerender } = render(
+      <JobDetail job={multiTurnJob({ historyTurns: [withoutOutput] })} />,
+    );
+    expect(screen.getByText('Waiting for the tool result…')).toBeInTheDocument();
+
+    rerender(<JobDetail job={multiTurnJob({ historyTurns: [withOutput] })} />);
+    expect(screen.getByText('711 tests passed in the stored turn')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
   });
 
   it('anchors every rendered turn and row for the scroll controller', () => {
