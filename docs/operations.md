@@ -258,10 +258,14 @@ text. Two details that only a live run shows: the era probe falls back to the
 handshake against a server that answers `-32601`, and the tool's *namespaced*
 name never leaves the platform — the upstream is addressed by its own.
 
-Reproducing that needs a Postgres, the pinned pi, and a stub upstream; the
-seams it crosses are exactly the ones the per-layer tests do not, which is why
-it is worth redoing after any change to the merged endpoint, the host, or the
-bridge.
+It is `tests/external/test_agent_mcp_end_to_end.py`, and it runs in seconds:
+the two ends (the user's server and the model) are threaded HTTP stubs the test
+starts itself, the relay is the real application on a real socket, and the CLI
+is installed at the version the sandbox Dockerfile pins. It skips rather than
+fails without Postgres, npm or the network, and it is in the external tier,
+which is run deliberately rather than as part of the default gate — the seams
+it crosses are exactly the ones no per-layer test does, so it is worth running
+after any change to the merged endpoint, the host or the bridge.
 
 **An adapter may claim MCP only when it can do both halves**: point the CLI at
 the platform's relay, *and* stop it reading any other MCP source. A runtime that
