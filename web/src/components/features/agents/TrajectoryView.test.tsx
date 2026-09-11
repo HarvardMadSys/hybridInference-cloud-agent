@@ -2,7 +2,7 @@
 import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentThreadEventApi } from '@/lib/api/agents';
@@ -66,7 +66,10 @@ function Harness({
 }) {
   const [query, setQuery] = useState(initialQuery);
   const [selected, setSelected] = useState<string | null>(null);
-  const steps = buildTrajectorySteps(events);
+  // Memoized the way the page memoizes them: a query change must not rebuild
+  // the steps, or an effect that depends on them would hide the difference
+  // between "the list changed" and "the filter changed".
+  const steps = useMemo(() => buildTrajectorySteps(events), [events]);
   return (
     <TrajectoryView
       events={events}
@@ -534,5 +537,84 @@ describe('TrajectoryView overview', () => {
     });
 
     expect(domain().style.left).not.toBe(first);
+  });
+
+  it('brings the interval into view once the search stops hiding its first row', () => {
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    const original = HTMLElement.prototype.scrollIntoView;
+    const scroll = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scroll;
+    try {
+      // The interval covers the first steps and the search hides all of them,
+      // so there is no row to bring into view yet.
+      fireEvent.change(screen.getByLabelText('Search steps'), { target: { value: 'step 8' } });
+      drag(0, 100);
+      expect(screen.getByRole('button', { name: /of 8 · Clear/ })).toBeInTheDocument();
+
+      scroll.mockClear();
+      fireEvent.change(screen.getByLabelText('Search steps'), { target: { value: '' } });
+
+      // Clearing the query rebuilds the visible rows, not the steps.
+      expect(scroll).toHaveBeenCalled();
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
+  it('cancels the gesture in flight on Escape, edge pan included', () => {
+    vi.useFakeTimers();
+    const { container } = render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    drag(0, 100);
+    expect(container.querySelector('[data-timeline-focus="outside"]')).not.toBeNull();
+
+    pointer('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 410, clientY: 10 });
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    fireEvent.keyDown(track(), { key: 'Escape' });
+
+    const parked = domain().style.left;
+    expect(container.querySelector('[data-timeline-selection][data-dragging="true"]')).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(domain().style.left).toBe(parked);
+
+    // The release must not commit the selection the reader just cancelled.
+    pointer('pointerup', { pointerId: 1, clientX: 410, clientY: 10 });
+    expect(container.querySelector('[data-timeline-focus="outside"]')).toBeNull();
+  });
+
+  it('walks into steps appended while the pointer is held at an edge', () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    pointer('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 410, clientY: 10 });
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+
+    const grown = [
+      ...MANY,
+      ...MANY.map((item, index) =>
+        event({ id: index + 9, payload: { text: `new step ${index + 9}` } }),
+      ),
+    ];
+    rerender(<Harness events={grown} />);
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    pointer('pointerup', { pointerId: 1, clientX: 410, clientY: 10 });
+
+    // A gesture that had reached the old end carries on into the steps that
+    // arrived while it was held.
+    expect(document.querySelectorAll('[data-timeline-focus="inside"]').length).toBeGreaterThan(8);
   });
 });

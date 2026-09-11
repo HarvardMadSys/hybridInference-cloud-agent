@@ -178,9 +178,11 @@ function ExecutionOverview({
   } | null>(null);
   const edgeFrameRef = useRef<number | null>(null);
   const [viewport, setViewport] = useState<TimelineViewport>(null);
-  // The frame loop advances between renders, so it keeps its own copy of the
-  // window rather than reading a closure the last render produced.
+  // The frame loop runs between renders, so it keeps its own copy of the window
+  // and of the projection it is walking: a step appended over SSE must reach a
+  // gesture that is already in flight.
   const viewportRef = useRef<TimelineViewport>(null);
+  const modelRef = useRef<TimelineModel>(model);
   const [animate, setAnimate] = useState(false);
   const [hover, setHover] = useState<{ fraction: number; key: string | null } | null>(null);
   const [draft, setDraft] = useState<DomainRange | null>(null);
@@ -189,6 +191,10 @@ function ExecutionOverview({
   useEffect(() => {
     viewportRef.current = viewport;
   }, [viewport]);
+
+  useEffect(() => {
+    modelRef.current = model;
+  }, [model]);
 
   const window_ = activeWindow(viewport, model, model.minimumWindow);
   const windowSpan = windowDuration(window_);
@@ -304,9 +310,13 @@ function ExecutionOverview({
    *
    * A pointermove only arrives when the pointer moves, so a reader who drags to
    * the edge and stops would otherwise get one step and then nothing, and could
-   * never select past what is on screen. The loop runs on frames and stops when
-   * the pointer leaves the edge zone, the window hits the end of the domain, or
-   * the gesture ends.
+   * never select past what is on screen. The loop runs on frames until the
+   * pointer leaves the edge zone or the gesture ends.
+   *
+   * Every frame reads the projection through a ref rather than the render that
+   * started the gesture: a step appended while the pointer is held extends the
+   * domain, and a gesture that had already reached the old end has to be able to
+   * carry on into it.
    */
   const runEdgePan = (): void => {
     if (edgeFrameRef.current !== null) return;
@@ -316,20 +326,24 @@ function ExecutionOverview({
       if (edge === null || edge.direction === 0) return;
       const current = viewportRef.current;
       if (current === null) return;
+      const live = modelRef.current;
       const next = shiftedWindow(
         current,
         -edge.direction * EDGE_PAN_FRAME_FRACTION * edge.strength,
-        model,
-        model.minimumWindow,
+        live,
+        live.minimumWindow,
       );
-      if (next.start === current.start) return;
-      viewportRef.current = next;
-      setAnimate(false);
-      setViewport(next);
+      if (next.start !== current.start) {
+        viewportRef.current = next;
+        setAnimate(false);
+        setViewport(next);
+      }
       const drag = dragRef.current;
       if (drag !== null) {
         setDraft(orderedRange(drag.anchorValue, valueAtFraction(next, edge.fraction)));
       }
+      // Held at the end of the domain, the loop keeps its frame: the projection
+      // can grow under the same gesture.
       edgeFrameRef.current = requestAnimationFrame(step);
     };
     edgeFrameRef.current = requestAnimationFrame(step);
@@ -445,6 +459,15 @@ function ExecutionOverview({
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.key !== 'Escape') return;
+    // Escape cancels the gesture in flight, not only what it has already
+    // produced. Without this, a draft interval and the frame loop walking the
+    // window would carry on after the reader asked for it to stop, and the
+    // release would commit the selection they just cancelled.
+    stopEdgePan();
+    dragRef.current = null;
+    panRef.current = null;
+    setPanning(false);
+    setDraft(null);
     if (range !== null) {
       event.preventDefault();
       commitRange(null);
@@ -744,11 +767,13 @@ export function TrajectoryView({
     if (first === undefined) return;
     const node = document.querySelector<HTMLElement>(`[data-step-key="${escapeKey(first.key)}"]`);
     // Hidden by the search right now: leave the interval unhandled so its first
-    // row is still reached when the filter stops hiding it.
+    // row is still reached when the filter stops hiding it. `visible` is a
+    // dependency for exactly that: the query is what brings the row back, and
+    // the steps it filters are memoized by the caller.
     if (node === null) return;
     node.scrollIntoView?.({ block: 'nearest' });
     scrolledRange.current = range;
-  }, [focused, range, steps]);
+  }, [focused, range, steps, visible]);
 
   function download() {
     const blob = new Blob([toSessionLog(events)], { type: 'application/x-ndjson' });
