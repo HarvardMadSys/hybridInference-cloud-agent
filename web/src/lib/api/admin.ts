@@ -22,6 +22,82 @@ const RUNTIME_VERSIONS = '/admin/agent/runtime-versions';
 /** Status values the control plane stores; see `cloud_agent/host_pool.py`. */
 export type AgentHostStatus = 'enrolling' | 'online' | 'draining' | 'disabled' | 'offline';
 
+/**
+ * Why a CPU figure is absent. The vocabulary is fixed by the control plane
+ * (`cloud_agent/capacity_protocol.py`) and every member means something
+ * different to the operator, so the page maps each one to its own label rather
+ * than collapsing them into a single "unknown".
+ */
+export type CpuMissingReason =
+  | 'warming_up'
+  | 'counter_reset'
+  | 'source_unavailable'
+  | 'invalid_sample';
+
+/** Why a memory figure is absent. Memory has no warm-up: it is instantaneous. */
+export type MemoryMissingReason = 'source_unavailable' | 'invalid_sample';
+
+export type CapacityInventoryStatus = 'available' | 'partial' | 'unavailable';
+
+/**
+ * One execution environment's retained-container count, as its runner saw it.
+ *
+ * Counts are of **containers**, not of chat memberships: a Fork adds a member
+ * to a group that already holds one container, so counting memberships would
+ * report a machine as busier every time somebody branched a conversation.
+ */
+export interface AgentHostCapacityInventory {
+  /** Deployment namespace the counts were scoped to, or null when unscoped. */
+  namespace: string | null;
+  status: CapacityInventoryStatus;
+  /** Null — never 0 — when the status is 'unavailable'. */
+  running: number | null;
+  stopped: number | null;
+  /** Fixed keys: created, paused, restarting, removing, dead. */
+  other_states: Record<string, number | null> | null;
+  /** Bounded identifier, e.g. 'unscoped_legacy_containers' or 'docker_timeout'. */
+  reason: string | null;
+  /** Chat containers carrying no namespace label; counted in no total. */
+  unscoped_legacy_containers: number | null;
+  /** One sandbox id was seen on more than one container. */
+  duplicate_sandbox_id: boolean;
+}
+
+/**
+ * The last accepted host observation, with the server's own accounting.
+ *
+ * A null `capacity` on a host means no usable observation has ever arrived,
+ * which is not the same as an idle machine. Nothing here is ever defaulted to
+ * zero on the way to the screen.
+ */
+export interface AgentHostCapacity {
+  schema_version: number;
+  source: string;
+  sample_id: string;
+  linux_boot_id: string | null;
+  /** 0..100, already normalized across all CPUs. Null when not measured. */
+  cpu_percent: number | null;
+  cpu_logical_count: number | null;
+  /** The interval `cpu_percent` averages, in seconds. */
+  cpu_window_seconds: number | null;
+  cpu_missing_reason: CpuMissingReason | null;
+  memory_total_bytes: number | null;
+  memory_available_bytes: number | null;
+  /** total - available. */
+  memory_used_bytes: number | null;
+  /** 0..100. */
+  memory_used_percent: number | null;
+  memory_missing_reason: MemoryMissingReason | null;
+  inventory: AgentHostCapacityInventory | null;
+  /** ISO-8601 UTC; when the control plane accepted the block. */
+  received_at: string;
+  /** ISO-8601 UTC; when the observation was taken. */
+  sampled_at: string;
+  /** Age at the server's read instant, in seconds. Never negative. */
+  sample_age_seconds: number;
+  freshness: 'fresh' | 'stale';
+}
+
 export interface AgentRunnerHost {
   host: string;
   active: boolean;
@@ -69,6 +145,16 @@ export interface AgentRunnerHost {
    * a version absent from it, because it is not in the image.
    */
   runtime_versions_available: Record<string, string[]> | null;
+  /**
+   * Generation of this host's capacity data; rotated by re-enrollment. A client
+   * uses it to drop a curve that belongs to the machine this one replaced.
+   */
+  capacity_epoch: string | null;
+  /**
+   * The last accepted observation, or null when none has ever arrived — which
+   * is not the same as an idle machine and must not be rendered as zero.
+   */
+  capacity: AgentHostCapacity | null;
 }
 
 export interface AgentRunnerHostPool {
@@ -81,6 +167,55 @@ export interface AgentRunnerHostPool {
    * runs whatever its claiming host reports as the image default.
    */
   runtime_versions: Record<string, string>;
+  /**
+   * The database instant this read was taken at, by the server's clock. Every
+   * age on the page is measured from it, plus locally observed elapsed time,
+   * rather than from the browser's wall clock.
+   */
+  observed_at: string | null;
+}
+
+/** The windows the capacity-history endpoint serves. */
+export type CapacityRange = '1h' | '6h' | '24h';
+
+/**
+ * One minute of history: an observation, or an explicit gap.
+ *
+ * A bucket nobody observed carries nulls rather than zeroes, and that is the
+ * whole point of the shape — a machine measured at 3% and a machine nobody
+ * measured are different facts.
+ */
+export interface AgentHostCapacityPoint {
+  /** ISO-8601 UTC; the start of the minute. */
+  bucket_at: string;
+  /** Null means this minute was not observed — an explicit gap. */
+  sampled_at: string | null;
+  linux_boot_id: string | null;
+  cpu_percent: number | null;
+  cpu_logical_count: number | null;
+  cpu_window_seconds: number | null;
+  cpu_missing_reason: CpuMissingReason | null;
+  memory_total_bytes: number | null;
+  memory_available_bytes: number | null;
+  memory_used_bytes: number | null;
+  memory_used_percent: number | null;
+  memory_missing_reason: MemoryMissingReason | null;
+}
+
+export interface AgentHostCapacityHistory {
+  host: string;
+  capacity_epoch: string | null;
+  /** ISO-8601 UTC, inclusive; floored to the minute. */
+  since: string;
+  /** ISO-8601 UTC, inclusive; floored to the minute. */
+  until: string;
+  /** ISO-8601 UTC; when the control plane read this window. */
+  observed_at: string;
+  /** Bucket width. */
+  resolution_seconds: number;
+  /** Each point is one observation per minute, not a continuous average. */
+  semantics: 'sampled_observation';
+  points: AgentHostCapacityPoint[];
 }
 
 export interface HostEnrollToken {
@@ -89,8 +224,33 @@ export interface HostEnrollToken {
   expires_at: string;
 }
 
-export async function getAgentRunnerHosts(): Promise<AgentRunnerHostPool> {
-  return jsonOrThrow<AgentRunnerHostPool>(await fetchWithAuth(API_BASE, HOSTS));
+export async function getAgentRunnerHosts(signal?: AbortSignal): Promise<AgentRunnerHostPool> {
+  return jsonOrThrow<AgentRunnerHostPool>(await fetchWithAuth(API_BASE, HOSTS, { signal }));
+}
+
+/**
+ * Read one host's stored CPU and memory history.
+ *
+ * Separate from the pool on purpose: the table is the page's main information
+ * and it loads on every poll, while a 24-hour curve is wanted only when an
+ * operator opens one machine.
+ *
+ * `host` is the enrollment name — the same identity the actions use, not the
+ * physical-group label. An unknown host is a 404 and an unsupported range a
+ * 422, both surfaced by `jsonOrThrow` rather than swallowed here.
+ */
+export async function getAgentRunnerHostCapacityHistory(
+  host: string,
+  range: CapacityRange,
+  signal?: AbortSignal,
+): Promise<AgentHostCapacityHistory> {
+  const query = new URLSearchParams({ range }).toString();
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `${HOSTS}/${encodeURIComponent(host)}/capacity-history?${query}`,
+    { signal },
+  );
+  return jsonOrThrow<AgentHostCapacityHistory>(resp);
 }
 
 /** Pin new-chat placement; existing retained groups stay on their owning host. */

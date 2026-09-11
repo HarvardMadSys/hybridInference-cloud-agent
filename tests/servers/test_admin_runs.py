@@ -189,6 +189,58 @@ async def test_empty_terminal_turn_has_no_promised_future_usage(setup):
         response = await client.get(PREFIX + "/ajob_other", headers=ADMIN)
     assert response.json()["usage"]["ledger"]["status"] == "unavailable"
     assert response.json()["usage"]["runtime"]["input_tokens"] is None
+    assert response.json()["session_statistics"] == {
+        "model_seconds": None,
+        "tool_seconds": None,
+        "ttft_seconds": None,
+        "output_tokens_per_second": None,
+        "timing_source": "message_events",
+    }
+
+
+async def test_session_statistics_reuses_safe_usage_inputs_without_additional_reads(setup):
+    app, queries, store, gateway = setup
+    queries.usage_inputs.return_value = {
+        "job_ids": ["ajob_other"],
+        "attempts": [{"job_id": "ajob_other", "attempt_id": 10, "started_at": START}],
+        "events": [
+            {
+                "job_id": "ajob_other",
+                "attempt_id": 10,
+                "event_type": kind,
+                "seq": seq,
+                "created_at": START + timedelta(seconds=seconds),
+                "payload": payload,
+            }
+            for seq, (seconds, kind, payload) in enumerate(
+                [
+                    (0, "lifecycle", {}),
+                    (2, "tool_use", {"id": "hashed-identity"}),
+                    (8, "tool_result", {"tool_use_id": "hashed-identity"}),
+                    (10, "message", {"usage": {"output_tokens": 80}}),
+                ],
+                start=1,
+            )
+        ],
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json()["session_statistics"] == {
+        "model_seconds": 4,
+        "tool_seconds": 6,
+        "ttft_seconds": 2,
+        "output_tokens_per_second": 20,
+        "timing_source": "message_events",
+    }
+    assert "hashed-identity" not in response.text
+    queries.usage_inputs.assert_awaited_once_with("ajob_other")
+    queries.event_content.assert_not_awaited()
+    queries.resources.assert_not_awaited()
+    store.get_job.assert_not_awaited()
+    store.job_usage_inputs.assert_not_awaited()
+    store.record_admin_action.assert_not_awaited()
+    assert gateway.asked == []
 
 
 async def test_resource_read_keeps_message_timing_and_unavailable_whole_turn(setup):

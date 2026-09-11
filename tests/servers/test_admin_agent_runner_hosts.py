@@ -48,13 +48,15 @@ class FakeHostStore:
     async def active_runner_host(self) -> str | None:
         return self.active_host
 
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
+    async def runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], datetime]:
         rows = sorted(
             ({**row, "is_active": row["host"] == self.active_host} for row in self.rows.values()),
             key=lambda row: row["last_seen_at"],
             reverse=True,
         )
-        return rows, self.active_host, dict(self.runtime_versions)
+        return rows, self.active_host, dict(self.runtime_versions), datetime.now(timezone.utc)
 
     async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
         # Mirrors the store: a version no host offers is refused, never stored.

@@ -333,7 +333,11 @@ To finish it:
    machine runs another stack of this service. `PROD_HOST_SLOTS` defaults to
    three and drives both scheduler slots and runner replicas;
    `PROD_RETAINED_DOCKER_DATA_ROOT` defaults to `/var/lib/docker` and must name
-   the daemon's actual durable data root.
+   the daemon's actual durable data root. If multiple sibling stacks remain on
+   that machine during a migration, set `PROD_SIBLING_COMPOSE_PROJECTS` to their
+   comma-separated project names. Otherwise the workflow uses the single
+   `STAGING_SANDBOX_COMPOSE_PROJECT`; do not turn that staging variable into a
+   list or disable the stray-stack guard.
 4. **Configure the production gateway first** — `IDENTITY_JWT_PRIVATE_KEY`,
    `IDENTITY_ALLOWED_REDIRECTS`, and a `GATEWAY_GRANT_DISPATCH_TOKEN` that is
    *not* staging's — then confirm it from outside:

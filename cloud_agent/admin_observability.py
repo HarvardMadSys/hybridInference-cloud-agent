@@ -17,6 +17,9 @@ from cloud_agent.grant_usage import (
     GatewayCursor,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
 from cloud_agent.ledger import JobUsageResponse  # noqa: TC001 — Pydantic resolves this at runtime.
+from cloud_agent.session_statistics import (
+    SessionStatistics,  # noqa: TC001 — Pydantic resolves this at runtime.
+)
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 
 
@@ -81,6 +84,7 @@ class AdminRunDetail(BaseModel):
     run: AdminRun
     attempts: list[AdminAttempt]
     usage: JobUsageResponse
+    session_statistics: SessionStatistics | None = None
     capabilities: AdminCapabilities = Field(default_factory=AdminCapabilities)
 
 

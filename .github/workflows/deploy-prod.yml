@@ -212,10 +212,10 @@ jobs:
         env:
           DEPLOY_ROOT: ${{ vars.PROD_SANDBOX_DEPLOY_ROOT }}
           COMPOSE_PROJECT: ${{ vars.PROD_SANDBOX_COMPOSE_PROJECT }}
-          # Staging's stack on this same machine is expected company, not a
-          # stray. Naming it keeps the guard pointed at what it is actually for:
-          # a second copy of *this* stack under a name nobody meant.
-          SIBLING_COMPOSE_PROJECTS: ${{ vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
+          # During a migration both the old and new staging projects may be
+          # present. Accept an explicit CSV without changing staging's own
+          # single project name or disabling the stray-stack guard.
+          SIBLING_COMPOSE_PROJECTS: ${{ vars.PROD_SIBLING_COMPOSE_PROJECTS || vars.STAGING_SANDBOX_COMPOSE_PROJECT }}
           AGENT_HOST_SLOTS: ${{ vars.PROD_HOST_SLOTS || '3' }}
           AGENT_RUNNER_REPLICAS: ${{ vars.PROD_HOST_SLOTS || '3' }}
           AGENT_CHAT_IDLE_TIMEOUT_S: "1800"

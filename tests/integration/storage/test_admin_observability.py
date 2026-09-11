@@ -332,9 +332,28 @@ async def test_metadata_projection_bounds_names_and_never_fetches_nested_content
     inputs = await queries.usage_inputs(job["id"])
     assert "PRIVATE" not in json.dumps(inputs, default=str)
     projected = inputs["events"][0]["payload"]
-    assert set(projected) == {"usage", "usage_id", "usage_scope", "has_text"}
+    assert set(projected) == {"usage", "usage_id", "usage_scope", "has_text", "id", "tool_use_id"}
     assert projected["usage"] == {"output_tokens": 20}
     assert len(projected["usage_id"]) == 64
+    assert len(projected["id"]) == 64
+    assert projected["tool_use_id"] is None
+    assert inputs["attempts"][0]["attempt_id"] == attempt
+
+
+async def test_usage_projection_pairs_hashed_tools_without_fetching_their_content(store):
+    job, attempt, _ = await _seed_attempt(store, grant_id=None)
+    identity = "PRIVATE-TOOL-IDENTITY"
+    await _event(store, job, attempt, 1, "tool_use", {"id": identity, "input": "PRIVATE-INPUT"})
+    await _event(
+        store, job, attempt, 2, "tool_result", {"tool_use_id": identity, "text": "PRIVATE-RESULT"}
+    )
+    await _event(store, job, attempt, 3, "tool_use", {"id": {"hidden": "PRIVATE-OBJECT"}})
+    inputs = await AdminRunQueries(store._pool).usage_inputs(job["id"])
+    assert "PRIVATE" not in json.dumps(inputs, default=str)
+    start, result, malformed = [event["payload"] for event in inputs["events"]]
+    assert start["id"] == result["tool_use_id"]
+    assert len(start["id"]) == 64
+    assert malformed["id"] is None
 
 
 async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attempt_totals(store):

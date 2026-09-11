@@ -168,6 +168,13 @@ function detail(overrides: Partial<AdminRunDetail> = {}): AdminRunDetail {
       },
     ],
     usage: usage(),
+    session_statistics: {
+      model_seconds: 1667,
+      tool_seconds: 6490,
+      ttft_seconds: 2.9,
+      output_tokens_per_second: 257,
+      timing_source: 'message_events',
+    },
     capabilities: { llm_requests: true },
     ...overrides,
   };
@@ -805,7 +812,7 @@ describe('admin run observation', () => {
       expect(fn).not.toHaveBeenCalled();
   });
 
-  it('loads metadata first and shows source-scoped accounting without inventing request metrics', async () => {
+  it('shows session statistics and one token usage summary without usage diagnostics', async () => {
     render(<AdminRunPage />);
     await screen.findByRole('article', { name: 'Execution 1 event 1' });
     expect(getAdminRunActivity).toHaveBeenCalledWith(
@@ -815,11 +822,27 @@ describe('admin run observation', () => {
     );
     expect(revealAdminEventContent).not.toHaveBeenCalled();
     expect(screen.queryByText('private command')).not.toBeInTheDocument();
-    const calls = screen.getByRole('row', { name: 'Model calls 2 Unavailable' });
-    expect(calls).toBeInTheDocument();
-    expect(screen.getByText('$0.0097')).toBeInTheDocument();
-    expect(screen.getByText('Not finalized')).toBeInTheDocument();
-    expect(screen.getByText(/Rows missing metrics: reasoning: 2/)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Session statistics' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Token usage' })).toBeVisible();
+    expect(screen.getByText('27m 47s')).toBeVisible();
+    const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
+    expect(totals.getByRole('row', { name: 'Model calls 2' })).toBeVisible();
+    expect(totals.getByText('$0.0097')).toHaveAttribute('title', '0.00978569');
+    expect(screen.queryByText(/Gateway totals for this run/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Estimates from recorded activity/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Gateway:/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Finalized')).not.toBeInTheDocument();
+    expect(screen.queryByText('Not finalized')).not.toBeInTheDocument();
+    expect(screen.queryByText('Accounting update in progress')).not.toBeInTheDocument();
+    expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
+    expect(screen.queryByText('Gateway ledger')).not.toBeInTheDocument();
+    expect(screen.queryByText('Runtime reported')).not.toBeInTheDocument();
+    expect(screen.queryByText('Attribution windows')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Snapshot:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Rows missing metrics:/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('table', { name: 'Usage source comparison' }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText('LLM requests')).toBeInTheDocument();
     // Collapsed by default: naming the surface must not read the gateway.
     expect(getAdminLlmRequestSources).not.toHaveBeenCalled();
@@ -828,6 +851,31 @@ describe('admin run observation', () => {
     expect(
       screen.queryByRole('button', { name: /Publish|View changes|Raw events/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it('keeps incomplete, estimated and unavailable usage clear in the summary', async () => {
+    const partial = usage();
+    partial.ledger.missing_attempts = 1;
+    partial.ledger.estimated_calls = 2;
+    partial.ledger.unknown_rows!.tokens_in = 1;
+    partial.ledger.unknown_rows!.spent_usd = 1;
+    vi.mocked(getAdminRun).mockResolvedValue(
+      detail({ usage: partial, session_statistics: undefined }),
+    );
+
+    render(<AdminRunPage />);
+    await screen.findByRole('heading', { name: 'Token usage' });
+    const statistics = within(screen.getByRole('region', { name: 'Session statistics' }));
+    expect(statistics.getAllByText('Unavailable')).toHaveLength(4);
+    const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
+    expect(
+      totals.getByRole('row', { name: 'Input tokens (including cache) 40,086 (1 unknown)' }),
+    ).toBeVisible();
+    expect(totals.getByRole('row', { name: 'Cost (USD) $0.0097 (1 unknown)' })).toBeVisible();
+    expect(totals.getByRole('row', { name: 'Reasoning tokens Unavailable' })).toBeVisible();
+    expect(screen.getByText('1 execution(s) have no gateway totals.')).toBeVisible();
+    expect(screen.getByText('2 calls contain estimated usage.')).toBeVisible();
+    expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
   });
 
   it('keeps zero-coverage totals unavailable and exposes timing provenance and incomplete process evidence', async () => {
@@ -877,7 +925,9 @@ describe('admin run observation', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Content access could not be recorded',
     );
-    expect(screen.getByText('$0.0097')).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('table', { name: 'Token usage totals' })).getByText('$0.0097'),
+    ).toBeVisible();
     expect(screen.queryByText('private command')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Reveal content' }));
     await screen.findByText(/private command/);
@@ -931,6 +981,16 @@ describe('admin run observation', () => {
       expect.any(AbortSignal),
     );
     expect(screen.queryByRole('article', { name: 'Execution 2 event 1' })).not.toBeInTheDocument();
+    // Activity and resources follow the selected history. Both summary
+    // sections continue to describe the entire run without another detail read.
+    expect(getAdminRun).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('27m 47s')).toBeVisible();
+    expect(screen.getByText('257 tok/s')).toBeVisible();
+    expect(
+      within(screen.getByRole('table', { name: 'Token usage totals' })).getByRole('row', {
+        name: 'Model calls 2',
+      }),
+    ).toBeVisible();
     const pending = deferred<Awaited<ReturnType<typeof revealAdminEventContent>>>();
     vi.mocked(revealAdminEventContent).mockReturnValueOnce(pending.promise);
     fireEvent.click(screen.getAllByRole('button', { name: 'Reveal content' })[0]);

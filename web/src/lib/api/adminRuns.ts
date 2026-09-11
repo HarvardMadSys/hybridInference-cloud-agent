@@ -55,10 +55,21 @@ export interface AdminAttempt {
   finished_at: string | null;
 }
 
+/** Estimates from recorded activity, aggregated across this run's executions. */
+export interface AdminSessionStatistics {
+  model_seconds: number | null;
+  tool_seconds: number | null;
+  ttft_seconds: number | null;
+  output_tokens_per_second: number | null;
+  timing_source: 'message_events';
+}
+
 export interface AdminRunDetail {
   run: AdminRun;
   attempts: AdminAttempt[];
   usage: AgentJobUsageApi;
+  /** Older control planes do not include session statistics. */
+  session_statistics?: AdminSessionStatistics | null;
   capabilities: { llm_requests: boolean };
 }
 

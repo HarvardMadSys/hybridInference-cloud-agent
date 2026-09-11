@@ -848,6 +848,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     """
     import asyncpg
 
+    from cloud_agent.capacity_history import collect_host_capacity_history
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
@@ -894,21 +895,30 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         reaper = asyncio.create_task(reap_expired_attempts(store, grants=app.state.grants))
         snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(store))
         ledger_collector = asyncio.create_task(collect_usage_snapshots(store, app.state.grants))
+        # Host capacity history keeps filling whether or not anybody has the
+        # admin page open — that is the whole reason it lives here rather than
+        # in the browser. Its own task and its own budgets, so a slow write
+        # cannot delay a heartbeat or the reaper.
+        capacity_history = asyncio.create_task(collect_host_capacity_history(store))
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
         _BACKGROUND_TASKS.add(ledger_collector)
+        _BACKGROUND_TASKS.add(capacity_history)
         reaper.add_done_callback(_BACKGROUND_TASKS.discard)
         snapshot_coordinator.add_done_callback(_BACKGROUND_TASKS.discard)
         ledger_collector.add_done_callback(_BACKGROUND_TASKS.discard)
+        capacity_history.add_done_callback(_BACKGROUND_TASKS.discard)
         app.state.reaper_task = reaper
         app.state.snapshot_task = snapshot_coordinator
         app.state.ledger_task = ledger_collector
+        app.state.capacity_task = capacity_history
         _start_publisher(app, store)
         logger.info("cloud agent control plane started")
     else:
         app.state.reaper_task = None
         app.state.snapshot_task = None
         app.state.ledger_task = None
+        app.state.capacity_task = None
         app.state.publish_task = None
         logger.info("cloud agent relay listener started")
 
@@ -919,6 +929,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.reaper_task,
             app.state.snapshot_task,
             app.state.ledger_task,
+            app.state.capacity_task,
             app.state.publish_task,
         ):
             if task is None:

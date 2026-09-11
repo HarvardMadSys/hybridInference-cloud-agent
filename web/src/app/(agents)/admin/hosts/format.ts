@@ -18,13 +18,6 @@ export function formatAge(seconds: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-/** Slots as "2 / 4", or "2" where the host declares no ceiling. */
-export function formatSlots(host: AgentRunnerHost): string {
-  return host.slots_total === null
-    ? `${host.slots_used}`
-    : `${host.slots_used} / ${host.slots_total}`;
-}
-
 /**
  * Every (runtime, versions) pair the pool as a whole offers.
  *
@@ -78,6 +71,10 @@ export function serverInventory(hosts: AgentRunnerHost[], profile: string) {
     return {
       name,
       host,
+      // Every enrollment behind this physical name, for the capacity columns:
+      // one member's CPU is the machine's, but retained sandboxes are counted
+      // across all of them, and a legacy environment's containers are real.
+      members,
       available: Boolean(host?.enrolled && host.status === 'online'),
       selected: members.some((member) => member.active),
     };

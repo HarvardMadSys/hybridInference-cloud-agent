@@ -27,6 +27,7 @@ from cloud_agent.api.routes import _attempt_duration_ms, _attempt_resources, _re
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry
+from cloud_agent.session_statistics import summarize_session_statistics
 from cloud_agent.storage.admin_queries import AdminRunQueries
 from cloud_agent.storage.store import TERMINAL_STATES
 
@@ -95,9 +96,10 @@ async def get_admin_run(
 ) -> AdminRunDetail:
     """Read a turn's metadata and existing accounting without owner impersonation."""
     run = await _run(queries, job_id)
+    runtime_inputs = await queries.usage_inputs(job_id)
     usage = summarize_job_usage(
         ledger_rows=await _require_store(store).ledger_rows_for_job(job_id=job_id),
-        runtime_inputs=await queries.usage_inputs(job_id),
+        runtime_inputs=runtime_inputs,
         runtime=run["runtime"],
         terminal=run["state"] in TERMINAL_STATES,
     )
@@ -105,6 +107,7 @@ async def get_admin_run(
         run=AdminRun.model_validate(run),
         attempts=[AdminAttempt.model_validate(row) for row in await queries.attempts(job_id)],
         usage=usage,
+        session_statistics=summarize_session_statistics(**runtime_inputs),
     )
 
 
