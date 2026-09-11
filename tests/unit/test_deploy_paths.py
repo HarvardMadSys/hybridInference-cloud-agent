@@ -228,3 +228,42 @@ def test_every_deploy_job_records_which_environment_it_deployed(workflow: str, e
     assert all(value == expected for value in environments.values()), (
         f"{workflow} has jobs that deploy without recording it: {environments}"
     )
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    [".github/workflows/deploy-staging.yml", ".github/workflows/deploy-prod.yml"],
+)
+def test_every_deploy_job_authenticates_its_image_pulls(workflow: str):
+    """A deploy builds, and every base image it builds from comes from Docker Hub.
+
+    Anonymous, the allowance is per IP and shared with the other repository's
+    CI; it ran out twice on 2026-09-11 and took seven image jobs with it. A
+    machine-level login would cover this too, but it is not in git, does not
+    survive a rebuilt host, and on the execution host was never done at all.
+
+    Parameterized over both files, and asserted on both jobs, because the
+    failure is asymmetry: the control half authenticated and the host half not
+    is a deploy that half works, at a rate limit nobody chose.
+
+    The config directory is the other half. The runners on one host share a
+    `$HOME`, and `docker/login-action`'s post step logs out of whatever config
+    it used — which is how every finished image cell was logging the runner
+    user out of Docker Hub before this.
+    """
+    spec = yaml.safe_load((REPO / workflow).read_text(encoding="utf-8"))
+    for name, job in spec["jobs"].items():
+        steps = job.get("steps", [])
+        logins = [s for s in steps if str(s.get("uses", "")).startswith("docker/login-action")]
+        assert len(logins) == 1, f"{workflow}:{name} has {len(logins)} Docker Hub logins"
+        assert logins[0]["with"]["username"] == "${{ secrets.DOCKERHUB_USERNAME }}"
+
+        isolated = [s for s in steps if "DOCKER_CONFIG=" in str(s.get("run", ""))]
+        assert isolated, f"{workflow}:{name} logs in to the shared ~/.docker/config.json"
+
+        order = {id(step): index for index, step in enumerate(steps)}
+        deploy = next(s for s in steps if s.get("name") == "Deploy")
+        assert order[id(isolated[0])] < order[id(logins[0])] < order[id(deploy)], (
+            f"{workflow}:{name} must point DOCKER_CONFIG somewhere private, then log in, "
+            "then deploy"
+        )

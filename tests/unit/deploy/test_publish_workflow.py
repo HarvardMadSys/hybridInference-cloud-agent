@@ -121,10 +121,11 @@ def test_a_published_release_is_never_rebuilt_or_rewritten() -> None:
     assert "getReleaseByTag" in script
     assert "core.setOutput('existing', 'true')" in script
     assert "error.status !== 404" in script
-    assert job("artifacts")["if"] == "needs.commit.outputs.existing == ''"
-    assert job("publish")["if"] == "needs.commit.outputs.existing == ''"
+    for name in ("artifacts", "acceptance", "publish"):
+        assert job(name)["if"] == "needs.commit.outputs.existing == ''", name
     assert job("artifacts")["needs"] == "commit"
-    assert job("publish")["needs"] == ["commit", "artifacts"]
+    assert job("acceptance")["needs"] == ["commit", "artifacts"]
+    assert job("publish")["needs"] == ["commit", "acceptance"]
 
 
 # --------------------------------------------------------------------- matrix
@@ -146,7 +147,7 @@ def test_the_cells_are_the_ones_the_collector_assembles() -> None:
 
 
 def test_every_checkout_pins_the_vetted_commit() -> None:
-    for job_name in ("artifacts", "publish"):
+    for job_name in ("artifacts", "acceptance", "publish"):
         checkouts = [
             s for s in steps(job_name) if str(s.get("uses", "")).startswith("actions/checkout@")
         ]
@@ -266,19 +267,20 @@ def test_the_publish_job_has_no_escape_hatch() -> None:
     for candidate in steps("publish"):
         assert not candidate.get("continue-on-error"), candidate.get("name")
         assert "always()" not in str(candidate.get("if", "")), candidate.get("name")
-    collect = step("Collect what the cells published", "publish")["with"]
-    assert collect == {"pattern": "release-cell-*", "merge-multiple": True, "path": "cells"}
+    collect = step("Collect the documents", "publish")["with"]
+    assert collect == {"name": "release-documents", "path": "release"}
 
 
 def test_the_manifest_names_the_run_and_the_recipe_asset() -> None:
-    package = str(step("Package the recipe", "publish")["run"])
+    """Generated in the acceptance job, because that is the job that deploys it."""
+    package = str(step("Package the recipe", "acceptance")["run"])
     assert "build_recipe.py --output release/recipe.tar.gz" in package
     assert "RECIPE_SHA256=$(sha256sum release/recipe.tar.gz" in package
 
-    assemble = str(step("Assemble the manifest", "publish")["run"])
+    assemble = str(step("Assemble the manifest", "acceptance")["run"])
     assert "publish_inputs assemble" in assemble and "--cells cells" in assemble
 
-    manifest = str(step("Write the manifest", "publish")["run"])
+    manifest = str(step("Write the manifest", "acceptance")["run"])
     assert "deploy/release/release_manifest.py" in manifest
     assert (
         '--recipe-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/recipe.tar.gz"'
@@ -289,14 +291,74 @@ def test_the_manifest_names_the_run_and_the_recipe_asset() -> None:
         '--publisher-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"'
         in manifest
     )
-    assert "MANIFEST_SHA256=$(sha256sum release/release.json" in manifest
     assert (
-        position("Package the recipe", "publish")
-        < position("Assemble the manifest", "publish")
-        < position("Write the manifest", "publish")
+        position("Package the recipe", "acceptance")
+        < position("Assemble the manifest", "acceptance")
+        < position("Write the manifest", "acceptance")
+        < position("Deploy it", "acceptance")
+        < position("Hand the documents", "acceptance")
+    )
+    summary = str(step("Record what a distribution will pin", "publish")["run"])
+    assert "MANIFEST_SHA256=$(sha256sum release/release.json" in summary
+    assert (
+        position("Record what a distribution will pin", "publish")
         < position("Write the release notes", "publish")
         < position("Publish the release", "publish")
     )
+
+
+# ------------------------------------------------------------------ acceptance
+
+
+def test_a_release_is_deployed_before_it_is_published() -> None:
+    """The order that makes "published" mean "installs"."""
+    deploy = str(step("Deploy it", "acceptance")["run"])
+    assert "deploy/release/acceptance.py" in deploy
+    assert "--manifest release/release.json" in deploy
+    assert "--recipe release/recipe.tar.gz" in deploy
+    assert "--variant agents" in deploy
+    assert '--project "${PROJECT}"' in deploy
+    assert '--workdir "${WORKDIR}"' in deploy
+
+
+def test_the_documents_are_generated_once_and_carried_forward() -> None:
+    """Two copies of a manifest is one sha256 over bytes nobody deployed."""
+    hand = step("Hand the documents", "acceptance")["with"]
+    assert hand["name"] == "release-documents"
+    assert "release/recipe.tar.gz" in hand["path"] and "release/release.json" in hand["path"]
+    assert hand["if-no-files-found"] == "error"
+
+    published = [str(s.get("run", "")) for s in steps("publish")]
+    assert not any("release_manifest.py" in run for run in published), (
+        "publish must attach the documents the acceptance deployed, not write new ones"
+    )
+    assert not any("build_recipe.py" in run for run in published)
+
+
+def test_the_acceptance_may_pull_the_release_but_never_write_one() -> None:
+    assert job("acceptance")["permissions"] == {"contents": "read", "packages": "read"}
+    registries = [
+        s["with"].get("registry", "docker.io")
+        for s in steps("acceptance")
+        if str(s.get("uses", "")).startswith("docker/login-action")
+    ]
+    assert sorted(registries) == ["docker.io", "ghcr.io"], (
+        "the stack pulls Postgres and nginx from Docker Hub and the release's own images from GHCR"
+    )
+    assert "ARM64" in str(job("acceptance")["runs-on"]), (
+        "the acceptance starts the control and web images, which are built for arm64"
+    )
+
+
+def test_the_acceptance_cleans_up_whatever_happened() -> None:
+    cleanup = step("Drop this acceptance's stack", "acceptance")
+    assert cleanup["if"] == "always()"
+    run = str(cleanup["run"])
+    assert "docker rm -f" in run and "docker volume rm" in run
+    assert "${PROJECT}-refusal" in run, "the negative case gets a project of its own, and a cleanup"
+    naming = str(step("Name this acceptance", "acceptance")["run"])
+    assert "GITHUB_RUN_ID" in naming and "GITHUB_RUN_ATTEMPT" in naming
+    assert 'echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"' in naming
 
 
 def test_a_release_becomes_visible_only_with_both_assets_on_it() -> None:

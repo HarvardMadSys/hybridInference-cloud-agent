@@ -141,6 +141,47 @@ Each run also asserts the image's own identity labels —
 `unknown`, so a build argument that fails to arrive produces an image every
 resolver refuses; this is the last place that can be seen before it is pushed.
 
+## Control-plane integration acceptance
+
+A release is published only if it deploys. Between pushing the images and
+creating the release, the publication workflow installs the candidate the way a
+distribution will: `deploy/release/acceptance.py` extracts the recipe into a
+directory with no source, writes a deployment `.env`, and runs the real
+`deploy/control-plane/deploy.sh` in artifact mode against a real Docker daemon,
+pulling this run's own digests from the registry. Then it asks each running
+container what it is and compares that with the manifest.
+
+| It proves | It does not prove |
+|---|---|
+| The recipe installs with no checkout, no Dockerfile, no build | Anything about the execution host, Kata, or a real job |
+| The images pull by digest and the containers carry those digests | That a second architecture would work; this starts the arm64 half |
+| Alembic migrates a real database from the control image | That the gateway contract works; there is no gateway |
+| The identity namespace check runs, and both listeners answer `/healthz` | That sign-in works end to end |
+| The web service runs the variant the manifest named, by its own labels | That the console renders for a user |
+| A deployment naming its own image is refused before anything is pulled | That a *registry* would refuse it; that is the resolver's job, in P4 |
+
+**The host readiness fence is expected to refuse, and that is the point.**
+`deploy_readiness` waits for a heartbeat from an execution host running this
+exact commit, and CI has no such host. Standing one up would make the check
+prove something about the fixture, and weakening the fence for CI would remove
+the only thing between a new control plane and a pool that has not been replaced
+with it. So the deploy is expected to reach the fence and stop, which is itself
+asserted: reaching it means every stage before it passed, in order. The stages
+are listed in `acceptance.py` as `STAGES`, and the module says what each one
+stands for.
+
+One service is left over by that stop. `web` starts after the fence, so the
+acceptance brings it up itself, from the same generated Compose file and under
+the same `--no-build --pull never` restrictions the deploy uses. That is an
+explicit step of the acceptance rather than something the deploy did.
+
+The comparison is in `accept_artifacts.py`, as pure functions with no daemon, so
+what "is what is running what the release named" means can be read and tested on
+its own. Two things it deliberately gets right: a registry digest is taken from
+`RepoDigests` rather than the image ID, which is a different object; and a role
+is checked against the image's own label rather than the registry path, because
+which package an image lives in is storage layout.
+
 ## Registry layout is not part of this contract
 
 Artifacts are addressed by digest, so which package or tag an image lives in is
@@ -250,8 +291,9 @@ acceptance.
 
 ## What is still owed
 
-* **P3 acceptance**: run the packaged deployment against real candidate images
-  on the intended control-plane and Kata hosts, including failure/recovery
-  checks. The source-free script path is covered by the tests above.
+* **The execution host's half of the acceptance**: the control-plane stack is
+  installed and checked on every release, above. The host stack is not, because
+  it needs Kata and a machine that can run it, so it belongs to the staging
+  handoff along with the failure and rollback drills.
 * **P4**: the resolver — the registry-side half of these checks, and
   `agent.lock` pinning this document's hash.

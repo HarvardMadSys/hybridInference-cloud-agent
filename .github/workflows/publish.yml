@@ -432,13 +432,161 @@ jobs:
           docker image rm "${IMAGE_TAG}" >/dev/null 2>&1 || true
           docker image rm "${IMAGE_REF}" >/dev/null 2>&1 || true
 
+  # -------------------------------------------------------------- acceptance
+  # A release is published only if it deploys. This job assembles the candidate
+  # manifest and recipe — the same two commands `publish` used to run — and then
+  # installs them the way a distribution will: the real deploy script, out of the
+  # extracted recipe, in artifact mode, pulling this run's own digests from the
+  # registry. `deploy/release/acceptance.py` says what that proves and, just as
+  # deliberately, where it stops: the host readiness fence has no execution host
+  # to satisfy it here, so the deploy is expected to reach it and refuse.
+  #
+  # The documents it generates are what `publish` attaches. Generating them once
+  # is the point: a manifest checked here and rewritten there would be two
+  # documents with one sha256 between them, and the one a distribution pins would
+  # be the one nobody deployed.
+  #
+  # ARM64 because the control and web images are: this job starts them.
+  acceptance:
+    name: Deploy the release before publishing it
+    needs: [commit, artifacts]
+    if: needs.commit.outputs.existing == ''
+    runs-on: [self-hosted, Linux, ARM64, image-verify-arm64]
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.commit.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Name this acceptance
+        run: |
+          set -euo pipefail
+          echo "PROJECT=acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_ENV}"
+          echo "WORKDIR=${RUNNER_TEMP}/acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_ENV}"
+          # Credentials of this job's own; see the same step in the cells above.
+          mkdir -p "${RUNNER_TEMP}/docker-config"
+          echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"
+
+      # The stack's own Postgres and nginx come from Docker Hub, and the
+      # anonymous allowance is shared with the other repository's CI.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Read-only: this job pulls the digests the cells pushed. It has no
+      # business writing to a package, and `packages: read` above says so.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Isolate uv cache dir
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          prune-cache: false
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Collect what the cells published
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-cell-*
+          merge-multiple: true
+          path: cells
+
+      - name: Package the recipe
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          uv run python deploy/release/build_recipe.py --output release/recipe.tar.gz --report
+          echo "RECIPE_SHA256=$(sha256sum release/recipe.tar.gz | cut -d' ' -f1)" >> "${GITHUB_ENV}"
+
+      - name: Assemble the manifest's inputs
+        env:
+          SHA: ${{ needs.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          uv run python -m deploy.release.publish_inputs assemble \
+            --cells cells \
+            --source-commit "${SHA}" \
+            --output release/inputs.json
+
+      # The recipe URL is the release asset's, known before the release exists
+      # because GitHub's download URLs are a function of tag and file name. The
+      # run URL is this run: the manifest points at the process that produced it
+      # rather than at whoever handed it over.
+      - name: Write the manifest
+        env:
+          TAG: ${{ needs.commit.outputs.tag }}
+        run: |
+          set -euo pipefail
+          uv run python deploy/release/release_manifest.py \
+            --inputs release/inputs.json \
+            --recipe-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/recipe.tar.gz" \
+            --recipe-sha256 "${RECIPE_SHA256}" \
+            --publisher-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --output release/release.json
+
+      # The `/agents` variant, because that is the one production serves and the
+      # one whose base path a wrong binding would break. The root variant's image
+      # is started by the smoke in its own cell above.
+      - name: Deploy it, and check what came up
+        run: |
+          set -euo pipefail
+          uv run python deploy/release/acceptance.py \
+            --manifest release/release.json \
+            --recipe release/recipe.tar.gz \
+            --variant agents \
+            --workdir "${WORKDIR}" \
+            --project "${PROJECT}"
+
+      # These exact bytes are what the release carries. `publish` attaches them
+      # rather than generating a second copy.
+      - name: Hand the documents to the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-documents
+          path: |
+            release/recipe.tar.gz
+            release/release.json
+          if-no-files-found: error
+          retention-days: 7
+
+      # The acceptance removes its own stack; this is the backstop for the paths
+      # where it never got that far. A shared runner must not accumulate a
+      # Postgres volume per attempt.
+      - name: Drop this acceptance's stack
+        if: always()
+        run: |
+          for project in "${PROJECT}" "${PROJECT}-refusal"; do
+            docker ps -aq --filter "label=com.docker.compose.project=${project}" \
+              | xargs -r docker rm -f || true
+            docker volume ls -q --filter "name=${project}" | xargs -r docker volume rm -f || true
+            docker network ls -q --filter "label=com.docker.compose.project=${project}" \
+              | xargs -r docker network rm || true
+          done
+          rm -rf "${WORKDIR}" || true
+
   # ----------------------------------------------------------------- publish
   # Runs only when every cell succeeded — `needs` skips it otherwise, and it
   # has no `if: always()` to bring it back. A release with six images is not a
   # smaller release; it is one that leaves a machine half updated.
   publish:
     name: Publish the release
-    needs: [commit, artifacts]
+    needs: [commit, acceptance]
     if: needs.commit.outputs.existing == ''
     runs-on: [self-hosted, Linux, ci-general]
     permissions:
@@ -459,52 +607,22 @@ jobs:
           enable-cache: true
           prune-cache: false
 
-      # The dev group too: `jsonschema` is what validates the manifest against
-      # the published schema, and the generator refuses to run without it.
       - name: Sync dependencies
         run: uv sync
 
-      - name: Collect what the cells published
+      # The documents the acceptance generated and then deployed. Not rebuilt
+      # here: a manifest checked in one job and rewritten in the next is two
+      # documents with one sha256 between them, and the one a distribution pins
+      # would be the one nobody deployed.
+      - name: Collect the documents the acceptance deployed
         uses: actions/download-artifact@v4
         with:
-          pattern: release-cell-*
-          merge-multiple: true
-          path: cells
+          name: release-documents
+          path: release
 
-      # Reproducible for a given tree, so the sha256 written into the manifest
-      # is the sha256 of the archive a deployment will download.
-      - name: Package the recipe
+      - name: Record what a distribution will pin
         run: |
           set -euo pipefail
-          mkdir -p release
-          uv run python deploy/release/build_recipe.py --output release/recipe.tar.gz --report
-          echo "RECIPE_SHA256=$(sha256sum release/recipe.tar.gz | cut -d' ' -f1)" >> "${GITHUB_ENV}"
-
-      - name: Assemble the manifest's inputs
-        env:
-          SHA: ${{ needs.commit.outputs.sha }}
-        run: |
-          set -euo pipefail
-          uv run python -m deploy.release.publish_inputs assemble \
-            --cells cells \
-            --source-commit "${SHA}" \
-            --output release/inputs.json
-
-      # The recipe URL is the release asset's, known before the release exists
-      # because GitHub's download URLs are a function of tag and file name. The
-      # run URL is this run: the manifest points at the process that produced
-      # it rather than at whoever handed it over.
-      - name: Write the manifest
-        env:
-          TAG: ${{ needs.commit.outputs.tag }}
-        run: |
-          set -euo pipefail
-          uv run python deploy/release/release_manifest.py \
-            --inputs release/inputs.json \
-            --recipe-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/recipe.tar.gz" \
-            --recipe-sha256 "${RECIPE_SHA256}" \
-            --publisher-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --output release/release.json
           echo "MANIFEST_SHA256=$(sha256sum release/release.json | cut -d' ' -f1)" >> "${GITHUB_ENV}"
 
       - name: Write the release notes
