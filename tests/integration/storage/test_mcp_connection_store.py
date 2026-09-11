@@ -24,7 +24,6 @@ import pytest
 import pytest_asyncio
 
 from cloud_agent.storage.repositories.mcp import McpConnectionRepository
-from cloud_agent.storage.store import AgentJobStore
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -75,12 +74,6 @@ async def pool():
 async def store(pool):
     """The MCP-connection capability, on the repository that now owns it."""
     return McpConnectionRepository(pool)
-
-
-@pytest_asyncio.fixture
-async def oauth_store(pool):
-    """The oauth-state capability, which migrates with source control."""
-    return AgentJobStore(pool)
 
 
 async def _connect(store: McpConnectionRepository, user_id: str, server: str, token: str) -> int:
@@ -192,25 +185,3 @@ async def test_a_stored_expiry_round_trips_as_an_aware_timestamp(
     assert row["expires_at"].tzinfo is not None
     assert abs((row["expires_at"] - expires_at).total_seconds()) < 1
     assert row["refresh_token_ciphertext"] == "refresh-ciphertext"
-
-
-async def test_oauth_state_accepts_an_mcp_provider_name(oauth_store: AgentJobStore) -> None:
-    """The widened check, tested against the constraint rather than its name.
-
-    The baseline's ``CHECK (provider IN ('github','gitlab'))`` was unnamed, so
-    0006 drops it by definition. If that lookup missed, this insert raises and
-    the connect flow would have been dead on arrival — with every other test in
-    the suite still green.
-    """
-    await oauth_store.create_oauth_state(
-        state_hash="mcp-state-hash",
-        user_id=_OWNER,
-        provider="github-mcp",
-        code_verifier_ciphertext=None,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
-    )
-
-    consumed = await oauth_store.consume_oauth_state(
-        state_hash="mcp-state-hash", user_id=_OWNER, provider="github-mcp"
-    )
-    assert consumed is not None
