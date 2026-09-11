@@ -46,7 +46,9 @@ class TestNetPolicy:
     def test_refuses_an_ipv4_mapped_loopback(self) -> None:
         """``::ffff:127.0.0.1`` is the classic way past an IPv4-only check."""
         with pytest.raises(net_policy.EndpointRejected):
-            net_policy.check_addresses("example.com", ["::ffff:127.0.0.1"], net_policy.EgressPolicy())
+            net_policy.check_addresses(
+                "example.com", ["::ffff:127.0.0.1"], net_policy.EgressPolicy()
+            )
 
     def test_refuses_when_one_of_several_addresses_is_private(self) -> None:
         """A name answering with both is a rebinding attempt, not a lucky one."""

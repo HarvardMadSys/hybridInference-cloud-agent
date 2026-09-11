@@ -110,9 +110,7 @@ def _tables_created_by_every_revision() -> set[str]:
     """
     created: set[str] = set()
     for path in sorted(VERSIONS.glob("*.py")):
-        created.update(
-            re.findall(r"CREATE TABLE (\w+)", path.read_text(encoding="utf-8"))
-        )
+        created.update(re.findall(r"CREATE TABLE (\w+)", path.read_text(encoding="utf-8")))
     return created
 
 

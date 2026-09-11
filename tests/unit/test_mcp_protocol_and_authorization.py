@@ -88,8 +88,11 @@ class TestJsonRpc:
         correlator = jsonrpc.Correlator()
         first = correlator.open("1")
         second = correlator.open("2")
-        correlator.route_all(jsonrpc.decode('[{"jsonrpc":"2.0","id":1,"result":"a"},'
-                                            '{"jsonrpc":"2.0","id":2,"result":"b"}]'))
+        correlator.route_all(
+            jsonrpc.decode(
+                '[{"jsonrpc":"2.0","id":1,"result":"a"},{"jsonrpc":"2.0","id":2,"result":"b"}]'
+            )
+        )
         assert first.messages[0].result() == "a"
         assert second.messages[0].result() == "b"
 
@@ -115,14 +118,14 @@ class TestSse:
     def test_crlf_is_a_terminator_not_data(self) -> None:
         """Servers send CRLF, and treating it as data corrupts every body."""
         decoder = sse.SseDecoder()
-        events = decoder.feed(b"event: message\r\ndata: {\"a\":1}\r\n\r\n")
+        events = decoder.feed(b'event: message\r\ndata: {"a":1}\r\n\r\n')
         assert len(events) == 1
         assert events[0].json() == {"a": 1}
 
     def test_a_frame_split_across_chunks_is_reassembled(self) -> None:
         """Chunk boundaries fall anywhere, including inside a JSON body."""
         decoder = sse.SseDecoder()
-        assert decoder.feed(b"data: {\"a\"") == []
+        assert decoder.feed(b'data: {"a"') == []
         events = decoder.feed(b":1}\n\n")
         assert events[0].json() == {"a": 1}
 
@@ -418,8 +421,12 @@ class TestAuthorization:
         """A binding whose rules are stamped against one capability."""
         capability = _capability()
         rules = overrides.pop(
-            "rules", {"search": ToolRule(name="search", policy=ToolPolicy.ALLOW,
-                                         fingerprint=capability.fingerprint())}
+            "rules",
+            {
+                "search": ToolRule(
+                    name="search", policy=ToolPolicy.ALLOW, fingerprint=capability.fingerprint()
+                )
+            },
         )
         base: dict[str, object] = {
             "thread_id": "t1",
@@ -541,17 +548,19 @@ class TestInvocations:
 
     def test_a_late_approval_cannot_revive_an_expired_call(self) -> None:
         """What the owner was shown is gone, so approving it means nothing."""
-        assert invocations.transition(
-            invocations.InvocationStatus.PENDING, "timeout"
-        ) is invocations.InvocationStatus.EXPIRED
+        assert (
+            invocations.transition(invocations.InvocationStatus.PENDING, "timeout")
+            is invocations.InvocationStatus.EXPIRED
+        )
         with pytest.raises(invocations.TransitionRefused):
             invocations.transition(invocations.InvocationStatus.EXPIRED, "approve")
 
     def test_a_lost_response_becomes_outcome_unknown_not_a_retry(self) -> None:
         """An external side effect may already have landed."""
-        assert invocations.transition(
-            invocations.InvocationStatus.DISPATCHING, "dispatch_lost"
-        ) is invocations.InvocationStatus.OUTCOME_UNKNOWN
+        assert (
+            invocations.transition(invocations.InvocationStatus.DISPATCHING, "dispatch_lost")
+            is invocations.InvocationStatus.OUTCOME_UNKNOWN
+        )
 
     def test_the_earliest_deadline_wins(self) -> None:
         """Four layers wait; the platform waits for the shortest of them."""
@@ -715,9 +724,9 @@ class TestHostRendering:
             config=ConnectionConfig(
                 transport=Transport.STDIO,
                 location=ExecutionLocation.MANAGED_WORKER,
-                launch=__import__(
-                    "cloud_agent.mcp.models", fromlist=["LaunchSpec"]
-                ).LaunchSpec(command="npx", args=("s@1.0.0",)),
+                launch=__import__("cloud_agent.mcp.models", fromlist=["LaunchSpec"]).LaunchSpec(
+                    command="npx", args=("s@1.0.0",)
+                ),
             ),
         )
         with pytest.raises(host.ConnectorRequired):
@@ -765,9 +774,7 @@ class TestAuthProfile:
     def test_a_stdio_connection_needs_a_launch_spec(self) -> None:
         """And a remote one must not pretend to have one."""
         with pytest.raises(ValueError):
-            ConnectionConfig(
-                transport=Transport.STDIO, location=ExecutionLocation.USER_CONNECTOR
-            )
+            ConnectionConfig(transport=Transport.STDIO, location=ExecutionLocation.USER_CONNECTOR)
 
     def test_a_remote_connection_may_not_use_the_stdio_transport(self) -> None:
         """The two contradict each other."""

@@ -71,7 +71,7 @@ from cloud_agent.github_app import AppNotInstalled, GitHubAppError
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp.models import ToolPolicy
+from cloud_agent.mcp.models import ALIAS_PATTERN, ToolPolicy
 from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
@@ -1255,7 +1255,9 @@ async def _resolve_mcp_bindings(
         prepared.append(
             {
                 "connection_id": connection_id,
-                "alias": getattr(entry, "alias", None) or _binding_alias(row),
+                "alias": _checked_alias(
+                    getattr(entry, "alias", None), fallback=_binding_alias(row)
+                ),
                 "enabled": bool(getattr(entry, "enabled", True)) and bool(rules),
                 "config_revision": resolved.connection.config_revision,
                 "authorization_epoch": resolved.connection.authorization_epoch,
@@ -1276,11 +1278,37 @@ async def _resolve_mcp_bindings(
 
 
 def _binding_alias(row: dict[str, Any]) -> str:
-    """A stable, displayable prefix for one connection's tool names."""
+    """A stable, displayable prefix for one connection's tool names.
+
+    Derived from the template when there is one, and from the connection id
+    otherwise. Never from the label: a label is free text the owner can edit,
+    and an alias that changed under a rename would look to a running session
+    like its tools had disappeared.
+    """
     template = str(row.get("template") or "").strip()
-    if template:
+    if template and re.fullmatch(ALIAS_PATTERN, template):
         return template
     return f"mcp{row['id']}"
+
+
+def _checked_alias(alias: str | None, *, fallback: str) -> str:
+    """Validate an explicit alias, or use one that is valid by construction."""
+    candidate = (alias or fallback).strip()
+    if not re.fullmatch(ALIAS_PATTERN, candidate):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "type": "invalid_request",
+                    "message": (
+                        f"{candidate!r} is not a usable MCP alias: use letters, digits, "
+                        "underscore and hyphen, starting with a letter or digit, up to "
+                        "40 characters."
+                    ),
+                }
+            },
+        )
+    return candidate
 
 
 def _require_registered_runtime(runtime: str) -> None:

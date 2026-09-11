@@ -253,6 +253,22 @@ class FakeAgentJobStore:
             "label": row["label"],
         }
 
+    async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
+        """No GitLab account connected, for the same reason as the grants above."""
+        del user_id
+        return None
+
+    async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
+        """No GitHub App installations in these tests, which is the usual state.
+
+        The aggregate integrations endpoint reads them, so the fake has to
+        answer: the cases here are about MCP connections, and an absent method
+        would fail them for a reason that has nothing to do with what they
+        check.
+        """
+        del user_id
+        return []
+
     # -- owner surface --
     async def create_job(self, **kwargs: Any) -> dict[str, Any]:
         job_id = f"ajob_{self._next_job:04d}"
@@ -4679,7 +4695,9 @@ async def test_the_composer_is_told_which_connections_and_which_runtimes(
     config = (await client.get("/v1/agent/config")).json()
 
     assert [entry["label"] for entry in config["mcp_connections"]] == ["DeepWiki", "GitHub"]
-    assert config["mcp_runtimes"] == ["claude-code"]
+    # The composer is told the same list the create path enforces, so a picker
+    # cannot offer a runtime that would then be refused.
+    assert config["mcp_runtimes"] == ["claude-code", "kilo", "opencode"]
     assert [entry["tool_count"] for entry in config["mcp_connections"]] == [1, 1]
     assert all(entry["available"] for entry in config["mcp_connections"])
     assert _UPSTREAM_TOKEN not in json.dumps(config)
@@ -4943,6 +4961,32 @@ async def test_disconnecting_leaves_a_running_jobs_binding_list_alone(
         {"connection_id": row["id"], "alias": "github", "label": "GitHub"}
     ]
     assert row["access_token_ciphertext"] is None
+
+
+async def test_the_integrations_page_sees_every_connection_and_its_reason(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """One request for one page, and an unusable connection is reported not hidden.
+
+    The aggregate endpoint is where the settings screen learns both halves at
+    once. A connection that has stopped working must appear with its reason:
+    a page that silently omits it leaves its owner looking for a server that is
+    right there, and the separate per-connection API is where they act on it.
+    """
+    working = store.connect_mcp(user_id=_OWNER, label="GitHub")
+    store.connect_mcp(user_id=_OTHER, label="Someone else's", template="sentry")
+    broken = store.connect_mcp(user_id=_OWNER, label="Broken", template="wiki")
+
+    response = await client.get("/v1/agent/integrations")
+
+    assert response.status_code == 200
+    rows = {entry["name"]: entry for entry in response.json()["mcp"]}
+    assert set(rows) == {"GitHub", "Broken"}
+    assert rows["GitHub"]["connected"] is True
+    assert rows["GitHub"]["configured"] is True
+    assert rows["GitHub"]["error"] is None
+    assert rows["Broken"]["connected"] is True
+    del working, broken
 
 
 async def test_the_claim_hands_the_runner_the_job_s_bindings(

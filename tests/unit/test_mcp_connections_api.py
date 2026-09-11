@@ -167,7 +167,12 @@ class FakeStore:
         return True
 
     async def set_mcp_client_registration(
-        self, *, connection_id: int, user_id: str, client_id: str, client_secret_ciphertext: str | None
+        self,
+        *,
+        connection_id: int,
+        user_id: str,
+        client_id: str,
+        client_secret_ciphertext: str | None,
     ) -> bool:
         row = self.connections.get(connection_id)
         if row is None or row["user_id"] != user_id:
@@ -214,14 +219,10 @@ class FakeStore:
             rows.append(row)
         return rows
 
-    async def replace_mcp_bindings(
-        self, *, thread_id: str, bindings: list[dict[str, Any]]
-    ) -> None:
+    async def replace_mcp_bindings(self, *, thread_id: str, bindings: list[dict[str, Any]]) -> None:
         # ``selection_pending`` is written FALSE by the real store: saving a
         # selection is exactly what ends the asking.
-        self.bindings[thread_id] = [
-            {**binding, "selection_pending": False} for binding in bindings
-        ]
+        self.bindings[thread_id] = [{**binding, "selection_pending": False} for binding in bindings]
 
     async def get_thread(self, thread_id: str) -> dict[str, Any] | None:
         return self.threads.get(thread_id)
@@ -430,7 +431,11 @@ class TestConnectionManagement:
         with _client(FakeStore()) as client:
             response = client.post(
                 "/v1/agent/mcp/connections",
-                json={"label": "Odd", "transport": "carrier-pigeon", "url": "https://x.example/mcp"},
+                json={
+                    "label": "Odd",
+                    "transport": "carrier-pigeon",
+                    "url": "https://x.example/mcp",
+                },
             )
         assert response.status_code == 400
         assert "streamable-http" in response.json()["detail"]["error"]["message"]
@@ -499,7 +504,11 @@ class TestConnectionManagement:
         with _client(store) as client:
             stale = client.post(
                 f"/v1/agent/mcp/connections/{connection_id}/secret",
-                json={"expected_authorization_epoch": 1, "secret": "new", "replaces_identity": False},
+                json={
+                    "expected_authorization_epoch": 1,
+                    "secret": "new",
+                    "replaces_identity": False,
+                },
             )
             fresh = client.post(
                 f"/v1/agent/mcp/connections/{connection_id}/secret",
@@ -667,16 +676,14 @@ class TestBindings:
             response = client.put(
                 "/v1/agent/mcp/threads/thread-1/bindings",
                 json={
-                    "bindings": [
-                        {"connection_id": connection_id, "tools": {"delete_all": "allow"}}
-                    ]
+                    "bindings": [{"connection_id": connection_id, "tools": {"delete_all": "allow"}}]
                 },
             )
         assert response.status_code == 400
         assert "delete_all" in response.json()["detail"]["error"]["message"]
 
     def test_an_empty_selection_does_not_enable_the_connection(self) -> None:
-        """"I chose nothing" and "I chose everything" must not be one row."""
+        """ "I chose nothing" and "I chose everything" must not be one row."""
         store = FakeStore()
         connection_id = _seed(store)
         self._with_capabilities(store, connection_id)
@@ -688,6 +695,47 @@ class TestBindings:
             )
         assert response.status_code == 200
         assert store.bindings["thread-1"][0]["enabled"] is False
+
+    def test_an_alias_that_cannot_be_a_url_segment_is_refused(self) -> None:
+        """The alias is a relay path segment and a tool-name prefix at once.
+
+        A slash would produce a path the relay cannot match, and anything
+        outside the grammar would be mangled into a tool name the model cannot
+        call -- both of which read to the agent as a broken server.
+        """
+        store = FakeStore()
+        connection_id = _seed(store)
+        self._with_capabilities(store, connection_id)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        for alias in ("../etc", "docs/api", "with space", "-leading", "x" * 41):
+            with _client(store) as client:
+                response = client.put(
+                    "/v1/agent/mcp/threads/thread-1/bindings",
+                    json={
+                        "bindings": [
+                            {
+                                "connection_id": connection_id,
+                                "alias": alias,
+                                "tools": {"search": "allow"},
+                            }
+                        ]
+                    },
+                )
+            assert response.status_code == 400, alias
+
+    def test_an_alias_is_derived_when_the_caller_gives_none(self) -> None:
+        """A default that is valid by construction, so the common case is silent."""
+        store = FakeStore()
+        connection_id = _seed(store, template="docs")
+        self._with_capabilities(store, connection_id)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            response = client.put(
+                "/v1/agent/mcp/threads/thread-1/bindings",
+                json={"bindings": [{"connection_id": connection_id, "tools": {"search": "allow"}}]},
+            )
+        assert response.status_code == 200
+        assert store.bindings["thread-1"][0]["alias"] == "docs"
 
     def test_another_users_thread_is_not_found(self) -> None:
         """A thread id from a client is not authority over it."""

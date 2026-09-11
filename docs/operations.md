@@ -200,9 +200,9 @@ with `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under an MCP-specific domain
 separator. What the server offers is discovered and stored as a capability
 snapshot; templates only prefill a form.
 
-The relay, the connection API and the discovery path are implemented and
-tested. The coding-agent adapters are not all done: see the runtime matrix
-below, which is a statement about the adapters rather than about the feature.
+The relay, the connection API, the discovery path and the tool-call path are
+implemented and tested. The coding-agent adapters are not all done, and the
+list below is a statement about the adapters rather than about the feature.
 
 Five things about this that look like details and are not:
 
@@ -227,17 +227,33 @@ Five things about this that look like details and are not:
   rather than copied onto a job, so narrowing a session takes effect on its
   next call instead of at its next turn.
 
-Only `claude-code` can currently be given connections, because it is the only
-adapter with a verified relay path that also shuts out repository-supplied MCP
-config. Every other adapter still fails closed, so a job naming connections on
-one of them is refused at creation rather than run with the tools silently
-missing. Codex, pi, OpenCode and Kilo are a matter of adapter work against
-their pinned versions, not of design.
+**An adapter may claim MCP only when it can do both halves**: point the CLI at
+the platform's relay, *and* stop it reading any other MCP source. A runtime that
+could be given servers but not stopped from picking up the repository's own
+would be worse than one with no MCP at all, so the capability is declared per
+runtime and checked against the pinned binary rather than inferred from the
+family a CLI belongs to.
 
-The credential is referenced, not embedded: the generated config carries
-`${AGENT_MCP_TOKEN}` and the adapter exports it, so the job token never becomes
-a process argument — where it would be readable from the process table and
-liable to be copied into an error tail or an event payload the owner reads.
+| Runtime | Pin | How the relay reaches it | Why the repository cannot add servers |
+|---|---|---|---|
+| `claude-code` | 2.1.220 | `--mcp-config` with the platform's servers | `--strict-mcp-config`, verified against the CLI: without it a committed `.mcp.json` is loaded alongside ours with no approval step |
+| `opencode` | 1.18.9 | the reviewed `opencode-freeinference` wrapper merges the relay endpoints into the `OPENCODE_CONFIG` it writes | the wrapper exports `OPENCODE_DISABLE_PROJECT_CONFIG`, which covers both `opencode.json` and `.opencode/` |
+| `kilo` | 7.4.17 | the reviewed `kilo-freeinference` wrapper, same shape under `KILO_CONFIG` | `KILO_DISABLE_PROJECT_CONFIG`; the fork renamed every switch, so this is verified for the fork and not inherited from OpenCode |
+| `codex` | 0.145.0 | not wired | `--ignore-user-config` does not suppress a trusted repository's `.codex/config.toml`, and `/etc/codex/requirements.toml` is kept as an empty allowlist — the fail-closed P0 policy |
+| `pi` | 0.73.1 | not wired | pi has no native MCP client at this version; MCP arrives through executable extensions, including project-local ones, which the adapter disables with `--no-extensions` |
+
+A job naming connections on a runtime that has not declared them is refused at
+creation rather than run with the tools silently missing.
+
+**The credential is referenced, not embedded, and the syntax is not portable.**
+Claude Code expands `${AGENT_MCP_TOKEN}`; the OpenCode family substitutes
+`{env:AGENT_MCP_TOKEN}` as a text pass over the raw config file before parsing
+it. Both were checked against the pinned binaries, and the wrong one fails
+silently: the literal placeholder is sent as the bearer token and every call is
+refused with a 401 that reads as a broken server. The address is decided once in
+`cloud_agent_host/runtimes.py` and the reference is written next to the CLI that
+has to expand it, in `deploy/sandbox/`. Either way the token travels in the
+environment, never in argv and never in the config file.
 
 ### What `--strict-mcp-config` is holding shut
 

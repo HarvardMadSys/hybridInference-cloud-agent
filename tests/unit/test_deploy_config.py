@@ -1357,6 +1357,176 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     assert seen["env"]["KILO_CONFIG"].startswith(str(activation))
 
 
+#: One entry per wrapper that publishes the platform's MCP relay, with the
+#: environment variable its CLI reads the merged config from.
+_MCP_WRAPPERS = (
+    ("opencode", _OPENCODE_WRAPPER, "OPENCODE", "OPENCODE_GATEWAY_MODEL", "OPENCODE_CONFIG"),
+    ("kilo", _KILO_WRAPPER, "KILO", "KILO_GATEWAY_MODEL", "KILO_CONFIG"),
+)
+
+
+def _run_mcp_wrapper(tmp_path, wrapper, prefix: str, model_var: str, config_var: str, **extra):
+    """Run one wrapper with a stub CLI, returning ``(result, seen)``.
+
+    The stub records the environment the real CLI would have started with, so a
+    test can read both the flags and the config file the wrapper wrote without
+    a CLI being installed.
+    """
+    import json as _json
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir(exist_ok=True)
+    record = tmp_path / f"seen-{prefix}.json"
+    stub = stub_dir / prefix.lower()
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "seen = {'argv': sys.argv[1:], 'env': dict(os.environ)}\n"
+        f"open({str(record)!r}, 'w').write(json.dumps(seen))\n"
+    )
+    stub.chmod(0o755)
+    home = tmp_path / f"home-{prefix}"
+    home.mkdir(exist_ok=True)
+    env = {
+        "PATH": f"{stub_dir}:{_os.environ['PATH']}",
+        "HOME": str(home),
+        "OPENAI_BASE_URL": "http://backend:8080/v1",
+        "OPENAI_API_KEY": "ajt.attempt.key",
+        model_var: "glm-5.1",
+        f"{prefix}_FREEINFERENCE_CONFIG_DIR": str(tmp_path / "activation" / prefix),
+    }
+    env.update(extra)
+    result = _subprocess.run(
+        [_sys.executable, str(wrapper), "run", "hi"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    seen = _json.loads(record.read_text()) if record.exists() else None
+    del config_var
+    return result, seen
+
+
+@pytest.mark.parametrize("name,wrapper,prefix,model_var,config_var", _MCP_WRAPPERS)
+def test_the_wrapper_declares_the_relay_and_references_the_token(
+    tmp_path, name, wrapper, prefix, model_var, config_var
+):
+    """**The relay endpoint and a reference, never the credential itself.**
+
+    The reference syntax is the load-bearing detail and it is not portable: this
+    CLI family substitutes ``{env:VAR}`` as a text pass over the raw config file
+    before parsing it, where Claude Code expands ``${VAR}``. The wrong one
+    produces a literal placeholder as the bearer token -- every call 401s and
+    nothing says why -- so the exact string is pinned here, and the json module
+    is what quotes a URL or a model id into the file.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    result, seen = _run_mcp_wrapper(
+        tmp_path,
+        wrapper,
+        prefix,
+        model_var,
+        config_var,
+        AGENT_MCP_SERVERS=_json.dumps({"github": "http://agent-mcp:8000/v1/agent/mcp/github"}),
+        AGENT_MCP_TOKEN="ajt.mcp.attempt.token",
+    )
+    assert result.returncode == 0, result.stderr
+
+    config = _json.loads(_Path(seen["env"][config_var]).read_text())
+    assert config["mcp"] == {
+        "github": {
+            "type": "remote",
+            "url": "http://agent-mcp:8000/v1/agent/mcp/github",
+            "enabled": True,
+            "headers": {"Authorization": "Bearer {env:AGENT_MCP_TOKEN}"},
+            # Without this the CLI probes the platform for an authorization
+            # server and marks the connection unauthenticated before the first
+            # call; the relay speaks MCP with a job token, not OAuth.
+            "oauth": False,
+        }
+    }
+    # The credential itself must never reach the file the CLI reads.
+    assert "ajt.mcp.attempt.token" not in _Path(seen["env"][config_var]).read_text()
+    # The project config is shut out, so this is the only MCP source.
+    assert seen["env"][f"{prefix}_DISABLE_PROJECT_CONFIG"] == "1"
+
+
+@pytest.mark.parametrize("name,wrapper,prefix,model_var,config_var", _MCP_WRAPPERS)
+def test_the_wrapper_declares_an_empty_map_when_the_run_has_no_connections(
+    tmp_path, name, wrapper, prefix, model_var, config_var
+):
+    """Written either way, so there is no turn on which the key is absent.
+
+    An MCP key that appeared only sometimes would leave the CLI free to find
+    its own sources on the turns where it did not -- which is exactly the hole
+    the project-config switch closes.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    result, seen = _run_mcp_wrapper(
+        tmp_path,
+        wrapper,
+        prefix,
+        model_var,
+        config_var,
+        AGENT_MCP_SERVERS="{}",
+        AGENT_MCP_TOKEN="",
+    )
+    assert result.returncode == 0, result.stderr
+    config = _json.loads(_Path(seen["env"][config_var]).read_text())
+    assert config["mcp"] == {}
+
+
+@pytest.mark.parametrize("name,wrapper,prefix,model_var,config_var", _MCP_WRAPPERS)
+def test_the_wrapper_refuses_connections_it_cannot_authenticate(
+    tmp_path, name, wrapper, prefix, model_var, config_var
+):
+    """A named refusal beats a run whose every tool call is a 401."""
+    import json as _json
+
+    result, _seen = _run_mcp_wrapper(
+        tmp_path,
+        wrapper,
+        prefix,
+        model_var,
+        config_var,
+        AGENT_MCP_SERVERS=_json.dumps({"github": "http://agent-mcp:8000/v1/agent/mcp/github"}),
+        AGENT_MCP_TOKEN="",
+    )
+    assert result.returncode == 64
+    assert "AGENT_MCP_TOKEN" in result.stderr
+
+
+@pytest.mark.parametrize("name,wrapper,prefix,model_var,config_var", _MCP_WRAPPERS)
+def test_the_wrapper_refuses_an_endpoint_map_it_cannot_read(
+    tmp_path, name, wrapper, prefix, model_var, config_var
+):
+    """Unreadable input is a refusal, not an empty map.
+
+    Degrading to "no servers" here would silently drop the tools the job was
+    created with, and the agent would work around their absence rather than
+    failing.
+    """
+    result, _seen = _run_mcp_wrapper(
+        tmp_path,
+        wrapper,
+        prefix,
+        model_var,
+        config_var,
+        AGENT_MCP_SERVERS="not json",
+        AGENT_MCP_TOKEN="ajt.token",
+    )
+    assert result.returncode == 64
+    assert "AGENT_MCP_SERVERS" in result.stderr
+
+
 def test_kilo_wrapper_refuses_to_run_half_configured(tmp_path):
     """Missing environment is a named refusal, not a run that dials out."""
     import os as _os

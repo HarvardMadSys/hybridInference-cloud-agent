@@ -133,9 +133,7 @@ def test_connection_management_is_not_reachable_from_a_sandbox(mcp_paths: set[st
     """
     prefix = _MCP_PREFIX + "/"
     relay = _relay_paths(mcp_paths)
-    management = {
-        path for path in mcp_paths if path.startswith(prefix) and path not in relay
-    }
+    management = {path for path in mcp_paths if path.startswith(prefix) and path not in relay}
     assert not management, f"the sandbox listener serves management routes: {sorted(management)}"
 
 

@@ -136,7 +136,9 @@ class TestRefresh:
         store = FakeStore(_row())
         _patch_token_response(monkeypatch, {"access_token": "new-access", "expires_in": 3600})
         outcome = await refresh.refresh_credential(
-            store, row=store.row, policy=EgressPolicy()  # type: ignore[arg-type]
+            store,
+            row=store.row,
+            policy=EgressPolicy(),  # type: ignore[arg-type]
         )
         assert outcome.refreshed
         assert store.writes and store.writes[0]["access_token_ciphertext"]
@@ -149,7 +151,9 @@ class TestRefresh:
         store = FakeStore(_row(credential_version=9))
         seen = _patch_token_response(monkeypatch, {"access_token": "new"})
         outcome = await refresh.refresh_credential(
-            store, row=_row(credential_version=8), policy=EgressPolicy()  # type: ignore[arg-type]
+            store,
+            row=_row(credential_version=8),
+            policy=EgressPolicy(),  # type: ignore[arg-type]
         )
         assert outcome.contended
         assert not outcome.refreshed
@@ -161,7 +165,9 @@ class TestRefresh:
         store = FakeStore(_row(refresh_rotates=False))
         _patch_token_response(monkeypatch, {"access_token": "new"})
         await refresh.refresh_credential(
-            store, row=store.row, policy=EgressPolicy()  # type: ignore[arg-type]
+            store,
+            row=store.row,
+            policy=EgressPolicy(),  # type: ignore[arg-type]
         )
         assert store.writes[0]["refresh_rotates"] is False
         assert store.writes[0]["refresh_token_ciphertext"]
@@ -173,7 +179,9 @@ class TestRefresh:
         _patch_token_response(monkeypatch, {"access_token": "new"})
         with pytest.raises(refresh.RefreshRefused):
             await refresh.refresh_credential(
-                store, row=store.row, policy=EgressPolicy()  # type: ignore[arg-type]
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
             )
         assert store.writes == []
 
@@ -189,7 +197,9 @@ class TestRefresh:
         monkeypatch.setattr(store, "set_mcp_credential", failing_write)
         with pytest.raises(refresh.RefreshRefused):
             await refresh.refresh_credential(
-                store, row=store.row, policy=EgressPolicy()  # type: ignore[arg-type]
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
             )
 
     @pytest.mark.asyncio
@@ -203,7 +213,9 @@ class TestRefresh:
         store = FakeStore(_row())
         with pytest.raises(refresh.RefreshRefused):
             await refresh.refresh_credential(
-                store, row=store.row, policy=EgressPolicy()  # type: ignore[arg-type]
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
             )
 
     @pytest.mark.asyncio
@@ -212,7 +224,9 @@ class TestRefresh:
         store = FakeStore(_row(token_endpoint=None))
         with pytest.raises(refresh.RefreshRefused) as raised:
             await refresh.refresh_credential(
-                store, row=store.row, policy=EgressPolicy()  # type: ignore[arg-type]
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
             )
         assert raised.value.kind == "protocol_incompatible"
 
@@ -224,7 +238,9 @@ class TestRefresh:
         )
         with pytest.raises(refresh.RefreshRefused):
             await refresh.refresh_credential(
-                store, row=store.row, policy=EgressPolicy()  # type: ignore[arg-type]
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
             )
 
 
@@ -244,6 +260,7 @@ class TestEnsureFresh:
         """Re-reading beats waiting: the other instance's write is newer."""
         store = FakeStore(_row(credential_version=9))
         row = await refresh.ensure_fresh(
-            store, row=_row(credential_version=8)  # type: ignore[arg-type]
+            store,
+            row=_row(credential_version=8),  # type: ignore[arg-type]
         )
         assert row["credential_version"] == 9

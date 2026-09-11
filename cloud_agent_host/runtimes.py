@@ -53,6 +53,17 @@ RAW = "raw"
 # so the credential never becomes a process argument.
 MCP_TOKEN_ENV = "AGENT_MCP_TOKEN"
 
+# Where the relay endpoints are handed to an image-shipped wrapper, as one JSON
+# object of ``{alias: {type, url, headers}}``.
+#
+# The wrapper merges it into the config file it already writes, under whichever
+# key its CLI spells MCP with. That split is deliberate: the address and the
+# token reference are decided here, and the dialect is decided next to the
+# pinned CLI version in ``deploy/sandbox/`` where it can be checked against the
+# binary. Writing each dialect's file from Python would put five vendor schemas
+# in one module and no way to review them beside the versions they describe.
+MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
+
 
 @dataclass(frozen=True)
 class NormalizedEvent:
@@ -102,7 +113,10 @@ class RuntimeCapabilities:
 
 @dataclass(frozen=True)
 class RuntimeMCPConfig:
-    """The MCP server ids made available to one agent run, and where to reach them.
+    """The MCP connection aliases available to one agent run, and where they are.
+
+    The aliases are opaque to the runtime: each names a conversation's binding,
+    which the relay resolves against that job's own list.
 
     **A separate address and a separate credential from inference.** MCP is
     served by the cloud agent's own relay, model calls by the FreeInference
@@ -111,11 +125,12 @@ class RuntimeMCPConfig:
     them in one field, as this did while the gateway proxied MCP, would make
     that separation impossible to express.
 
-    Still no endpoint or header for the *upstream*: the ids stay opaque, the
-    relay resolves them, and an upstream's credential never leaves it. What is
-    here is this deployment's own relay address and the token that opens it —
-    and the token is referenced by environment variable, never written into an
-    argument.
+    Still no endpoint or header for the *upstream*: each alias is a name one
+    conversation gave one connection, the relay resolves it against that job's
+    own bindings, and an upstream's credential never leaves the control plane.
+    What is here is this deployment's own relay address and the token that opens
+    it — and the token is referenced by environment variable, never written
+    into an argument or into a config file.
     """
 
     server_ids: tuple[str, ...] = ()
@@ -202,23 +217,21 @@ class AgentRuntime:
         return []
 
     @staticmethod
-    def _mcp_endpoints(
-        config: RuntimeMCPConfig, *, gateway_base_url: str
-    ) -> dict[str, dict[str, Any]]:
-        """Resolve opaque server ids into sandbox-local relay endpoints.
+    def relay_urls(config: RuntimeMCPConfig, *, gateway_base_url: str) -> dict[str, str]:
+        """Resolve opaque aliases into sandbox-local relay URLs.
 
         The agent is told this service's fixed MCP-only relay URL, and nothing
         else: not the upstream address, not the user's credential that reaches
         it. Both stay in the control plane, which is what lets a sandbox with
         no general egress use these servers at all.
 
-        **The token is referenced, not embedded.** ``${AGENT_MCP_TOKEN}`` is
-        expanded by the CLI from the environment, so the credential never
-        becomes a process argument — where it would be readable from the
-        process table and, worse, liable to be copied into an error tail or an
-        event payload the owner can read. Verified against the real CLI: with
-        the header written this way and the variable exported, the proxy
-        authenticates the request and the argv carries only the placeholder.
+        **No header and no credential here.** How a CLI is told to put a bearer
+        token on a request is a dialect question, and every one of them spells
+        it differently: Claude Code expands ``${VAR}``, OpenCode and its fork
+        expand ``{env:VAR}``, and a config written with the wrong one sends the
+        placeholder verbatim and 401s on every call. So the address is decided
+        here and the reference is written next to the CLI that has to expand
+        it, which is also where it can be checked against the pinned binary.
         """
         if config.server_ids and not config.base_url:
             # No relay address is not a reason to fall back to the inference
@@ -228,17 +241,38 @@ class AgentRuntime:
             raise RuntimeMCPUnavailableError(
                 "MCP was requested but no relay address was configured for this run"
             )
+        if config.server_ids and not config.credential:
+            # Every config below references the token rather than embedding it,
+            # so a missing one expands to the empty string and the relay refuses
+            # each call with 401 -- which reads to the agent as a broken server
+            # rather than as a run that was never given a credential.
+            raise RuntimeMCPUnavailableError(
+                "MCP was requested but no relay credential was minted for this run"
+            )
         base = config.base_url.rstrip("/").removesuffix("/v1")
+        return {server_id: f"{base}/v1/agent/mcp/{server_id}" for server_id in config.server_ids}
+
+    @classmethod
+    def _mcp_endpoints(
+        cls, config: RuntimeMCPConfig, *, gateway_base_url: str
+    ) -> dict[str, dict[str, Any]]:
+        """The relay endpoints in Claude Code's own dialect and header syntax.
+
+        **The token is referenced, not embedded.** ``${AGENT_MCP_TOKEN}`` is
+        expanded by the CLI from the environment, so the credential never
+        becomes a process argument — where it would be readable from the
+        process table and, worse, liable to be copied into an error tail or an
+        event payload the owner can read. Verified against the real CLI: with
+        the header written this way and the variable exported, the proxy
+        authenticates the request and the argv carries only the placeholder.
+        """
         return {
             server_id: {
                 "type": "http",
-                "url": f"{base}/v1/agent/mcp/{server_id}",
-                # Referenced, never written in: the credential is expanded by
-                # the CLI from the environment, so it cannot reach the process
-                # table, an error tail, or an event payload the owner reads.
+                "url": url,
                 "headers": {"Authorization": f"Bearer ${{{MCP_TOKEN_ENV}}}"},
             }
-            for server_id in config.server_ids
+            for server_id, url in cls.relay_urls(config, gateway_base_url=gateway_base_url).items()
         }
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -255,6 +289,47 @@ class AgentRuntime:
             raise RuntimeMCPUnavailableError(
                 f"runtime {self.name!r} cannot use MCP servers until its isolated relay path is enabled"
             )
+
+    def _accept_mcp(
+        self,
+        config: RuntimeMCPConfig,
+        *,
+        gateway_base_url: str,
+        env: dict[str, str],
+    ) -> None:
+        """Carry the relay endpoints into the run, or refuse to.
+
+        The default refuses, and an adapter overrides this only when it can do
+        *both* halves: point the CLI at the platform's relay and stop it reading
+        any other MCP source. A runtime that could be given servers but not
+        stopped from picking up the repository's own would be worse than one
+        with no MCP at all, so there is no override that supplies endpoints
+        without a verified suppression.
+        """
+        del gateway_base_url, env
+        self._require_empty_mcp_config(config)
+
+    def _wrapper_mcp_env(
+        self,
+        config: RuntimeMCPConfig,
+        *,
+        gateway_base_url: str,
+        env: dict[str, str],
+    ) -> None:
+        """Publish the relay endpoints for an image-shipped wrapper to merge.
+
+        Written even when the run has no servers. A key that appears only
+        sometimes would leave the run with whatever MCP sources the CLI finds
+        for itself on the turns where it is absent, which is the shape the
+        suppression exists to prevent.
+        """
+        endpoints = self.relay_urls(config, gateway_base_url=gateway_base_url)
+        env[MCP_SERVERS_ENV] = json.dumps(endpoints, sort_keys=True)
+        # The wrapper's config references this name; it has to resolve, to the
+        # token or to the empty string when the run has no servers. Setting it
+        # only sometimes would leave the reference dangling on the turns where
+        # it was absent, which is the shape a stale token hides in.
+        env[MCP_TOKEN_ENV] = config.credential
 
     @staticmethod
     def _raw(line: str, reason: str) -> NormalizedEvent:
@@ -883,12 +958,12 @@ class GenericRuntime(AgentRuntime):
         """Expand the template into argv without ever invoking a shell.
 
         A Tier 2 runtime is any headless CLI, so there is no flag this adapter
-        could know to pass and no way to shut out a repository's own config.
-        A non-empty set is refused rather than dropped, and so is a reasoning
-        effort: the same argument, since the template says nothing about how
-        this CLI spells one.
+        could know to pass and no way to shut out a repository's own config
+        *unless* an image-shipped wrapper supplies one. That is what
+        :meth:`_accept_mcp` decides, and why the base answer is a refusal: a
+        non-empty set is dropped tools or someone else's servers, and neither
+        is a thing to discover mid-run.
         """
-        self._require_empty_mcp_config(mcp_config)
         self.effort_args(reasoning_effort)
         argv = [
             part.replace("{prompt}", task_prompt).replace("{model}", model)
@@ -901,6 +976,7 @@ class GenericRuntime(AgentRuntime):
             "ANTHROPIC_BASE_URL": base,
             "ANTHROPIC_API_KEY": credential,
         }
+        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
         return argv, env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -1362,9 +1438,23 @@ class OpencodeRuntime(GenericRuntime):
     #: the chat-completions body, and nothing else in the config does.
     EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
+    def _accept_mcp(
+        self, config: RuntimeMCPConfig, *, gateway_base_url: str, env: dict[str, str]
+    ) -> None:
+        """Hand the relay endpoints to the reviewed wrapper.
+
+        Both halves hold, and both are checked against the pinned binary rather
+        than assumed: the wrapper writes the platform's own ``OPENCODE_CONFIG``,
+        and it exports ``OPENCODE_DISABLE_PROJECT_CONFIG``, which is the flag
+        that stops the repository's ``opencode.json`` and ``.opencode/`` from
+        being merged afterwards. Without the second, the first would be one MCP
+        source among several and a committed file could add its own servers.
+        """
+        self._wrapper_mcp_env(config, gateway_base_url=gateway_base_url, env=env)
+
     def capabilities(self) -> RuntimeCapabilities:
         """Tier 2 mechanics, but this one control is verified and wired."""
-        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS)
+        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS, mcp=True)
 
 
 class KiloRuntime(GenericRuntime):
@@ -1497,9 +1587,22 @@ class KiloRuntime(GenericRuntime):
     #: the chat-completions body, and nothing else in the config does.
     EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
+    def _accept_mcp(
+        self, config: RuntimeMCPConfig, *, gateway_base_url: str, env: dict[str, str]
+    ) -> None:
+        """The fork gets its own switch, not the parent's.
+
+        Kilo renamed every kill switch to ``KILO_*``, and the wrapper exports
+        ``KILO_DISABLE_PROJECT_CONFIG``. Reading the shared mechanism as "the
+        same as OpenCode" is exactly how a fork silently loses a control: the
+        wrapper is verified against the pinned fork, so the claim is made here
+        for this runtime and not inherited from its sibling.
+        """
+        self._wrapper_mcp_env(config, gateway_base_url=gateway_base_url, env=env)
+
     def capabilities(self) -> RuntimeCapabilities:
         """Tier 2 mechanics, but this one control is verified and wired."""
-        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS)
+        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS, mcp=True)
 
 
 _REGISTRY: dict[str, type[AgentRuntime]] = {

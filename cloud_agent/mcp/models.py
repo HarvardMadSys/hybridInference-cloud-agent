@@ -151,6 +151,13 @@ class ConnectorStatus(StrEnum):
     REVOKED = "revoked"
 
 
+#: The characters an alias may contain. It becomes a URL path segment on the
+#: relay and a prefix on every tool name the connection contributes, so the
+#: grammar is the intersection of the two rather than whatever a client sends:
+#: a slash would break the path, and anything outside this set would be mangled
+#: in a tool name the model then cannot call.
+ALIAS_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$"
+
 #: Version negotiation outcome for one optional capability.
 SupportState = Literal["native", "platform-bridge", "unsupported"]
 
@@ -688,6 +695,7 @@ class ConnectionStore(Protocol):
 
 
 __all__ = [
+    "ALIAS_PATTERN",
     "PREFERRED_PROTOCOL_VERSION",
     "STATELESS_PROTOCOL_VERSIONS",
     "SUPPORTED_PROTOCOL_VERSIONS",

@@ -23,6 +23,7 @@ somebody else made.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -43,6 +44,7 @@ from cloud_agent.mcp.authorization import binding_from_selection
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
 from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
 from cloud_agent.mcp.models import (
+    ALIAS_PATTERN,
     AuthKind,
     CapabilityKind,
     ConnectionErrorKind,
@@ -1356,7 +1358,7 @@ async def replace_thread_bindings(
         binding = binding_from_selection(
             thread_id=thread_id,
             connection=connection,
-            alias=item.alias or _default_alias(row, index),
+            alias=_checked_alias(item.alias, fallback=_default_alias(row, index)),
             rules=rules,
             resources={name: _parse_policy(value) for name, value in item.resources.items()},
             prompts={name: _parse_policy(value) for name, value in item.prompts.items()},
@@ -1578,6 +1580,24 @@ def _parse_auth_kind(value: str) -> AuthKind:
     except ValueError as exc:
         allowed = ", ".join(item.value for item in AuthKind)
         raise _bad_request(f"unknown auth kind {value!r}; use one of: {allowed}") from exc
+
+
+def _checked_alias(alias: str | None, *, fallback: str) -> str:
+    """Validate a binding alias, or derive one that is valid by construction.
+
+    The alias is a URL path segment on the relay and a prefix on every tool
+    name the connection contributes, so a value outside the grammar produces
+    either a 404 the agent reads as a broken server or a tool name the model
+    cannot call. Checked here rather than at first use, because the user can
+    still be told which value was wrong.
+    """
+    candidate = (alias or fallback).strip()
+    if not re.fullmatch(ALIAS_PATTERN, candidate):
+        raise _bad_request(
+            f"{candidate!r} is not a usable alias: use letters, digits, underscore and "
+            "hyphen, starting with a letter or digit, up to 40 characters"
+        )
+    return candidate
 
 
 def _parse_policy(value: str) -> ToolPolicy:
