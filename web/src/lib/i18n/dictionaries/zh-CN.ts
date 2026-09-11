@@ -143,6 +143,15 @@ export const zhCN: Record<TranslationKey, string> = {
   'turnNavigation.state.failed': '失败',
   'turnNavigation.state.cancelled': '已停止',
 
+  'conversation.status': '对话状态',
+  'conversation.state.queued': '排队中',
+  'conversation.state.running': '运行中',
+  'conversation.state.idle': '空闲',
+  'conversation.state.failed': '失败',
+  'conversation.executionHistory': '执行记录（{count}）',
+  'conversation.viewingExecution': '正在查看第 {number} 次执行',
+  'conversation.executionHistoryHint': '选择一次历史执行，查看当时的活动记录。',
+
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': '已归档会话',
   'archive.subtitle': '找回之前的工作，或整理不再需要的会话。',

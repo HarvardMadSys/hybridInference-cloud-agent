@@ -188,7 +188,8 @@ describe('JobDetail', () => {
     async (parentJobId) => {
       render(<JobDetail job={makeJob({ state: 'queued', events: [], parentJobId })} />);
       expect(await screen.findByText('Waiting to start')).toBeInTheDocument();
-      expect(screen.queryByText('Queued after the current run')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Queued$/);
+      expect(screen.queryByText(/Queued after (the )?current run/)).not.toBeInTheDocument();
     },
   );
 
@@ -682,10 +683,54 @@ describe('JobDetail', () => {
     (state) => {
       const stateNote = 'agent completed (shared workspace; publication snapshot pending)';
       render(<JobDetail job={makeJob({ state, stateNote, sandbox: 'io.containerd.kata.v2' })} />);
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
       expect(screen.queryByText(stateNote)).not.toBeInTheDocument();
       expect(screen.queryByText(/^(Done|Completed|Outcome|Needs review)$/)).not.toBeInTheDocument();
       expect(screen.queryByRole('dialog', { name: 'Run details' })).not.toBeInTheDocument();
       expect(screen.queryByText('Sandbox')).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(['queued', 'running', 'failed'] as const)(
+    'shows the %s conversation state without changing the current turn',
+    (state) => {
+      render(<JobDetail job={makeJob({ state })} />);
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(
+        state[0].toUpperCase() + state.slice(1),
+      );
+      expect(screen.getByLabelText('Agent activity')).toHaveTextContent('I found the cause.');
+      expect(screen.queryByText(/Execution history/)).not.toBeInTheDocument();
+      if (state === 'failed') {
+        expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+      } else {
+        expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+      }
+    },
+  );
+
+  it('becomes idle after stopping while preserving the stopped result and follow-up', () => {
+    const job = makeJob();
+    const { rerender } = render(<JobDetail job={job} />);
+    expect(screen.getByLabelText('Conversation status')).toHaveTextContent('Running');
+    rerender(<JobDetail job={{ ...job, state: 'cancelled' }} />);
+    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
+    expect(screen.getByText('Run stopped')).toBeInTheDocument();
+    expect(screen.getByLabelText('Add a follow-up')).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+  });
+
+  it.each(['done', 'cancelled'] as const)(
+    'shows ongoing conversation activity when the selected turn is %s',
+    (state) => {
+      const job = makeJob({ state, conversationState: 'running' });
+      const { rerender } = render(<JobDetail job={job} />);
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Running$/);
+      // A historical turn does not gain a Stop action for another turn.
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+      if (state === 'cancelled') expect(screen.getByText('Run stopped')).toBeInTheDocument();
+      rerender(<JobDetail job={{ ...job, conversationState: 'idle' }} />);
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
+      expect(screen.getByLabelText('Agent activity')).toHaveTextContent('I found the cause.');
     },
   );
 
@@ -792,6 +837,7 @@ describe('JobDetail', () => {
         })}
       />,
     );
+    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
     const workspace = screen.getByRole('region', { name: 'Task progress' });
     expect(within(workspace).getByText(message)).toBeVisible();
     expect(
@@ -908,13 +954,30 @@ describe('JobDetail', () => {
       />,
     );
     expect(await screen.findByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    const history = screen.getByText('Execution history (2)').closest('details');
+    expect(history).not.toHaveAttribute('open');
+    expect(screen.getByText('Final answer')).toBeVisible();
+    expect(screen.queryByText('Superseded answer')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Execution history (2)'));
+    expect(history).toHaveAttribute('open');
     fireEvent.click(screen.getByRole('button', { name: '1 · superseded' }));
+    expect(screen.getByRole('button', { name: '1 · superseded' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByText(/Viewing execution 1/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
     expect(screen.getByText('Superseded answer')).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Usage' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '2 · finished' }));
+    fireEvent.click(screen.getByText(/Execution history \(2\)/));
+    await waitFor(() => expect(screen.getByText('Final answer')).toBeVisible());
+    expect(history).not.toHaveAttribute('open');
+    expect(screen.queryByText(/Viewing execution 1/)).not.toBeInTheDocument();
     expect(screen.getByLabelText('Run usage')).toHaveTextContent('2 model calls');
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    expect(followUpAgentJob).not.toHaveBeenCalled();
   });
 
   it.each([null, 0])('preserves an absent or zero Gateway model-call count (%s)', async (turns) => {
@@ -1605,6 +1668,7 @@ describe('JobDetail', () => {
       />,
     );
 
+    fireEvent.click(screen.getByText('Execution history (2)'));
     fireEvent.click(screen.getByRole('button', { name: '1 · superseded' }));
     expect(screen.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
 

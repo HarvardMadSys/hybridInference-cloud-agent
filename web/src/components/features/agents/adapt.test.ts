@@ -1,12 +1,13 @@
 // Tests for the API → UI adapter.
 //
 // The cases that matter are the ones where a wrong mapping would mislead a
-// user about their own job: a finished-but-unpublished job looking done, a
+// user about their own job: a completed chat looking active while it publishes, a
 // superseded attempt looking live, or an event kind silently vanishing.
 
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
+import { getConversationState, toConversationState } from './conversationState';
 
 import {
   lifecyclePhaseLabel,
@@ -102,7 +103,7 @@ function event(
 
 describe('toDisplayState', () => {
   it('separates published from merely finished', () => {
-    // Both are `succeeded` on the wire, but only one is done to a user.
+    // Both are idle conversations; per-turn results retain their legacy values.
     expect(toDisplayState({ ...JOB, state: 'succeeded', published_pr_url: 'u' })).toBe('done');
     expect(toDisplayState({ ...JOB, state: 'succeeded', published_pr_url: null })).toBe(
       'needs_review',
@@ -120,6 +121,29 @@ describe('toDisplayState', () => {
     ['cancelled', 'cancelled'],
   ] as const)('maps %s', (wire, display) => {
     expect(toDisplayState({ ...JOB, state: wire })).toBe(display);
+  });
+});
+
+describe('conversation display state', () => {
+  it('preserves a cancelled turn while carrying the whole conversation activity', () => {
+    const job = toDisplayJob({ ...JOB, state: 'cancelled', conversation_state: 'running' });
+    expect(job.state).toBe('cancelled');
+    expect(job.conversationState).toBe('running');
+    expect(getConversationState(job)).toBe('running');
+  });
+  it.each([
+    ['queued', null, 'queued'],
+    ['running', null, 'running'],
+    ['publishing', null, 'running'],
+    ['succeeded', null, 'idle'],
+    ['succeeded', 'https://github.com/o/n/pull/1', 'idle'],
+    ['failed', null, 'failed'],
+    ['cancelled', null, 'idle'],
+  ] as const)('displays %s with PR %s as %s', (state, published_pr_url, expected) => {
+    const job = toDisplayJob({ ...JOB, state, published_pr_url });
+    expect(toConversationState(job.state)).toBe(expected);
+    // Presentation never rewrites the individual turn's result or PR metadata.
+    expect(job.state).toBe(toDisplayState({ ...JOB, state, published_pr_url }));
   });
 });
 
@@ -594,24 +618,32 @@ describe('toDisplayJob', () => {
     ]);
   });
 
-  it("carries a stored turn's own outcome onto its rail entry", () => {
+  it.each([
+    ['failed', 'failed'],
+    ['cancelled', 'cancelled'],
+    ['succeeded', 'needs_review'],
+  ] as const)("carries a stored turn's %s outcome onto its rail entry", (state, expected) => {
     // A turn that failed is not the same as a turn that was never classified:
     // the rail says so from the thread's job row rather than from whichever
     // events that turn happens to carry.
-    const current = { ...JOB, id: 'ajob_2', thread_id: 'thread_1', turn_no: 2 };
+    const current = {
+      ...JOB,
+      id: 'ajob_2',
+      thread_id: 'thread_1',
+      turn_no: 2,
+      state: 'succeeded' as const,
+    };
     const job = toDisplayJob(current, {
       thread: {
         thread_id: 'thread_1',
-        jobs: [
-          { ...JOB, id: 'ajob_1', thread_id: 'thread_1', turn_no: 1, state: 'failed' },
-          current,
-        ],
+        jobs: [{ ...JOB, id: 'ajob_1', thread_id: 'thread_1', turn_no: 1, state }, current],
         messages: [],
       },
       threadEvents: [],
     });
 
-    expect(job.historyTurns?.[0].state).toBe('failed');
+    expect(toConversationState(job.state)).toBe('idle');
+    expect(job.historyTurns?.[0].state).toBe(expected);
   });
 
   it('renders a settled turn from durable messages when it has no events', () => {

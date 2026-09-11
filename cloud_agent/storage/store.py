@@ -311,6 +311,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "execution_profile": row["execution_profile"],
         "reasoning_effort": row["reasoning_effort"],
         "state": row["state"],
+        "conversation_state": row.get("conversation_state"),
         "cancel_requested": row["cancel_requested"],
         "terminal_resume_pending": row["terminal_resume_pending"],
         "current_attempt_id": row["current_attempt_id"],
@@ -346,10 +347,25 @@ _JOB_OWN_COLUMNS = (
     "created_at, updated_at"
 )
 _THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile, t.mcp_servers"
+# Probe the unfinished-turn index before the latest-turn index: a cancelled
+# queued follow-up must not hide work that is still running earlier in the chat.
+_CONVERSATION_STATE_SQL = """
+COALESCE(
+    (SELECT active.state FROM agent_jobs active
+     WHERE active.thread_id = j.thread_id AND active.user_id = j.user_id
+       AND active.state IN ('queued', 'running')
+     ORDER BY CASE WHEN active.state = 'running' THEN 0 ELSE 1 END, active.turn_no DESC
+     LIMIT 1),
+    (SELECT CASE WHEN latest.state = 'failed' THEN 'failed' ELSE 'idle' END
+     FROM agent_jobs latest
+     WHERE latest.thread_id = j.thread_id AND latest.user_id = j.user_id
+     ORDER BY latest.turn_no DESC LIMIT 1)
+)"""
 _QUALIFIED_JOB_COLUMNS = (
     ", ".join(f"j.{column.strip()}" for column in _JOB_OWN_COLUMNS.split(","))
     + ", "
     + _THREAD_CONFIG_COLUMNS
+    + f", {_CONVERSATION_STATE_SQL} AS conversation_state"
 )
 _JOB_SELECT = (
     f"SELECT {_QUALIFIED_JOB_COLUMNS} FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id"
@@ -382,7 +398,10 @@ WITH latest AS (
       AND ($3::text IS NULL OR STRPOS(LOWER(t.title), LOWER($3)) > 0)
       {repo_filter}
 ), matched AS (
-    SELECT * FROM latest WHERE $4::text IS NULL OR display_state = $4
+    SELECT * FROM latest
+    WHERE $4::text IS NULL
+       OR CASE WHEN $4 IN ('done', 'needs_review', 'cancelled')
+               THEN display_state ELSE conversation_state END = $4
 )
 """
 

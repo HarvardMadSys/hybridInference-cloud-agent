@@ -144,6 +144,15 @@ export const en = {
   'turnNavigation.state.failed': 'Failed',
   'turnNavigation.state.cancelled': 'Cancelled',
 
+  'conversation.status': 'Conversation status',
+  'conversation.state.queued': 'Queued',
+  'conversation.state.running': 'Running',
+  'conversation.state.idle': 'Idle',
+  'conversation.state.failed': 'Failed',
+  'conversation.executionHistory': 'Execution history ({count})',
+  'conversation.viewingExecution': 'Viewing execution {number}',
+  'conversation.executionHistoryHint': 'Select a past execution to view its recorded activity.',
+
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': 'Archived sessions',
   'archive.subtitle': 'Revisit past work or organize sessions you no longer need.',

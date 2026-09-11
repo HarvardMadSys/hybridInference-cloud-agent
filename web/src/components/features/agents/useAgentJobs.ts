@@ -24,6 +24,7 @@ import type {
 import { toDisplayJob } from './adapt';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
+import { getConversationState } from './conversationState';
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
   'started',
@@ -70,6 +71,7 @@ export function applyAgentLifecycleEvent(
       ...current,
       telemetry_attempt_id: telemetryAttemptId,
       state: 'queued',
+      conversation_state: 'queued',
       current_attempt_id: null,
     };
   }
@@ -81,6 +83,7 @@ export function applyAgentLifecycleEvent(
       ...current,
       telemetry_attempt_id: telemetryAttemptId,
       state: 'running',
+      conversation_state: 'running',
       current_attempt_id: event.attempt_id,
     };
   }
@@ -89,6 +92,7 @@ export function applyAgentLifecycleEvent(
       ...current,
       telemetry_attempt_id: telemetryAttemptId,
       state: 'publishing',
+      conversation_state: 'running',
       current_attempt_id: event.attempt_id,
     };
   }
@@ -162,8 +166,8 @@ export function useAgentJobList(
   // not need a request every ten seconds.
   const hasLive = jobs.some(
     (job) =>
-      job.state === 'running' ||
-      job.state === 'queued' ||
+      getConversationState(job) === 'running' ||
+      getConversationState(job) === 'queued' ||
       (job.workspaceShared === true &&
         isActiveWorkspacePublicationState(job.workspacePublicationState)),
   );
@@ -478,34 +482,42 @@ export function useAgentJob(jobId: string): {
     };
   }, [awaitingTitle, jobId, tick]);
 
-  // A shared turn reaches its terminal job state before its quiescent
-  // workspace snapshot is captured and published. The SSE correctly closes
-  // at the turn boundary, so keep only that small, asynchronous tail live;
-  // otherwise the badge and draft-PR link remain stale until a full reload.
-  // Jobs without a retained group never enter this loop, and terminal
-  // publication states stop it immediately after the next response.
+  // A queued or terminal turn's stream cannot report another turn finishing.
+  // Refresh shared activity until this turn takes over or the conversation
+  // and its publication have both settled.
   const publicationActive = hasActiveWorkspacePublication(api);
+  const conversationActive =
+    api?.conversation_state === 'running' || api?.conversation_state === 'queued';
+  const metadataActive =
+    publicationActive || (state !== 'running' && state !== 'publishing' && conversationActive);
   useEffect(() => {
-    if (!jobId || !publicationActive) return undefined;
+    if (!jobId || !metadataActive) return undefined;
     let cancelled = false;
+    let pending = false;
+    const version = generation.current;
     const timer = setInterval(() => {
-      // Publication changes only fields on the job row. Fetching the complete
+      if (pending) return;
+      pending = true;
+      // These updates change only fields on the job row. Fetching the complete
       // conversation and event history every five seconds would add load and
       // briefly reset unrelated UI state for no benefit.
       void getAgentJob(jobId)
         .then((latest) => {
-          if (!cancelled) setApi(latest);
+          if (!cancelled && generation.current === version) setApi(latest);
         })
         .catch(() => {
           // This is a background freshness aid. Keep the last good terminal
           // view on a transient failure and try again on the next interval.
+        })
+        .finally(() => {
+          pending = false;
         });
     }, 5_000);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [jobId, publicationActive]);
+  }, [jobId, metadataActive, tick]);
 
   const job = api ? toDisplayJob(api, { events, patch, thread, threadEvents }) : null;
   // The turn rows come from the thread read, which is a snapshot: a live

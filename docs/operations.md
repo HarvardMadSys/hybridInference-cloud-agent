@@ -70,6 +70,22 @@ Manual renames always take precedence, including a rename to the same text.
 Follow-ups keep the conversation name; forks inherit it. Existing conversation
 titles are preserved by migration and are not automatically regenerated.
 
+### Conversation status and run history
+
+The conversation UI shows four states: **Queued**, **Running**, **Idle**, and
+**Failed**. Any running turn takes precedence over queued turns; when no turn
+is active, the latest turn determines whether the conversation is failed or
+idle. Completed and user-stopped turns both leave the conversation idle.
+Opening an older turn does not change this conversation status. The owner API
+reports it as `conversation_state`, independently of the selected job's `state`.
+
+Each turn keeps its own completion, failure, or cancellation result. Execution
+history is collapsed by default and appears only when that turn has multiple
+attempts. Admin run details show the server and timestamps directly, with past
+attempts available for inspection. Selecting history changes the records being
+viewed; it does not restart a task or change its server. These display rules do
+not change task scheduling or retry behavior.
+
 ## Verified
 
 Against real components on a developer machine:

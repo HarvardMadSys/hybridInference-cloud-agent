@@ -32,19 +32,16 @@ import type {
 } from './types';
 
 /**
- * Map a server state onto a display state.
+ * Preserve a server result as a per-turn display state.
  *
- * `succeeded` splits in two, because those are different things to a user: a
- * job whose patch is already a draft PR is done, while one that finished
- * without a PR is waiting on the publish step (or produced no changes) and
- * still wants a human.
+ * Historical turns and their actions keep the distinction between success,
+ * failure and cancellation. Conversation badges use `toConversationState`
+ * to present successful and stopped turns as idle regardless of publication.
  */
 export function toDisplayState(job: AgentJobApi): AgentJobState {
   if (job.state === 'queued') return 'queued';
   if (job.state === 'running' || job.state === 'publishing') return 'running';
-  // `succeeded` splits in two because those are different things to a user: a
-  // job whose patch is already a draft PR is done, while one that finished
-  // without a PR is waiting on the publish step (or produced no changes).
+  // Retain the legacy result values for historical turn consumers.
   if (job.state === 'succeeded') return job.published_pr_url ? 'done' : 'needs_review';
   if (job.state === 'failed') return 'failed';
   if (job.state === 'cancelled') return 'cancelled';
@@ -743,6 +740,7 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     title: job.title ?? options.thread?.title ?? job.task_prompt.split('\n')[0].slice(0, 80),
     prompt: job.task_prompt,
     state: toDisplayState(job),
+    conversationState: job.conversation_state ?? undefined,
     stateNote: job.detail ? ownerFailureMessage(job.detail) : undefined,
     repo: job.repo,
     baseRef: job.base_ref ?? undefined,

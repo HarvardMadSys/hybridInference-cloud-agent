@@ -4150,6 +4150,117 @@ async def test_session_search_state_and_project_facets_apply_before_pagination(
     ]
 
 
+async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(store: AgentJobStore):
+    completed = await _create_job(store, task_prompt="Completed", repo="acme/api")
+    published = await _create_job(store, task_prompt="Published", repo="acme/web")
+    stopped = await _create_job(store, task_prompt="Stopped", repo="acme/api")
+    older_completed = await _create_job(store, task_prompt="Continued", repo="acme/api")
+    follow_up = await store.create_follow_up(
+        parent_job_id=older_completed["id"], user_id="user-1", prompt="Continue working"
+    )
+    assert follow_up is not None and follow_up["state"] == "queued"
+    foreign = await _create_job(store, user_id="user-2", repo="acme/api")
+    unarchived = await _create_job(store, repo="acme/api")
+    excluded = [
+        await _create_job(store, task_prompt=state) for state in ("failed", "queued", "running")
+    ]
+    states = [
+        (completed, "succeeded"),
+        (published, "succeeded"),
+        (stopped, "cancelled"),
+        (older_completed, "succeeded"),
+        (foreign, "succeeded"),
+        (unarchived, "succeeded"),
+        *zip(excluded, ("failed", "queued", "running"), strict=True),
+    ]
+    for job, state in states:
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_jobs SET state = $2, "
+                "native_turn_no = CASE WHEN $2 = 'succeeded' THEN turn_no ELSE NULL END "
+                "WHERE id = $1",
+                job["id"],
+                state,
+            )
+        if job is not unarchived:
+            await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=True)
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET published_pr_url = 'https://example.test/pr/1' WHERE id = $1",
+            published["id"],
+        )
+    cursor = None
+    found = []
+    for _ in range(3):
+        page = await store.list_sessions(
+            user_id="user-1", archived=True, state="idle", limit=1, cursor=cursor
+        )
+        assert page["total"] == 3
+        assert page["projects"] == [
+            {"repo": "acme/api", "count": 2},
+            {"repo": "acme/web", "count": 1},
+        ]
+        found.extend(page["sessions"])
+        cursor = page["next_cursor"]
+    assert cursor is None
+    assert {row["thread_id"] for row in found} == {
+        completed["thread_id"],
+        published["thread_id"],
+        stopped["thread_id"],
+    }
+    assert {row["job"]["state"] for row in found} == {"succeeded", "cancelled"}
+
+    project = await store.list_sessions(
+        user_id="user-1", archived=True, state="idle", repo="acme/api"
+    )
+    assert project["total"] == 2
+    assert {row["thread_id"] for row in project["sessions"]} == {
+        completed["thread_id"],
+        stopped["thread_id"],
+    }
+    assert project["projects"] == page["projects"]
+
+
+async def test_conversation_state_keeps_active_work_visible_after_cancelling_queued_turn(
+    store: AgentJobStore,
+):
+    first = await _create_job(store)
+    follow_up = await store.create_follow_up(
+        parent_job_id=first["id"], user_id="user-1", prompt="Queued follow-up"
+    )
+    assert follow_up is not None and follow_up["state"] == "queued"
+    assert (await store.get_job(first["id"]))["conversation_state"] == "queued"
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = 'running' WHERE id = $1", first["id"])
+    assert await store.request_cancel(job_id=follow_up["id"], user_id="user-1") == "cancelled"
+
+    for job_id in (first["id"], follow_up["id"]):
+        assert (await store.get_job(job_id))["conversation_state"] == "running"
+    conversation = (await store.list_conversations(user_id="user-1"))["conversations"][0]["job"]
+    assert conversation["id"] == follow_up["id"]
+    assert conversation["state"] == "cancelled"
+    assert conversation["conversation_state"] == "running"
+    assert (await store.list_sessions(user_id="user-1", state="running"))["total"] == 1
+    assert (await store.list_sessions(user_id="user-1", state="idle"))["total"] == 0
+
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1 WHERE id = $1",
+            first["id"],
+        )
+    assert (await store.get_job(first["id"]))["conversation_state"] == "idle"
+    assert (await store.get_job(follow_up["id"]))["conversation_state"] == "idle"
+    assert (await store.list_sessions(user_id="user-1", state="idle"))["total"] == 1
+
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = 'failed' WHERE id = $1", follow_up["id"])
+    historical = await store.get_job(first["id"])
+    assert historical["state"] == "succeeded"
+    assert historical["conversation_state"] == "failed"
+    assert (await store.list_sessions(user_id="user-1", state="failed"))["total"] == 1
+    assert (await store.list_sessions(user_id="user-1", state="idle"))["total"] == 0
+
+
 async def test_session_cursor_is_scoped_to_owner_and_filters(store: AgentJobStore):
     for _ in range(2):
         job = await _create_job(store)

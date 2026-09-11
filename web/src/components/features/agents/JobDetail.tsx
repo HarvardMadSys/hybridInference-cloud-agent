@@ -30,6 +30,11 @@ import {
 import { lifecyclePhaseLabel, ownerFailureMessage, toDiffFileDetails } from './adapt';
 import { isComposerSubmit } from './composerKeys';
 import {
+  CONVERSATION_STATE_KEYS,
+  getConversationState,
+  type ConversationState,
+} from './conversationState';
+import {
   conversationNavigationScope,
   describeCurrentTurn,
   describeHistoryTurns,
@@ -96,40 +101,24 @@ const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'files', label: 'Files' },
 ];
 
-const STATE_PILL: Record<AgentJob['state'], { label: string; className: string; dot?: string }> = {
+const STATE_PILL: Record<ConversationState, { className: string; dot?: string }> = {
   running: {
-    label: 'Running',
     className:
       'bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 ring-1 ring-inset ring-blue-100 dark:ring-blue-500/25',
     dot: 'bg-blue-500',
   },
   queued: {
-    label: 'Queued',
     className:
       'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400 ring-1 ring-inset ring-gray-200/70 dark:ring-white/10',
     dot: 'bg-gray-400 dark:bg-gray-600',
   },
-  needs_review: {
-    // This display enum means API succeeded without a published PR. A run
-    // that produced no patch needs no review, so completion is the truth.
-    label: 'Completed',
-    className:
-      'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-100 dark:ring-emerald-500/25',
-  },
-  done: {
-    label: 'Done',
-    className:
-      'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-100 dark:ring-emerald-500/25',
-  },
-  failed: {
-    label: 'Failed',
-    className:
-      'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-inset ring-red-100 dark:ring-red-500/25',
-  },
-  cancelled: {
-    label: 'Cancelled',
+  idle: {
     className:
       'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400 ring-1 ring-inset ring-gray-200/70 dark:ring-white/10',
+  },
+  failed: {
+    className:
+      'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-inset ring-red-100 dark:ring-red-500/25',
   },
 };
 
@@ -1194,7 +1183,8 @@ export function JobDetail({
 
   const selectedAttempt = job.attempts.find((attempt) => attempt.no === attemptNo);
   const runNote = ownerRunNote(job);
-  const pill = STATE_PILL[job.state];
+  const conversationState = getConversationState(job);
+  const pill = STATE_PILL[conversationState];
   const isArchived = Boolean(job.archivedAt);
   const isActive = job.state === 'running' || job.state === 'queued';
   const isSuccessful = job.state === 'done' || job.state === 'needs_review';
@@ -1633,18 +1623,17 @@ export function JobDetail({
               </button>
             ))}
           </nav>
-          {!isSuccessful ? (
-            <span
-              className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
-            >
-              {pill.dot ? (
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${pill.dot} ${isActive ? 'animate-pulse' : ''}`}
-                />
-              ) : null}
-              {job.state === 'queued' && job.parentJobId ? 'Queued after current run' : pill.label}
-            </span>
-          ) : null}
+          <span
+            aria-label={t('conversation.status')}
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
+          >
+            {pill.dot ? (
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${pill.dot} ${isActive ? 'animate-pulse' : ''}`}
+              />
+            ) : null}
+            {t(CONVERSATION_STATE_KEYS[conversationState])}
+          </span>
           {job.diffFiles.length ? (
             <button
               type="button"
@@ -1850,26 +1839,45 @@ export function JobDetail({
                     ) : null}
 
                     {job.attempts.length > 1 ? (
-                      <div className="my-3 flex flex-wrap items-center gap-1.5 text-xs">
-                        <span className="mr-1 text-gray-400 dark:text-gray-500">Run attempts</span>
-                        {job.attempts.map((attempt) => (
-                          <button
-                            key={attempt.no}
-                            type="button"
-                            onClick={() => {
-                              chosenAttemptRef.current = attempt.no;
-                              setAttemptNo(attempt.no);
-                            }}
-                            className={`rounded-md px-2 py-1 ${
-                              attempt.no === attemptNo
-                                ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900'
-                                : 'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-white/15'
-                            }`}
-                          >
-                            {attempt.no} · {attempt.status}
-                          </button>
-                        ))}
-                      </div>
+                      <details
+                        className="my-3 text-xs"
+                        onToggle={(event) => {
+                          if (!event.currentTarget.open) {
+                            chosenAttemptRef.current = liveAttempt;
+                            setAttemptNo(liveAttempt);
+                          }
+                        }}
+                      >
+                        <summary className="cursor-pointer text-gray-500 dark:text-gray-400">
+                          {t('conversation.executionHistory', { count: job.attempts.length })}
+                          {attemptNo !== liveAttempt
+                            ? ` · ${t('conversation.viewingExecution', { number: attemptNo })}`
+                            : ''}
+                        </summary>
+                        <p className="mt-2 text-gray-400 dark:text-gray-500">
+                          {t('conversation.executionHistoryHint')}
+                        </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          {job.attempts.map((attempt) => (
+                            <button
+                              key={attempt.no}
+                              type="button"
+                              aria-pressed={attempt.no === attemptNo}
+                              onClick={() => {
+                                chosenAttemptRef.current = attempt.no;
+                                setAttemptNo(attempt.no);
+                              }}
+                              className={`rounded-md px-2 py-1 ${
+                                attempt.no === attemptNo
+                                  ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900'
+                                  : 'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-white/15'
+                              }`}
+                            >
+                              {attempt.no} · {attempt.status}
+                            </button>
+                          ))}
+                        </div>
+                      </details>
                     ) : null}
 
                     {selectedAttempt?.status === 'superseded' && selectedAttempt.note ? (

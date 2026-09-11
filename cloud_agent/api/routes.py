@@ -473,6 +473,7 @@ def _job_response(
             sandbox.get("origin_thread_id") or job.get("thread_id") or job["id"]
         ),
         state=job["state"],
+        conversation_state=job.get("conversation_state"),
         cancel_requested=job["cancel_requested"],
         current_attempt_id=job["current_attempt_id"],
         published_pr_url=job["published_pr_url"],

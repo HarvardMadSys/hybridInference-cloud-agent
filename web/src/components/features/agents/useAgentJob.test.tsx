@@ -33,7 +33,10 @@ beforeEach(() => {
   } as Awaited<ReturnType<typeof getAgentJobGit>>);
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 function event(
   id: number,
@@ -54,6 +57,93 @@ function event(
 }
 
 describe('useAgentJob live turn rows', () => {
+  it('refreshes shared activity while the selected follow-up waits and hands off to its stream', async () => {
+    vi.useFakeTimers();
+    const initial = {
+      id: 'queued-followup',
+      state: 'queued',
+      conversation_state: 'running',
+      thread_id: 'live-thread',
+      turn_no: 2,
+      task_prompt: 'A follow-up',
+      runtime: 'codex',
+      model: 'test',
+      title_source: 'generated',
+    } as AgentJobApi;
+    vi.mocked(getAgentJob)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce({ ...initial, conversation_state: 'queued' })
+      .mockResolvedValue({ ...initial, state: 'running', conversation_state: 'running' });
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: 'live-thread',
+      jobs: [initial],
+      messages: [],
+    } as unknown as AgentThreadApi);
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
+    vi.mocked(streamAgentJob).mockResolvedValue(undefined);
+
+    const { result } = renderHook(() => useAgentJob(initial.id));
+    await act(async () => {});
+    expect(result.current.job?.state).toBe('queued');
+    expect(result.current.job?.conversationState).toBe('running');
+    expect(streamAgentJob).toHaveBeenCalledOnce();
+
+    // The earlier turn settles without sending an event on this turn's stream.
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(result.current.job?.state).toBe('queued');
+    expect(result.current.job?.conversationState).toBe('queued');
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(result.current.job?.state).toBe('running');
+    expect(result.current.job?.conversationState).toBe('running');
+    expect(getAgentJob).toHaveBeenCalledTimes(3);
+
+    // Its own stream now carries the running turn through completion.
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(getAgentJob).toHaveBeenCalledTimes(3);
+    expect(streamAgentJob).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['cancelled', 'running'],
+    ['succeeded', 'queued'],
+  ] as const)(
+    'refreshes a %s turn while its conversation is %s and stops once idle',
+    async (state, conversation_state) => {
+      vi.useFakeTimers();
+      const initial = {
+        id: 'old-job',
+        state,
+        conversation_state,
+        thread_id: 'live-thread',
+        task_prompt: 'An earlier turn',
+        runtime: 'codex',
+        model: 'test',
+        title_source: 'generated',
+      } as AgentJobApi;
+      vi.mocked(getAgentJob)
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValue({ ...initial, conversation_state: 'idle' });
+      vi.mocked(getAgentJobThread).mockResolvedValue({
+        thread_id: 'live-thread',
+        jobs: [initial],
+        messages: [],
+      } as unknown as AgentThreadApi);
+      vi.mocked(listAllAgentThreadEvents).mockResolvedValue([]);
+
+      const { result } = renderHook(() => useAgentJob(initial.id));
+      await act(async () => {});
+      expect(result.current.job?.conversationState).toBe(conversation_state);
+      expect(streamAgentJob).not.toHaveBeenCalled();
+      await act(async () => vi.advanceTimersByTimeAsync(5_000));
+      expect(result.current.job?.conversationState).toBe('idle');
+      expect(result.current.job?.state).toBe(state === 'cancelled' ? 'cancelled' : 'needs_review');
+      expect(getAgentJob).toHaveBeenCalledTimes(2);
+      expect(getAgentJobThread).toHaveBeenCalledOnce();
+      await act(async () => vi.advanceTimersByTimeAsync(15_000));
+      expect(getAgentJob).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it('carries a replaced attempt into the rows that scope the inspector', async () => {
     const initial = {
       id: 'live-job',

@@ -37,7 +37,9 @@ function RunDetails({ jobId }: { jobId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
-  const [attemptId, setAttemptId] = useState<number | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // A null selection follows the latest attempt, including newly started ones.
+  const [historicalAttemptId, setHistoricalAttemptId] = useState<number | null>(null);
   const [denied, setDenied] = useState(false);
   const onAccessDenied = useCallback(() => setDenied(true), []);
 
@@ -49,11 +51,10 @@ function RunDetails({ jobId }: { jobId: string }) {
       .then((next) => {
         if (controller.signal.aborted) return;
         setDetail(next);
-        setAttemptId((current) =>
-          next.attempts.some((attempt) => attempt.attempt_id === current)
-            ? current
-            : (next.attempts[0]?.attempt_id ?? null),
+        setHistoricalAttemptId((current) =>
+          next.attempts.some((attempt) => attempt.attempt_id === current) ? current : null,
         );
+        if (next.attempts.length <= 1) setHistoryOpen(false);
       })
       .catch((e: unknown) => {
         if (!controller.signal.aborted) {
@@ -67,7 +68,15 @@ function RunDetails({ jobId }: { jobId: string }) {
     return () => controller.abort();
   }, [jobId, revision]);
 
-  const attempt = detail?.attempts.find((item) => item.attempt_id === attemptId);
+  const attempts = [...(detail?.attempts ?? [])].sort(
+    (a, b) => b.attempt_no - a.attempt_no || b.attempt_id - a.attempt_id,
+  );
+  const latestAttempt = attempts[0];
+  const attempt =
+    (historyOpen && attempts.find((item) => item.attempt_id === historicalAttemptId)) ||
+    latestAttempt;
+  const attemptId = attempt?.attempt_id ?? null;
+  const viewingHistory = attempt !== latestAttempt;
   if (denied) return <AdminRequired />;
   return (
     <div className="flex-1 overflow-y-auto">
@@ -130,35 +139,67 @@ function RunDetails({ jobId }: { jobId: string }) {
                 </div>
               ))}
             </dl>
-            {detail.attempts.length > 0 ? (
-              <>
-                <div className={`${CARD} mt-8 flex flex-wrap items-center gap-4 p-5`}>
-                  <label className="text-sm font-medium">
-                    Execution
-                    <select
-                      className={`${INPUT} ml-3 inline-block w-auto`}
-                      value={attemptId ?? ''}
-                      onChange={(event) => setAttemptId(Number(event.target.value))}
-                    >
-                      {detail.attempts.map((item) => (
-                        <option key={item.attempt_id} value={item.attempt_id}>
-                          {item.attempt_no} · {item.host || 'Unknown host'}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {attempt && (
-                    <div className="text-xs text-gray-500 dark:text-gray-400">
-                      <p>
-                        {attempt.status} · Started {dateTime(attempt.started_at)}
-                      </p>
-                      {attempt.finished_at && (
-                        <p className="mt-1">Finished {dateTime(attempt.finished_at)}</p>
-                      )}
+            {attempt ? (
+              <div className={`${CARD} mt-8 p-5`}>
+                <dl className="flex flex-wrap gap-x-8 gap-y-4 text-sm">
+                  {[
+                    ['Server', attempt.host || 'Unknown host'],
+                    ['Status', attempt.status],
+                    ['Started', dateTime(attempt.started_at)],
+                    ...(attempt.finished_at ? [['Finished', dateTime(attempt.finished_at)]] : []),
+                  ].map(([label, value]) => (
+                    <div key={label}>
+                      <dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt>
+                      <dd className="mt-1 text-gray-800 dark:text-gray-200">{value}</dd>
                     </div>
-                  )}
-                </div>
-              </>
+                  ))}
+                </dl>
+                {attempts.length > 1 && (
+                  <div className="mt-4 border-t border-gray-100 pt-4 dark:border-white/5">
+                    <button
+                      type="button"
+                      className="text-sm text-crimson hover:underline dark:text-crimson-light"
+                      aria-expanded={historyOpen}
+                      aria-controls="attempt-history"
+                      onClick={() => {
+                        setHistoryOpen((open) => !open);
+                        setHistoricalAttemptId(null);
+                      }}
+                    >
+                      Previous attempts ({attempts.length - 1})
+                    </button>
+                    {historyOpen && (
+                      <div id="attempt-history" className="mt-3">
+                        <label className="text-sm font-medium">
+                          View attempt
+                          <select
+                            className={`${INPUT} mt-2 sm:ml-3 sm:mt-0 sm:inline-block sm:w-auto`}
+                            value={viewingHistory ? attempt.attempt_id : ''}
+                            onChange={(event) =>
+                              setHistoricalAttemptId(
+                                event.target.value ? Number(event.target.value) : null,
+                              )
+                            }
+                          >
+                            <option value="">Latest attempt</option>
+                            {attempts.slice(1).map((item) => (
+                              <option key={item.attempt_id} value={item.attempt_id}>
+                                Attempt {item.attempt_no} · {item.status} ·{' '}
+                                {dateTime(item.started_at)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                          {viewingHistory
+                            ? 'Viewing a previous attempt. Activity, resources and LLM requests below show this attempt.'
+                            : 'Viewing the latest attempt. Choose a previous attempt to inspect its records.'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             ) : (
               <p className="mt-8 text-sm text-gray-500 dark:text-gray-400">
                 No execution has started.
@@ -181,6 +222,7 @@ function RunDetails({ jobId }: { jobId: string }) {
             <UsageSnapshot usage={detail.usage} />
             {detail.capabilities.llm_requests ? (
               <LLMRequests
+                key={`requests:${attemptId}`}
                 jobId={jobId}
                 attemptId={attemptId ?? undefined}
                 running={attempt?.finished_at == null}

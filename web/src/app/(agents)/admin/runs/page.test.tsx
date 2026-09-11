@@ -173,6 +173,22 @@ function detail(overrides: Partial<AdminRunDetail> = {}): AdminRunDetail {
   };
 }
 
+function attemptsDetail(): AdminRunDetail {
+  return detail({
+    attempts: [
+      { ...detail().attempts[0], status: 'failed' },
+      {
+        attempt_id: 20,
+        attempt_no: 2,
+        host: 'host-b',
+        status: 'succeeded',
+        started_at: '2026-09-10T08:02:00Z',
+        finished_at: '2026-09-10T08:03:00Z',
+      },
+    ],
+  });
+}
+
 function event(overrides: Partial<AdminActivityEvent> = {}): AdminActivityEvent {
   return {
     id: 42,
@@ -271,6 +287,13 @@ beforeEach(() => {
   vi.mocked(getAdminRun).mockResolvedValue(detail());
   vi.mocked(getAdminRunActivity).mockResolvedValue({ events: [event()], next_cursor: null });
   vi.mocked(getAdminAttemptResources).mockResolvedValue(resources());
+  vi.mocked(getAdminLlmRequestSources).mockResolvedValue({
+    job_id: 'job-1',
+    observed_at: '2026-09-10T08:03:00Z',
+    sources: [],
+    next_cursor: null,
+    reason: null,
+  });
   vi.mocked(revealAdminEventContent).mockResolvedValue({
     id: 42,
     attempt_id: 10,
@@ -644,6 +667,119 @@ describe('admin runs list', () => {
 });
 
 describe('admin run observation', () => {
+  it('shows the server and timing without an execution selector for a single attempt', async () => {
+    render(<AdminRunPage />);
+    await screen.findByText('Server');
+    const serverCard = screen.getByText('Server').closest('dl')!;
+    expect(within(serverCard).getByText('host-a')).toBeInTheDocument();
+    expect(within(serverCard).getByText('succeeded')).toBeInTheDocument();
+    expect(within(serverCard).getByText('Started')).toBeInTheDocument();
+    expect(within(serverCard).getByText('Finished')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Previous attempts/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Execution')).not.toBeInTheDocument();
+  });
+
+  it('follows the newest attempt regardless of response order and discovers new attempts on refresh', async () => {
+    const initial = attemptsDetail();
+    const newest = {
+      ...initial.attempts[1],
+      attempt_id: 30,
+      attempt_no: 3,
+      host: 'host-c',
+      started_at: '2026-09-10T08:04:00Z',
+      finished_at: null,
+    };
+    vi.mocked(getAdminRun)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(
+        detail({ attempts: [initial.attempts[0], newest, initial.attempts[1]] }),
+      );
+    render(<AdminRunPage />);
+    await screen.findByText('host-b');
+    expect(getAdminRunActivity).toHaveBeenLastCalledWith(
+      'job-1',
+      { attempt_id: 20, limit: 100 },
+      expect.any(AbortSignal),
+    );
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    // Opening history alone must not pin the latest attempt when a new one arrives.
+    fireEvent.click(screen.getByRole('button', { name: 'Previous attempts (1)' }));
+    expect(screen.getByLabelText('View attempt')).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh run' }));
+    await screen.findByText('host-c');
+    expect(getAdminRunActivity).toHaveBeenLastCalledWith(
+      'job-1',
+      { attempt_id: 30, limit: 100 },
+      expect.any(AbortSignal),
+    );
+    expect(getAdminAttemptResources).toHaveBeenLastCalledWith('job-1', 30, expect.any(AbortSignal));
+    expect(screen.getByLabelText('View attempt')).toHaveValue('');
+    expect(screen.queryByText('Finished')).not.toBeInTheDocument();
+  });
+
+  it('keeps explicit history across refresh, scopes every panel, and returns to latest when closed', async () => {
+    const initial = attemptsDetail();
+    vi.mocked(getAdminRun).mockResolvedValue(initial);
+    vi.mocked(getAdminRunActivity).mockImplementation(async (_jobId, filters) => {
+      const attemptId = filters?.attempt_id;
+      if (attemptId === undefined) throw new Error('Expected attempt-scoped activity request');
+      return {
+        events: [event({ id: attemptId, attempt_id: attemptId, attempt_no: attemptId / 10 })],
+        next_cursor: null,
+      };
+    });
+    render(<AdminRunPage />);
+    await screen.findByRole('article', { name: 'Execution 2 event 1' });
+    fireEvent.click(screen.getByRole('button', { name: 'Previous attempts (1)' }));
+    fireEvent.change(screen.getByLabelText('View attempt'), { target: { value: '10' } });
+    await screen.findByRole('article', { name: 'Execution 1 event 1' });
+    expect(screen.queryByRole('article', { name: 'Execution 2 event 1' })).not.toBeInTheDocument();
+    expect(screen.getByText('host-a')).toBeInTheDocument();
+    expect(screen.getByText('failed')).toBeInTheDocument();
+    expect(getAdminAttemptResources).toHaveBeenLastCalledWith('job-1', 10, expect.any(AbortSignal));
+    fireEvent.click(screen.getByText('LLM requests'));
+    await waitFor(() =>
+      expect(getAdminLlmRequestSources).toHaveBeenLastCalledWith(
+        'job-1',
+        { attempt_id: 10, limit: 100 },
+        expect.any(AbortSignal),
+      ),
+    );
+
+    vi.mocked(getAdminRun).mockResolvedValueOnce(
+      detail({
+        attempts: [
+          ...initial.attempts,
+          { ...initial.attempts[1], attempt_id: 30, attempt_no: 3, host: 'host-c' },
+        ],
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh run' }));
+    await screen.findByRole('button', { name: 'Previous attempts (2)' });
+    expect(screen.getByLabelText('View attempt')).toHaveValue('10');
+    expect(screen.getByText('host-a')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous attempts (2)' }));
+    await screen.findByText('host-c');
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('article', { name: 'Execution 1 event 1' })).not.toBeInTheDocument();
+    expect(getAdminRunActivity).toHaveBeenLastCalledWith(
+      'job-1',
+      { attempt_id: 30, limit: 100 },
+      expect.any(AbortSignal),
+    );
+    expect(getAdminAttemptResources).toHaveBeenLastCalledWith('job-1', 30, expect.any(AbortSignal));
+    fireEvent.click(screen.getByText('LLM requests'));
+    await waitFor(() =>
+      expect(getAdminLlmRequestSources).toHaveBeenLastCalledWith(
+        'job-1',
+        { attempt_id: 30, limit: 100 },
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
   it('explains queued runs without assuming why execution has not started', async () => {
     vi.mocked(getAdminRun).mockResolvedValue(
       detail({ run: run({ state: 'queued' }), attempts: [] }),
@@ -769,41 +905,32 @@ describe('admin run observation', () => {
   );
 
   it('keeps repeated event sequences separate across executions and scopes paged activity by execution', async () => {
-    vi.mocked(getAdminRun).mockResolvedValue(
-      detail({
-        attempts: [
-          ...detail().attempts,
-          {
-            attempt_id: 20,
-            attempt_no: 2,
-            host: 'host-b',
-            status: 'succeeded',
-            started_at: '2026-09-10T08:02:00Z',
-            finished_at: '2026-09-10T08:03:00Z',
-          },
-        ],
-      }),
-    );
+    vi.mocked(getAdminRun).mockResolvedValue(attemptsDetail());
+    vi.mocked(getAdminRunActivity).mockResolvedValueOnce({
+      events: [event({ id: 70, attempt_id: 20, attempt_no: 2 })],
+      next_cursor: null,
+    });
     const view = render(<AdminRunPage />);
-    await screen.findByRole('article', { name: 'Execution 1 event 1' });
+    await screen.findByRole('article', { name: 'Execution 2 event 1' });
     vi.mocked(getAdminRunActivity)
       .mockResolvedValueOnce({
-        events: [event({ id: 70, attempt_id: 20, attempt_no: 2 })],
-        next_cursor: 'second-attempt',
+        events: [event()],
+        next_cursor: 'first-attempt',
       })
       .mockResolvedValueOnce({
-        events: [event({ id: 71, attempt_id: 20, attempt_no: 2, seq: 2 })],
+        events: [event({ id: 43, seq: 2 })],
         next_cursor: null,
       });
-    fireEvent.change(screen.getByLabelText('Execution'), { target: { value: '20' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Previous attempts (1)' }));
+    fireEvent.change(screen.getByLabelText('View attempt'), { target: { value: '10' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Load more activity' }));
-    await screen.findByRole('article', { name: 'Execution 2 event 2' });
+    await screen.findByRole('article', { name: 'Execution 1 event 2' });
     expect(getAdminRunActivity).toHaveBeenLastCalledWith(
       'job-1',
-      { attempt_id: 20, limit: 100, cursor: 'second-attempt' },
+      { attempt_id: 10, limit: 100, cursor: 'first-attempt' },
       expect.any(AbortSignal),
     );
-    expect(screen.queryByRole('article', { name: 'Execution 1 event 1' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('article', { name: 'Execution 2 event 1' })).not.toBeInTheDocument();
     const pending = deferred<Awaited<ReturnType<typeof revealAdminEventContent>>>();
     vi.mocked(revealAdminEventContent).mockReturnValueOnce(pending.promise);
     fireEvent.click(screen.getAllByRole('button', { name: 'Reveal content' })[0]);
@@ -811,5 +938,39 @@ describe('admin run observation', () => {
     view.rerender(<AdminRunPage />);
     expect(vi.mocked(revealAdminEventContent).mock.lastCall?.[2]?.aborted).toBe(true);
     expect(screen.getByText('Admin access required')).toBeInTheDocument();
+    auth.access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
+    view.rerender(<AdminRunPage />);
+    await screen.findByText('host-b');
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+  });
+
+  it('discards history and aborts its reads when navigating to another run', async () => {
+    vi.mocked(getAdminRun).mockResolvedValueOnce(attemptsDetail());
+    const view = render(<AdminRunPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Previous attempts (1)' }));
+    fireEvent.change(screen.getByLabelText('View attempt'), { target: { value: '10' } });
+    const pending = deferred<Awaited<ReturnType<typeof getAdminLlmRequestSources>>>();
+    vi.mocked(getAdminLlmRequestSources).mockReturnValueOnce(pending.promise);
+    fireEvent.click(screen.getByText('LLM requests'));
+    await waitFor(() => expect(getAdminLlmRequestSources).toHaveBeenCalled());
+    const historyRead = vi.mocked(getAdminLlmRequestSources).mock.lastCall![2];
+
+    route.jobId = 'job-2';
+    vi.mocked(getAdminRun).mockResolvedValueOnce(
+      detail({
+        run: run({ id: 'job-2', title: 'Second run' }),
+        attempts: [{ ...detail().attempts[0], attempt_id: 40, host: 'host-d' }],
+      }),
+    );
+    view.rerender(<AdminRunPage />);
+    await screen.findByText('host-d');
+    expect(historyRead?.aborted).toBe(true);
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Previous attempts/ })).not.toBeInTheDocument();
+    expect(getAdminRunActivity).toHaveBeenLastCalledWith(
+      'job-2',
+      { attempt_id: 40, limit: 100 },
+      expect.any(AbortSignal),
+    );
   });
 });

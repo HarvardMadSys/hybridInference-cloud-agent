@@ -6,6 +6,7 @@
 // possible, but remain renderable on their own for older/partial event logs.
 
 export type AgentJobState = 'queued' | 'running' | 'needs_review' | 'done' | 'failed' | 'cancelled';
+export type ConversationState = 'queued' | 'running' | 'idle' | 'failed';
 
 export interface AgentAttempt {
   id?: number;
@@ -243,6 +244,8 @@ export interface AgentJob {
   /** Complete current-turn prompt. Older fixtures may only have `title`. */
   prompt?: string;
   state: AgentJobState;
+  /** Authoritative activity across all turns, including when viewing a historical job. */
+  conversationState?: ConversationState;
   /** Short badge text next to the title, e.g. gate hold or failure reason. */
   stateNote?: string;
   repo: string;
