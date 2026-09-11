@@ -18,6 +18,7 @@ vi.mock('@/lib/api/adminRuns', () => ({
 
 import { getAdminLlmRequestSources, getAdminLlmRequests } from '@/lib/api/adminRuns';
 import {
+  continues,
   durationLabel,
   LLMRequests,
   modelLabel,
@@ -368,9 +369,8 @@ describe('LLM requests panel', () => {
       <LLMRequests jobId="job-1" attemptId={11} running={false} onAccessDenied={() => {}} />,
     );
     late.resolve(page([row({ request_id: 'req_stale' })]));
-    await screen.findByText(/Execution 11/);
+    expect(await screen.findByText('req_current')).toBeInTheDocument();
     expect(screen.queryByText('req_stale')).not.toBeInTheDocument();
-    expect(screen.getByText('req_current')).toBeInTheDocument();
   });
 
   it('hands a revoked session to the page instead of showing an empty list', async () => {
@@ -517,5 +517,177 @@ describe('LLM requests panel', () => {
     expect(screen.getByText(/3:21:00 AM/)).toBeInTheDocument();
     expect(screen.queryByText(/3:30:00 AM/)).not.toBeInTheDocument();
     expect(screen.getByText('req_example')).toBeInTheDocument();
+  });
+
+  it('does not page a read a refresh is already replacing', async () => {
+    requests.mockResolvedValueOnce(page([row({ request_id: 'req_first' })], 'cursor-1'));
+    renderPanel();
+    await expand();
+    await screen.findByText('req_first');
+
+    const refreshed = deferred<AdminLlmRequestPage>();
+    requests.mockReturnValueOnce(refreshed.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    expect(requests).toHaveBeenCalledTimes(2);
+
+    const fresh = {
+      ...page(
+        [row({ request_id: 'req_fresh', request_started_at: '2026-09-11T03:25:04Z' })],
+        'cursor-2',
+      ),
+      window: {
+        since: '2026-09-11T03:25:00Z',
+        until: '2026-09-11T03:26:00Z',
+        basis: 'request_started_at' as const,
+      },
+    };
+    await act(async () => {
+      refreshed.resolve(fresh);
+      await refreshed.promise;
+    });
+    expect(await screen.findByText('req_fresh')).toBeInTheDocument();
+    expect(screen.queryByText('req_first')).not.toBeInTheDocument();
+    expect(screen.getByText(/3:25:00 AM/)).toBeInTheDocument();
+    expect(screen.queryByText(/3:21:00 AM/)).not.toBeInTheDocument();
+  });
+
+  it('drops a page that was in flight when the read it belonged to was replaced', async () => {
+    requests.mockResolvedValueOnce(page([row({ request_id: 'req_first' })], 'cursor-1'));
+    renderPanel();
+    await expand();
+    await screen.findByText('req_first');
+
+    const oldPage = deferred<AdminLlmRequestPage>();
+    requests.mockReturnValueOnce(oldPage.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+
+    const fresh = {
+      ...page([row({ request_id: 'req_fresh' })], 'cursor-2'),
+      window: {
+        since: '2026-09-11T03:25:00Z',
+        until: '2026-09-11T03:26:00Z',
+        basis: 'request_started_at' as const,
+      },
+    };
+    requests.mockResolvedValueOnce(fresh);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('req_fresh');
+
+    await act(async () => {
+      oldPage.resolve(
+        page(
+          [row({ request_id: 'req_late', request_started_at: '2026-09-11T03:20:30Z' })],
+          'cursor-1',
+        ),
+      );
+      await oldPage.promise;
+    });
+    expect(screen.queryByText('req_late')).not.toBeInTheDocument();
+    expect(screen.getByText(/3:25:00 AM/)).toBeInTheDocument();
+
+    // The continuation on offer is still the fresh read's, not the stale one.
+    requests.mockResolvedValue(page([], 'cursor-3'));
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() =>
+      expect(requests).toHaveBeenLastCalledWith(
+        'job-1',
+        { source_id: '42', limit: 50, cursor: 'cursor-2' },
+        expect.anything(),
+      ),
+    );
+  });
+
+  it('asks for a restart when a page answers a different read', async () => {
+    requests.mockResolvedValueOnce(page([row({ request_id: 'req_first' })], 'cursor-1'));
+    renderPanel();
+    await expand();
+    await screen.findByText('req_first');
+
+    // A continuation whose window differs from the page on screen: the server
+    // never sends one, so the panel must not merge it if it ever arrives.
+    requests.mockResolvedValueOnce(
+      page([row({ request_id: 'req_other_window' })], null) && {
+        ...page([row({ request_id: 'req_other_window' })], null),
+        window: {
+          since: '2026-09-11T03:25:00Z',
+          until: '2026-09-11T03:26:00Z',
+          basis: 'request_started_at' as const,
+        },
+      },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await screen.findByRole('button', { name: 'Start again from the first page' });
+    expect(screen.queryByText('req_other_window')).not.toBeInTheDocument();
+    expect(screen.getByText('req_first')).toBeInTheDocument();
+  });
+
+  it("does not query the previous execution's source after switching execution", async () => {
+    const denied = vi.fn();
+    const sourcesForAttempt = (attemptId: number | undefined) =>
+      Promise.resolve(
+        attemptId === 11
+          ? sourcesPage([source({ source_id: '77', attempt_id: 11, attempt_no: 2 })])
+          : sourcesPage([source({ source_id: '42', attempt_id: 10, attempt_no: 1 })]),
+      );
+    sources.mockImplementation((_jobId, filters) => sourcesForAttempt(filters?.attempt_id));
+    const first = page([row({ request_id: 'req_10' })]);
+    const second = {
+      ...page([row({ request_id: 'req_11' })]),
+      source_id: '77',
+      attempt_id: 11,
+      attempt_no: 2,
+    };
+    requests.mockResolvedValueOnce(first).mockResolvedValue(second);
+
+    const view = renderPanel({ attemptId: 10, denied });
+    await expand();
+    await screen.findByText('req_10');
+    requests.mockClear();
+
+    view.rerender(
+      <LLMRequests jobId="job-1" attemptId={11} running={false} onAccessDenied={denied} />,
+    );
+    await screen.findByText('req_11');
+    expect(screen.queryByText('req_10')).not.toBeInTheDocument();
+    expect(requests.mock.calls.map((call) => call[1])).toEqual([{ source_id: '77', limit: 50 }]);
+  });
+
+  it('keeps the previous execution off the screen when its replacement has no sources', async () => {
+    const denied = vi.fn();
+    const sourcesForAttempt = (attemptId: number | undefined) => {
+      if (attemptId === 11) {
+        return Promise.reject(new APIError('SERVICE_UNAVAILABLE', 'unavailable', 503));
+      }
+      return Promise.resolve(
+        sourcesPage([source({ source_id: '42', attempt_id: 10, attempt_no: 1 })]),
+      );
+    };
+    sources.mockImplementation((_jobId, filters) => sourcesForAttempt(filters?.attempt_id));
+    requests.mockResolvedValue(page([row({ request_id: 'req_10' })]));
+    const view = renderPanel({ attemptId: 10, denied });
+    await expand();
+    await screen.findByText('req_10');
+    requests.mockClear();
+
+    view.rerender(
+      <LLMRequests jobId="job-1" attemptId={11} running={false} onAccessDenied={denied} />,
+    );
+    expect(await screen.findByText(/Service temporarily unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText('req_10')).not.toBeInTheDocument();
+    expect(requests).not.toHaveBeenCalled();
+  });
+
+  it('treats only a page from the same source and window as a continuation', () => {
+    const current = page([row()]);
+    expect(continues({ ...current, requests: [] }, current)).toBe(true);
+    expect(continues({ ...current, source_id: '43' }, current)).toBe(false);
+    expect(
+      continues(
+        { ...current, window: { ...current.window, until: '2026-09-11T03:30:00Z' } },
+        current,
+      ),
+    ).toBe(false);
   });
 });

@@ -57,6 +57,22 @@ export function sourceExplanation(source: AdminLlmRequestSource): string {
   );
 }
 
+/**
+ * Whether a page continues the read currently on screen.
+ *
+ * A continuation is only valid for one source and one fixed window. The server
+ * refuses a window that moved, but the panel also holds pages across a refresh,
+ * and a page that answers the previous read must never be appended to the new
+ * one under its header.
+ */
+export function continues(next: AdminLlmRequestPage, current: AdminLlmRequestPage): boolean {
+  return (
+    next.source_id === current.source_id &&
+    next.window.since === current.window.since &&
+    next.window.until === current.window.until
+  );
+}
+
 function isRestart(error: unknown): boolean {
   return (
     error instanceof APIError &&
@@ -85,6 +101,7 @@ export function LLMRequests({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [sources, setSources] = useState<AdminLlmRequestSource[] | null>(null);
+  const [sourcesFor, setSourcesFor] = useState<string | null>(null);
   const [sourceReason, setSourceReason] = useState<string | null>(null);
   const [sourceId, setSourceId] = useState<string | null>(null);
   const [page, setPage] = useState<AdminLlmRequestPage | null>(null);
@@ -100,22 +117,27 @@ export function LLMRequests({
   const sourcesRequest = useRef<AbortController | null>(null);
   const pageRequest = useRef<AbortController | null>(null);
   const moreRequest = useRef<AbortController | null>(null);
-  const generation = useRef(0);
+  // Two counters, because a page read and the source read start for different
+  // reasons: replacing a page must not invalidate the list that is still being
+  // read, and re-reading the list must invalidate every page read.
+  const sourcesGeneration = useRef(0);
+  const pageGeneration = useRef(0);
+  const pageRun = useRef(0);
 
-  const key = `${jobId}:${attemptId ?? ''}:${sourceId ?? ''}`;
+  const executionKey = `${jobId}:${attemptId ?? ''}`;
+  const key = `${executionKey}:${sourceId ?? ''}`;
   const loadedKey = useRef('');
+  const loadedExecution = useRef('');
 
   /**
-   * Retire every read that belongs to the selection being replaced.
+   * Retire the page reads that belong to the source being replaced.
    *
    * The generation is bumped here rather than only where a read starts, so a
    * response that is already in flight cannot be mistaken for one of the new
    * selection: it is dropped, not appended, and its cursor never replaces the
    * current one.
    */
-  const retire = useCallback(() => {
-    sourcesRequest.current?.abort();
-    sourcesRequest.current = null;
+  const retirePages = useCallback(() => {
     pageRequest.current?.abort();
     pageRequest.current = null;
     moreRequest.current?.abort();
@@ -123,11 +145,27 @@ export function LLMRequests({
     // Every flag a retired request would have cleared is cleared here, so a
     // cancelled read can never leave a control disabled for good.
     setLoading(false);
-    setLoadingSources(false);
     setMoreLoading(false);
-    generation.current += 1;
-    return generation.current;
+    pageGeneration.current += 1;
+    return pageGeneration.current;
   }, []);
+
+  /**
+   * Retire every read, the source list included.
+   *
+   * Used when the execution itself changes: the list has to be re-read, so the
+   * read that is doing it is the one thing that must survive. Clearing the
+   * selected source changes the panel's selection key, which is why retirement
+   * there must not reach the source request.
+   */
+  const retireAll = useCallback(() => {
+    sourcesRequest.current?.abort();
+    sourcesRequest.current = null;
+    setLoadingSources(false);
+    retirePages();
+    sourcesGeneration.current += 1;
+    return sourcesGeneration.current;
+  }, [retirePages]);
 
   const fail = useCallback(
     (caught: unknown) => {
@@ -150,8 +188,22 @@ export function LLMRequests({
   useEffect(() => {
     if (!expanded) return;
     const controller = new AbortController();
-    const current = retire();
+    const current = retireAll();
     sourcesRequest.current = controller;
+    const executionChanged = loadedExecution.current !== executionKey;
+    loadedExecution.current = executionKey;
+    if (executionChanged) {
+      // A different execution holds different references. Its source id is not
+      // this execution's to query, and nothing read for the previous one may
+      // stay on screen while the new list is being read.
+      setSourceId(null);
+      setSourcesFor(null);
+      setRows([]);
+      setPage(null);
+      setPagesLoaded(0);
+      setStale(null);
+      loadedKey.current = '';
+    }
     setLoadingSources(true);
     setSources(null);
     setSourceReason(null);
@@ -159,8 +211,9 @@ export function LLMRequests({
     setRestart(false);
     getAdminLlmRequestSources(jobId, { attempt_id: attemptId, limit: 100 }, controller.signal)
       .then((next) => {
-        if (controller.signal.aborted || generation.current !== current) return;
+        if (controller.signal.aborted || sourcesGeneration.current !== current) return;
         setSources(next.sources);
+        setSourcesFor(executionKey);
         setSourceReason(next.reason);
         const queryable = next.sources.filter((source) => source.availability === 'queryable');
         setSourceId((chosen) =>
@@ -172,24 +225,29 @@ export function LLMRequests({
         );
       })
       .catch((caught: unknown) => {
-        if (!controller.signal.aborted && generation.current === current) fail(caught);
+        if (!controller.signal.aborted && sourcesGeneration.current === current) fail(caught);
       })
       .finally(() => {
-        if (!controller.signal.aborted && generation.current === current) setLoadingSources(false);
+        if (!controller.signal.aborted && sourcesGeneration.current === current)
+          setLoadingSources(false);
       });
     return () => {
       controller.abort();
       if (sourcesRequest.current === controller) sourcesRequest.current = null;
     };
-  }, [expanded, jobId, attemptId, revision, retire, fail]);
+  }, [expanded, jobId, attemptId, executionKey, revision, retireAll, fail]);
 
   // One page at a time, for one reference. A refresh keeps the rows that are
   // already on screen until the new ones arrive; switching reference clears
   // them first so a late response cannot fill the new selection.
   useEffect(() => {
-    if (!expanded || !sourceId) return;
+    // The selected source is only usable once the list in front of us was read
+    // for this execution: on the render where the execution changes, the old
+    // id is still in state and must not be queried.
+    if (!expanded || !sourceId || sourcesFor !== executionKey) return;
     const controller = new AbortController();
-    const current = generation.current;
+    const current = pageGeneration.current;
+    const run = ++pageRun.current;
     pageRequest.current = controller;
     const sameSelection = loadedKey.current === key;
     loadedKey.current = key;
@@ -208,32 +266,33 @@ export function LLMRequests({
       controller.signal,
     )
       .then((next) => {
-        if (controller.signal.aborted || generation.current !== current) return;
+        if (controller.signal.aborted || pageGeneration.current !== current) return;
+        if (pageRun.current !== run) return;
         setPage(next);
         setRows(next.requests);
         setPagesLoaded(1);
         setStale(next.fetched_at);
       })
       .catch((caught: unknown) => {
-        if (!controller.signal.aborted && generation.current === current) fail(caught);
+        if (!controller.signal.aborted && pageGeneration.current === current) fail(caught);
       })
       .finally(() => {
-        if (!controller.signal.aborted && generation.current === current) setLoading(false);
+        if (!controller.signal.aborted && pageGeneration.current === current) setLoading(false);
       });
     return () => {
       controller.abort();
       if (pageRequest.current === controller) pageRequest.current = null;
     };
-  }, [expanded, jobId, sourceId, revision, key, fail]);
+  }, [expanded, jobId, executionKey, sourceId, sourcesFor, revision, key, fail]);
 
   // Changing job, execution or source retires every in-flight read first, so a
   // page that arrives late is dropped instead of being appended to a list it
   // does not describe. The same cleanup covers unmounting the panel.
   useEffect(
     () => () => {
-      retire();
+      retirePages();
     },
-    [key, retire],
+    [key, retirePages],
   );
 
   // Only a visible first page of a running execution keeps re-reading itself,
@@ -250,9 +309,13 @@ export function LLMRequests({
   }, [expanded, sourceId, running, pagesLoaded, restart, loading, moreLoading]);
 
   async function loadMore() {
-    if (!page?.next_cursor || !sourceId || moreLoading) return;
+    // A first-page read replaces the page this continuation came from, so a
+    // page must never be fetched while one is in flight: its cursor belongs to
+    // the read that is being replaced.
+    if (!page?.next_cursor || !sourceId || loading || moreLoading) return;
     const controller = new AbortController();
-    const current = generation.current;
+    const current = pageGeneration.current;
+    const run = pageRun.current;
     moreRequest.current = controller;
     setMoreLoading(true);
     setError(null);
@@ -262,7 +325,16 @@ export function LLMRequests({
         { source_id: sourceId, limit: LLM_REQUEST_PAGE_SIZE, cursor: page.next_cursor },
         controller.signal,
       );
-      if (controller.signal.aborted || generation.current !== current) return;
+      if (controller.signal.aborted || pageGeneration.current !== current) return;
+      if (pageRun.current !== run) return;
+      if (!continues(next, page)) {
+        // The continuation answered a read that is no longer on screen. Its
+        // rows describe a different window, and appending them would mix two
+        // reads under one header.
+        setRestart(true);
+        setError('That page belongs to a different read. Load the first page again.');
+        return;
+      }
       setPage(next);
       setRows((previous) => [...previous, ...next.requests]);
       setPagesLoaded((count) => count + 1);
@@ -270,7 +342,7 @@ export function LLMRequests({
     } catch (caught) {
       // The loaded pages and their cursor stay: the same continuation is worth
       // retrying, and a failed page is not the end of the result.
-      if (!controller.signal.aborted && generation.current === current) fail(caught);
+      if (!controller.signal.aborted && pageGeneration.current === current) fail(caught);
     } finally {
       // Cleared whenever this call is still the one the panel is waiting on,
       // including when a refresh or a selection change cancelled it. Leaving
@@ -434,7 +506,7 @@ export function LLMRequests({
                   <button
                     type="button"
                     className={BUTTON}
-                    disabled={moreLoading}
+                    disabled={moreLoading || loading}
                     onClick={() => void loadMore()}
                   >
                     {moreLoading ? 'Loading…' : 'Load more'}
