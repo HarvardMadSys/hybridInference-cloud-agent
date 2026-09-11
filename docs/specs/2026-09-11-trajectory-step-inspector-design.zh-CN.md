@@ -5,6 +5,7 @@
 - 代码基线：`dev`，`b7a24c6`。实现前重新检查最新 `dev` 的相关变更。
 - 目标仓库：`HarvardMadSys/hybridInference-cloud-agent`，本地目录名也可能为 `freeinference-cloud-agent`。
 - 修订 2026-09-11：Tool 的 Payload / Result 不再内嵌已存事件记录（见 §6.2、§6.3）。原始记录由 Run 的 Raw 页签与 Session log 统一提供，step 不再各带一份。
+- 修订 2026-09-11（二）：Tool 详情不再单独提供复制实参的按钮与 `Error flag` 行（见 §6.2、§6.3）。复制由 Payload / Result 块自带的 `Copy` 提供，失败状态由 Status 与退出码表达。
 
 ## 1. 已确认的产品决定
 
@@ -213,13 +214,13 @@ Timing ›
 - 对象/数组格式化并高亮；字符串按原文展示，不强制解析成 JSON。
 - 空字符串、空对象、`false`、`0` 均是合法值，不用 `||` 误判成未记录。
 - `detail` / `text` 只有在特定 runtime 的契约确认它就是实参时才可作为实参；否则标为预览或降级信息。
-- 缺失显示 `Payload was not recorded.`。只提供复制实参，不增加 Tool 的 Raw 页签，也不在 Payload 内重复调用事件本身。
+- 缺失显示 `Payload was not recorded.`。复制实参由 Payload 块自带的 `Copy` 提供，不另设按钮，不增加 Tool 的 Raw 页签，也不在 Payload 内重复调用事件本身。
 
 ### 6.3 Result
 
 - 通过第 8 节的配对规则找到结果。支持 `content`、`output`、`aggregated_output`、`text` 等已验证的 runtime 结果字段。
-- 显示可读输出、退出码与错误标志，不内嵌原始结果记录；重复结果时只保留歧义提示，不列出记录本身。
-- `is_error = true` 或有效非零退出码表示失败，不能只根据父 run 成功而显示 Completed。
+- 显示可读输出与退出码，不内嵌原始结果记录；重复结果时只保留歧义提示，不列出记录本身。
+- `is_error = true` 或有效非零退出码表示失败，不能只根据父 run 成功而显示 Completed。失败由 Status 与退出码表达，不再单独列出 `Error flag` 行；没有退出码时，失败只体现在 Status 上。
 - 已收到空结果时显示 `Tool completed with no output.`；没有结果记录是另一个状态。
 - 尚在等待结果时显示 `Waiting for result…`；已结束的 attempt 缺结果时显示 `Result was not recorded.`。
 - 对运行中状态的判断必须基于匹配 attempt 的状态；不是基于当前页面最新的 job 是否还在运行。

@@ -17,7 +17,6 @@ import {
   TextBlock,
   TruncationNote,
   ValueBlock,
-  copyText,
   recordedAt,
 } from './StepDetailParts';
 import { formatDuration } from './TurnFooter';
@@ -161,18 +160,6 @@ export function ToolStepDetails({
           <EmptyNote>Payload was not recorded.</EmptyNote>
         )}
         {step.truncated && callEvent ? <TruncationNote payload={callEvent.payload ?? {}} /> : null}
-        <button
-          type="button"
-          onClick={() =>
-            void copyText(
-              JSON.stringify(step.payloadValue ?? step.payloadPreview ?? null, null, 2) ?? '',
-              'Arguments',
-            )
-          }
-          className="rounded border border-gray-200 px-2 py-0.5 text-[11px] text-gray-500 hover:border-gray-300 hover:text-gray-900 dark:border-white/10 dark:text-gray-400 dark:hover:border-white/20 dark:hover:text-gray-100"
-        >
-          Copy arguments
-        </button>
       </TabPanel>
     );
   }
@@ -184,19 +171,16 @@ export function ToolStepDetails({
           <>
             <TruncationNote payload={resultEvents[0]?.payload ?? {}} />
             <ResultState step={step} />
-            <DetailRows>
-              <DetailRow label="Error flag" tone={step.result.isError ? 'error' : 'default'}>
-                {step.result.isError ? 'true' : 'false'}
-              </DetailRow>
-              {step.result.exitCode !== null ? (
+            {step.result.exitCode !== null ? (
+              <DetailRows>
                 <DetailRow
                   label="Exit code"
                   tone={step.result.exitCode === 0 ? 'default' : 'error'}
                 >
                   {step.result.exitCode}
                 </DetailRow>
-              ) : null}
-            </DetailRows>
+              </DetailRows>
+            ) : null}
             {step.ambiguity === 'duplicate_result' ? (
               <p role="note" className="text-[11px] text-amber-700 dark:text-amber-300">
                 More than one result was stored for this call, so the pairing is not verified and
