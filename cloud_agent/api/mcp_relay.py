@@ -40,7 +40,11 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent.api.deps import get_credential_queries, get_mcp_connections
+from cloud_agent.api.deps import (
+    get_credential_queries,
+    get_mcp_connections,
+    require_mcp,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
@@ -198,7 +202,7 @@ async def _authorize(
 
     # The owner's servers, not the caller's — see the module docstring. The
     # same fence row that authorized this call names them.
-    registry = await registry_for_user(connections, user_id=identity["user_id"])
+    registry = await registry_for_user(require_mcp(connections), user_id=identity["user_id"])
     server = registry.get(server_name)
     if server is None:
         # Granted at creation and unreachable now: the owner disconnected the

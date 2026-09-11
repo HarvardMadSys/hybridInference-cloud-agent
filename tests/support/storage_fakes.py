@@ -47,6 +47,106 @@ GETTERS: dict[str, Any] = {
 }
 
 
+#: The modules that define each port, so a boundary can be derived from the
+#: Protocol rather than written out by hand.
+#: Capability name (as ``capability_overrides`` receives it, and as ``GETTERS``
+#: is keyed) -> the Protocol that describes it. One mapping, one key space: an
+#: earlier revision keyed this by Protocol name while the caller passed
+#: capability names, so every lookup missed and the boundary was silently never
+#: applied -- which is exactly the failure mode the boundary exists to prevent.
+PORT_MODULES: dict[str, str] = {
+    "conversation_commands": "ConversationCommands",
+    "conversation_queries": "ConversationQueries",
+    "attempts": "AttemptCommands",
+    "execution_queries": "ExecutionQueries",
+    "sandboxes": "SandboxRepository",
+    "residencies": "ResidencyRepository",
+    "session_forks": "SessionForkRepository",
+    "snapshots": "SnapshotRepository",
+    "hosts": "HostPoolRepository",
+    "source_control": "SourceControlRepository",
+    "mcp": "McpConnectionRepository",
+    "grants": "GrantRepository",
+    "credentials": "CredentialQueries",
+    "ledger": "LedgerRepository",
+    "audit": "AuditRepository",
+}
+
+
+#: Protocol name -> its defining module, for the introspection below.
+_PROTOCOL_MODULES: dict[str, str] = {
+    "ConversationCommands": "cloud_agent.ports.conversations",
+    "ConversationQueries": "cloud_agent.ports.conversation_queries",
+    "AttemptCommands": "cloud_agent.ports.attempts",
+    "ExecutionQueries": "cloud_agent.ports.execution_queries",
+    "SandboxRepository": "cloud_agent.ports.sandboxes",
+    "ResidencyRepository": "cloud_agent.ports.residencies",
+    "SessionForkRepository": "cloud_agent.ports.session_forks",
+    "SnapshotRepository": "cloud_agent.ports.snapshots",
+    "HostPoolRepository": "cloud_agent.ports.host_pool",
+    "SourceControlRepository": "cloud_agent.ports.source_control",
+    "McpConnectionRepository": "cloud_agent.ports.mcp",
+    "GrantRepository": "cloud_agent.ports.grants",
+    "CredentialQueries": "cloud_agent.ports.credential_queries",
+    "LedgerRepository": "cloud_agent.ports.ledger",
+    "AuditRepository": "cloud_agent.ports.audit",
+}
+
+
+def _protocol_methods(port: str) -> frozenset[str]:
+    """The method names one Protocol declares."""
+    import importlib
+    import inspect
+
+    module = importlib.import_module(_PROTOCOL_MODULES[port])
+    protocol = getattr(module, port)
+    return frozenset(
+        name
+        for name, _ in inspect.getmembers(protocol, inspect.isfunction)
+        if not name.startswith("_")
+    )
+
+
+class Boundary:
+    """One double, narrowed to the methods of a single capability.
+
+    Why this exists: a route handed the wrong port does not fail against a
+    permissive double, because the double answers every method either way. Seven
+    such mis-wirings reached a green suite for exactly that reason. Answering
+    only what the capability declares turns "this handler used the wrong port"
+    into an AttributeError in the test, which is the failure the type checker
+    would give if the caller files were in its scope.
+    """
+
+    def __init__(self, fake: Any, port: str) -> None:
+        """Wrap ``fake``, exposing only what ``port`` declares.
+
+        A private name is delegated rather than refused: ``_pool`` is how the
+        in-memory doubles reach their own storage, and it is not part of the
+        capability contract either way.
+        """
+        self._fake = fake
+        self._port = port
+        self._allowed = _protocol_methods(port)
+
+    def __getattr__(self, name: str) -> Any:
+        """Return the double's attribute, or refuse a method outside the port.
+
+        The refusal is on the *port*, not on whether the double happens to
+        implement the name. That distinction is the whole point: the doubles are
+        all-purpose, so a check that consulted them would answer for every
+        capability and enforce nothing.
+        """
+        if name.startswith("_"):
+            return getattr(self._fake, name)
+        if name not in self._allowed:
+            raise AttributeError(
+                f"{name!r} is not part of {self._port}: this call used a capability "
+                f"it was not given"
+            )
+        return getattr(self._fake, name)
+
+
 def _provider(fake: Any) -> Any:
     """Return a zero-argument dependency that answers with ``fake``.
 
@@ -80,4 +180,11 @@ def capability_overrides(app: FastAPI, fake: Any, *capabilities: str) -> None:
     if unknown:
         raise KeyError(f"unknown capabilities {unknown}; known: {sorted(GETTERS)}")
     for name in capabilities:
-        app.dependency_overrides[GETTERS[name]] = _provider(fake)
+        # An unconfigured deployment wires None itself; wrapping it would hide
+        # the None the route is supposed to refuse.
+        wired: Any = (
+            Boundary(fake, PORT_MODULES[name])
+            if name in PORT_MODULES and fake is not None
+            else fake
+        )
+        app.dependency_overrides[GETTERS[name]] = _provider(wired)

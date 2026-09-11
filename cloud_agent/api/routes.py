@@ -3265,7 +3265,10 @@ async def stream_agent_job_events(
                         # connection without polluting the event sequence.
                         yield ": keepalive\n\n"
 
-                job = await execution.get_job(job_id)
+                import sys
+
+                print("EXEC TYPE:", type(execution).__name__, file=sys.stderr)
+                job = await require_queries(conversations).get_job(job_id)
                 if job is None:
                     return
                 if job["state"] in TERMINAL_STATES:
