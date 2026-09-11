@@ -586,6 +586,134 @@ describe('one physical server', () => {
     expect(facts.sandboxes.perSource.map((line) => line.host)).toEqual(['replica-a', 'replica-b']);
   });
 
+  it('does not treat an unidentified expired source as covered', () => {
+    // An expired report with no namespace cannot be shown to be the same
+    // environment as anything, so it is a source this server cannot see — not
+    // a duplicate to be quietly deduped away. Hiding it is the failure that
+    // cannot be recovered from; saying "Partial" when the two turn out to be
+    // one machine is the failure that can.
+    const fresh = host({
+      host: 'fresh',
+      capacity: capacity({
+        sample_age_seconds: 5,
+        inventory: inventory({ namespace: 'ns-a', running: 2, stopped: 0 }),
+      }),
+    });
+    const anonymous = host({
+      host: 'anonymous',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        inventory: inventory({ namespace: null, running: 9, stopped: 0 }),
+      }),
+    });
+
+    const facts = groupCapacityFacts([fresh, anonymous]);
+
+    expect(facts.sandboxes.partial).toBe(true);
+    expect(facts.stale).toBe(true);
+    expect(facts.sandboxes.text).toBe('≥2 observed · Partial');
+    // The unidentified source is named in the panel, where an operator can
+    // see that a whole environment is not being counted.
+    expect(facts.sandboxes.perSource.map((line) => line.host)).toContain('anonymous');
+  });
+
+  it('does not treat the same namespace on an unproven host as covered', () => {
+    // A rebuilt machine keeps its name, so a namespace alone does not survive
+    // it: the same namespace on another boot id is another Docker host, and an
+    // unknown boot id proves nothing either way.
+    const fresh = host({
+      host: 'fresh',
+      capacity: capacity({
+        sample_age_seconds: 5,
+        linux_boot_id: 'boot-a',
+        inventory: inventory({ namespace: 'ns-a', running: 2, stopped: 0 }),
+      }),
+    });
+    const otherBoot = host({
+      host: 'other-boot',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        linux_boot_id: 'boot-b',
+        inventory: inventory({ namespace: 'ns-a', running: 9, stopped: 0 }),
+      }),
+    });
+    const unknownBoot = host({
+      host: 'unknown-boot',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        linux_boot_id: null,
+        inventory: inventory({ namespace: 'ns-a', running: 9, stopped: 0 }),
+      }),
+    });
+
+    expect(groupCapacityFacts([fresh, otherBoot]).sandboxes.partial).toBe(true);
+    expect(groupCapacityFacts([fresh, unknownBoot]).sandboxes.partial).toBe(true);
+
+    // The proof works both ways: same namespace, same known boot id, is a
+    // superseded duplicate and nothing is missing.
+    const sameBoot = host({
+      host: 'same-boot',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        linux_boot_id: 'boot-a',
+        inventory: inventory({ namespace: 'ns-a', running: 2, stopped: 0 }),
+      }),
+    });
+    const covered = groupCapacityFacts([fresh, sameBoot]);
+    expect(covered.sandboxes.partial).toBe(false);
+    expect(covered.stale).toBe(false);
+  });
+
+  it('never renders the unknown counts of a partial listing as zero', () => {
+    // The heartbeat model accepts `partial` with every count null and a
+    // reason, which is the honest shape a listing gets when it can say what
+    // happened but not how many. Formatting those nulls as zeroes states a
+    // very specific nothing.
+    const nothingCounted = host({
+      host: 'nothing',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        inventory: inventory({
+          status: 'partial',
+          running: null,
+          stopped: null,
+          other_states: null,
+          reason: 'unknown_state',
+        }),
+      }),
+    });
+    const someCounted = host({
+      host: 'some',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        inventory: inventory({
+          status: 'partial',
+          running: 2,
+          stopped: null,
+          reason: 'unknown_state',
+        }),
+      }),
+    });
+
+    const none = summarizeSandboxes([nothingCounted], () => true);
+    expect(none.text).toBe('Unavailable');
+    expect(none.staleOnly).toBe(false);
+    expect(none.contributingHosts).toEqual([]);
+    expect(none.perSource[0].counts).toBe('Not counted');
+
+    const some = summarizeSandboxes([someCounted], () => true);
+    expect(some.text).toBe('≥2 observed');
+    expect(some.text).not.toContain('stopped');
+    expect(some.staleOnly).toBe(true);
+    expect(some.perSource[0].counts).toBe('≥2 observed');
+  });
+
   it('falls back to a stale observation when that is all there is', () => {
     const facts = groupCapacityFacts([
       host({ capacity: capacity({ sample_age_seconds: 400, freshness: 'stale' }) }),

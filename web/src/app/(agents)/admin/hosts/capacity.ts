@@ -319,6 +319,23 @@ function observedAtMs(capacity: AgentHostCapacity): number {
   return Number.isFinite(sampled) ? sampled : 0;
 }
 
+/**
+ * Whether a current report proves an expired one measured the same host.
+ *
+ * Both halves of the identity are required, and the failure direction is
+ * deliberate: when they cannot be established the expired report is *not*
+ * covered, so the row keeps saying its coverage is incomplete. Assuming
+ * sameness would let a machine that has stopped reporting disappear into a
+ * neighbour's namespace.
+ */
+function provesSameHost(expired: InventoryReport, current: InventoryReport): boolean {
+  const namespace = expired.inventory.namespace?.trim() ?? '';
+  if (namespace === '') return false;
+  if ((current.inventory.namespace?.trim() ?? '') !== namespace) return false;
+  const bootId = expired.capacity.linux_boot_id;
+  return bootId !== null && bootId !== undefined && bootId === current.capacity.linux_boot_id;
+}
+
 /** The later report of two, by sampled instant, then by receipt. */
 function isNewer(candidate: InventoryReport, existing: InventoryReport): boolean {
   const bySample = observedAtMs(candidate.capacity) - observedAtMs(existing.capacity);
@@ -326,15 +343,43 @@ function isNewer(candidate: InventoryReport, existing: InventoryReport): boolean
   return Date.parse(candidate.capacity.received_at) > Date.parse(existing.capacity.received_at);
 }
 
+/** Every count slot of a report, whether or not the report filled it in. */
+function countValues(inventory: AgentHostCapacityInventory): (number | null)[] {
+  return [
+    inventory.running,
+    inventory.stopped,
+    ...OTHER_CONTAINER_STATES.map((state) => inventory.other_states?.[state] ?? null),
+  ];
+}
+
+/**
+ * One report's counts, in the words that report's own completeness allows.
+ *
+ * `countPhrase` formats a sum, where an unknown count contributes nothing and
+ * the total is explicitly a lower bound. Using it for a *single* report prints
+ * that same unknown as a zero — "3 running · 0 stopped" for a listing that
+ * never got as far as counting the stopped ones — which is a specific claim
+ * where there was none. Here the unknowns decide the shape of the sentence:
+ * everything counted gets the full breakdown, something counted gets a lower
+ * bound, nothing counted says so.
+ */
+function countsPhrase(inventory: AgentHostCapacityInventory): string {
+  if (inventory.status === 'unavailable') return NOT_COUNTED;
+  const values = countValues(inventory);
+  if (values.every((value) => value === null)) return NOT_COUNTED;
+  if (values.every((value) => value !== null)) return countPhrase(tallyOf(inventory));
+  return `≥${values.reduce<number>((sum, value) => sum + (value ?? 0), 0)} observed`;
+}
+
+/** What a source says when it established no count at all. */
+const NOT_COUNTED = 'Not counted';
+
 function sourceLine(report: InventoryReport): SandboxSourceLine {
   return {
     host: report.host,
     namespace: report.inventory.namespace,
     status: report.inventory.status,
-    counts:
-      report.inventory.status === 'unavailable'
-        ? 'Not counted'
-        : countPhrase(tallyOf(report.inventory)),
+    counts: countsPhrase(report.inventory),
     sampledAt: report.capacity.sampled_at,
     reason: report.inventory.reason,
     unscopedLegacyContainers: report.inventory.unscoped_legacy_containers ?? 0,
@@ -444,24 +489,31 @@ export function summarizeSandboxes(
   if (unreported > 0) reasons.add('inventory_not_reported');
   if (stale.length > 0) reasons.add('source_stale');
 
-  // An expired report only means something is missing when nothing current
-  // covers the same environment. The default deployment runs three replicas
-  // against one namespace, so the usual "stale" report is a superseded
-  // duplicate of a report that is right here — counting that as incomplete
-  // coverage would put "Partial" on every server whose replicas beat at
-  // slightly different moments.
-  const coveredNamespaces = new Set(
-    contributing.map((report) => report.inventory.namespace?.trim() ?? ''),
+  // An expired report means something is missing unless a current report
+  // *proves* it describes the same environment. The default deployment runs
+  // three replicas against one namespace, so the usual "stale" report is a
+  // superseded duplicate of one that is right here, and treating that as
+  // incomplete coverage would put "Partial" on every server whose replicas
+  // beat at slightly different moments.
+  //
+  // Proving it takes both halves of the identity. A missing namespace cannot
+  // name an environment at all, and a namespace on its own does not survive a
+  // rebuilt machine: the same name on a different boot id is a different
+  // Docker host, and an unknown boot id is not evidence of anything. Anything
+  // short of that stays visible as incomplete coverage rather than being
+  // quietly deduped away — over-reporting a gap is recoverable, hiding one is
+  // not.
+  const missing = stale.filter(
+    (report) => !contributing.some((current) => provesSameHost(report, current)),
   );
-  const missing = stale.filter((report) => {
-    const namespace = report.inventory.namespace?.trim() ?? '';
-    return namespace !== '' && !coveredNamespaces.has(namespace);
-  });
   if (missing.length > 0) reasons.add('source_stale');
 
   const counted = contributing.length > 0 ? contributing : unscoped;
   const countable = counted.filter((report) => report.inventory.status !== 'unavailable');
-  if (countable.length === 0) {
+  // A report that came back without a single count is not a zero and not a
+  // total: nothing here can be rendered as the current count of anything.
+  const established = countable.filter((report) => countsPhrase(report.inventory) !== NOT_COUNTED);
+  if (established.length === 0) {
     // Nothing current was counted. The newest expired report that actually
     // established a count is still worth showing — an operator wants to know
     // what the server last looked like — but never as the current total, and
@@ -469,7 +521,7 @@ export function summarizeSandboxes(
     const last = newestWithCounts(stale);
     if (last !== null) {
       return {
-        text: countPhrase(tallyOf(last.inventory)),
+        text: countsPhrase(last.inventory),
         partial: true,
         reasons: [...reasons],
         explanation:
@@ -510,7 +562,7 @@ export function summarizeSandboxes(
       text: countable
         .map(
           (report) =>
-            `${report.inventory.namespace ?? report.host} ${countPhrase(tallyOf(report.inventory))}`,
+            `${report.inventory.namespace ?? report.host} ${countsPhrase(report.inventory)}`,
         )
         .join(' | '),
       partial: true,
@@ -572,7 +624,7 @@ export function summarizeSandboxes(
  * failed are skipped — their counts are null, and a null is not a zero.
  */
 function newestWithCounts(reports: InventoryReport[]): InventoryReport | null {
-  const usable = reports.filter((report) => report.inventory.status !== 'unavailable');
+  const usable = reports.filter((report) => countsPhrase(report.inventory) !== NOT_COUNTED);
   if (usable.length === 0) return null;
   return [...usable].sort((a, b) => observedAtMs(b.capacity) - observedAtMs(a.capacity))[0];
 }
