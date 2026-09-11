@@ -8,12 +8,29 @@
 // Selecting a row no longer opens an inline panel: the detail goes to the
 // right-hand inspector, so the list keeps its place while a step is read.
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { filterSteps, type TrajectoryStep } from './trajectorySteps';
 import { toSessionLog, type TrajectoryLane } from './trajectory';
 import { formatDuration } from './TurnFooter';
+import {
+  columnAt,
+  layoutFor,
+  scrollLeftForColumn,
+  zoomAfterStep,
+  zoomAfterWheel,
+  type ZoomAnchor,
+} from './trajectoryZoom';
+
+// Restoring the zoom anchor belongs before the paint, which is the point of
+// doing it in a layout effect at all; on the server, where it would warn and do
+// nothing, `useEffect` is that same no-op.
+const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
+/** The zoom controls above the overview: quiet, small, and secondary to it. */
+const ZOOM_CONTROL =
+  'flex h-5 min-w-[1.25rem] items-center justify-center rounded-md border border-gray-200 px-1 text-[11px] leading-none text-gray-500 transition-colors hover:border-gray-300 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:text-gray-400 dark:hover:border-white/20 dark:hover:text-gray-100';
 
 const LANES: { key: TrajectoryLane; label: string; tone: string }[] = [
   { key: 'input', label: 'Input', tone: 'bg-sky-400' },
@@ -51,48 +68,183 @@ function Minimap({
     count: steps.filter((step) => step.lane === lane.key).length,
   })).filter((lane) => lane.count > 0);
 
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const anchorRef = useRef<ZoomAnchor | null>(null);
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const [zoom, setZoom] = useState<number | null>(null);
+  const layout = useMemo(
+    () => layoutFor(zoom, viewportWidth, steps.length),
+    [steps.length, viewportWidth, zoom],
+  );
+
+  // The card is as wide as its column of the page, so the track is measured
+  // rather than assumed. A zoom the reader chose survives the re-measure:
+  // `layoutFor` clamps it to whatever the new width allows.
+  useEffect(() => {
+    const element = scrollerRef.current;
+    if (element === null) return undefined;
+    const measure = () => {
+      setViewportWidth(element.clientWidth);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  // React registers `wheel` at the root as a passive listener, so zooming is
+  // attached by hand: the handler has to be able to preventDefault, or the page
+  // scrolls away while the columns grow.
+  useEffect(() => {
+    const element = scrollerRef.current;
+    if (element === null) return undefined;
+    const onWheel = (event: WheelEvent): void => {
+      // A trackpad's horizontal swipe is a pan, and stays native.
+      if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+      const next = zoomAfterWheel(zoom, event.deltaY, viewportWidth, steps.length);
+      // A step with nowhere to go leaves the wheel to the page.
+      if (next === zoom) return;
+      event.preventDefault();
+      const rect = element.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      anchorRef.current = { column: columnAt(x, element.scrollLeft, layout), x };
+      setZoom(next);
+    };
+    element.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      element.removeEventListener('wheel', onWheel);
+    };
+  }, [layout, steps.length, viewportWidth, zoom]);
+
+  // The zoom is anchored on a column, but the browser only applies the new
+  // width after the render: restore the anchor before the paint, or the track
+  // jumps out from under the pointer.
+  useIsomorphicLayoutEffect(() => {
+    const element = scrollerRef.current;
+    const anchor = anchorRef.current;
+    if (element === null || anchor === null) return;
+    anchorRef.current = null;
+    const next = scrollLeftForColumn(anchor.column, anchor.x, layout, viewportWidth);
+    if (next !== element.scrollLeft) element.scrollLeft = next;
+  }, [layout, viewportWidth]);
+
+  /** Anchor the next zoom on the middle of what the reader can see. */
+  const anchorAtCentre = (): void => {
+    const element = scrollerRef.current;
+    if (element === null) return;
+    const x = element.clientWidth / 2;
+    anchorRef.current = { column: columnAt(x, element.scrollLeft, layout), x };
+  };
+
+  const zoomBy = (direction: 1 | -1): void => {
+    const next = zoomAfterStep(zoom, direction, viewportWidth, steps.length);
+    if (next === zoom) return;
+    anchorAtCentre();
+    setZoom(next);
+  };
+
+  const fitAll = (): void => {
+    if (zoom === null) return;
+    anchorAtCentre();
+    setZoom(null);
+  };
+
+  // Fitted, the track is a minimum width and the card decides how wide it ends
+  // up: that is the layout the server already painted, so a freshly loaded page
+  // does not flash a narrow strip before the card is measured. Zoomed, the
+  // width is the zoom, and it is spelled out.
+  const trackStyle =
+    zoom === null ? { minWidth: layout.trackWidthPx } : { width: layout.trackWidthPx };
+
   return (
-    <div className="flex gap-4">
-      <div className="w-24 shrink-0 space-y-1.5">
-        {lanes.map((lane) => (
-          <div key={lane.key} className="flex h-5 items-center gap-2">
-            <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${lane.tone}`} />
-            <span className="text-[11px] font-medium text-gray-600 dark:text-gray-300">
-              {lane.label}
-            </span>
-            <span className="ml-auto text-[10px] tabular-nums text-gray-400 dark:text-gray-500">
-              {lane.count}
-            </span>
-          </div>
-        ))}
+    <div className="space-y-2">
+      <div className="flex items-center justify-end gap-1">
+        <button
+          type="button"
+          aria-label="Zoom out"
+          title="Zoom out"
+          disabled={zoom === null}
+          onClick={() => zoomBy(-1)}
+          className={ZOOM_CONTROL}
+        >
+          −
+        </button>
+        <button
+          type="button"
+          aria-label="Zoom in"
+          title="Zoom in"
+          disabled={!layout.canZoomIn}
+          onClick={() => zoomBy(1)}
+          className={ZOOM_CONTROL}
+        >
+          +
+        </button>
+        <button
+          type="button"
+          aria-label="Fit every step"
+          title="Fit every step"
+          disabled={zoom === null}
+          onClick={fitAll}
+          className={ZOOM_CONTROL}
+        >
+          Fit
+        </button>
       </div>
-      <div className="min-w-0 flex-1 overflow-x-auto pb-1">
-        <div className="space-y-1.5" style={{ minWidth: steps.length * 12 + 8 }}>
+      <div className="flex gap-4">
+        <div className="w-24 shrink-0 space-y-1.5">
           {lanes.map((lane) => (
-            <div
-              key={lane.key}
-              className="grid h-5 items-center gap-0.5 rounded-md bg-gray-50 px-1 dark:bg-white/[0.03]"
-              style={{ gridTemplateColumns: `repeat(${steps.length}, minmax(0, 1fr))` }}
-            >
-              {steps.map((step) =>
-                step.lane === lane.key ? (
-                  <button
-                    key={step.key}
-                    type="button"
-                    aria-label={`${step.label} (${step.kind}, step ${step.stepNo})`}
-                    aria-pressed={selectedKey === step.key}
-                    title={`${step.label} (${step.kind})${step.timing.durationMs !== null ? ` · ${formatDuration(step.timing.durationMs)}` : ''}`}
-                    onClick={() => onSelect(step.key)}
-                    className={`mx-auto h-3.5 w-full max-w-4 rounded-[3px] transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-700 focus-visible:ring-offset-2 dark:focus-visible:ring-gray-200 dark:focus-visible:ring-offset-gray-900 ${
-                      step.status === 'failed' ? 'bg-rose-400' : lane.tone
-                    } ${selectedKey === step.key ? 'opacity-100 ring-1 ring-gray-700 ring-offset-1 dark:ring-gray-200 dark:ring-offset-gray-900' : selectedKey === null ? 'opacity-80' : 'opacity-60'}`}
-                  />
-                ) : (
-                  <span key={step.key} aria-hidden="true" />
-                ),
-              )}
+            <div key={lane.key} className="flex h-5 items-center gap-2">
+              <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${lane.tone}`} />
+              <span className="text-[11px] font-medium text-gray-600 dark:text-gray-300">
+                {lane.label}
+              </span>
+              <span className="ml-auto text-[10px] tabular-nums text-gray-400 dark:text-gray-500">
+                {lane.count}
+              </span>
             </div>
           ))}
+        </div>
+        <div
+          ref={scrollerRef}
+          role="group"
+          aria-label="Execution overview; scroll to zoom"
+          tabIndex={0}
+          onDoubleClick={fitAll}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') fitAll();
+          }}
+          className="min-w-0 flex-1 overflow-x-auto pb-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-700 focus-visible:ring-offset-2 dark:focus-visible:ring-gray-200 dark:focus-visible:ring-offset-gray-900"
+        >
+          <div className="space-y-1.5" style={trackStyle}>
+            {lanes.map((lane) => (
+              <div
+                key={lane.key}
+                className="grid h-5 items-center gap-0.5 rounded-md bg-gray-50 px-1 dark:bg-white/[0.03]"
+                style={{ gridTemplateColumns: `repeat(${steps.length}, minmax(0, 1fr))` }}
+              >
+                {steps.map((step) =>
+                  step.lane === lane.key ? (
+                    <button
+                      key={step.key}
+                      type="button"
+                      aria-label={`${step.label} (${step.kind}, step ${step.stepNo})`}
+                      aria-pressed={selectedKey === step.key}
+                      title={`${step.label} (${step.kind})${step.timing.durationMs !== null ? ` · ${formatDuration(step.timing.durationMs)}` : ''}`}
+                      onClick={() => onSelect(step.key)}
+                      className={`mx-auto h-3.5 w-full max-w-4 rounded-[3px] transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-700 focus-visible:ring-offset-2 dark:focus-visible:ring-gray-200 dark:focus-visible:ring-offset-gray-900 ${
+                        step.status === 'failed' ? 'bg-rose-400' : lane.tone
+                      } ${selectedKey === step.key ? 'opacity-100 ring-1 ring-gray-700 ring-offset-1 dark:ring-gray-200 dark:ring-offset-gray-900' : selectedKey === null ? 'opacity-80' : 'opacity-60'}`}
+                    />
+                  ) : (
+                    <span key={step.key} aria-hidden="true" />
+                  ),
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>

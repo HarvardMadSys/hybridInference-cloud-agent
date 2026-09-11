@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -222,5 +222,102 @@ describe('TrajectoryView', () => {
     );
     expect(secondScroll).toHaveBeenCalledTimes(1);
     expect(firstScroll).not.toHaveBeenCalled();
+  });
+});
+
+describe('TrajectoryView zoom', () => {
+  /** The track is the zoomed surface: fitted it sets a minimum, zoomed a width. */
+  function trackWidth(): number {
+    const scroller = screen.getByRole('group', { name: /execution overview/i });
+    const track = scroller.firstElementChild as HTMLElement;
+    return Number.parseFloat(track.style.width || track.style.minWidth);
+  }
+
+  /** Dispatch a wheel step and report whether the overview took it. */
+  function wheel(deltaY: number): boolean {
+    const scroller = screen.getByRole('group', { name: /execution overview/i });
+    const event = new WheelEvent('wheel', { deltaY, bubbles: true, cancelable: true });
+    act(() => {
+      scroller.dispatchEvent(event);
+    });
+    return event.defaultPrevented;
+  }
+
+  it('lays the overview out at the pitch it has always used while fitted', () => {
+    render(<Harness events={EVENTS} />);
+    const scroller = screen.getByRole('group', { name: /execution overview/i });
+    const track = scroller.firstElementChild as HTMLElement;
+
+    // Two steps at twelve pixels each, plus the track's padding. A minimum and
+    // not a width: the card decides how wide it ends up, and the server paints
+    // that same layout before anything is measured.
+    expect(track.style.minWidth).toBe('30px');
+    expect(track.style.width).toBe('');
+  });
+
+  it('gives the wheel to the page when there is nothing left to zoom out to', () => {
+    render(<Harness events={EVENTS} />);
+
+    expect(wheel(100)).toBe(false);
+    expect(trackWidth()).toBe(30);
+  });
+
+  it('opens the columns apart on a wheel-up and closes them again', () => {
+    render(<Harness events={EVENTS} />);
+
+    expect(wheel(-100)).toBe(true);
+    const zoomed = trackWidth();
+    expect(zoomed).toBeGreaterThan(30);
+
+    expect(wheel(100)).toBe(true);
+    expect(trackWidth()).toBe(30);
+  });
+
+  it('steps with the buttons, and fits every step again', () => {
+    render(<Harness events={EVENTS} />);
+    const zoomIn = screen.getByRole('button', { name: 'Zoom in' });
+    const zoomOut = screen.getByRole('button', { name: 'Zoom out' });
+    const fit = screen.getByRole('button', { name: 'Fit every step' });
+
+    expect(zoomOut).toBeDisabled();
+    expect(fit).toBeDisabled();
+
+    fireEvent.click(zoomIn);
+    const zoomed = trackWidth();
+    expect(zoomed).toBeGreaterThan(30);
+    expect(zoomOut).toBeEnabled();
+    expect(fit).toBeEnabled();
+
+    fireEvent.click(zoomIn);
+    expect(trackWidth()).toBeGreaterThan(zoomed);
+
+    fireEvent.click(fit);
+    expect(trackWidth()).toBe(30);
+    expect(zoomOut).toBeDisabled();
+  });
+
+  it('fits every step again on Escape and on a double click', () => {
+    render(<Harness events={EVENTS} />);
+    const scroller = screen.getByRole('group', { name: /execution overview/i });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(trackWidth()).toBeGreaterThan(30);
+    fireEvent.keyDown(scroller, { key: 'Escape' });
+    expect(trackWidth()).toBe(30);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(trackWidth()).toBeGreaterThan(30);
+    fireEvent.doubleClick(scroller);
+    expect(trackWidth()).toBe(30);
+  });
+
+  it('keeps the step a mark names selected while the columns move', () => {
+    render(<Harness events={EVENTS} />);
+    const mark = screen.getByRole('button', { name: 'Bash (tool, step 1)' });
+
+    fireEvent.click(mark);
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    expect(mark).toHaveAttribute('aria-pressed', 'true');
   });
 });
