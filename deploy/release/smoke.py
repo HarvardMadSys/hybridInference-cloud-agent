@@ -59,6 +59,9 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The runtime label namespace the sandbox image writes and the host reads.
+SMOKE_RUN_LABEL = "io.hybridinference.smoke.run"
+
+#: The runtime label namespace the sandbox image writes and the host reads.
 RUNTIME_LABEL_PREFIX = "org.freeinference.runtime."
 RUNTIME_LABEL_SUFFIX = ".version"
 
@@ -173,10 +176,22 @@ class Container:
     inline cleanup, and the runner is a shared machine that would accumulate one
     of these per attempt until the disk fills — the symptom then landing on
     whatever job happens to be running at the time.
+
+    Every container carries the run it belongs to in a label, because cleanup
+    keyed on the name prefix reaches across runs: a shared runner hosts two jobs
+    at once, and a job that failed a moment ago is running its own
+    `docker rm -f` over every container whose name contains `smoke-`. That
+    happened — this check's control cell lost its application container ninety
+    seconds into a poll — and the label is the fix.
     """
 
     name: str
+    run: str
     published: dict[int, int] = field(default_factory=dict)
+
+    @classmethod
+    def for_run(cls, kind: str, run: str) -> Container:
+        return cls(name=f"smoke-{kind}-{run}", run=run)
 
     def start(
         self,
@@ -189,7 +204,14 @@ class Container:
         entrypoint: str | None = None,
         command: Sequence[str] = (),
     ) -> None:
-        args = ["run", "-d", "--name", self.name]
+        args = [
+            "run",
+            "-d",
+            "--name",
+            self.name,
+            "--label",
+            f"{SMOKE_RUN_LABEL}={self.run}",
+        ]
         for key, value in (env or {}).items():
             args += ["-e", f"{key}={value}"]
         for port in publish:
@@ -332,7 +354,7 @@ def verify_web(image: str, *, variant: str, suffix: str, keep: bool) -> list[str
     stayed moved.
     """
     base_path = {"root": "", "agents": "/agents"}[variant]
-    container = Container(name=f"smoke-web-{variant}-{suffix}")
+    container = Container.for_run(f"web-{variant}", suffix)
     try:
         container.start(
             image,
@@ -389,8 +411,8 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
     the API alone would not have caught that.
     """
     network = Network(f"smoke-control-{suffix}")
-    postgres = Container(name=f"smoke-control-pg-{suffix}")
-    app = Container(name=f"smoke-control-app-{suffix}")
+    postgres = Container.for_run("control-pg", suffix)
+    app = Container.for_run("control-app", suffix)
     try:
         with network:
             postgres.start(
@@ -415,7 +437,7 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
             dsn = f"postgresql+asyncpg://cloudagent:smoke@smoke-control-pg-{suffix}:5432/cloudagent"
             common = _control_environment(dsn)
 
-            migrate = Container(name=f"smoke-control-migrate-{suffix}")
+            migrate = Container.for_run("control-migrate", suffix)
             try:
                 migrate.start(
                     image,
@@ -491,7 +513,7 @@ def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
     failure a build cannot see — a wheel that installs but does not import, and
     the `COPY --from=docker` line going missing from the image.
     """
-    container = Container(name=f"smoke-runner-{suffix}")
+    container = Container.for_run("runner", suffix)
     try:
         container.start(
             image,
@@ -506,7 +528,7 @@ def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
         if container.exit_code() != 0:
             raise SmokeFailure(f"the runner's modules do not import\n{container.logs()}")
 
-        cli = Container(name=f"smoke-runner-docker-{suffix}")
+        cli = Container.for_run("runner-docker", suffix)
         try:
             cli.start(image, entrypoint="docker", command=("--version",))
             cli.wait()
@@ -554,7 +576,7 @@ def verify_sandbox(image: str, *, suffix: str, keep: bool) -> list[str]:
 
     evidence: list[str] = []
     for runtime, claimed in sorted(claims.items()):
-        container = Container(name=f"smoke-sandbox-{runtime}-{suffix}")
+        container = Container.for_run(f"sandbox-{runtime}", suffix)
         try:
             # The same query the build makes, for the same reason: the version
             # may arrive on stderr, and a CLI that prints a banner first puts it
@@ -597,7 +619,7 @@ def verify_tunnel(image: str, *, suffix: str, keep: bool) -> list[str]:
     the failure mode that matters: a tunnel that appears to run while carrying
     nothing is how a whole host's jobs fail as "the broker is unreachable".
     """
-    probe = Container(name=f"smoke-tunnel-ssh-{suffix}")
+    probe = Container.for_run("tunnel-ssh", suffix)
     try:
         probe.start(image, entrypoint="ssh", command=("-V",))
         probe.wait()
@@ -606,7 +628,7 @@ def verify_tunnel(image: str, *, suffix: str, keep: bool) -> list[str]:
     finally:
         probe.stop()
 
-    hop = Container(name=f"smoke-tunnel-hop-{suffix}")
+    hop = Container.for_run("tunnel-hop", suffix)
     try:
         hop.start(
             image,
@@ -647,7 +669,7 @@ def verify_egress(image: str, *, suffix: str, keep: bool, workdir: Path) -> list
     config = workdir / f"squid-{suffix}.conf"
     config.write_text(build_config_from_env({"AGENT_EGRESS_ALLOWLIST": "registry.npmjs.org"}))
 
-    container = Container(name=f"smoke-egress-{suffix}")
+    container = Container.for_run("egress", suffix)
     try:
         container.start(image, volumes={config: "/etc/squid/generated/squid.conf"})
         time.sleep(10)

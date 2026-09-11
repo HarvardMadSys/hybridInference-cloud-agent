@@ -831,7 +831,11 @@ jobs:
       - name: Drop this run's containers and image
         if: always()
         run: |
-          docker ps -aq --filter "name=smoke-" | xargs -r docker rm -f || true
+          # Scoped by this run's label, not by the name prefix: a shared runner
+          # hosts two jobs at once, so `--filter name=smoke-` reaches into a
+          # concurrent run and kills its containers mid-check.
+          docker ps -aq --filter "label=io.hybridinference.smoke.run=${SUFFIX}" \
+            | xargs -r docker rm -f || true
           # Not `-f`: two runs of the same commit build the same image id under
           # different tags, and a forced removal takes their containers with it.
           # A refused removal leaves an image behind, which is the cheaper
