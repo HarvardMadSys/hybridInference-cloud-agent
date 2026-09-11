@@ -17,6 +17,7 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
+from cloud_agent.storage.store import TERMINAL_STATES
 
 from cloud_agent.admin_usage import (
     MAX_USAGE_LEDGER_ROWS,
@@ -37,7 +38,6 @@ from cloud_agent.storage.admin_usage_queries import (
     _PROJECTION_SQL,
     AdminUsageQueries,
 )
-from cloud_agent.storage.store import TERMINAL_STATES
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 

@@ -15,11 +15,12 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent import identity
 from cloud_agent.admin_observability import AdminActivityPage, AdminRunList, cursor_scope
 from cloud_agent.api import admin_runs, usage
-from cloud_agent.api.deps import get_agent_job_store, get_gateway_client
+from cloud_agent.api.deps import get_gateway_client, get_storage
 from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 from tests.servers.test_owner_revalidation import _AccessGateway
+from tests.support.storage import OneFake
 from tests.unit.test_ledger_snapshots import END, START, ledger_row
 
 ADMIN = {"Authorization": "Bearer admin-observations-test"}
@@ -115,19 +116,21 @@ def setup(monkeypatch):
         ),
         event_content=AsyncMock(return_value=event),
     )
-    store = SimpleNamespace(
-        get_job=AsyncMock(return_value=run),
-        ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
-        record_admin_action=AsyncMock(return_value=1),
-        queue_job_ledger_refresh=AsyncMock(),
-        job_usage_inputs=AsyncMock(),
+    store = OneFake(
+        SimpleNamespace(
+            get_job=AsyncMock(return_value=run),
+            ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
+            record_admin_action=AsyncMock(return_value=1),
+            queue_job_ledger_refresh=AsyncMock(),
+            job_usage_inputs=AsyncMock(),
+        )
     )
     gateway = _AccessGateway(["agent.use", "agent.admin"])
     app = FastAPI()
     app.include_router(admin_runs.router)
     app.include_router(usage.router)
     app.dependency_overrides[admin_runs.get_admin_run_queries] = lambda: queries
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_gateway_client] = lambda: gateway
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "admin-person"}
     return app, queries, store, gateway

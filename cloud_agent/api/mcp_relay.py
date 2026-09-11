@@ -40,7 +40,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
@@ -49,26 +49,29 @@ from cloud_agent.mcp_proxy import (
     plan_request,
 )
 from cloud_agent.mcp_registry import McpServer, registry_for_user
-from cloud_agent.ports import credential_queries, mcp
 from cloud_agent.tokens import SCOPE_MCP, InvalidAgentToken, parse_worker_token
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from cloud_agent.ports import (
+        CredentialQueries,
+        McpConnectionRepository,
+    )
+
 
 logger = get_logger(__name__)
 
 
-class _McpRelayStorage(
-    mcp.McpConnectionRepository,
-    credential_queries.CredentialQueries,
-    Protocol,
-):
+class _McpRelayStorage(Protocol):
     """The capabilities this module's handlers reach the store for.
 
     Named here so that reaching for one more is a deliberate edit to
     this list rather than a call that happens to type-check.
     """
+
+    credential_queries: CredentialQueries
+    mcp: McpConnectionRepository
 
 
 router = APIRouter(prefix="/v1/agent/mcp")
@@ -169,7 +172,7 @@ async def _authorize(
     # with an unexpired lease. So revocation is automatic — the instant the
     # reaper supersedes the attempt or the owner cancels, the same token stops
     # buying tools, with no key to remember to revoke.
-    identity = await store.resolve_model_credential(
+    identity = await store.credential_queries.resolve_model_credential(
         job_id=claims["job_id"],
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
@@ -210,7 +213,7 @@ async def _authorize(
 
     # The owner's servers, not the caller's — see the module docstring. The
     # same fence row that authorized this call names them.
-    registry = await registry_for_user(store, user_id=identity["user_id"])
+    registry = await registry_for_user(store.mcp, user_id=identity["user_id"])
     server = registry.get(server_name)
     if server is None:
         # Granted at creation and unreachable now: the owner disconnected the
@@ -405,7 +408,7 @@ async def mcp_post(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: _McpRelayStorage | None = Depends(get_agent_job_store),
+    store: _McpRelayStorage | None = Depends(get_storage),
 ) -> Any:
     """Relay one MCP request, refusing tools the allowlist does not cover."""
     server, job_id = await _authorize(server_name, authorization, store)
@@ -436,7 +439,7 @@ async def mcp_get(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: _McpRelayStorage | None = Depends(get_agent_job_store),
+    store: _McpRelayStorage | None = Depends(get_storage),
 ) -> Any:
     """Open the server-to-client stream for an established session."""
     server, job_id = await _authorize(server_name, authorization, store)
@@ -448,7 +451,7 @@ async def mcp_delete(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: _McpRelayStorage | None = Depends(get_agent_job_store),
+    store: _McpRelayStorage | None = Depends(get_storage),
 ) -> Any:
     """Terminate an MCP session."""
     server, job_id = await _authorize(server_name, authorization, store)

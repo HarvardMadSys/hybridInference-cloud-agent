@@ -1,4 +1,4 @@
-"""Integration tests for AgentJobStore (Postgres): fencing, reaper, snapshots.
+"""Integration tests for Storage (Postgres): fencing, reaper, snapshots.
 
 These pin the concurrency-ownership contract from issue #1041: attempts +
 lease_generation fencing (zombie workers can never write after a reap),
@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 
 from cloud_agent.schemas import WorkerEventRequest
-from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.storage.assembly import Storage
 from cloud_agent.thread_stats import summarize_thread
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -43,8 +43,14 @@ _SHARED_HOST_CAPABILITIES = [
 
 
 @pytest_asyncio.fixture
-async def store():
-    """Provide a clean AgentJobStore over the shared test database."""
+async def pool():
+    """The connection pool these tests arrange and assert over directly.
+
+    Separate from ``store`` because it is a separate thing: the assembly owns
+    its pool and does not hand it out, so a test that needs raw SQL for its
+    arrange or its assertion asks for the pool it created, rather than
+    reaching past a repository into one.
+    """
     import asyncpg
 
     base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
@@ -70,24 +76,29 @@ async def store():
         pytest.skip(f"PostgreSQL not available: {exc}")
         return  # unreachable
 
-    job_store = AgentJobStore(pool)
     # Schema and backfills come from the baseline migration now, not from
-    # the store. This is E1's acceptance: `alembic upgrade head` on a fresh
-    # database has to leave every one of these tests passing.
+    # the storage layer. This is E1's acceptance: `alembic upgrade head` on a
+    # fresh database has to leave every one of these tests passing.
     apply_migrations(db_config)
 
     async with pool.acquire() as conn:
         await reset_agent_tables(conn)
 
     try:
-        yield job_store
+        yield pool
     finally:
         async with pool.acquire() as conn:
             await reset_agent_tables(conn)
         await pool.close()
 
 
-async def _create_job(store: AgentJobStore, **overrides) -> dict:
+@pytest_asyncio.fixture
+async def store(pool):
+    """The whole storage layer, assembled the way the service assembles it."""
+    return Storage(pool)
+
+
+async def _create_job(store: Storage, **overrides) -> dict:
     """Create a job with sensible defaults."""
     params = {
         "user_id": "user-1",
@@ -98,18 +109,18 @@ async def _create_job(store: AgentJobStore, **overrides) -> dict:
         "base_sha": "deadbeef",
     }
     params.update(overrides)
-    return await store.create_job(**params)
+    return await store.conversation_commands.create_job(**params)
 
 
 async def test_thread_stats_keep_output_presence_when_omitting_long_transcripts(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """Exercise the SQL projection that previously bypassed false-zero detection."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
     for text in [" \n\t", "long answer " * 1000]:
-        assert await store.append_event(
+        assert await store.attempt_commands.append_event(
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
             event_type="message",
@@ -119,7 +130,9 @@ async def test_thread_stats_keep_output_presence_when_omitting_long_transcripts(
                 "usage": {"input_tokens": 100, "output_tokens": 0},
             },
         )
-    inputs = await store.thread_stats_inputs(job_id=job["id"], user_id=job["user_id"])
+    inputs = await store.execution_queries.thread_stats_inputs(
+        job_id=job["id"], user_id=job["user_id"]
+    )
     assert inputs is not None
     assert [event["payload"]["has_text"] for event in inputs["events"]] == [False, True]
     assert all("text" not in event["payload"] for event in inputs["events"])
@@ -132,20 +145,21 @@ async def test_thread_stats_keep_output_presence_when_omitting_long_transcripts(
 
 
 async def test_bounded_event_stays_bounded_in_postgres_and_marks_the_assistant_message(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """Both event readers and the plain thread-message path see bounded content."""
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
     event = WorkerEventRequest(event_type="message", payload={"text": '界😀\n"\\' * 100_000})
-    event_id = await store.append_event(
+    event_id = await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         event_type=event.event_type,
         payload=event.payload,
     )
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         size = await conn.fetchval(
             "SELECT octet_length(payload::text) FROM agent_job_events WHERE id = $1", event_id
         )
@@ -156,7 +170,7 @@ async def test_bounded_event_stays_bounded_in_postgres_and_marks_the_assistant_m
     assert content.endswith("[Content truncated: event payload exceeded 256 KiB.]")
 
 
-async def _settled(store: AgentJobStore, job_id: str) -> None:
+async def _settled(pool, store: Storage, job_id: str) -> None:
     """Stand in for the runner's settlement: a success carries its native ordinal.
 
     The runner settles the shared workspace before it reports success and the
@@ -164,7 +178,7 @@ async def _settled(store: AgentJobStore, job_id: str) -> None:
     without one. Tests that skip the sandbox protocol and finish a job
     directly prepare that fact here, instead of the store guessing it.
     """
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET native_turn_no = turn_no "
             "WHERE id = $1 AND native_turn_no IS NULL",
@@ -172,9 +186,9 @@ async def _settled(store: AgentJobStore, job_id: str) -> None:
         )
 
 
-async def _expire_attempt(store: AgentJobStore, attempt_id: int) -> None:
+async def _expire_attempt(pool, store: Storage, attempt_id: int) -> None:
     """Force an attempt's lease into the past."""
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_attempts SET lease_expires_at = NOW() - INTERVAL '1 second' "
             "WHERE id = $1",
@@ -197,7 +211,7 @@ _DEFAULT_CLAIM_VALUE = object()
 
 
 async def _claim(
-    store: AgentJobStore,
+    store: Storage,
     *,
     worker_id: str,
     lease_ttl_seconds: float,
@@ -218,19 +232,19 @@ async def _claim(
     )
     assert isinstance(credential, str)
     assert isinstance(attestation, dict)
-    if await store.get_host(host=host) is None:
-        await store.register_host(
+    if await store.host_pool.get_host(host=host) is None:
+        await store.host_pool.register_host(
             host=host,
             credential_hash=credential,
             capabilities=_SHARED_HOST_CAPABILITIES,
             slots_total=128,
         )
-        await store.record_host_heartbeat(
+        await store.host_pool.record_host_heartbeat(
             host=host,
             capabilities=_SHARED_HOST_CAPABILITIES,
             sandbox_image_digest="sha256:shared-image",
         )
-    return await store.claim_job(
+    return await store.attempt_commands.claim_job(
         worker_id=worker_id,
         lease_ttl_seconds=lease_ttl_seconds,
         host=host,
@@ -240,17 +254,17 @@ async def _claim(
 
 
 async def _reserve_retained_chat(
-    store: AgentJobStore,
+    store: Storage,
 ) -> tuple[dict, dict, dict]:
     """Create a single-member shared group under a real database fence."""
     credential_hash = "runner-a-credential-hash"
-    await store.register_host(
+    await store.host_pool.register_host(
         host="runner-a",
         credential_hash=credential_hash,
         capabilities=_SHARED_HOST_CAPABILITIES,
         slots_total=4,
     )
-    online = await store.record_host_heartbeat(
+    online = await store.host_pool.record_host_heartbeat(
         host="runner-a",
         capabilities=_SHARED_HOST_CAPABILITIES,
         sandbox_image_digest="sha256:shared-image",
@@ -266,7 +280,7 @@ async def _reserve_retained_chat(
         claim_attestation=_shared_claim_attestation(),
     )
     assert claim is not None
-    sandbox = await store.reserve_thread_sandbox(
+    sandbox = await store.sandbox.reserve_thread_sandbox(
         thread_id=job["thread_id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -283,19 +297,19 @@ async def _reserve_retained_chat(
 
 
 async def _reserve_shared_chat(
-    store: AgentJobStore,
+    store: Storage,
     *,
     metadata: dict | None = None,
     task_prompt: str = "fix the flaky test",
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
-    await store.register_host(
+    await store.host_pool.register_host(
         host="shared-runner",
         credential_hash="test-credential-hash",
         capabilities=_SHARED_HOST_CAPABILITIES,
         slots_total=4,
     )
-    online = await store.record_host_heartbeat(
+    online = await store.host_pool.record_host_heartbeat(
         host="shared-runner",
         capabilities=_SHARED_HOST_CAPABILITIES,
         sandbox_image_digest="sha256:shared-image",
@@ -311,7 +325,7 @@ async def _reserve_shared_chat(
         claim_attestation=_shared_claim_attestation(),
     )
     assert claim is not None and claim["id"] == job["id"]
-    sandbox = await store.reserve_thread_sandbox(
+    sandbox = await store.sandbox.reserve_thread_sandbox(
         thread_id=job["thread_id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -328,7 +342,8 @@ async def _reserve_shared_chat(
 
 
 async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """A shared turn, snapshot, publication, and base import form one lineage."""
     job, claim, sandbox = await _reserve_shared_chat(
@@ -342,14 +357,14 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    running = await store.mark_thread_sandbox_running(
+    running = await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-shared-one",
         context_status="new",
     )
     assert running is not None and running["shared_live"] is True
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    settled = await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    settled = await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="live",
@@ -359,7 +374,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     )
     assert settled is not None
     assert settled["workspace_publication_state"] == "pending"
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -367,7 +382,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
         to_state="succeeded",
     )
 
-    capture = await store.claim_due_sandbox_snapshot()
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
     assert capture["sandbox_id"] == sandbox["sandbox_id"]
     assert capture["anchor_job_id"] == job["id"]
@@ -375,7 +390,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
     digest = hashlib.sha256(patch.encode()).hexdigest()
     assert (
-        await store.record_sandbox_snapshot_capture(
+        await store.snapshot.record_sandbox_snapshot_capture(
             snapshot_id=capture["snapshot_id"],
             sandbox_id=capture["sandbox_id"],
             sandbox_generation=capture["generation"],
@@ -388,7 +403,7 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
         == "captured"
     )
 
-    publication = await store.claim_for_publish()
+    publication = await store.snapshot.claim_for_publish()
     assert publication is not None
     assert publication["publication_kind"] == "shared_snapshot"
     assert publication["snapshot_id"] == capture["snapshot_id"]
@@ -397,31 +412,31 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert publication["patch"] == patch
     assert publication["metadata"] == {"_agent_base_ref": "release/x"}
     # Publication is group bookkeeping, not another state of the model turn.
-    assert (await store.get_job(job["id"]))["state"] == "succeeded"
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "succeeded"
 
     commit_sha = "b" * 40
-    assert await store.record_snapshot_publish(
+    assert await store.snapshot.record_snapshot_publish(
         snapshot_id=capture["snapshot_id"],
         pr_url="https://example.test/pull/1",
         commit_sha=commit_sha,
     )
-    published_job = await store.get_job(job["id"])
+    published_job = await store.conversation_queries.get_job(job["id"])
     assert published_job is not None
     assert published_job["state"] == "succeeded"
     assert published_job["published_commit_sha"] == commit_sha
 
-    pending_import = await store.pending_snapshot_base_import()
+    pending_import = await store.snapshot.pending_snapshot_base_import()
     assert pending_import is not None
     assert pending_import["snapshot_id"] == capture["snapshot_id"]
     assert pending_import["published_commit_sha"] == commit_sha
-    assert await store.complete_snapshot_base_import(
+    assert await store.snapshot.complete_snapshot_base_import(
         snapshot_id=capture["snapshot_id"],
         commit_sha=commit_sha,
     )
-    final_sandbox = await store.thread_sandbox(thread_id=job["thread_id"])
+    final_sandbox = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert final_sandbox is not None
     assert final_sandbox["workspace_publication_state"] == "published"
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         group = await conn.fetchrow(
             "SELECT published_base_sha, snapshot_state FROM agent_sandboxes WHERE id = $1",
             sandbox["sandbox_id"],
@@ -429,11 +444,12 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert group is not None
     assert group["published_base_sha"] == commit_sha
     assert group["snapshot_state"] == "quiescent"
-    assert await store.pending_snapshot_base_import() is None
+    assert await store.snapshot.pending_snapshot_base_import() is None
 
 
 async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """An idle Docker stop must not strand the final publication snapshot."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -444,13 +460,13 @@ async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-shared-stopped-snapshot",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="live",
@@ -458,24 +474,24 @@ async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
         idle_timeout_seconds=15,
         base_sha=job["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_sandboxes SET state = 'stopped', idle_deadline = NULL WHERE id = $1",
             sandbox["sandbox_id"],
         )
 
-    capture = await store.claim_due_sandbox_snapshot()
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
 
     assert capture is not None
     assert capture["sandbox_id"] == sandbox["sandbox_id"]
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         capturing = await conn.fetchrow(
             "SELECT state, snapshot_state FROM agent_sandboxes WHERE id = $1",
             sandbox["sandbox_id"],
@@ -487,7 +503,7 @@ async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
     # A valid receipt proves that the host started the exact container before
     # running Git. Durable state follows that Docker fact and re-arms timeout.
     assert (
-        await store.record_sandbox_snapshot_capture(
+        await store.snapshot.record_sandbox_snapshot_capture(
             snapshot_id=capture["snapshot_id"],
             sandbox_id=capture["sandbox_id"],
             sandbox_generation=capture["generation"],
@@ -499,7 +515,7 @@ async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
         )
         == "published"
     )
-    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert durable is not None
     assert durable["state"] == "running"
     assert durable["workspace_publication_state"] == "published"
@@ -507,7 +523,8 @@ async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
 
 
 async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_container(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """Capture completion is fenced by the Docker generation and exact id."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -518,13 +535,13 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-before-replacement",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="live",
@@ -532,17 +549,17 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
         idle_timeout_seconds=15,
         base_sha=job["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    capture = await store.claim_due_sandbox_snapshot()
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE agent_sandboxes
@@ -555,7 +572,7 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
         )
 
     assert (
-        await store.record_sandbox_snapshot_capture(
+        await store.snapshot.record_sandbox_snapshot_capture(
             snapshot_id=capture["snapshot_id"],
             sandbox_id=capture["sandbox_id"],
             sandbox_generation=capture["generation"],
@@ -567,7 +584,7 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
         )
         is None
     )
-    assert not await store.defer_sandbox_snapshot_capture(
+    assert not await store.snapshot.defer_sandbox_snapshot_capture(
         snapshot_id=capture["snapshot_id"],
         sandbox_id=capture["sandbox_id"],
         sandbox_generation=capture["generation"],
@@ -575,7 +592,7 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
         detail="receipt lost its lifecycle fence",
         dirty=True,
     )
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         group = await conn.fetchrow(
             """
             SELECT generation, container_id, state, snapshot_state
@@ -607,7 +624,8 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
     ],
 )
 async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
     failure_mode: str,
     expected_snapshot_state: str,
 ):
@@ -620,13 +638,13 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-shared-failure",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="live",
@@ -634,18 +652,18 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
         idle_timeout_seconds=1800,
         base_sha=job["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    capture = await store.claim_due_sandbox_snapshot()
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
 
     if failure_mode == "capture_dirty":
-        assert await store.defer_sandbox_snapshot_capture(
+        assert await store.snapshot.defer_sandbox_snapshot_capture(
             snapshot_id=capture["snapshot_id"],
             sandbox_id=capture["sandbox_id"],
             sandbox_generation=capture["generation"],
@@ -654,12 +672,12 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
             dirty=True,
         )
     elif failure_mode == "capture_stalled":
-        assert await store.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [
+        assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [
             capture["snapshot_id"]
         ]
     else:
         patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
-        assert await store.record_sandbox_snapshot_capture(
+        assert await store.snapshot.record_sandbox_snapshot_capture(
             snapshot_id=capture["snapshot_id"],
             sandbox_id=capture["sandbox_id"],
             sandbox_generation=capture["generation"],
@@ -669,19 +687,19 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
             patch=patch,
             content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
         )
-        publication = await store.claim_for_publish()
+        publication = await store.snapshot.claim_for_publish()
         assert publication is not None
         if failure_mode == "publish_failed":
-            await store.fail_snapshot_publish(
+            await store.snapshot.fail_snapshot_publish(
                 snapshot_id=capture["snapshot_id"],
                 detail="publisher rejected the immutable patch",
             )
         else:
-            assert await store.reap_stalled_snapshot_publishes(stall_seconds=0) == [
+            assert await store.snapshot.reap_stalled_snapshot_publishes(stall_seconds=0) == [
                 capture["snapshot_id"]
             ]
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         group = await conn.fetchrow(
             "SELECT snapshot_state, idle_deadline FROM agent_sandboxes WHERE id = $1",
             sandbox["sandbox_id"],
@@ -693,7 +711,7 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
 
 @pytest.mark.parametrize("next_action", ["follow_up", "fork", "capture", "publish", "base_import"])
 async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
-    store: AgentJobStore, next_action: str
+    pool, store: Storage, next_action: str
 ):
     """A failed hidden child remains history but cannot occupy the host manifest."""
     from cloud_agent_host.runner import _shared_group_manifest
@@ -707,11 +725,11 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="container-fork-recovery", context_status="new"
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="live",
@@ -719,20 +737,20 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         idle_timeout_seconds=1800,
         base_sha=job["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    operation = await store.prepare_session_fork(
+    operation = await store.session_fork.prepare_session_fork(
         source_job_id=job["id"], user_id=job["user_id"], idempotency_key="stalled-fork"
     )
     assert operation is not None and operation.get("error") is None
-    actions = await store.reap_stalled_session_forks(stall_seconds=0)
+    actions = await store.session_fork.reap_stalled_session_forks(stall_seconds=0)
     assert [action["id"] for action in actions] == [operation["id"]]
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         tombstone = await conn.fetchrow(
             "SELECT t.deleted_at, m.resident_slot_id FROM agent_threads t "
             "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id WHERE t.id = $1",
@@ -742,14 +760,14 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
     assert tombstone["resident_slot_id"] is None
 
     if next_action == "fork":
-        observed = await store.prepare_session_fork(
+        observed = await store.session_fork.prepare_session_fork(
             source_job_id=job["id"], user_id=job["user_id"], idempotency_key="replacement-fork"
         )
         assert observed is not None and observed.get("error") is None
         assert observed["target_resident_slot_id"] == operation["target_resident_slot_id"]
         expected_members = {job["thread_id"], observed["target_thread_id"]}
     elif next_action == "follow_up":
-        follow = await store.create_follow_up(
+        follow = await store.conversation_commands.create_follow_up(
             parent_job_id=job["id"], user_id=job["user_id"], prompt="continue after failed Fork"
         )
         assert follow is not None and follow.get("error") is None
@@ -761,7 +779,7 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
             host_credential_hash="test-credential-hash",
         )
         assert follow_claim is not None and follow_claim["id"] == follow["id"]
-        observed = await store.reserve_thread_sandbox(
+        observed = await store.sandbox.reserve_thread_sandbox(
             thread_id=job["thread_id"],
             attempt_id=follow_claim["attempt_id"],
             lease_generation=follow_claim["lease_generation"],
@@ -776,11 +794,11 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         assert observed is not None
         expected_members = {job["thread_id"]}
     else:
-        observed = await store.claim_due_sandbox_snapshot()
+        observed = await store.snapshot.claim_due_sandbox_snapshot()
         assert observed is not None
         if next_action in {"publish", "base_import"}:
             patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
-            assert await store.record_sandbox_snapshot_capture(
+            assert await store.snapshot.record_sandbox_snapshot_capture(
                 snapshot_id=observed["snapshot_id"],
                 sandbox_id=observed["sandbox_id"],
                 sandbox_generation=observed["generation"],
@@ -790,15 +808,15 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
                 patch=patch,
                 content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
             )
-            observed = await store.claim_for_publish()
+            observed = await store.snapshot.claim_for_publish()
             assert observed is not None
         if next_action == "base_import":
-            assert await store.record_snapshot_publish(
+            assert await store.snapshot.record_snapshot_publish(
                 snapshot_id=observed["snapshot_id"],
                 pr_url="https://example.invalid/pull/1",
                 commit_sha="b" * 40,
             )
-            observed = await store.pending_snapshot_base_import()
+            observed = await store.snapshot.pending_snapshot_base_import()
             assert observed is not None
         expected_members = {job["thread_id"]}
     # Exercise the strict runner projection and the host HTTP schema. Both
@@ -814,7 +832,8 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
 
 
 async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -825,13 +844,13 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-shared-one",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="live",
@@ -839,7 +858,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         idle_timeout_seconds=1800,
         base_sha=job["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -850,28 +869,28 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     # A newly deployed host may still retain a container created from the v1
     # image. Ordinary follow-ups remain valid, but its old helper must never
     # receive an at-anchor request it would silently interpret as "latest".
-    before_upgrade = await store.thread_sandbox(thread_id=job["thread_id"])
+    before_upgrade = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert before_upgrade is not None and before_upgrade["native_fork_capable"] is True
-    await store.record_host_heartbeat(
+    await store.host_pool.record_host_heartbeat(
         host="shared-runner",
         capabilities=_SHARED_HOST_CAPABILITIES,
         sandbox_image_digest="sha256:new-host-image",
     )
-    after_upgrade = await store.thread_sandbox(thread_id=job["thread_id"])
+    after_upgrade = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert after_upgrade is not None and after_upgrade["native_fork_capable"] is False
-    refused = await store.prepare_session_fork(
+    refused = await store.session_fork.prepare_session_fork(
         source_job_id=job["id"],
         user_id=job["user_id"],
         idempotency_key="native-fork-old-container",
     )
     assert refused == {"error": "native_fork_unavailable"}
-    await store.record_host_heartbeat(
+    await store.host_pool.record_host_heartbeat(
         host="shared-runner",
         capabilities=_SHARED_HOST_CAPABILITIES,
         sandbox_image_digest="sha256:shared-image",
     )
 
-    operation = await store.prepare_session_fork(
+    operation = await store.session_fork.prepare_session_fork(
         source_job_id=job["id"],
         user_id=job["user_id"],
         idempotency_key="native-fork-one",
@@ -882,18 +901,22 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert operation["sandbox_id"] == sandbox["sandbox_id"]
     assert operation["container_id"] == "container-shared-one"
     assert operation["target_thread_id"] != job["thread_id"]
-    await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=True)
-    assert (await store.list_sessions(user_id=job["user_id"], archived=True))["sessions"][0][
-        "delete_block_reason"
-    ] == "fork_in_progress"
-    assert await store.delete_sessions(thread_ids=[job["thread_id"]], user_id=job["user_id"]) == {
-        "error": "fork_in_progress"
-    }
-    await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=False)
+    await store.conversation_commands.set_thread_archived(
+        job_id=job["id"], user_id=job["user_id"], archived=True
+    )
+    assert (await store.conversation_queries.list_sessions(user_id=job["user_id"], archived=True))[
+        "sessions"
+    ][0]["delete_block_reason"] == "fork_in_progress"
+    assert await store.conversation_commands.delete_sessions(
+        thread_ids=[job["thread_id"]], user_id=job["user_id"]
+    ) == {"error": "fork_in_progress"}
+    await store.conversation_commands.set_thread_archived(
+        job_id=job["id"], user_id=job["user_id"], archived=False
+    )
     # The child exists from preparation — its membership already owns a
     # resident slot and can carry a residency — but it has no turns, so the
     # owner cannot see it anywhere until finalization copies the history in.
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         assert (
             await conn.fetchval(
                 "SELECT COUNT(*) FROM agent_jobs WHERE thread_id = $1",
@@ -909,7 +932,9 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
             )
             == operation["id"]
         )
-    visible = await store.list_conversations(user_id=job["user_id"], include_archived=True)
+    visible = await store.conversation_queries.list_conversations(
+        user_id=job["user_id"], include_archived=True
+    )
     assert operation["target_thread_id"] not in {
         item["job"]["thread_id"] for item in visible["conversations"]
     }
@@ -919,7 +944,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     # supervisor as locally quiescent; it must not re-arm a stop while the
     # native mutation is in flight.
     assert (
-        await store.reconcile_thread_sandbox_observation(
+        await store.sandbox.reconcile_thread_sandbox_observation(
             thread_id=job["thread_id"],
             host="shared-runner",
             sandbox_id=sandbox["sandbox_id"],
@@ -932,7 +957,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         )
         == "running"
     )
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         group = await conn.fetchrow(
             "SELECT active_operation_count, idle_deadline FROM agent_sandboxes WHERE id = $1",
             sandbox["sandbox_id"],
@@ -941,7 +966,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert group["active_operation_count"] == 1
     assert group["idle_deadline"] is None
     assert (
-        await store.due_thread_sandbox_stop(
+        await store.sandbox.due_thread_sandbox_stop(
             thread_id=job["thread_id"],
             host="shared-runner",
             sandbox_id=sandbox["sandbox_id"],
@@ -952,28 +977,28 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     )
 
     coordinator = "coordinator-one"
-    assert await store.claim_session_fork_materialization(
+    assert await store.session_fork.claim_session_fork_materialization(
         operation_id=operation["id"],
         coordinator_token=coordinator,
         lease_seconds=210,
     )
-    assert not await store.claim_session_fork_materialization(
+    assert not await store.session_fork.claim_session_fork_materialization(
         operation_id=operation["id"],
         coordinator_token="competing-coordinator",
         lease_seconds=210,
     )
-    residencies = await store.establish_session_fork_residencies(
+    residencies = await store.session_fork.establish_session_fork_residencies(
         operation_id=operation["id"],
         coordinator_token=coordinator,
         ttl_seconds=120,
     )
     assert residencies is not None
-    assert await store.link_residency_grant(
+    assert await store.grants.link_residency_grant(
         thread_id=residencies["source"]["thread_id"],
         generation=residencies["source"]["generation"],
         grant_id="grant-source-first",
     )
-    assert await store.link_residency_grant(
+    assert await store.grants.link_residency_grant(
         thread_id=residencies["target"]["thread_id"],
         generation=residencies["target"]["generation"],
         grant_id="grant-target-first",
@@ -982,7 +1007,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     # rotated the source residency. Its release must share the durable
     # operation fence or it can revoke the brand-new source process grant.
     assert (
-        await store.release_shared_residency_if_quiescent(
+        await store.residency.release_shared_residency_if_quiescent(
             thread_id=residencies["source"]["thread_id"],
             generation=residencies["source"]["generation"],
             process_generation=1,
@@ -992,7 +1017,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         is None
     )
     assert (
-        await store.heartbeat_residency(
+        await store.residency.heartbeat_residency(
             thread_id=residencies["source"]["thread_id"],
             generation=residencies["source"]["generation"],
             host="shared-runner",
@@ -1000,7 +1025,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         )
         == "grant-source-first"
     )
-    retried_residencies = await store.establish_session_fork_residencies(
+    retried_residencies = await store.session_fork.establish_session_fork_residencies(
         operation_id=operation["id"],
         coordinator_token=coordinator,
         ttl_seconds=120,
@@ -1028,7 +1053,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         "source_process_generation": 2,
         "target_process_generation": 1,
     }
-    materialized = await store.record_session_fork_materialized(
+    materialized = await store.session_fork.record_session_fork_materialized(
         operation_id=operation["id"],
         coordinator_token=coordinator,
         receipt=receipt,
@@ -1037,16 +1062,16 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     # Queue finalization before an idempotent owner retry while holding the
     # operation lock. A retry that takes thread -> operation would deadlock
     # against finalization's operation -> thread once this lock is released.
-    async with store._pool.acquire() as conn, conn.transaction():
+    async with pool.acquire() as conn, conn.transaction():
         await conn.fetchrow(
             "SELECT id FROM agent_session_forks WHERE id = $1 FOR UPDATE", operation["id"]
         )
         finalization = asyncio.create_task(
-            store.finalize_session_fork(operation_id=operation["id"])
+            store.session_fork.finalize_session_fork(operation_id=operation["id"])
         )
         await asyncio.sleep(0.03)
         retry = asyncio.create_task(
-            store.prepare_session_fork(
+            store.session_fork.prepare_session_fork(
                 source_job_id=job["id"],
                 user_id=job["user_id"],
                 idempotency_key="native-fork-one",
@@ -1062,8 +1087,8 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert child["title_source"] == "inherited"
     assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]
-    child_sandbox = await store.thread_sandbox(thread_id=child["thread_id"])
-    source_sandbox = await store.thread_sandbox(thread_id=job["thread_id"])
+    child_sandbox = await store.sandbox.thread_sandbox(thread_id=child["thread_id"])
+    source_sandbox = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert child_sandbox is not None and source_sandbox is not None
     assert child_sandbox["sandbox_id"] == source_sandbox["sandbox_id"] == sandbox["sandbox_id"]
     assert child_sandbox["container_id"] == source_sandbox["container_id"]
@@ -1071,7 +1096,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     assert source_sandbox["native_session_id"] == "native-source"
     assert child["native_turn_no"] == 1
     assert len(child_sandbox["group_members"]) == 2
-    assert await store.finalize_session_fork(operation_id=operation["id"]) == child
+    assert await store.session_fork.finalize_session_fork(operation_id=operation["id"]) == child
 
     # A STOPPED heartbeat can be sampled after the fork registered its new
     # residency generation but before the source process was restarted. By the
@@ -1079,7 +1104,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     # newer. Neither reconciliation nor grant release may roll that process
     # back to stopped after the operation fence itself has cleared.
     assert (
-        await store.reconcile_thread_sandbox_observation(
+        await store.sandbox.reconcile_thread_sandbox_observation(
             thread_id=job["thread_id"],
             host="shared-runner",
             sandbox_id=sandbox["sandbox_id"],
@@ -1100,12 +1125,12 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         )
         is None
     )
-    source_after_stale_stop = await store.thread_sandbox(thread_id=job["thread_id"])
+    source_after_stale_stop = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert source_after_stale_stop is not None
     assert source_after_stale_stop["process_generation"] == 2
     assert source_after_stale_stop["resident_state"] == "live"
     assert (
-        await store.release_shared_residency_if_quiescent(
+        await store.residency.release_shared_residency_if_quiescent(
             thread_id=residencies["source"]["thread_id"],
             generation=residencies["source"]["generation"],
             process_generation=1,
@@ -1115,7 +1140,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         is None
     )
     assert (
-        await store.heartbeat_residency(
+        await store.residency.heartbeat_residency(
             thread_id=residencies["source"]["thread_id"],
             generation=residencies["source"]["generation"],
             host="shared-runner",
@@ -1123,19 +1148,19 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
         )
         == ""
     )
-    same_request = await store.prepare_session_fork(
+    same_request = await store.session_fork.prepare_session_fork(
         source_job_id=job["id"],
         user_id=job["user_id"],
         idempotency_key="native-fork-one",
     )
     assert same_request is not None and same_request["state"] == "ready"
 
-    source_follow_up = await store.create_follow_up(
+    source_follow_up = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue source",
     )
-    child_follow_up = await store.create_follow_up(
+    child_follow_up = await store.conversation_commands.create_follow_up(
         parent_job_id=child["id"],
         user_id=child["user_id"],
         prompt="continue child",
@@ -1166,7 +1191,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
 
 
 async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_failed(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """Provider history and platform terminal state cannot drift by one turn."""
     first, first_claim, sandbox = await _reserve_shared_chat(store)
@@ -1177,13 +1202,13 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **first_fence,
         container_id="container-native-ordinal",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**first_fence, job_id=first["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**first_fence, job_id=first["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **first_fence,
         job_id=first["id"],
         context_status="live",
@@ -1191,7 +1216,7 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         idle_timeout_seconds=1800,
         base_sha=first["base_sha"],
     )
-    second = await store.create_follow_up(
+    second = await store.conversation_commands.create_follow_up(
         parent_job_id=first["id"],
         user_id=first["user_id"],
         prompt="continue after a lost final response",
@@ -1199,7 +1224,7 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
     assert second is not None and second["state"] == "queued"
     # This is the finalization-only failure case: the native exchange is
     # already durable, even though the platform outcome is failed.
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=first["id"],
         attempt_id=first_claim["attempt_id"],
         lease_generation=first_claim["lease_generation"],
@@ -1207,8 +1232,8 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         to_state="failed",
         detail="job finalization failed after native settlement",
     )
-    assert (await store.get_job(first["id"]))["native_turn_no"] == 1
-    assert (await store.get_job(second["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(first["id"]))["native_turn_no"] == 1
+    assert (await store.conversation_queries.get_job(second["id"]))["state"] == "queued"
 
     second_claim = await _claim(
         store,
@@ -1219,7 +1244,7 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         claim_attestation=_shared_claim_attestation(),
     )
     assert second_claim is not None and second_claim["id"] == second["id"]
-    activated = await store.reserve_thread_sandbox(
+    activated = await store.sandbox.reserve_thread_sandbox(
         thread_id=first["thread_id"],
         attempt_id=second_claim["attempt_id"],
         lease_generation=second_claim["lease_generation"],
@@ -1239,13 +1264,13 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         "sandbox_generation": activated["generation"],
         "activation_generation": activated["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **second_fence,
         container_id="container-native-ordinal",
         context_status="restored",
     )
-    assert await store.admit_thread_sandbox_turn(**second_fence, job_id=second["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**second_fence, job_id=second["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **second_fence,
         job_id=second["id"],
         context_status="restored",
@@ -1253,16 +1278,16 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         idle_timeout_seconds=1800,
         base_sha=first["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=second["id"],
         attempt_id=second_claim["attempt_id"],
         lease_generation=second_claim["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    assert (await store.get_job(second["id"]))["native_turn_no"] == 2
+    assert (await store.conversation_queries.get_job(second["id"]))["native_turn_no"] == 2
 
-    operation = await store.prepare_session_fork(
+    operation = await store.session_fork.prepare_session_fork(
         source_job_id=second["id"],
         user_id=second["user_id"],
         idempotency_key="native-fork-after-finalization-failure",
@@ -1271,23 +1296,23 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
     assert operation["source_native_turn_no"] == 2
 
 
-async def test_create_get_list_round_trip(store: AgentJobStore):
+async def test_create_get_list_round_trip(store: Storage):
     """create -> get -> list returns the queued job with its fields."""
     job = await _create_job(store, metadata={"origin": "test"})
     assert job["state"] == "queued"
     assert job["id"].startswith("ajob_")
 
-    fetched = await store.get_job(job["id"])
+    fetched = await store.conversation_queries.get_job(job["id"])
     assert fetched is not None
     assert fetched["task_prompt"] == "fix the flaky test"
     assert fetched["metadata"] == {"origin": "test"}
 
-    listed = await store.list_jobs(user_id="user-1")
+    listed = await store.conversation_queries.list_jobs(user_id="user-1")
     assert [item["id"] for item in listed] == [job["id"]]
-    assert await store.get_job("ajob_missing") is None
+    assert await store.conversation_queries.get_job("ajob_missing") is None
 
 
-async def test_execution_profile_persists_and_is_inherited_by_follow_up(store, monkeypatch):
+async def test_execution_profile_persists_and_is_inherited_by_follow_up(pool, store, monkeypatch):
     trusted_default = await _create_job(store, task_prompt="trusted default")
     assert trusted_default["execution_profile"] == "trusted-v1"
 
@@ -1302,22 +1327,24 @@ async def test_execution_profile_persists_and_is_inherited_by_follow_up(store, m
         metadata={"execution_profile": "trusted-v1"},
     )
     assert source["execution_profile"] == "untrusted-kata-v1"
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", source["id"])
 
-    follow_up = await store.create_follow_up(
+    follow_up = await store.conversation_commands.create_follow_up(
         parent_job_id=source["id"], user_id="user-1", prompt="continue"
     )
     assert follow_up is not None
     assert follow_up["execution_profile"] == "untrusted-kata-v1"
-    assert (await store.get_job(source["id"]))["execution_profile"] == "untrusted-kata-v1"
+    assert (await store.conversation_queries.get_job(source["id"]))[
+        "execution_profile"
+    ] == "untrusted-kata-v1"
 
 
-async def test_conversations_page_all_history_with_pins_and_equal_activity(store: AgentJobStore):
+async def test_conversations_page_all_history_with_pins_and_equal_activity(pool, store: Storage):
     """Keyset pages cross the pinned boundary without missing tied threads."""
     jobs = [await _create_job(store, task_prompt=f"Historical task {i}") for i in range(61)]
     same_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET created_at = $1, updated_at = $1", same_time)
         await conn.execute("UPDATE agent_threads SET created_at = $1, updated_at = $1", same_time)
         await conn.execute(
@@ -1325,11 +1352,13 @@ async def test_conversations_page_all_history_with_pins_and_equal_activity(store
             same_time,
             [job["thread_id"] for job in jobs[:3]],
         )
-    first = await store.list_conversations(user_id="user-1")
+    first = await store.conversation_queries.list_conversations(user_id="user-1")
     assert len(first["conversations"]) == 50
     assert first["next_cursor"]
     assert all(item["job"]["pinned_at"] for item in first["conversations"][:3])
-    second = await store.list_conversations(user_id="user-1", cursor=first["next_cursor"])
+    second = await store.conversation_queries.list_conversations(
+        user_id="user-1", cursor=first["next_cursor"]
+    )
     assert len(second["conversations"]) == 11
     assert second["next_cursor"] is None
     assert {item["job"]["id"] for item in first["conversations"] + second["conversations"]} == {
@@ -1338,7 +1367,9 @@ async def test_conversations_page_all_history_with_pins_and_equal_activity(store
     seen = []
     cursor = None
     while True:
-        page = await store.list_conversations(user_id="user-1", limit=2, cursor=cursor)
+        page = await store.conversation_queries.list_conversations(
+            user_id="user-1", limit=2, cursor=cursor
+        )
         seen.extend(item["job"]["thread_id"] for item in page["conversations"])
         cursor = page["next_cursor"]
         if cursor is None:
@@ -1351,22 +1382,30 @@ async def test_conversations_page_all_history_with_pins_and_equal_activity(store
 
 @pytest.mark.parametrize("pinned", [True, False, None])
 async def test_conversations_filter_pins_before_paginating_owned_active_threads(
-    store: AgentJobStore, pinned: bool | None
+    store: Storage, pinned: bool | None
 ):
     """Each sidebar section pages its own rows without duplicates or omissions."""
     jobs = [await _create_job(store, task_prompt=f"Sidebar task {i}") for i in range(7)]
     for job in jobs[:3]:
-        await store.set_thread_pinned(job_id=job["id"], user_id="user-1", pinned=True)
+        await store.conversation_commands.set_thread_pinned(
+            job_id=job["id"], user_id="user-1", pinned=True
+        )
     archived = await _create_job(store, task_prompt="Sidebar archived")
-    await store.set_thread_pinned(job_id=archived["id"], user_id="user-1", pinned=True)
-    await store.set_thread_archived(job_id=archived["id"], user_id="user-1", archived=True)
+    await store.conversation_commands.set_thread_pinned(
+        job_id=archived["id"], user_id="user-1", pinned=True
+    )
+    await store.conversation_commands.set_thread_archived(
+        job_id=archived["id"], user_id="user-1", archived=True
+    )
     foreign = await _create_job(store, user_id="user-2", task_prompt="Sidebar foreign")
-    await store.set_thread_pinned(job_id=foreign["id"], user_id="user-2", pinned=True)
+    await store.conversation_commands.set_thread_pinned(
+        job_id=foreign["id"], user_id="user-2", pinned=True
+    )
 
     seen = []
     cursor = None
     while True:
-        page = await store.list_conversations(
+        page = await store.conversation_queries.list_conversations(
             user_id="user-1", pinned=pinned, q="Sidebar", limit=2, cursor=cursor
         )
         seen.extend(item["job"]["id"] for item in page["conversations"])
@@ -1381,7 +1420,7 @@ async def test_conversations_filter_pins_before_paginating_owned_active_threads(
     assert len(seen) == len(expected)
     assert set(seen) == {job["id"] for job in expected}
 
-    with_archive = await store.list_conversations(
+    with_archive = await store.conversation_queries.list_conversations(
         user_id="user-1", pinned=pinned, include_archived=True
     )
     expected_ids = {job["id"] for job in expected}
@@ -1391,7 +1430,7 @@ async def test_conversations_filter_pins_before_paginating_owned_active_threads(
 
 
 async def test_conversations_search_canonical_title_and_repo_with_literal_unicode(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """Later turns and prompt body text cannot replace the durable task title."""
     original = await _create_job(
@@ -1399,58 +1438,75 @@ async def test_conversations_search_canonical_title_and_repo_with_literal_unicod
     )
     tip = original
     for _ in range(52):
-        tip = await store.create_follow_up(
+        tip = await store.conversation_commands.create_follow_up(
             parent_job_id=tip["id"], user_id="user-1", prompt="later-turn-only keyword"
         )
         assert tip is not None and "error" not in tip
     await _create_job(store, task_prompt="Unrelated task")
     for query in ["修复", "CAFÉ", "100%_\\bug", "%", "_", "\\", "  修复  "]:
-        result = await store.list_conversations(user_id="user-1", q=query)
+        result = await store.conversation_queries.list_conversations(user_id="user-1", q=query)
         assert len(result["conversations"]) == 1, query
         item = result["conversations"][0]
         assert item["title"] == "修复 Café 100%_\\Bug"
         assert item["job"]["id"] == tip["id"]
         assert item["job"]["turn_no"] == 53
     for query in ["private body-only", "later-turn-only", "missing"]:
-        assert (await store.list_conversations(user_id="user-1", q=query))["conversations"] == []
-    by_repo = await store.list_conversations(user_id="user-1", q="EXAMPLE-ORG/EXAMPLE")
+        assert (await store.conversation_queries.list_conversations(user_id="user-1", q=query))[
+            "conversations"
+        ] == []
+    by_repo = await store.conversation_queries.list_conversations(
+        user_id="user-1", q="EXAMPLE-ORG/EXAMPLE"
+    )
     assert len(by_repo["conversations"]) == 2
-    assert len((await store.list_conversations(user_id="user-1", q="  "))["conversations"]) == 2
+    assert (
+        len(
+            (await store.conversation_queries.list_conversations(user_id="user-1", q="  "))[
+                "conversations"
+            ]
+        )
+        == 2
+    )
 
 
-async def test_conversations_archive_repo_and_tenant_filters_are_independent(store: AgentJobStore):
+async def test_conversations_archive_repo_and_tenant_filters_are_independent(pool, store: Storage):
     """Including archives widens state visibility without crossing ownership."""
     active = await _create_job(store, task_prompt="shared search title")
     archived = await _create_job(store, task_prompt="shared search title")
     elsewhere = await _create_job(store, repo="other/project", task_prompt="shared search title")
     foreign = await _create_job(store, user_id="user-2", task_prompt="shared search title")
-    await store.set_thread_archived(job_id=archived["id"], user_id="user-1", archived=True)
-    await store.set_thread_archived(job_id=foreign["id"], user_id="user-2", archived=True)
-    normal = await store.list_conversations(user_id="user-1", q="shared")
+    await store.conversation_commands.set_thread_archived(
+        job_id=archived["id"], user_id="user-1", archived=True
+    )
+    await store.conversation_commands.set_thread_archived(
+        job_id=foreign["id"], user_id="user-2", archived=True
+    )
+    normal = await store.conversation_queries.list_conversations(user_id="user-1", q="shared")
     assert {item["job"]["id"] for item in normal["conversations"]} == {
         active["id"],
         elsewhere["id"],
     }
-    both = await store.list_conversations(
+    both = await store.conversation_queries.list_conversations(
         user_id="user-1", q="shared", repo=active["repo"], include_archived=True
     )
     assert {item["job"]["id"]: item["archived"] for item in both["conversations"]} == {
         active["id"]: False,
         archived["id"]: True,
     }
-    assert (await store.list_conversations(user_id="nobody", include_archived=True)) == {
+    assert (
+        await store.conversation_queries.list_conversations(user_id="nobody", include_archived=True)
+    ) == {
         "conversations": [],
         "next_cursor": None,
     }
-    assert (await store.list_conversations(user_id="user-1", repo="missing/repo"))[
-        "conversations"
-    ] == []
+    assert (
+        await store.conversation_queries.list_conversations(user_id="user-1", repo="missing/repo")
+    )["conversations"] == []
     # A job cannot be re-owned apart from its thread, nor a thread apart from
     # its jobs: the composite owner keys refuse the malformed association the
     # list read used to have to defend against.
     import asyncpg
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             await conn.execute(
                 "UPDATE agent_jobs SET user_id = 'user-2' WHERE id = $1", active["id"]
@@ -1460,7 +1516,9 @@ async def test_conversations_archive_repo_and_tenant_filters_are_independent(sto
                 "UPDATE agent_threads SET user_id = 'user-2' WHERE id = $1",
                 elsewhere["thread_id"],
             )
-    everything = await store.list_conversations(user_id="user-1", include_archived=True)
+    everything = await store.conversation_queries.list_conversations(
+        user_id="user-1", include_archived=True
+    )
     assert {item["job"]["id"] for item in everything["conversations"]} == {
         active["id"],
         archived["id"],
@@ -1468,28 +1526,30 @@ async def test_conversations_archive_repo_and_tenant_filters_are_independent(sto
     }
 
 
-async def test_conversations_cannot_hold_a_foreign_turn(store: AgentJobStore):
+async def test_conversations_cannot_hold_a_foreign_turn(pool, store: Storage):
     """A turn's owner is its thread's owner; the schema refuses any other row."""
     parent = await _create_job(store)
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="turn body"
     )
     assert child is not None
     import asyncpg
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             await conn.execute(
                 "UPDATE agent_jobs SET user_id = 'user-2' WHERE id = $1", child["id"]
             )
-    page = await store.list_conversations(user_id="user-1")
+    page = await store.conversation_queries.list_conversations(user_id="user-1")
     assert [item["job"]["id"] for item in page["conversations"]] == [child["id"]]
-    assert (await store.list_conversations(user_id="user-2"))["conversations"] == []
+    assert (await store.conversation_queries.list_conversations(user_id="user-2"))[
+        "conversations"
+    ] == []
 
 
 @pytest.mark.parametrize("pinned", [None, True, False])
 async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
-    store: AgentJobStore,
+    store: Storage,
     pinned: bool | None,
 ):
     """Cursor data never broadens owner, repo, archive, or text search scope."""
@@ -1499,8 +1559,12 @@ async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
     for _ in range(2):
         job = await _create_job(store)
         if pinned:
-            await store.set_thread_pinned(job_id=job["id"], user_id="user-1", pinned=True)
-    page = await store.list_conversations(user_id="user-1", limit=1, pinned=pinned)
+            await store.conversation_commands.set_thread_pinned(
+                job_id=job["id"], user_id="user-1", pinned=True
+            )
+    page = await store.conversation_queries.list_conversations(
+        user_id="user-1", limit=1, pinned=pinned
+    )
     cursor = page["next_cursor"]
     assert cursor
     for changed in [
@@ -1510,7 +1574,7 @@ async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
         {"include_archived": True},
     ] + [{"pinned": value} for value in [None, True, False] if value is not pinned]:
         with pytest.raises(ValueError, match="Invalid conversation cursor"):
-            await store.list_conversations(
+            await store.conversation_queries.list_conversations(
                 **{"user_id": "user-1", "cursor": cursor, "pinned": pinned, **changed}
             )
     data = json.loads(base64.urlsafe_b64decode(cursor))
@@ -1521,50 +1585,61 @@ async def test_conversations_cursor_rejects_malformed_and_changed_search_scope(
         )
     for invalid in malformed:
         with pytest.raises(ValueError, match="Invalid conversation cursor"):
-            await store.list_conversations(user_id="user-1", cursor=invalid, pinned=pinned)
+            await store.conversation_queries.list_conversations(
+                user_id="user-1", cursor=invalid, pinned=pinned
+            )
     with pytest.raises(ValueError, match="Invalid conversation search"):
-        await store.list_conversations(user_id="user-1", q="\x00")
+        await store.conversation_queries.list_conversations(user_id="user-1", q="\x00")
 
 
 async def test_conversation_activity_counts_messages_and_transitions_without_lease_noise(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """Running work rises on meaningful changes without every heartbeat reordering it."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="activity-worker", lease_ttl_seconds=60)
     assert claim is not None
-    before = (await store.list_conversations(user_id="user-1"))["conversations"][0]
-    assert await store.heartbeat(
+    before = (await store.conversation_queries.list_conversations(user_id="user-1"))[
+        "conversations"
+    ][0]
+    assert await store.attempt_commands.heartbeat(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         lease_ttl_seconds=60,
     )
-    heartbeat = (await store.list_conversations(user_id="user-1"))["conversations"][0]
+    heartbeat = (await store.conversation_queries.list_conversations(user_id="user-1"))[
+        "conversations"
+    ][0]
     assert heartbeat["last_activity_at"] == before["last_activity_at"]
-    assert await store.append_event(
+    assert await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         event_type="message",
         payload={"text": "meaningful assistant reply"},
     )
-    after = (await store.list_conversations(user_id="user-1"))["conversations"][0]
+    after = (await store.conversation_queries.list_conversations(user_id="user-1"))[
+        "conversations"
+    ][0]
     assert after["last_activity_at"] > before["last_activity_at"]
     assert after["job"]["id"] == job["id"]
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'failed', updated_at = NOW() WHERE id = $1", job["id"]
         )
-    final = (await store.list_conversations(user_id="user-1"))["conversations"][0]
+    final = (await store.conversation_queries.list_conversations(user_id="user-1"))[
+        "conversations"
+    ][0]
     assert final["job"]["state"] == "failed"
     assert final["last_activity_at"] > after["last_activity_at"]
 
 
-async def test_projects_sort_by_message_and_job_activity_preserving_pins(store: AgentJobStore):
+async def test_projects_sort_by_message_and_job_activity_preserving_pins(pool, store: Storage):
     """An older project's new reply or completion changes its recency."""
     older = await _create_job(store, repo="owner/older")
     newer = await _create_job(store, repo="owner/newer")
     dates = [datetime(2026, 1, day, tzinfo=timezone.utc) for day in range(1, 5)]
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         for job, timestamp in zip((older, newer), dates[:2], strict=True):
             await conn.execute(
                 "UPDATE agent_jobs SET created_at = $2, updated_at = $2 WHERE id = $1",
@@ -1576,52 +1651,58 @@ async def test_projects_sort_by_message_and_job_activity_preserving_pins(store: 
                 job["thread_id"],
                 timestamp,
             )
-    assert [p["repo"] for p in await store.list_projects(user_id="user-1")] == [
+    assert [
+        p["repo"] for p in await store.conversation_queries.list_projects(user_id="user-1")
+    ] == [
         "owner/newer",
         "owner/older",
     ]
     # Assistant messages advance the thread timestamp, without a new job.
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_threads SET updated_at = $2 WHERE id = $1", older["thread_id"], dates[2]
         )
-    projects = await store.list_projects(user_id="user-1")
+    projects = await store.conversation_queries.list_projects(user_id="user-1")
     assert [p["repo"] for p in projects] == ["owner/older", "owner/newer"]
     assert projects[0]["last_activity_at"] == dates[2]
     # A completion advances the job timestamp, without another user turn.
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET updated_at = $2, state = 'succeeded', native_turn_no = 1 "
             "WHERE id = $1",
             newer["id"],
             dates[3],
         )
-    projects = await store.list_projects(user_id="user-1")
+    projects = await store.conversation_queries.list_projects(user_id="user-1")
     assert [p["repo"] for p in projects] == ["owner/newer", "owner/older"]
-    conversations = await store.list_conversations(user_id="user-1")
+    conversations = await store.conversation_queries.list_conversations(user_id="user-1")
     assert (
         projects[0]["last_activity_at"]
         == conversations["conversations"][0]["last_activity_at"]
         == dates[3]
     )
-    await store.set_thread_pinned(job_id=older["id"], user_id="user-1", pinned=True)
-    assert [p["repo"] for p in await store.list_projects(user_id="user-1")] == [
+    await store.conversation_commands.set_thread_pinned(
+        job_id=older["id"], user_id="user-1", pinned=True
+    )
+    assert [
+        p["repo"] for p in await store.conversation_queries.list_projects(user_id="user-1")
+    ] == [
         "owner/older",
         "owner/newer",
     ]
 
 
-async def test_projects_summarize_a_user_s_repos_and_page_one_at_a_time(store: AgentJobStore):
+async def test_projects_summarize_a_user_s_repos_and_page_one_at_a_time(store: Storage):
     """The sidebar's task tree: a folder per repo, and a page inside one."""
     first = await _create_job(store)
-    follow_up = await store.create_follow_up(
+    follow_up = await store.conversation_commands.create_follow_up(
         parent_job_id=first["id"], user_id="user-1", prompt="and the docs"
     )
     assert follow_up is not None
     other = await _create_job(store, repo="example-org/other-repo")
     await _create_job(store, user_id="user-2", repo="example-org/not-mine")
 
-    projects = await store.list_projects(user_id="user-1")
+    projects = await store.conversation_queries.list_projects(user_id="user-1")
 
     by_repo = {project["repo"]: project for project in projects}
     assert set(by_repo) == {"example-org/example-repo", "example-org/other-repo"}
@@ -1631,28 +1712,32 @@ async def test_projects_summarize_a_user_s_repos_and_page_one_at_a_time(store: A
     # Most recently active first.
     assert projects[0]["repo"] == "example-org/other-repo"
 
-    paged = await store.list_jobs(user_id="user-1", repo="example-org/other-repo")
+    paged = await store.conversation_queries.list_jobs(
+        user_id="user-1", repo="example-org/other-repo"
+    )
     assert [job["id"] for job in paged] == [other["id"]]
     # No filter still means every project.
-    assert len(await store.list_jobs(user_id="user-1")) == 3
+    assert len(await store.conversation_queries.list_jobs(user_id="user-1")) == 3
 
 
-async def test_archived_threads_leave_the_active_project_tree(store: AgentJobStore):
+async def test_archived_threads_leave_the_active_project_tree(store: Storage):
     """A repo whose only thread is archived is not an active folder."""
     job = await _create_job(store)
-    await store.set_thread_archived(job_id=job["id"], user_id="user-1", archived=True)
+    await store.conversation_commands.set_thread_archived(
+        job_id=job["id"], user_id="user-1", archived=True
+    )
 
-    assert await store.list_projects(user_id="user-1") == []
-    archived = await store.list_projects(user_id="user-1", archived=True)
+    assert await store.conversation_queries.list_projects(user_id="user-1") == []
+    archived = await store.conversation_queries.list_projects(user_id="user-1", archived=True)
     assert [project["repo"] for project in archived] == ["example-org/example-repo"]
 
 
 async def test_archive_and_restore_filter_owned_threads_without_cancelling(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """One owned job id archives every turn without changing run state."""
     parent = await _create_job(store)
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
     )
     assert child is not None
@@ -1666,98 +1751,134 @@ async def test_archive_and_restore_filter_owned_threads_without_cancelling(
     assert claim is not None
     assert claim["id"] == parent["id"]
 
-    archived = await store.set_thread_archived(job_id=child["id"], user_id="user-1", archived=True)
+    archived = await store.conversation_commands.set_thread_archived(
+        job_id=child["id"], user_id="user-1", archived=True
+    )
 
     assert archived is not None
     assert archived["thread_id"] == parent["thread_id"]
     assert archived["archived_at"] is not None
-    archived_again = await store.set_thread_archived(
+    archived_again = await store.conversation_commands.set_thread_archived(
         job_id=parent["id"], user_id="user-1", archived=True
     )
     assert archived_again == archived
-    archived_thread = await store.get_thread_for_job(job_id=child["id"], user_id="user-1")
+    archived_thread = await store.conversation_queries.get_thread_for_job(
+        job_id=child["id"], user_id="user-1"
+    )
     assert archived_thread["archived_at"] == archived["archived_at"]
-    assert await store.list_jobs(user_id="user-1") == []
-    assert {job["id"] for job in await store.list_jobs(user_id="user-1", archived=True)} == {
+    assert await store.conversation_queries.list_jobs(user_id="user-1") == []
+    assert {
+        job["id"]
+        for job in await store.conversation_queries.list_jobs(user_id="user-1", archived=True)
+    } == {
         parent["id"],
         child["id"],
     }
-    live_parent = await store.get_job(parent["id"])
+    live_parent = await store.conversation_queries.get_job(parent["id"])
     assert live_parent is not None
     assert live_parent["state"] == "running"
     assert live_parent["cancel_requested"] is False
 
     assert (
-        await store.set_thread_archived(job_id=foreign["id"], user_id="user-1", archived=True)
+        await store.conversation_commands.set_thread_archived(
+            job_id=foreign["id"], user_id="user-1", archived=True
+        )
         is None
     )
     assert (
-        await store.set_thread_archived(job_id="ajob_missing", user_id="user-1", archived=True)
+        await store.conversation_commands.set_thread_archived(
+            job_id="ajob_missing", user_id="user-1", archived=True
+        )
         is None
     )
-    assert [job["id"] for job in await store.list_jobs(user_id="user-2")] == [foreign["id"]]
+    assert [job["id"] for job in await store.conversation_queries.list_jobs(user_id="user-2")] == [
+        foreign["id"]
+    ]
 
-    restored = await store.set_thread_archived(
+    restored = await store.conversation_commands.set_thread_archived(
         job_id=parent["id"], user_id="user-1", archived=False
     )
 
     assert restored == {"thread_id": parent["thread_id"], "archived_at": None}
-    restored_thread = await store.get_thread_for_job(job_id=parent["id"], user_id="user-1")
+    restored_thread = await store.conversation_queries.get_thread_for_job(
+        job_id=parent["id"], user_id="user-1"
+    )
     assert restored_thread["archived_at"] is None
-    assert await store.list_jobs(user_id="user-1", archived=True) == []
-    assert {job["id"] for job in await store.list_jobs(user_id="user-1")} == {
+    assert await store.conversation_queries.list_jobs(user_id="user-1", archived=True) == []
+    assert {job["id"] for job in await store.conversation_queries.list_jobs(user_id="user-1")} == {
         parent["id"],
         child["id"],
     }
 
 
 async def test_rename_persists_across_turns_and_search_without_changing_prompts(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """The canonical thread title survives reads, follow-ups, and owner isolation."""
     parent = await _create_job(store)
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
     )
     foreign = await _create_job(store, user_id="user-2")
     title = "Renamed CSV conversation"
-    result = await store.set_thread_title(job_id=child["id"], user_id="user-1", title=title)
+    result = await store.conversation_commands.set_thread_title(
+        job_id=child["id"], user_id="user-1", title=title
+    )
     assert result == {"thread_id": parent["thread_id"], "title": title}
     for original in (parent, child):
-        job = await store.get_job(original["id"])
+        job = await store.conversation_queries.get_job(original["id"])
         assert job["title"] == title
         assert job["task_prompt"] == original["task_prompt"]
-        thread = await store.get_thread_for_job(job_id=original["id"], user_id="user-1")
+        thread = await store.conversation_queries.get_thread_for_job(
+            job_id=original["id"], user_id="user-1"
+        )
         assert thread["title"] == title
         assert all(turn["title"] == title for turn in thread["jobs"])
-    assert all(job["title"] == title for job in await store.list_jobs(user_id="user-1"))
-    conversations = await store.list_conversations(user_id="user-1", q="Renamed CSV")
+    assert all(
+        job["title"] == title
+        for job in await store.conversation_queries.list_jobs(user_id="user-1")
+    )
+    conversations = await store.conversation_queries.list_conversations(
+        user_id="user-1", q="Renamed CSV"
+    )
     assert [item["title"] for item in conversations["conversations"]] == [title]
-    next_turn = await store.create_follow_up(
+    next_turn = await store.conversation_commands.create_follow_up(
         parent_job_id=child["id"], user_id="user-1", prompt="one more change"
     )
     assert next_turn["title"] == title
     for job_id in (foreign["id"], "ajob_missing"):
-        assert await store.set_thread_title(job_id=job_id, user_id="user-1", title="no") is None
-    async with store._pool.acquire() as conn:
+        assert (
+            await store.conversation_commands.set_thread_title(
+                job_id=job_id, user_id="user-1", title="no"
+            )
+            is None
+        )
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", parent["thread_id"]
         )
-    assert await store.set_thread_title(job_id=parent["id"], user_id="user-1", title="no") is None
+    assert (
+        await store.conversation_commands.set_thread_title(
+            job_id=parent["id"], user_id="user-1", title="no"
+        )
+        is None
+    )
 
 
 async def test_pin_and_unpin_owned_threads_are_idempotent_and_reorder_lists(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """A pin covers every turn and its project, while foreign jobs remain private."""
     parent = await _create_job(store)
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="also update the docs"
     )
     assert child is not None
     newer = await _create_job(store, repo="example-org/newer-repo")
     foreign = await _create_job(store, user_id="user-2", repo="example-org/foreign")
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET created_at = $2 WHERE id = $1",
             parent["id"],
@@ -1774,18 +1895,23 @@ async def test_pin_and_unpin_owned_threads_are_idempotent_and_reorder_lists(
             datetime(2026, 7, 3, tzinfo=timezone.utc),
         )
 
-    pinned = await store.set_thread_pinned(job_id=child["id"], user_id="user-1", pinned=True)
+    pinned = await store.conversation_commands.set_thread_pinned(
+        job_id=child["id"], user_id="user-1", pinned=True
+    )
 
     assert pinned is not None
     assert pinned["thread_id"] == parent["thread_id"]
     assert pinned["pinned_at"] is not None
     assert (
-        await store.set_thread_pinned(job_id=parent["id"], user_id="user-1", pinned=True) == pinned
+        await store.conversation_commands.set_thread_pinned(
+            job_id=parent["id"], user_id="user-1", pinned=True
+        )
+        == pinned
     )
-    jobs = await store.list_jobs(user_id="user-1")
+    jobs = await store.conversation_queries.list_jobs(user_id="user-1")
     assert [job["id"] for job in jobs] == [child["id"], parent["id"], newer["id"]]
     assert jobs[0]["pinned_at"] == jobs[1]["pinned_at"] == pinned["pinned_at"]
-    projects = await store.list_projects(user_id="user-1")
+    projects = await store.conversation_queries.list_projects(user_id="user-1")
     assert [project["repo"] for project in projects] == [
         "example-org/example-repo",
         "example-org/newer-repo",
@@ -1793,34 +1919,45 @@ async def test_pin_and_unpin_owned_threads_are_idempotent_and_reorder_lists(
     assert projects[0]["pinned_count"] == 1
     assert projects[0]["pinned_at"] == pinned["pinned_at"]
     assert (
-        await store.set_thread_pinned(job_id=foreign["id"], user_id="user-1", pinned=True) is None
+        await store.conversation_commands.set_thread_pinned(
+            job_id=foreign["id"], user_id="user-1", pinned=True
+        )
+        is None
     )
     assert (
-        await store.set_thread_pinned(job_id="ajob_missing", user_id="user-1", pinned=True) is None
+        await store.conversation_commands.set_thread_pinned(
+            job_id="ajob_missing", user_id="user-1", pinned=True
+        )
+        is None
     )
 
-    unpinned = await store.set_thread_pinned(job_id=parent["id"], user_id="user-1", pinned=False)
+    unpinned = await store.conversation_commands.set_thread_pinned(
+        job_id=parent["id"], user_id="user-1", pinned=False
+    )
 
     assert unpinned == {"thread_id": parent["thread_id"], "pinned_at": None}
-    assert [job["id"] for job in await store.list_jobs(user_id="user-1")] == [
+    assert [job["id"] for job in await store.conversation_queries.list_jobs(user_id="user-1")] == [
         newer["id"],
         child["id"],
         parent["id"],
     ]
-    assert [project["repo"] for project in await store.list_projects(user_id="user-1")] == [
+    assert [
+        project["repo"]
+        for project in await store.conversation_queries.list_projects(user_id="user-1")
+    ] == [
         "example-org/newer-repo",
         "example-org/example-repo",
     ]
 
 
-async def test_concurrent_follow_ups_form_one_linear_thread(store: AgentJobStore):
+async def test_concurrent_follow_ups_form_one_linear_thread(store: Storage):
     """The thread lock serializes simultaneous sends instead of forking."""
     parent = await _create_job(store)
     children = await asyncio.gather(
-        store.create_follow_up(
+        store.conversation_commands.create_follow_up(
             parent_job_id=parent["id"], user_id="user-1", prompt="first concurrent turn"
         ),
-        store.create_follow_up(
+        store.conversation_commands.create_follow_up(
             parent_job_id=parent["id"], user_id="user-1", prompt="second concurrent turn"
         ),
     )
@@ -1833,7 +1970,7 @@ async def test_concurrent_follow_ups_form_one_linear_thread(store: AgentJobStore
     assert [job["state"] for job in ordered] == ["queued", "queued"]
 
 
-async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: AgentJobStore):
+async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Storage):
     """A queued live turn never waits for the asynchronous group publisher."""
     parent, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
@@ -1843,13 +1980,13 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Agent
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-shared-waiting",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
-    child = await store.create_follow_up(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id=parent["user_id"], prompt="already waiting"
     )
     assert child is not None and child["state"] == "queued"
@@ -1863,7 +2000,7 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Agent
         )
         is None
     )
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=parent["id"],
         context_status="live",
@@ -1883,7 +2020,7 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Agent
         )
         is None
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=parent["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -1891,7 +2028,7 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Agent
         to_state="succeeded",
     )
 
-    released = await store.get_job(child["id"])
+    released = await store.conversation_queries.get_job(child["id"])
     assert released is not None
     assert released["state"] == "queued"
     next_claim = await _claim(
@@ -1904,25 +2041,25 @@ async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: Agent
     assert next_claim is not None and next_claim["id"] == child["id"]
 
 
-async def test_concurrent_claims_keep_queued_turns_in_order(store: AgentJobStore):
+async def test_concurrent_claims_keep_queued_turns_in_order(store: Storage):
     """SKIP LOCKED must never turn the next row in one chat into parallel work."""
     parent = await _create_job(store)
-    first = await store.create_follow_up(
+    first = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
     )
-    second = await store.create_follow_up(
+    second = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="third turn"
     )
     other = await _create_job(store, task_prompt="an independent chat")
     assert first is not None and second is not None
     # Enroll before racing claims, so host registration is not the race under test.
-    await store.register_host(
+    await store.host_pool.register_host(
         host="runner-a",
         credential_hash="runner-a-credential-hash",
         slots_total=128,
         capabilities=_SHARED_HOST_CAPABILITIES,
     )
-    await store.record_host_heartbeat(
+    await store.host_pool.record_host_heartbeat(
         host="runner-a",
         capabilities=_SHARED_HOST_CAPABILITIES,
         sandbox_image_digest="sha256:shared-image",
@@ -1940,9 +2077,9 @@ async def test_concurrent_claims_keep_queued_turns_in_order(store: AgentJobStore
     claims = await race_claims()
     assert {claim["id"] for claim in claims} == {parent["id"], other["id"]}
     assert len(claims) == 2
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 2
+    assert (await store.host_pool.get_host(host="runner-a"))["slots_used"] == 2
     parent_claim = next(claim for claim in claims if claim["id"] == parent["id"])
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=parent["id"],
         attempt_id=parent_claim["attempt_id"],
         lease_generation=parent_claim["lease_generation"],
@@ -1952,7 +2089,7 @@ async def test_concurrent_claims_keep_queued_turns_in_order(store: AgentJobStore
     )
     claims = await race_claims()
     assert len(claims) == 1 and claims[0]["id"] == first["id"]
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=first["id"],
         attempt_id=claims[0]["attempt_id"],
         lease_generation=claims[0]["lease_generation"],
@@ -1962,12 +2099,12 @@ async def test_concurrent_claims_keep_queued_turns_in_order(store: AgentJobStore
     )
     claims = await race_claims()
     assert len(claims) == 1 and claims[0]["id"] == second["id"]
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 2
+    assert (await store.host_pool.get_host(host="runner-a"))["slots_used"] == 2
 
 
 @pytest.mark.parametrize("parent_already_running", [False, True])
 async def test_cancelled_intermediate_turns_do_not_bypass_unfinished_ancestor(
-    store: AgentJobStore,
+    store: Storage,
     parent_already_running: bool,
 ):
     """A terminal direct parent does not imply all previous turns are finished."""
@@ -1979,13 +2116,16 @@ async def test_cancelled_intermediate_turns_do_not_bypass_unfinished_ancestor(
     )
     children = []
     for number in range(3):
-        child = await store.create_follow_up(
+        child = await store.conversation_commands.create_follow_up(
             parent_job_id=parent["id"], user_id="user-1", prompt=f"follow-up {number}"
         )
         assert child is not None and child["state"] == "queued"
         children.append(child)
     for child in children[:2]:
-        assert await store.request_cancel(job_id=child["id"], user_id="user-1") == "cancelled"
+        assert (
+            await store.attempt_commands.request_cancel(job_id=child["id"], user_id="user-1")
+            == "cancelled"
+        )
     other = await _create_job(store, task_prompt="runnable behind blocked follow-ups")
     if parent_claim is None:
         parent_claim = await _claim(store, worker_id="parent-worker", lease_ttl_seconds=60)
@@ -1993,9 +2133,9 @@ async def test_cancelled_intermediate_turns_do_not_bypass_unfinished_ancestor(
     other_claim = await _claim(store, worker_id="other-worker", lease_ttl_seconds=60)
     assert other_claim is not None and other_claim["id"] == other["id"]
     assert await _claim(store, worker_id="third-worker", lease_ttl_seconds=60) is None
-    assert (await store.get_job(children[-1]["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(children[-1]["id"]))["state"] == "queued"
 
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=parent["id"],
         attempt_id=parent_claim["attempt_id"],
         lease_generation=parent_claim["lease_generation"],
@@ -2007,7 +2147,7 @@ async def test_cancelled_intermediate_turns_do_not_bypass_unfinished_ancestor(
     assert next_claim is not None and next_claim["id"] == children[-1]["id"]
 
 
-async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: AgentJobStore):
+async def test_settlement_and_concurrent_follow_up_use_one_lock_order(pool, store: Storage):
     parent, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
         "thread_id": parent["thread_id"],
@@ -2016,14 +2156,14 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: Age
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-lock-order",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "DROP TRIGGER IF EXISTS test_delay_membership_update "
             "ON agent_thread_sandbox_memberships"
@@ -2048,7 +2188,7 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: Age
         )
     try:
         settlement = asyncio.create_task(
-            store.settle_thread_sandbox(
+            store.sandbox.settle_thread_sandbox(
                 **fence,
                 job_id=parent["id"],
                 context_status="live",
@@ -2059,7 +2199,7 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: Age
         )
         await asyncio.sleep(0.05)
         follow_up = asyncio.create_task(
-            store.create_follow_up(
+            store.conversation_commands.create_follow_up(
                 parent_job_id=parent["id"],
                 user_id=parent["user_id"],
                 prompt="send while settlement holds its locks",
@@ -2070,7 +2210,7 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: Age
             timeout=3,
         )
     finally:
-        async with store._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             await conn.execute(
                 "DROP TRIGGER IF EXISTS test_delay_membership_update "
                 "ON agent_thread_sandbox_memberships"
@@ -2081,7 +2221,7 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: Age
     assert child is not None and child["state"] == "queued"
 
 
-async def test_settlement_and_host_reconciliation_use_one_lock_order(store: AgentJobStore):
+async def test_settlement_and_host_reconciliation_use_one_lock_order(pool, store: Storage):
     parent, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
         "thread_id": parent["thread_id"],
@@ -2090,14 +2230,14 @@ async def test_settlement_and_host_reconciliation_use_one_lock_order(store: Agen
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-reconcile-lock-order",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "DROP TRIGGER IF EXISTS test_delay_membership_update "
             "ON agent_thread_sandbox_memberships"
@@ -2122,7 +2262,7 @@ async def test_settlement_and_host_reconciliation_use_one_lock_order(store: Agen
         )
     try:
         settlement = asyncio.create_task(
-            store.settle_thread_sandbox(
+            store.sandbox.settle_thread_sandbox(
                 **fence,
                 job_id=parent["id"],
                 context_status="live",
@@ -2133,7 +2273,7 @@ async def test_settlement_and_host_reconciliation_use_one_lock_order(store: Agen
         )
         await asyncio.sleep(0.05)
         reconciliation = asyncio.create_task(
-            store.reconcile_thread_sandbox_observation(
+            store.sandbox.reconcile_thread_sandbox_observation(
                 thread_id=parent["thread_id"],
                 host="shared-runner",
                 sandbox_id=sandbox["sandbox_id"],
@@ -2157,7 +2297,7 @@ async def test_settlement_and_host_reconciliation_use_one_lock_order(store: Agen
             timeout=3,
         )
     finally:
-        async with store._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             await conn.execute(
                 "DROP TRIGGER IF EXISTS test_delay_membership_update "
                 "ON agent_thread_sandbox_memberships"
@@ -2169,10 +2309,11 @@ async def test_settlement_and_host_reconciliation_use_one_lock_order(store: Agen
 
 
 async def test_stopped_reconciliation_locks_even_unreported_members_first(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     parent, _, sandbox = await _reserve_shared_chat(store)
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE agent_thread_sandbox_memberships
@@ -2209,7 +2350,7 @@ async def test_stopped_reconciliation_locks_even_unreported_members_first(
         )
 
     async def membership_then_group() -> None:
-        async with store._pool.acquire() as conn, conn.transaction():
+        async with pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 "UPDATE agent_thread_sandbox_memberships "
                 "SET updated_at = NOW() WHERE thread_id = $1",
@@ -2224,7 +2365,7 @@ async def test_stopped_reconciliation_locks_even_unreported_members_first(
         lifecycle = asyncio.create_task(membership_then_group())
         await asyncio.sleep(0.05)
         reconciliation = asyncio.create_task(
-            store.reconcile_thread_sandbox_observation(
+            store.sandbox.reconcile_thread_sandbox_observation(
                 thread_id=parent["thread_id"],
                 host="shared-runner",
                 sandbox_id=sandbox["sandbox_id"],
@@ -2239,7 +2380,7 @@ async def test_stopped_reconciliation_locks_even_unreported_members_first(
             timeout=3,
         )
     finally:
-        async with store._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             await conn.execute(
                 "DROP TRIGGER IF EXISTS test_delay_membership_update "
                 "ON agent_thread_sandbox_memberships"
@@ -2249,7 +2390,7 @@ async def test_stopped_reconciliation_locks_even_unreported_members_first(
     assert reconciled == "stopped"
 
 
-async def test_claim_creates_fenced_attempt(store: AgentJobStore):
+async def test_claim_creates_fenced_attempt(store: Storage):
     """Claiming moves the job to running with attempt_no = generation = 1."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
@@ -2263,12 +2404,12 @@ async def test_claim_creates_fenced_attempt(store: AgentJobStore):
     assert await _claim(store, worker_id="w2", lease_ttl_seconds=60) is None
 
 
-async def test_heartbeat_extends_and_fences(store: AgentJobStore):
+async def test_heartbeat_extends_and_fences(store: Storage):
     """Heartbeat succeeds with the right generation and fences the wrong one."""
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
 
-    beat = await store.heartbeat(
+    beat = await store.attempt_commands.heartbeat(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         lease_ttl_seconds=60,
@@ -2276,7 +2417,7 @@ async def test_heartbeat_extends_and_fences(store: AgentJobStore):
     assert beat["ok"] is True
     assert beat["cancel_requested"] is False
 
-    stale = await store.heartbeat(
+    stale = await store.attempt_commands.heartbeat(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"] + 1,
         lease_ttl_seconds=60,
@@ -2284,14 +2425,14 @@ async def test_heartbeat_extends_and_fences(store: AgentJobStore):
     assert stale["ok"] is False
 
 
-async def test_event_seq_and_global_cursor(store: AgentJobStore):
+async def test_event_seq_and_global_cursor(store: Storage):
     """Events get per-attempt seq 1..n and a strictly increasing global id."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
 
     ids = []
     for index in range(3):
-        event_id = await store.append_event(
+        event_id = await store.attempt_commands.append_event(
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
             event_type="message",
@@ -2301,16 +2442,16 @@ async def test_event_seq_and_global_cursor(store: AgentJobStore):
         ids.append(event_id)
     assert ids == sorted(ids)
 
-    events = await store.list_events_after(job_id=job["id"], after_id=0)
+    events = await store.execution_queries.list_events_after(job_id=job["id"], after_id=0)
     assert [event["seq"] for event in events] == [1, 2, 3]
     assert [event["payload"]["index"] for event in events] == [0, 1, 2]
 
-    tail = await store.list_events_after(job_id=job["id"], after_id=ids[1])
+    tail = await store.execution_queries.list_events_after(job_id=job["id"], after_id=ids[1])
     assert [event["id"] for event in tail] == [ids[2]]
 
 
 async def test_retained_workspace_readiness_is_a_durable_thread_wide_fence(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """Old turn URLs cannot mutate while an activation or fork owns the chat."""
     job, claim, sandbox = await _reserve_retained_chat(store)
@@ -2322,53 +2463,53 @@ async def test_retained_workspace_readiness_is_a_durable_thread_wide_fence(
         "activation_generation": sandbox["activation_generation"],
     }
 
-    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is False
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.thread_workspace_ready(thread_id=job["thread_id"]) is False
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-retained-one",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is False
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.thread_workspace_ready(thread_id=job["thread_id"]) is False
 
-    assert await store.append_event(
+    assert await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         event_type="lifecycle",
         payload={"phase": "workspace_ready"},
     )
-    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is True
-    assert await store.append_event(
+    assert await store.sandbox.thread_workspace_ready(thread_id=job["thread_id"]) is True
+    assert await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         event_type="lifecycle",
         payload={"phase": "workspace_finalizing"},
     )
-    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is False
+    assert await store.sandbox.thread_workspace_ready(thread_id=job["thread_id"]) is False
 
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="new",
         native_session_id="native-session-one",
         idle_timeout_seconds=1800,
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    assert await store.thread_workspace_ready(thread_id=job["thread_id"]) is True
+    assert await store.sandbox.thread_workspace_ready(thread_id=job["thread_id"]) is True
 
 
-async def test_zombie_worker_is_fenced_out_after_reap(store: AgentJobStore):
+async def test_zombie_worker_is_fenced_out_after_reap(pool, store: Storage):
     """After a reap, every write path of the old attempt is rejected."""
     job = await _create_job(store)
     old = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert (
-        await store.append_event(
+        await store.attempt_commands.append_event(
             attempt_id=old["attempt_id"],
             lease_generation=old["lease_generation"],
             event_type="message",
@@ -2377,12 +2518,12 @@ async def test_zombie_worker_is_fenced_out_after_reap(store: AgentJobStore):
         is not None
     )
 
-    await _expire_attempt(store, old["attempt_id"])
-    actions = await store.reap_expired(max_attempts=3)
+    await _expire_attempt(pool, store, old["attempt_id"])
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
     assert actions == [{"job_id": job["id"], "attempt_id": old["attempt_id"], "action": "queued"}]
 
     # The supersede is announced as an append-only control event.
-    events = await store.list_events_after(job_id=job["id"], after_id=0)
+    events = await store.execution_queries.list_events_after(job_id=job["id"], after_id=0)
     assert events[-1]["event_type"] == "attempt_superseded"
     assert events[-1]["payload"]["reason"] == "lease_expired"
 
@@ -2397,10 +2538,15 @@ async def test_zombie_worker_is_fenced_out_after_reap(store: AgentJobStore):
         "attempt_id": old["attempt_id"],
         "lease_generation": old["lease_generation"],
     }
-    assert await store.append_event(**zombie_kwargs, event_type="message", payload={}) is None
-    assert (await store.heartbeat(**zombie_kwargs, lease_ttl_seconds=60))["ok"] is False
     assert (
-        await store.transition(
+        await store.attempt_commands.append_event(**zombie_kwargs, event_type="message", payload={})
+        is None
+    )
+    assert (await store.attempt_commands.heartbeat(**zombie_kwargs, lease_ttl_seconds=60))[
+        "ok"
+    ] is False
+    assert (
+        await store.attempt_commands.transition(
             job_id=job["id"],
             **zombie_kwargs,
             from_states=("running",),
@@ -2410,7 +2556,7 @@ async def test_zombie_worker_is_fenced_out_after_reap(store: AgentJobStore):
     )
     # The live attempt keeps working.
     assert (
-        await store.append_event(
+        await store.attempt_commands.append_event(
             attempt_id=new["attempt_id"],
             lease_generation=new["lease_generation"],
             event_type="message",
@@ -2421,7 +2567,8 @@ async def test_zombie_worker_is_fenced_out_after_reap(store: AgentJobStore):
 
 
 async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_fences(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     job, claim, sandbox = await _reserve_retained_chat(store)
     fence = {
@@ -2431,12 +2578,12 @@ async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-retained-one",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
     request = dict(
         **fence,
         job_id=job["id"],
@@ -2444,11 +2591,11 @@ async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_
         native_session_id="claude-session-one",
         idle_timeout_seconds=1800,
     )
-    original = await store.settle_thread_sandbox(**request)
+    original = await store.sandbox.settle_thread_sandbox(**request)
     assert original is not None
 
     async def snapshot_state():
-        async with store._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             return (
                 await conn.fetchrow(
                     "SELECT workspace_epoch, idle_deadline FROM agent_sandboxes WHERE id = $1",
@@ -2464,13 +2611,15 @@ async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_
             )
 
     before = await snapshot_state()
-    replay = await store.settle_thread_sandbox(**request)
+    replay = await store.sandbox.settle_thread_sandbox(**request)
     assert replay is not None
     assert replay["native_session_id"] == original["native_session_id"]
     assert await snapshot_state() == before
     # A retry that cannot restate the locator still replays the recorded one;
     # the attempt, lease and activation fences already pin the boundary.
-    locator_free = await store.settle_thread_sandbox(**(request | {"native_session_id": None}))
+    locator_free = await store.sandbox.settle_thread_sandbox(
+        **(request | {"native_session_id": None})
+    )
     assert locator_free is not None
     assert locator_free["native_session_id"] == original["native_session_id"]
     assert await snapshot_state() == before
@@ -2480,14 +2629,15 @@ async def test_settlement_ack_replay_preserves_snapshot_epoch_and_rejects_stale_
         {"native_session_id": "a-different-session"},
         {"context_status": "restored"},
     ]:
-        assert await store.settle_thread_sandbox(**(request | change)) is None
-    await _expire_attempt(store, claim["attempt_id"])
-    assert await store.settle_thread_sandbox(**request) is None
+        assert await store.sandbox.settle_thread_sandbox(**(request | change)) is None
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    assert await store.sandbox.settle_thread_sandbox(**request) is None
     assert await snapshot_state() == before
 
 
 async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     job, claim, sandbox = await _reserve_retained_chat(store)
     fence = {
@@ -2497,14 +2647,14 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    running = await store.mark_thread_sandbox_running(
+    running = await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-retained-one",
         context_status="new",
     )
     assert running is not None
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    settled = await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    settled = await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="new",
@@ -2522,42 +2672,42 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
         "sandbox_generation": sandbox["generation"],
         "running": True,
     }
-    await store.reconcile_thread_sandbox_observation(
+    await store.sandbox.reconcile_thread_sandbox_observation(
         **observation,
         activity_active=True,
     )
-    assert (await store.thread_sandbox(thread_id=job["thread_id"]))["idle_deadline"] is None
-    await store.reconcile_thread_sandbox_observation(
+    assert (await store.sandbox.thread_sandbox(thread_id=job["thread_id"]))["idle_deadline"] is None
+    await store.sandbox.reconcile_thread_sandbox_observation(
         **observation,
         activity_active=False,
         idle_remaining_seconds=120,
     )
-    rearmed = await store.thread_sandbox(thread_id=job["thread_id"])
+    rearmed = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert rearmed["idle_deadline"] > datetime.now(timezone.utc)
 
     # A broker can restart between turns, reconstruct the immutable container
     # identity from Docker, and know no activation generation. A terminal that
     # wakes the stopped container must still promote the durable row and own
     # its idle clock, but only while no worker attempt owns it.
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_sandboxes SET idle_deadline = NOW() - INTERVAL '1 second' WHERE id = $1",
             sandbox["sandbox_id"],
         )
     observation["running"] = False
-    assert await store.reconcile_thread_sandbox_observation(**observation) == "stopped"
+    assert await store.sandbox.reconcile_thread_sandbox_observation(**observation) == "stopped"
     observation["running"] = True
-    promoted = await store.reconcile_thread_sandbox_observation(
+    promoted = await store.sandbox.reconcile_thread_sandbox_observation(
         **observation,
         activity_active=True,
     )
     assert promoted == "running"
-    await store.reconcile_thread_sandbox_observation(
+    await store.sandbox.reconcile_thread_sandbox_observation(
         **observation,
         activity_active=False,
         idle_remaining_seconds=120,
     )
-    rearmed_after_restart = await store.thread_sandbox(thread_id=job["thread_id"])
+    rearmed_after_restart = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert rearmed_after_restart["state"] == "running"
     assert rearmed_after_restart["idle_deadline"] > datetime.now(timezone.utc)
 
@@ -2565,26 +2715,26 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
     # deadline, it reports activity as unknown. The control plane grants one
     # recovery window only; repeated healthy heartbeats must not keep an idle
     # container alive forever by moving that deadline forward.
-    await store.reconcile_thread_sandbox_observation(
+    await store.sandbox.reconcile_thread_sandbox_observation(
         **observation,
         activity_active=True,
     )
-    await store.reconcile_thread_sandbox_observation(
+    await store.sandbox.reconcile_thread_sandbox_observation(
         **observation,
         activity_active=None,
         idle_remaining_seconds=None,
     )
-    first_recovery = await store.thread_sandbox(thread_id=job["thread_id"])
+    first_recovery = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert first_recovery["idle_deadline"] is not None
-    await store.reconcile_thread_sandbox_observation(
+    await store.sandbox.reconcile_thread_sandbox_observation(
         **observation,
         activity_active=None,
         idle_remaining_seconds=None,
     )
-    second_recovery = await store.thread_sandbox(thread_id=job["thread_id"])
+    second_recovery = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert second_recovery["idle_deadline"] == first_recovery["idle_deadline"]
 
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -2592,7 +2742,7 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
         to_state="succeeded",
     )
 
-    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert durable is not None
     assert durable["state"] == "running"
     assert durable["active_attempt_id"] is None
@@ -2602,7 +2752,7 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
 
 
 async def test_retained_container_identity_cannot_be_replaced_or_reimaged(
-    store: AgentJobStore,
+    store: Storage,
 ):
     job, claim, sandbox = await _reserve_retained_chat(store)
     fence = {
@@ -2613,7 +2763,7 @@ async def test_retained_container_identity_cannot_be_replaced_or_reimaged(
         "activation_generation": sandbox["activation_generation"],
     }
     assert (
-        await store.mark_thread_sandbox_running(
+        await store.sandbox.mark_thread_sandbox_running(
             **fence,
             container_id="container-retained-one",
             context_status="new",
@@ -2621,7 +2771,7 @@ async def test_retained_container_identity_cannot_be_replaced_or_reimaged(
         is not None
     )
     assert (
-        await store.mark_thread_sandbox_running(
+        await store.sandbox.mark_thread_sandbox_running(
             **fence,
             container_id="container-retained-replacement",
             context_status="new",
@@ -2629,7 +2779,7 @@ async def test_retained_container_identity_cannot_be_replaced_or_reimaged(
         is None
     )
     with pytest.raises(ValueError, match="immutable identity"):
-        await store.reserve_thread_sandbox(
+        await store.sandbox.reserve_thread_sandbox(
             thread_id=job["thread_id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -2644,7 +2794,7 @@ async def test_retained_container_identity_cannot_be_replaced_or_reimaged(
 
 
 async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool_switch(
-    store: AgentJobStore,
+    store: Storage,
 ):
     job = await _create_job(store)
     original = await _claim(
@@ -2660,7 +2810,7 @@ async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool
         },
     )
     assert original is not None
-    sandbox = await store.reserve_thread_sandbox(
+    sandbox = await store.sandbox.reserve_thread_sandbox(
         thread_id=job["thread_id"],
         attempt_id=original["attempt_id"],
         lease_generation=original["lease_generation"],
@@ -2680,20 +2830,20 @@ async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-pinned",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="new",
         native_session_id="session-pinned",
         idle_timeout_seconds=1800,
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=original["attempt_id"],
         lease_generation=original["lease_generation"],
@@ -2712,15 +2862,15 @@ async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool
         )
         is None
     )
-    assert await store.set_active_runner_host(host="runner-b")
-    child = await store.create_follow_up(
+    assert await store.host_pool.set_active_runner_host(host="runner-b")
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue",
     )
     assert child is not None and child["state"] == "queued"
 
-    _, active_host, _, retained_hosts = await store.deployment_runner_pool()
+    _, active_host, _, retained_hosts = await store.host_pool.deployment_runner_pool()
     assert active_host == "runner-b"
     assert "runner-a" in retained_hosts
 
@@ -2774,7 +2924,7 @@ async def test_retained_follow_up_keeps_owning_host_image_and_cli_pin_after_pool
     assert new_claim is not None and new_claim["id"] == fresh["id"]
 
 
-async def test_compatible_v1_runner_cannot_materialize_a_new_group(store: AgentJobStore):
+async def test_compatible_v1_runner_cannot_materialize_a_new_group(store: Storage):
     fresh = await _create_job(store)
     v1_attestation = {
         **_shared_claim_attestation(),
@@ -2790,11 +2940,11 @@ async def test_compatible_v1_runner_cannot_materialize_a_new_group(store: AgentJ
     )
 
     assert claim is None
-    assert (await store.get_job(fresh["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(fresh["id"]))["state"] == "queued"
 
 
 async def test_failed_preadmission_activation_requests_an_immediate_stop(
-    store: AgentJobStore,
+    store: Storage,
 ):
     job, claim, sandbox = await _reserve_retained_chat(store)
     fence = {
@@ -2805,7 +2955,7 @@ async def test_failed_preadmission_activation_requests_an_immediate_stop(
         "activation_generation": sandbox["activation_generation"],
     }
     assert (
-        await store.mark_thread_sandbox_running(
+        await store.sandbox.mark_thread_sandbox_running(
             **fence,
             container_id="container-retained-one",
             context_status="new",
@@ -2813,7 +2963,7 @@ async def test_failed_preadmission_activation_requests_an_immediate_stop(
         is not None
     )
 
-    abandoned = await store.abandon_thread_sandbox(
+    abandoned = await store.sandbox.abandon_thread_sandbox(
         **fence,
         lost=False,
         detail="checkout failed",
@@ -2827,11 +2977,11 @@ async def test_failed_preadmission_activation_requests_an_immediate_stop(
 
 
 async def test_failed_preadmission_before_container_creation_can_be_reprovisioned(
-    store: AgentJobStore,
+    store: Storage,
 ):
     job, claim, sandbox = await _reserve_retained_chat(store)
 
-    abandoned = await store.abandon_thread_sandbox(
+    abandoned = await store.sandbox.abandon_thread_sandbox(
         thread_id=job["thread_id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -2851,18 +3001,18 @@ async def test_failed_preadmission_before_container_creation_can_be_reprovisione
 
 
 async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """A missing native locator fails closed before any new prompt is sent."""
     job, claim, sandbox = await _reserve_retained_chat(store)
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="do not leave this turn waiting forever",
     )
     assert child is not None and child["state"] == "queued"
 
-    abandoned = await store.abandon_thread_sandbox(
+    abandoned = await store.sandbox.abandon_thread_sandbox(
         thread_id=job["thread_id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -2876,10 +3026,10 @@ async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost
     assert abandoned is not None
     assert abandoned["state"] == "lost"
     assert abandoned["context_status"] == "lost"
-    queued = await store.get_job(child["id"])
+    queued = await store.conversation_queries.get_job(child["id"])
     assert queued["state"] == "failed"
     assert "lost the retained sandbox context" in queued["detail"]
-    assert await store.create_follow_up(
+    assert await store.conversation_commands.create_follow_up(
         parent_job_id=child["id"],
         user_id=job["user_id"],
         prompt="still must not be accepted",
@@ -2887,7 +3037,7 @@ async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost
 
 
 async def test_failed_admitted_turn_fails_queued_follow_up(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """A terminal job and a LOST context are different scheduling signals."""
     job, claim, sandbox = await _reserve_retained_chat(store)
@@ -2898,20 +3048,20 @@ async def test_failed_admitted_turn_fails_queued_follow_up(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-retained-one",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    child = await store.create_follow_up(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="this cannot run after an ambiguous turn",
     )
     assert child is not None and child["state"] == "queued"
 
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -2920,21 +3070,21 @@ async def test_failed_admitted_turn_fails_queued_follow_up(
         detail="agent exited after prompt admission",
     )
 
-    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert durable["state"] == "stopping"
     assert durable["context_status"] == "lost"
     assert durable["idle_deadline"] is None
-    blocked = await store.get_job(child["id"])
+    blocked = await store.conversation_queries.get_job(child["id"])
     assert blocked["state"] == "failed"
     assert "lost the retained sandbox context" in blocked["detail"]
 
 
 async def test_failed_preadmission_late_container_observation_is_stopped(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """A Docker create that outran /running cannot become an immortal orphan."""
     job, claim, sandbox = await _reserve_retained_chat(store)
-    abandoned = await store.abandon_thread_sandbox(
+    abandoned = await store.sandbox.abandon_thread_sandbox(
         thread_id=job["thread_id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -2946,7 +3096,7 @@ async def test_failed_preadmission_late_container_observation_is_stopped(
     )
     assert abandoned is not None and abandoned["state"] == "provisioning"
 
-    recovered = await store.reconcile_thread_sandbox_observation(
+    recovered = await store.sandbox.reconcile_thread_sandbox_observation(
         thread_id=job["thread_id"],
         host="runner-a",
         sandbox_id="asbx_test",
@@ -2959,11 +3109,11 @@ async def test_failed_preadmission_late_container_observation_is_stopped(
     )
 
     assert recovered == "stopping"
-    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert durable is not None
     assert durable["container_id"] == "container-created-before-response-loss"
     assert durable["state"] == "stopping"
-    due = await store.due_thread_sandbox_stop(
+    due = await store.sandbox.due_thread_sandbox_stop(
         thread_id=job["thread_id"],
         host="runner-a",
         sandbox_id="asbx_test",
@@ -2976,7 +3126,8 @@ async def test_failed_preadmission_late_container_observation_is_stopped(
 
 
 async def test_expired_shared_admission_loses_only_that_member_and_residency(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """One ambiguous fork member cannot poison its siblings or keep spending."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -2987,12 +3138,12 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-shared-one",
         context_status="new",
     )
-    residency = await store.establish_residency(
+    residency = await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="shared-runner",
         sandbox_id=sandbox["sandbox_id"],
@@ -3001,20 +3152,20 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
         ttl_seconds=1800,
     )
     assert residency is not None
-    assert await store.record_shared_thread_residency(
+    assert await store.sandbox.record_shared_thread_residency(
         thread_id=job["thread_id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         sandbox_id=sandbox["sandbox_id"],
         residency_generation=residency["generation"],
     )
-    assert await store.link_residency_grant(
+    assert await store.grants.link_residency_grant(
         thread_id=job["thread_id"],
         generation=residency["generation"],
         grant_id="grant-shared-expired",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    child = await store.create_follow_up(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="must not run after an ambiguous shared turn",
@@ -3022,7 +3173,7 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
     assert child is not None and child["state"] == "queued"
 
     sibling = await _create_job(store, task_prompt="independent fork sibling")
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO agent_thread_sandbox_memberships (
@@ -3034,9 +3185,9 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
             sibling["thread_id"],
             sandbox["sandbox_id"],
         )
-    await _expire_attempt(store, claim["attempt_id"])
+    await _expire_attempt(pool, store, claim["attempt_id"])
 
-    actions = await store.reap_expired(max_attempts=3)
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
 
     assert actions == [
         {
@@ -3051,8 +3202,8 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
             },
         }
     ]
-    failed = await store.thread_sandbox(thread_id=job["thread_id"])
-    surviving = await store.thread_sandbox(thread_id=sibling["thread_id"])
+    failed = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    surviving = await store.sandbox.thread_sandbox(thread_id=sibling["thread_id"])
     assert failed is not None and surviving is not None
     assert failed["native_state"] == "lost"
     assert failed["context_status"] == "lost"
@@ -3064,8 +3215,8 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
     assert surviving["resident_state"] == "live"
     assert surviving["state"] == "running"
     assert surviving["idle_deadline"] is not None
-    assert (await store.get_job(child["id"]))["state"] == "failed"
-    async with store._pool.acquire() as conn:
+    assert (await store.conversation_queries.get_job(child["id"]))["state"] == "failed"
+    async with pool.acquire() as conn:
         assert (
             await conn.fetchval(
                 "SELECT residency_status FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
@@ -3076,7 +3227,7 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
 
     # A late host census can report the orphan process, but LOST is durable
     # and may not be promoted back to LIVE by observation alone.
-    await store.reconcile_thread_sandbox_observation(
+    await store.sandbox.reconcile_thread_sandbox_observation(
         thread_id=job["thread_id"],
         host="shared-runner",
         sandbox_id=sandbox["sandbox_id"],
@@ -3095,14 +3246,15 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
             }
         ],
     )
-    still_lost = await store.thread_sandbox(thread_id=job["thread_id"])
+    still_lost = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert still_lost is not None
     assert still_lost["resident_state"] == "lost"
     assert still_lost["native_state"] == "lost"
 
 
 async def test_expired_shared_finalization_preserves_context_and_snapshot_progress(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """A settled prompt is never replayed and still enters the group snapshot."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -3113,13 +3265,13 @@ async def test_expired_shared_finalization_preserves_context_and_snapshot_progre
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-shared-one",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="live",
@@ -3127,18 +3279,18 @@ async def test_expired_shared_finalization_preserves_context_and_snapshot_progre
         idle_timeout_seconds=1800,
         base_sha=job["base_sha"],
     )
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue from the settled shared context",
     )
     assert child is not None and child["state"] == "queued"
-    await _expire_attempt(store, claim["attempt_id"])
+    await _expire_attempt(pool, store, claim["attempt_id"])
 
-    actions = await store.reap_expired(max_attempts=3)
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
 
     assert actions == [{"job_id": job["id"], "attempt_id": claim["attempt_id"], "action": "failed"}]
-    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert durable is not None
     assert durable["native_state"] == "ready"
     assert durable["context_status"] == "live"
@@ -3147,14 +3299,15 @@ async def test_expired_shared_finalization_preserves_context_and_snapshot_progre
     assert durable["active_attempt_id"] is None
     assert durable["admitted_job_id"] is None
     assert durable["idle_deadline"] is not None
-    assert (await store.get_job(child["id"]))["state"] == "queued"
-    capture = await store.claim_due_sandbox_snapshot()
+    assert (await store.conversation_queries.get_job(child["id"]))["state"] == "queued"
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
     assert capture["anchor_job_id"] == job["id"]
 
 
 async def test_expired_job_finalization_preserves_an_already_settled_context(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     job, claim, sandbox = await _reserve_retained_chat(store)
     fence = {
@@ -3165,22 +3318,22 @@ async def test_expired_job_finalization_preserves_an_already_settled_context(
         "activation_generation": sandbox["activation_generation"],
     }
     assert (
-        await store.mark_thread_sandbox_running(
+        await store.sandbox.mark_thread_sandbox_running(
             **fence,
             container_id="container-retained-one",
             context_status="new",
         )
         is not None
     )
-    assert await store.record_continuity_mode(
+    assert await store.attempt_commands.record_continuity_mode(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         mode=None,
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
     assert (
-        await store.settle_thread_sandbox(
+        await store.sandbox.settle_thread_sandbox(
             **fence,
             job_id=job["id"],
             context_status="new",
@@ -3189,33 +3342,36 @@ async def test_expired_job_finalization_preserves_an_already_settled_context(
         )
         is not None
     )
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="continue from the already-settled context",
     )
     assert child is not None and child["state"] == "queued"
-    await _expire_attempt(store, claim["attempt_id"])
+    await _expire_attempt(pool, store, claim["attempt_id"])
 
-    actions = await store.reap_expired(max_attempts=3)
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
 
     assert actions == [{"job_id": job["id"], "attempt_id": claim["attempt_id"], "action": "failed"}]
-    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert durable is not None
     assert durable["state"] == "running"
     assert durable["context_status"] == "new"
     assert durable["last_settled_job_id"] == job["id"]
     assert durable["admitted_job_id"] is None
     assert durable["idle_deadline"] is not None
-    assert (await store.job_turn_telemetry(job_id=job["id"]))["context_status"] == "new"
-    failed = await store.get_job(job["id"])
+    assert (await store.execution_queries.job_turn_telemetry(job_id=job["id"]))[
+        "context_status"
+    ] == "new"
+    failed = await store.conversation_queries.get_job(job["id"])
     assert failed["state"] == "failed"
     assert "prompt was not replayed" in failed["detail"]
-    assert (await store.get_job(child["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(child["id"]))["state"] == "queued"
 
 
 async def test_expired_retained_admission_fails_closed_instead_of_replaying(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     job, claim, sandbox = await _reserve_retained_chat(store)
     fence = {
@@ -3226,70 +3382,78 @@ async def test_expired_retained_admission_fails_closed_instead_of_replaying(
         "activation_generation": sandbox["activation_generation"],
     }
     assert (
-        await store.mark_thread_sandbox_running(
+        await store.sandbox.mark_thread_sandbox_running(
             **fence,
             container_id="container-retained-one",
             context_status="new",
         )
         is not None
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    child = await store.create_follow_up(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="must not run after an expired admitted turn",
     )
     assert child is not None and child["state"] == "queued"
-    await _expire_attempt(store, claim["attempt_id"])
+    await _expire_attempt(pool, store, claim["attempt_id"])
 
-    actions = await store.reap_expired(max_attempts=3)
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
 
     assert actions == [{"job_id": job["id"], "attempt_id": claim["attempt_id"], "action": "failed"}]
-    assert (await store.get_job(job["id"]))["state"] == "failed"
-    durable = await store.thread_sandbox(thread_id=job["thread_id"])
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "failed"
+    durable = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert durable is not None
     assert durable["state"] == "stopping"
     assert durable["context_status"] == "lost"
     assert durable["active_attempt_id"] is None
     assert durable["admitted_job_id"] is None
     assert durable["idle_deadline"] is None
-    assert (await store.job_turn_telemetry(job_id=job["id"]))["context_status"] == "lost"
-    failed_child = await store.get_job(child["id"])
+    assert (await store.execution_queries.job_turn_telemetry(job_id=job["id"]))[
+        "context_status"
+    ] == "lost"
+    failed_child = await store.conversation_queries.get_job(child["id"])
     assert failed_child["state"] == "failed"
     assert "lost the retained sandbox context" in failed_child["detail"]
 
 
-async def test_reap_fails_job_after_max_attempts(store: AgentJobStore):
+async def test_reap_fails_job_after_max_attempts(pool, store: Storage):
     """Exhausting the attempt budget fails the job instead of requeueing."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    await _expire_attempt(store, claim["attempt_id"])
+    await _expire_attempt(pool, store, claim["attempt_id"])
 
-    actions = await store.reap_expired(max_attempts=1)
+    actions = await store.attempt_commands.reap_expired(max_attempts=1)
     assert actions[0]["action"] == "failed"
-    fetched = await store.get_job(job["id"])
+    fetched = await store.conversation_queries.get_job(job["id"])
     assert fetched["state"] == "failed"
     assert "exhausted" in fetched["detail"]
-    assert await store.list_terminal_resumes_pending() == [job["id"]]
-    assert await store.mark_terminal_resume_complete(job_id=job["id"]) is True
-    assert await store.list_terminal_resumes_pending() == []
+    assert await store.sandbox.list_terminal_resumes_pending() == [job["id"]]
+    assert await store.sandbox.mark_terminal_resume_complete(job_id=job["id"]) is True
+    assert await store.sandbox.list_terminal_resumes_pending() == []
 
 
-async def test_cancel_queued_and_running(store: AgentJobStore):
+async def test_cancel_queued_and_running(store: Storage):
     """Queued jobs cancel immediately; running jobs cancel via the worker."""
     queued = await _create_job(store)
-    assert await store.request_cancel(job_id=queued["id"]) == "cancelled"
-    assert (await store.get_job(queued["id"]))["state"] == "cancelled"
-    assert await store.list_terminal_resumes_pending() == [queued["id"]]
-    assert await store.mark_terminal_resume_complete(job_id=queued["id"]) is True
+    assert await store.attempt_commands.request_cancel(job_id=queued["id"]) == "cancelled"
+    assert (await store.conversation_queries.get_job(queued["id"]))["state"] == "cancelled"
+    assert await store.sandbox.list_terminal_resumes_pending() == [queued["id"]]
+    assert await store.sandbox.mark_terminal_resume_complete(job_id=queued["id"]) is True
 
     # Owner scoping: the wrong user cannot cancel.
     running = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    assert await store.request_cancel(job_id=running["id"], user_id="someone-else") is None
+    assert (
+        await store.attempt_commands.request_cancel(job_id=running["id"], user_id="someone-else")
+        is None
+    )
 
-    assert await store.request_cancel(job_id=running["id"], user_id="user-1") == "running"
-    beat = await store.heartbeat(
+    assert (
+        await store.attempt_commands.request_cancel(job_id=running["id"], user_id="user-1")
+        == "running"
+    )
+    beat = await store.attempt_commands.heartbeat(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         lease_ttl_seconds=60,
@@ -3299,7 +3463,7 @@ async def test_cancel_queued_and_running(store: AgentJobStore):
 
     # The worker performs the fenced terminal transition.
     assert (
-        await store.transition(
+        await store.attempt_commands.transition(
             job_id=running["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -3308,13 +3472,13 @@ async def test_cancel_queued_and_running(store: AgentJobStore):
         )
         is True
     )
-    assert (await store.get_job(running["id"]))["state"] == "cancelled"
+    assert (await store.conversation_queries.get_job(running["id"]))["state"] == "cancelled"
 
     # Cancelling a terminal job is a no-op that reports the state.
-    assert await store.request_cancel(job_id=running["id"]) == "cancelled"
+    assert await store.attempt_commands.request_cancel(job_id=running["id"]) == "cancelled"
 
 
-async def test_model_credential_follows_the_fence(store: AgentJobStore):
+async def test_model_credential_follows_the_fence(pool, store: Storage):
     """A worker token buys inference only while its attempt owns the job.
 
     This is the revocation mechanism for the sandbox's model access: there is
@@ -3329,7 +3493,7 @@ async def test_model_credential_follows_the_fence(store: AgentJobStore):
         "lease_generation": claim["lease_generation"],
     }
 
-    identity = await store.resolve_model_credential(**fence)
+    identity = await store.credential_queries.resolve_model_credential(**fence)
     assert identity is not None
     assert identity["user_id"] == "user-1"
     # The budget assertion that sat here went with the column: a grant scopes
@@ -3338,22 +3502,22 @@ async def test_model_credential_follows_the_fence(store: AgentJobStore):
 
     # A different generation never resolves.
     assert (
-        await store.resolve_model_credential(
+        await store.credential_queries.resolve_model_credential(
             job_id=job["id"], attempt_id=claim["attempt_id"], lease_generation=99
         )
         is None
     )
 
     # Lease expiry alone stops it, even before the reaper runs.
-    await _expire_attempt(store, claim["attempt_id"])
-    assert await store.resolve_model_credential(**fence) is None
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    assert await store.credential_queries.resolve_model_credential(**fence) is None
 
     # After the reap the new attempt resolves and the old one stays dead.
-    await store.reap_expired(max_attempts=3)
+    await store.attempt_commands.reap_expired(max_attempts=3)
     retry = await _claim(store, worker_id="w2", lease_ttl_seconds=60)
-    assert await store.resolve_model_credential(**fence) is None
+    assert await store.credential_queries.resolve_model_credential(**fence) is None
     assert (
-        await store.resolve_model_credential(
+        await store.credential_queries.resolve_model_credential(
             job_id=job["id"],
             attempt_id=retry["attempt_id"],
             lease_generation=retry["lease_generation"],
@@ -3362,7 +3526,7 @@ async def test_model_credential_follows_the_fence(store: AgentJobStore):
     )
 
 
-async def test_model_credential_dies_with_a_terminal_job(store: AgentJobStore):
+async def test_model_credential_dies_with_a_terminal_job(pool, store: Storage):
     """Finishing the job stops its token from buying more inference."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
@@ -3371,16 +3535,16 @@ async def test_model_credential_dies_with_a_terminal_job(store: AgentJobStore):
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
-    assert await store.resolve_model_credential(**fence) is not None
+    assert await store.credential_queries.resolve_model_credential(**fence) is not None
 
-    await _settled(store, fence["job_id"])
-    await store.transition(**fence, from_states=("running",), to_state="succeeded")
-    assert await store.resolve_model_credential(**fence) is None
+    await _settled(pool, store, fence["job_id"])
+    await store.attempt_commands.transition(**fence, from_states=("running",), to_state="succeeded")
+    assert await store.credential_queries.resolve_model_credential(**fence) is None
 
 
 @pytest.mark.parametrize("users_surface", ["absent", "unrelated", "unreadable", "other_profile"])
 async def test_model_credential_uses_only_agent_owned_metadata(
-    store: AgentJobStore, users_surface: str
+    pool, store: Storage, users_surface: str
 ):
     """Local objects named users cannot change or break fenced MCP resolution."""
     job = await _create_job(store, mcp_servers=["github", "docs"])
@@ -3390,7 +3554,7 @@ async def test_model_credential_uses_only_agent_owned_metadata(
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         transaction = conn.transaction()
         await transaction.start()
         try:
@@ -3438,8 +3602,8 @@ async def test_model_credential_uses_only_agent_owned_metadata(
             async def borrow_connection():
                 yield conn
 
-            scoped_store = AgentJobStore(SimpleNamespace(acquire=borrow_connection))
-            identity = await scoped_store.resolve_model_credential(**fence)
+            scoped_store = Storage(SimpleNamespace(acquire=borrow_connection))
+            identity = await scoped_store.credential_queries.resolve_model_credential(**fence)
             assert identity == {
                 "user_id": job["user_id"],
                 "job_id": job["id"],
@@ -3453,7 +3617,7 @@ async def test_model_credential_uses_only_agent_owned_metadata(
             await transaction.rollback()
 
 
-async def test_an_expired_lease_is_dead_before_the_reaper_runs(store: AgentJobStore):
+async def test_an_expired_lease_is_dead_before_the_reaper_runs(pool, store: Storage):
     """Expiry must take effect immediately, not when the reaper next passes.
 
     Previously every fenced write checked only generation and status, so a
@@ -3468,25 +3632,30 @@ async def test_an_expired_lease_is_dead_before_the_reaper_runs(store: AgentJobSt
         "lease_generation": claim["lease_generation"],
     }
     # Everything works while the lease is live.
-    assert await store.append_event(**fence, event_type="message", payload={}) is not None
+    assert (
+        await store.attempt_commands.append_event(**fence, event_type="message", payload={})
+        is not None
+    )
 
-    await _expire_attempt(store, claim["attempt_id"])
+    await _expire_attempt(pool, store, claim["attempt_id"])
     # Deliberately do NOT run the reaper.
 
-    assert (await store.heartbeat(**fence, lease_ttl_seconds=60))["ok"] is False
-    assert await store.append_event(**fence, event_type="message", payload={}) is None
+    assert (await store.attempt_commands.heartbeat(**fence, lease_ttl_seconds=60))["ok"] is False
     assert (
-        await store.transition(
+        await store.attempt_commands.append_event(**fence, event_type="message", payload={}) is None
+    )
+    assert (
+        await store.attempt_commands.transition(
             job_id=job["id"], **fence, from_states=("running",), to_state="succeeded"
         )
         is False
     )
     # And the job is untouched: still running with no terminal state.
-    fetched = await store.get_job(job["id"])
+    fetched = await store.conversation_queries.get_job(job["id"])
     assert fetched["state"] == "running"
 
 
-async def test_a_released_claim_costs_no_retry(store: AgentJobStore):
+async def test_a_released_claim_costs_no_retry(pool, store: Storage):
     """A claim the platform gave up on must not spend the job's retry budget.
 
     The regression this pins: the budget was read off ``attempt_no``, which
@@ -3501,47 +3670,52 @@ async def test_a_released_claim_costs_no_retry(store: AgentJobStore):
     for _ in range(3):
         claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
         assert claim is not None, "a released job must be claimable again"
-        assert await store.release_claim(job_id=job["id"], attempt_id=claim["attempt_id"])
-        assert (await store.get_job(job["id"]))["state"] == "queued"
+        assert await store.attempt_commands.release_claim(
+            job_id=job["id"], attempt_id=claim["attempt_id"]
+        )
+        assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
 
     # The budget is untouched: a real attempt still gets to run and be reaped.
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    await _expire_attempt(store, claim["attempt_id"])
-    actions = await store.reap_expired(max_attempts=3)
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
 
     assert actions[0]["action"] == "queued", "aborted claims must not count as attempts"
-    assert (await store.get_job(job["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
 
 
-async def test_releasing_records_why_rather_than_erasing_the_attempt(store: AgentJobStore):
+async def test_releasing_records_why_rather_than_erasing_the_attempt(store: Storage):
     """History stays append-only: the abandoned attempt is marked, not deleted."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
 
-    await store.release_claim(job_id=job["id"], attempt_id=claim["attempt_id"])
+    await store.attempt_commands.release_claim(job_id=job["id"], attempt_id=claim["attempt_id"])
 
-    events = await store.list_events_after(job_id=job["id"])
+    events = await store.execution_queries.list_events_after(job_id=job["id"])
     aborted = [e for e in events if e["event_type"] == "attempt_aborted"]
     assert aborted, "an operator must be able to see the platform dropped this one"
     assert aborted[0]["attempt_id"] == claim["attempt_id"]
 
 
-async def test_releasing_a_job_that_moved_on_is_a_no_op(store: AgentJobStore):
+async def test_releasing_a_job_that_moved_on_is_a_no_op(store: Storage):
     """A late release must never drag a running job back to the queue."""
     job = await _create_job(store)
     first = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    await store.release_claim(job_id=job["id"], attempt_id=first["attempt_id"])
+    await store.attempt_commands.release_claim(job_id=job["id"], attempt_id=first["attempt_id"])
     second = await _claim(store, worker_id="w2", lease_ttl_seconds=60)
 
     # The first attempt is already finished, so releasing it again changes nothing.
-    assert await store.release_claim(job_id=job["id"], attempt_id=first["attempt_id"]) is False
+    assert (
+        await store.attempt_commands.release_claim(job_id=job["id"], attempt_id=first["attempt_id"])
+        is False
+    )
 
-    fetched = await store.get_job(job["id"])
+    fetched = await store.conversation_queries.get_job(job["id"])
     assert fetched["state"] == "running"
     assert fetched["current_attempt_id"] == second["attempt_id"]
 
 
-async def test_releasing_with_the_wrong_generation_is_refused(store: AgentJobStore):
+async def test_releasing_with_the_wrong_generation_is_refused(store: Storage):
     """The weakest fence in the store was this one; it now matches the others.
 
     Releasing a claim returns the job to the queue, so an unfenced release is a
@@ -3551,15 +3725,15 @@ async def test_releasing_with_the_wrong_generation_is_refused(store: AgentJobSto
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
 
     assert (
-        await store.release_claim(
+        await store.attempt_commands.release_claim(
             job_id=job["id"], attempt_id=claim["attempt_id"], lease_generation=999
         )
         is False
     )
-    assert (await store.get_job(job["id"]))["state"] == "running"
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "running"
 
     assert (
-        await store.release_claim(
+        await store.attempt_commands.release_claim(
             job_id=job["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -3568,7 +3742,7 @@ async def test_releasing_with_the_wrong_generation_is_refused(store: AgentJobSto
     )
 
 
-async def test_a_release_writes_its_event_into_the_right_job(store: AgentJobStore):
+async def test_a_release_writes_its_event_into_the_right_job(store: Storage):
     """agent_job_events.job_id has no foreign key, so a mismatched pair would land
     a control event in another job's stream — possibly another tenant's."""
     victim = await _create_job(store)
@@ -3577,17 +3751,17 @@ async def test_a_release_writes_its_event_into_the_right_job(store: AgentJobStor
 
     # Deliberately name the wrong job alongside the real attempt id.
     wrong = victim["id"] if claim["id"] != victim["id"] else target["id"]
-    await store.release_claim(job_id=wrong, attempt_id=claim["attempt_id"])
+    await store.attempt_commands.release_claim(job_id=wrong, attempt_id=claim["attempt_id"])
 
-    stray = await store.list_events_after(job_id=wrong)
+    stray = await store.execution_queries.list_events_after(job_id=wrong)
     assert not [e for e in stray if e["event_type"] == "attempt_aborted"], (
         "the event must follow the attempt's real job, not the caller's claim"
     )
-    owned = await store.list_events_after(job_id=claim["id"])
+    owned = await store.execution_queries.list_events_after(job_id=claim["id"])
     assert [e for e in owned if e["event_type"] == "attempt_aborted"]
 
 
-async def test_a_cancelled_job_released_from_a_claim_ends_cancelled(store: AgentJobStore):
+async def test_a_cancelled_job_released_from_a_claim_ends_cancelled(store: Storage):
     """Requeueing a cancelled job put it somewhere nothing could ever reach.
 
     `claim_job` skips queued rows with `cancel_requested`, and the reaper only
@@ -3597,54 +3771,54 @@ async def test_a_cancelled_job_released_from_a_claim_ends_cancelled(store: Agent
     """
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    assert await store.request_cancel(job_id=job["id"]) == "running"
+    assert await store.attempt_commands.request_cancel(job_id=job["id"]) == "running"
 
-    await store.release_claim(
+    await store.attempt_commands.release_claim(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
     )
 
-    fetched = await store.get_job(job["id"])
+    fetched = await store.conversation_queries.get_job(job["id"])
     assert fetched["state"] == "cancelled", "a cancelled job must not be requeued"
-    assert await store.list_terminal_resumes_pending() == [job["id"]]
+    assert await store.sandbox.list_terminal_resumes_pending() == [job["id"]]
 
 
-async def test_an_uncancelled_job_still_returns_to_the_queue(store: AgentJobStore):
+async def test_an_uncancelled_job_still_returns_to_the_queue(store: Storage):
     """The ordinary release path is unchanged."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
 
-    await store.release_claim(
+    await store.attempt_commands.release_claim(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
     )
 
-    assert (await store.get_job(job["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
     assert await _claim(store, worker_id="w2", lease_ttl_seconds=60) is not None
 
 
-async def test_a_replayed_event_seq_is_answered_with_the_stored_row(store: AgentJobStore):
+async def test_a_replayed_event_seq_is_answered_with_the_stored_row(pool, store: Storage):
     """A retry after a dropped response duplicates neither event nor message."""
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
 
-    first = await store.append_event(
+    first = await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         event_type="message",
         payload={"text": "the answer"},
         event_seq=1,
     )
-    replay = await store.append_event(
+    replay = await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         event_type="message",
         payload={"text": "the answer"},
         event_seq=1,
     )
-    second = await store.append_event(
+    second = await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         event_type="tool_use",
@@ -3654,7 +3828,7 @@ async def test_a_replayed_event_seq_is_answered_with_the_stored_row(store: Agent
 
     assert replay == first
     assert second is not None and second != first
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         events = await conn.fetchval(
             "SELECT COUNT(*) FROM agent_job_events WHERE attempt_id = $1", claim["attempt_id"]
         )
@@ -3666,7 +3840,7 @@ async def test_a_replayed_event_seq_is_answered_with_the_stored_row(store: Agent
     assert messages == 1
 
 
-async def test_a_resource_rollup_upserts_rather_than_accumulating(store: AgentJobStore):
+async def test_a_resource_rollup_upserts_rather_than_accumulating(store: Storage):
     """A retried post is the same window said twice, not a second window.
 
     Idempotence here is a statement about ``ON CONFLICT``, which is exactly
@@ -3686,26 +3860,26 @@ async def test_a_resource_rollup_upserts_rather_than_accumulating(store: AgentJo
         "sampler_version": "1",
     }
 
-    assert await store.record_attempt_resources(
+    assert await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"], lease_generation=claim["lease_generation"], rollup=rollup
     )
-    assert await store.record_attempt_resources(
+    assert await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"], lease_generation=claim["lease_generation"], rollup=rollup
     )
 
-    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    telemetry = await store.execution_queries.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
     assert telemetry["attempt_id"] == claim["attempt_id"]
     assert telemetry["cpu_usec"] == 1_000, "a retried post accumulated instead of replacing"
     assert telemetry["net_rx_bytes"] == 4_096
 
 
-async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
+async def test_retry_telemetry_is_read_back_per_attempt(pool, store: Storage):
     """The owner UI can pair each attempt's events with the same window."""
     job = await _create_job(store)
     first = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert first is not None
-    assert await store.record_attempt_resources(
+    assert await store.attempt_commands.record_attempt_resources(
         attempt_id=first["attempt_id"],
         lease_generation=first["lease_generation"],
         rollup={
@@ -3717,12 +3891,12 @@ async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
             "processes": [_retry_process("first")],
         },
     )
-    await _expire_attempt(store, first["attempt_id"])
-    await store.reap_expired(max_attempts=3)
+    await _expire_attempt(pool, store, first["attempt_id"])
+    await store.attempt_commands.reap_expired(max_attempts=3)
 
     second = await _claim(store, worker_id="w2", lease_ttl_seconds=60)
     assert second is not None
-    assert await store.record_attempt_resources(
+    assert await store.attempt_commands.record_attempt_resources(
         attempt_id=second["attempt_id"],
         lease_generation=second["lease_generation"],
         rollup={
@@ -3735,7 +3909,7 @@ async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
         },
     )
 
-    attempts = await store.job_attempts_telemetry(job_id=job["id"])
+    attempts = await store.execution_queries.job_attempts_telemetry(job_id=job["id"])
 
     assert [attempt["attempt_id"] for attempt in attempts] == [
         first["attempt_id"],
@@ -3744,7 +3918,9 @@ async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
     assert [attempt["attempt_no"] for attempt in attempts] == [1, 2]
     assert all("tool_calls" not in attempt and "processes" not in attempt for attempt in attempts)
     details = [
-        await store.job_turn_telemetry(job_id=job["id"], attempt_id=attempt["attempt_id"])
+        await store.execution_queries.job_turn_telemetry(
+            job_id=job["id"], attempt_id=attempt["attempt_id"]
+        )
         for attempt in attempts
     ]
     assert [attempt["cpu_usec"] for attempt in details] == [1_000, 7_000]
@@ -3752,7 +3928,9 @@ async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):
     assert [attempt["processes"][0]["comm"] for attempt in details] == ["first", "second"]
     other_job = await _create_job(store)
     assert (
-        await store.job_turn_telemetry(job_id=other_job["id"], attempt_id=first["attempt_id"])
+        await store.execution_queries.job_turn_telemetry(
+            job_id=other_job["id"], attempt_id=first["attempt_id"]
+        )
         is None
     )
 
@@ -3777,31 +3955,31 @@ def _retry_process(comm: str) -> dict[str, object]:
 
 
 async def test_a_superseded_attempt_cannot_overwrite_the_live_one_s_numbers(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """Fenced by the same predicate as every other worker write."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
-    await store.record_attempt_resources(
+    await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         rollup={"cpu_usec": 1_000, "sample_count": 5, "coverage": 1.0, "sampler_version": "1"},
     )
 
-    stale = await store.record_attempt_resources(
+    stale = await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"] + 1,
         rollup={"cpu_usec": 999_999, "sample_count": 1, "coverage": 1.0, "sampler_version": "1"},
     )
 
     assert stale is False
-    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    telemetry = await store.execution_queries.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
     assert telemetry["cpu_usec"] == 1_000
 
 
-async def test_an_unmeasured_window_is_stored_as_such_not_as_zero(store: AgentJobStore):
+async def test_an_unmeasured_window_is_stored_as_such_not_as_zero(store: Storage):
     """Null counters with coverage 0 — the row that says "not measured".
 
     Postgres is what makes this meaningful: the columns are nullable, so a
@@ -3812,13 +3990,13 @@ async def test_an_unmeasured_window_is_stored_as_such_not_as_zero(store: AgentJo
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
 
-    assert await store.record_attempt_resources(
+    assert await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         rollup={"sample_count": 0, "coverage": 0.0, "sampler_version": "1"},
     )
 
-    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    telemetry = await store.execution_queries.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
     assert telemetry["cpu_usec"] is None
     assert telemetry["coverage"] == 0.0
@@ -3848,13 +4026,13 @@ def _tool_call(seq: int, name: str, **overrides: object) -> dict[str, object]:
     }
 
 
-async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobStore):
+async def test_per_call_rows_are_stored_and_read_back_in_order(store: Storage):
     """The rows the footer's expanded table renders, over real SQL."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
 
-    assert await store.record_attempt_resources(
+    assert await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         rollup={
@@ -3913,7 +4091,7 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
         },
     )
 
-    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    telemetry = await store.execution_queries.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
     assert telemetry["tool_calls_truncated"] is False
     assert telemetry["tool_time_ms"] == 9_543
@@ -3951,7 +4129,7 @@ async def test_per_call_rows_are_stored_and_read_back_in_order(store: AgentJobSt
 
 
 async def test_a_retried_post_replaces_the_call_list_rather_than_appending(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """The list is one statement about the attempt, not a set to union with."""
     job = await _create_job(store)
@@ -3959,28 +4137,28 @@ async def test_a_retried_post_replaces_the_call_list_rather_than_appending(
     assert claim is not None
     base = {"sample_count": 5, "coverage": 1.0, "sampler_version": "2"}
 
-    await store.record_attempt_resources(
+    await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         rollup={**base, "tool_calls": [_tool_call(1, "Bash"), _tool_call(2, "Read")]},
     )
-    await store.record_attempt_resources(
+    await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         rollup={**base, "tool_calls": [_tool_call(1, "Bash")]},
     )
 
-    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    telemetry = await store.execution_queries.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
     assert len(telemetry["tool_calls"]) == 1, "a retried post left a row from the first"
 
 
-async def test_a_superseded_attempt_cannot_write_per_call_rows_either(store: AgentJobStore):
+async def test_a_superseded_attempt_cannot_write_per_call_rows_either(store: Storage):
     """The rows describe spans inside a window this attempt no longer owns."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
-    await store.record_attempt_resources(
+    await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         rollup={
@@ -3991,7 +4169,7 @@ async def test_a_superseded_attempt_cannot_write_per_call_rows_either(store: Age
         },
     )
 
-    stale = await store.record_attempt_resources(
+    stale = await store.attempt_commands.record_attempt_resources(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"] + 1,
         rollup={
@@ -4003,14 +4181,14 @@ async def test_a_superseded_attempt_cannot_write_per_call_rows_either(store: Age
     )
 
     assert stale is False
-    telemetry = await store.job_turn_telemetry(job_id=job["id"])
+    telemetry = await store.execution_queries.job_turn_telemetry(job_id=job["id"])
     assert telemetry is not None
     (row,) = telemetry["tool_calls"]
     assert row["cpu_usec_exclusive"] is None, "a fenced write reached the per-call rows"
 
 
 async def test_a_row_cannot_claim_a_number_is_both_exclusive_and_shared(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """The whole point of two columns is that a reader can tell them apart."""
     import asyncpg
@@ -4020,7 +4198,7 @@ async def test_a_row_cannot_claim_a_number_is_both_exclusive_and_shared(
     assert claim is not None
 
     with pytest.raises(asyncpg.IntegrityConstraintViolationError):
-        await store.record_attempt_resources(
+        await store.attempt_commands.record_attempt_resources(
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
             rollup={
@@ -4033,19 +4211,19 @@ async def test_a_row_cannot_claim_a_number_is_both_exclusive_and_shared(
     assert job["id"]
 
 
-async def test_thread_events_span_every_turn_and_page(store: AgentJobStore):
+async def test_thread_events_span_every_turn_and_page(store: Storage):
     """A thread's complete log stays ordered and pageable across follow-ups."""
     first = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
     for kind in ("tool_use", "tool_result", "message"):
-        await store.append_event(
+        await store.attempt_commands.append_event(
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
             event_type=kind,
             payload={"marker": kind},
         )
-    await store.transition(
+    await store.attempt_commands.transition(
         job_id=first["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -4053,53 +4231,65 @@ async def test_thread_events_span_every_turn_and_page(store: AgentJobStore):
         to_state="failed",
         detail="synthetic first-turn failure",
     )
-    second = await store.create_follow_up(
+    second = await store.conversation_commands.create_follow_up(
         parent_job_id=first["id"], user_id="user-1", prompt="and the docs"
     )
     assert second is not None
 
-    events = await store.list_thread_events_after(job_id=second["id"], user_id="user-1")
+    events = await store.execution_queries.list_thread_events_after(
+        job_id=second["id"], user_id="user-1"
+    )
     assert events is not None
     assert [event["event_type"] for event in events] == ["tool_use", "tool_result", "message"]
     assert all(event["turn_no"] == 1 for event in events)
     assert events[0]["payload"] == {"marker": "tool_use"}
 
-    page = await store.list_thread_events_after(job_id=second["id"], user_id="user-1", limit=2)
+    page = await store.execution_queries.list_thread_events_after(
+        job_id=second["id"], user_id="user-1", limit=2
+    )
     assert page is not None and len(page) == 2
-    rest = await store.list_thread_events_after(
+    rest = await store.execution_queries.list_thread_events_after(
         job_id=second["id"], user_id="user-1", after_id=page[-1]["id"]
     )
     assert rest is not None and [event["event_type"] for event in rest] == ["message"]
 
 
-async def test_thread_events_stop_at_the_owner(store: AgentJobStore):
+async def test_thread_events_stop_at_the_owner(store: Storage):
     mine = await _create_job(store)
 
-    assert await store.list_thread_events_after(job_id=mine["id"], user_id="user-2") is None
-    assert await store.list_thread_events_after(job_id=mine["id"], user_id="user-1") == []
+    assert (
+        await store.execution_queries.list_thread_events_after(job_id=mine["id"], user_id="user-2")
+        is None
+    )
+    assert (
+        await store.execution_queries.list_thread_events_after(job_id=mine["id"], user_id="user-1")
+        == []
+    )
 
 
-async def test_session_pages_count_threads_and_keep_long_conversation_titles(store: AgentJobStore):
+async def test_session_pages_count_threads_and_keep_long_conversation_titles(store: Storage):
     """A long thread cannot consume the history window or replace its title."""
     jobs = [await _create_job(store, task_prompt=f"History task {index}") for index in range(55)]
     long_thread = jobs[0]
     for index in range(60):
-        child = await store.create_follow_up(
+        child = await store.conversation_commands.create_follow_up(
             parent_job_id=long_thread["id"], user_id="user-1", prompt=f"Follow-up {index}"
         )
         assert child is not None and child["turn_no"] == index + 2
-    await store.set_sessions_archived(
+    await store.conversation_commands.set_sessions_archived(
         thread_ids=[job["thread_id"] for job in jobs], user_id="user-1", archived=True
     )
-    first = await store.list_sessions(user_id="user-1", archived=True, limit=50)
+    first = await store.conversation_queries.list_sessions(
+        user_id="user-1", archived=True, limit=50
+    )
     assert first["total"] == 55 and len(first["sessions"]) == 50
     assert first["next_cursor"] is not None
     # Removing a preceding row must not skip the next conversation, as an
     # offset cursor would. Counts reflect the current owner history.
-    await store.set_sessions_archived(
+    await store.conversation_commands.set_sessions_archived(
         thread_ids=[first["sessions"][0]["thread_id"]], user_id="user-1", archived=False
     )
-    second = await store.list_sessions(
+    second = await store.conversation_queries.list_sessions(
         user_id="user-1", archived=True, limit=50, cursor=first["next_cursor"]
     )
     assert second["total"] == 54 and len(second["sessions"]) == 5
@@ -4114,15 +4304,18 @@ async def test_session_pages_count_threads_and_keep_long_conversation_titles(sto
 
 
 async def test_session_search_state_and_project_facets_apply_before_pagination(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     target = await _create_job(store, task_prompt="Repair 100%_ Coverage", repo="acme/api")
     other_project = await _create_job(store, task_prompt="Repair Dashboard", repo="acme/web")
     needs_review = await _create_job(store, task_prompt="Repair renderer", repo="acme/api")
     foreign = await _create_job(store, user_id="user-2", task_prompt="Repair 100%_ Coverage")
     for job in (target, other_project, needs_review, foreign):
-        await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=True)
-    async with store._pool.acquire() as conn:
+        await store.conversation_commands.set_thread_archived(
+            job_id=job["id"], user_id=job["user_id"], archived=True
+        )
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'succeeded', "
             "native_turn_no = COALESCE(native_turn_no, turn_no)"
@@ -4132,17 +4325,23 @@ async def test_session_search_state_and_project_facets_apply_before_pagination(
             "WHERE id = ANY($1::text[])",
             [target["id"], other_project["id"]],
         )
-    literal = await store.list_sessions(user_id="user-1", archived=True, search="100%_")
+    literal = await store.conversation_queries.list_sessions(
+        user_id="user-1", archived=True, search="100%_"
+    )
     assert [row["thread_id"] for row in literal["sessions"]] == [target["thread_id"]]
-    found = await store.list_sessions(
+    found = await store.conversation_queries.list_sessions(
         user_id="user-1", archived=True, search="rEPAir", state="done", repo="acme/api", limit=1
     )
     assert found["total"] == 1
     assert found["projects"] == [{"repo": "acme/api", "count": 1}, {"repo": "acme/web", "count": 1}]
     assert found["sessions"][0]["thread_id"] == target["thread_id"]
-    review = await store.list_sessions(user_id="user-1", archived=True, state="needs_review")
+    review = await store.conversation_queries.list_sessions(
+        user_id="user-1", archived=True, state="needs_review"
+    )
     assert review["total"] == 1 and review["sessions"][0]["thread_id"] == needs_review["thread_id"]
-    missing = await store.list_sessions(user_id="user-1", archived=True, repo="acme/missing")
+    missing = await store.conversation_queries.list_sessions(
+        user_id="user-1", archived=True, repo="acme/missing"
+    )
     assert missing["total"] == 0 and missing["sessions"] == []
     assert missing["projects"] == [
         {"repo": "acme/api", "count": 2},
@@ -4150,12 +4349,12 @@ async def test_session_search_state_and_project_facets_apply_before_pagination(
     ]
 
 
-async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(store: AgentJobStore):
+async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(pool, store: Storage):
     completed = await _create_job(store, task_prompt="Completed", repo="acme/api")
     published = await _create_job(store, task_prompt="Published", repo="acme/web")
     stopped = await _create_job(store, task_prompt="Stopped", repo="acme/api")
     older_completed = await _create_job(store, task_prompt="Continued", repo="acme/api")
-    follow_up = await store.create_follow_up(
+    follow_up = await store.conversation_commands.create_follow_up(
         parent_job_id=older_completed["id"], user_id="user-1", prompt="Continue working"
     )
     assert follow_up is not None and follow_up["state"] == "queued"
@@ -4174,7 +4373,7 @@ async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(sto
         *zip(excluded, ("failed", "queued", "running"), strict=True),
     ]
     for job, state in states:
-        async with store._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE agent_jobs SET state = $2, "
                 "native_turn_no = CASE WHEN $2 = 'succeeded' THEN turn_no ELSE NULL END "
@@ -4183,8 +4382,10 @@ async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(sto
                 state,
             )
         if job is not unarchived:
-            await store.set_thread_archived(job_id=job["id"], user_id=job["user_id"], archived=True)
-    async with store._pool.acquire() as conn:
+            await store.conversation_commands.set_thread_archived(
+                job_id=job["id"], user_id=job["user_id"], archived=True
+            )
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET published_pr_url = 'https://example.test/pr/1' WHERE id = $1",
             published["id"],
@@ -4192,7 +4393,7 @@ async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(sto
     cursor = None
     found = []
     for _ in range(3):
-        page = await store.list_sessions(
+        page = await store.conversation_queries.list_sessions(
             user_id="user-1", archived=True, state="idle", limit=1, cursor=cursor
         )
         assert page["total"] == 3
@@ -4210,7 +4411,7 @@ async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(sto
     }
     assert {row["job"]["state"] for row in found} == {"succeeded", "cancelled"}
 
-    project = await store.list_sessions(
+    project = await store.conversation_queries.list_sessions(
         user_id="user-1", archived=True, state="idle", repo="acme/api"
     )
     assert project["total"] == 2
@@ -4222,50 +4423,70 @@ async def test_idle_sessions_filter_latest_turn_before_pagination_and_facets(sto
 
 
 async def test_conversation_state_keeps_active_work_visible_after_cancelling_queued_turn(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     first = await _create_job(store)
-    follow_up = await store.create_follow_up(
+    follow_up = await store.conversation_commands.create_follow_up(
         parent_job_id=first["id"], user_id="user-1", prompt="Queued follow-up"
     )
     assert follow_up is not None and follow_up["state"] == "queued"
-    assert (await store.get_job(first["id"]))["conversation_state"] == "queued"
-    async with store._pool.acquire() as conn:
+    assert (await store.conversation_queries.get_job(first["id"]))["conversation_state"] == "queued"
+    async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state = 'running' WHERE id = $1", first["id"])
-    assert await store.request_cancel(job_id=follow_up["id"], user_id="user-1") == "cancelled"
+    assert (
+        await store.attempt_commands.request_cancel(job_id=follow_up["id"], user_id="user-1")
+        == "cancelled"
+    )
 
     for job_id in (first["id"], follow_up["id"]):
-        assert (await store.get_job(job_id))["conversation_state"] == "running"
-    conversation = (await store.list_conversations(user_id="user-1"))["conversations"][0]["job"]
+        assert (await store.conversation_queries.get_job(job_id))["conversation_state"] == "running"
+    conversation = (await store.conversation_queries.list_conversations(user_id="user-1"))[
+        "conversations"
+    ][0]["job"]
     assert conversation["id"] == follow_up["id"]
     assert conversation["state"] == "cancelled"
     assert conversation["conversation_state"] == "running"
-    assert (await store.list_sessions(user_id="user-1", state="running"))["total"] == 1
-    assert (await store.list_sessions(user_id="user-1", state="idle"))["total"] == 0
+    assert (await store.conversation_queries.list_sessions(user_id="user-1", state="running"))[
+        "total"
+    ] == 1
+    assert (await store.conversation_queries.list_sessions(user_id="user-1", state="idle"))[
+        "total"
+    ] == 0
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1 WHERE id = $1",
             first["id"],
         )
-    assert (await store.get_job(first["id"]))["conversation_state"] == "idle"
-    assert (await store.get_job(follow_up["id"]))["conversation_state"] == "idle"
-    assert (await store.list_sessions(user_id="user-1", state="idle"))["total"] == 1
+    assert (await store.conversation_queries.get_job(first["id"]))["conversation_state"] == "idle"
+    assert (await store.conversation_queries.get_job(follow_up["id"]))[
+        "conversation_state"
+    ] == "idle"
+    assert (await store.conversation_queries.list_sessions(user_id="user-1", state="idle"))[
+        "total"
+    ] == 1
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state = 'failed' WHERE id = $1", follow_up["id"])
-    historical = await store.get_job(first["id"])
+    historical = await store.conversation_queries.get_job(first["id"])
     assert historical["state"] == "succeeded"
     assert historical["conversation_state"] == "failed"
-    assert (await store.list_sessions(user_id="user-1", state="failed"))["total"] == 1
-    assert (await store.list_sessions(user_id="user-1", state="idle"))["total"] == 0
+    assert (await store.conversation_queries.list_sessions(user_id="user-1", state="failed"))[
+        "total"
+    ] == 1
+    assert (await store.conversation_queries.list_sessions(user_id="user-1", state="idle"))[
+        "total"
+    ] == 0
 
 
-async def test_session_cursor_is_scoped_to_owner_and_filters(store: AgentJobStore):
+async def test_session_cursor_is_scoped_to_owner_and_filters(store: Storage):
     for _ in range(2):
         job = await _create_job(store)
-        await store.set_thread_archived(job_id=job["id"], user_id="user-1", archived=True)
-    page = await store.list_sessions(user_id="user-1", archived=True, limit=1)
+        await store.conversation_commands.set_thread_archived(
+            job_id=job["id"], user_id="user-1", archived=True
+        )
+    page = await store.conversation_queries.list_sessions(user_id="user-1", archived=True, limit=1)
     assert page["next_cursor"] is not None
     for overrides in (
         {"user_id": "user-2"},
@@ -4277,23 +4498,25 @@ async def test_session_cursor_is_scoped_to_owner_and_filters(store: AgentJobStor
     ):
         args = {"user_id": "user-1", "archived": True, "cursor": page["next_cursor"], **overrides}
         with pytest.raises(ValueError, match="Invalid session cursor"):
-            await store.list_sessions(**args)
+            await store.conversation_queries.list_sessions(**args)
 
 
-async def test_session_pages_can_skip_summary_without_changing_rows_or_cursor(store: AgentJobStore):
+async def test_session_pages_can_skip_summary_without_changing_rows_or_cursor(store: Storage):
     for repo in ("acme/api", "acme/api", "acme/web"):
         job = await _create_job(store, repo=repo)
-        await store.set_thread_archived(job_id=job["id"], user_id="user-1", archived=True)
+        await store.conversation_commands.set_thread_archived(
+            job_id=job["id"], user_id="user-1", archived=True
+        )
     options = {"user_id": "user-1", "archived": True, "repo": "acme/api", "limit": 1}
-    summary = await store.list_sessions(**options)
-    rows = await store.list_sessions(**options, include_summary=False)
+    summary = await store.conversation_queries.list_sessions(**options)
+    rows = await store.conversation_queries.list_sessions(**options, include_summary=False)
     assert rows == {**summary, "total": None, "projects": None}
     assert summary["projects"] == [
         {"repo": "acme/api", "count": 2},
         {"repo": "acme/web", "count": 1},
     ]
     assert rows["next_cursor"] is not None
-    next_rows = await store.list_sessions(
+    next_rows = await store.conversation_queries.list_sessions(
         **options, cursor=rows["next_cursor"], include_summary=False
     )
     assert next_rows["total"] is None and next_rows["projects"] is None
@@ -4302,100 +4525,134 @@ async def test_session_pages_can_skip_summary_without_changing_rows_or_cursor(st
     assert next_rows["next_cursor"] is None
 
 
-async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(store: AgentJobStore):
+async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(pool, store: Storage):
     mine = await _create_job(store)
     busy = await _create_job(store)
     foreign = await _create_job(store, user_id="user-2")
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state = 'failed' WHERE id = $1", mine["id"])
-    assert await store.set_sessions_archived(
+    assert await store.conversation_commands.set_sessions_archived(
         thread_ids=[mine["thread_id"], foreign["thread_id"]], user_id="user-1", archived=True
     ) == {"error": "not_found"}
-    assert (await store.get_job(mine["id"]))["archived_at"] is None
-    assert await store.delete_sessions(thread_ids=[mine["thread_id"]], user_id="user-1") == {
-        "error": "not_archived"
-    }
+    assert (await store.conversation_queries.get_job(mine["id"]))["archived_at"] is None
+    assert await store.conversation_commands.delete_sessions(
+        thread_ids=[mine["thread_id"]], user_id="user-1"
+    ) == {"error": "not_archived"}
     selection = [mine["thread_id"], busy["thread_id"]]
-    archived = await store.set_sessions_archived(
+    archived = await store.conversation_commands.set_sessions_archived(
         thread_ids=selection, user_id="user-1", archived=True
     )
     assert len(archived["sessions"]) == 2
     assert len({row["archived_at"] for row in archived["sessions"]}) == 1
-    assert await store.delete_sessions(thread_ids=selection, user_id="user-1") == {
-        "error": "session_active"
-    }
-    assert await store.delete_sessions(
+    assert await store.conversation_commands.delete_sessions(
+        thread_ids=selection, user_id="user-1"
+    ) == {"error": "session_active"}
+    assert await store.conversation_commands.delete_sessions(
         thread_ids=[mine["thread_id"], foreign["thread_id"]], user_id="user-1"
     ) == {"error": "not_found"}
-    assert (await store.get_job(mine["id"]))["deleted_at"] is None
-    assert await store.delete_sessions(thread_ids=[mine["thread_id"]], user_id="user-1") == {
-        "thread_ids": [mine["thread_id"]]
-    }
-    retained = await store.get_job(mine["id"])
+    assert (await store.conversation_queries.get_job(mine["id"]))["deleted_at"] is None
+    assert await store.conversation_commands.delete_sessions(
+        thread_ids=[mine["thread_id"]], user_id="user-1"
+    ) == {"thread_ids": [mine["thread_id"]]}
+    retained = await store.conversation_queries.get_job(mine["id"])
     assert retained is not None and retained["deleted_at"] is not None
     assert retained["task_prompt"] == mine["task_prompt"]
-    assert await store.get_thread_for_job(job_id=mine["id"], user_id="user-1") is None
-    assert await store.list_thread_events_after(job_id=mine["id"], user_id="user-1") is None
-    assert await store.thread_stats_inputs(job_id=mine["id"], user_id="user-1") is None
     assert (
-        await store.set_thread_archived(job_id=mine["id"], user_id="user-1", archived=False) is None
+        await store.conversation_queries.get_thread_for_job(job_id=mine["id"], user_id="user-1")
+        is None
     )
-    assert await store.set_thread_pinned(job_id=mine["id"], user_id="user-1", pinned=True) is None
-    assert await store.set_sessions_archived(
+    assert (
+        await store.execution_queries.list_thread_events_after(job_id=mine["id"], user_id="user-1")
+        is None
+    )
+    assert (
+        await store.execution_queries.thread_stats_inputs(job_id=mine["id"], user_id="user-1")
+        is None
+    )
+    assert (
+        await store.conversation_commands.set_thread_archived(
+            job_id=mine["id"], user_id="user-1", archived=False
+        )
+        is None
+    )
+    assert (
+        await store.conversation_commands.set_thread_pinned(
+            job_id=mine["id"], user_id="user-1", pinned=True
+        )
+        is None
+    )
+    assert await store.conversation_commands.set_sessions_archived(
         thread_ids=selection, user_id="user-1", archived=False
     ) == {"error": "not_found"}
-    assert (await store.get_job(busy["id"]))["archived_at"] is not None
+    assert (await store.conversation_queries.get_job(busy["id"]))["archived_at"] is not None
     assert (
-        await store.create_follow_up(
+        await store.conversation_commands.create_follow_up(
             parent_job_id=mine["id"], user_id="user-1", prompt="must not resurrect"
         )
         is None
     )
     assert (
-        await store.prepare_session_fork(
+        await store.session_fork.prepare_session_fork(
             source_job_id=mine["id"], user_id="user-1", idempotency_key="deleted-history"
         )
         is None
     )
-    assert {job["id"] for job in await store.list_jobs(user_id="user-1", archived=True)} == {
-        busy["id"]
-    }
-    assert (await store.list_sessions(user_id="user-1", archived=True))["total"] == 1
+    assert {
+        job["id"]
+        for job in await store.conversation_queries.list_jobs(user_id="user-1", archived=True)
+    } == {busy["id"]}
+    assert (await store.conversation_queries.list_sessions(user_id="user-1", archived=True))[
+        "total"
+    ] == 1
     assert {
         item["job"]["id"]
-        for item in (await store.list_conversations(user_id="user-1", include_archived=True))[
-            "conversations"
-        ]
+        for item in (
+            await store.conversation_queries.list_conversations(
+                user_id="user-1", include_archived=True
+            )
+        )["conversations"]
     } == {busy["id"]}
-    assert (await store.list_projects(user_id="user-1", archived=True))[0]["task_count"] == 1
+    assert (await store.conversation_queries.list_projects(user_id="user-1", archived=True))[0][
+        "task_count"
+    ] == 1
 
 
-async def test_archiving_serializes_with_follow_up_creation(store: AgentJobStore):
+async def test_archiving_serializes_with_follow_up_creation(pool, store: Storage):
     job = await _create_job(store)
-    async with store._pool.acquire() as conn, conn.transaction():
+    async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "UPDATE agent_threads SET archived_at = NOW() WHERE id = $1", job["thread_id"]
         )
         follow_up = asyncio.create_task(
-            store.create_follow_up(
+            store.conversation_commands.create_follow_up(
                 parent_job_id=job["id"], user_id="user-1", prompt="racing message"
             )
         )
         await asyncio.sleep(0.03)
         assert not follow_up.done()
     assert await asyncio.wait_for(follow_up, timeout=3) == {"error": "session_archived"}
-    assert len((await store.get_thread_for_job(job_id=job["id"], user_id="user-1"))["jobs"]) == 1
-    await store.set_sessions_archived(
+    assert (
+        len(
+            (
+                await store.conversation_queries.get_thread_for_job(
+                    job_id=job["id"], user_id="user-1"
+                )
+            )["jobs"]
+        )
+        == 1
+    )
+    await store.conversation_commands.set_sessions_archived(
         thread_ids=[job["thread_id"]], user_id="user-1", archived=False
     )
-    resumed = await store.create_follow_up(
+    resumed = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"], user_id="user-1", prompt="resume"
     )
     assert resumed is not None and resumed["turn_no"] == 2
 
 
 async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billing(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """History deletion is independent of the shared container's lifetime."""
     source, claim, sandbox = await _reserve_shared_chat(store)
@@ -4406,17 +4663,17 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="container-history-delete", context_status="new"
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=source["id"])
-    assert await store.append_event(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=source["id"])
+    assert await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         event_type="message",
         payload={"text": "Retained answer for the source session"},
     )
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=source["id"],
         context_status="live",
@@ -4424,21 +4681,23 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
         idle_timeout_seconds=1800,
         base_sha=source["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=source["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    await store.set_thread_archived(job_id=source["id"], user_id="user-1", archived=True)
-    pending = await store.list_sessions(user_id="user-1", archived=True)
+    await store.conversation_commands.set_thread_archived(
+        job_id=source["id"], user_id="user-1", archived=True
+    )
+    pending = await store.conversation_queries.list_sessions(user_id="user-1", archived=True)
     assert pending["sessions"][0]["delete_block_reason"] == "publication_pending"
-    assert await store.delete_sessions(thread_ids=[source["thread_id"]], user_id="user-1") == {
-        "error": "publication_pending"
-    }
+    assert await store.conversation_commands.delete_sessions(
+        thread_ids=[source["thread_id"]], user_id="user-1"
+    ) == {"error": "publication_pending"}
     sibling = await _create_job(store, task_prompt="forked sibling")
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_sandbox_snapshots SET state = 'published'")
         await conn.execute(
             "UPDATE agent_jobs SET state = 'succeeded', "
@@ -4478,20 +4737,25 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
             """,
             claim["attempt_id"],
         )
-    sibling_turn = await store.create_follow_up(
+    sibling_turn = await store.conversation_commands.create_follow_up(
         parent_job_id=sibling["id"], user_id="user-1", prompt="independent work"
     )
     assert sibling_turn is not None and sibling_turn["state"] == "queued"
-    before = await store.thread_sandbox(thread_id=source["thread_id"])
+    before = await store.sandbox.thread_sandbox(thread_id=source["thread_id"])
     assert before["resident_state"] == "live"
-    assert (await store.list_sessions(user_id="user-1", archived=True))["sessions"][0]["can_delete"]
-    assert await store.delete_sessions(thread_ids=[source["thread_id"]], user_id="user-1") == {
-        "thread_ids": [source["thread_id"]]
-    }
-    assert await store.thread_sandbox(thread_id=source["thread_id"]) == before
-    assert (await store.get_job(sibling_turn["id"]))["state"] == "queued"
-    assert await store.get_thread_for_job(job_id=sibling["id"], user_id="user-1") is not None
-    async with store._pool.acquire() as conn:
+    assert (await store.conversation_queries.list_sessions(user_id="user-1", archived=True))[
+        "sessions"
+    ][0]["can_delete"]
+    assert await store.conversation_commands.delete_sessions(
+        thread_ids=[source["thread_id"]], user_id="user-1"
+    ) == {"thread_ids": [source["thread_id"]]}
+    assert await store.sandbox.thread_sandbox(thread_id=source["thread_id"]) == before
+    assert (await store.conversation_queries.get_job(sibling_turn["id"]))["state"] == "queued"
+    assert (
+        await store.conversation_queries.get_thread_for_job(job_id=sibling["id"], user_id="user-1")
+        is not None
+    )
+    async with pool.acquire() as conn:
         assert (
             await conn.fetchval(
                 "SELECT snapshot FROM agent_attempt_ledger WHERE attempt_id = $1",
@@ -4513,14 +4777,14 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
             > 0
         )
     assert (
-        await store.heartbeat_residency(
+        await store.residency.heartbeat_residency(
             thread_id=source["thread_id"], generation=1, host="shared-runner", ttl_seconds=120
         )
         == "grant-history"
     )
 
 
-async def test_generated_title_is_canonical_and_stable_across_turns(store: AgentJobStore):
+async def test_generated_title_is_canonical_and_stable_across_turns(store: Storage):
     """The prompt remains intact while each turn reads the same short summary."""
     prompt = "Please implement the CSV export for SPRUCE_8462 with detailed validation."
     job, claim, sandbox = await _reserve_shared_chat(store, task_prompt=prompt)
@@ -4532,9 +4796,13 @@ async def test_generated_title_is_canonical_and_stable_across_turns(store: Agent
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
-    assert await store.set_generated_thread_title(**fence, title="SPRUCE_8462 CSV export")
-    assert not await store.set_generated_thread_title(**fence, title="Second summary")
-    saved = await store.get_job(job["id"])
+    assert await store.conversation_commands.set_generated_thread_title(
+        **fence, title="SPRUCE_8462 CSV export"
+    )
+    assert not await store.conversation_commands.set_generated_thread_title(
+        **fence, title="Second summary"
+    )
+    saved = await store.conversation_queries.get_job(job["id"])
     assert saved is not None
     assert saved["title"] == "SPRUCE_8462 CSV export"
     assert saved["title_source"] == "generated"
@@ -4546,11 +4814,11 @@ async def test_generated_title_is_canonical_and_stable_across_turns(store: Agent
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **sandbox_fence, container_id="title-container", context_status="new"
     )
-    assert await store.admit_thread_sandbox_turn(**sandbox_fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**sandbox_fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **sandbox_fence,
         job_id=job["id"],
         context_status="live",
@@ -4558,8 +4826,10 @@ async def test_generated_title_is_canonical_and_stable_across_turns(store: Agent
         idle_timeout_seconds=1800,
         base_sha=job["base_sha"],
     )
-    assert await store.transition(**fence, from_states=("running",), to_state="succeeded")
-    child = await store.create_follow_up(
+    assert await store.attempt_commands.transition(
+        **fence, from_states=("running",), to_state="succeeded"
+    )
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"], user_id=job["user_id"], prompt="Now add JSON too"
     )
     assert child is not None and child.get("error") is None
@@ -4573,7 +4843,7 @@ async def test_generated_title_is_canonical_and_stable_across_turns(store: Agent
         host_credential_hash="test-credential-hash",
     )
     assert followup_claim is not None and not followup_claim["title_generation_pending"]
-    assert not await store.set_generated_thread_title(
+    assert not await store.conversation_commands.set_generated_thread_title(
         job_id=child["id"],
         attempt_id=followup_claim["attempt_id"],
         lease_generation=followup_claim["lease_generation"],
@@ -4581,19 +4851,19 @@ async def test_generated_title_is_canonical_and_stable_across_turns(store: Agent
     )
 
 
-async def test_manual_same_title_wins_in_flight_generation(store: AgentJobStore):
+async def test_manual_same_title_wins_in_flight_generation(pool, store: Storage):
     """A manual save claims ownership even if the user keeps the fallback text."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
     assert claim is not None and claim["title_generation_pending"]
     # Hold the user edit uncommitted so generation really races the row lock.
-    async with store._pool.acquire() as conn, conn.transaction():
+    async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "UPDATE agent_threads SET title_source = 'manual' WHERE id = $1",
             job["thread_id"],
         )
         generation = asyncio.create_task(
-            store.set_generated_thread_title(
+            store.conversation_commands.set_generated_thread_title(
                 job_id=job["id"],
                 attempt_id=claim["attempt_id"],
                 lease_generation=claim["lease_generation"],
@@ -4603,22 +4873,22 @@ async def test_manual_same_title_wins_in_flight_generation(store: AgentJobStore)
         await asyncio.sleep(0.03)
         assert not generation.done()
     assert not await asyncio.wait_for(generation, timeout=3)
-    saved = await store.get_job(job["id"])
+    saved = await store.conversation_queries.get_job(job["id"])
     assert saved is not None and saved["title"] == job["title"]
     assert saved["title_source"] == "manual"
 
 
-async def test_manual_same_title_sets_provenance(store: AgentJobStore):
+async def test_manual_same_title_sets_provenance(store: Storage):
     """Saving the visible fallback without edits still blocks later generation."""
     job = await _create_job(store)
-    assert await store.set_thread_title(
+    assert await store.conversation_commands.set_thread_title(
         job_id=job["id"], user_id=job["user_id"], title=job["title"]
     )
     claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
     assert claim is not None and not claim["title_generation_pending"]
-    saved = await store.get_job(job["id"])
+    saved = await store.conversation_queries.get_job(job["id"])
     assert saved is not None and saved["title_source"] == "manual"
-    assert not await store.set_generated_thread_title(
+    assert not await store.conversation_commands.set_generated_thread_title(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -4630,7 +4900,7 @@ async def test_manual_same_title_sets_provenance(store: AgentJobStore):
     "fence_break", ["generation", "job", "expired", "failed", "cancelled", "deleted"]
 )
 async def test_generated_title_rejects_stale_or_deleted_work(
-    store: AgentJobStore, fence_break: str
+    pool, store: Storage, fence_break: str
 ):
     """Expired/superseded work cannot mutate the canonical conversation title."""
     job = await _create_job(store)
@@ -4643,7 +4913,7 @@ async def test_generated_title_rejects_stale_or_deleted_work(
     elif fence_break == "job":
         job_id = (await _create_job(store, user_id="other-owner"))["id"]
     elif fence_break in {"failed", "cancelled"}:
-        assert await store.transition(
+        assert await store.attempt_commands.transition(
             job_id=job_id,
             attempt_id=claim["attempt_id"],
             lease_generation=generation,
@@ -4651,7 +4921,7 @@ async def test_generated_title_rejects_stale_or_deleted_work(
             to_state=fence_break,
         )
     else:
-        async with store._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             if fence_break == "expired":
                 await conn.execute(
                     "UPDATE agent_attempts SET lease_expires_at = NOW() - INTERVAL '1 second' "
@@ -4663,22 +4933,22 @@ async def test_generated_title_rejects_stale_or_deleted_work(
                     "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1",
                     job["thread_id"],
                 )
-    assert not await store.set_generated_thread_title(
+    assert not await store.conversation_commands.set_generated_thread_title(
         job_id=job_id,
         attempt_id=claim["attempt_id"],
         lease_generation=generation,
         title="Stale result",
     )
-    saved = await store.get_job(job["id"])
+    saved = await store.conversation_queries.get_job(job["id"])
     assert saved is not None and saved["title"] == job["title"]
 
 
-async def test_title_generation_is_not_repeated_on_retry(store: AgentJobStore):
+async def test_title_generation_is_not_repeated_on_retry(store: Storage):
     """Failed first-claim generation keeps the short fallback on a later attempt."""
     job = await _create_job(store)
     first = await _claim(store, worker_id="first-worker", lease_ttl_seconds=60)
     assert first is not None and first["title_generation_pending"]
-    assert await store.release_claim(
+    assert await store.attempt_commands.release_claim(
         job_id=job["id"],
         attempt_id=first["attempt_id"],
         lease_generation=first["lease_generation"],
@@ -4686,7 +4956,7 @@ async def test_title_generation_is_not_repeated_on_retry(store: AgentJobStore):
     second = await _claim(store, worker_id="second-worker", lease_ttl_seconds=60)
     assert second is not None and not second["title_generation_pending"]
     for claim in [first, second]:
-        assert not await store.set_generated_thread_title(
+        assert not await store.conversation_commands.set_generated_thread_title(
             job_id=job["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -4694,7 +4964,7 @@ async def test_title_generation_is_not_repeated_on_retry(store: AgentJobStore):
         )
 
 
-async def test_successful_short_task_accepts_delayed_title(store: AgentJobStore):
+async def test_successful_short_task_accepts_delayed_title(pool, store: Storage):
     """A fast task can finish before its independent title request returns."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="title-worker", lease_ttl_seconds=60)
@@ -4704,16 +4974,20 @@ async def test_successful_short_task_accepts_delayed_title(store: AgentJobStore)
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
-    await _settled(store, fence["job_id"])
-    assert await store.transition(**fence, from_states=("running",), to_state="succeeded")
-    assert await store.set_generated_thread_title(**fence, title="Fix flaky test")
-    saved = await store.get_job(job["id"])
+    await _settled(pool, store, fence["job_id"])
+    assert await store.attempt_commands.transition(
+        **fence, from_states=("running",), to_state="succeeded"
+    )
+    assert await store.conversation_commands.set_generated_thread_title(
+        **fence, title="Fix flaky test"
+    )
+    saved = await store.conversation_queries.get_job(job["id"])
     assert saved is not None and saved["title"] == "Fix flaky test"
     assert saved["title_source"] == "generated"
 
 
 async def test_a_cancelled_parent_released_by_the_platform_unblocks_its_queued_child(
-    store: AgentJobStore,
+    store: Storage,
 ):
     """A platform-side release that lands as ``cancelled`` is a turn boundary too.
 
@@ -4723,35 +4997,41 @@ async def test_a_cancelled_parent_released_by_the_platform_unblocks_its_queued_c
     parent = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None and claim["id"] == parent["id"]
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
     )
     assert child is not None and child["state"] == "queued"
 
-    assert await store.request_cancel(job_id=parent["id"], user_id="user-1") == "running"
-    assert await store.release_claim(job_id=parent["id"], attempt_id=claim["attempt_id"])
+    assert (
+        await store.attempt_commands.request_cancel(job_id=parent["id"], user_id="user-1")
+        == "running"
+    )
+    assert await store.attempt_commands.release_claim(
+        job_id=parent["id"], attempt_id=claim["attempt_id"]
+    )
 
-    assert (await store.get_job(parent["id"]))["state"] == "cancelled"
-    assert (await store.get_job(child["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(parent["id"]))["state"] == "cancelled"
+    assert (await store.conversation_queries.get_job(child["id"]))["state"] == "queued"
     # And it is the next thing a runner is handed.
     next_claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert next_claim is not None and next_claim["id"] == child["id"]
 
 
 async def test_queued_follow_up_needs_no_promotion_after_parent_finishes(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """Eligibility follows the parent state even if no terminal cleanup ran."""
     parent = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
     )
     assert child is not None and child["state"] == "queued"
     # A terminal parent without the scoped continuity cleanup, as can exist
     # in legacy data. Claiming does not depend on a second state update.
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'failed', current_attempt_id = NULL WHERE id = $1",
             parent["id"],
@@ -4760,24 +5040,25 @@ async def test_queued_follow_up_needs_no_promotion_after_parent_finishes(
             "UPDATE agent_attempts SET status = 'finished', finished_at = NOW() WHERE id = $1",
             claim["attempt_id"],
         )
-    assert (await store.get_job(child["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(child["id"]))["state"] == "queued"
     next_claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert next_claim is not None and next_claim["id"] == child["id"]
 
 
 async def test_queued_cleanup_fails_tail_after_success_without_retained_context(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """Legacy success cannot cause a queued follow-up to start a fresh sandbox."""
     parent = await _create_job(store)
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
     )
-    grandchild = await store.create_follow_up(
+    grandchild = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="third turn"
     )
     assert child is not None and grandchild is not None
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1 WHERE id = $1",
             parent["id"],
@@ -4786,16 +5067,17 @@ async def test_queued_cleanup_fails_tail_after_success_without_retained_context(
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None and claim["id"] == other["id"]
     assert await _claim(store, worker_id="w2", lease_ttl_seconds=60) is None
-    await store.sweep_queued_follow_ups()
+    await store.attempt_commands.sweep_queued_follow_ups()
     for pending in (child, grandchild):
-        saved = await store.get_job(pending["id"])
+        saved = await store.conversation_queries.get_job(pending["id"])
         assert saved["state"] == "failed"
         assert "predates retained-session continuity" in saved["detail"]
 
 
 @pytest.mark.parametrize("lost_field", ["context_status", "native_state"])
 async def test_queued_child_with_lost_membership_is_not_claimed_before_cleanup(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
     lost_field: str,
 ):
     """A running group does not prove its member's native context is usable."""
@@ -4807,17 +5089,17 @@ async def test_queued_child_with_lost_membership_is_not_claimed_before_cleanup(
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence,
         container_id="container-lost-member",
         context_status="new",
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
-    child = await store.create_follow_up(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
     )
     assert child is not None and child["state"] == "queued"
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=parent["id"],
         context_status="live",
@@ -4825,7 +5107,7 @@ async def test_queued_child_with_lost_membership_is_not_claimed_before_cleanup(
         idle_timeout_seconds=1800,
         base_sha=parent["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=parent["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -4833,7 +5115,7 @@ async def test_queued_child_with_lost_membership_is_not_claimed_before_cleanup(
         to_state="succeeded",
     )
     # Model legacy membership loss without the same-transaction tail cleanup.
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             f"UPDATE agent_thread_sandbox_memberships SET {lost_field} = 'lost' "
             "WHERE thread_id = $1",
@@ -4849,12 +5131,12 @@ async def test_queued_child_with_lost_membership_is_not_claimed_before_cleanup(
         )
         is None
     )
-    assert (await store.get_job(child["id"]))["state"] == "queued"
-    await store.sweep_queued_follow_ups()
-    assert (await store.get_job(child["id"]))["state"] == "failed"
+    assert (await store.conversation_queries.get_job(child["id"]))["state"] == "queued"
+    await store.attempt_commands.sweep_queued_follow_ups()
+    assert (await store.conversation_queries.get_job(child["id"]))["state"] == "failed"
 
 
-async def test_a_success_that_skipped_settlement_is_refused_loudly(store: AgentJobStore):
+async def test_a_success_that_skipped_settlement_is_refused_loudly(pool, store: Storage):
     """The store does not guess a native ordinal; a protocol slip fails, visibly."""
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
@@ -4864,14 +5146,19 @@ async def test_a_success_that_skipped_settlement_is_refused_loudly(store: AgentJ
         "lease_generation": claim["lease_generation"],
     }
     with pytest.raises(ValueError, match="settle"):
-        await store.transition(**fence, from_states=("running",), to_state="succeeded")
-    assert (await store.get_job(job["id"]))["state"] == "running"
-    await _settled(store, job["id"])
-    assert await store.transition(**fence, from_states=("running",), to_state="succeeded")
+        await store.attempt_commands.transition(
+            **fence, from_states=("running",), to_state="succeeded"
+        )
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "running"
+    await _settled(pool, store, job["id"])
+    assert await store.attempt_commands.transition(
+        **fence, from_states=("running",), to_state="succeeded"
+    )
 
 
 async def test_conversations_activity_counts_an_earlier_turn_finishing_last(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """A cancelled follow-up does not hide the parent's later completion.
 
@@ -4881,17 +5168,20 @@ async def test_conversations_activity_counts_an_earlier_turn_finishing_last(
     parent = await _create_job(store, task_prompt="first conversation")
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None and claim["id"] == parent["id"]
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
     )
     assert child is not None and child["state"] == "queued"
-    assert await store.request_cancel(job_id=child["id"], user_id="user-1") == "cancelled"
+    assert (
+        await store.attempt_commands.request_cancel(job_id=child["id"], user_id="user-1")
+        == "cancelled"
+    )
     other = await _create_job(store, task_prompt="second conversation")
-    before = await store.list_conversations(user_id="user-1")
+    before = await store.conversation_queries.list_conversations(user_id="user-1")
     assert [item["job"]["id"] for item in before["conversations"]] == [other["id"], child["id"]]
 
-    await _settled(store, parent["id"])
-    assert await store.transition(
+    await _settled(pool, store, parent["id"])
+    assert await store.attempt_commands.transition(
         job_id=parent["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -4899,29 +5189,33 @@ async def test_conversations_activity_counts_an_earlier_turn_finishing_last(
         to_state="succeeded",
     )
 
-    after = await store.list_conversations(user_id="user-1")
+    after = await store.conversation_queries.list_conversations(user_id="user-1")
     assert [item["job"]["id"] for item in after["conversations"]] == [child["id"], other["id"]]
-    finished = await store.get_job(parent["id"])
+    finished = await store.conversation_queries.get_job(parent["id"])
     assert after["conversations"][0]["last_activity_at"] == finished["updated_at"]
 
 
 async def test_conversations_activity_counts_a_publication_of_an_earlier_turn(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ):
     """Publication stamps the turns it included, and that is activity too."""
     parent = await _create_job(store, task_prompt="first conversation")
-    child = await store.create_follow_up(
+    child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
     )
     assert child is not None
-    assert await store.request_cancel(job_id=child["id"], user_id="user-1") == "cancelled"
+    assert (
+        await store.attempt_commands.request_cancel(job_id=child["id"], user_id="user-1")
+        == "cancelled"
+    )
     other = await _create_job(store, task_prompt="second conversation")
-    before = await store.list_conversations(user_id="user-1")
+    before = await store.conversation_queries.list_conversations(user_id="user-1")
     assert [item["job"]["id"] for item in before["conversations"]] == [other["id"], child["id"]]
     # What ``record_snapshot_publish`` writes on every included, succeeded
     # turn: the pull request, the commit, and a fresh ``updated_at``.
     published_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1, "
             "published_pr_url = 'https://example.test/pr/1', updated_at = $2 WHERE id = $1",
@@ -4929,6 +5223,6 @@ async def test_conversations_activity_counts_a_publication_of_an_earlier_turn(
             published_at,
         )
 
-    after = await store.list_conversations(user_id="user-1")
+    after = await store.conversation_queries.list_conversations(user_id="user-1")
     assert [item["job"]["id"] for item in after["conversations"]] == [child["id"], other["id"]]
     assert after["conversations"][0]["last_activity_at"] == published_at

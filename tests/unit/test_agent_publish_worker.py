@@ -22,6 +22,7 @@ from cloud_agent.publish_worker import (
     publish_one,
 )
 from cloud_agent.publisher import PublishError, PublishResult
+from tests.support.storage import AllCapabilities
 
 pytestmark = pytest.mark.asyncio
 
@@ -53,7 +54,7 @@ _JOB = {
 }
 
 
-class FakeStore:
+class FakeStore(AllCapabilities):
     """Records what the publisher did to the job."""
 
     def __init__(self, job: dict[str, Any] | None = None, *, record_ok: bool = True) -> None:

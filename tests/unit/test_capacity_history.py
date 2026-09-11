@@ -24,6 +24,7 @@ from cloud_agent.capacity_history import (
     collect_host_capacity_history,
 )
 from cloud_agent.capacity_protocol import bucket_for
+from tests.support.storage import AllCapabilities
 
 SAMPLE = "00000000-0000-4000-8000-000000000001"
 EPOCH = "00000000-0000-4000-8000-0000000000ff"
@@ -65,7 +66,7 @@ def candidate(host: str, *, sampled_at: datetime | None = None, **overrides: Any
     return row
 
 
-class FakeStore:
+class FakeStore(AllCapabilities):
     """The store surface the task uses, with per-call failure injection."""
 
     def __init__(

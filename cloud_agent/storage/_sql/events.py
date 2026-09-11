@@ -1,9 +1,10 @@
 """One event row, written inside the caller's transaction.
 
-Moved verbatim out of :mod:`cloud_agent.storage.store`. Two capabilities write
-events -- an attempt reporting its progress, and a snapshot publish recording
-its outcome -- so the statement belongs to neither and lives here, taking the
-caller's connection as its first argument exactly as it did as a method.
+Lifted verbatim from the single storage class this package replaced. Two
+capabilities write events -- an attempt reporting its progress, and a snapshot
+publish recording its outcome -- so the statement belongs to neither and lives
+here, taking the caller's connection as its first argument exactly as it did
+as a method.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """API-surface tests for the agent-sandbox job router.
 
-Runs against a minimal in-memory stand-in for ``AgentJobStore`` so the default
+Runs against a minimal in-memory stand-in for the storage layer so the default
 (no-database) suite covers the HTTP contract: owner scoping, capability-token
 authentication, the fenced-write → 409 mapping, and SSE framing. The store's
 own concurrency semantics are pinned separately by the ``dbtest`` suite.
@@ -40,10 +40,11 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import broker_routing, mcp_catalogue
 from cloud_agent.api import routes as agent_jobs_router
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp_catalogue import McpProvider
 from cloud_agent.mcp_registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
+from tests.support.storage import AllCapabilities
 
 pytestmark = pytest.mark.asyncio
 
@@ -53,8 +54,8 @@ _MCP_ENCRYPTION_KEY = "api-test-mcp-encryption-key"
 _MCP_CIPHER = mcp_cipher(_MCP_ENCRYPTION_KEY)
 
 
-class FakeAgentJobStore:
-    """In-memory stand-in exposing the AgentJobStore surface the router uses."""
+class FakeStorage(AllCapabilities):
+    """In-memory stand-in exposing the storage surface the router uses."""
 
     def __init__(self) -> None:
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -997,12 +998,12 @@ def _api_key_secret(monkeypatch):
 
 
 @pytest.fixture()
-def store() -> FakeAgentJobStore:
+def store() -> FakeStorage:
     """Provide a fresh in-memory store."""
-    return FakeAgentJobStore()
+    return FakeStorage()
 
 
-def _attach_shared_workspace(store: FakeAgentJobStore, job_id: str) -> str:
+def _attach_shared_workspace(store: FakeStorage, job_id: str) -> str:
     """Give a route test the retained group a real runner would reserve."""
     job = store.jobs[job_id]
     thread_id = str(job["thread_id"])
@@ -1112,7 +1113,7 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     # The create endpoints fail fast on models the deployment cannot serve, so
     # the gateway the test answers with must contain what the tests submit.
     app.dependency_overrides[get_gateway_client] = _FakeGateway
@@ -1159,7 +1160,7 @@ def _browser_session(*, expires_delta=None) -> str:
 
 
 @pytest_asyncio.fixture()
-async def client(store: FakeAgentJobStore):
+async def client(store: FakeStorage):
     """Mount only the agent-jobs router with auth stubbed to a fixed owner."""
     app = _build_app(store)
     transport = ASGITransport(app=app)
@@ -1212,7 +1213,7 @@ async def test_create_get_list_round_trip(client: AsyncClient):
 
 
 async def test_execution_profile_is_server_owned_and_reserved_metadata_is_dropped(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """The deployment chooses the boundary; a request cannot forge or lower it."""
     monkeypatch.setenv("AGENT_DEFAULT_EXECUTION_PROFILE", "untrusted-kata-v1")
@@ -1250,7 +1251,7 @@ async def test_execution_profile_is_server_owned_and_reserved_metadata_is_droppe
 
 
 async def test_follow_up_inherits_profile_instead_of_rereading_policy(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     monkeypatch.setenv("AGENT_DEFAULT_EXECUTION_PROFILE", "untrusted-kata-v1")
     source_id = await _create_job(client)
@@ -1289,7 +1290,7 @@ async def test_repo_filter_rejects_a_value_git_would_read_as_an_option(client: A
 
 
 async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Search returns the canonical title separately from the latest prompt."""
     job_id = await _create_job(client)
@@ -1359,7 +1360,7 @@ async def test_conversation_search_rejects_invalid_parameters(client: AsyncClien
 
 
 async def test_conversation_search_rejects_invalid_cursor(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     search = AsyncMock(side_effect=ValueError("Invalid conversation cursor for this search"))
     monkeypatch.setattr(store, "list_conversations", search, raising=False)
@@ -1369,7 +1370,7 @@ async def test_conversation_search_rejects_invalid_cursor(
 
 
 async def test_conversation_search_requires_owner_and_accepts_browser_session(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Anonymous searches are refused; signed-in searches use the JWT owner."""
     search = AsyncMock(return_value={"conversations": [], "next_cursor": None})
@@ -1391,7 +1392,7 @@ async def test_conversation_search_requires_owner_and_accepts_browser_session(
 
 
 async def test_conversation_search_forwards_unpinned_filter(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """False selects the ordinary list rather than omitting the filter."""
     search = AsyncMock(return_value={"conversations": [], "next_cursor": None})
@@ -1402,7 +1403,7 @@ async def test_conversation_search_forwards_unpinned_filter(
 
 
 def _seed_event(
-    store: FakeAgentJobStore,
+    store: FakeStorage,
     *,
     job_id: str,
     seq: int,
@@ -1424,7 +1425,7 @@ def _seed_event(
 
 
 async def test_thread_stats_summarize_every_turn_in_the_thread(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """The bar counts the whole conversation, not just the job asked about."""
     parent_id = await _create_job(client)
@@ -1471,9 +1472,7 @@ async def test_thread_stats_summarize_every_turn_in_the_thread(
         assert body["timing_source"] == "message_events"
 
 
-async def test_thread_stats_report_absent_tokens_as_null(
-    client: AsyncClient, store: FakeAgentJobStore
-):
+async def test_thread_stats_report_absent_tokens_as_null(client: AsyncClient, store: FakeStorage):
     """A runtime that reports no usage must not look like one that used none."""
     job_id = await _create_job(client)
     _seed_event(store, job_id=job_id, seq=1, event_type="raw", payload={"text": "tier-2 tail"})
@@ -1487,7 +1486,7 @@ async def test_thread_stats_report_absent_tokens_as_null(
     assert body["tokens_source"] == "unavailable"
 
 
-async def test_thread_stats_are_owner_scoped(client: AsyncClient, store: FakeAgentJobStore):
+async def test_thread_stats_are_owner_scoped(client: AsyncClient, store: FakeStorage):
     """Someone else's thread is not summarizable, same as it is not readable."""
     job_id = await _create_job(client)
     store.jobs[job_id]["user_id"] = _OTHER
@@ -1520,7 +1519,7 @@ async def test_archived_threads_leave_the_active_project_tree(client: AsyncClien
 
 
 async def test_archive_and_restore_filter_the_entire_thread_without_cancelling(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Archive hides every turn while leaving a live run untouched."""
     parent_id = await _create_job(client)
@@ -1562,7 +1561,7 @@ async def test_archive_and_restore_filter_the_entire_thread_without_cancelling(
 
 
 async def test_rename_from_a_follow_up_updates_the_conversation_and_preserves_prompts(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Any turn renames all owner-facing views while keeping execution inputs intact."""
     parent_id = await _create_job(client)
@@ -1614,7 +1613,7 @@ async def test_rename_accepts_trimmed_title_limit(client: AsyncClient):
 
 
 async def test_rename_hides_foreign_missing_and_deleted_jobs(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Renaming exposes no other owner's jobs and cannot restore deleted history."""
     foreign_id = await _create_job(client)
@@ -1628,7 +1627,7 @@ async def test_rename_hides_foreign_missing_and_deleted_jobs(
 
 
 async def test_pin_and_unpin_are_thread_scoped_idempotent_and_reorder_lists(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Any turn pins the conversation and its project without touching run state."""
     parent_id = await _create_job(client)
@@ -1702,7 +1701,7 @@ async def test_follow_up_response_inherits_the_thread_pin(
 
 
 async def test_follow_up_queues_after_parent_and_uses_native_session_context(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """A user can send the next turn while the current sandbox is active."""
     parent_id = await _create_job(client)
@@ -1752,7 +1751,7 @@ async def test_follow_up_queues_after_parent_and_uses_native_session_context(
 
 
 async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Every unfinished earlier turn blocks a claim, even across a cancellation."""
     parent_id = await _create_job(client)
@@ -1901,7 +1900,7 @@ async def test_follow_ups_append_to_latest_turn_and_reject_blank_prompts(
 
 
 async def test_follow_up_is_refused_when_retained_context_is_lost(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
     store.jobs[job_id]["state"] = "failed"
@@ -1923,7 +1922,7 @@ async def test_follow_up_is_refused_when_retained_context_is_lost(
 
 async def test_follow_up_handles_context_loss_during_admission_checks(
     client: AsyncClient,
-    store: FakeAgentJobStore,
+    store: FakeStorage,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The locked store check closes the gap after the advisory API read."""
@@ -1944,7 +1943,7 @@ async def test_follow_up_handles_context_loss_during_admission_checks(
 
 
 async def test_chat_without_shared_native_state_cannot_be_forked(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Fork never falls back to copying transcript rows or workspace data."""
     source_id = await _create_job(client)
@@ -1957,7 +1956,7 @@ async def test_chat_without_shared_native_state_cannot_be_forked(
     assert len(store.jobs) == 1
 
 
-async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: FakeAgentJobStore):
+async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: FakeStorage):
     """A running turn's output is not history yet, so it cannot anchor a fork."""
     job_id = await _create_job(client)
 
@@ -1975,7 +1974,7 @@ async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: Fak
 
 async def test_failed_turn_is_neither_advertised_nor_accepted_as_a_fork_anchor(
     client: AsyncClient,
-    store: FakeAgentJobStore,
+    store: FakeStorage,
 ):
     job_id = await _create_job(client)
     job = store.jobs[job_id]
@@ -2004,7 +2003,7 @@ async def test_failed_turn_is_neither_advertised_nor_accepted_as_a_fork_anchor(
 
 async def test_successful_turn_needs_a_persisted_native_ordinal_before_advertising_fork(
     client: AsyncClient,
-    store: FakeAgentJobStore,
+    store: FakeStorage,
 ):
     job_id = await _create_job(client)
     job = store.jobs[job_id]
@@ -2031,7 +2030,7 @@ async def test_successful_turn_needs_a_persisted_native_ordinal_before_advertisi
 
 
 async def test_legacy_retained_chat_cannot_fall_back_to_a_docker_clone(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Historical one-chat containers stay readable but are never cloned."""
 
@@ -2061,7 +2060,7 @@ async def test_legacy_retained_chat_cannot_fall_back_to_a_docker_clone(
 
 
 async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Clicking Fork immediately materializes a sibling process, not a clone."""
 
@@ -2135,7 +2134,7 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
 
 
 async def test_shared_chat_can_fork_from_a_specific_historical_turn(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """The host receives the selected prefix, not an implicit latest fork."""
 
@@ -2210,7 +2209,7 @@ async def test_shared_chat_can_fork_from_a_specific_historical_turn(
 
 
 async def test_same_native_fork_request_has_one_external_coordinator(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Two API workers must not rotate residencies or fork the CLI twice."""
 
@@ -2277,9 +2276,7 @@ async def test_same_native_fork_request_has_one_external_coordinator(
     assert broker.calls == 1
 
 
-async def test_ready_native_fork_retry_does_not_need_the_host(
-    store: FakeAgentJobStore, monkeypatch
-):
+async def test_ready_native_fork_retry_does_not_need_the_host(store: FakeStorage, monkeypatch):
     """A lost success response remains idempotent after the host disappears."""
 
     class Broker:
@@ -2337,7 +2334,7 @@ async def test_ready_native_fork_retry_does_not_need_the_host(
     assert broker.calls == 1
 
 
-async def test_fork_is_owner_scoped(client: AsyncClient, store: FakeAgentJobStore):
+async def test_fork_is_owner_scoped(client: AsyncClient, store: FakeStorage):
     """Someone else's job id forks as 404, indistinguishable from absent."""
     job_id = await _create_job(client)
     store.jobs[job_id]["state"] = "succeeded"
@@ -2348,7 +2345,7 @@ async def test_fork_is_owner_scoped(client: AsyncClient, store: FakeAgentJobStor
     assert response.status_code == 404
 
 
-async def test_browser_jwt_can_list_agent_jobs(store: FakeAgentJobStore):
+async def test_browser_jwt_can_list_agent_jobs(store: FakeStorage):
     """Regression: the web login JWT was interpreted as an invalid API key."""
     app = _build_app(store)
     app.dependency_overrides.pop(agent_jobs_router.authenticate_agent_owner)
@@ -2365,7 +2362,7 @@ async def test_browser_jwt_can_list_agent_jobs(store: FakeAgentJobStore):
     assert response.json() == {"jobs": []}
 
 
-async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeAgentJobStore):
+async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeStorage):
     """Credential dispatch must preserve a JWT's own expiry failure."""
     from datetime import timedelta
 
@@ -2394,7 +2391,7 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeAg
 # surfaces.
 
 
-async def test_sandbox_token_stays_out_of_owner_routes(store: FakeAgentJobStore):
+async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
     """A structured Agent token must not be mistaken for a browser JWT."""
     from cloud_agent.tokens import SCOPE_MODEL
 
@@ -2419,7 +2416,7 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeAgentJobStore)
 
 
 @pytest.mark.parametrize("role", ["free", "pro", "internal"])
-async def test_a_gateway_allowed_non_admin_owner_can_read(store: FakeAgentJobStore, role: str):
+async def test_a_gateway_allowed_non_admin_owner_can_read(store: FakeStorage, role: str):
     """The explicit policy, rather than a profile role, admits the owner."""
     app = _build_app(store, role=role)
     transport = ASGITransport(app=app)
@@ -2428,7 +2425,7 @@ async def test_a_gateway_allowed_non_admin_owner_can_read(store: FakeAgentJobSto
     assert response.status_code == 200
 
 
-async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: FakeAgentJobStore):
+async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: FakeStorage):
     """Someone else's job is indistinguishable from a missing one."""
     foreign = await store.create_job(
         user_id=_OTHER,
@@ -2488,7 +2485,7 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         assert missing_pin.status_code == 404
 
 
-async def test_live_workspace_routes_use_the_job_broker(store: FakeAgentJobStore, monkeypatch):
+async def test_live_workspace_routes_use_the_job_broker(store: FakeStorage, monkeypatch):
     """Files, terminal and Git address the same retained chat workspace."""
 
     class Broker:
@@ -2567,7 +2564,7 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeAgentJobStore
 
 
 async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """The broker's shared-only 404 describes the workspace, not a file path."""
     from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
@@ -2594,7 +2591,7 @@ async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
 
 
 async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn_url(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Broker restart cannot bypass a protected latest-turn workspace phase."""
 
@@ -2761,7 +2758,7 @@ class _TerminalSessionBroker:
 
 
 async def test_interactive_terminal_routes_proxy_owner_session_lifecycle(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """The gateway keeps broker credentials private while proxying PTY controls."""
     broker = _TerminalSessionBroker()
@@ -2806,7 +2803,7 @@ async def test_interactive_terminal_routes_proxy_owner_session_lifecycle(
 
 
 async def test_terminal_controls_use_the_attached_session_capability(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Attached PTY controls skip entitlement and never replay the event log."""
     broker = _TerminalSessionBroker()
@@ -2864,7 +2861,7 @@ async def test_terminal_controls_use_the_attached_session_capability(
 
 
 async def test_interactive_terminal_stream_is_relayed_byte_for_byte(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Output and exit SSE frames cross the gateway without re-encoding."""
     broker = _TerminalSessionBroker()
@@ -2895,7 +2892,7 @@ async def test_interactive_terminal_stream_is_relayed_byte_for_byte(
 
 
 async def test_full_terminal_lifecycle_is_available_while_agent_runs(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """PTY creation waits for checkout, then stays available during the run."""
     broker = _TerminalSessionBroker()
@@ -3011,7 +3008,7 @@ async def test_full_terminal_lifecycle_is_available_while_agent_runs(
 
 
 async def test_worker_suspends_terminals_around_protected_workspace_phases(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Preparation and capture pause PTYs; execution and settled jobs resume them."""
     broker = _TerminalSessionBroker()
@@ -3078,7 +3075,7 @@ async def test_worker_suspends_terminals_around_protected_workspace_phases(
 
 
 async def test_settled_terminal_access_replays_durable_resume_after_restart(
-    store: FakeAgentJobStore,
+    store: FakeStorage,
     monkeypatch,
 ):
     """The first owner access repairs a persisted resume missed before restart."""
@@ -3102,7 +3099,7 @@ async def test_settled_terminal_access_replays_durable_resume_after_restart(
 
 
 async def test_worker_re_suspends_terminals_if_ready_event_loses_lease(
-    store: FakeAgentJobStore,
+    store: FakeStorage,
     monkeypatch,
 ):
     """A lease expiring during broker resume cannot expose background processes."""
@@ -3144,7 +3141,7 @@ async def test_worker_re_suspends_terminals_if_ready_event_loses_lease(
 
 
 async def test_worker_re_suspends_terminals_if_finish_loses_lease(
-    store: FakeAgentJobStore,
+    store: FakeStorage,
     monkeypatch,
 ):
     """A failed terminal transition compensates after broker resume."""
@@ -3186,9 +3183,7 @@ async def test_worker_re_suspends_terminals_if_finish_loses_lease(
     ]
 
 
-async def test_terminal_readiness_uses_the_shared_group_barrier(
-    store: FakeAgentJobStore, monkeypatch
-):
+async def test_terminal_readiness_uses_the_shared_group_barrier(store: FakeStorage, monkeypatch):
     """Owner PTYs open only after the durable shared workspace barrier clears."""
     broker = _TerminalSessionBroker()
     monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
@@ -3216,7 +3211,7 @@ async def test_terminal_readiness_uses_the_shared_group_barrier(
 
 
 async def test_terminal_routes_recheck_entitlement_before_contacting_broker(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Owning a chat does not bypass current repository entitlement."""
     job = await store.create_job(
@@ -3244,7 +3239,7 @@ async def test_terminal_routes_recheck_entitlement_before_contacting_broker(
 
 
 async def test_terminal_routes_report_missing_broker_and_workspace_as_conflicts(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """A retained chat reports missing broker/workspace as actionable conflicts."""
     from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
@@ -3324,7 +3319,7 @@ async def test_interactive_terminal_request_bounds(
         "nul\x00path",
     ],
 )
-async def test_workspace_files_reject_path_traversal(store: FakeAgentJobStore, unsafe_path: str):
+async def test_workspace_files_reject_path_traversal(store: FakeStorage, unsafe_path: str):
     """Decoded traversal and platform-specific aliases fail before GitHub is called."""
     from cloud_agent.api.deps import get_agent_app_credentials
 
@@ -3344,7 +3339,7 @@ async def test_workspace_files_reject_path_traversal(store: FakeAgentJobStore, u
     assert app_creds.calls == []
 
 
-async def test_workspace_files_recheck_repository_entitlement(store: FakeAgentJobStore):
+async def test_workspace_files_recheck_repository_entitlement(store: FakeStorage):
     """Owning a legacy row does not entitle its repository after access is revoked."""
     from cloud_agent.api.deps import get_agent_app_credentials
 
@@ -3377,7 +3372,7 @@ async def test_cancel_queued_job(client: AsyncClient):
 
 
 async def test_cancel_requeued_job_authoritatively_resumes_terminals(
-    store: FakeAgentJobStore,
+    store: FakeStorage,
     monkeypatch,
 ):
     """Cancellation must not strand sessions paused by an expired attempt."""
@@ -3397,7 +3392,7 @@ async def test_cancel_requeued_job_authoritatively_resumes_terminals(
     assert store.jobs[job_id]["terminal_resume_pending"] is False
 
 
-async def test_worker_flow_claim_event_finish(client: AsyncClient, store: FakeAgentJobStore):
+async def test_worker_flow_claim_event_finish(client: AsyncClient, store: FakeStorage):
     """The worker path is claim → token → event → fenced finish."""
     job_id = await _create_job(client)
 
@@ -3436,7 +3431,7 @@ async def test_worker_flow_claim_event_finish(client: AsyncClient, store: FakeAg
 
 
 async def test_retained_prompt_admission_is_worker_and_generation_fenced(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
     claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
@@ -3462,7 +3457,7 @@ async def test_retained_prompt_admission_is_worker_and_generation_fenced(
 
 
 async def test_shared_abandon_releases_the_exact_residency_and_grant(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """A pre-admission process failure must not leave a renewable grant live."""
 
@@ -3544,7 +3539,7 @@ async def test_shared_abandon_releases_the_exact_residency_and_grant(
     assert grants.revoked == ["agr_resident_shared"]
 
 
-async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: FakeAgentJobStore):
+async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: FakeStorage):
     """A retry of a dropped response gets the stored id, not a duplicate row."""
     job_id = await _create_job(client)
     claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
@@ -3559,7 +3554,7 @@ async def test_a_replayed_event_seq_is_idempotent(client: AsyncClient, store: Fa
 
 
 async def test_worker_api_bounds_oversized_events_without_failing_or_duplicating_the_turn(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Older runners can upload large events; the API stores a labelled preview."""
     job_id = await _create_job(client)
@@ -3589,9 +3584,7 @@ async def test_empty_queue_claim_returns_null(client: AsyncClient):
     assert response.json() is None
 
 
-async def test_lost_lease_maps_to_409_on_every_write_path(
-    client: AsyncClient, store: FakeAgentJobStore
-):
+async def test_lost_lease_maps_to_409_on_every_write_path(client: AsyncClient, store: FakeStorage):
     """Once the fence moves on, every remaining worker write returns 409."""
     job_id = await _create_job(client)
     claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
@@ -3650,7 +3643,7 @@ async def test_finish_rejects_non_terminal_state(client: AsyncClient):
 
 
 async def test_sse_stream_replays_and_closes_on_terminal_state(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """The SSE stream emits id-tagged frames and ends with job_finished."""
     job_id = await _create_job(client)
@@ -3677,7 +3670,7 @@ async def test_sse_stream_replays_and_closes_on_terminal_state(
     assert payload["state"] == "succeeded"
 
 
-async def test_sse_resumes_from_last_event_id(client: AsyncClient, store: FakeAgentJobStore):
+async def test_sse_resumes_from_last_event_id(client: AsyncClient, store: FakeStorage):
     """Last-Event-ID skips already-delivered events."""
     job_id = await _create_job(client)
     claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
@@ -3701,7 +3694,7 @@ async def test_sse_resumes_from_last_event_id(client: AsyncClient, store: FakeAg
     assert '"text":"two"' in body
 
 
-async def test_missing_store_returns_503(store: FakeAgentJobStore):
+async def test_missing_store_returns_503(store: FakeStorage):
     """Without a database the agent API reports 503 rather than crashing."""
     app = _build_app(None)
     transport = ASGITransport(app=app)
@@ -3710,7 +3703,7 @@ async def test_missing_store_returns_503(store: FakeAgentJobStore):
     assert response.status_code == 503
 
 
-async def test_claim_requires_an_enrolled_host_identity(store: FakeAgentJobStore):
+async def test_claim_requires_an_enrolled_host_identity(store: FakeStorage):
     """An ordinary customer cannot dequeue and read another tenant's job.
 
     Regression: claim_job takes the oldest queued job across all tenants and
@@ -3740,7 +3733,7 @@ async def test_claim_requires_an_enrolled_host_identity(store: FakeAgentJobStore
     assert allowed.json()["repo"] == "private/repo"
 
 
-async def test_pool_wide_bearer_token_does_not_open_claim(store: FakeAgentJobStore):
+async def test_pool_wide_bearer_token_does_not_open_claim(store: FakeStorage):
     """Only an enrolled, individually revocable host may dequeue work."""
     await store.create_job(
         user_id=_OWNER,
@@ -3763,7 +3756,7 @@ async def test_pool_wide_bearer_token_does_not_open_claim(store: FakeAgentJobSto
 
 
 async def test_worker_cannot_inject_sse_frames_via_event_type(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """A newline in event_type must not break out of the SSE event field.
 
@@ -3823,9 +3816,7 @@ async def test_lease_ttl_is_capped_server_side(client: AsyncClient):
     assert response.status_code == 422
 
 
-async def test_terminal_stream_drains_beyond_one_page(
-    client: AsyncClient, store: FakeAgentJobStore
-):
+async def test_terminal_stream_drains_beyond_one_page(client: AsyncClient, store: FakeStorage):
     """A finished job with multiple pages of backlog delivers every event.
 
     Regression: the terminal path drained exactly one extra page before
@@ -3874,7 +3865,7 @@ async def test_terminal_stream_drains_beyond_one_page(
 
 
 async def test_the_claim_hands_over_a_gateway_grant_not_a_minted_token(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """The sandbox credential is distinct from the runner's — and is not ours.
 
@@ -3965,7 +3956,7 @@ async def test_event_type_guard_rejects_a_trailing_newline(client: AsyncClient):
     assert _SAFE_EVENT_TYPE.fullmatch("message\n") is None
 
 
-async def test_the_claim_carries_a_read_only_clone_credential(store: FakeAgentJobStore):
+async def test_the_claim_carries_a_read_only_clone_credential(store: FakeStorage):
     """The runner needs to check the repository out; it must not get push rights.
 
     An installation token inherits *every* permission the App holds unless it
@@ -4005,7 +3996,7 @@ async def test_a_deployment_without_a_github_app_still_claims_jobs(client: Async
 
 
 async def test_an_uninstalled_app_hands_the_job_over_without_a_credential(
-    store: FakeAgentJobStore,
+    store: FakeStorage,
 ):
     """A settled "not installed here" must not block the job.
 
@@ -4032,7 +4023,7 @@ async def test_an_uninstalled_app_hands_the_job_over_without_a_credential(
 
 
 async def test_a_transient_credential_error_is_retryable_not_terminal(
-    store: FakeAgentJobStore,
+    store: FakeStorage,
 ):
     """GitHub having a bad minute must not permanently fail someone's job.
 
@@ -4063,7 +4054,7 @@ async def test_a_transient_credential_error_is_retryable_not_terminal(
 
 
 async def test_the_worker_reports_the_commit_it_actually_worked_from(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """A job submitted without a base_sha is unpublishable until one is recorded.
 
@@ -4089,7 +4080,7 @@ async def test_the_worker_reports_the_commit_it_actually_worked_from(
 
 
 async def test_a_worker_cannot_overwrite_a_base_the_owner_pinned(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """An owner who names a commit must get a patch against that commit."""
     pinned = "b" * 40
@@ -4131,7 +4122,7 @@ async def test_an_unentitled_repo_is_refused_at_creation(client: AsyncClient):
     assert "repo_not_allowed" in response.text
 
 
-async def test_a_legacy_row_gets_no_credential_at_claim(store: FakeAgentJobStore):
+async def test_a_legacy_row_gets_no_credential_at_claim(store: FakeStorage):
     """A row written before the check existed must not yield a token now."""
     from cloud_agent.api.deps import get_agent_app_credentials
 
@@ -4163,7 +4154,7 @@ async def test_a_legacy_row_gets_no_credential_at_claim(store: FakeAgentJobStore
     assert store.released
 
 
-async def test_spend_and_usage_come_from_the_ledger_not_the_agent(store: FakeAgentJobStore):
+async def test_spend_and_usage_come_from_the_ledger_not_the_agent(store: FakeStorage):
     """A job's numbers must not depend on what the agent says about itself.
 
     Models do misreport their own usage — this session watched one claim it had
@@ -4260,7 +4251,7 @@ class _FakeGitHubApp:
         return "ghs_x"
 
 
-def _store_with_grants(store: FakeAgentJobStore) -> FakeAgentJobStore:
+def _store_with_grants(store: FakeStorage) -> FakeStorage:
     """Give the fake store the grant surface the router uses."""
     store.grants = {}
     store.consumed_oauth_states = set()
@@ -4292,7 +4283,7 @@ def _store_with_grants(store: FakeAgentJobStore) -> FakeAgentJobStore:
     return store
 
 
-async def test_connecting_records_only_what_github_attests(store: FakeAgentJobStore, monkeypatch):
+async def test_connecting_records_only_what_github_attests(store: FakeStorage, monkeypatch):
     """The entitlement must come from GitHub's answer, not the browser's claim.
 
     The browser sends a code; the platform exchanges it for a token that speaks
@@ -4325,7 +4316,7 @@ async def test_connecting_records_only_what_github_attests(store: FakeAgentJobSt
     assert config.json()["github_connected"] is True
 
 
-async def test_a_connected_user_may_run_only_their_own_repos(store: FakeAgentJobStore, monkeypatch):
+async def test_a_connected_user_may_run_only_their_own_repos(store: FakeStorage, monkeypatch):
     """Connecting one owner must not entitle someone else's repository."""
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
     from cloud_agent.api.deps import get_agent_app_credentials
@@ -4356,7 +4347,7 @@ async def test_a_connected_user_may_run_only_their_own_repos(store: FakeAgentJob
     assert "connected" in theirs.text
 
 
-async def test_a_failed_exchange_grants_nothing(store: FakeAgentJobStore, monkeypatch):
+async def test_a_failed_exchange_grants_nothing(store: FakeStorage, monkeypatch):
     """A code that does not verify must leave the user with no entitlement."""
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
     from cloud_agent.api.deps import get_agent_app_credentials
@@ -4380,7 +4371,7 @@ async def test_a_failed_exchange_grants_nothing(store: FakeAgentJobStore, monkey
     assert config.json()["repos"] == []
 
 
-async def test_disconnecting_removes_the_entitlement(store: FakeAgentJobStore, monkeypatch):
+async def test_disconnecting_removes_the_entitlement(store: FakeStorage, monkeypatch):
     """Revoking here is half of it; uninstalling on GitHub is the other half."""
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
     from cloud_agent.api.deps import get_agent_app_credentials
@@ -4406,7 +4397,7 @@ async def test_disconnecting_removes_the_entitlement(store: FakeAgentJobStore, m
     assert after.status_code == 403
 
 
-async def test_a_branch_is_pinned_to_a_commit_at_creation(store: FakeAgentJobStore, monkeypatch):
+async def test_a_branch_is_pinned_to_a_commit_at_creation(store: FakeStorage, monkeypatch):
     """A job records the sha, never the branch name.
 
     A branch moves. A job that stored "dev" would silently mean a different
@@ -4462,7 +4453,7 @@ async def test_reserved_base_ref_metadata_cannot_invent_a_branch(client: AsyncCl
     assert created.json()["metadata"] is None
 
 
-async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeAgentJobStore, monkeypatch):
+async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage, monkeypatch):
     """Better a clear 400 than a job queued against a ref that does not exist."""
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
     from cloud_agent.api.deps import get_agent_app_credentials
@@ -4491,7 +4482,7 @@ async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeAgentJob
     assert "nope" in created.text
 
 
-async def test_branches_are_only_listed_for_an_entitled_repo(store: FakeAgentJobStore, monkeypatch):
+async def test_branches_are_only_listed_for_an_entitled_repo(store: FakeStorage, monkeypatch):
     """This reads through the platform's installation, so it needs the same gate.
 
     Without it, the endpoint enumerates branches of any repository the App
@@ -4563,7 +4554,7 @@ def _catalogue(monkeypatch, *names: str) -> None:
 
 
 async def test_the_composer_is_told_which_servers_and_which_runtimes(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """A picker built from anything but the create endpoint's rules is decoration."""
     _catalogue(monkeypatch)
@@ -4580,7 +4571,7 @@ async def test_the_composer_is_told_which_servers_and_which_runtimes(
 
 
 async def test_the_composer_offers_only_what_this_user_connected(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """The whole point of #49: another person's connection is not on offer.
 
@@ -4596,7 +4587,7 @@ async def test_the_composer_offers_only_what_this_user_connected(
 
 
 async def test_omitting_servers_takes_everything_the_owner_connected(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Connecting is the opt-in, so a job that chose nothing still gets them."""
     _catalogue(monkeypatch)
@@ -4623,7 +4614,7 @@ async def test_a_user_who_connected_nothing_gets_a_job_that_runs_without_mcp(
 
 
 async def test_an_explicit_empty_list_means_no_servers(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Choosing none is a real choice and must not be read as "unset"."""
     _catalogue(monkeypatch)
@@ -4642,7 +4633,7 @@ async def test_an_explicit_empty_list_means_no_servers(
 
 
 async def test_an_unknown_server_is_refused_at_creation(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Better than discovering mid-run that the task's one tool is missing."""
     _catalogue(monkeypatch)
@@ -4661,7 +4652,7 @@ async def test_an_unknown_server_is_refused_at_creation(
 
 
 async def test_naming_a_server_someone_else_connected_is_refused_at_creation(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Refused in the same words as one that does not exist.
 
@@ -4689,7 +4680,7 @@ async def test_naming_a_server_someone_else_connected_is_refused_at_creation(
 
 
 async def test_a_runtime_that_cannot_load_mcp_refuses_the_job(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Silently dropping the tools would produce confidently wrong work."""
     _catalogue(monkeypatch)
@@ -4709,7 +4700,7 @@ async def test_a_runtime_that_cannot_load_mcp_refuses_the_job(
 
 
 @contextlib.asynccontextmanager
-async def _integrations_client(store: FakeAgentJobStore):
+async def _integrations_client(store: FakeStorage):
     """A client for the Integrations page, which reads more of the store.
 
     The page answers for source control as well as MCP, so the fake needs the
@@ -4728,7 +4719,7 @@ async def _integrations_client(store: FakeAgentJobStore):
 
 
 async def test_the_integrations_page_lists_the_catalogue_with_connection_state(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """The whole catalogue, marked — not just the part already connected.
 
@@ -4754,7 +4745,7 @@ async def test_the_integrations_page_lists_the_catalogue_with_connection_state(
 
 
 async def test_the_integrations_page_never_shows_another_users_connection(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Connected is a fact about the caller, and only the caller."""
     _catalogue(monkeypatch)
@@ -4769,9 +4760,7 @@ async def test_the_integrations_page_never_shows_another_users_connection(
     assert "ghu_someone_elses_secret" not in json.dumps(body)
 
 
-async def test_disconnecting_removes_only_the_callers_credential(
-    store: FakeAgentJobStore, monkeypatch
-):
+async def test_disconnecting_removes_only_the_callers_credential(store: FakeStorage, monkeypatch):
     """Two users connected the same server; one disconnects."""
     _catalogue(monkeypatch)
     store.connect_mcp(user_id=_OWNER, server="github")
@@ -4787,7 +4776,7 @@ async def test_disconnecting_removes_only_the_callers_credential(
 
 
 async def test_disconnecting_a_server_that_was_never_connected_is_a_404(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Not an error worth hiding, and not a silent success either."""
     _catalogue(monkeypatch)
@@ -4797,7 +4786,7 @@ async def test_disconnecting_a_server_that_was_never_connected_is_a_404(
 
 
 async def test_a_follow_up_is_refused_when_its_thread_s_server_was_disconnected(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Fail fast at creation, on **every** turn — not only a runtime switch.
 
@@ -4831,7 +4820,7 @@ async def test_a_follow_up_is_refused_when_its_thread_s_server_was_disconnected(
 
 
 async def test_a_follow_up_still_runs_while_its_thread_s_server_is_connected(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """The check must not refuse the ordinary case it now runs on."""
     _catalogue(monkeypatch)
@@ -4854,7 +4843,7 @@ async def test_a_follow_up_still_runs_while_its_thread_s_server_is_connected(
 
 
 async def test_an_expired_connection_is_neither_offered_nor_usable(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """A stored expiry in the past is a token we already know will be refused.
 
@@ -4892,7 +4881,7 @@ async def test_an_expired_connection_is_neither_offered_nor_usable(
 
 
 async def test_the_integrations_page_says_why_a_connection_buys_nothing(
-    store: FakeAgentJobStore, monkeypatch
+    store: FakeStorage, monkeypatch
 ):
     """Connected and unusable is a real state, and the page must name it.
 
@@ -4916,7 +4905,7 @@ async def test_the_integrations_page_says_why_a_connection_buys_nothing(
 
 
 async def test_disconnecting_leaves_a_running_jobs_server_list_alone(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """A job keeps the name it was created with and loses the credential.
 
@@ -4948,7 +4937,7 @@ async def test_disconnecting_leaves_a_running_jobs_server_list_alone(
 
 
 async def test_the_claim_hands_the_runner_the_job_s_servers(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """The runner passes names to the adapter; it never learns the addresses."""
     _catalogue(monkeypatch)
@@ -5024,7 +5013,7 @@ async def test_a_deployment_with_no_relay_hands_over_no_mcp_credential(
 
 
 async def test_a_job_created_with_an_alias_stores_the_canonical_id(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """**Validated as an alias, stored as an alias — the shape of the bug.**
 
@@ -5051,9 +5040,7 @@ async def test_an_unknown_model_is_still_refused_at_creation(client: AsyncClient
     assert response.json()["detail"]["error"]["type"] == "model_not_available"
 
 
-async def test_the_owner_sees_what_their_turn_consumed(
-    client: AsyncClient, store: FakeAgentJobStore
-):
+async def test_the_owner_sees_what_their_turn_consumed(client: AsyncClient, store: FakeStorage):
     """The footer's numbers, end to end: runner posts, owner reads."""
     job_id = await _create_job(client)
     claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
@@ -5189,7 +5176,7 @@ async def test_resource_sequences_and_process_references_are_consistent(
 
 
 async def test_per_call_rows_survive_the_wire_in_both_directions(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Posted by the runner, read by the owner, over the real request models.
 
@@ -5309,7 +5296,7 @@ async def test_per_call_rows_survive_the_wire_in_both_directions(
 
 
 async def test_a_turn_with_no_per_call_rows_reads_as_an_empty_list(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Every turn recorded before this shipped, and every unmeasured one."""
     job_id = await _create_job(client)
@@ -5329,7 +5316,7 @@ async def test_a_turn_with_no_per_call_rows_reads_as_an_empty_list(
 
 
 async def test_more_calls_than_the_cap_are_refused_rather_than_truncated_server_side(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """The runner caps and flags; the server must not quietly cap a second time."""
     job_id = await _create_job(client)
@@ -5352,7 +5339,7 @@ async def test_more_calls_than_the_cap_are_refused_rather_than_truncated_server_
 
 
 async def test_a_rollup_is_the_same_window_said_twice_not_two_windows(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Retrying the post must not double a turn's consumption."""
     job_id = await _create_job(client)
@@ -5368,7 +5355,7 @@ async def test_a_rollup_is_the_same_window_said_twice_not_two_windows(
 
 
 async def test_a_superseded_attempt_cannot_relabel_what_the_live_one_used(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Fenced like every other worker write."""
     job_id = await _create_job(client)
@@ -5389,7 +5376,7 @@ async def test_a_superseded_attempt_cannot_relabel_what_the_live_one_used(
 
 
 async def test_an_unmeasured_turn_reports_nothing_rather_than_zero(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """The distinction the whole feature rests on.
 
@@ -5411,7 +5398,7 @@ async def test_an_unmeasured_turn_reports_nothing_rather_than_zero(
 
 @pytest.mark.parametrize("state", ["running", "failed"])
 async def test_job_timing_does_not_invent_a_missing_attempt_finish(
-    client: AsyncClient, store: FakeAgentJobStore, state: str
+    client: AsyncClient, store: FakeStorage, state: str
 ):
     """A job update or terminal state cannot supply an unrecorded end time."""
     job_id = await _create_job(client)
@@ -5440,7 +5427,7 @@ async def test_job_timing_does_not_invent_a_missing_attempt_finish(
 
 
 async def test_job_list_and_thread_do_not_substitute_job_dates_for_execution_timing(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Paths without a telemetry read leave the execution window unknown."""
     job_id = await _create_job(client)
@@ -5469,7 +5456,7 @@ async def test_job_list_and_thread_do_not_substitute_job_dates_for_execution_tim
 
 
 async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Selecting an old transcript must never show the retry's measurements."""
     job_id = await _create_job(client)
@@ -5530,7 +5517,7 @@ async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
 
 
 async def test_retry_picker_polls_only_summaries_and_fetches_one_detail(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Adding retries must not multiply the polled tool/process payload."""
     job_id = await _create_job(client)
@@ -5579,7 +5566,7 @@ async def test_retry_picker_polls_only_summaries_and_fetches_one_detail(
 
 
 async def test_attempt_telemetry_is_fenced_to_the_owned_job(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
     another = await _create_job(client)
@@ -5811,7 +5798,7 @@ async def test_every_runtime_still_takes_ordinary_turns(client: AsyncClient):
 
 
 async def test_a_thread_read_returns_what_earlier_turns_did(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """A follow-up must not make the previous turn's tool activity unreachable."""
     first_id = await _create_job(client)
@@ -5842,9 +5829,7 @@ async def test_a_thread_read_returns_what_earlier_turns_did(
     assert thread["events"][0]["payload"]["name"] == "Bash"
 
 
-async def test_a_thread_event_read_refuses_a_foreign_job(
-    client: AsyncClient, store: FakeAgentJobStore
-):
+async def test_a_thread_event_read_refuses_a_foreign_job(client: AsyncClient, store: FakeStorage):
     job_id = await _create_job(client)
     store.jobs[job_id]["user_id"] = "someone-else"
 
@@ -5855,7 +5840,7 @@ async def test_a_thread_event_read_refuses_a_foreign_job(
 
 @pytest.mark.parametrize("session_state", ["queued", "running", "idle", "failed"])
 async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch, session_state: str
+    client: AsyncClient, store: FakeStorage, monkeypatch, session_state: str
 ):
     job_id = await _create_job(client)
     await store.set_thread_archived(job_id=job_id, user_id=_OWNER, archived=True)
@@ -5911,7 +5896,7 @@ async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
 
 
 async def test_job_response_preserves_turn_result_beside_conversation_activity(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
     store.jobs[job_id].update(state="cancelled", conversation_state="running")
@@ -5921,9 +5906,7 @@ async def test_job_response_preserves_turn_result_beside_conversation_activity(
     assert response.json()["conversation_state"] == "running"
 
 
-async def test_session_list_can_omit_summary(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
-):
+async def test_session_list_can_omit_summary(client: AsyncClient, store: FakeStorage, monkeypatch):
     listing = AsyncMock(
         return_value={"sessions": [], "total": None, "projects": None, "next_cursor": None}
     )
@@ -5936,7 +5919,7 @@ async def test_session_list_can_omit_summary(
 
 
 async def test_session_list_rejects_bad_cursor_and_display_filters(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     listing = AsyncMock(side_effect=ValueError("Invalid session cursor for these filters"))
     monkeypatch.setattr(store, "list_sessions", listing, raising=False)
@@ -5947,7 +5930,7 @@ async def test_session_list_rejects_bad_cursor_and_display_filters(
 
 
 async def test_session_mutations_use_explicit_owner_snapshot(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     thread_ids = ["athr_1", "athr_2"]
     archive = AsyncMock(
@@ -5980,7 +5963,7 @@ async def test_session_mutations_use_explicit_owner_snapshot(
     ],
 )
 async def test_session_delete_conflicts_have_actionable_types(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch, error: str, status: int
+    client: AsyncClient, store: FakeStorage, monkeypatch, error: str, status: int
 ):
     delete = AsyncMock(return_value={"error": error})
     monkeypatch.setattr(store, "delete_sessions", delete, raising=False)
@@ -6001,7 +5984,7 @@ async def test_session_mutations_refuse_ambiguous_selections(client: AsyncClient
 
 
 async def test_archived_history_is_readable_but_follow_up_requires_unarchive(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
     assert (await client.post(f"/v1/agent/jobs/{job_id}/archive")).status_code == 200
@@ -6019,7 +6002,7 @@ async def test_archived_history_is_readable_but_follow_up_requires_unarchive(
 
 
 async def test_follow_up_rechecks_archive_at_the_atomic_store_boundary(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     job_id = await _create_job(client)
     monkeypatch.setattr(
@@ -6031,7 +6014,7 @@ async def test_follow_up_rechecks_archive_at_the_atomic_store_boundary(
 
 
 async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspace(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
     store.jobs[job_id]["deleted_at"] = datetime.now(timezone.utc)
@@ -6058,7 +6041,7 @@ def _configured_identity_issuer(monkeypatch):
 
 
 async def test_a_submission_key_reaches_the_store_with_a_fingerprint(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """The ``Idempotency-Key`` header becomes the job's submission key."""
     response = await client.post(
@@ -6083,16 +6066,14 @@ async def test_a_submission_key_reaches_the_store_with_a_fingerprint(
     assert key == "turn-2" and isinstance(fingerprint, str) and len(fingerprint) == 64
 
 
-async def test_a_submission_without_a_key_carries_none(
-    client: AsyncClient, store: FakeAgentJobStore
-):
+async def test_a_submission_without_a_key_carries_none(client: AsyncClient, store: FakeStorage):
     job_id = await _create_job(client)
     assert store.jobs[job_id]["client_request_id"] is None
     assert store.jobs[job_id]["client_request_fingerprint"] is None
 
 
 async def test_a_reused_key_under_different_content_is_a_409(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """The store's conflict answer is the API's ``idempotency_conflict``."""
 
@@ -6110,7 +6091,7 @@ async def test_a_reused_key_under_different_content_is_a_409(
 
 
 async def test_a_follow_up_resend_after_archiving_returns_the_first_turn(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """The replay wins over a check that changed after the first send.
 
@@ -6135,7 +6116,7 @@ async def test_a_follow_up_resend_after_archiving_returns_the_first_turn(
 
 
 async def test_a_follow_up_resend_after_the_sandbox_is_lost_returns_the_first_turn(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeStorage
 ):
     """Same rule for the other advisory check the handler runs before the store."""
     parent_id = await _create_job(client)
@@ -6153,7 +6134,7 @@ async def test_a_follow_up_resend_after_the_sandbox_is_lost_returns_the_first_tu
 
 
 async def test_a_create_resend_after_a_tool_server_disconnects_returns_the_first_job(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """A tool the first send was allowed to use is not re-authorised on a resend."""
     _catalogue(monkeypatch)
@@ -6178,7 +6159,7 @@ async def test_a_create_resend_after_a_tool_server_disconnects_returns_the_first
 
 
 async def test_a_new_key_still_runs_the_checks_that_can_refuse_it(
-    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
     """Answering the resend first must not turn the mutable checks off.
 

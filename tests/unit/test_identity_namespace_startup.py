@@ -17,7 +17,6 @@ async def test_namespace_mismatch_stops_both_listeners_and_closes_pool(monkeypat
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
     monkeypatch.setenv("GATEWAY_ISSUER", "https://new.example")
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=pool))
-    monkeypatch.setattr("cloud_agent.storage.store.AgentJobStore.initialize", AsyncMock())
     check = AsyncMock(side_effect=IdentityNamespaceError("issuer mismatch"))
     monkeypatch.setattr("cloud_agent.identity_namespace.ensure_gateway_namespace", check)
     app = FastAPI()
@@ -36,7 +35,6 @@ async def test_configured_gateway_requires_an_explicit_issuer(monkeypatch):
     monkeypatch.setenv("GATEWAY_BASE_URL", "https://gateway.example")
     monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=pool))
-    monkeypatch.setattr("cloud_agent.storage.store.AgentJobStore.initialize", AsyncMock())
     with pytest.raises(IdentityNotConfigured):
         async with lifespan(FastAPI(), background=False):
             pytest.fail("The transport URL must never stand in for the issuer")

@@ -25,8 +25,8 @@ import os
 import pytest
 import pytest_asyncio
 
+from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
-from cloud_agent.storage.store import AgentJobStore
 from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
@@ -83,7 +83,7 @@ async def db():
 @pytest_asyncio.fixture
 async def store(db):
     """Everything this test needs, to set a live claim up."""
-    return AgentJobStore(db)
+    return Storage(db)
 
 
 @pytest_asyncio.fixture
@@ -92,7 +92,7 @@ async def credentials(db):
     return PostgresCredentialQueries(db)
 
 
-async def _live(store: AgentJobStore, **overrides):
+async def _live(store: Storage, **overrides):
     """A job with one live claim on it, and the claim."""
     job = await _create_job(store, user_id=_OWNER, **overrides)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
@@ -101,7 +101,7 @@ async def _live(store: AgentJobStore, **overrides):
 
 
 async def test_a_live_attempt_resolves_its_owner_model_and_scope(
-    store: AgentJobStore, credentials: PostgresCredentialQueries
+    store: Storage, credentials: PostgresCredentialQueries
 ) -> None:
     """All three travel together, which is the point of one fenced read."""
     job, claim = await _live(store)
@@ -120,7 +120,7 @@ async def test_a_live_attempt_resolves_its_owner_model_and_scope(
 
 
 async def test_a_superseded_generation_resolves_nothing(
-    store: AgentJobStore, credentials: PostgresCredentialQueries
+    store: Storage, credentials: PostgresCredentialQueries
 ) -> None:
     """A generation that is not the attempt's is a stale worker asking."""
     job, claim = await _live(store)
@@ -136,7 +136,7 @@ async def test_a_superseded_generation_resolves_nothing(
 
 
 async def test_an_attempt_the_job_no_longer_points_at_resolves_nothing(
-    store: AgentJobStore, credentials: PostgresCredentialQueries
+    db, store: Storage, credentials: PostgresCredentialQueries
 ) -> None:
     """The job's own fence: a superseded attempt is not the current one.
 
@@ -156,7 +156,7 @@ async def test_an_attempt_the_job_no_longer_points_at_resolves_nothing(
         is not None
     )
 
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET current_attempt_id = NULL WHERE id = $1", job["id"]
         )
@@ -172,11 +172,11 @@ async def test_an_attempt_the_job_no_longer_points_at_resolves_nothing(
 
 
 async def test_an_expired_lease_resolves_nothing(
-    store: AgentJobStore, credentials: PostgresCredentialQueries
+    db, store: Storage, credentials: PostgresCredentialQueries
 ) -> None:
     """The lease is the clock, and the query reads it."""
     job, claim = await _live(store)
-    await _expire_attempt(store, claim["attempt_id"])
+    await _expire_attempt(db, store, claim["attempt_id"])
 
     assert (
         await credentials.resolve_model_credential(
@@ -189,7 +189,7 @@ async def test_an_expired_lease_resolves_nothing(
 
 
 async def test_a_settled_job_resolves_nothing(
-    store: AgentJobStore, credentials: PostgresCredentialQueries
+    db, store: Storage, credentials: PostgresCredentialQueries
 ) -> None:
     """Once the turn is over there is nothing left to authorize.
 
@@ -203,7 +203,7 @@ async def test_a_settled_job_resolves_nothing(
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
-    await _settled(store, job["id"])
-    await store.transition(**fence, from_states=("running",), to_state="succeeded")
+    await _settled(db, store, job["id"])
+    await store.attempt_commands.transition(**fence, from_states=("running",), to_state="succeeded")
 
     assert await credentials.resolve_model_credential(**fence) is None

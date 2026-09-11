@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent import identity
 from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES, MAX_USAGE_RUNS
 from cloud_agent.api import admin_usage
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.storage.admin_usage_queries import (
     UsageQueryTooLarge,
@@ -75,7 +75,7 @@ def setup(monkeypatch, queries):
     monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
     app = create_app()
     app.dependency_overrides[admin_usage.get_admin_usage_queries] = lambda: queries
-    app.dependency_overrides[get_agent_job_store] = lambda: None
+    app.dependency_overrides[get_storage] = lambda: None
     return app, queries
 
 

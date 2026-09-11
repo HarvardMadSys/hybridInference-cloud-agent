@@ -28,8 +28,8 @@ import os
 import pytest
 import pytest_asyncio
 
+from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
-from cloud_agent.storage.store import AgentJobStore
 from tests.integration.storage.test_agent_job_store import _claim, _create_job
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
@@ -82,7 +82,7 @@ async def db():
 @pytest_asyncio.fixture
 async def store(db):
     """Everything this test needs, to create a job, claim it and append."""
-    return AgentJobStore(db)
+    return Storage(db)
 
 
 @pytest_asyncio.fixture
@@ -91,13 +91,13 @@ async def queries(db):
     return PostgresExecutionQueries(db)
 
 
-async def _running_job(store: AgentJobStore, **overrides):
+async def _running_job(store: Storage, **overrides):
     """A job with one live claim and two appended events."""
     job = await _create_job(store, user_id=_OWNER, **overrides)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
     for seq, text in enumerate(["first", "second"], start=1):
-        await store.append_event(
+        await store.attempt_commands.append_event(
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
             event_type="message",
@@ -110,7 +110,7 @@ async def _running_job(store: AgentJobStore, **overrides):
 
 
 async def test_the_thread_read_answers_nothing_for_a_stranger(
-    store: AgentJobStore, queries: PostgresExecutionQueries
+    store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """Absence and refusal are the same answer, which callers rely on."""
     job, _ = await _running_job(store)
@@ -121,7 +121,7 @@ async def test_the_thread_read_answers_nothing_for_a_stranger(
 
 
 async def test_the_thread_read_returns_decoded_payloads_in_order(
-    store: AgentJobStore, queries: PostgresExecutionQueries
+    store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """A payload is JSONB, and reconstructing a turn needs it decoded."""
     job, _ = await _running_job(store)
@@ -134,7 +134,7 @@ async def test_the_thread_read_returns_decoded_payloads_in_order(
 
 
 async def test_the_thread_read_pages_by_event_id(
-    store: AgentJobStore, queries: PostgresExecutionQueries
+    store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """``after_id`` is the caller's cursor into a long thread."""
     job, _ = await _running_job(store)
@@ -150,7 +150,7 @@ async def test_the_thread_read_pages_by_event_id(
 
 
 async def test_the_per_job_read_returns_the_same_turn(
-    store: AgentJobStore, queries: PostgresExecutionQueries
+    store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """The per-job read is scoped to the turn being watched, not the thread."""
     job, _ = await _running_job(store)
@@ -164,7 +164,7 @@ async def test_the_per_job_read_returns_the_same_turn(
 
 
 async def test_the_stats_inputs_answer_nothing_for_a_stranger(
-    store: AgentJobStore, queries: PostgresExecutionQueries
+    store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """The summary of a thread is as private as the thread."""
     job, _ = await _running_job(store)
@@ -174,7 +174,7 @@ async def test_the_stats_inputs_answer_nothing_for_a_stranger(
 
 
 async def test_the_stats_inputs_carry_the_threads_jobs_attempts_and_events(
-    store: AgentJobStore, queries: PostgresExecutionQueries
+    store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """One read gathers everything a summary needs, across the whole thread."""
     job, _ = await _running_job(store)
@@ -189,7 +189,7 @@ async def test_the_stats_inputs_carry_the_threads_jobs_attempts_and_events(
 
 
 async def test_the_usage_inputs_and_telemetry_answer_for_their_job(
-    store: AgentJobStore, queries: PostgresExecutionQueries
+    store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """Three aggregates read the same turn from different tables."""
     job, claim = await _running_job(store)
@@ -204,7 +204,7 @@ async def test_the_usage_inputs_and_telemetry_answer_for_their_job(
 
 
 async def test_turn_telemetry_answers_nothing_for_an_attempt_the_job_never_had(
-    store: AgentJobStore, queries: PostgresExecutionQueries
+    store: Storage, queries: PostgresExecutionQueries
 ) -> None:
     """An attempt id that is not this job's is not this job's telemetry."""
     job, claim = await _running_job(store)

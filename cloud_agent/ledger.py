@@ -11,7 +11,7 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime  # noqa: TC003 — Pydantic resolves this at runtime.
 from decimal import Decimal, localcontext
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -27,6 +27,9 @@ from cloud_agent.grant_usage import (
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.thread_stats import normalized_runtime_input_tokens, summarize_thread
+
+if TYPE_CHECKING:
+    from cloud_agent.ports import LedgerRepository
 
 logger = get_logger(__name__)
 
@@ -366,7 +369,7 @@ def summarize_conversation(rows: list[dict[str, Any]]) -> ConversationUsage:
     )
 
 
-async def refresh_ledger_entry(store: Any, grants: Any, row: dict[str, Any]) -> None:
+async def refresh_ledger_entry(store: LedgerRepository, grants: Any, row: dict[str, Any]) -> None:
     """Fetch a claimed reference, preserving cached data on every failure."""
     report = None
     error_code = None
@@ -398,7 +401,7 @@ async def refresh_ledger_entry(store: Any, grants: Any, row: dict[str, Any]) -> 
     )
 
 
-async def collect_usage_snapshots(store: Any, grants: Any) -> None:
+async def collect_usage_snapshots(store: LedgerRepository, grants: Any) -> None:
     """Run ledger reads on their own bounded pool, separate from grant renewal."""
     while True:
         try:

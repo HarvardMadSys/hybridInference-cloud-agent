@@ -1,8 +1,8 @@
 """Postgres implementation of the native session-fork port.
 
-Moved verbatim out of :mod:`cloud_agent.storage.store`: the statements, their
-bound parameters and their transaction ownership are what they were, and only
-the class holding them changed.
+Lifted verbatim from the single storage class this package replaced: the
+statements, their bound parameters and their transaction ownership are what
+they were, and only the class holding them changed.
 """
 
 from __future__ import annotations

@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cloud_agent.ports import HostCapacityRepository
-    from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
 
@@ -71,7 +70,7 @@ HISTORY_PRUNE_BATCH_SIZE = 2000
 
 
 async def collect_host_capacity_history(
-    store: AgentJobStore,
+    store: HostCapacityRepository,
     *,
     interval_seconds: float = HISTORY_INTERVAL_S,
     batch_size: int = HISTORY_BATCH_SIZE,
@@ -83,7 +82,7 @@ async def collect_host_capacity_history(
     """Record one capacity observation per host per minute, and prune old ones.
 
     Args:
-        store: The agent store.
+        store: The host-capacity capability.
         interval_seconds: Delay between rounds.
         batch_size: Hosts per page.
         batch_timeout_seconds: Ceiling on one database batch.
@@ -123,7 +122,7 @@ async def collect_host_capacity_history(
 
 
 async def _record_round(
-    store: AgentJobStore,
+    store: HostCapacityRepository,
     cursor: str | None,
     *,
     batch_size: int,

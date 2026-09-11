@@ -28,8 +28,8 @@ from cloud_agent.host_pool import (
     hash_secret,
 )
 from cloud_agent.storage._sql.hosts import release_host_slot
+from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
-from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
@@ -90,7 +90,7 @@ async def db():
 @pytest_asyncio.fixture
 async def store(db):
     """Everything else these tests need, to claim and settle work."""
-    return AgentJobStore(db)
+    return Storage(db)
 
 
 @pytest_asyncio.fixture
@@ -99,7 +99,7 @@ async def hosts(db):
     return PostgresHostPoolRepository(db)
 
 
-async def _create_job(store: AgentJobStore, **overrides) -> dict:
+async def _create_job(store: Storage, **overrides) -> dict:
     params = {
         "user_id": "u1",
         "repo": "acme/widgets",
@@ -108,10 +108,10 @@ async def _create_job(store: AgentJobStore, **overrides) -> dict:
         "model": "glm-5.1",
     }
     params.update(overrides)
-    return await store.create_job(**params)
+    return await store.conversation_commands.create_job(**params)
 
 
-async def _settled(store: AgentJobStore, job_id: str) -> None:
+async def _settled(db, store: Storage, job_id: str) -> None:
     """Stand in for the runner's settlement: a success carries its native ordinal.
 
     The runner settles the shared workspace before it reports success and the
@@ -119,7 +119,7 @@ async def _settled(store: AgentJobStore, job_id: str) -> None:
     without one. Tests that skip the sandbox protocol and finish a job
     directly prepare that fact here, instead of the store guessing it.
     """
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET native_turn_no = turn_no "
             "WHERE id = $1 AND native_turn_no IS NULL",
@@ -127,9 +127,7 @@ async def _settled(store: AgentJobStore, job_id: str) -> None:
         )
 
 
-async def _enrol(
-    store: AgentJobStore, host: str, hosts: PostgresHostPoolRepository, **overrides
-) -> dict:
+async def _enrol(store: Storage, host: str, hosts: PostgresHostPoolRepository, **overrides) -> dict:
     """Register a host and put it online, the way a real boot does."""
     row = await hosts.register_host(
         host=host, credential_hash=hash_secret(f"cred-{host}"), **overrides
@@ -179,7 +177,7 @@ _DEFAULT_CLAIM_VALUE = object()
 
 
 async def _claim(
-    store: AgentJobStore,
+    store: Storage,
     *,
     worker_id: str,
     lease_ttl_seconds: float,
@@ -199,7 +197,7 @@ async def _claim(
     )
     assert isinstance(credential, str)
     assert isinstance(attestation, dict)
-    return await store.claim_job(
+    return await store.attempt_commands.claim_job(
         worker_id=worker_id,
         lease_ttl_seconds=lease_ttl_seconds,
         host=host,
@@ -397,10 +395,10 @@ async def test_an_unknown_host_cannot_be_transitioned(store, hosts: PostgresHost
 
 
 async def test_the_reaper_marks_a_silent_enrolled_host_offline(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     await _enrol(store, "runner-a", hosts=hosts)
-    await _age_heartbeat(store, "runner-a", seconds=600)
+    await _age_heartbeat(db, store, "runner-a", seconds=600)
 
     reaped = await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3)
 
@@ -417,7 +415,7 @@ async def test_the_reaper_leaves_a_recently_seen_host_alone(
 
 
 async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     """The operator's instruction must survive the machine's absence.
 
@@ -431,7 +429,7 @@ async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(
     """
     await _enrol(store, "runner-a", hosts=hosts)
     await hosts.set_host_status(host="runner-a", status=HOST_DRAINING)
-    await _age_heartbeat(store, "runner-a", seconds=600)
+    await _age_heartbeat(db, store, "runner-a", seconds=600)
 
     assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
     assert (await hosts.get_host(host="runner-a"))["status"] == HOST_DRAINING
@@ -442,10 +440,10 @@ async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(
 
 
 async def test_a_host_that_registered_and_never_came_up_ages_out_of_enrolling(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_runner_hosts SET first_seen_at = NOW() - INTERVAL '1 hour' "
             "WHERE host = 'runner-a'"
@@ -454,18 +452,18 @@ async def test_a_host_that_registered_and_never_came_up_ages_out_of_enrolling(
     assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == ["runner-a"]
 
 
-async def test_a_disabled_host_is_not_reaped_again(store, hosts: PostgresHostPoolRepository):
+async def test_a_disabled_host_is_not_reaped_again(db, store, hosts: PostgresHostPoolRepository):
     """Nothing to say: it is already out, and re-reporting it is noise."""
     await _enrol(store, "runner-a", hosts=hosts)
     await hosts.remove_host(host="runner-a")
-    await _age_heartbeat(store, "runner-a", seconds=600)
+    await _age_heartbeat(db, store, "runner-a", seconds=600)
 
     assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
 
 
-async def _age_heartbeat(store: AgentJobStore, host: str, *, seconds: int) -> None:
+async def _age_heartbeat(db, store: Storage, host: str, *, seconds: int) -> None:
     """Push a host's last heartbeat into the past, without sleeping."""
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_runner_hosts "
             "SET last_heartbeat_at = NOW() - make_interval(secs => $2) "
@@ -512,7 +510,7 @@ async def test_a_heartbeat_round_trips_the_version_stamp(store, hosts: PostgresH
 
 
 async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     """Rolling replicas sharing a host row are judged and stamped independently."""
     await _enrol(store, "runner-a", hosts=hosts)
@@ -534,7 +532,7 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(
     )
 
     assert claim is not None
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         attempt = await conn.fetchrow(
             "SELECT sandbox_runtime, sandbox_image_digest, runtime_version, "
             "host_kernel, guest_kernel "
@@ -553,7 +551,7 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(
         sandbox_image_digest="sha256:newer-host-row",
         runtime_versions={"claude-code": "3.0.0"},
     )
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         unchanged = await conn.fetchrow(
             "SELECT sandbox_image_digest, runtime_version FROM agent_attempts WHERE id = $1",
             claim["attempt_id"],
@@ -569,7 +567,7 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(
     await _create_job(store)
     trusted = await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-b")
     assert trusted is not None
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         attempt = await conn.fetchrow(
             "SELECT sandbox_runtime, sandbox_image_digest, runtime_version "
             "FROM agent_attempts WHERE id = $1",
@@ -626,7 +624,7 @@ async def test_shared_host_row_cannot_authorize_a_mismatched_polling_replica(
     )
 
     assert claim is None
-    assert (await store.get_job(job["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
 
 
 async def test_exact_polling_replica_can_claim_shared_work(store, hosts):
@@ -697,7 +695,7 @@ async def test_runc_replica_skips_secure_work_and_takes_the_next_trusted_job(sto
     )
 
     assert claim is not None and claim["id"] == trusted["id"]
-    assert (await store.get_job(secure["id"]))["state"] == "queued"
+    assert (await store.conversation_queries.get_job(secure["id"]))["state"] == "queued"
 
 
 @pytest.mark.parametrize(
@@ -805,7 +803,7 @@ async def test_a_full_host_claims_nothing_more(store, hosts):
     assert second is None
 
 
-async def test_the_job_a_full_host_could_not_take_is_still_queued(store, hosts):
+async def test_the_job_a_full_host_could_not_take_is_still_queued(db, store, hosts):
     """Refusing must not consume the job, or capacity becomes data loss."""
     await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     job = await _create_job(store)
@@ -814,9 +812,9 @@ async def test_the_job_a_full_host_could_not_take_is_still_queued(store, hosts):
 
     await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
-    states = {job["id"]: (await store.get_job(job["id"]))["state"]}
+    states = {job["id"]: (await store.conversation_queries.get_job(job["id"]))["state"]}
     assert "queued" in states.values() or states[job["id"]] == "running"
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         queued = await conn.fetchval("SELECT count(*) FROM agent_jobs WHERE state = 'queued'")
     assert queued == 1
 
@@ -845,10 +843,10 @@ async def test_a_draining_host_receives_no_new_claims(store, hosts: PostgresHost
 
 
 @pytest.mark.parametrize("status", [HOST_ENROLLING, HOST_OFFLINE, HOST_DISABLED])
-async def test_only_an_online_host_claims(store, status, hosts):
+async def test_only_an_online_host_claims(db, store, status, hosts):
     await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
     await _create_job(store)
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_runner_hosts SET status = $2 WHERE host = $1", "runner-a", status
         )
@@ -887,13 +885,13 @@ async def test_a_runner_without_an_enrolled_host_never_claims(store):
     assert await _claim(store, worker_id="w1", lease_ttl_seconds=60) is None
 
 
-async def test_finishing_a_job_gives_the_slot_back(store, hosts: PostgresHostPoolRepository):
+async def test_finishing_a_job_gives_the_slot_back(db, store, hosts: PostgresHostPoolRepository):
     await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
-    await _settled(store, claim["id"])
-    await store.transition(
+    await _settled(db, store, claim["id"])
+    await store.attempt_commands.transition(
         job_id=claim["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -911,7 +909,7 @@ async def test_releasing_an_unstarted_claim_gives_the_slot_back(
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
-    await store.release_claim(
+    await store.attempt_commands.release_claim(
         job_id=claim["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -925,13 +923,13 @@ async def test_a_reaped_attempt_gives_the_slot_back(store, hosts: PostgresHostPo
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
 
-    await store.reap_expired(max_attempts=3)
+    await store.attempt_commands.reap_expired(max_attempts=3)
 
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
 async def test_a_double_terminal_transition_releases_one_slot_not_two(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     """The counter must survive a caller that retries a finish."""
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
@@ -941,8 +939,8 @@ async def test_a_double_terminal_transition_releases_one_slot_not_two(
     await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
     for _ in range(3):
-        await _settled(store, first["id"])
-        await store.transition(
+        await _settled(db, store, first["id"])
+        await store.attempt_commands.transition(
             job_id=first["id"],
             attempt_id=first["attempt_id"],
             lease_generation=first["lease_generation"],
@@ -954,7 +952,7 @@ async def test_a_double_terminal_transition_releases_one_slot_not_two(
 
 
 async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     """Two paths out of ``running`` that can both be attempted for one attempt."""
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
@@ -963,16 +961,16 @@ async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(
     first = await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
     await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
 
-    await store.reap_expired(max_attempts=3)
-    await _settled(store, first["id"])
-    await store.transition(
+    await store.attempt_commands.reap_expired(max_attempts=3)
+    await _settled(db, store, first["id"])
+    await store.attempt_commands.transition(
         job_id=first["id"],
         attempt_id=first["attempt_id"],
         lease_generation=first["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    await store.release_claim(
+    await store.attempt_commands.release_claim(
         job_id=first["id"],
         attempt_id=first["attempt_id"],
         lease_generation=first["lease_generation"],
@@ -982,7 +980,7 @@ async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(
 
 
 async def test_slots_never_go_negative_under_concurrent_release(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     """The invariant, hammered.
 
@@ -1002,10 +1000,10 @@ async def test_slots_never_go_negative_under_concurrent_release(
 
     # Every exit path, several times each, all at once.
     for claim in claims:
-        await _settled(store, claim["id"])
+        await _settled(db, store, claim["id"])
     await asyncio.gather(
         *[
-            store.transition(
+            store.attempt_commands.transition(
                 job_id=claim["id"],
                 attempt_id=claim["attempt_id"],
                 lease_generation=claim["lease_generation"],
@@ -1016,7 +1014,7 @@ async def test_slots_never_go_negative_under_concurrent_release(
             for _ in range(3)
         ],
         *[
-            store.release_claim(
+            store.attempt_commands.release_claim(
                 job_id=claim["id"],
                 attempt_id=claim["attempt_id"],
                 lease_generation=claim["lease_generation"],
@@ -1024,7 +1022,7 @@ async def test_slots_never_go_negative_under_concurrent_release(
             for claim in claims
             for _ in range(3)
         ],
-        *[store.reap_expired(max_attempts=3) for _ in range(3)],
+        *[store.attempt_commands.reap_expired(max_attempts=3) for _ in range(3)],
     )
 
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
@@ -1083,7 +1081,7 @@ async def test_releasing_a_slot_for_no_host_is_a_no_op(db):
         await release_host_slot(conn, None)
 
 
-async def test_the_schema_itself_refuses_a_negative_slot_count(store, hosts):
+async def test_the_schema_itself_refuses_a_negative_slot_count(db, store, hosts):
     """The last line of defence, asserted directly.
 
     If a future writer forgets the ``slots_used > 0`` predicate, this is what
@@ -1093,19 +1091,19 @@ async def test_the_schema_itself_refuses_a_negative_slot_count(store, hosts):
 
     await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
 
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         with pytest.raises(asyncpg.CheckViolationError):
             await conn.execute(
                 "UPDATE agent_runner_hosts SET slots_used = -1 WHERE host = 'runner-a'"
             )
 
 
-async def test_the_schema_refuses_a_status_it_does_not_know(store, hosts):
+async def test_the_schema_refuses_a_status_it_does_not_know(db, store, hosts):
     import asyncpg
 
     await _enrol(store, "runner-a", hosts=hosts)
 
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         with pytest.raises(asyncpg.CheckViolationError):
             await conn.execute(
                 "UPDATE agent_runner_hosts SET status = 'sleepy' WHERE host = 'runner-a'"
@@ -1138,7 +1136,7 @@ async def test_removing_a_busy_host_is_refused_unless_forced(
 
 
 async def test_forgetting_a_host_does_not_break_its_attempts(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     """The FK is ON DELETE SET NULL, so history survives its machine.
 
@@ -1148,8 +1146,8 @@ async def test_forgetting_a_host_does_not_break_its_attempts(
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
-    await _settled(store, claim["id"])
-    await store.transition(
+    await _settled(db, store, claim["id"])
+    await store.attempt_commands.transition(
         job_id=claim["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -1198,7 +1196,7 @@ async def _resident_chat(
         capabilities=["shared-sandbox-v1", "native-fork-at-anchor-v1"],
         sandbox_image_digest="sha256:shared-image",
     )
-    sandbox = await store.reserve_thread_sandbox(
+    sandbox = await store.sandbox.reserve_thread_sandbox(
         thread_id=job["thread_id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -1214,7 +1212,7 @@ async def _resident_chat(
     return job, claim, sandbox
 
 
-async def test_residency_is_earned_by_the_running_attempt_only(store, hosts):
+async def test_residency_is_earned_by_the_running_attempt_only(db, store, hosts):
     """Review finding 4: the gate shares the write's transaction and checks
     the lease clock — expired, finished, or another host's attempt earns
     nothing."""
@@ -1223,7 +1221,7 @@ async def test_residency_is_earned_by_the_running_attempt_only(store, hosts):
 
     # Another machine, even while the attempt runs: nothing.
     assert (
-        await store.establish_residency(
+        await store.residency.establish_residency(
             thread_id=job["thread_id"],
             host="runner-b",
             runtime_id="claude-code",
@@ -1233,7 +1231,7 @@ async def test_residency_is_earned_by_the_running_attempt_only(store, hosts):
         is None
     )
     # The running host: earned.
-    row = await store.establish_residency(
+    row = await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1243,8 +1241,8 @@ async def test_residency_is_earned_by_the_running_attempt_only(store, hosts):
     assert row is not None and row["generation"] == 1
 
     # A finished attempt: nothing — even before any reaper pass.
-    await _settled(store, job["id"])
-    await store.transition(
+    await _settled(db, store, job["id"])
+    await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
@@ -1252,7 +1250,7 @@ async def test_residency_is_earned_by_the_running_attempt_only(store, hosts):
         to_state="succeeded",
     )
     assert (
-        await store.establish_residency(
+        await store.residency.establish_residency(
             thread_id=job["thread_id"],
             host="runner-a",
             runtime_id="claude-code",
@@ -1271,7 +1269,7 @@ async def test_an_expired_lease_earns_no_residency(store, hosts):
     assert claim is not None
 
     assert (
-        await store.establish_residency(
+        await store.residency.establish_residency(
             thread_id=job["thread_id"],
             host="runner-a",
             runtime_id="claude-code",
@@ -1291,7 +1289,7 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, ho
     """
     await _enrol(store, "runner-a", hosts=hosts)
     job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    first = await store.establish_residency(
+    first = await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1302,14 +1300,14 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, ho
 
     # The attempt is released and reclaimed on the owning host, which
     # rotates the residency fence.
-    await store.release_claim(
+    await store.attempt_commands.release_claim(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
     )
     reclaim = await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
     assert reclaim is not None
-    second = await store.establish_residency(
+    second = await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1318,21 +1316,23 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, ho
     )
     assert second["generation"] == 2
 
-    live = await store.resident_host(thread_id=job["thread_id"])
+    live = await store.residency.resident_host(thread_id=job["thread_id"])
     assert (live["host"], live["generation"]) == ("runner-a", 2)
     # The previous generation can neither re-promote nor end its successor.
     assert (
-        await store.heartbeat_residency(
+        await store.residency.heartbeat_residency(
             thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
         )
         is None
     )
     assert (
-        await store.release_residency(thread_id=job["thread_id"], generation=1, host="runner-a")
+        await store.residency.release_residency(
+            thread_id=job["thread_id"], generation=1, host="runner-a"
+        )
         is None
     )
     assert (
-        await store.heartbeat_residency(
+        await store.residency.heartbeat_residency(
             thread_id=job["thread_id"], generation=2, ttl_seconds=60, host="runner-a"
         )
         is not None
@@ -1343,7 +1343,7 @@ async def test_residency_writes_are_scoped_to_the_holding_host(store, hosts):
     """A guessed (thread, generation) from another machine changes nothing."""
     await _enrol(store, "runner-a", hosts=hosts)
     job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    row = await store.establish_residency(
+    row = await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1353,19 +1353,19 @@ async def test_residency_writes_are_scoped_to_the_holding_host(store, hosts):
     generation = row["generation"]
 
     assert (
-        await store.heartbeat_residency(
+        await store.residency.heartbeat_residency(
             thread_id=job["thread_id"], generation=generation, ttl_seconds=60, host="runner-b"
         )
         is None
     )
     assert (
-        await store.release_residency(
+        await store.residency.release_residency(
             thread_id=job["thread_id"], generation=generation, host="runner-b"
         )
         is None
     )
     assert (
-        await store.release_residency(
+        await store.residency.release_residency(
             thread_id=job["thread_id"], generation=generation, host="runner-a"
         )
         is not None
@@ -1375,7 +1375,7 @@ async def test_residency_writes_are_scoped_to_the_holding_host(store, hosts):
 async def test_the_reaper_lapses_expired_residencies_without_resetting_generations(store, hosts):
     await _enrol(store, "runner-a", hosts=hosts)
     job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.establish_residency(
+    await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1383,12 +1383,12 @@ async def test_the_reaper_lapses_expired_residencies_without_resetting_generatio
         ttl_seconds=-1,
     )
 
-    lapsed = await store.reap_expired_residencies()
+    lapsed = await store.residency.reap_expired_residencies()
 
     assert [(row["thread_id"], row["generation"]) for row in lapsed] == [(job["thread_id"], 1)]
-    assert await store.resident_host(thread_id=job["thread_id"]) is None
+    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
     # Re-establishing continues the count — a dead generation stays dead.
-    revived = await store.establish_residency(
+    revived = await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1405,7 +1405,7 @@ async def test_establish_returns_what_the_grant_mint_needs(store, hosts):
     await _enrol(store, "runner-a", hosts=hosts)
     job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
 
-    row = await store.establish_residency(
+    row = await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1422,7 +1422,7 @@ async def test_establish_returns_what_the_grant_mint_needs(store, hosts):
 async def test_the_residency_grant_link_is_generation_scoped(store, hosts):
     await _enrol(store, "runner-a", hosts=hosts)
     job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.establish_residency(
+    await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1434,13 +1434,15 @@ async def test_the_residency_grant_link_is_generation_scoped(store, hosts):
     # the one way it happens is a takeover between mint and link, and the
     # caller must revoke the orphan grant rather than hand it over.
     assert (
-        await store.link_residency_grant(
+        await store.grants.link_residency_grant(
             thread_id=job["thread_id"], generation=2, grant_id="agr-orphan"
         )
         is False
     )
     assert (
-        await store.link_residency_grant(thread_id=job["thread_id"], generation=1, grant_id="agr-1")
+        await store.grants.link_residency_grant(
+            thread_id=job["thread_id"], generation=1, grant_id="agr-1"
+        )
         is True
     )
 
@@ -1451,7 +1453,7 @@ async def test_beats_and_release_carry_the_grant_they_keep_alive(store, hosts):
     unlinked residency answers with the empty string, not a loss."""
     await _enrol(store, "runner-a", hosts=hosts)
     job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.establish_residency(
+    await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1460,20 +1462,24 @@ async def test_beats_and_release_carry_the_grant_they_keep_alive(store, hosts):
     )
 
     assert (
-        await store.heartbeat_residency(
+        await store.residency.heartbeat_residency(
             thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
         )
         == ""
     )
-    await store.link_residency_grant(thread_id=job["thread_id"], generation=1, grant_id="agr-1")
+    await store.grants.link_residency_grant(
+        thread_id=job["thread_id"], generation=1, grant_id="agr-1"
+    )
     assert (
-        await store.heartbeat_residency(
+        await store.residency.heartbeat_residency(
             thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
         )
         == "agr-1"
     )
     assert (
-        await store.release_residency(thread_id=job["thread_id"], generation=1, host="runner-a")
+        await store.residency.release_residency(
+            thread_id=job["thread_id"], generation=1, host="runner-a"
+        )
         == "agr-1"
     )
 
@@ -1483,22 +1489,24 @@ async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store, 
     old generation's grant so the endpoint can kill it now, not at TTL."""
     await _enrol(store, "runner-a", hosts=hosts)
     job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.establish_residency(
+    await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
         ttl_seconds=60,
     )
-    await store.link_residency_grant(thread_id=job["thread_id"], generation=1, grant_id="agr-old")
+    await store.grants.link_residency_grant(
+        thread_id=job["thread_id"], generation=1, grant_id="agr-old"
+    )
 
-    await store.release_claim(
+    await store.attempt_commands.release_claim(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
     )
     assert await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a")
-    second = await store.establish_residency(
+    second = await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
@@ -1513,18 +1521,18 @@ async def test_reaped_residencies_carry_their_grant_id(store, hosts):
     """The reaper revokes what the lapse orphans — it needs the id to do it."""
     await _enrol(store, "runner-a", hosts=hosts)
     job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.establish_residency(
+    await store.residency.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
         runtime_id="claude-code",
         runtime_version=None,
         ttl_seconds=-1,
     )
-    await store.link_residency_grant(
+    await store.grants.link_residency_grant(
         thread_id=job["thread_id"], generation=1, grant_id="agr-lapsed"
     )
 
-    lapsed = await store.reap_expired_residencies()
+    lapsed = await store.residency.reap_expired_residencies()
     assert [(row["thread_id"], row["grant_id"]) for row in lapsed] == [
         (job["thread_id"], "agr-lapsed")
     ]

@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import admin_hosts, hosts
-from cloud_agent.api.deps import get_agent_job_store, get_grant_client, verify_admin_access
+from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
 from cloud_agent.broker_routing import (
     ENV_BROKER_HOSTS,
     BrokerUrlRefused,
@@ -41,12 +41,13 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
+from tests.support.storage import AllCapabilities
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
 
-class FakeHostPoolStore:
-    """The host-pool surface of AgentJobStore, in memory.
+class FakeHostPoolStore(AllCapabilities):
+    """The host-pool capability, in memory.
 
     Mirrors the store's *decisions*, not its SQL: single-use token consumption,
     the transition table gate, and the busy check on removal all live here in
@@ -366,7 +367,7 @@ def _build_app(store: FakeHostPoolStore) -> FastAPI:
     app = FastAPI()
     app.include_router(hosts.router)
     app.include_router(admin_hosts.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     # Supplied rather than left real because the subject here is the pool, not
     # the admin gate; ``test_api_auth_deps.py`` is where the gate is pinned.
     app.dependency_overrides[verify_admin_access] = lambda: "admin@test"
@@ -932,7 +933,7 @@ async def claim_client(monkeypatch):
     store = ClaimRecorder()
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
 
     transport = ASGITransport(app=app)

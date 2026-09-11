@@ -31,6 +31,7 @@ from cloud_agent.mcp_registry import (
     mcp_cipher,
     registry_for_user,
 )
+from tests.support.storage import AllCapabilities
 
 _GATEWAY = "https://gateway.example.com"
 _TOKEN = "ajt.job.attempt.signature"
@@ -47,7 +48,7 @@ def _server(**overrides) -> McpServer:
     )
 
 
-class FakeConnectionStore:
+class FakeConnectionStore(AllCapabilities):
     """Connections by user, as the store returns them."""
 
     def __init__(self, by_user: dict[str, list[dict]] | None = None) -> None:

@@ -22,9 +22,8 @@ from cloud_agent.admin_usage import (
     MAX_USAGE_SNAPSHOT_BYTES,
 )
 from cloud_agent.api import admin_usage
-from cloud_agent.api.deps import get_agent_job_store
-from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
-from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.api.deps import get_storage
+from cloud_agent.storage.assembly import Storage
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
 from tests.unit.test_ledger_snapshots import END, START, report_payload
@@ -53,6 +52,7 @@ def coherent_payload(*, calls: int, amount: str, grant_id: str = "grant-one") ->
 
 
 async def _seed_snapshot(
+    db,
     store,
     ledger_id: int,
     *,
@@ -62,7 +62,7 @@ async def _seed_snapshot(
     queried_at: datetime | None = None,
 ) -> None:
     """Write the totals a Gateway read would have stored, verbatim."""
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_attempt_ledger SET snapshot = $2::jsonb, queried_at = $3 WHERE id = $1",
             ledger_id,
@@ -71,13 +71,15 @@ async def _seed_snapshot(
         )
 
 
-async def _backdate(store, job_ids: list[str], created_at: datetime, *, state: str | None = None):
+async def _backdate(
+    db, store, job_ids: list[str], created_at: datetime, *, state: str | None = None
+):
     """Place a run in the past, and optionally in a terminal state.
 
     A succeeded run must name the native turn it finished, so the state and that
     number are written together rather than the constraint being worked around.
     """
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET created_at = $2 WHERE id = ANY($1::text[])", job_ids, created_at
         )
@@ -93,25 +95,22 @@ async def _backdate(store, job_ids: list[str], created_at: datetime, *, state: s
 
 def _client(store) -> AsyncClient:
     from cloud_agent.api import admin_runs
-    from cloud_agent.storage.admin_queries import AdminRunQueries
 
     app = FastAPI()
     app.include_router(admin_usage.router)
     app.include_router(admin_runs.router)
-    app.dependency_overrides[admin_usage.get_admin_usage_queries] = lambda: AdminUsageQueries(
-        store._pool
-    )
-    app.dependency_overrides[admin_runs.get_admin_run_queries] = lambda: AdminRunQueries(
-        store._pool
-    )
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The assembled projections, not two more built from a loose pool: these
+    # routes read what the service reads.
+    app.dependency_overrides[admin_usage.get_admin_usage_queries] = lambda: store.admin_usage
+    app.dependency_overrides[admin_runs.get_admin_run_queries] = lambda: store.admin_runs
+    app.dependency_overrides[get_storage] = lambda: store
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 @pytest_asyncio.fixture
 async def store(db):
     """Everything these tests need, to set a claim up."""
-    return AgentJobStore(db)
+    return Storage(db)
 
 
 @pytest.fixture
@@ -122,21 +121,21 @@ def admin_token(monkeypatch):
     return ADMIN
 
 
-async def test_the_aggregate_matches_the_single_run_ledger_field_by_field(store, admin_token):
+async def test_the_aggregate_matches_the_single_run_ledger_field_by_field(db, store, admin_token):
     job = await _create_job(store, user_id="owner-one", model="model-a")
-    _, attempt_one, ledger_one = await _seed_attempt(store, job=job)
-    _, _, ledger_two = await _seed_attempt(store, job=job, attempt_no=2, grant_id="grant-two")
+    _, attempt_one, ledger_one = await _seed_attempt(db, store, job=job)
+    _, _, ledger_two = await _seed_attempt(db, store, job=job, attempt_no=2, grant_id="grant-two")
     failed = await _create_job(store, user_id="owner-two", model="model-b")
-    _, _, ledger_failed = await _seed_attempt(store, job=failed, grant_id="grant-three")
-    await _backdate(store, [job["id"]], START, state="succeeded")
-    await _backdate(store, [failed["id"]], START, state="failed")
-    async with store._pool.acquire() as conn:
+    _, _, ledger_failed = await _seed_attempt(db, store, job=failed, grant_id="grant-three")
+    await _backdate(db, store, [job["id"]], START, state="succeeded")
+    await _backdate(db, store, [failed["id"]], START, state="failed")
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_attempts SET status = 'running' WHERE id = $1", attempt_one
         )
-    await _seed_snapshot(store, ledger_one, amount="1.00", calls=2)
-    await _seed_snapshot(store, ledger_two, amount="0.50", calls=1, grant_id="grant-two")
-    await _seed_snapshot(store, ledger_failed, amount="0.25", calls=4, grant_id="grant-three")
+    await _seed_snapshot(db, store, ledger_one, amount="1.00", calls=2)
+    await _seed_snapshot(db, store, ledger_two, amount="0.50", calls=1, grant_id="grant-two")
+    await _seed_snapshot(db, store, ledger_failed, amount="0.25", calls=4, grant_id="grant-three")
 
     async with _client(store) as client:
         response = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
@@ -163,7 +162,7 @@ async def test_the_aggregate_matches_the_single_run_ledger_field_by_field(store,
     assert owner_one["usage"]["totals"]["spent_usd"] == "1.50"
 
 
-async def test_a_missing_snapshot_keeps_the_run_detail_status(store, admin_token):
+async def test_a_missing_snapshot_keeps_the_run_detail_status(db, store, admin_token):
     """The aggregate's coverage must be the run detail's coverage.
 
     A turn that never claimed is unavailable; one whose reference simply has no
@@ -173,8 +172,8 @@ async def test_a_missing_snapshot_keeps_the_run_detail_status(store, admin_token
     """
     unstarted = await _create_job(store, user_id="owner-one", model="model-a")
     untracked = await _create_job(store, user_id="owner-one", model="model-a")
-    _, _, ledger_untracked = await _seed_attempt(store, job=untracked)
-    await _backdate(store, [unstarted["id"], untracked["id"]], START, state="succeeded")
+    _, _, ledger_untracked = await _seed_attempt(db, store, job=untracked)
+    await _backdate(db, store, [unstarted["id"], untracked["id"]], START, state="succeeded")
     assert ledger_untracked is not None
 
     async with _client(store) as client:
@@ -193,13 +192,13 @@ async def test_a_missing_snapshot_keeps_the_run_detail_status(store, admin_token
     assert body["summary"]["missing_attempts"] == 1
 
 
-async def test_the_window_is_half_open_on_job_creation_time(store, admin_token):
+async def test_the_window_is_half_open_on_job_creation_time(db, store, admin_token):
     at_since = await _create_job(store, user_id="owner-one", model="model-a")
     at_until = await _create_job(store, user_id="owner-one", model="model-a")
     before = await _create_job(store, user_id="owner-one", model="model-a")
-    await _backdate(store, [at_since["id"]], START)
-    await _backdate(store, [at_until["id"]], datetime(2026, 9, 11, tzinfo=UTC))
-    await _backdate(store, [before["id"]], datetime(2026, 9, 8, 23, 59, 59, tzinfo=UTC))
+    await _backdate(db, store, [at_since["id"]], START)
+    await _backdate(db, store, [at_until["id"]], datetime(2026, 9, 11, tzinfo=UTC))
+    await _backdate(db, store, [before["id"]], datetime(2026, 9, 8, 23, 59, 59, tzinfo=UTC))
 
     async with _client(store) as client:
         response = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
@@ -218,12 +217,14 @@ async def test_the_window_is_half_open_on_job_creation_time(store, admin_token):
     assert sum(day["usage"]["run_count"] for day in body["days"]) == 1
 
 
-async def test_a_run_is_counted_once_on_its_creation_day_whatever_its_span(store, admin_token):
+async def test_a_run_is_counted_once_on_its_creation_day_whatever_its_span(db, store, admin_token):
     """A turn created late on the 9th keeps its whole snapshot on the 9th."""
     job = await _create_job(store, user_id="owner-one", model="model-a")
-    _, _, ledger_id = await _seed_attempt(store, job=job)
-    await _backdate(store, [job["id"]], datetime(2026, 9, 9, 23, 59, tzinfo=UTC), state="succeeded")
-    await _seed_snapshot(store, ledger_id, amount="9.99", calls=3)
+    _, _, ledger_id = await _seed_attempt(db, store, job=job)
+    await _backdate(
+        db, store, [job["id"]], datetime(2026, 9, 9, 23, 59, tzinfo=UTC), state="succeeded"
+    )
+    await _seed_snapshot(db, store, ledger_id, amount="9.99", calls=3)
 
     async with _client(store) as client:
         response = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
@@ -236,19 +237,20 @@ async def test_a_run_is_counted_once_on_its_creation_day_whatever_its_span(store
     assert body["summary"]["totals"]["spent_usd"] == "9.99"
 
 
-async def test_every_day_and_both_breakdowns_add_up_to_the_summary(store, admin_token):
+async def test_every_day_and_both_breakdowns_add_up_to_the_summary(db, store, admin_token):
     users = ["owner-one", "owner-two"]
     models = ["model-a", "model-b", ""]
     for index in range(6):
         job = await _create_job(store, user_id=users[index % 2], model=models[index % 3] or "")
-        _, _, ledger_id = await _seed_attempt(store, job=job)
+        _, _, ledger_id = await _seed_attempt(db, store, job=job)
         await _backdate(
+            db,
             store,
             [job["id"]],
             datetime(2026, 9, 9, tzinfo=UTC) + timedelta(days=index % 2, hours=index),
             state="succeeded",
         )
-        await _seed_snapshot(store, ledger_id, amount=f"{index + 1}.00", calls=index + 1)
+        await _seed_snapshot(db, store, ledger_id, amount=f"{index + 1}.00", calls=index + 1)
 
     async with _client(store) as client:
         response = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
@@ -270,7 +272,7 @@ async def test_every_day_and_both_breakdowns_add_up_to_the_summary(store, admin_
     assert {group["key"] for group in body["by_model"]["groups"]} == {"model-a", "model-b", None}
 
 
-async def test_long_configured_models_are_not_merged_into_one_group(store, admin_token):
+async def test_long_configured_models_are_not_merged_into_one_group(db, store, admin_token):
     """Grouping uses the stored identity, never a truncated stand-in.
 
     Two models that share their first 256 characters are two groups, and the
@@ -280,11 +282,11 @@ async def test_long_configured_models_are_not_merged_into_one_group(store, admin
     second_model = "m" * 256 + "two"
     first = await _create_job(store, user_id="owner-one", model=first_model)
     second = await _create_job(store, user_id="owner-one", model=second_model)
-    _, _, first_ledger = await _seed_attempt(store, job=first)
-    _, _, second_ledger = await _seed_attempt(store, job=second)
-    await _backdate(store, [first["id"], second["id"]], START, state="succeeded")
-    await _seed_snapshot(store, first_ledger, amount="1.00")
-    await _seed_snapshot(store, second_ledger, amount="2.00")
+    _, _, first_ledger = await _seed_attempt(db, store, job=first)
+    _, _, second_ledger = await _seed_attempt(db, store, job=second)
+    await _backdate(db, store, [first["id"], second["id"]], START, state="succeeded")
+    await _seed_snapshot(db, store, first_ledger, amount="1.00")
+    await _seed_snapshot(db, store, second_ledger, amount="2.00")
 
     async with _client(store) as client:
         response = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
@@ -307,14 +309,14 @@ async def test_long_configured_models_are_not_merged_into_one_group(store, admin
     assert "summary" not in filtered.json()
 
 
-async def test_an_exact_filter_selects_only_that_group(store, admin_token):
+async def test_an_exact_filter_selects_only_that_group(db, store, admin_token):
     first = await _create_job(store, user_id="owner-one", model="model-a")
     second = await _create_job(store, user_id="owner-two", model="model-b")
-    _, _, first_ledger = await _seed_attempt(store, job=first)
-    _, _, second_ledger = await _seed_attempt(store, job=second)
-    await _backdate(store, [first["id"], second["id"]], START, state="succeeded")
-    await _seed_snapshot(store, first_ledger, amount="1.00")
-    await _seed_snapshot(store, second_ledger, amount="2.00")
+    _, _, first_ledger = await _seed_attempt(db, store, job=first)
+    _, _, second_ledger = await _seed_attempt(db, store, job=second)
+    await _backdate(db, store, [first["id"], second["id"]], START, state="succeeded")
+    await _seed_snapshot(db, store, first_ledger, amount="1.00")
+    await _seed_snapshot(db, store, second_ledger, amount="2.00")
 
     async with _client(store) as client:
         response = await client.get(
@@ -326,11 +328,13 @@ async def test_an_exact_filter_selects_only_that_group(store, admin_token):
     assert body["by_user"]["groups"][0]["key"] == "owner-two"
 
 
-async def test_too_many_jobs_is_refused_without_a_partial_total(store, admin_token, monkeypatch):
+async def test_too_many_jobs_is_refused_without_a_partial_total(
+    db, store, admin_token, monkeypatch
+):
     monkeypatch.setattr(admin_usage, "MAX_USAGE_RUNS", 1)
     for index in range(2):
         job = await _create_job(store, user_id="owner-one", model="model-a")
-        await _backdate(store, [job["id"]], START + timedelta(minutes=index), state="succeeded")
+        await _backdate(db, store, [job["id"]], START + timedelta(minutes=index), state="succeeded")
 
     async with _client(store) as client:
         response = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
@@ -340,7 +344,7 @@ async def test_too_many_jobs_is_refused_without_a_partial_total(store, admin_tok
 
 
 async def test_the_cohort_and_its_snapshots_come_from_one_read_view(
-    store, admin_token, monkeypatch
+    db, store, admin_token, monkeypatch
 ):
     """A run selected as active cannot be priced by a snapshot of its end.
 
@@ -352,11 +356,11 @@ async def test_the_cohort_and_its_snapshots_come_from_one_read_view(
     the two real states.
     """
     job = await _create_job(store, user_id="owner-one", model="model-a")
-    _, _, ledger_id = await _seed_attempt(store, job=job)
-    await _backdate(store, [job["id"]], START, state="running")
-    await _seed_snapshot(store, ledger_id, amount="1.00", calls=1)
+    _, _, ledger_id = await _seed_attempt(db, store, job=job)
+    await _backdate(db, store, [job["id"]], START, state="running")
+    await _seed_snapshot(db, store, ledger_id, amount="1.00", calls=1)
 
-    queries = AdminUsageQueries(store._pool)
+    queries = store.admin_usage
     original_reports = queries._reports
     ready = asyncio.Event()
     updated = asyncio.Event()
@@ -372,19 +376,19 @@ async def test_the_cohort_and_its_snapshots_come_from_one_read_view(
     app = FastAPI()
     app.include_router(admin_usage.router)
     app.dependency_overrides[admin_usage.get_admin_usage_queries] = lambda: queries
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         request = asyncio.create_task(
             client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
         )
         await ready.wait()
-        async with store._pool.acquire() as conn:
+        async with db.acquire() as conn:
             await conn.execute(
                 "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1 WHERE id = $1",
                 job["id"],
             )
-        await _seed_snapshot(store, ledger_id, amount="2.00", calls=2)
+        await _seed_snapshot(db, store, ledger_id, amount="2.00", calls=2)
         updated.set()
         response = await request
 
@@ -401,15 +405,15 @@ async def test_the_cohort_and_its_snapshots_come_from_one_read_view(
 
 
 async def test_the_projection_preserves_a_damaged_report_instead_of_repairing_it(
-    store, admin_token
+    db, store, admin_token
 ):
     """A missing required key must not arrive as a null that still validates."""
     job = await _create_job(store, user_id="owner-one", model="model-a")
-    _, _, ledger_id = await _seed_attempt(store, job=job)
-    await _backdate(store, [job["id"]], START, state="succeeded")
+    _, _, ledger_id = await _seed_attempt(db, store, job=job)
+    await _backdate(db, store, [job["id"]], START, state="succeeded")
     damaged = coherent_payload(calls=1, amount="1.00")
     del damaged["totals"]["spent_usd"]
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_attempt_ledger SET snapshot = $2::jsonb, queried_at = $3 WHERE id = $1",
             ledger_id,
@@ -417,7 +421,7 @@ async def test_the_projection_preserves_a_damaged_report_instead_of_repairing_it
             END,
         )
 
-    _, rows = await AdminUsageQueries(store._pool).selection(
+    _, rows = await store.admin_usage.selection(
         since=START,
         until=END,
         user_id=None,
@@ -440,15 +444,15 @@ async def test_the_projection_preserves_a_damaged_report_instead_of_repairing_it
     assert body["summary"]["status_counts"]["unavailable"] == 1
 
 
-async def test_a_snapshot_carrying_only_allowlisted_keys_is_read(store, admin_token):
+async def test_a_snapshot_carrying_only_allowlisted_keys_is_read(db, store, admin_token):
     """Extra stored keys are dropped by the projection, not by the reader."""
     job = await _create_job(store, user_id="owner-one", model="model-a")
-    _, _, ledger_id = await _seed_attempt(store, job=job)
-    await _backdate(store, [job["id"]], START, state="succeeded")
+    _, _, ledger_id = await _seed_attempt(db, store, job=job)
+    await _backdate(db, store, [job["id"]], START, state="succeeded")
     payload = coherent_payload(calls=2, amount="3.00")
     payload["token"] = "private gateway credential"
     payload["metadata"] = {"authorization": "private"}
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_attempt_ledger SET snapshot = $2::jsonb, queried_at = $3 WHERE id = $1",
             ledger_id,
@@ -463,13 +467,13 @@ async def test_a_snapshot_carrying_only_allowlisted_keys_is_read(store, admin_to
     assert "private" not in response.text
 
 
-async def test_event_volume_does_not_change_the_result(store, admin_token):
+async def test_event_volume_does_not_change_the_result(db, store, admin_token):
     """Aggregation reads jobs and ledger rows, never the event table."""
     job = await _create_job(store, user_id="owner-one", model="model-a")
-    _, attempt_id, ledger_id = await _seed_attempt(store, job=job)
-    await _backdate(store, [job["id"]], START, state="succeeded")
-    await _seed_snapshot(store, ledger_id, amount="1.00")
-    async with store._pool.acquire() as conn:
+    _, attempt_id, ledger_id = await _seed_attempt(db, store, job=job)
+    await _backdate(db, store, [job["id"]], START, state="succeeded")
+    await _seed_snapshot(db, store, ledger_id, amount="1.00")
+    async with db.acquire() as conn:
         await conn.executemany(
             "INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload)"
             " VALUES ($1, $2, $3, $4, $5::jsonb)",

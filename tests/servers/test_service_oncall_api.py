@@ -3,7 +3,7 @@
 Runs the real auth: ``verify_oncall_dispatch`` reads its two environment
 variables and falls back to the real ``verify_admin_access``, so what these
 cases pin is the door itself — not a stub of it. The store is a minimal
-in-memory stand-in exposing only what this router asks of ``AgentJobStore``;
+in-memory stand-in exposing only what this router asks of the storage layer;
 the owner surface's own concurrency and fence semantics are pinned elsewhere.
 
 The one property every case circles: this door must add **no** authority
@@ -24,10 +24,11 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import service_jobs
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_agent_job_store,
     get_gateway_client,
+    get_storage,
 )
 from cloud_agent.schemas import BASE_REF_METADATA_KEY
+from tests.support.storage import AllCapabilities
 
 pytestmark = pytest.mark.asyncio
 
@@ -40,8 +41,8 @@ _ADMIN_TOKEN = "admin-secret-1"
 _TEST_MODELS = ("glm-5.2", "glm-5.1")
 
 
-class FakeOnCallStore:
-    """In-memory stand-in for the slice of ``AgentJobStore`` this router uses."""
+class FakeOnCallStore(AllCapabilities):
+    """In-memory stand-in for the slice of the storage layer this router uses."""
 
     def __init__(self) -> None:
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -164,7 +165,7 @@ def _build_app(store: FakeOnCallStore, *, app_credentials: Any | None = None) ->
     """Mount only the service router; auth stays real."""
     app = FastAPI()
     app.include_router(service_jobs.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_gateway_client] = _FakeGateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: app_credentials
     return app

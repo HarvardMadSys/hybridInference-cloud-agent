@@ -1,12 +1,12 @@
-"""The storage ports describe the store, and nothing else describes the store.
+"""The storage ports describe the repositories, and nothing else does.
 
 Three properties, each of which has already been violated once by a draft of
 this refactor somewhere else:
 
-* every port method exists on ``AgentJobStore`` with the same signature, so a
-  port cannot describe an operation the store does not have;
-* every public store method is claimed by exactly one port, so a capability
-  cannot quietly belong to nobody;
+* every port method exists on a repository with the same signature, so a
+  port cannot describe an operation the storage layer does not have;
+* every public repository method is claimed by exactly one port, so a
+  capability cannot quietly belong to nobody;
 * no port imports ``cloud_agent.storage``, so the dependency keeps pointing
   inward.
 
@@ -24,12 +24,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PORTS_DIR = REPO_ROOT / "cloud_agent" / "ports"
-STORE_PATH = REPO_ROOT / "cloud_agent" / "storage" / "store.py"
 REPOSITORIES_DIR = REPO_ROOT / "cloud_agent" / "storage" / "repositories"
 
-#: ``initialize`` is the store's own lifecycle call, not a capability any caller
-#: asks a port for. It leaves with the startup path in stage 3.
-UNPORTED = {"initialize"}
+#: Nothing is exempt any more. ``initialize`` was the one public method no port
+#: claimed, and it left with the store: the schema is Alembic's, so there is no
+#: startup call for a port to describe.
+UNPORTED: set[str] = set()
 
 
 def _methods(path: Path, class_name: str | None = None) -> dict[str, tuple[str, str, str]]:
@@ -56,24 +56,23 @@ def _port_files() -> list[Path]:
 
 
 def _repository_files() -> list[Path]:
-    """Capabilities that have moved out of the store into their own class."""
-    if not REPOSITORIES_DIR.is_dir():
-        return []
+    """One module per capability; together, the whole storage implementation."""
+    assert REPOSITORIES_DIR.is_dir(), REPOSITORIES_DIR
     return sorted(p for p in REPOSITORIES_DIR.glob("*.py") if p.name != "__init__.py")
 
 
 def _implementations() -> dict[str, tuple[str, str, str, str]]:
-    """Every method a port can be satisfied by, repositories taking precedence.
+    """Every method a port can be satisfied by.
 
-    Stage 2 moves one capability at a time: the statements go to a
-    repository and the store keeps a delegating stub. The port describes the
-    statements, so it is the repository that has to match it once one exists.
+    One entry per name, and the repositories are the only source: with the
+    store deleted there is no second implementation for a port to match
+    against by accident.
     """
     found: dict[str, tuple[str, str, str, str]] = {}
     for path in _repository_files():
-        found.update(_methods(path))
-    for name, described in _methods(STORE_PATH, "AgentJobStore").items():
-        found.setdefault(name, described)
+        for name, described in _methods(path).items():
+            assert name not in found or name == "__init__", f"{name}: two repositories define it"
+            found[name] = described
     return found
 
 
@@ -97,9 +96,9 @@ def test_every_port_method_matches_its_implementation(path: Path) -> None:
         assert described[3] == actual[3], f"{path.name}.{name}: docstring differs"
 
 
-def test_every_public_store_method_is_claimed_once() -> None:
+def test_every_public_repository_method_is_claimed_once() -> None:
     """Nothing is left behind, and nothing is claimed by two ports."""
-    store = _methods(STORE_PATH, "AgentJobStore")
+    store = _implementations()
     public = {name for name in store if not name.startswith("_")}
     claimed: dict[str, str] = {}
     for path in _port_files():
@@ -144,7 +143,7 @@ def test_the_ports_cover_every_capability_the_callers_reach_for() -> None:
 
     reached: dict[str, set[str]] = {}
     for path in sorted((REPO_ROOT / "cloud_agent").rglob("*.py")):
-        if path == STORE_PATH:
+        if path.parent == REPOSITORIES_DIR:
             continue
         for node in ast.walk(ast.parse(path.read_text())):
             if (

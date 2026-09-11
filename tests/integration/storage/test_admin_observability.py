@@ -18,12 +18,11 @@ from cloud_agent.admin_observability import (
     decode_cursor,
 )
 from cloud_agent.api import admin_runs
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_storage
 from cloud_agent.api.routes import _attempt_resources
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.storage.admin_queries import AdminRunQueries
-from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.storage.assembly import Storage
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
@@ -32,7 +31,7 @@ from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as d
 @pytest_asyncio.fixture
 async def store(db):
     """Everything these tests need, to set a claim up."""
-    return AgentJobStore(db)
+    return Storage(db)
 
 
 from tests.unit.test_ledger_snapshots import END, START
@@ -40,8 +39,8 @@ from tests.unit.test_ledger_snapshots import END, START
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
-async def _event(store, job, attempt_id, seq, event_type="message", payload=None):
-    async with store._pool.acquire() as conn:
+async def _event(db, store, job, attempt_id, seq, event_type="message", payload=None):
+    async with db.acquire() as conn:
         return await conn.fetchval(
             """INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload)
                VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id""",
@@ -53,8 +52,8 @@ async def _event(store, job, attempt_id, seq, event_type="message", payload=None
         )
 
 
-async def _safe_title(store, job, title="Example task"):
-    async with store._pool.acquire() as conn:
+async def _safe_title(db, store, job, title="Example task"):
+    async with db.acquire() as conn:
         await conn.execute(
             "UPDATE agent_threads SET title = $2, title_source = 'generated' WHERE id = $1",
             job["thread_id"],
@@ -62,7 +61,7 @@ async def _safe_title(store, job, title="Example task"):
         )
 
 
-async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turns(store):
+async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turns(db, store):
     first = await _create_job(
         store,
         user_id="owner-one",
@@ -70,12 +69,12 @@ async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turn
         metadata={"auth": "PRIVATE-METADATA"},
     )
     second = await _create_job(store, user_id="owner-two", model="other-model")
-    _, a1, _ = await _seed_attempt(store, job=first, grant_id=None)
-    _, a2, _ = await _seed_attempt(store, job=first, attempt_no=2, grant_id=None)
-    _, b1, _ = await _seed_attempt(store, job=second, grant_id=None)
-    await _safe_title(store, first, "Approved title " + "x" * 500)
-    await _safe_title(store, second)
-    async with store._pool.acquire() as conn:
+    _, a1, _ = await _seed_attempt(db, store, job=first, grant_id=None)
+    _, a2, _ = await _seed_attempt(db, store, job=first, attempt_no=2, grant_id=None)
+    _, b1, _ = await _seed_attempt(db, store, job=second, grant_id=None)
+    await _safe_title(db, store, first, "Approved title " + "x" * 500)
+    await _safe_title(db, store, second)
+    async with db.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET created_at = $1, detail = 'PRIVATE-ERROR'", START)
         await conn.execute(
             "INSERT INTO agent_runner_hosts (host, first_seen_at, last_seen_at) VALUES ('runner-one', NOW(), NOW())"
@@ -84,10 +83,10 @@ async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turn
             "UPDATE agent_attempts SET host_id = 'runner-one' WHERE id = ANY($1::bigint[])",
             [a1, a2],
         )
-    await _event(store, first, a1, 1, "tool_use", {"input": "PRIVATE-INPUT"})
-    await _event(store, first, a2, 1, "tool_use", {"input": "PRIVATE-INPUT"})
-    await _event(store, second, b1, 1, "message", {"text": "PRIVATE-OUTPUT"})
-    queries = AdminRunQueries(store._pool)
+    await _event(db, store, first, a1, 1, "tool_use", {"input": "PRIVATE-INPUT"})
+    await _event(db, store, first, a2, 1, "tool_use", {"input": "PRIVATE-INPUT"})
+    await _event(db, store, second, b1, 1, "message", {"text": "PRIVATE-OUTPUT"})
+    queries = store.admin_runs
 
     async def page(**filters):
         return await queries.list_runs(
@@ -117,7 +116,7 @@ async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turn
     assert "event_count" not in run
 
 
-async def test_run_physical_hosts_group_runners_without_changing_ids_or_filters(store):
+async def test_run_physical_hosts_group_runners_without_changing_ids_or_filters(db, store):
     job = await _create_job(store)
     hosts = {
         "gpu-box": {"physical_host": "gpu-box"},
@@ -128,8 +127,8 @@ async def test_run_physical_hosts_group_runners_without_changing_ids_or_filters(
         "null-label": {"physical_host": None},
     }
     for number, (host, labels) in enumerate(hosts.items(), 1):
-        _, attempt, _ = await _seed_attempt(store, job=job, attempt_no=number, grant_id=None)
-        async with store._pool.acquire() as conn:
+        _, attempt, _ = await _seed_attempt(db, store, job=job, attempt_no=number, grant_id=None)
+        async with db.acquire() as conn:
             await conn.execute(
                 "INSERT INTO agent_runner_hosts (host, labels, first_seen_at, last_seen_at) "
                 "VALUES ($1, $2::jsonb, NOW(), NOW())",
@@ -139,9 +138,9 @@ async def test_run_physical_hosts_group_runners_without_changing_ids_or_filters(
             await conn.execute(
                 "UPDATE agent_attempts SET host_id = $1 WHERE id = $2", host, attempt
             )
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET created_at = $1 WHERE id = $2", START, job["id"])
-    queries = AdminRunQueries(store._pool)
+    queries = store.admin_runs
     # Filtering still targets the exact runner, even when its display name is shared.
     page = await queries.list_runs(
         filters=RunFilters(host="gpu-box-kata"), since=START, until=END, cursor=None, limit=20
@@ -156,10 +155,12 @@ async def test_run_physical_hosts_group_runners_without_changing_ids_or_filters(
 
 
 @pytest.mark.parametrize("title_source", ["fallback", "generated", "manual"])
-async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypatch, title_source):
+async def test_admin_metadata_routes_hide_prompt_fallback_titles(
+    db, store, monkeypatch, title_source
+):
     job = await _create_job(store, task_prompt="PRIVATE-PROMPT-FIRST-LINE\nMore private content")
     expected = None if title_source == "fallback" else "Approved task title"
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET created_at = $1 WHERE id = $2", START, job["id"])
         if expected is not None:
             await conn.execute(
@@ -178,7 +179,7 @@ async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypa
     monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
     app = FastAPI()
     app.include_router(admin_runs.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         headers = {"Authorization": "Bearer db-admin-observation-test"}
         listing = await client.get(
@@ -195,13 +196,13 @@ async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypa
     assert detail.json()["run"]["title"] == expected
 
 
-async def test_run_status_filters_exact_states_before_pagination(store, monkeypatch):
+async def test_run_status_filters_exact_states_before_pagination(db, store, monkeypatch):
     states = ("queued", "running", "succeeded", "failed", "cancelled")
     jobs = {}
     for state in states:
         job = await _create_job(store)
         jobs[state] = job["id"]
-        async with store._pool.acquire() as conn:
+        async with db.acquire() as conn:
             await conn.execute(
                 "UPDATE agent_jobs SET state = $2, created_at = $3, "
                 "native_turn_no = CASE WHEN $2 = 'succeeded' THEN 1 END WHERE id = $1",
@@ -212,7 +213,7 @@ async def test_run_status_filters_exact_states_before_pagination(store, monkeypa
     monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
     app = FastAPI()
     app.include_router(admin_runs.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         for selected in (None, *states):
             expected = states if selected is None else (selected,)
@@ -237,11 +238,11 @@ async def test_run_status_filters_exact_states_before_pagination(store, monkeypa
             assert seen == sorted(((jobs[state], state) for state in expected), reverse=True)
 
 
-async def test_run_cursor_keeps_tied_timestamps_and_the_original_filter_window(store):
+async def test_run_cursor_keeps_tied_timestamps_and_the_original_filter_window(db, store):
     jobs = [await _create_job(store) for _ in range(4)]
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET created_at = $1", START)
-    queries = AdminRunQueries(store._pool)
+    queries = store.admin_runs
     filters = RunFilters()
     cursor = None
     seen = []
@@ -263,18 +264,31 @@ async def test_run_cursor_keeps_tied_timestamps_and_the_original_filter_window(s
     assert len(set(seen)) == 4
 
 
-async def test_activity_cursor_orders_per_attempt_and_freezes_late_control_events(store):
-    job, first, _ = await _seed_attempt(store, grant_id=None)
-    _, second, _ = await _seed_attempt(store, job=job, attempt_no=2, grant_id=None)
-    other, other_attempt, _ = await _seed_attempt(store, grant_id=None)
+async def test_activity_cursor_orders_per_attempt_and_freezes_late_control_events(db, store):
+    job, first, _ = await _seed_attempt(db, store, grant_id=None)
+    _, second, _ = await _seed_attempt(db, store, job=job, attempt_no=2, grant_id=None)
+    other, other_attempt, _ = await _seed_attempt(db, store, grant_id=None)
     ids = [
         await _event(
-            store, job, first, 1, "tool_use", {"id": "same-id", "name": "Bash", "input": "PRIVATE"}
+            db,
+            store,
+            job,
+            first,
+            1,
+            "tool_use",
+            {"id": "same-id", "name": "Bash", "input": "PRIVATE"},
         ),
         await _event(
-            store, job, second, 1, "tool_use", {"id": "same-id", "name": "Read", "input": "PRIVATE"}
+            db,
+            store,
+            job,
+            second,
+            1,
+            "tool_use",
+            {"id": "same-id", "name": "Read", "input": "PRIVATE"},
         ),
         await _event(
+            db,
             store,
             job,
             first,
@@ -283,6 +297,7 @@ async def test_activity_cursor_orders_per_attempt_and_freezes_late_control_event
             {"tool_use_id": "same-id", "is_error": True, "text": "PRIVATE"},
         ),
         await _event(
+            db,
             store,
             job,
             second,
@@ -291,8 +306,8 @@ async def test_activity_cursor_orders_per_attempt_and_freezes_late_control_event
             {"tool_use_id": "same-id", "is_error": False, "text": "PRIVATE"},
         ),
     ]
-    await _event(store, other, other_attempt, 1, "message", {"text": "PRIVATE-OTHER"})
-    queries = AdminRunQueries(store._pool)
+    await _event(db, store, other, other_attempt, 1, "message", {"text": "PRIVATE-OTHER"})
+    queries = store.admin_runs
     page1 = await queries.activity(job["id"], attempt_id=None, cursor=None, limit=2)
     assert [(row.attempt_id, row.seq) for row in page1.events] == [(first, 1), (first, 2)]
     assert page1.events[1].is_error is True
@@ -300,7 +315,7 @@ async def test_activity_cursor_orders_per_attempt_and_freezes_late_control_event
     assert "PRIVATE" not in page1.model_dump_json()
     assert "payload" not in page1.model_dump_json()
     cursor = decode_cursor(page1.next_cursor, ActivityCursor, cursor_scope([job["id"], None]))
-    late = await _event(store, job, first, 3, "attempt_superseded", {"detail": "PRIVATE-LATE"})
+    late = await _event(db, store, job, first, 3, "attempt_superseded", {"detail": "PRIVATE-LATE"})
     page2 = await queries.activity(job["id"], attempt_id=None, cursor=cursor, limit=2)
     assert [(row.attempt_id, row.seq) for row in page2.events] == [(second, 1), (second, 2)]
     assert page2.next_cursor is None
@@ -315,8 +330,8 @@ async def test_activity_cursor_orders_per_attempt_and_freezes_late_control_event
         decode_cursor(page1.next_cursor, ActivityCursor, cursor_scope([job["id"], first]))
 
 
-async def test_metadata_projection_bounds_names_and_never_fetches_nested_content(store):
-    job, attempt, _ = await _seed_attempt(store, grant_id=None)
+async def test_metadata_projection_bounds_names_and_never_fetches_nested_content(db, store):
+    job, attempt, _ = await _seed_attempt(db, store, grant_id=None)
     payload = {
         "id": "PRIVATE-ID" * 200,
         "name": "tool-" * 10_000,
@@ -332,8 +347,8 @@ async def test_metadata_projection_bounds_names_and_never_fetches_nested_content
         "usage_id": "PRIVATE-IDENTITY",
         "usage_scope": "PRIVATE-SCOPE",
     }
-    await _event(store, job, attempt, 1, "tool_use", payload)
-    queries = AdminRunQueries(store._pool)
+    await _event(db, store, job, attempt, 1, "tool_use", payload)
+    queries = store.admin_runs
     activity = await queries.activity(job["id"], attempt_id=None, cursor=None, limit=10)
     assert len(activity.events[0].tool_name) == 160
     assert activity.events[0].tool_use_id is None  # no ambiguous truncated identity
@@ -350,15 +365,21 @@ async def test_metadata_projection_bounds_names_and_never_fetches_nested_content
     assert inputs["attempts"][0]["attempt_id"] == attempt
 
 
-async def test_usage_projection_pairs_hashed_tools_without_fetching_their_content(store):
-    job, attempt, _ = await _seed_attempt(store, grant_id=None)
+async def test_usage_projection_pairs_hashed_tools_without_fetching_their_content(db, store):
+    job, attempt, _ = await _seed_attempt(db, store, grant_id=None)
     identity = "PRIVATE-TOOL-IDENTITY"
-    await _event(store, job, attempt, 1, "tool_use", {"id": identity, "input": "PRIVATE-INPUT"})
+    await _event(db, store, job, attempt, 1, "tool_use", {"id": identity, "input": "PRIVATE-INPUT"})
     await _event(
-        store, job, attempt, 2, "tool_result", {"tool_use_id": identity, "text": "PRIVATE-RESULT"}
+        db,
+        store,
+        job,
+        attempt,
+        2,
+        "tool_result",
+        {"tool_use_id": identity, "text": "PRIVATE-RESULT"},
     )
-    await _event(store, job, attempt, 3, "tool_use", {"id": {"hidden": "PRIVATE-OBJECT"}})
-    inputs = await AdminRunQueries(store._pool).usage_inputs(job["id"])
+    await _event(db, store, job, attempt, 3, "tool_use", {"id": {"hidden": "PRIVATE-OBJECT"}})
+    inputs = await store.admin_runs.usage_inputs(job["id"])
     assert "PRIVATE" not in json.dumps(inputs, default=str)
     start, result, malformed = [event["payload"] for event in inputs["events"]]
     assert start["id"] == result["tool_use_id"]
@@ -366,9 +387,9 @@ async def test_usage_projection_pairs_hashed_tools_without_fetching_their_conten
     assert malformed["id"] is None
 
 
-async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attempt_totals(store):
-    job, first, _ = await _seed_attempt(store, grant_id=None)
-    _, second, _ = await _seed_attempt(store, job=job, attempt_no=2, grant_id=None)
+async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attempt_totals(db, store):
+    job, first, _ = await _seed_attempt(db, store, grant_id=None)
+    _, second, _ = await _seed_attempt(db, store, job=job, attempt_no=2, grant_id=None)
     shared = {
         "usage_id": "same-response",
         "usage": {
@@ -380,8 +401,9 @@ async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attemp
     }
     for attempt in (first, second):
         for seq, kind in enumerate(("thinking", "tool_use", "message"), start=1):
-            await _event(store, job, attempt, seq, kind, {**shared, "text": "PRIVATE"})
+            await _event(db, store, job, attempt, seq, kind, {**shared, "text": "PRIVATE"})
     await _event(
+        db,
         store,
         job,
         second,
@@ -397,9 +419,9 @@ async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attemp
             },
         },
     )
-    queries = AdminRunQueries(store._pool)
+    queries = store.admin_runs
     admin_inputs = await queries.usage_inputs(job["id"])
-    owner_inputs = await store.job_usage_inputs(job_id=job["id"])
+    owner_inputs = await store.execution_queries.job_usage_inputs(job_id=job["id"])
     admin = summarize_job_usage(
         ledger_rows=[], runtime_inputs=admin_inputs, runtime="claude-code", terminal=True
     )
@@ -414,10 +436,10 @@ async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attemp
     assert "PRIVATE" not in json.dumps(admin_inputs, default=str)
 
 
-async def test_resources_preserve_measurement_scope_and_never_read_another_jobs_attempt(store):
-    job, attempt, _ = await _seed_attempt(store, grant_id=None)
-    other, other_attempt, _ = await _seed_attempt(store, grant_id=None)
-    async with store._pool.acquire() as conn:
+async def test_resources_preserve_measurement_scope_and_never_read_another_jobs_attempt(db, store):
+    job, attempt, _ = await _seed_attempt(db, store, grant_id=None)
+    other, other_attempt, _ = await _seed_attempt(db, store, grant_id=None)
+    async with db.acquire() as conn:
         await conn.execute(
             "INSERT INTO agent_attempt_resources (job_id, attempt_id, sampler_version, coverage, process_observer, process_observation_complete) VALUES ($1, $2, 'shared-member-v1', 0, 'kata-guest', TRUE)",
             job["id"],
@@ -435,7 +457,7 @@ async def test_resources_preserve_measurement_scope_and_never_read_another_jobs_
             "INSERT INTO agent_process_observations (attempt_id, process_seq, uid, pid, tgid, comm, started_offset_ms, duration_ms, exit_code, observed_exit, tool_call_seqs, cpu_usec, mem_peak_bytes) VALUES ($1, 1, 1000, 42, 42, 'python', 5, 25, 0, TRUE, ARRAY[1], 1200, 4096)",
             attempt,
         )
-    queries = AdminRunQueries(store._pool)
+    queries = store.admin_runs
     row = await queries.resources(job["id"], attempt)
     resources = _attempt_resources(row)
     assert resources.cpu_usec is None
@@ -452,13 +474,15 @@ async def test_resources_preserve_measurement_scope_and_never_read_another_jobs_
 
 
 async def test_legacy_large_content_is_bounded_in_sql_and_real_http_reveal_is_audited(
-    store, monkeypatch
+    db, store, monkeypatch
 ):
-    job, attempt, _ = await _seed_attempt(store, grant_id=None)
-    other, other_attempt, _ = await _seed_attempt(store, grant_id=None)
-    event = await _event(store, job, attempt, 1, "tool_result", {"text": '😀\n"' * 200_000})
-    other_event = await _event(store, other, other_attempt, 1, "message", {"text": "PRIVATE-OTHER"})
-    queries = AdminRunQueries(store._pool)
+    job, attempt, _ = await _seed_attempt(db, store, grant_id=None)
+    other, other_attempt, _ = await _seed_attempt(db, store, grant_id=None)
+    event = await _event(db, store, job, attempt, 1, "tool_result", {"text": '😀\n"' * 200_000})
+    other_event = await _event(
+        db, store, other, other_attempt, 1, "message", {"text": "PRIVATE-OTHER"}
+    )
+    queries = store.admin_runs
     fetched = await queries.event_content(job["id"], event)
     assert (
         len(json.dumps(fetched["payload"], ensure_ascii=False).encode()) <= MAX_EVENT_PAYLOAD_BYTES
@@ -470,7 +494,7 @@ async def test_legacy_large_content_is_bounded_in_sql_and_real_http_reveal_is_au
     monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
     app = FastAPI()
     app.include_router(admin_runs.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             f"/admin/agent/runs/{job['id']}/events/{event}/content",
@@ -480,7 +504,7 @@ async def test_legacy_large_content_is_bounded_in_sql_and_real_http_reveal_is_au
     assert len(response.content) <= MAX_EVENT_PAYLOAD_BYTES
     assert response.json()["truncated"] is True
     assert response.headers["cache-control"] == "no-store"
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         record = await conn.fetchrow(
             "SELECT target_user_id, details, success FROM agent_admin_audit_log WHERE details->>'job_id' = $1",
             job["id"],

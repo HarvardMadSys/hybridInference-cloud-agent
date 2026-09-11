@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.storage.assembly import Storage
 
 
 @pytest.mark.asyncio
@@ -15,7 +15,7 @@ async def test_session_summary_is_only_queried_when_requested(include_summary: b
     pool = MagicMock()
     pool.acquire.return_value.__aenter__.return_value = conn
 
-    result = await AgentJobStore(pool).list_sessions(
+    result = await Storage(pool).conversation_queries.list_sessions(
         user_id="owner", repo="owner/project", archived=True, include_summary=include_summary
     )
 

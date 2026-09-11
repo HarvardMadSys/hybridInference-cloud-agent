@@ -29,7 +29,6 @@ import asyncpg
 
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, probe_broker
 from cloud_agent.host_pool import HOST_ONLINE
-from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
@@ -324,8 +323,13 @@ async def wait_for_shared_live(
     # an aware UTC timestamp avoids local-time ambiguity in the comparison.
     not_before = datetime.now(UTC)
     deadline = time.monotonic() + timeout_seconds
+    from cloud_agent.storage.assembly import Storage
+
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
-    store = AgentJobStore(pool)
+    # The one assembly, so this entry point names no implementation of its
+    # own: it needs the host pool and takes it from the same place the
+    # service does.
+    store = Storage(pool).host_pool
     last_detail = ""
     try:
         while True:

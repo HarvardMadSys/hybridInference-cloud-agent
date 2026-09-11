@@ -18,25 +18,32 @@ import pytest_asyncio
 from cloud_agent.domain.requests import request_fingerprint
 from tests.integration.storage.test_agent_job_store import (
     _create_job,
+    pool as _shared_pool,  # noqa: F401
     store as _shared_store,  # noqa: F401
 )
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
 @pytest_asyncio.fixture(name="store")
-async def _store(_shared_store: AgentJobStore) -> AgentJobStore:  # noqa: F811
+async def _store(_shared_store: Storage) -> Storage:  # noqa: F811
     """The clean store the job-store tests use, under the same name."""
     return _shared_store
+
+
+@pytest_asyncio.fixture(name="pool")
+async def _pool(_shared_pool):  # noqa: F811
+    """That store's pool, for the racing insert these tests stage directly."""
+    return _shared_pool
 
 
 _CREATE = {"repo": "example-org/example-repo", "task_prompt": "fix the flaky test"}
 
 
-async def test_a_resent_create_returns_the_job_the_first_send_made(store: AgentJobStore):
+async def test_a_resent_create_returns_the_job_the_first_send_made(pool, store: Storage):
     key = "submit-1"
     fingerprint = request_fingerprint("create", _CREATE)
     first = await _create_job(store, client_request_id=key, client_request_fingerprint=fingerprint)
@@ -44,12 +51,12 @@ async def test_a_resent_create_returns_the_job_the_first_send_made(store: AgentJ
     assert again["id"] == first["id"]
     assert again["thread_id"] == first["thread_id"]
     assert again["title"] == first["title"]
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_jobs") == 1
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_threads") == 1
 
 
-async def test_the_same_key_under_different_content_is_refused(store: AgentJobStore):
+async def test_the_same_key_under_different_content_is_refused(pool, store: Storage):
     key = "submit-1"
     first = await _create_job(
         store,
@@ -65,11 +72,11 @@ async def test_the_same_key_under_different_content_is_refused(store: AgentJobSt
         ),
     )
     assert edited == {"error": "client_request_conflict"}
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         assert await conn.fetch("SELECT id FROM agent_jobs") == [(first["id"],)]
 
 
-async def test_keys_are_scoped_to_their_owner(store: AgentJobStore):
+async def test_keys_are_scoped_to_their_owner(store: Storage):
     fingerprint = request_fingerprint("create", _CREATE)
     mine = await _create_job(store, client_request_id="k", client_request_fingerprint=fingerprint)
     theirs = await _create_job(
@@ -78,7 +85,7 @@ async def test_keys_are_scoped_to_their_owner(store: AgentJobStore):
     assert theirs["id"] != mine["id"]
 
 
-async def test_two_sends_racing_produce_one_job(store: AgentJobStore):
+async def test_two_sends_racing_produce_one_job(pool, store: Storage):
     fingerprint = request_fingerprint("create", _CREATE)
     results = await asyncio.gather(
         *[
@@ -87,23 +94,23 @@ async def test_two_sends_racing_produce_one_job(store: AgentJobStore):
         ]
     )
     assert len({job["id"] for job in results}) == 1
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_jobs") == 1
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_threads") == 1
 
 
-async def test_a_resent_follow_up_returns_the_turn_the_first_send_made(store: AgentJobStore):
+async def test_a_resent_follow_up_returns_the_turn_the_first_send_made(pool, store: Storage):
     parent = await _create_job(store)
     payload = {"parent_job_id": parent["id"], "prompt": "and then"}
     fingerprint = request_fingerprint("follow_up", payload)
-    first = await store.create_follow_up(
+    first = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"],
         user_id="user-1",
         prompt="and then",
         client_request_id="turn-2",
         client_request_fingerprint=fingerprint,
     )
-    again = await store.create_follow_up(
+    again = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"],
         user_id="user-1",
         prompt="and then",
@@ -112,7 +119,7 @@ async def test_a_resent_follow_up_returns_the_turn_the_first_send_made(store: Ag
     )
     assert first is not None and again is not None
     assert again["id"] == first["id"] and again["turn_no"] == 2
-    edited = await store.create_follow_up(
+    edited = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"],
         user_id="user-1",
         prompt="and then something else",
@@ -122,14 +129,14 @@ async def test_a_resent_follow_up_returns_the_turn_the_first_send_made(store: Ag
         ),
     )
     assert edited == {"error": "client_request_conflict"}
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_jobs") == 2
 
 
-async def test_a_key_travels_with_its_fingerprint(store: AgentJobStore):
+async def test_a_key_travels_with_its_fingerprint(pool, store: Storage):
     with pytest.raises(ValueError):
         await _create_job(store, client_request_id="alone")
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         job = await _create_job(store)
         with pytest.raises(asyncpg.CheckViolationError):
             await conn.execute(
@@ -137,14 +144,14 @@ async def test_a_key_travels_with_its_fingerprint(store: AgentJobStore):
             )
 
 
-async def test_an_admin_action_records_who_acted(store: AgentJobStore):
-    row_id = await store.record_admin_action(
+async def test_an_admin_action_records_who_acted(pool, store: Storage):
+    row_id = await store.audit.record_admin_action(
         action="agent.runner_host.drain",
         actor_id="admin-7",
         admin_ip="203.0.113.9",
         details={"host": "runner-a"},
     )
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT actor_id, admin_ip, action FROM agent_admin_audit_log WHERE id = $1", row_id
         )

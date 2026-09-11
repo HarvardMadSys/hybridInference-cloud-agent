@@ -1,7 +1,7 @@
 """End-to-end agent job lifecycle over the real Postgres-backed store.
 
 The API-surface tests use an in-memory stand-in; this one wires the router to
-a real ``AgentJobStore`` so the HTTP layer and the fencing SQL are exercised
+a real ``Storage`` so the HTTP layer and the fencing SQL are exercised
 together — including the zombie-worker case, where a reaped attempt's token
 still parses but every write must be rejected with 409.
 
@@ -25,12 +25,12 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_agent_job_store,
     get_gateway_client,
     get_grant_client,
     get_log_store,
+    get_storage,
 )
-from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.storage.assembly import Storage
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
@@ -104,7 +104,7 @@ class _FakeGrants:
 
 @pytest_asyncio.fixture()
 async def api(monkeypatch):
-    """Mount the router over a real AgentJobStore with auth stubbed."""
+    """Mount the router over a real Storage with auth stubbed."""
     import asyncpg
 
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "lifecycle-test-secret")
@@ -132,27 +132,27 @@ async def api(monkeypatch):
         pytest.skip(f"PostgreSQL not available: {exc}")
         return  # unreachable
 
-    store = AgentJobStore(pool)
+    store = Storage(pool)
     # ``initialize()`` is a no-op now — the schema and its backfills are the
     # baseline migration's, and a deploy applies them the same way.
     apply_migrations(db_config)
     async with pool.acquire() as conn:
         await reset_agent_tables(conn)
         await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
-    await store.register_host(
+    await store.host_pool.register_host(
         host="runner-test",
         credential_hash="test-credential-hash",
         capabilities=[SHARED_SANDBOX_CAPABILITY],
         slots_total=4,
     )
-    await store.record_host_heartbeat(
+    await store.host_pool.record_host_heartbeat(
         host="runner-test",
         capabilities=[SHARED_SANDBOX_CAPABILITY],
     )
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_gateway_client] = _FakeGateway
     app.dependency_overrides[get_grant_client] = _FakeGrants
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
@@ -210,7 +210,7 @@ async def test_reaped_worker_token_is_rejected_end_to_end(api):
             "WHERE id = $1",
             attempt_id,
         )
-    actions = await store.reap_expired(max_attempts=3)
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
     assert actions[0]["action"] == "queued"
 
     # Every remaining worker write path of the zombie is now rejected.

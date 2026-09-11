@@ -13,7 +13,7 @@ This module mints exactly that: a stateless HMAC token bound to one
   attempt and nothing else;
 - **self-revoking** — the token carries the fencing triple, so the moment the
   reaper supersedes that attempt every store write it can attempt is rejected.
-  Revocation needs no token blacklist: the fence in ``AgentJobStore`` is the
+  Revocation needs no token blacklist: the fence in the attempt tables is the
   authority.
 
 Signed with this service's **own** secret, ``AGENT_CONTROL_TOKEN_SECRET``.

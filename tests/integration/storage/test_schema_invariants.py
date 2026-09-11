@@ -22,36 +22,45 @@ from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
     _reserve_shared_chat,
+    pool as _shared_pool,  # noqa: F401
     store as _shared_store,  # noqa: F401
 )
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
 @pytest_asyncio.fixture(name="store")
-async def _store(_shared_store: AgentJobStore) -> AgentJobStore:  # noqa: F811
+async def _store(_shared_store: Storage) -> Storage:  # noqa: F811
     """The clean store the job-store tests use, under the same name."""
     return _shared_store
 
 
-async def _refused(store: AgentJobStore, error: type[Exception], sql: str, *params) -> None:
-    async with store._pool.acquire() as conn:
+@pytest_asyncio.fixture(name="pool")
+async def _pool(_shared_pool):  # noqa: F811
+    """That store's pool, for the constraint violations these tests provoke."""
+    return _shared_pool
+
+
+async def _refused(pool, store: Storage, error: type[Exception], sql: str, *params) -> None:
+    async with pool.acquire() as conn:
         with pytest.raises(error):
             await conn.execute(sql, *params)
 
 
-async def test_a_job_belongs_to_an_existing_thread(store: AgentJobStore) -> None:
+async def test_a_job_belongs_to_an_existing_thread(pool, store: Storage) -> None:
     job = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "UPDATE agent_jobs SET thread_id = 'athr_missing' WHERE id = $1",
         job["id"],
     )
     await _refused(
+        pool,
         store,
         asyncpg.NotNullViolationError,
         "UPDATE agent_jobs SET thread_id = NULL WHERE id = $1",
@@ -59,9 +68,10 @@ async def test_a_job_belongs_to_an_existing_thread(store: AgentJobStore) -> None
     )
 
 
-async def test_a_job_is_owned_by_its_threads_owner(store: AgentJobStore) -> None:
+async def test_a_job_is_owned_by_its_threads_owner(pool, store: Storage) -> None:
     job = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "UPDATE agent_jobs SET user_id = 'someone-else' WHERE id = $1",
@@ -69,9 +79,10 @@ async def test_a_job_is_owned_by_its_threads_owner(store: AgentJobStore) -> None
     )
 
 
-async def test_job_state_is_a_closed_vocabulary(store: AgentJobStore) -> None:
+async def test_job_state_is_a_closed_vocabulary(pool, store: Storage) -> None:
     job = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.CheckViolationError,
         "UPDATE agent_jobs SET state = 'publishing' WHERE id = $1",
@@ -79,12 +90,13 @@ async def test_job_state_is_a_closed_vocabulary(store: AgentJobStore) -> None:
     )
 
 
-async def test_a_jobs_current_attempt_is_one_of_its_own(store: AgentJobStore) -> None:
+async def test_a_jobs_current_attempt_is_one_of_its_own(pool, store: Storage) -> None:
     first = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim["id"] == first["id"]
     other = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "UPDATE agent_jobs SET current_attempt_id = $2 WHERE id = $1",
@@ -93,12 +105,13 @@ async def test_a_jobs_current_attempt_is_one_of_its_own(store: AgentJobStore) ->
     )
 
 
-async def test_an_event_is_filed_under_its_attempts_job(store: AgentJobStore) -> None:
+async def test_an_event_is_filed_under_its_attempts_job(pool, store: Storage) -> None:
     first = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim["id"] == first["id"]
     other = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type) VALUES ($1, $2, 1, 'x')",
@@ -108,17 +121,20 @@ async def test_an_event_is_filed_under_its_attempts_job(store: AgentJobStore) ->
 
 
 async def test_an_attempt_keeps_a_valid_status_and_a_positive_generation(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ) -> None:
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     await _refused(
+        pool,
         store,
         asyncpg.CheckViolationError,
         "UPDATE agent_attempts SET status = 'audit-invalid' WHERE id = $1",
         claim["attempt_id"],
     )
     await _refused(
+        pool,
         store,
         asyncpg.CheckViolationError,
         "UPDATE agent_attempts SET lease_generation = -1 WHERE id = $1",
@@ -127,6 +143,7 @@ async def test_an_attempt_keeps_a_valid_status_and_a_positive_generation(
     # Leaving ``running`` without a finish time, or finishing while running,
     # is the same lie told two ways.
     await _refused(
+        pool,
         store,
         asyncpg.CheckViolationError,
         "UPDATE agent_attempts SET status = 'superseded' WHERE id = $1",
@@ -134,12 +151,13 @@ async def test_an_attempt_keeps_a_valid_status_and_a_positive_generation(
     )
 
 
-async def test_a_membership_cannot_cross_tenants(store: AgentJobStore) -> None:
+async def test_a_membership_cannot_cross_tenants(pool, store: Storage) -> None:
     _job, _claim_row, sandbox = await _reserve_shared_chat(store)
     foreign = await _create_job(store, user_id="someone-else")
     # Either owner column is wrong for one of the two parents.
     for owner in ("someone-else", "user-1"):
         await _refused(
+            pool,
             store,
             asyncpg.ForeignKeyViolationError,
             "INSERT INTO agent_thread_sandbox_memberships (thread_id, user_id, sandbox_id) "
@@ -151,13 +169,15 @@ async def test_a_membership_cannot_cross_tenants(store: AgentJobStore) -> None:
 
 
 async def test_a_membership_names_only_its_own_threads_jobs_and_attempts(
-    store: AgentJobStore,
+    pool,
+    store: Storage,
 ) -> None:
     job, _claim_row, _sandbox = await _reserve_shared_chat(store)
     other = await _create_job(store)
     other_claim = await _claim(store, worker_id="w2", lease_ttl_seconds=60)
     assert other_claim["id"] == other["id"]
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "UPDATE agent_thread_sandbox_memberships SET active_attempt_id = $2 WHERE thread_id = $1",
@@ -165,6 +185,7 @@ async def test_a_membership_names_only_its_own_threads_jobs_and_attempts(
         other_claim["attempt_id"],
     )
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "UPDATE agent_thread_sandbox_memberships SET last_settled_job_id = $2 WHERE thread_id = $1",
@@ -173,9 +194,10 @@ async def test_a_membership_names_only_its_own_threads_jobs_and_attempts(
     )
 
 
-async def test_a_hot_residency_carries_a_lease(store: AgentJobStore) -> None:
+async def test_a_hot_residency_carries_a_lease(pool, store: Storage) -> None:
     job, _claim_row, _sandbox = await _reserve_shared_chat(store)
     await _refused(
+        pool,
         store,
         asyncpg.CheckViolationError,
         "UPDATE agent_thread_sandbox_memberships SET residency_status = 'hot' WHERE thread_id = $1",
@@ -183,9 +205,9 @@ async def test_a_hot_residency_carries_a_lease(store: AgentJobStore) -> None:
     )
 
 
-async def test_a_snapshot_includes_only_existing_jobs(store: AgentJobStore) -> None:
+async def test_a_snapshot_includes_only_existing_jobs(pool, store: Storage) -> None:
     job, _claim_row, sandbox = await _reserve_shared_chat(store)
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             async with conn.transaction():
                 snapshot_id = await conn.fetchval(
@@ -205,10 +227,10 @@ async def test_a_snapshot_includes_only_existing_jobs(store: AgentJobStore) -> N
                 )
 
 
-async def test_a_snapshots_anchor_is_one_of_its_included_jobs(store: AgentJobStore) -> None:
+async def test_a_snapshots_anchor_is_one_of_its_included_jobs(pool, store: Storage) -> None:
     """The deferred key is checked at commit, so the whole transaction is refused."""
     job, _claim_row, sandbox = await _reserve_shared_chat(store)
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             async with conn.transaction():
                 await conn.execute(
@@ -220,9 +242,10 @@ async def test_a_snapshots_anchor_is_one_of_its_included_jobs(store: AgentJobSto
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_sandbox_snapshots") == 0
 
 
-async def test_a_succeeded_job_carries_its_native_turn(store: AgentJobStore) -> None:
+async def test_a_succeeded_job_carries_its_native_turn(pool, store: Storage) -> None:
     job = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.CheckViolationError,
         "UPDATE agent_jobs SET state = 'succeeded' WHERE id = $1",
@@ -230,17 +253,18 @@ async def test_a_succeeded_job_carries_its_native_turn(store: AgentJobStore) -> 
     )
     # A turn that settled its native context and then failed keeps the
     # ordinal: the constraint is one-directional on purpose.
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'failed', native_turn_no = 1 WHERE id = $1",
             job["id"],
         )
 
 
-async def test_a_fork_copy_is_terminal(store: AgentJobStore) -> None:
+async def test_a_fork_copy_is_terminal(pool, store: Storage) -> None:
     source = await _create_job(store)
     copy = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.CheckViolationError,
         "UPDATE agent_jobs SET fork_source_job_id = $2 WHERE id = $1",
@@ -249,10 +273,11 @@ async def test_a_fork_copy_is_terminal(store: AgentJobStore) -> None:
     )
 
 
-async def test_a_message_and_a_parent_stay_in_the_jobs_thread(store: AgentJobStore) -> None:
+async def test_a_message_and_a_parent_stay_in_the_jobs_thread(pool, store: Storage) -> None:
     first = await _create_job(store)
     second = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "INSERT INTO agent_thread_messages (thread_id, job_id, role, content) "
@@ -261,6 +286,7 @@ async def test_a_message_and_a_parent_stay_in_the_jobs_thread(store: AgentJobSto
         second["id"],
     )
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "UPDATE agent_jobs SET parent_job_id = $2, turn_no = 2 WHERE id = $1",
@@ -269,6 +295,7 @@ async def test_a_message_and_a_parent_stay_in_the_jobs_thread(store: AgentJobSto
     )
     # And a root turn is exactly the one without a parent.
     await _refused(
+        pool,
         store,
         asyncpg.CheckViolationError,
         "UPDATE agent_jobs SET turn_no = 2 WHERE id = $1",
@@ -276,12 +303,13 @@ async def test_a_message_and_a_parent_stay_in_the_jobs_thread(store: AgentJobSto
     )
 
 
-async def test_resource_rows_belong_to_their_attempts_job(store: AgentJobStore) -> None:
+async def test_resource_rows_belong_to_their_attempts_job(pool, store: Storage) -> None:
     first = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim["id"] == first["id"]
     other = await _create_job(store)
     await _refused(
+        pool,
         store,
         asyncpg.ForeignKeyViolationError,
         "INSERT INTO agent_attempt_resources (attempt_id, job_id, sampler_version) "

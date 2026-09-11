@@ -2,7 +2,7 @@
 
 Ported from the gateway with assertions untouched. One piece of wiring changed
 and could not not change: the gateway's ``AppServices`` container became
-``app.state.store``. ``verify_admin_access`` is this repository's own since E7
+``app.state.storage``. ``verify_admin_access`` is this repository's own since E7
 and is left real — the ``ADMIN_TOKEN`` these tests knock with is the door it
 actually opens.
 """
@@ -17,13 +17,14 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import admin_hosts as admin_router
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_storage
+from tests.support.storage import AllCapabilities
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
 
-class FakeHostStore:
-    """The runner-host surface of AgentJobStore, in memory."""
+class FakeHostStore(AllCapabilities):
+    """The runner-host capability, in memory."""
 
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
@@ -93,9 +94,9 @@ class FakeHostStore:
 def _admin_app(store: FakeHostStore | None) -> FastAPI:
     """Mount the admin router over one store, with E7's gate stood in for."""
     app = FastAPI()
-    app.state.store = store
+    app.state.storage = store
     app.include_router(admin_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     return app
 
 

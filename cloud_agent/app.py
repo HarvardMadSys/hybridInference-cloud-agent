@@ -29,7 +29,7 @@ import asyncio
 import contextlib
 import os
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import (
@@ -49,11 +49,57 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports import (
         AttemptCommands,
+        ConversationQueries,
         GrantRepository,
         HostPoolRepository,
         ResidencyRepository,
+        SandboxRepository,
+        SessionForkRepository,
+        SnapshotRepository,
     )
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.publish_worker import PublishStorage
+
+
+class _SettledTerminals(Protocol):
+    """What reconciling a settled terminal reaches for."""
+
+    conversation_queries: ConversationQueries
+    host_pool: HostPoolRepository
+    sandbox: SandboxRepository
+
+
+class _GrantRenewal(Protocol):
+    """Renewing a live grant, and abandoning the attempt when it cannot be."""
+
+    attempt_commands: AttemptCommands
+    grants: GrantRepository
+
+
+class _SnapshotCapture(Protocol):
+    """Capturing a due shared-workspace snapshot, through its host's broker."""
+
+    host_pool: HostPoolRepository
+    snapshot: SnapshotRepository
+
+
+class _Reaping(Protocol):
+    """What one reaper pass reaches for, named rather than inherited.
+
+    The pass is deliberately broad -- hosts, then residencies, then queued
+    follow-ups, then attempts, then the forks and snapshots an expiry
+    strands -- so this list is long. It is still a list: adding an eighth
+    capability is an edit here, not a call that happens to type-check.
+    """
+
+    attempt_commands: AttemptCommands
+    conversation_queries: ConversationQueries
+    grants: GrantRepository
+    host_pool: HostPoolRepository
+    residency: ResidencyRepository
+    sandbox: SandboxRepository
+    session_fork: SessionForkRepository
+    snapshot: SnapshotRepository
+
 
 logger = get_logger(__name__)
 
@@ -183,7 +229,7 @@ GRANT_RENEWAL_CONCURRENCY = 16
 GRANT_RENEWAL_PASS_DEADLINE_S = (GRANT_TTL_S - RENEWAL_INTERVAL_S) / 2
 
 
-async def _reconcile_settled_terminals(store: AgentJobStore) -> None:
+async def _reconcile_settled_terminals(store: _SettledTerminals) -> None:
     """Replay durable settled-terminal recovery markers after restarts.
 
     The broker is resolved per job, because with a host pool there is no
@@ -194,22 +240,22 @@ async def _reconcile_settled_terminals(store: AgentJobStore) -> None:
     from cloud_agent.broker_routing import broker_for_job, hydrate_shared_broker
     from cloud_agent.terminal_coordination import resume_settled_terminal
 
-    for job_id in await store.list_terminal_resumes_pending():
+    for job_id in await store.sandbox.list_terminal_resumes_pending():
         try:
-            job = await store.get_job(job_id)
+            job = await store.conversation_queries.get_job(job_id)
             if job is None or job.get("thread_sandbox") is None:
                 # No retained group exists to resume (for example, a queued
                 # job cancelled before its first claim). This marker has no
                 # external side effect behind it and can be retired.
-                await store.mark_terminal_resume_complete(job_id=job_id)
+                await store.sandbox.mark_terminal_resume_complete(job_id=job_id)
                 continue
-            broker = await hydrate_shared_broker(job, await broker_for_job(store, job_id))
+            broker = await hydrate_shared_broker(job, await broker_for_job(store.host_pool, job_id))
             if await resume_settled_terminal(
                 str(job["thread_id"]),
                 job_id=job_id,
                 broker=broker,
             ):
-                await store.mark_terminal_resume_complete(job_id=job_id)
+                await store.sandbox.mark_terminal_resume_complete(job_id=job_id)
         except Exception:
             # One unavailable host must not prevent reconciliation of markers
             # owned by every other host in this pass. The marker remains set,
@@ -288,7 +334,7 @@ async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, An
 
 
 async def _renew_live_grants(
-    store: AgentJobStore, grants: Any, *, failures: dict[str, int]
+    store: _GrantRenewal, grants: Any, *, failures: dict[str, int]
 ) -> None:
     """Extend the grants of attempts that are still current — and only those.
 
@@ -327,7 +373,7 @@ async def _renew_live_grants(
     """
     seen: set[str] = set()
     renewed: list[str] = []
-    renewable = await store.list_renewable_grants()
+    renewable = await store.grants.list_renewable_grants()
     if len(renewable) >= GRANT_RENEWAL_PAGE:
         # The pass was capped, so some live attempt was not renewed this time
         # round. The ordering makes the window rotate, but a pool this size
@@ -365,7 +411,7 @@ async def _renew_live_grants(
             )
             if definitive and refusals >= GRANT_RENEWAL_GIVE_UP_AFTER:
                 try:
-                    await _abandon_unrenewable_attempt(store, row)
+                    await _abandon_unrenewable_attempt(store.attempt_commands, row)
                 except Exception:
                     # Leave the count at or above the threshold, so the next
                     # pass that is again definitively refused retries the
@@ -486,7 +532,7 @@ async def _reap_lapsed_residencies(store: ResidencyRepository, grants: Any | Non
 
 
 async def _cleanup_reaped_shared_residencies(
-    store: AgentJobStore,
+    store: HostPoolRepository,
     actions: list[dict[str, Any]],
     grants: Any | None,
 ) -> None:
@@ -528,7 +574,7 @@ async def _cleanup_reaped_shared_residencies(
                 await grants.revoke(grant_id)
 
 
-async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
+async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> None:
     """Capture at most one quiescent shared workspace without blocking turns."""
     claim = getattr(store, "claim_due_sandbox_snapshot", None)
     if claim is None:
@@ -541,9 +587,9 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
     from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
 
     try:
-        broker = await broker_for_job(store, snapshot["anchor_job_id"])
+        broker = await broker_for_job(store.host_pool, snapshot["anchor_job_id"])
         if broker is None:
-            await store.defer_sandbox_snapshot_capture(
+            await store.snapshot.defer_sandbox_snapshot_capture(
                 snapshot_id=int(snapshot["snapshot_id"]),
                 sandbox_id=str(snapshot["sandbox_id"]),
                 sandbox_generation=int(snapshot["generation"]),
@@ -566,7 +612,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         digest = receipt.get("content_sha256")
         if not isinstance(patch, str) or not isinstance(digest, str):
             raise ValueError("shared snapshot host receipt omitted its patch or hash")
-        recorded = await store.record_sandbox_snapshot_capture(
+        recorded = await store.snapshot.record_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),
             sandbox_generation=int(snapshot["generation"]),
@@ -579,7 +625,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         if recorded is None:
             raise ValueError("shared snapshot receipt lost its durable generation fence")
     except WorkspaceBrokerError as exc:
-        await store.defer_sandbox_snapshot_capture(
+        await store.snapshot.defer_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),
             sandbox_generation=int(snapshot["generation"]),
@@ -588,7 +634,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
             dirty=exc.status_code in {410, 422, 502},
         )
     except ValueError as exc:
-        await store.defer_sandbox_snapshot_capture(
+        await store.snapshot.defer_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),
             sandbox_generation=int(snapshot["generation"]),
@@ -600,7 +646,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         # A graceful control-plane stop must not leave this claim invisible
         # until the much longer stalled-capture timeout elapses.
         with contextlib.suppress(Exception):
-            await store.defer_sandbox_snapshot_capture(
+            await store.snapshot.defer_sandbox_snapshot_capture(
                 snapshot_id=int(snapshot["snapshot_id"]),
                 sandbox_id=str(snapshot["sandbox_id"]),
                 sandbox_generation=int(snapshot["generation"]),
@@ -613,7 +659,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         # Release the durable claim before surfacing it to the coordinator's
         # log-and-continue boundary.
         with contextlib.suppress(Exception):
-            await store.defer_sandbox_snapshot_capture(
+            await store.snapshot.defer_sandbox_snapshot_capture(
                 snapshot_id=int(snapshot["snapshot_id"]),
                 sandbox_id=str(snapshot["sandbox_id"]),
                 sandbox_generation=int(snapshot["generation"]),
@@ -624,7 +670,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
 
 
 async def coordinate_shared_snapshots(
-    store: AgentJobStore,
+    store: _SnapshotCapture,
     *,
     interval_seconds: float = SNAPSHOT_CAPTURE_INTERVAL_S,
 ) -> None:
@@ -640,7 +686,7 @@ async def coordinate_shared_snapshots(
 
 
 async def reap_expired_attempts(
-    store: AgentJobStore,
+    store: _Reaping,
     *,
     interval_seconds: float = REAP_INTERVAL_S,
     max_attempts: int = MAX_ATTEMPTS,
@@ -678,7 +724,7 @@ async def reap_expired_attempts(
         # publishes for that pass, which is a strictly worse outage than the
         # one it was reporting: jobs stop being recovered at all.
         try:
-            await _reap_offline_hosts(store)
+            await _reap_offline_hosts(store.host_pool)
         except Exception:
             logger.warning("Host reaper pass failed", exc_info=True)
         # Residencies after hosts, before attempts: a lapsed hot sandbox must
@@ -686,7 +732,7 @@ async def reap_expired_attempts(
         # attempt pass requeues anything that might route back to it. Its own
         # try, for the same reason as the host pass above.
         try:
-            await _reap_lapsed_residencies(store, grants)
+            await _reap_lapsed_residencies(store.residency, grants)
         except Exception:
             logger.warning("Residency reaper pass failed", exc_info=True)
         # Queued follow-ups after residencies, before the attempt pass: give
@@ -694,19 +740,21 @@ async def reap_expired_attempts(
         # Normal ordering is enforced at claim time; this cleanup uses the
         # partial queued indexes instead of running on every runner poll.
         try:
-            await store.sweep_queued_follow_ups()
+            await store.attempt_commands.sweep_queued_follow_ups()
         except Exception:
             logger.warning("Queued follow-up sweep failed", exc_info=True)
         try:
-            actions = await store.reap_expired(max_attempts=max_attempts)
-            await _cleanup_reaped_shared_residencies(store, actions, grants)
+            actions = await store.attempt_commands.reap_expired(max_attempts=max_attempts)
+            await _cleanup_reaped_shared_residencies(store.host_pool, actions, grants)
             await _reconcile_settled_terminals(store)
             if actions:
                 logger.info(
                     "agent_attempts_reaped",
                     extra={"event": "agent_attempts_reaped", "count": len(actions)},
                 )
-            snapshot_reaper = getattr(store, "reap_stalled_sandbox_snapshot_captures", None)
+            snapshot_reaper = getattr(
+                store.snapshot, "reap_stalled_sandbox_snapshot_captures", None
+            )
             if snapshot_reaper is not None:
                 stalled_captures = await snapshot_reaper()
                 if stalled_captures:
@@ -728,7 +776,7 @@ async def reap_expired_attempts(
                             "snapshot_ids": stalled_snapshot_publishes,
                         },
                     )
-            stalled_session_forks = await store.reap_stalled_session_forks()
+            stalled_session_forks = await store.session_fork.reap_stalled_session_forks()
             if stalled_session_forks:
                 from cloud_agent.broker_routing import broker_for_job
 
@@ -737,10 +785,12 @@ async def reap_expired_attempts(
                 for operation in stalled_session_forks:
                     operation_id = str(operation["id"])
                     if operation.get("recovery_action") == "finalize":
-                        if await store.finalize_session_fork(operation_id=operation_id):
+                        if await store.session_fork.finalize_session_fork(
+                            operation_id=operation_id
+                        ):
                             recovered.append(operation_id)
                         continue
-                    broker = await broker_for_job(store, operation["source_job_id"])
+                    broker = await broker_for_job(store.host_pool, operation["source_job_id"])
                     for residency in operation.get("cleanup_residencies") or []:
                         if broker is not None:
                             with contextlib.suppress(Exception):
@@ -769,7 +819,7 @@ async def reap_expired_attempts(
         # attempts being recovered.
         if grants is not None:
             try:
-                await _revoke_dead_grants(store, grants)
+                await _revoke_dead_grants(store.grants, grants)
             except Exception:
                 logger.warning("Grant revocation pass failed", exc_info=True)
             try:
@@ -811,7 +861,7 @@ def _build_source_control(app: FastAPI) -> None:
         logger.warning("GitLab OAuth config present but unusable", exc_info=True)
 
 
-def _start_publisher(app: FastAPI, store: AgentJobStore) -> None:
+def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
     """Start the publish loop, idle if no git credential is configured."""
     from cloud_agent.publish_worker import GitHubCredential, publish_loop
 
@@ -859,18 +909,18 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.storage.assembly import Storage
 
     dsn = os.environ.get(ENV_DATABASE_URL, "")
     if not dsn:
         raise RuntimeError(f"{ENV_DATABASE_URL} must be set")
 
     pool = await asyncpg.create_pool(dsn)
-    store = AgentJobStore(pool)
-    # Schema is Alembic's; this is a no-op kept so the call site is honest
-    # about when the store becomes usable.
+    storage = Storage(pool)
+    # Schema is Alembic's. There is no initialize step to run: the store's
+    # no-op one went with the store, and the DDL and backfills it used to
+    # carry have been migrations since 0001.
     try:
-        await store.initialize()
         from cloud_agent.identity import ENV_ISSUER, gateway_issuer
         from cloud_agent.identity_namespace import ensure_gateway_namespace
 
@@ -881,7 +931,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         await pool.close()
         raise
 
-    app.state.store = store
+    app.state.storage = storage
     app.state.gateway = GatewayClient()
     # The sandbox's credential is minted at the gateway now (E9), so the claim
     # path and the renewal/revocation passes share one client — and one
@@ -899,14 +949,16 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     # So this is a parameter of the lifespan rather than a property of it, and
     # `create_mcp_app` says no.
     if background:
-        reaper = asyncio.create_task(reap_expired_attempts(store, grants=app.state.grants))
-        snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(store))
-        ledger_collector = asyncio.create_task(collect_usage_snapshots(store, app.state.grants))
+        reaper = asyncio.create_task(reap_expired_attempts(storage, grants=app.state.grants))
+        snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(storage))
+        ledger_collector = asyncio.create_task(
+            collect_usage_snapshots(storage.ledger, app.state.grants)
+        )
         # Host capacity history keeps filling whether or not anybody has the
         # admin page open — that is the whole reason it lives here rather than
         # in the browser. Its own task and its own budgets, so a slow write
         # cannot delay a heartbeat or the reaper.
-        capacity_history = asyncio.create_task(collect_host_capacity_history(store))
+        capacity_history = asyncio.create_task(collect_host_capacity_history(storage.host_capacity))
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
         _BACKGROUND_TASKS.add(ledger_collector)
@@ -919,7 +971,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.snapshot_task = snapshot_coordinator
         app.state.ledger_task = ledger_collector
         app.state.capacity_task = capacity_history
-        _start_publisher(app, store)
+        _start_publisher(app, storage)
         logger.info("cloud agent control plane started")
     else:
         app.state.reaper_task = None

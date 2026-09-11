@@ -63,15 +63,20 @@ from cloud_agent.logging_utils import get_logger
 if TYPE_CHECKING:
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.storage.assembly import Storage
 
 
 # ── Wiring this service owns ───────────────────────────────────────────
 
 
-def get_agent_job_store(request: Request) -> AgentJobStore | None:
-    """Dependency to obtain the agent job store (if configured)."""
-    return getattr(request.app.state, "store", None)
+def get_storage(request: Request) -> Storage | None:
+    """Dependency to obtain the assembled storage layer (if configured).
+
+    One provider for all sixteen capabilities, and not sixteen providers: a
+    handler takes this and annotates the Protocol naming the capabilities it
+    uses, so the narrowing is stated where the calls are, next to them.
+    """
+    return getattr(request.app.state, "storage", None)
 
 
 def get_gateway_client(request: Request) -> GatewayClient:

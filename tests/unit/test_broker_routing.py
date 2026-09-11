@@ -16,11 +16,12 @@ import pytest
 from cloud_agent import broker_routing
 from cloud_agent.broker_routing import broker_for_attempt, broker_for_job, hydrate_shared_broker
 from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+from tests.support.storage import AllCapabilities
 
 BROKER_TOKEN_ENV = "AGENT_WORKSPACE_BROKER_TOKEN"
 
 
-class FakeRoutingStore:
+class FakeRoutingStore(AllCapabilities):
     """Answers only the two lookups broker routing performs."""
 
     def __init__(self, by_attempt: dict[int, dict[str, Any]] | None = None, **by_job: Any) -> None:

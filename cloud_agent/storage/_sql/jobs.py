@@ -1,8 +1,8 @@
 """Job row projections, and the statements built from them.
 
-Moved verbatim out of :mod:`cloud_agent.storage.store`. The text is what it
-was; only the module that owns it changed, so a statement that reads these
-can import them without importing the store.
+Lifted verbatim from the single storage class this package replaced. The
+text is what it was; only the module that owns it changed, so a statement
+that reads these can import them without importing everything else.
 """
 
 from __future__ import annotations

@@ -1,8 +1,8 @@
 """Postgres implementation of the Host capacity observations and their history port.
 
-Moved verbatim out of :mod:`cloud_agent.storage.store`. The statements, their
-bound parameters and their transaction ownership are what they were; only the
-class holding them changed.
+Lifted verbatim from the single storage class this package replaced. The
+statements, their bound parameters and their transaction ownership are what
+they were; only the class holding them changed.
 """
 
 from __future__ import annotations

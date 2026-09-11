@@ -26,8 +26,8 @@ import os
 import pytest
 import pytest_asyncio
 
+from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
-from cloud_agent.storage.store import AgentJobStore
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
@@ -83,7 +83,7 @@ async def db():
 @pytest_asyncio.fixture
 async def store(db):
     """Everything this test needs, to create a job."""
-    return AgentJobStore(db)
+    return Storage(db)
 
 
 @pytest_asyncio.fixture
@@ -159,7 +159,9 @@ async def test_an_archived_project_leaves_the_default_list(
 ) -> None:
     """The archive filter is applied to the thread, not to the jobs."""
     job = await _create_job(store, repo="org/archived")
-    await store.set_thread_archived(job_id=job["id"], user_id=_OWNER, archived=True)
+    await store.conversation_commands.set_thread_archived(
+        job_id=job["id"], user_id=_OWNER, archived=True
+    )
 
     assert await queries.list_projects(user_id=_OWNER) == []
     assert [row["repo"] for row in await queries.list_projects(user_id=_OWNER, archived=True)] == [

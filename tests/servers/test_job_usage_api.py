@@ -11,9 +11,10 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import usage
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_storage
 from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.app import create_app, create_mcp_app
+from tests.support.storage import OneFake
 from tests.unit.test_ledger_snapshots import END, START, ledger_row
 
 
@@ -34,18 +35,20 @@ def store():
         }
         for attempt in (10, 11)
     ]
-    return SimpleNamespace(
-        get_job=AsyncMock(return_value={"id": "ajob_1", "user_id": "owner"}),
-        ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
-        ledger_rows_for_conversation=AsyncMock(return_value=[ledger_row(job_id="ajob_1")]),
-        job_usage_inputs=AsyncMock(
-            return_value={
-                "job_ids": ["ajob_1"],
-                "attempts": [{"job_id": "ajob_1", "started_at": START}],
-                "events": events,
-            }
-        ),
-        queue_job_ledger_refresh=AsyncMock(),
+    return OneFake(
+        SimpleNamespace(
+            get_job=AsyncMock(return_value={"id": "ajob_1", "user_id": "owner"}),
+            ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
+            ledger_rows_for_conversation=AsyncMock(return_value=[ledger_row(job_id="ajob_1")]),
+            job_usage_inputs=AsyncMock(
+                return_value={
+                    "job_ids": ["ajob_1"],
+                    "attempts": [{"job_id": "ajob_1", "started_at": START}],
+                    "events": events,
+                }
+            ),
+            queue_job_ledger_refresh=AsyncMock(),
+        )
     )
 
 
@@ -53,7 +56,7 @@ def store():
 def app(store):
     app = FastAPI()
     app.include_router(usage.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "owner"}
     return app
 

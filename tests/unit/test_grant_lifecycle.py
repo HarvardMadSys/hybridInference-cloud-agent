@@ -47,11 +47,12 @@ from cloud_agent.app import (
 )
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
+from tests.support.storage import AllCapabilities
 
 pytestmark = pytest.mark.asyncio
 
 
-class _AttemptStore:
+class _AttemptStore(AllCapabilities):
     """A store modelled on the two predicates the real queries use.
 
     An attempt is renewable while it is ``running``; anything else — superseded

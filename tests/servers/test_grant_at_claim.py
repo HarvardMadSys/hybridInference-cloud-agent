@@ -39,10 +39,11 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_agent_job_store,
     get_grant_client,
+    get_storage,
 )
 from cloud_agent.gateway import GatewayError
+from tests.support.storage import AllCapabilities
 
 pytestmark = pytest.mark.asyncio
 
@@ -51,14 +52,17 @@ _ATTEMPT = 100
 _GENERATION = 1
 
 
-class _ClaimStore:
+class _ClaimStore(AllCapabilities):
     """Only the surface ``worker_claim`` touches."""
 
     def __init__(self, *, queued: bool = True, fence_still_current: bool = True) -> None:
         self.queued = queued
         self.fence_still_current = fence_still_current
         self.released: list[tuple[str, int]] = []
-        self.grants: dict[int, str] = {}
+        # Named apart from the capability: `store.linked` is now the grant
+        # repository the route reaches for, not this fake's record of what it
+        # linked.
+        self.linked: dict[int, str] = {}
 
     async def claim_job(
         self,
@@ -103,7 +107,7 @@ class _ClaimStore:
     ) -> bool:
         if not self.fence_still_current:
             return False
-        self.grants[attempt_id] = grant_id
+        self.linked[attempt_id] = grant_id
         return True
 
 
@@ -153,7 +157,7 @@ class _Grants:
 def _app(store: _ClaimStore, grants: _Grants) -> FastAPI:
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     app.dependency_overrides[get_grant_client] = lambda: grants
     app.dependency_overrides[agent_jobs_router.verify_claiming_host] = lambda: {
@@ -222,7 +226,7 @@ async def test_the_grant_is_linked_to_the_attempt_under_its_fence(claim):
 
     await claim(store, grants)
 
-    assert store.grants == {_ATTEMPT: "agr_7"}
+    assert store.linked == {_ATTEMPT: "agr_7"}
 
 
 async def test_a_refused_grant_returns_the_job_to_the_queue(claim):
@@ -238,7 +242,7 @@ async def test_a_refused_grant_returns_the_job_to_the_queue(claim):
     assert response.status_code == 503
     assert response.json()["detail"]["error"]["type"] == "credential_unavailable"
     assert store.released == [(_JOB, _ATTEMPT)]
-    assert store.grants == {}
+    assert store.linked == {}
 
 
 async def test_a_grant_that_cannot_be_linked_is_revoked_not_handed_over(claim):
@@ -255,7 +259,7 @@ async def test_a_grant_that_cannot_be_linked_is_revoked_not_handed_over(claim):
     assert response.status_code == 503
     assert response.json()["detail"]["error"]["type"] == "credential_unavailable"
     assert grants.revoked == ["agr_7"]
-    assert store.grants == {}
+    assert store.linked == {}
 
 
 async def test_a_grant_with_no_id_is_refused_rather_than_used(claim):

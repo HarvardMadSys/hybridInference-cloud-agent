@@ -226,6 +226,7 @@ async def test_an_expired_oauth_state_cannot_be_consumed(
 
 
 async def test_creating_a_state_prunes_the_ones_that_expired_yesterday(
+    pool,
     store: PostgresSourceControlRepository,
 ) -> None:
     """The table is swept on write, so it cannot grow without bound."""
@@ -244,7 +245,7 @@ async def test_creating_a_state_prunes_the_ones_that_expired_yesterday(
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
 
-    async with store._pool.acquire() as conn:
+    async with pool.acquire() as conn:
         remaining = await conn.fetch("SELECT state_hash FROM agent_oauth_states")
     assert [row["state_hash"] for row in remaining] == ["hash-fresh"]
 

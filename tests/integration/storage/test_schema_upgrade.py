@@ -17,7 +17,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.storage.assembly import Storage
 from tests.integration.storage.test_agent_job_store import _reserve_shared_chat
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
@@ -61,7 +61,7 @@ async def store():
     async with pool.acquire() as conn:
         await reset_agent_tables(conn)
     try:
-        yield AgentJobStore(pool)
+        yield Storage(pool)
     finally:
         # These tests walk the schema backwards. Whatever happened, the shared
         # per-worker database is expected at head by every other test.
@@ -71,7 +71,7 @@ async def store():
         await pool.close()
 
 
-async def _prepared_fork(store: AgentJobStore) -> dict[str, str]:
+async def _prepared_fork(store: Storage) -> dict[str, str]:
     """A settled shared chat with one prepared, unfinished native fork."""
     job, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
@@ -81,11 +81,11 @@ async def _prepared_fork(store: AgentJobStore) -> dict[str, str]:
         "sandbox_generation": sandbox["generation"],
         "activation_generation": sandbox["activation_generation"],
     }
-    assert await store.mark_thread_sandbox_running(
+    assert await store.sandbox.mark_thread_sandbox_running(
         **fence, container_id="container-shared-one", context_status="new"
     )
-    assert await store.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-    assert await store.settle_thread_sandbox(
+    assert await store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
+    assert await store.sandbox.settle_thread_sandbox(
         **fence,
         job_id=job["id"],
         context_status="live",
@@ -93,14 +93,14 @@ async def _prepared_fork(store: AgentJobStore) -> dict[str, str]:
         idle_timeout_seconds=1800,
         base_sha=job["base_sha"],
     )
-    assert await store.transition(
+    assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         from_states=("running",),
         to_state="succeeded",
     )
-    operation = await store.prepare_session_fork(
+    operation = await store.session_fork.prepare_session_fork(
         source_job_id=job["id"], user_id=job["user_id"], idempotency_key="upgrade-fork"
     )
     assert operation is not None and operation.get("error") is None, operation
@@ -112,7 +112,7 @@ async def _prepared_fork(store: AgentJobStore) -> dict[str, str]:
     }
 
 
-async def test_a_failed_fork_from_the_previous_revision_upgrades(store: AgentJobStore):
+async def test_a_failed_fork_from_the_previous_revision_upgrades(store: Storage):
     """A failure 0003 left behind is a name, not a row; 0004 has to cope."""
     fork = await _prepared_fork(store)
     config = _db_config()
@@ -176,7 +176,7 @@ async def test_a_failed_fork_from_the_previous_revision_upgrades(store: AgentJob
     assert key == 1, "the foreign key the whole revision exists for must be present"
 
 
-async def test_an_in_flight_fork_refuses_the_upgrade(store: AgentJobStore):
+async def test_an_in_flight_fork_refuses_the_upgrade(store: Storage):
     """Tombstoning a fork the coordinator has not finished is not a migration's call."""
     fork = await _prepared_fork(store)
     config = _db_config()

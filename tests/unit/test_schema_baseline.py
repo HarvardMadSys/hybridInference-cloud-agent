@@ -17,7 +17,19 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 VERSIONS = REPO / "migrations/versions"
 BASELINE = VERSIONS / "0001_schema_baseline.py"
-STORE = REPO / "cloud_agent/storage/store.py"
+STORAGE = REPO / "cloud_agent/storage"
+
+
+def _storage_source() -> str:
+    """Every line of the storage layer, as one text to scan.
+
+    This read the single ``store.py``. The store is gone and its statements
+    live across ``storage/_sql`` and ``storage/repositories``, so the scan
+    follows them: the same assertions over strictly more files than before,
+    which is what keeps "the schema has one owner" checkable after the split.
+    """
+    return "\n".join(path.read_text(encoding="utf-8") for path in sorted(STORAGE.rglob("*.py")))
+
 
 EXPECTED_TABLES = {
     "agent_admin_audit_log",
@@ -100,23 +112,25 @@ def test_the_revision_identifier_fits_alembic_version_num() -> None:
     assert len(str(_module_constant("revision"))) <= 32
 
 
-def test_the_baseline_creates_every_table_the_store_names() -> None:
-    """Every ``agent_*`` table the store reads or writes is created here."""
+def test_the_baseline_creates_every_table_the_storage_layer_names() -> None:
+    """Every ``agent_*`` table the storage layer reads or writes is created here."""
     created = set()
     for statement in _literal("_STATEMENTS"):
         match = re.search(r"CREATE TABLE (\w+)", statement)
         if match:
             created.add(match.group(1))
     assert created == EXPECTED_TABLES
-    named_by_store = set(re.findall(r"\b(agent_[a-z_]+)\b", STORE.read_text(encoding="utf-8")))
-    tables_in_store = {name for name in named_by_store if name in created or name.endswith("s")}
+    named_by_storage = set(re.findall(r"\b(agent_[a-z_]+)\b", _storage_source()))
+    tables_in_storage = {name for name in named_by_storage if name in created or name.endswith("s")}
     missing = {
         name
-        for name in tables_in_store
+        for name in tables_in_storage
         if name not in created
-        and re.search(rf"(FROM|INTO|UPDATE|JOIN) {name}\b", STORE.read_text(encoding="utf-8"))
+        and re.search(rf"(FROM|INTO|UPDATE|JOIN) {name}\b", _storage_source())
     }
-    assert not missing, f"the store names tables the baseline does not create: {sorted(missing)}"
+    assert not missing, (
+        f"the storage layer names tables the baseline does not create: {sorted(missing)}"
+    )
 
 
 def test_the_downgrade_drops_exactly_what_the_upgrade_creates() -> None:
@@ -152,7 +166,7 @@ def test_the_legacy_shapes_are_gone() -> None:
             assert residue not in jobs_ddl
             continue
         assert residue not in joined, residue
-    store = STORE.read_text(encoding="utf-8")
+    store = _storage_source()
     for residue in (
         "agent_thread_sandboxes",
         "agent_job_artifacts",
@@ -166,26 +180,26 @@ def test_the_legacy_shapes_are_gone() -> None:
     # the class the Postgres tier caught and this tier did not: a query that
     # arrived from a branch landing after the rewrite, still naming a column
     # the rewrite deleted. (``routes.py``'s ``body.mode`` is a request field,
-    # not SQL, which is why this reads the store alone.)
+    # not SQL, which is why this reads the storage layer alone.)
     leftover = re.search(r"\b\w+\.mode\b", store)
-    assert leftover is None, f"the store names a dropped column: {leftover.group(0)}"
+    assert leftover is None, f"the storage layer names a dropped column: {leftover.group(0)}"
 
 
-def test_the_store_executes_no_ddl() -> None:
-    """The schema has one owner. A store that creates tables is two owners."""
-    source = STORE.read_text(encoding="utf-8")
+def test_the_storage_layer_executes_no_ddl() -> None:
+    """The schema has one owner. A repository that creates tables is two owners."""
+    source = _storage_source()
     offenders = [
         line.strip()
         for line in source.splitlines()
         if re.search(r"\b(CREATE TABLE|ALTER TABLE|CREATE INDEX|DROP TABLE)\b", line)
         and not line.strip().startswith("#")
     ]
-    assert not offenders, f"the store still executes DDL: {offenders}"
+    assert not offenders, f"the storage layer still executes DDL: {offenders}"
 
 
-def test_the_store_imports_no_gateway_module() -> None:
+def test_the_storage_layer_imports_no_gateway_module() -> None:
     """The gateway is reached over HTTP only (AGENTS.md rule 5)."""
-    assert "serving." not in STORE.read_text(encoding="utf-8")
+    assert "serving." not in _storage_source()
 
 
 @pytest.mark.parametrize("path", sorted(VERSIONS.glob("*.py")), ids=lambda p: p.name)

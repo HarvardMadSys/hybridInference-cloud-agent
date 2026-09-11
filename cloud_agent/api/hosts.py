@@ -22,17 +22,16 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from cloud_agent.api.deps import get_agent_job_store, get_grant_client
+from cloud_agent.api.deps import get_grant_client, get_storage
 from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
 from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
 )
-from cloud_agent.ports import grants, host_pool, residency, sandbox
 from cloud_agent.schemas import (
     HostHeartbeatRequest,
     HostHeartbeatResponse,
@@ -43,21 +42,28 @@ from cloud_agent.schemas import (
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 
+if TYPE_CHECKING:
+    from cloud_agent.ports import (
+        GrantRepository,
+        HostPoolRepository,
+        ResidencyRepository,
+        SandboxRepository,
+    )
+
 logger = logging.getLogger(__name__)
 
 
-class _HostsStorage(
-    grants.GrantRepository,
-    host_pool.HostPoolRepository,
-    residency.ResidencyRepository,
-    sandbox.SandboxRepository,
-    Protocol,
-):
+class _HostsStorage(Protocol):
     """The capabilities this module's handlers reach the store for.
 
     Named here so that reaching for one more is a deliberate edit to
     this list rather than a call that happens to type-check.
     """
+
+    grants: GrantRepository
+    host_pool: HostPoolRepository
+    residency: ResidencyRepository
+    sandbox: SandboxRepository
 
 
 router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
@@ -94,7 +100,7 @@ def _unauthorized(message: str) -> HTTPException:
 
 async def authenticate_host(
     authorization: str | None = Header(None),
-    store: _HostsStorage | None = Depends(get_agent_job_store),
+    store: _HostsStorage | None = Depends(get_storage),
 ) -> dict[str, Any]:
     """Resolve the host behind a host credential, or refuse.
 
@@ -121,7 +127,7 @@ async def authenticate_host(
         # operator's signal is the boot-time failure to mint, not a stack trace
         # per heartbeat.
         raise _unauthorized("Host credentials cannot be verified by this deployment.") from exc
-    host = await job_store.authenticate_host(
+    host = await job_store.host_pool.authenticate_host(
         host=claims["host"], credential_hash=hash_secret(token)
     )
     if host is None:
@@ -155,7 +161,7 @@ def _checked_broker_url(url: str | None) -> str | None:
 @router.post("/register", response_model=HostRegisterResponse)
 async def register_host(
     body: HostRegisterRequest,
-    store: _HostsStorage | None = Depends(get_agent_job_store),
+    store: _HostsStorage | None = Depends(get_storage),
 ) -> HostRegisterResponse:
     """Spend a one-time enrollment token and receive a host credential.
 
@@ -182,7 +188,7 @@ async def register_host(
     # operator can correct; consuming the token first turns that typo into a
     # second privileged admin operation for no security benefit.
     broker_url = _checked_broker_url(body.broker_url)
-    if not await job_store.consume_enroll_token(
+    if not await job_store.host_pool.consume_enroll_token(
         token_hash=hash_secret(body.enroll_token), host=body.name
     ):
         # One answer for expired, already-spent, never-issued and issued-for-
@@ -200,7 +206,7 @@ async def register_host(
             },
         )
     credential = mint_host_token(host=body.name)
-    host = await job_store.register_host(
+    host = await job_store.host_pool.register_host(
         host=body.name,
         credential_hash=hash_secret(credential),
         capabilities=body.capabilities,
@@ -224,7 +230,7 @@ async def register_host(
 async def heartbeat_host(
     body: HostHeartbeatRequest,
     host: dict[str, Any] = Depends(authenticate_host),
-    store: _HostsStorage | None = Depends(get_agent_job_store),
+    store: _HostsStorage | None = Depends(get_storage),
     grants: Any = Depends(get_grant_client),
 ) -> HostHeartbeatResponse:
     """Report liveness, and whatever about this machine has changed.
@@ -236,7 +242,7 @@ async def heartbeat_host(
     get this far, because its credential no longer authenticates.
     """
     job_store = _require_store(store)
-    updated = await job_store.record_host_heartbeat(
+    updated = await job_store.host_pool.record_host_heartbeat(
         host=host["host"],
         credential_hash=host.get("credential_hash"),
         # An unusable block was already dropped by the request model, so this
@@ -265,7 +271,7 @@ async def heartbeat_host(
     # residencies_lost and the host tears that sandbox down.
     lost: list[ResidencyBeat] = []
     for residency_beat in body.residencies or []:
-        extended = await job_store.heartbeat_residency(
+        extended = await job_store.residency.heartbeat_residency(
             thread_id=residency_beat.thread_id,
             generation=residency_beat.generation,
             host=updated["host"],
@@ -291,7 +297,7 @@ async def heartbeat_host(
     # recording that STOPPED transition.
     retained_stops: list[RetainedSandboxStop] = []
     for retained in body.retained_sandboxes or []:
-        await job_store.reconcile_thread_sandbox_observation(
+        await job_store.sandbox.reconcile_thread_sandbox_observation(
             thread_id=retained.thread_id,
             host=updated["host"],
             sandbox_id=retained.sandbox_id,
@@ -309,7 +315,7 @@ async def heartbeat_host(
             # residency credential. Release and revoke it instead of renewing
             # it forever. The database fences this against concurrent starts.
             if not retained.running or member.resident_state in {"stopped", "lost"}:
-                released = await job_store.release_shared_residency_if_quiescent(
+                released = await job_store.residency.release_shared_residency_if_quiescent(
                     thread_id=member.thread_id,
                     generation=member.residency_generation,
                     process_generation=member.process_generation,
@@ -324,7 +330,7 @@ async def heartbeat_host(
             # process that has proved itself LIVE.
             if member.resident_state != "live":
                 continue
-            extended = await job_store.heartbeat_residency(
+            extended = await job_store.residency.heartbeat_residency(
                 thread_id=member.thread_id,
                 generation=member.residency_generation,
                 host=updated["host"],
@@ -345,7 +351,7 @@ async def heartbeat_host(
                     )
                 )
         if retained.running:
-            due = await job_store.due_thread_sandbox_stop(
+            due = await job_store.sandbox.due_thread_sandbox_stop(
                 thread_id=retained.thread_id,
                 host=updated["host"],
                 sandbox_id=retained.sandbox_id,
@@ -372,7 +378,7 @@ async def heartbeat_host(
 
 
 async def _mint_residency_grant(
-    job_store: grants.GrantRepository, grants: Any, *, row: dict[str, Any]
+    job_store: GrantRepository, grants: Any, *, row: dict[str, Any]
 ) -> str | None:
     """Mint the worker-fenced grant for one supervisor-owned member process."""
     if grants is None:

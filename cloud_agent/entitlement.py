@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from cloud_agent.ports import SourceControlRepository
 
 # `owner/name`, the only shape GitHub uses and the only one the publisher and
 # runner know how to handle. Also keeps a leading `-` out of git's argv.
@@ -83,7 +86,7 @@ def require_allowed_repo(repo: str, env: dict[str, str] | None = None) -> None:
 async def repos_for_user(
     user_id: str,
     *,
-    store: Any = None,
+    store: SourceControlRepository | None = None,
     app_credentials: Any = None,
     env: dict[str, str] | None = None,
 ) -> list[str]:
@@ -126,7 +129,7 @@ async def require_entitled_repo(
     repo: str,
     user_id: str,
     *,
-    store: Any = None,
+    store: SourceControlRepository | None = None,
     app_credentials: Any = None,
     env: dict[str, str] | None = None,
 ) -> None:

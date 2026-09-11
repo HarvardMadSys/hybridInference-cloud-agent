@@ -78,7 +78,7 @@ def test_a_token_is_spent_for_a_credential(credential_file, monkeypatch) -> None
         sent["body"] = json.loads(request.data)
         # `enrolling`, which is what the control plane actually answers a
         # registration with: the credential is issued, but the machine has not
-        # heartbeated yet. See `AgentJobStore.register_host`.
+        # heartbeated yet. See `Storage.register_host`.
         return _Response({"host": "h1", "credential": "hc_secret", "status": "enrolling"})
 
     monkeypatch.setattr(enrollment.urllib.request, "urlopen", fake_urlopen)

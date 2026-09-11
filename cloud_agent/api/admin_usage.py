@@ -9,7 +9,7 @@ missing and is visible as coverage rather than as zero usage.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import AwareDatetime  # noqa: TC002 — FastAPI resolves this at runtime.
@@ -28,7 +28,7 @@ from cloud_agent.admin_usage import (
     prepare_jobs,
     resolve_usage_window,
 )
-from cloud_agent.api.deps import get_agent_job_store, require_store, verify_admin_access
+from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage.admin_usage_queries import (
@@ -37,18 +37,17 @@ from cloud_agent.storage.admin_usage_queries import (
     UsageQueryUnavailable,
 )
 
-if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
-
 logger = get_logger(__name__)
 
 
-def _require_store(store: AgentJobStore | None) -> AgentJobStore:
-    """The store, or 503.
+class _AdminUsageStorage(Protocol):
+    """The one projection this module's handlers reach the storage layer for."""
 
-    Still the concrete class: this module reads its pool directly, which
-    stage 3 removes.
-    """
+    admin_usage: AdminUsageQueries
+
+
+def _require_store(store: _AdminUsageStorage | None) -> _AdminUsageStorage:
+    """The storage layer, or 503."""
     return require_store(store)
 
 
@@ -67,10 +66,10 @@ router = APIRouter(prefix="/admin/agent/usage", dependencies=[Depends(_no_store)
 
 
 def get_admin_usage_queries(
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminUsageStorage | None = Depends(get_storage),
 ) -> AdminUsageQueries:
     """Expose only the bounded aggregate projections to this route."""
-    return AdminUsageQueries(_require_store(store)._pool)
+    return _require_store(store).admin_usage
 
 
 def _error(status: int, error_type: str, message: str) -> HTTPException:

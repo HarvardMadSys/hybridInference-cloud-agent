@@ -27,26 +27,29 @@ import pytest
 
 from cloud_agent import app as control_plane
 from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
+from tests.support.storage import OneFake
 
 pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture
-def store() -> SimpleNamespace:
-    return SimpleNamespace(
-        list_terminal_resumes_pending=AsyncMock(return_value=["ajob_test"]),
-        mark_terminal_resume_complete=AsyncMock(return_value=True),
-        get_job=AsyncMock(
-            return_value={
-                "id": "ajob_test",
-                "thread_id": "athr_test",
-                "thread_sandbox": {
-                    "shared_live": True,
+def store() -> OneFake:
+    return OneFake(
+        SimpleNamespace(
+            list_terminal_resumes_pending=AsyncMock(return_value=["ajob_test"]),
+            mark_terminal_resume_complete=AsyncMock(return_value=True),
+            get_job=AsyncMock(
+                return_value={
+                    "id": "ajob_test",
                     "thread_id": "athr_test",
-                    "origin_thread_id": "athr_test",
-                },
-            }
-        ),
+                    "thread_sandbox": {
+                        "shared_live": True,
+                        "thread_id": "athr_test",
+                        "origin_thread_id": "athr_test",
+                    },
+                }
+            ),
+        )
     )
 
 
