@@ -33,11 +33,9 @@ Design (adjudicated in issue #1041):
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import json
 import secrets
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
@@ -71,8 +69,20 @@ from cloud_agent.host_pool import (
     HOST_ONLINE,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.jobs import (
+    JOB_SELECT,
+    QUALIFIED_JOB_COLUMNS,
+    SESSION_DELETE_BLOCK_SQL,
+)
+from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABILITY_JSON, THREAD_SANDBOX_SOURCE
+from cloud_agent.storage._sql.sessions import (
+    decode_conversation_cursor,
+    decode_session_cursor,
+    encode_session_cursor,
+    session_cursor_scope,
+    session_query,
+)
 from cloud_agent.storage.repositories.audit import AuditRepository
 from cloud_agent.storage.repositories.credential_queries import CredentialQueries
 from cloud_agent.storage.repositories.execution_queries import ExecutionQueries
@@ -86,6 +96,7 @@ from cloud_agent.task_titles import fallback_title
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from datetime import datetime
 
 logger = get_logger(__name__)
 
@@ -108,13 +119,6 @@ def _new_sandbox_id() -> str:
 def _new_session_fork_id() -> str:
     """Generate one shared native-session fork operation id."""
     return f"asfork_{secrets.token_hex(16)}"
-
-
-def _sandbox_row_to_dict(row: Any) -> dict[str, Any]:
-    """Decode the JSON members embedded in the shared sandbox read shape."""
-    result = dict(row)
-    result["group_members"] = load_json(result.get("group_members")) or []
-    return result
 
 
 def resolve_runtime_version(
@@ -161,232 +165,6 @@ def resolve_runtime_version(
         )
     default = host_default.get(runtime)
     return default if isinstance(default, str) and default else None
-
-
-def _job_row_to_dict(row: Any) -> dict[str, Any]:
-    """Convert an ``agent_jobs`` row to a plain dict."""
-    return {
-        "id": row["id"],
-        "thread_id": row["thread_id"],
-        "parent_job_id": row["parent_job_id"],
-        "turn_no": row["turn_no"],
-        "native_turn_no": row["native_turn_no"],
-        "user_id": row["user_id"],
-        "repo": row["repo"],
-        "base_sha": row["base_sha"],
-        "task_prompt": row["task_prompt"],
-        "title": row.get("title") or row.get("session_title"),
-        "title_source": row.get("title_source"),
-        "setup_script": row["setup_script"],
-        "runtime": row["runtime"],
-        "model": row["model"],
-        "execution_profile": row["execution_profile"],
-        "reasoning_effort": row["reasoning_effort"],
-        "state": row["state"],
-        "conversation_state": row.get("conversation_state"),
-        "cancel_requested": row["cancel_requested"],
-        "terminal_resume_pending": row["terminal_resume_pending"],
-        "current_attempt_id": row["current_attempt_id"],
-        "published_pr_url": row["published_pr_url"],
-        "published_commit_sha": row["published_commit_sha"],
-        "detail": row["detail"],
-        "metadata": load_json(row["metadata"]),
-        "fork_source_job_id": row["fork_source_job_id"],
-        # Resolved once, at creation, against the deployment registry — not
-        # re-read per attempt. A job runs with the tool surface it was created
-        # with, so removing a server from the registry stops new jobs from
-        # asking for it without changing what a running one was promised.
-        "mcp_servers": list(row["mcp_servers"] or []),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "pinned_at": row.get("pinned_at"),
-        "archived_at": row.get("archived_at"),
-        "deleted_at": row.get("deleted_at"),
-        "thread_sandbox": load_json(row.get("thread_sandbox")),
-    }
-
-
-# A job's own columns. What a job shares with every other turn of its
-# conversation — repo, setup script, execution profile, tool servers — lives on
-# the thread, so every read of a job joins ``agent_threads t`` and reports the
-# thread's values under the job's keys.
-_JOB_OWN_COLUMNS = (
-    "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, base_sha, task_prompt, "
-    "runtime, model, reasoning_effort, state, "
-    "cancel_requested, terminal_resume_pending, current_attempt_id, "
-    "published_pr_url, published_commit_sha, detail, "
-    "metadata, fork_source_job_id, "
-    "created_at, updated_at"
-)
-_THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile, t.mcp_servers"
-# Probe the unfinished-turn index before the latest-turn index: a cancelled
-# queued follow-up must not hide work that is still running earlier in the chat.
-_CONVERSATION_STATE_SQL = """
-COALESCE(
-    (SELECT active.state FROM agent_jobs active
-     WHERE active.thread_id = j.thread_id AND active.user_id = j.user_id
-       AND active.state IN ('queued', 'running')
-     ORDER BY CASE WHEN active.state = 'running' THEN 0 ELSE 1 END, active.turn_no DESC
-     LIMIT 1),
-    (SELECT CASE WHEN latest.state = 'failed' THEN 'failed' ELSE 'idle' END
-     FROM agent_jobs latest
-     WHERE latest.thread_id = j.thread_id AND latest.user_id = j.user_id
-     ORDER BY latest.turn_no DESC LIMIT 1)
-)"""
-_QUALIFIED_JOB_COLUMNS = (
-    ", ".join(f"j.{column.strip()}" for column in _JOB_OWN_COLUMNS.split(","))
-    + ", "
-    + _THREAD_CONFIG_COLUMNS
-    + f", {_CONVERSATION_STATE_SQL} AS conversation_state"
-)
-_JOB_SELECT = (
-    f"SELECT {_QUALIFIED_JOB_COLUMNS} FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id"
-)
-
-
-def _session_query(*, filter_repo: bool = False) -> str:
-    """Filter project rows before looking up each conversation's latest turn."""
-    repo_filter = "AND ($5::text IS NULL OR t.repo = $5)" if filter_repo else ""
-    return f"""
-WITH latest AS (
-    SELECT {_QUALIFIED_JOB_COLUMNS}, t.id AS session_id, t.title AS session_title, t.title_source,
-           t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
-           CASE
-               WHEN j.state = 'queued' THEN 'queued'
-               WHEN j.state = 'running' THEN 'running'
-               WHEN j.state = 'succeeded' AND NULLIF(j.published_pr_url, '') IS NOT NULL THEN 'done'
-               WHEN j.state = 'succeeded' THEN 'needs_review'
-               ELSE j.state
-           END AS display_state
-    FROM agent_threads t
-    CROSS JOIN LATERAL (
-        SELECT * FROM agent_jobs latest_job
-        WHERE latest_job.thread_id = t.id AND latest_job.user_id = $1
-        ORDER BY latest_job.turn_no DESC, latest_job.id DESC
-        LIMIT 1
-    ) j
-    WHERE t.user_id = $1 AND t.deleted_at IS NULL
-      AND (($2 AND t.archived_at IS NOT NULL) OR (NOT $2 AND t.archived_at IS NULL))
-      AND ($3::text IS NULL OR STRPOS(LOWER(t.title), LOWER($3)) > 0)
-      {repo_filter}
-), matched AS (
-    SELECT * FROM latest
-    WHERE $4::text IS NULL
-       OR CASE WHEN $4 IN ('done', 'needs_review', 'cancelled')
-               THEN display_state ELSE conversation_state END = $4
-)
-"""
-
-
-# An idle native process and its HOT credential lease outlive the completed
-# turn. Removing a chat from owner history must not tear down that process or
-# its shared workspace. Actual work and unfinished publication remain visible
-# until they settle; the retained rows keep lineage and billing attributable.
-_SESSION_DELETE_BLOCK_SQL = """
-CASE
-    WHEN t.archived_at IS NULL THEN 'not_archived'
-    WHEN EXISTS (
-        SELECT 1 FROM agent_jobs busy_job
-        WHERE busy_job.thread_id = t.session_id
-          AND busy_job.state NOT IN ('succeeded', 'failed', 'cancelled')
-    ) OR EXISTS (
-        SELECT 1 FROM agent_attempts a
-        JOIN agent_jobs busy_job ON busy_job.id = a.job_id
-        WHERE busy_job.thread_id = t.session_id
-          AND a.status = 'running' AND a.lease_expires_at > NOW()
-    ) OR EXISTS (
-        SELECT 1 FROM agent_thread_sandbox_memberships m
-        WHERE m.thread_id = t.session_id
-          AND (m.active_attempt_id IS NOT NULL OR m.resident_state IN ('starting', 'restarting'))
-    ) THEN 'session_active'
-    WHEN EXISTS (
-        SELECT 1 FROM agent_session_forks f
-        WHERE (f.source_thread_id = t.session_id OR f.target_thread_id = t.session_id)
-          AND f.state IN ('preparing', 'materialized')
-    ) OR EXISTS (
-        SELECT 1 FROM agent_thread_sandbox_memberships m
-        WHERE m.thread_id = t.session_id AND m.fork_operation_id IS NOT NULL
-    ) THEN 'fork_in_progress'
-    WHEN EXISTS (
-        SELECT 1 FROM agent_sandbox_snapshots snapshot
-        JOIN agent_snapshot_jobs included ON included.snapshot_id = snapshot.id
-        JOIN agent_jobs included_job ON included_job.id = included.job_id
-        WHERE included_job.thread_id = t.session_id
-          AND snapshot.state IN ('pending', 'capturing', 'captured', 'publishing')
-    ) THEN 'publication_pending'
-    ELSE NULL
-END
-"""
-
-
-def _session_cursor_scope(
-    user_id: str, archived: bool, search: str | None, repo: str | None, state: str | None
-) -> str:
-    """Bind pagination to the same owner's filter selection."""
-    return hashlib.sha256(json.dumps([user_id, archived, search, repo, state]).encode()).hexdigest()
-
-
-def _decode_session_cursor(cursor: str | None, scope: str) -> tuple[datetime | None, str | None]:
-    """Validate a bounded keyset cursor before sending its values to SQL."""
-    if cursor is None:
-        return None, None
-    try:
-        if len(cursor) > 1024:
-            raise ValueError
-        payload = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
-        if not isinstance(payload, dict) or payload.get("scope") != scope:
-            raise ValueError
-        sort_at = datetime.fromisoformat(payload["at"])
-        thread_id = payload["id"]
-        if (
-            sort_at.tzinfo is None
-            or not isinstance(thread_id, str)
-            or not thread_id
-            or len(thread_id) > 128
-            or "\x00" in thread_id
-        ):
-            raise ValueError
-        return sort_at, thread_id
-    except (ValueError, TypeError, KeyError, binascii.Error) as exc:
-        raise ValueError("Invalid session cursor for these filters") from exc
-
-
-def _encode_session_cursor(sort_at: datetime, thread_id: str, scope: str) -> str:
-    """Encode the last conversation key, not an offset into a moving list."""
-    return base64.urlsafe_b64encode(
-        json.dumps({"at": sort_at.isoformat(), "id": thread_id, "scope": scope}).encode()
-    ).decode()
-
-
-def _decode_conversation_cursor(
-    cursor: str, scope: str
-) -> tuple[bool, datetime | None, datetime, str]:
-    """Validate a pagination boundary, including its owner and search scope."""
-    try:
-        if not cursor or len(cursor) > 2048:
-            raise ValueError
-        data = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
-        if (
-            not isinstance(data, dict)
-            or type(data.get("v")) is not int
-            or data["v"] != 1
-            or data.get("scope") != scope
-        ):
-            raise ValueError
-        pin = data["pin"]
-        activity = datetime.fromisoformat(data["activity"])
-        thread = data["thread"]
-        if pin is not None:
-            pin = datetime.fromisoformat(pin)
-            if pin.tzinfo is None:
-                raise ValueError
-        if activity.tzinfo is None or not isinstance(thread, str) or not 1 <= len(thread) <= 128:
-            raise ValueError
-        if "\x00" in thread:
-            raise ValueError
-        return pin is not None, pin, activity, thread
-    except (ValueError, TypeError, KeyError, binascii.Error, OverflowError, RecursionError) as exc:
-        raise ValueError("Invalid conversation cursor for this search") from exc
 
 
 class AgentJobStore:
@@ -730,7 +508,7 @@ class AgentJobStore:
                     client_request_id,
                     client_request_fingerprint,
                 )
-                row = await conn.fetchrow(f"{_JOB_SELECT} WHERE j.id = $1", job_id)
+                row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
                 await conn.execute(
                     """
                     INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
@@ -753,7 +531,7 @@ class AgentJobStore:
             )
             assert replayed is not None
             return replayed
-        result = _job_row_to_dict(row)
+        result = job_row_to_dict(row)
         result["title"] = fallback_title(task_prompt)
         result["title_source"] = "fallback"
         return result
@@ -885,7 +663,7 @@ class AgentJobStore:
                 return {"error": "session_archived"}
             thread_id = thread["id"]
             parent = await conn.fetchrow(
-                f"{_JOB_SELECT} WHERE j.thread_id = $1 "
+                f"{JOB_SELECT} WHERE j.thread_id = $1 "
                 "ORDER BY j.turn_no DESC LIMIT 1 FOR UPDATE OF j",
                 thread_id,
             )
@@ -961,7 +739,7 @@ class AgentJobStore:
                 client_request_id,
                 client_request_fingerprint,
             )
-            row = await conn.fetchrow(f"{_JOB_SELECT} WHERE j.id = $1", job_id)
+            row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
             await conn.execute(
                 """
                 INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
@@ -974,7 +752,7 @@ class AgentJobStore:
             await conn.execute(
                 "UPDATE agent_threads SET updated_at = NOW() WHERE id = $1", thread_id
             )
-        result = _job_row_to_dict(row)
+        result = job_row_to_dict(row)
         result["title"] = thread["title"]
         result["title_source"] = thread["title_source"]
         result["pinned_at"] = thread["pinned_at"]
@@ -993,18 +771,18 @@ class AgentJobStore:
             operation["source_thread_id"],
         )
         source = await conn.fetchrow(
-            f"{_JOB_SELECT} WHERE j.id = $1",
+            f"{JOB_SELECT} WHERE j.id = $1",
             operation["source_job_id"],
         )
         result = dict(operation)
         result["host_receipt"] = load_json(result.get("host_receipt"))
         if sandbox is not None:
-            sandbox_dict = _sandbox_row_to_dict(sandbox)
+            sandbox_dict = sandbox_row_to_dict(sandbox)
             result["thread_sandbox"] = sandbox_dict
             for key, value in sandbox_dict.items():
                 result.setdefault(key, value)
         if source is not None:
-            result["source_job"] = _job_row_to_dict(source)
+            result["source_job"] = job_row_to_dict(source)
             # Assigned at the native settlement boundary, not inferred from
             # the final job state. A lease may expire after context settlement
             # but before job finalization; subsequent successful turns must
@@ -1063,7 +841,7 @@ class AgentJobStore:
                 return result
 
             source = await conn.fetchrow(
-                f"{_JOB_SELECT} WHERE j.id = $1 AND j.user_id = $2 FOR UPDATE OF j",
+                f"{JOB_SELECT} WHERE j.id = $1 AND j.user_id = $2 FOR UPDATE OF j",
                 source_job_id,
                 user_id,
             )
@@ -1595,7 +1373,7 @@ class AgentJobStore:
                 if thread is None:
                     return None
                 source = await conn.fetchrow(
-                    f"{_JOB_SELECT} WHERE j.id = $1 FOR UPDATE OF j",
+                    f"{JOB_SELECT} WHERE j.id = $1 FOR UPDATE OF j",
                     operation["source_job_id"],
                 )
                 membership = await conn.fetchrow(
@@ -1614,7 +1392,7 @@ class AgentJobStore:
                 ):
                     return None
                 turns = await conn.fetch(
-                    f"{_JOB_SELECT} WHERE j.thread_id = $1 AND j.turn_no <= $2 ORDER BY j.turn_no",
+                    f"{JOB_SELECT} WHERE j.thread_id = $1 AND j.turn_no <= $2 ORDER BY j.turn_no",
                     operation["source_thread_id"],
                     source["turn_no"],
                 )
@@ -1954,20 +1732,20 @@ class AgentJobStore:
                 thread["id"],
             )
             jobs = await conn.fetch(
-                f"{_JOB_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no",
+                f"{JOB_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no",
                 thread["id"],
             )
             sandbox = await conn.fetchrow(
                 f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread["id"],
             )
-            job_rows = [_job_row_to_dict(job) for job in jobs]
+            job_rows = [job_row_to_dict(job) for job in jobs]
             for job in job_rows:
                 job["title"] = thread["title"]
                 job["pinned_at"] = thread["pinned_at"]
                 job["archived_at"] = thread["archived_at"]
                 if sandbox is not None:
-                    job["thread_sandbox"] = _sandbox_row_to_dict(sandbox)
+                    job["thread_sandbox"] = sandbox_row_to_dict(sandbox)
         return {
             "id": thread["id"],
             "repo": thread["repo"],
@@ -2053,7 +1831,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at, t.deleted_at,
+                SELECT {QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at, t.deleted_at,
                        to_jsonb(s) AS thread_sandbox
                 FROM agent_jobs j
                 LEFT JOIN agent_threads t ON t.id = j.thread_id
@@ -2062,7 +1840,7 @@ class AgentJobStore:
                 """,
                 job_id,
             )
-        return _job_row_to_dict(row) if row else None
+        return job_row_to_dict(row) if row else None
 
     async def list_jobs(
         self,
@@ -2080,7 +1858,7 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at
+                SELECT {QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at, t.archived_at
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = $1
                 WHERE j.user_id = $1
@@ -2096,7 +1874,7 @@ class AgentJobStore:
                 archived,
                 repo,
             )
-        return [_job_row_to_dict(row) for row in rows]
+        return [job_row_to_dict(row) for row in rows]
 
     async def list_conversations(
         self,
@@ -2132,7 +1910,7 @@ class AgentJobStore:
             scope_filters.append(pinned)
         scope = hashlib.sha256(json.dumps(scope_filters).encode()).hexdigest()
         boundary = (
-            _decode_conversation_cursor(cursor, scope)
+            decode_conversation_cursor(cursor, scope)
             if cursor is not None
             else (None, None, None, None)
         )
@@ -2170,7 +1948,7 @@ class AgentJobStore:
                     ORDER BY pinned_at DESC NULLS LAST, last_activity_at DESC, thread_id DESC
                     LIMIT $5
                 )
-                SELECT {_QUALIFIED_JOB_COLUMNS}, page.title, page.pinned_at,
+                SELECT {QUALIFIED_JOB_COLUMNS}, page.title, page.pinned_at,
                        page.archived, page.last_activity_at
                 FROM page
                 JOIN agent_threads t ON t.id = page.thread_id
@@ -2209,7 +1987,7 @@ class AgentJobStore:
         return {
             "conversations": [
                 {
-                    "job": _job_row_to_dict(row),
+                    "job": job_row_to_dict(row),
                     "title": row["title"],
                     "archived": row["archived"],
                     "last_activity_at": row["last_activity_at"],
@@ -2282,15 +2060,15 @@ class AgentJobStore:
         keyset remains valid when earlier rows are unarchived or deleted.
         Row-only requests skip the full-history aggregate and return null counts.
         """
-        scope = _session_cursor_scope(user_id, archived, search, repo, state)
-        after_at, after_id = _decode_session_cursor(cursor, scope)
+        scope = session_cursor_scope(user_id, archived, search, repo, state)
+        after_at, after_id = decode_session_cursor(cursor, scope)
         async with (
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
             projects = (
                 await conn.fetch(
-                    _session_query()
+                    session_query()
                     + "SELECT repo, COUNT(*) AS count FROM matched GROUP BY repo ORDER BY repo",
                     user_id,
                     archived,
@@ -2301,9 +2079,9 @@ class AgentJobStore:
                 else None
             )
             rows = await conn.fetch(
-                _session_query(filter_repo=True)
+                session_query(filter_repo=True)
                 + f"""
-                SELECT t.*, {_SESSION_DELETE_BLOCK_SQL} AS delete_block_reason
+                SELECT t.*, {SESSION_DELETE_BLOCK_SQL} AS delete_block_reason
                 FROM matched t
                 WHERE ($6::timestamptz IS NULL OR (t.sort_at, t.session_id) < ($6, $7::text))
                 ORDER BY t.sort_at DESC, t.session_id DESC
@@ -2325,7 +2103,7 @@ class AgentJobStore:
                     "thread_id": row["session_id"],
                     "title": row["session_title"],
                     "archived_at": row["archived_at"],
-                    "job": _job_row_to_dict(row),
+                    "job": job_row_to_dict(row),
                     "can_delete": row["delete_block_reason"] is None,
                     "delete_block_reason": row["delete_block_reason"],
                 }
@@ -2342,7 +2120,7 @@ class AgentJobStore:
                 else None
             ),
             "next_cursor": (
-                _encode_session_cursor(page[-1]["sort_at"], page[-1]["session_id"], scope)
+                encode_session_cursor(page[-1]["sort_at"], page[-1]["session_id"], scope)
                 if len(rows) > limit
                 else None
             ),
@@ -2399,7 +2177,7 @@ class AgentJobStore:
                     SELECT id AS session_id, archived_at FROM agent_threads
                     WHERE id = ANY($1::text[]) AND user_id = $2
                 ), checked AS (
-                    SELECT t.session_id, {_SESSION_DELETE_BLOCK_SQL} AS reason
+                    SELECT t.session_id, {SESSION_DELETE_BLOCK_SQL} AS reason
                     FROM selected t
                 )
                 SELECT reason FROM checked WHERE reason IS NOT NULL ORDER BY session_id LIMIT 1
@@ -2878,7 +2656,7 @@ class AgentJobStore:
             )
             job_row = await conn.fetchrow(
                 f"""
-                SELECT {_QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox,
+                SELECT {QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox,
                        t.title_source
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id
@@ -3022,7 +2800,7 @@ class AgentJobStore:
                 job_id,
                 attempt["id"],
             )
-        claim = _job_row_to_dict(job_row)
+        claim = job_row_to_dict(job_row)
         claim["state"] = RUNNING
         claim["current_attempt_id"] = attempt["id"]
         claim["attempt_id"] = attempt["id"]
@@ -4122,7 +3900,7 @@ class AgentJobStore:
             f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
             thread_id,
         )
-        return None if row is None else _sandbox_row_to_dict(row)
+        return None if row is None else sandbox_row_to_dict(row)
 
     async def mark_thread_sandbox_running(
         self,
@@ -4190,7 +3968,7 @@ class AgentJobStore:
                 f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread_id,
             )
-        return None if row is None else _sandbox_row_to_dict(row)
+        return None if row is None else sandbox_row_to_dict(row)
 
     async def record_thread_sandbox_process(
         self,
@@ -4447,7 +4225,7 @@ class AgentJobStore:
                     f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                     thread_id,
                 )
-                return _sandbox_row_to_dict(row)
+                return sandbox_row_to_dict(row)
             shared = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandbox_memberships m
@@ -4586,7 +4364,7 @@ class AgentJobStore:
                 f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread_id,
             )
-        return None if row is None else _sandbox_row_to_dict(row)
+        return None if row is None else sandbox_row_to_dict(row)
 
     async def reconcile_thread_sandbox_observation(
         self,
@@ -4962,7 +4740,7 @@ class AgentJobStore:
                 f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread_id,
             )
-        return None if current is None else _sandbox_row_to_dict(current)
+        return None if current is None else sandbox_row_to_dict(current)
 
     async def thread_sandbox(self, *, thread_id: str) -> dict[str, Any] | None:
         """Return the durable local sandbox mapping, including STOPPED/LOST."""
