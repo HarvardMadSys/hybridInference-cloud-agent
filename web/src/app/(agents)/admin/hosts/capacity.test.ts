@@ -362,6 +362,41 @@ describe('retained sandboxes', () => {
     expect(summary.reasons).toEqual(['inventory_not_reported']);
   });
 
+  it('does not count a record that is neither reporting nor reporting anything', () => {
+    // The row a rename leaves behind: the machine's previous identity, offline
+    // since it stopped answering under that name, and never having sent an
+    // observation because it ran code older than the collector. It is not a
+    // source this page can be short of — its containers, if it has any, are on
+    // this same Docker host under the name that is still reporting.
+    const summary = summarizeSandboxes([
+      host({
+        host: 'rtx6000b-kata',
+        status: 'online',
+        capacity: capacity({ inventory: inventory({ running: 0, stopped: 18 }) }),
+      }),
+      host({ host: 'rtx6000b', status: 'offline', capacity: null }),
+    ]);
+
+    expect(summary.text).toBe('0 running · 18 stopped');
+    expect(summary.partial).toBe(false);
+    expect(summary.reasons).toEqual([]);
+  });
+
+  it('still bounds the total when a *reporting* enrollment sent no inventory', () => {
+    // The case the lower bound exists for: a runner alive on this machine,
+    // running code older than the collector, holding containers the page
+    // cannot see. Silence from a machine that is answering is a gap; silence
+    // from a record that is not answering is not.
+    const summary = summarizeSandboxes([
+      host({ host: 'runner-a', status: 'online', capacity: capacity({ inventory: inventory() }) }),
+      host({ host: 'runner-b', status: 'online', capacity: null }),
+      host({ host: 'runner-old', status: 'offline', capacity: null }),
+    ]);
+
+    expect(summary.text).toBe('≥10 observed · Partial');
+    expect(summary.reasons).toEqual(['inventory_not_reported']);
+  });
+
   it('carries the legacy-unscoped warning into the total', () => {
     const summary = summarizeSandboxes([
       host({

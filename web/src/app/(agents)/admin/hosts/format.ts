@@ -81,23 +81,45 @@ export function serverInventory(hosts: AgentRunnerHost[], profile: string) {
   });
 }
 
+/** Statuses in which an enrollment is still reporting in. */
+const REPORTING_STATUSES = new Set(['online', 'draining']);
+
+/**
+ * Whether this enrollment is still reporting in.
+ *
+ * The one definition of it on this page. `draining` counts: it is an operator's
+ * instruction to stop taking work, not silence — the machine is still there and
+ * still sending its load.
+ */
+export function isReporting(host: AgentRunnerHost): boolean {
+  return REPORTING_STATUSES.has(host.status);
+}
+
 /**
  * The enrollments a capacity curve may be drawn from.
  *
- * A physical name groups identities for display, and one of them can be an
- * environment that has been removed: its row survives on purpose — attempts
- * name it and its history stays in the API — but its credential is revoked and
- * it is no longer a machine anyone can read a curve from. Offering it is how
- * the panel's source control came to look like the server's own name repeated
- * with a suffix, and how a retired environment came to be mistaken for a
- * second one.
+ * A physical name groups identities for display, and the rows behind it are
+ * not all machines someone can look at. Two rules, in order:
  *
- * Offline is not removed, and is deliberately kept. A host that missed its
- * heartbeats may be rebooting, its last curve is still this machine's, and the
- * stale marker is what says how old the reading is.
+ *   * **A removed enrollment is never offered.** Its row survives on purpose —
+ *     attempts name it and its history stays in the API — but its credential
+ *     is revoked. Offering it is how a retired environment came to look like a
+ *     second one.
+ *   * **While any enrollment is reporting, only the reporting ones are
+ *     offered.** A row that has stopped heartbeating under a name this machine
+ *     no longer answers to is the machine's previous identity, not a second
+ *     environment: the same box, renamed, whose old row the reaper marked
+ *     offline and nothing cleans up. Its curve is the same machine's, before
+ *     the rename, so nothing is lost by leaving it out of a picker.
+ *
+ * When *nothing* is reporting the fallback is deliberate: every non-removed
+ * enrollment stays available, so a machine that is rebooting can still show
+ * its last curve with the stale marker that says how old it is.
  */
 export function curveSourceHosts(members: AgentRunnerHost[]): AgentRunnerHost[] {
-  return members.filter((member) => member.status !== 'disabled');
+  const live = members.filter((member) => member.status !== 'disabled');
+  const reporting = live.filter((member) => isReporting(member));
+  return reporting.length > 0 ? reporting : live;
 }
 
 /**

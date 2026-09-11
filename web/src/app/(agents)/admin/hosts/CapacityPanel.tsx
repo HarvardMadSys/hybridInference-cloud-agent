@@ -24,7 +24,6 @@ import {
   rangeLabel,
   reasonLabel,
 } from './capacity';
-import { formatAge } from './format';
 
 export interface CapacityPanelProps {
   id: string;
@@ -40,8 +39,6 @@ export interface CapacityPanelProps {
   sources: string[];
   onSourceChange: (host: string) => void;
   sandboxes: SandboxSummary;
-  /** Age of the oldest contributing observation, advanced locally. */
-  oldestAgeSeconds: number | null;
   stale: boolean;
   range: CapacityRange;
   onRangeChange: (range: CapacityRange) => void;
@@ -63,12 +60,6 @@ export interface CapacityPanelProps {
  * "Curvebox-a-kata". The emphasis the two-tone version bought is not worth a
  * fact that cannot be read back.
  */
-function MetaItem({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="font-medium text-gray-600 dark:text-gray-300">{`${label}: ${value}`}</span>
-  );
-}
-
 export default function CapacityPanel({
   id,
   name,
@@ -76,7 +67,6 @@ export default function CapacityPanel({
   sources,
   onSourceChange,
   sandboxes,
-  oldestAgeSeconds,
   stale,
   range,
   onRangeChange,
@@ -104,12 +94,18 @@ export default function CapacityPanel({
           <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-50">
             Capacity · {name}
           </h3>
-          {/* Which enrollment the curve belongs to, and the two facts that say
-              how much of it is real: a physical row can be several
-              enrollments, and a curve silently mixing them would be a
-              different machine's load under this machine's name. With more
-              than one, the operator picks; the choice is never carried across
-              servers, and never merged. */}
+          {/* Which enrollment the curve belongs to — **only when there is a
+              choice.** A physical row can be several enrollments, and a curve
+              silently mixing them would be a different machine's load under
+              this machine's name, so with more than one the operator picks and
+              the choice is never carried across servers or merged.
+
+              With one, the enrollment is not a choice and its name is not
+              information: the heading above already names the server, and the
+              operator did not come here to read an identity that only differs
+              from it by a suffix. What is left is the case where no enrollment
+              reports anything at all, which is the one fact the empty charts
+              below cannot state for themselves. */}
           <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
             {sources.length > 1 ? (
               <span className="inline-flex items-center gap-1.5">
@@ -133,16 +129,7 @@ export default function CapacityPanel({
               <span className="text-gray-500 dark:text-gray-400">
                 No enrollment reports capacity for this server.
               </span>
-            ) : (
-              <MetaItem label="Curve" value={source} />
-            )}
-            <MetaItem
-              label="Oldest observation"
-              value={oldestAgeSeconds === null ? 'none yet' : formatAge(oldestAgeSeconds)}
-            />
-            {history !== null && (
-              <MetaItem label="Bucket" value={`${history.resolution_seconds}s`} />
-            )}
+            ) : null}
           </div>
         </div>
 
@@ -241,8 +228,9 @@ export default function CapacityPanel({
             <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Refreshing history…</p>
           )}
           <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-            Each point is one observation: CPU averages the interval before it, memory is
-            instantaneous. Read {formatUtcTimestamp(history.observed_at)}.
+            Each point is one observation, {history.resolution_seconds}s apart: CPU averages the
+            interval before it, memory is instantaneous. Read{' '}
+            {formatUtcTimestamp(history.observed_at)}.
           </p>
         </>
       )}

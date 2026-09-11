@@ -961,11 +961,6 @@ function HostsView() {
                                 sources={openSources}
                                 onSourceChange={selectSource}
                                 sandboxes={openFacts.sandboxes}
-                                oldestAgeSeconds={
-                                  openFacts.oldestSampleAgeSeconds === null
-                                    ? null
-                                    : liveAgeSeconds(openFacts.oldestSampleAgeSeconds, elapsedMs)
-                                }
                                 stale={openFacts.stale}
                                 range={range}
                                 onRangeChange={setRange}

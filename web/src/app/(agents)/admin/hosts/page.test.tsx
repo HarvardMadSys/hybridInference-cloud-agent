@@ -578,6 +578,34 @@ describe('capacity columns', () => {
     expect(within(row).getByRole('button', { name: 'Drain' })).toBeEnabled();
   });
 
+  it('counts a renamed machine once, not as a partial of two records', async () => {
+    // The shape staging had: the machine renamed to `-kata`, its previous row
+    // left offline and never having reported an inventory. One machine, so the
+    // count is a count — not a lower bound produced by a record of the same
+    // box under a name it no longer answers to.
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          host: 'rtx6000b-kata',
+          labels: { physical_host: 'rtx6000b' },
+          status: 'online',
+          capacity: capacity({ inventory: inventory({ running: 0, stopped: 18 }) }),
+        }),
+        host({
+          host: 'rtx6000b',
+          labels: { physical_host: 'rtx6000b' },
+          status: 'offline',
+          capacity: null,
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'rtx6000b' })).closest('tr')!;
+    expect(within(row).getByText('0 running · 18 stopped')).toBeInTheDocument();
+    expect(within(row).queryByText(/Partial/)).not.toBeInTheDocument();
+  });
+
   it('says a partial count is a lower bound', async () => {
     mocked.list.mockResolvedValue(
       pool([
@@ -635,6 +663,23 @@ describe('capacity panel', () => {
 
     fireEvent.click(toggleB);
     expect(screen.queryByText('Capacity · box-b')).not.toBeInTheDocument();
+  });
+
+  it('does not repeat the row age or the bucket width in the panel header', async () => {
+    // Both were already on screen. The age is the Observed column, which is
+    // the same number advanced from the same instant; the bucket width is what
+    // the sentence under the charts already says in words. Two more labels in
+    // a header are two more things to read that say nothing new.
+    render(<AdminHostsPage />);
+    await openPanel();
+
+    await vi.waitFor(() =>
+      expect(screen.getByRole('img', { name: 'CPU usage (%)' })).toBeInTheDocument(),
+    );
+    expect(screen.getByText('12s ago')).toBeInTheDocument();
+    expect(screen.queryByText(/^Oldest observation:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Bucket:/)).not.toBeInTheDocument();
+    expect(screen.getByText(/one observation, 60s apart/)).toBeInTheDocument();
   });
 
   it('reads one hour by default and switches window on request', async () => {
@@ -875,11 +920,62 @@ describe('capacity panel', () => {
 
     await openPanel('rtx6000b');
 
-    await vi.waitFor(() => expect(screen.getByText('Curve: rtx6000b-kata')).toBeInTheDocument());
-    expect(screen.queryByLabelText('Curve source')).not.toBeInTheDocument();
+    // One enrollment is not a choice, so neither the control nor the identity
+    // is shown: the heading above already names the server, and the enrollment
+    // name differs from it only by a suffix.
     await vi.waitFor(() =>
       expect(mocked.history).toHaveBeenCalledWith('rtx6000b-kata', '1h', expect.anything()),
     );
+    expect(screen.queryByLabelText('Curve source')).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Curve:/)).not.toBeInTheDocument();
+  });
+
+  it("shows one name when the other enrollment is the machine's old identity", async () => {
+    // The shape staging had: the machine renamed to `-kata`, its previous row
+    // left behind and marked offline by the reaper. One machine, one curve,
+    // and no control asking which of two names for it to draw.
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          host: 'rtx6000b-kata',
+          labels: { physical_host: 'rtx6000b' },
+          status: 'online',
+          capacity: capacity(),
+        }),
+        host({
+          host: 'rtx6000b',
+          labels: { physical_host: 'rtx6000b' },
+          status: 'offline',
+          capacity: null,
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    await openPanel('rtx6000b');
+
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('rtx6000b-kata', '1h', expect.anything()),
+    );
+    expect(screen.queryByLabelText('Curve source')).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Curve:/)).not.toBeInTheDocument();
+  });
+
+  it('still offers both while both are reporting', async () => {
+    // Two stacks genuinely running on one box is the case the control exists
+    // for; the rule above must not collapse it.
+    mocked.list.mockResolvedValue(
+      pool([
+        host({ host: 'box-kata', labels: { physical_host: 'box' }, status: 'online' }),
+        host({ host: 'box-runc', labels: { physical_host: 'box' }, status: 'draining' }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    await openPanel('box');
+
+    await vi.waitFor(() => expect(screen.getByLabelText('Curve source')).toBeInTheDocument());
+    expect(within(screen.getByLabelText('Curve source')).getAllByRole('option')).toHaveLength(2);
   });
 
   it('moves off a source that is removed while the panel is open', async () => {

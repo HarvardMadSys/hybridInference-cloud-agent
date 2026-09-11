@@ -26,9 +26,28 @@ describe('curve sources', () => {
     expect(curveSourceHosts(members).map((member) => member.host)).toEqual(['rtx6000b-kata']);
   });
 
-  it('keeps an offline enrollment, because it may be coming back', () => {
-    // A host that missed its heartbeats is not a retired one. Its last curve
-    // is still this machine's, and the stale marker is what says how old it is.
+  it('drops an enrollment that stopped reporting while another one is', () => {
+    // The same machine under a previous identity: a row the reaper marked
+    // offline after a rename, which nothing ever cleans up. It is not a second
+    // environment, and its curve is this machine's history from before the
+    // rename — so leaving it out of a picker loses no reading.
+    const members = [host('rtx6000b-kata', 'online'), host('rtx6000b', 'offline')];
+
+    expect(curveSourceHosts(members).map((member) => member.host)).toEqual(['rtx6000b-kata']);
+  });
+
+  it('counts a draining enrollment as one that is still reporting', () => {
+    // Draining is an operator's instruction to stop taking work, not silence:
+    // the machine is still there and still sending its load.
+    const members = [host('a', 'draining'), host('b', 'offline')];
+
+    expect(curveSourceHosts(members).map((member) => member.host)).toEqual(['a']);
+  });
+
+  it('keeps every live enrollment when none of them is reporting', () => {
+    // A machine that is rebooting has no reporting row at all. Its last curve
+    // is still this machine's, and the stale marker is what says how old it
+    // is — so the fallback is everyone who has not been removed.
     const members = [host('a', 'offline'), host('b', 'enrolling')];
 
     expect(curveSourceHosts(members).map((member) => member.host)).toEqual(['a', 'b']);
