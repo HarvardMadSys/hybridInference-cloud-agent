@@ -741,6 +741,14 @@ jobs:
     # owner, and on 2026-09-11 a cell finishing while the staging deploy was
     # mid-build deleted the builder out from under it — `target migrate:
     # failed to receive status`, `graceful_stop`.
+    #
+    # `cache-from: type=gha` is deliberately absent from the builds below, as an
+    # experiment. With a builder per runner, every x64 runner already holds a
+    # complete cache for every artifact: on rtx6000b-ca-3 the sandbox build
+    # finishes in 5.5s with every layer CACHED. CI nonetheless downloads 835MB
+    # of layers that are present locally, and the only difference between CI's
+    # invocation and that manual build is this flag. If the download disappears,
+    # it was the cause; if not, this is reverted and the search continues.
     strategy:
       fail-fast: false
       matrix:
@@ -875,7 +883,6 @@ jobs:
           build-args: |
             SOURCE_COMMIT=${{ github.sha }}
             ${{ matrix.artifact.build_args }}
-          cache-from: type=gha,scope=${{ matrix.artifact.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.artifact.name }}
 
       # No builder work here: one that would not start was already replaced
@@ -897,7 +904,6 @@ jobs:
           build-args: |
             SOURCE_COMMIT=${{ github.sha }}
             ${{ matrix.artifact.build_args }}
-          cache-from: type=gha,scope=${{ matrix.artifact.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.artifact.name }}
 
       - name: Isolate uv cache dir
