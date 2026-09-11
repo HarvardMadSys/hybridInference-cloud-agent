@@ -27,6 +27,7 @@ from cloud_agent.host_pool import (
     HOST_ONLINE,
     hash_secret,
 )
+from cloud_agent.storage.repositories.host_pool import HostPoolRepository
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -44,7 +45,7 @@ _ALLOWED_TEST_DB_PATTERN = "_test_"
 
 
 @pytest_asyncio.fixture
-async def store():
+async def db():
     """A clean store over the shared test database."""
     import asyncpg
 
@@ -79,10 +80,22 @@ async def store():
 
     await _reset()
     try:
-        yield AgentJobStore(pool)
+        yield pool
     finally:
         await _reset()
         await pool.close()
+
+
+@pytest_asyncio.fixture
+async def store(db):
+    """Everything else these tests need, to claim and settle work."""
+    return AgentJobStore(db)
+
+
+@pytest_asyncio.fixture
+async def hosts(db):
+    """The capability under test, on the repository that now owns it."""
+    return HostPoolRepository(db)
 
 
 async def _create_job(store: AgentJobStore, **overrides) -> dict:
@@ -113,13 +126,13 @@ async def _settled(store: AgentJobStore, job_id: str) -> None:
         )
 
 
-async def _enrol(store: AgentJobStore, host: str, **overrides) -> dict:
+async def _enrol(store: AgentJobStore, host: str, hosts: HostPoolRepository, **overrides) -> dict:
     """Register a host and put it online, the way a real boot does."""
-    row = await store.register_host(
+    row = await hosts.register_host(
         host=host, credential_hash=hash_secret(f"cred-{host}"), **overrides
     )
     assert row["status"] == HOST_ENROLLING
-    return await store.record_host_heartbeat(host=host)
+    return await hosts.record_host_heartbeat(host=host)
 
 
 def _kata_attestation(**overrides) -> dict:
@@ -196,17 +209,17 @@ async def _claim(
 # ── G2: enrollment tokens ──────────────────────────────────────────────
 
 
-async def test_an_enrollment_token_is_spendable_exactly_once(store):
+async def test_an_enrollment_token_is_spendable_exactly_once(store, hosts: HostPoolRepository):
     """Same name both times: the second refusal must be replay, not the binding."""
-    await store.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=900)
+    await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=900)
 
-    first = await store.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
-    second = await store.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
+    first = await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
+    second = await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
 
     assert (first, second) == (True, False)
 
 
-async def test_two_machines_racing_one_token_produce_one_winner(store):
+async def test_two_machines_racing_one_token_produce_one_winner(store, hosts: HostPoolRepository):
     """The single-use property is the UPDATE's predicate, not a read-then-write.
 
     A token pasted into two consoles at once is exactly how a fleet gets
@@ -214,11 +227,11 @@ async def test_two_machines_racing_one_token_produce_one_winner(store):
     Every racer claims the name the token names, so what is under test is the
     predicate on ``consumed_at`` rather than the one on ``host``.
     """
-    await store.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=900)
+    await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=900)
 
     results = await asyncio.gather(
         *(
-            store.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
+            hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
             for _ in range(8)
         )
     )
@@ -226,13 +239,13 @@ async def test_two_machines_racing_one_token_produce_one_winner(store):
     assert sum(results) == 1
 
 
-async def test_an_expired_token_cannot_be_spent(store):
-    await store.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=-1)
+async def test_an_expired_token_cannot_be_spent(store, hosts: HostPoolRepository):
+    await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=-1)
 
-    assert not await store.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
+    assert not await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
 
 
-async def test_a_token_is_spendable_only_under_the_name_it_names(store):
+async def test_a_token_is_spendable_only_under_the_name_it_names(store, hosts: HostPoolRepository):
     """The name is the token's, not the registering machine's.
 
     ``register_host`` upserts, so spending a token under a live host's name
@@ -240,31 +253,31 @@ async def test_a_token_is_spendable_only_under_the_name_it_names(store):
     took a working machine out of the pool. The name therefore comes from the
     token an admin issued.
     """
-    await store.issue_enroll_token(token_hash=hash_secret("t"), host="runner-b", ttl_seconds=900)
+    await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-b", ttl_seconds=900)
 
-    assert not await store.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
+    assert not await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
 
 
-async def test_a_mismatched_name_does_not_spend_the_token(store):
+async def test_a_mismatched_name_does_not_spend_the_token(store, hosts: HostPoolRepository):
     """A typo is retried, not re-issued: the name is a predicate, not a check."""
-    await store.issue_enroll_token(token_hash=hash_secret("t"), host="runner-b", ttl_seconds=900)
-    await store.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
+    await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-b", ttl_seconds=900)
+    await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
 
-    assert await store.consume_enroll_token(token_hash=hash_secret("t"), host="runner-b")
+    assert await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-b")
 
 
-async def test_a_typo_cannot_revoke_a_live_hosts_credential(store):
+async def test_a_typo_cannot_revoke_a_live_hosts_credential(store, hosts: HostPoolRepository):
     """The eviction the binding removes, end to end against the real schema."""
-    await _enrol(store, "runner-a", slots_total=4)
-    await store.issue_enroll_token(token_hash=hash_secret("t"), host="runner-b", ttl_seconds=900)
+    await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
+    await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-b", ttl_seconds=900)
 
-    spent = await store.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
+    spent = await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
 
     assert spent is False
-    survivor = await store.get_host(host="runner-a")
+    survivor = await hosts.get_host(host="runner-a")
     assert survivor["status"] == HOST_ONLINE
     assert survivor["enrolled"] is True
-    assert await store.authenticate_host(
+    assert await hosts.authenticate_host(
         host="runner-a", credential_hash=hash_secret("cred-runner-a")
     )
 
@@ -272,8 +285,8 @@ async def test_a_typo_cannot_revoke_a_live_hosts_credential(store):
 # ── G2/G3: registration, authentication, heartbeat ─────────────────────
 
 
-async def test_registration_stores_what_the_host_declared(store):
-    await store.register_host(
+async def test_registration_stores_what_the_host_declared(store, hosts: HostPoolRepository):
+    await hosts.register_host(
         host="runner-a",
         credential_hash=hash_secret("cred"),
         capabilities=["runc", "kata", "kata"],
@@ -283,7 +296,7 @@ async def test_registration_stores_what_the_host_declared(store):
         labels={"region": "cambridge"},
     )
 
-    row = await store.get_host(host="runner-a")
+    row = await hosts.get_host(host="runner-a")
     assert row["status"] == HOST_ENROLLING
     assert row["capabilities"] == ["kata", "runc"]
     assert row["slots_total"] == 3
@@ -292,97 +305,103 @@ async def test_registration_stores_what_the_host_declared(store):
     assert row["enrolled"] is True
 
 
-async def test_the_credential_hash_never_leaves_the_store(store):
+async def test_the_credential_hash_never_leaves_the_store(store, hosts: HostPoolRepository):
     """Reading it back out would make the row as good as the credential."""
-    await store.register_host(host="runner-a", credential_hash=hash_secret("cred"))
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
 
-    assert "credential_hash" not in (await store.get_host(host="runner-a"))
-
-
-async def test_only_the_current_credential_authenticates(store):
-    await store.register_host(host="runner-a", credential_hash=hash_secret("first"))
-    await store.register_host(host="runner-a", credential_hash=hash_secret("second"))
-
-    assert (
-        await store.authenticate_host(host="runner-a", credential_hash=hash_secret("first")) is None
-    )
-    assert await store.authenticate_host(host="runner-a", credential_hash=hash_secret("second"))
+    assert "credential_hash" not in (await hosts.get_host(host="runner-a"))
 
 
-async def test_a_disabled_host_authenticates_nothing(store):
-    await store.register_host(host="runner-a", credential_hash=hash_secret("cred"))
-    await store.remove_host(host="runner-a")
+async def test_only_the_current_credential_authenticates(store, hosts: HostPoolRepository):
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("first"))
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("second"))
 
     assert (
-        await store.authenticate_host(host="runner-a", credential_hash=hash_secret("cred")) is None
+        await hosts.authenticate_host(host="runner-a", credential_hash=hash_secret("first")) is None
+    )
+    assert await hosts.authenticate_host(host="runner-a", credential_hash=hash_secret("second"))
+
+
+async def test_a_disabled_host_authenticates_nothing(store, hosts: HostPoolRepository):
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
+    await hosts.remove_host(host="runner-a")
+
+    assert (
+        await hosts.authenticate_host(host="runner-a", credential_hash=hash_secret("cred")) is None
     )
 
 
-async def test_the_first_heartbeat_promotes_and_records(store):
-    await store.register_host(host="runner-a", credential_hash=hash_secret("cred"))
+async def test_the_first_heartbeat_promotes_and_records(store, hosts: HostPoolRepository):
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
 
-    row = await store.record_host_heartbeat(host="runner-a", runner_version="9.9")
+    row = await hosts.record_host_heartbeat(host="runner-a", runner_version="9.9")
 
     assert row["status"] == HOST_ONLINE
     assert row["runner_version"] == "9.9"
     assert row["last_heartbeat_at"] is not None
 
 
-async def test_a_heartbeat_does_not_resurrect_a_drained_or_disabled_host(store):
-    await _enrol(store, "runner-a")
-    await store.set_host_status(host="runner-a", status=HOST_DRAINING)
+async def test_a_heartbeat_does_not_resurrect_a_drained_or_disabled_host(
+    store, hosts: HostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
+    await hosts.set_host_status(host="runner-a", status=HOST_DRAINING)
 
-    assert (await store.record_host_heartbeat(host="runner-a"))["status"] == HOST_DRAINING
+    assert (await hosts.record_host_heartbeat(host="runner-a"))["status"] == HOST_DRAINING
 
 
-async def test_re_registration_recounts_slots_rather_than_zeroing_them(store):
+async def test_re_registration_recounts_slots_rather_than_zeroing_them(
+    store, hosts: HostPoolRepository
+):
     """A machine rebuilt mid-job must not be told it is empty.
 
     Zeroing would over-subscribe it while the old attempts still hold leases;
     counting is right whether the machine was rebuilt or merely re-registered.
     """
-    await _enrol(store, "runner-a", slots_total=4)
+    await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 1
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 1
 
-    await store.register_host(host="runner-a", credential_hash=hash_secret("new"), slots_total=4)
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("new"), slots_total=4)
 
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 1
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 1
 
 
 # ── G3: the status machine and the reaper ──────────────────────────────
 
 
-async def test_an_illegal_transition_is_refused_by_the_store(store):
-    await _enrol(store, "runner-a")
-    await store.remove_host(host="runner-a")
+async def test_an_illegal_transition_is_refused_by_the_store(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", hosts=hosts)
+    await hosts.remove_host(host="runner-a")
 
-    assert await store.set_host_status(host="runner-a", status=HOST_ONLINE) == "invalid"
-    assert (await store.get_host(host="runner-a"))["status"] == HOST_DISABLED
-
-
-async def test_an_unknown_host_cannot_be_transitioned(store):
-    assert await store.set_host_status(host="nope", status=HOST_DRAINING) == "unknown"
+    assert await hosts.set_host_status(host="runner-a", status=HOST_ONLINE) == "invalid"
+    assert (await hosts.get_host(host="runner-a"))["status"] == HOST_DISABLED
 
 
-async def test_the_reaper_marks_a_silent_enrolled_host_offline(store):
-    await _enrol(store, "runner-a")
+async def test_an_unknown_host_cannot_be_transitioned(store, hosts: HostPoolRepository):
+    assert await hosts.set_host_status(host="nope", status=HOST_DRAINING) == "unknown"
+
+
+async def test_the_reaper_marks_a_silent_enrolled_host_offline(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", hosts=hosts)
     await _age_heartbeat(store, "runner-a", seconds=600)
 
-    reaped = await store.reap_offline_hosts(interval_seconds=30, missed_intervals=3)
+    reaped = await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3)
 
     assert reaped == ["runner-a"]
-    assert (await store.get_host(host="runner-a"))["status"] == HOST_OFFLINE
+    assert (await hosts.get_host(host="runner-a"))["status"] == HOST_OFFLINE
 
 
-async def test_the_reaper_leaves_a_recently_seen_host_alone(store):
-    await _enrol(store, "runner-a")
+async def test_the_reaper_leaves_a_recently_seen_host_alone(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", hosts=hosts)
 
-    assert await store.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
+    assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
 
 
-async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(store):
+async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(
+    store, hosts: HostPoolRepository
+):
     """The operator's instruction must survive the machine's absence.
 
     This failed before: the reaper moved ``draining -> offline``, and the next
@@ -393,36 +412,38 @@ async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(store
 
     Drain is an instruction, not an observation. Nothing overwrites it.
     """
-    await _enrol(store, "runner-a")
-    await store.set_host_status(host="runner-a", status=HOST_DRAINING)
+    await _enrol(store, "runner-a", hosts=hosts)
+    await hosts.set_host_status(host="runner-a", status=HOST_DRAINING)
     await _age_heartbeat(store, "runner-a", seconds=600)
 
-    assert await store.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
-    assert (await store.get_host(host="runner-a"))["status"] == HOST_DRAINING
+    assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
+    assert (await hosts.get_host(host="runner-a"))["status"] == HOST_DRAINING
 
     # And the return does not promote it either.
-    await store.record_host_heartbeat(host="runner-a")
-    assert (await store.get_host(host="runner-a"))["status"] == HOST_DRAINING
+    await hosts.record_host_heartbeat(host="runner-a")
+    assert (await hosts.get_host(host="runner-a"))["status"] == HOST_DRAINING
 
 
-async def test_a_host_that_registered_and_never_came_up_ages_out_of_enrolling(store):
-    await store.register_host(host="runner-a", credential_hash=hash_secret("cred"))
+async def test_a_host_that_registered_and_never_came_up_ages_out_of_enrolling(
+    store, hosts: HostPoolRepository
+):
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
     async with store._pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_runner_hosts SET first_seen_at = NOW() - INTERVAL '1 hour' "
             "WHERE host = 'runner-a'"
         )
 
-    assert await store.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == ["runner-a"]
+    assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == ["runner-a"]
 
 
-async def test_a_disabled_host_is_not_reaped_again(store):
+async def test_a_disabled_host_is_not_reaped_again(store, hosts: HostPoolRepository):
     """Nothing to say: it is already out, and re-reporting it is noise."""
-    await _enrol(store, "runner-a")
-    await store.remove_host(host="runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
+    await hosts.remove_host(host="runner-a")
     await _age_heartbeat(store, "runner-a", seconds=600)
 
-    assert await store.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
+    assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
 
 
 async def _age_heartbeat(store: AgentJobStore, host: str, *, seconds: int) -> None:
@@ -440,21 +461,21 @@ async def _age_heartbeat(store: AgentJobStore, host: str, *, seconds: int) -> No
 # ── G4: host-aware claiming ────────────────────────────────────────────
 
 
-async def test_a_claim_takes_a_slot_and_stamps_the_attempt(store):
-    await _enrol(store, "runner-a", slots_total=2)
+async def test_a_claim_takes_a_slot_and_stamps_the_attempt(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
 
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
     assert claim is not None
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 1
-    assert (await store.host_for_attempt(attempt_id=claim["attempt_id"]))["host"] == "runner-a"
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 1
+    assert (await hosts.host_for_attempt(attempt_id=claim["attempt_id"]))["host"] == "runner-a"
 
 
-async def test_a_heartbeat_round_trips_the_version_stamp(store):
+async def test_a_heartbeat_round_trips_the_version_stamp(store, hosts: HostPoolRepository):
     """'' and {} are answers, and a stampless beat does not erase them."""
-    await _enrol(store, "runner-a")
-    row = await store.record_host_heartbeat(
+    await _enrol(store, "runner-a", hosts=hosts)
+    row = await hosts.record_host_heartbeat(
         host="runner-a",
         sandbox_runtime="",
         sandbox_image_digest="sha256:abc",
@@ -464,17 +485,19 @@ async def test_a_heartbeat_round_trips_the_version_stamp(store):
     assert row["sandbox_image_digest"] == "sha256:abc"
     assert row["runtime_versions"] == {}
 
-    row = await store.record_host_heartbeat(host="runner-a")
+    row = await hosts.record_host_heartbeat(host="runner-a")
 
     assert row["sandbox_runtime"] == ""
     assert row["sandbox_image_digest"] == "sha256:abc"
     assert row["runtime_versions"] == {}
 
 
-async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(store):
+async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(
+    store, hosts: HostPoolRepository
+):
     """Rolling replicas sharing a host row are judged and stamped independently."""
-    await _enrol(store, "runner-a")
-    await store.record_host_heartbeat(
+    await _enrol(store, "runner-a", hosts=hosts)
+    await hosts.record_host_heartbeat(
         host="runner-a",
         sandbox_runtime="",
         sandbox_image_digest="sha256:old-host-row",
@@ -505,7 +528,7 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
     assert attempt["host_kernel"] == "6.8.0-host"
     assert attempt["guest_kernel"] == "6.1.0-kata"
 
-    await store.record_host_heartbeat(
+    await hosts.record_host_heartbeat(
         host="runner-a",
         sandbox_runtime="io.containerd.kata.v2",
         sandbox_image_digest="sha256:newer-host-row",
@@ -523,7 +546,7 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
 
     # Trusted execution changes the isolation profile, not the retained
     # session protocol: it still needs an exact shared-session attestation.
-    await _enrol(store, "runner-b")
+    await _enrol(store, "runner-b", hosts=hosts)
     await _create_job(store)
     trusted = await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-b")
     assert trusted is not None
@@ -568,9 +591,11 @@ async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(st
         ),
     ],
 )
-async def test_shared_host_row_cannot_authorize_a_mismatched_polling_replica(store, attestation):
+async def test_shared_host_row_cannot_authorize_a_mismatched_polling_replica(
+    store, attestation, hosts
+):
     """One upgraded sibling's heartbeat is not another replica's claim proof."""
-    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2)
+    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2, hosts=hosts)
     job = await _create_job(store, metadata={"requires": ["shared-sandbox-v1"]})
 
     claim = await _claim(
@@ -585,8 +610,8 @@ async def test_shared_host_row_cannot_authorize_a_mismatched_polling_replica(sto
     assert (await store.get_job(job["id"]))["state"] == "queued"
 
 
-async def test_exact_polling_replica_can_claim_shared_work(store):
-    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2)
+async def test_exact_polling_replica_can_claim_shared_work(store, hosts):
+    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2, hosts=hosts)
     job = await _create_job(store, metadata={"requires": ["shared-sandbox-v1"]})
 
     claim = await _claim(
@@ -600,8 +625,8 @@ async def test_exact_polling_replica_can_claim_shared_work(store):
     assert claim is not None and claim["id"] == job["id"]
 
 
-async def test_new_group_claim_requires_the_control_planes_exact_deployment(store):
-    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2)
+async def test_new_group_claim_requires_the_control_planes_exact_deployment(store, hosts):
+    await _enrol(store, "runner-a", capabilities=["shared-sandbox-v1"], slots_total=2, hosts=hosts)
     job = await _create_job(store, metadata={"requires": ["shared-sandbox-v1"]})
     stale = _shared_attestation(
         runner_capabilities=[
@@ -638,8 +663,8 @@ async def test_new_group_claim_requires_the_control_planes_exact_deployment(stor
     assert accepted is not None and accepted["id"] == job["id"]
 
 
-async def test_runc_replica_skips_secure_work_and_takes_the_next_trusted_job(store):
-    await _enrol(store, "runner-a", capabilities=["kata"])
+async def test_runc_replica_skips_secure_work_and_takes_the_next_trusted_job(store, hosts):
+    await _enrol(store, "runner-a", capabilities=["kata"], hosts=hosts)
     secure = await _create_job(store, execution_profile="untrusted-kata-v1")
     trusted = await _create_job(store, task_prompt="trusted", execution_profile="trusted-v1")
 
@@ -666,8 +691,10 @@ async def test_runc_replica_skips_secure_work_and_takes_the_next_trusted_job(sto
         _kata_attestation(guest_kernel=""),
     ],
 )
-async def test_capability_labels_or_arbitrary_runtime_cannot_claim_secure_work(store, attestation):
-    await _enrol(store, "runner-a", capabilities=["kata"])
+async def test_capability_labels_or_arbitrary_runtime_cannot_claim_secure_work(
+    store, attestation, hosts
+):
+    await _enrol(store, "runner-a", capabilities=["kata"], hosts=hosts)
     await _create_job(store, execution_profile="untrusted-kata-v1")
 
     assert (
@@ -683,8 +710,8 @@ async def test_capability_labels_or_arbitrary_runtime_cannot_claim_secure_work(s
     )
 
 
-async def test_shared_or_superseded_host_credential_cannot_claim_secure_work(store):
-    await _enrol(store, "runner-a")
+async def test_shared_or_superseded_host_credential_cannot_claim_secure_work(store, hosts):
+    await _enrol(store, "runner-a", hosts=hosts)
     job = await _create_job(store, execution_profile="untrusted-kata-v1")
 
     shared = await _claim(
@@ -717,11 +744,13 @@ async def test_shared_or_superseded_host_credential_cannot_claim_secure_work(sto
     assert current is not None and current["id"] == job["id"]
 
 
-async def test_reenrollment_revokes_an_already_authenticated_claim_generation(store):
-    await _enrol(store, "runner-a")
+async def test_reenrollment_revokes_an_already_authenticated_claim_generation(
+    store, hosts: HostPoolRepository
+):
+    await _enrol(store, "runner-a", hosts=hosts)
     old_hash = hash_secret("cred-runner-a")
-    await store.register_host(host="runner-a", credential_hash=hash_secret("replacement"))
-    await store.record_host_heartbeat(host="runner-a")
+    await hosts.register_host(host="runner-a", credential_hash=hash_secret("replacement"))
+    await hosts.record_host_heartbeat(host="runner-a")
     await _create_job(store, execution_profile="untrusted-kata-v1")
 
     assert (
@@ -745,8 +774,8 @@ async def test_reenrollment_revokes_an_already_authenticated_claim_generation(st
     )
 
 
-async def test_a_full_host_claims_nothing_more(store):
-    await _enrol(store, "runner-a", slots_total=1)
+async def test_a_full_host_claims_nothing_more(store, hosts):
+    await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     await _create_job(store)
     await _create_job(store)
 
@@ -757,9 +786,9 @@ async def test_a_full_host_claims_nothing_more(store):
     assert second is None
 
 
-async def test_the_job_a_full_host_could_not_take_is_still_queued(store):
+async def test_the_job_a_full_host_could_not_take_is_still_queued(store, hosts):
     """Refusing must not consume the job, or capacity becomes data loss."""
-    await _enrol(store, "runner-a", slots_total=1)
+    await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     job = await _create_job(store)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
@@ -773,9 +802,9 @@ async def test_the_job_a_full_host_could_not_take_is_still_queued(store):
     assert queued == 1
 
 
-async def test_an_unmetered_host_keeps_claiming(store):
+async def test_an_unmetered_host_keeps_claiming(store, hosts: HostPoolRepository):
     """Null slots_total is the pre-pool shape and must stay unlimited."""
-    await _enrol(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
     for _ in range(3):
         await _create_job(store)
 
@@ -785,20 +814,20 @@ async def test_an_unmetered_host_keeps_claiming(store):
     ]
 
     assert all(claim is not None for claim in claims)
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 3
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 3
 
 
-async def test_a_draining_host_receives_no_new_claims(store):
-    await _enrol(store, "runner-a", slots_total=4)
+async def test_a_draining_host_receives_no_new_claims(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
     await _create_job(store)
-    await store.set_host_status(host="runner-a", status=HOST_DRAINING)
+    await hosts.set_host_status(host="runner-a", status=HOST_DRAINING)
 
     assert await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
 
 
 @pytest.mark.parametrize("status", [HOST_ENROLLING, HOST_OFFLINE, HOST_DISABLED])
-async def test_only_an_online_host_claims(store, status):
-    await _enrol(store, "runner-a", slots_total=4)
+async def test_only_an_online_host_claims(store, status, hosts):
+    await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
     await _create_job(store)
     async with store._pool.acquire() as conn:
         await conn.execute(
@@ -808,9 +837,9 @@ async def test_only_an_online_host_claims(store, status):
     assert await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
 
 
-async def test_a_host_missing_a_required_capability_skips_that_job(store):
+async def test_a_host_missing_a_required_capability_skips_that_job(store, hosts):
     """And takes the next one it *can* run, rather than stalling behind it."""
-    await _enrol(store, "runner-a", slots_total=4, capabilities=["runc"])
+    await _enrol(store, "runner-a", slots_total=4, capabilities=["runc"], hosts=hosts)
     await _create_job(store, metadata={"requires": ["kata"]})
     runnable = await _create_job(store, task_prompt="the plain one")
 
@@ -820,8 +849,10 @@ async def test_a_host_missing_a_required_capability_skips_that_job(store):
     assert claim["id"] == runnable["id"]
 
 
-async def test_a_host_declaring_a_superset_takes_the_job(store):
-    await _enrol(store, "runner-a", slots_total=4, capabilities=["kata", "gpu", "runc"])
+async def test_a_host_declaring_a_superset_takes_the_job(store, hosts):
+    await _enrol(
+        store, "runner-a", slots_total=4, capabilities=["kata", "gpu", "runc"], hosts=hosts
+    )
     job = await _create_job(store, metadata={"requires": ["kata", "gpu"]})
 
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
@@ -837,8 +868,8 @@ async def test_a_runner_without_an_enrolled_host_never_claims(store):
     assert await _claim(store, worker_id="w1", lease_ttl_seconds=60) is None
 
 
-async def test_finishing_a_job_gives_the_slot_back(store):
-    await _enrol(store, "runner-a", slots_total=1)
+async def test_finishing_a_job_gives_the_slot_back(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
@@ -851,11 +882,11 @@ async def test_finishing_a_job_gives_the_slot_back(store):
         to_state="succeeded",
     )
 
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 0
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
-async def test_releasing_an_unstarted_claim_gives_the_slot_back(store):
-    await _enrol(store, "runner-a", slots_total=1)
+async def test_releasing_an_unstarted_claim_gives_the_slot_back(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
@@ -865,22 +896,24 @@ async def test_releasing_an_unstarted_claim_gives_the_slot_back(store):
         lease_generation=claim["lease_generation"],
     )
 
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 0
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
-async def test_a_reaped_attempt_gives_the_slot_back(store):
-    await _enrol(store, "runner-a", slots_total=1)
+async def test_a_reaped_attempt_gives_the_slot_back(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
 
     await store.reap_expired(max_attempts=3)
 
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 0
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
-async def test_a_double_terminal_transition_releases_one_slot_not_two(store):
+async def test_a_double_terminal_transition_releases_one_slot_not_two(
+    store, hosts: HostPoolRepository
+):
     """The counter must survive a caller that retries a finish."""
-    await _enrol(store, "runner-a", slots_total=2)
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     await _create_job(store)
     first = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
@@ -896,12 +929,14 @@ async def test_a_double_terminal_transition_releases_one_slot_not_two(store):
             to_state="succeeded",
         )
 
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 1
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 1
 
 
-async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(store):
+async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(
+    store, hosts: HostPoolRepository
+):
     """Two paths out of ``running`` that can both be attempted for one attempt."""
-    await _enrol(store, "runner-a", slots_total=2)
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     await _create_job(store)
     first = await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
@@ -922,10 +957,10 @@ async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(store):
         lease_generation=first["lease_generation"],
     )
 
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 1
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 1
 
 
-async def test_slots_never_go_negative_under_concurrent_release(store):
+async def test_slots_never_go_negative_under_concurrent_release(store, hosts: HostPoolRepository):
     """The invariant, hammered.
 
     A counter that drifts below zero makes a host look permanently
@@ -935,12 +970,12 @@ async def test_slots_never_go_negative_under_concurrent_release(store):
     predicate, and the column carries a CHECK — so this asserts on the outcome
     of all three together.
     """
-    await _enrol(store, "runner-a", slots_total=4)
+    await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
     claims = []
     for _ in range(4):
         await _create_job(store)
         claims.append(await _claim(store, worker_id="w", lease_ttl_seconds=60, host="runner-a"))
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 4
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 4
 
     # Every exit path, several times each, all at once.
     for claim in claims:
@@ -969,16 +1004,16 @@ async def test_slots_never_go_negative_under_concurrent_release(store):
         *[store.reap_expired(max_attempts=3) for _ in range(3)],
     )
 
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 0
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
-async def test_concurrent_claims_never_oversubscribe_a_host(store):
+async def test_concurrent_claims_never_oversubscribe_a_host(store, hosts: HostPoolRepository):
     """Capacity is decided by the UPDATE, not by the read that preceded it.
 
     Eight runners polling a two-slot host at once is the ordinary steady state
     of a replica set, and a check-then-increment hands out eight.
     """
-    await _enrol(store, "runner-a", slots_total=2)
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     for _ in range(8):
         await _create_job(store)
 
@@ -988,10 +1023,10 @@ async def test_concurrent_claims_never_oversubscribe_a_host(store):
 
     granted = [claim for claim in claims if claim is not None]
     assert len(granted) == 2
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 2
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 2
 
 
-async def test_the_release_helper_refuses_to_decrement_past_zero(store):
+async def test_the_release_helper_refuses_to_decrement_past_zero(store, hosts: HostPoolRepository):
     """Tested directly, because nothing above can currently reach it twice.
 
     The job-level fence in ``transition`` already makes a second terminal
@@ -1000,7 +1035,7 @@ async def test_the_release_helper_refuses_to_decrement_past_zero(store):
     until some future caller released a slot on a path the fence does not
     cover. Calling it straight is the only way to assert what it promises.
     """
-    await _enrol(store, "runner-a", slots_total=2)
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
@@ -1008,7 +1043,7 @@ async def test_the_release_helper_refuses_to_decrement_past_zero(store):
         for _ in range(5):
             await store._release_host_slot(conn, "runner-a")
 
-    assert (await store.get_host(host="runner-a"))["slots_used"] == 0
+    assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
 async def test_releasing_a_slot_for_no_host_is_a_no_op(store):
@@ -1017,7 +1052,7 @@ async def test_releasing_a_slot_for_no_host_is_a_no_op(store):
         await store._release_host_slot(conn, None)
 
 
-async def test_the_schema_itself_refuses_a_negative_slot_count(store):
+async def test_the_schema_itself_refuses_a_negative_slot_count(store, hosts):
     """The last line of defence, asserted directly.
 
     If a future writer forgets the ``slots_used > 0`` predicate, this is what
@@ -1025,7 +1060,7 @@ async def test_the_schema_itself_refuses_a_negative_slot_count(store):
     """
     import asyncpg
 
-    await _enrol(store, "runner-a", slots_total=1)
+    await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
 
     async with store._pool.acquire() as conn:
         with pytest.raises(asyncpg.CheckViolationError):
@@ -1034,10 +1069,10 @@ async def test_the_schema_itself_refuses_a_negative_slot_count(store):
             )
 
 
-async def test_the_schema_refuses_a_status_it_does_not_know(store):
+async def test_the_schema_refuses_a_status_it_does_not_know(store, hosts):
     import asyncpg
 
-    await _enrol(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
 
     async with store._pool.acquire() as conn:
         with pytest.raises(asyncpg.CheckViolationError):
@@ -1049,31 +1084,31 @@ async def test_the_schema_refuses_a_status_it_does_not_know(store):
 # ── G6 / #1158 interaction ─────────────────────────────────────────────
 
 
-async def test_removing_keeps_the_row_and_forgetting_drops_it(store):
-    await _enrol(store, "runner-a")
+async def test_removing_keeps_the_row_and_forgetting_drops_it(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", hosts=hosts)
 
-    assert await store.remove_host(host="runner-a") == "ok"
-    assert await store.get_host(host="runner-a") is not None
-    assert await store.forget_runner_host(host="runner-a") == "deleted"
-    assert await store.get_host(host="runner-a") is None
+    assert await hosts.remove_host(host="runner-a") == "ok"
+    assert await hosts.get_host(host="runner-a") is not None
+    assert await hosts.forget_runner_host(host="runner-a") == "deleted"
+    assert await hosts.get_host(host="runner-a") is None
 
 
-async def test_removing_a_busy_host_is_refused_unless_forced(store):
-    await _enrol(store, "runner-a", slots_total=2)
+async def test_removing_a_busy_host_is_refused_unless_forced(store, hosts: HostPoolRepository):
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
-    assert await store.remove_host(host="runner-a") == "busy"
-    assert await store.remove_host(host="runner-a", force=True) == "ok"
+    assert await hosts.remove_host(host="runner-a") == "busy"
+    assert await hosts.remove_host(host="runner-a", force=True) == "ok"
 
 
-async def test_forgetting_a_host_does_not_break_its_attempts(store):
+async def test_forgetting_a_host_does_not_break_its_attempts(store, hosts: HostPoolRepository):
     """The FK is ON DELETE SET NULL, so history survives its machine.
 
     A RESTRICT here would make #1158's housekeeping start failing on any
     machine that had ever run anything — which is every machine.
     """
-    await _enrol(store, "runner-a", slots_total=2)
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
     await _settled(store, claim["id"])
@@ -1085,23 +1120,23 @@ async def test_forgetting_a_host_does_not_break_its_attempts(store):
         to_state="succeeded",
     )
 
-    assert await store.forget_runner_host(host="runner-a") == "deleted"
-    assert await store.host_for_attempt(attempt_id=claim["attempt_id"]) is None
+    assert await hosts.forget_runner_host(host="runner-a") == "deleted"
+    assert await hosts.host_for_attempt(attempt_id=claim["attempt_id"]) is None
 
 
-async def test_the_pin_and_the_pool_both_have_to_agree(store):
+async def test_the_pin_and_the_pool_both_have_to_agree(store, hosts: HostPoolRepository):
     """They compose: the pin says which host, the pool says whether it can.
 
     #1158's switch is untouched by phase G, and a pinned host that has been
     drained still claims nothing — otherwise draining would silently unpin.
     """
-    await _enrol(store, "runner-a", slots_total=2)
-    await _enrol(store, "runner-b", slots_total=2)
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
+    await _enrol(store, "runner-b", slots_total=2, hosts=hosts)
     await _create_job(store)
-    await store.set_active_runner_host(host="runner-a")
+    await hosts.set_active_runner_host(host="runner-a")
 
     assert await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-b") is None
-    await store.set_host_status(host="runner-a", status=HOST_DRAINING)
+    await hosts.set_host_status(host="runner-a", status=HOST_DRAINING)
     assert await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a") is None
 
 
@@ -1116,10 +1151,10 @@ async def _running_claim(store, host: str, **overrides) -> tuple[dict, dict]:
     return job, claim
 
 
-async def _resident_chat(store, host: str) -> tuple[dict, dict, dict]:
+async def _resident_chat(store, host: str, hosts: HostPoolRepository) -> tuple[dict, dict, dict]:
     """A running claim on ``host`` with the retained membership a residency lives on."""
     job, claim = await _running_claim(store, host)
-    await store.record_host_heartbeat(
+    await hosts.record_host_heartbeat(
         host=host,
         capabilities=["shared-sandbox-v1", "native-fork-at-anchor-v1"],
         sandbox_image_digest="sha256:shared-image",
@@ -1140,12 +1175,12 @@ async def _resident_chat(store, host: str) -> tuple[dict, dict, dict]:
     return job, claim, sandbox
 
 
-async def test_residency_is_earned_by_the_running_attempt_only(store):
+async def test_residency_is_earned_by_the_running_attempt_only(store, hosts):
     """Review finding 4: the gate shares the write's transaction and checks
     the lease clock — expired, finished, or another host's attempt earns
     nothing."""
-    await _enrol(store, "runner-a")
-    job, claim, _sandbox = await _resident_chat(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
 
     # Another machine, even while the attempt runs: nothing.
     assert (
@@ -1189,9 +1224,9 @@ async def test_residency_is_earned_by_the_running_attempt_only(store):
     )
 
 
-async def test_an_expired_lease_earns_no_residency(store):
+async def test_an_expired_lease_earns_no_residency(store, hosts):
     """Running in name only: the reaper has not passed, the clock has."""
-    await _enrol(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
     job = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
     assert claim is not None
@@ -1208,15 +1243,15 @@ async def test_an_expired_lease_earns_no_residency(store):
     )
 
 
-async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store):
+async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, hosts):
     """Contract tests 10 and 13: one winner, and late writers change nothing.
 
     A retained chat is never taken over by another machine — its writable
     layer lives on one host — so the rotation happens on the host that owns
     it, and the dead generation stays dead there.
     """
-    await _enrol(store, "runner-a")
-    job, claim, _sandbox = await _resident_chat(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     first = await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
@@ -1265,10 +1300,10 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store):
     )
 
 
-async def test_residency_writes_are_scoped_to_the_holding_host(store):
+async def test_residency_writes_are_scoped_to_the_holding_host(store, hosts):
     """A guessed (thread, generation) from another machine changes nothing."""
-    await _enrol(store, "runner-a")
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     row = await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
@@ -1298,9 +1333,9 @@ async def test_residency_writes_are_scoped_to_the_holding_host(store):
     )
 
 
-async def test_the_reaper_lapses_expired_residencies_without_resetting_generations(store):
-    await _enrol(store, "runner-a")
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a")
+async def test_the_reaper_lapses_expired_residencies_without_resetting_generations(store, hosts):
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
@@ -1324,12 +1359,12 @@ async def test_the_reaper_lapses_expired_residencies_without_resetting_generatio
     assert revived["generation"] == 2
 
 
-async def test_establish_returns_what_the_grant_mint_needs(store):
+async def test_establish_returns_what_the_grant_mint_needs(store, hosts):
     """Retained-session design §6: mint a thread-attributed grant from exactly
     what the earn-gate already proved — the establishing claim's user, model
     and attempt — so the row must carry all three."""
-    await _enrol(store, "runner-a")
-    job, claim, _sandbox = await _resident_chat(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
 
     row = await store.establish_residency(
         thread_id=job["thread_id"],
@@ -1345,9 +1380,9 @@ async def test_establish_returns_what_the_grant_mint_needs(store):
     assert row["previous_grant_id"] is None
 
 
-async def test_the_residency_grant_link_is_generation_scoped(store):
-    await _enrol(store, "runner-a")
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a")
+async def test_the_residency_grant_link_is_generation_scoped(store, hosts):
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
@@ -1371,12 +1406,12 @@ async def test_the_residency_grant_link_is_generation_scoped(store):
     )
 
 
-async def test_beats_and_release_carry_the_grant_they_keep_alive(store):
+async def test_beats_and_release_carry_the_grant_they_keep_alive(store, hosts):
     """The beat that extends the lease renews the grant; the release that ends
     it revokes the grant — so both hand their caller the grant id, and an
     unlinked residency answers with the empty string, not a loss."""
-    await _enrol(store, "runner-a")
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
@@ -1404,11 +1439,11 @@ async def test_beats_and_release_carry_the_grant_they_keep_alive(store):
     )
 
 
-async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store):
+async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store, hosts):
     """A takeover is a credential rotation: the new establish must name the
     old generation's grant so the endpoint can kill it now, not at TTL."""
-    await _enrol(store, "runner-a")
-    job, claim, _sandbox = await _resident_chat(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
@@ -1435,10 +1470,10 @@ async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store):
     assert second["previous_grant_id"] == "agr-old"
 
 
-async def test_reaped_residencies_carry_their_grant_id(store):
+async def test_reaped_residencies_carry_their_grant_id(store, hosts):
     """The reaper revokes what the lapse orphans — it needs the id to do it."""
-    await _enrol(store, "runner-a")
-    job, _claim, _sandbox = await _resident_chat(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
+    job, _claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.establish_residency(
         thread_id=job["thread_id"],
         host="runner-a",
@@ -1456,8 +1491,8 @@ async def test_reaped_residencies_carry_their_grant_id(store):
     ]
 
 
-async def test_a_new_chat_without_a_group_is_claimable_by_an_enrolled_host(store):
-    await _enrol(store, "runner-a")
+async def test_a_new_chat_without_a_group_is_claimable_by_an_enrolled_host(store, hosts):
+    await _enrol(store, "runner-a", hosts=hosts)
     job = await _create_job(store)
 
     claimed = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
@@ -1465,9 +1500,9 @@ async def test_a_new_chat_without_a_group_is_claimable_by_an_enrolled_host(store
     assert claimed is not None and claimed["id"] == job["id"]
 
 
-async def test_each_claim_keeps_its_own_image_stamp_across_a_rolling_upgrade(store):
+async def test_each_claim_keeps_its_own_image_stamp_across_a_rolling_upgrade(store, hosts):
     """A later replica image cannot rewrite an earlier attempt's stamp."""
-    await _enrol(store, "runner-a")
+    await _enrol(store, "runner-a", hosts=hosts)
     await _create_job(store)
     await _create_job(store, task_prompt="second queued chat")
     claim_one = await _claim(
@@ -1503,15 +1538,17 @@ async def test_each_claim_keeps_its_own_image_stamp_across_a_rolling_upgrade(sto
 MENU = ["2.1.220", "2.1.235"]
 
 
-async def _menu_host(store, host: str, *, menu: list[str] = MENU) -> None:
+async def _menu_host(
+    store, host: str, *, menu: list[str] = MENU, hosts: HostPoolRepository
+) -> None:
     """A host whose *heartbeat* advertises a default and its image's menu.
 
     That row is what the admin page renders and what ``set_runtime_version``
     validates a choice against. It is deliberately not what the claim reads —
     see ``_menu_attestation``.
     """
-    await _enrol(store, host)
-    await store.record_host_heartbeat(
+    await _enrol(store, host, hosts=hosts)
+    await hosts.record_host_heartbeat(
         host=host,
         sandbox_runtime="",
         sandbox_image_digest="sha256:menu",
@@ -1541,20 +1578,22 @@ async def _menu_claim(store, worker: str, *, menu: list[str] = MENU):
     )
 
 
-async def test_a_heartbeat_round_trips_the_menu_beside_the_default(store):
+async def test_a_heartbeat_round_trips_the_menu_beside_the_default(
+    store, hosts: HostPoolRepository
+):
     """Two facts, two columns; a stampless beat erases neither."""
-    await _menu_host(store, "runner-a")
+    await _menu_host(store, "runner-a", hosts=hosts)
 
-    row = await store.record_host_heartbeat(host="runner-a")
+    row = await hosts.record_host_heartbeat(host="runner-a")
 
     assert row["runtime_versions"] == {"claude-code": "2.1.220"}
     assert row["runtime_versions_available"] == {"claude-code": ["2.1.220", "2.1.235"]}
 
 
-async def test_a_selection_reaches_the_attempt_the_claim_stamps(store):
+async def test_a_selection_reaches_the_attempt_the_claim_stamps(store, hosts: HostPoolRepository):
     """The feature, end to end in SQL: admin picks, the next attempt records it."""
-    await _menu_host(store, "runner-a")
-    assert await store.set_runtime_version(runtime="claude-code", version="2.1.235")
+    await _menu_host(store, "runner-a", hosts=hosts)
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
     await _create_job(store)  # runtime claude-code
 
     claim = await _menu_claim(store, "w1")
@@ -1563,21 +1602,21 @@ async def test_a_selection_reaches_the_attempt_the_claim_stamps(store):
     assert claim["runtime_version"] == "2.1.235"
 
 
-async def test_a_version_no_host_offers_is_refused(store):
+async def test_a_version_no_host_offers_is_refused(store, hosts: HostPoolRepository):
     """Refused rather than stored: the claim would fall back and say nothing."""
-    await _menu_host(store, "runner-a", menu=["2.1.220"])
+    await _menu_host(store, "runner-a", menu=["2.1.220"], hosts=hosts)
 
-    assert not await store.set_runtime_version(runtime="claude-code", version="2.1.235")
+    assert not await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
 
-    _, _, selected, _ = await store.runner_pool()
+    _, _, selected, _ = await hosts.runner_pool()
     assert selected == {}
 
 
-async def test_clearing_a_selection_returns_to_the_host_default(store):
-    await _menu_host(store, "runner-a")
-    await store.set_runtime_version(runtime="claude-code", version="2.1.235")
+async def test_clearing_a_selection_returns_to_the_host_default(store, hosts: HostPoolRepository):
+    await _menu_host(store, "runner-a", hosts=hosts)
+    await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
 
-    assert await store.set_runtime_version(runtime="claude-code", version=None)
+    assert await hosts.set_runtime_version(runtime="claude-code", version=None)
     await _create_job(store)
     claim = await _menu_claim(store, "w1")
 
@@ -1585,7 +1624,9 @@ async def test_clearing_a_selection_returns_to_the_host_default(store):
     assert claim["runtime_version"] == "2.1.220"
 
 
-async def test_a_selection_the_image_lost_falls_back_instead_of_parking(store):
+async def test_a_selection_the_image_lost_falls_back_instead_of_parking(
+    store, hosts: HostPoolRepository
+):
     """The drift the fallback exists for, reachable in exactly this order.
 
     A selection is only accepted while some host offers it — but the image can
@@ -1594,8 +1635,8 @@ async def test_a_selection_the_image_lost_falls_back_instead_of_parking(store):
     on a configuration change nobody would connect to it; running the
     default is the smaller wrong, and the claim logs which it did.
     """
-    await _menu_host(store, "runner-a")
-    assert await store.set_runtime_version(runtime="claude-code", version="2.1.235")
+    await _menu_host(store, "runner-a", hosts=hosts)
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
 
     # The rebuild: same host, same name, an image that no longer holds 2.1.235.
     # The claiming replica says so itself, which is the evidence that counts —
@@ -1608,22 +1649,24 @@ async def test_a_selection_the_image_lost_falls_back_instead_of_parking(store):
     assert claim["runtime_version"] == "2.1.220"
 
 
-async def test_physical_server_grouping_preserves_deployment_identity_and_labels(store):
+async def test_physical_server_grouping_preserves_deployment_identity_and_labels(
+    store, hosts: HostPoolRepository
+):
     """Display metadata cannot merge credentials, brokers, capacity or placement."""
     for name in ("gpu-box", "gpu-box-kata"):
-        await store.register_host(
+        await hosts.register_host(
             host=name,
             credential_hash=hash_secret(name),
             broker_url=f"http://{name}:8092",
             slots_total=3,
             labels={"zone": "test"},
         )
-        await store.record_host_heartbeat(host=name, physical_host="gpu-box")
-    await store.set_active_runner_host(host="gpu-box-kata")
-    await store.set_host_status(host="gpu-box-kata", status=HOST_DRAINING)
+        await hosts.record_host_heartbeat(host=name, physical_host="gpu-box")
+    await hosts.set_active_runner_host(host="gpu-box-kata")
+    await hosts.set_host_status(host="gpu-box-kata", status=HOST_DRAINING)
     # Old replicas omitting the new field must not erase it.
-    await store.record_host_heartbeat(host="gpu-box-kata")
-    rows, active, _, _ = await store.runner_pool()
+    await hosts.record_host_heartbeat(host="gpu-box-kata")
+    rows, active, _, _ = await hosts.runner_pool()
     assert active == "gpu-box-kata"
     assert len(rows) == 2
     for row in rows:
@@ -1632,6 +1675,6 @@ async def test_physical_server_grouping_preserves_deployment_identity_and_labels
         assert row["slots_total"] == 3
         assert row["status"] == (HOST_DRAINING if row["host"] == active else HOST_ONLINE)
     assert (
-        await store.authenticate_host(host="gpu-box", credential_hash=hash_secret("gpu-box-kata"))
+        await hosts.authenticate_host(host="gpu-box", credential_hash=hash_secret("gpu-box-kata"))
         is None
     )
