@@ -10,6 +10,7 @@ import { getAdminRun, type AdminRunDetail } from '@/lib/api/adminRuns';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../../AdminNavigation';
+import { Activation } from '../Activation';
 import { Activity } from '../Activity';
 import { LLMRequests } from '../LLMRequests';
 import { Resources } from '../Resources';
@@ -213,12 +214,20 @@ function RunDetails({ jobId }: { jobId: string }) {
               onAccessDenied={onAccessDenied}
             />
             {attemptId !== null && (
-              <Resources
-                key={`resources:${attemptId}:${revision}`}
-                jobId={jobId}
-                attemptId={attemptId}
-                onAccessDenied={onAccessDenied}
-              />
+              <>
+                <Activation
+                  key={`activation:${attemptId}:${revision}`}
+                  jobId={jobId}
+                  attemptId={attemptId}
+                  onAccessDenied={onAccessDenied}
+                />
+                <Resources
+                  key={`resources:${attemptId}:${revision}`}
+                  jobId={jobId}
+                  attemptId={attemptId}
+                  onAccessDenied={onAccessDenied}
+                />
+              </>
             )}
             <SessionStatistics statistics={detail.session_statistics} />
             <UsageSnapshot usage={detail.usage} />

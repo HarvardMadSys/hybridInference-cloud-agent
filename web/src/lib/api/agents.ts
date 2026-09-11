@@ -116,6 +116,20 @@ export interface AgentAttemptSummaryApi {
 
 export interface AgentAttemptTelemetryApi extends AgentAttemptSummaryApi {
   resources: AttemptResourcesApi | null;
+  /**
+   * How long the host spent starting this execution's sandbox, measured in the
+   * runner process. Absent on older control planes and on attempts recorded
+   * before this was measured — never zero.
+   */
+  activation?: AgentAttemptActivationApi | null;
+}
+
+export interface AgentAttemptActivationApi {
+  total_ms: number;
+  /** Stage name to milliseconds. A stage that did not run is absent, not 0. */
+  stages: Record<string, number>;
+  /** The stage running when the activation failed; null once admitted. */
+  failed_stage: string | null;
 }
 
 export type AgentLedgerStatus = 'pending' | 'available' | 'partial' | 'unavailable' | 'stale';

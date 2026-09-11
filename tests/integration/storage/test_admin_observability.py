@@ -107,6 +107,34 @@ async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turn
     assert "event_count" not in run
 
 
+async def test_resource_read_decodes_the_activation_breakdown_from_jsonb(store):
+    """The document, not the text asyncpg would otherwise hand a reader.
+
+    This read is what the run-detail page renders. Handing it a JSON string
+    would not degrade gracefully — the shaper iterates the mapping — so the
+    decode belongs to the query that knows which columns are documents.
+    """
+    job = await _create_job(store)
+    _, attempt, _ = await _seed_attempt(store, job=job, grant_id=None)
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempts SET activation_ms = $2, activation_stages = $3::jsonb, "
+            "activation_failed_stage = $4 WHERE id = $1",
+            attempt,
+            4200,
+            json.dumps({"checkout": 2800, "resident_start": 500}),
+            "resident_start",
+        )
+    queries = AdminRunQueries(store._pool)
+
+    telemetry = await queries.resources(job["id"], attempt)
+
+    assert telemetry is not None
+    assert telemetry["activation_ms"] == 4200
+    assert telemetry["activation_stages"] == {"checkout": 2800, "resident_start": 500}
+    assert telemetry["activation_failed_stage"] == "resident_start"
+
+
 async def test_run_physical_hosts_group_runners_without_changing_ids_or_filters(store):
     job = await _create_job(store)
     hosts = {

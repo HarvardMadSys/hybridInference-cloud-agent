@@ -4929,6 +4929,47 @@ class AgentJobStore:
                 )
             )
 
+    async def record_attempt_activation(
+        self,
+        *,
+        attempt_id: int,
+        lease_generation: int,
+        activation: dict[str, Any],
+    ) -> bool:
+        """Store one attempt's sandbox activation, lease-fenced and idempotent.
+
+        Fenced like every other worker write: a superseded attempt must not be
+        able to describe how the live one started. Idempotent because the host
+        may retry the post — the activation is one closed window, so a repeat
+        is that window said twice rather than a second window to add. The
+        update replaces rather than merges for the same reason: a retry that
+        reports fewer stages means fewer stages.
+
+        This is written as soon as the prompt reaches the Agent CLI, which is
+        before the attempt settles. A turn that later times out therefore
+        still carries the measurement of how it started, and a failed
+        activation carries the partial breakdown plus the stage it died in.
+        """
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    UPDATE agent_attempts
+                    SET activation_ms = $3,
+                        activation_stages = $4::jsonb,
+                        activation_failed_stage = $5
+                    WHERE id = $1 AND lease_generation = $2
+                      AND status = 'running' AND lease_expires_at > NOW()
+                    RETURNING id
+                    """,
+                    attempt_id,
+                    lease_generation,
+                    activation.get("total_ms"),
+                    json.dumps(activation.get("stages") or {}),
+                    activation.get("failed_stage"),
+                )
+            )
+
     async def record_attempt_resources(
         self,
         *,

@@ -416,6 +416,22 @@ class ControlPlane:
         except Exception:
             pass
 
+    def report_activation(self, activation: dict[str, Any]) -> None:
+        """Report how long this attempt spent starting its sandbox. Best-effort.
+
+        Swallowed like every other observability write, and for the same
+        reason: an activation that succeeded must not be turned into a failed
+        turn because the platform could not record how long it took. The
+        number is also lost on a lease that has already moved on, which the
+        caller learns through a log line rather than by failing the turn.
+        """
+        try:
+            self._post(f"/v1/agent/worker/jobs/{self.job_id}/activation", activation)
+        except LeaseLost:
+            raise
+        except Exception:
+            pass
+
     def reserve_chat_sandbox(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Reserve immutable thread/container identity under this attempt fence."""
         return self._post(
@@ -1306,6 +1322,97 @@ def _shared_group_manifest(reservation: dict[str, Any], *, thread_id: str) -> li
     return projected
 
 
+class ActivationRecorder:
+    """Time the stages between claiming a turn and handing it to the CLI.
+
+    The window this measures is the one a user waits through before the model
+    is asked anything: the sandbox reservation, its container and private
+    networks, the workspace import, the setup script, the grant, the Agent
+    CLI's own start and the prompt's admission. Until now the only trace of it
+    was a ``stage`` string used when something failed, and the timing had to
+    be reconstructed from log lines.
+
+    Deliberately host-side and monotonic. Control-plane receipt timestamps
+    exist for every stage that posts one, but they carry a round trip each and
+    are blind to the stages that post nothing, so subtracting them measures
+    the network as much as the work. ``time.monotonic`` here measures only
+    what this process actually waited for, and cannot go backwards when the
+    host's wall clock is stepped mid-activation.
+
+    It also keeps naming the stage after the window closes. The failure paths
+    still need a label for *where* a turn died, and the same word should mean
+    the same thing in a duration and in a log line.
+    """
+
+    def __init__(self) -> None:
+        self._started_at = time.monotonic()
+        self._last_mark = self._started_at
+        self._current = "reservation"
+        self._durations: dict[str, int] = {}
+        self._total_ms: int | None = None
+        self._failed_stage: str | None = None
+
+    @property
+    def current(self) -> str:
+        """The stage being waited on right now, for failure attribution."""
+        return self._current
+
+    def enter(self, stage: str) -> None:
+        """Close the running stage and start ``stage``.
+
+        After :meth:`finish` this only moves the label: the label is still
+        what a failure log needs, but the measurement is closed and must not
+        grow a tail made of turn time.
+        """
+        if self._total_ms is None:
+            self._close_current()
+        self._current = stage
+
+    def finish(self, *, failed: bool = False) -> None:
+        """Close the window. Later stages are labelled, not measured."""
+        if self._total_ms is not None:
+            return
+        self._close_current()
+        window = max(0, round((self._last_mark - self._started_at) * 1000))
+        # The window is the primary measurement, floored at what its own parts
+        # add up to. Every instant was attributed to exactly one stage, so the
+        # two agree up to rounding — and rounding each stage on its own can
+        # push the sum a millisecond or two past a window rounded once. The
+        # wire schema refuses a breakdown larger than its total, and a report
+        # rejected there would lose the whole measurement rather than a
+        # millisecond of it.
+        self._total_ms = max(window, sum(self._durations.values()))
+        if failed:
+            self._failed_stage = self._current
+
+    def report(self) -> dict[str, Any]:
+        """The wire payload for one finished activation.
+
+        Callers must have called :meth:`finish`; reporting an open window would
+        send a total that keeps changing between the report and its retry.
+        """
+        if self._total_ms is None:
+            raise RuntimeError("an activation must be finished before it is reported")
+        return {
+            "total_ms": self._total_ms,
+            "stages": dict(self._durations),
+            "failed_stage": self._failed_stage,
+        }
+
+    def _close_current(self) -> None:
+        """Add the time since the last mark to the stage that was running.
+
+        A stage can be re-entered — a retried receipt, a loop that steps back
+        out and in — so the durations accumulate rather than overwrite. Summing
+        them still cannot exceed the total, because every millisecond counted
+        here sits inside the window and is counted once.
+        """
+        now = time.monotonic()
+        elapsed = max(0, round((now - self._last_mark) * 1000))
+        self._durations[self._current] = self._durations.get(self._current, 0) + elapsed
+        self._last_mark = now
+
+
 def _stream_shared_agent_turn(
     *,
     supervisor: SessionSupervisorClient,
@@ -1460,6 +1567,33 @@ def _run_shared_live_attempt(
         finish_attempt("failed", f"runtime {job.runtime!r} has no shared live transport")
         return 2
 
+    # The activation clock starts here: after the claim, before the sandbox
+    # reservation. Everything between this line and prompt admission is time
+    # the user spends waiting for a sandbox rather than for a model. The queue
+    # wait that precedes it is a different measurement, already derivable from
+    # the attempt's own ``started_at`` against the job's ``created_at``.
+    activation = ActivationRecorder()
+    activation_reported = False
+
+    def report_activation(*, failed: bool) -> None:
+        """Send the measurement once, and before the attempt settles.
+
+        Once, because a turn that fails after a successful activation would
+        otherwise repost a closed window as if it had failed. Before the
+        attempt settles, because the control plane fences this write on the
+        attempt still running — which is also why a lease that has already
+        moved on loses the number rather than the turn.
+        """
+        nonlocal activation_reported
+        if activation_reported:
+            return
+        activation_reported = True
+        activation.finish(failed=failed)
+        try:
+            control.report_activation(activation.report())
+        except Exception as exc:
+            _log_control_failure("activation_report", job.job_id, exc)
+
     manager = ChatSandboxManager(backend)
     stamp = backend.version_stamp()
     existing = job.thread_sandbox or {}
@@ -1559,7 +1693,7 @@ def _run_shared_live_attempt(
     terminals_suspended = False
     context_invalid = False
     failure_detail: str | None = None
-    stage = "supervisor_acquire"
+    activation.enter("supervisor_acquire")
     context_status = "restored" if has_context else "new"
     idle_timeout_s = _chat_idle_timeout_s()
 
@@ -1567,6 +1701,13 @@ def _run_shared_live_attempt(
         nonlocal abandoned
         if abandoned or settled:
             return
+        # Every path that writes an attempt off funnels through here, and every
+        # one of them does it while the attempt is still the live writer. That
+        # makes this the one place the activation measurement cannot be lost:
+        # a failure path that forgot to report would leave an attempt which
+        # visibly started with nothing to say about how long that took. It is a
+        # no-op once a successful activation has already been reported.
+        report_activation(failed=True)
         if supervisor is not None and lease_token is not None:
             try:
                 supervisor.abandon_shared(job.thread_id, token=lease_token, lost=lost)
@@ -1620,7 +1761,7 @@ def _run_shared_live_attempt(
         context_status = str(lease.get("context_status") or context_status)
         if context_status not in {"new", "live", "restored"}:
             raise SandboxError(f"shared supervisor returned invalid context {context_status!r}")
-        stage = "sandbox_running"
+        activation.enter("sandbox_running")
         running = control.mark_chat_sandbox_running(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,
@@ -1644,18 +1785,18 @@ def _run_shared_live_attempt(
                 },
             )
         )
-        stage = "terminal_suspend"
+        activation.enter("terminal_suspend")
         control.suspend_terminals("workspace_preparing")
         terminals_suspended = True
 
         if not has_context:
-            stage = "workspace_reset"
+            activation.enter("workspace_reset")
             manager.reset_unsettled_state(spec)
-            stage = "checkout"
+            activation.enter("checkout")
             base_sha = _prepare_retained_checkout(job=job, manager=manager, spec=spec)
             reused_workspace = False
             if job.setup_script:
-                stage = "setup"
+                activation.enter("setup")
                 setup = run_setup(
                     script=job.setup_script,
                     workdir=CHAT_WORKDIR,
@@ -1672,10 +1813,10 @@ def _run_shared_live_attempt(
                     abandon_before_finish(lost=False, detail=failure_detail)
                     finish_attempt("failed", failure_detail, base_sha=base_sha)
                     return 1
-            stage = "workspace_permissions"
+            activation.enter("workspace_permissions")
             manager.prepare_shared_workspace(spec)
         else:
-            stage = "native_workspace_resume"
+            activation.enter("native_workspace_resume")
             if not native_session_id:
                 context_invalid = True
                 raise SandboxError("shared chat has no native Agent CLI session locator")
@@ -1709,7 +1850,7 @@ def _run_shared_live_attempt(
             )
         )
 
-        stage = "runtime_preflight"
+        activation.enter("runtime_preflight")
         version_problem = runtime_version_unavailable(job, retained)
         if version_problem is not None:
             failure_detail = version_problem
@@ -1722,12 +1863,12 @@ def _run_shared_live_attempt(
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 2
 
-        stage = "agent_network"
+        activation.enter("agent_network")
         if has_context:
             manager.require_network_phase(spec, "agent")
         else:
             manager.transition_to_agent_network(spec)
-        stage = "terminal_resume"
+        activation.enter("terminal_resume")
         control.resume_terminals()
         terminals_suspended = False
 
@@ -1751,7 +1892,7 @@ def _run_shared_live_attempt(
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
         )
-        stage = "resident_start"
+        activation.enter("resident_start")
         resident_descriptor: dict[str, Any] | None = None
         if lease.get("resident_state") == "live":
             try:
@@ -1805,7 +1946,7 @@ def _run_shared_live_attempt(
         else:
             control.report_context_status("new")
 
-        stage = "prompt_admission"
+        activation.enter("prompt_admission")
         _retry_lifecycle_receipt(
             "prompt_admission_retry",
             job.job_id,
@@ -1815,9 +1956,14 @@ def _run_shared_live_attempt(
             ),
         )
         turn_admitted = True
+        # The activation is over the moment the CLI accepts the prompt. Report
+        # it here rather than at settlement so the number survives a turn that
+        # goes on to time out, and so it excludes the model's own latency —
+        # which is the whole point of measuring the start separately.
+        report_activation(failed=False)
         result_frame: dict[str, Any] | None = None
         try:
-            stage = "turn_stream"
+            activation.enter("turn_stream")
             exit_code, tail, tool_errors, result_frame = _stream_shared_agent_turn(
                 supervisor=supervisor,
                 job=job,
@@ -1873,7 +2019,7 @@ def _run_shared_live_attempt(
                 )
             )
 
-        stage = "settlement"
+        activation.enter("settlement")
         local_settle = _retry_lifecycle_receipt(
             "supervisor_settlement_retry",
             job.job_id,
@@ -1937,13 +2083,13 @@ def _run_shared_live_attempt(
         return 3
     except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
         failure_detail = str(exc)
-        _log_control_failure(stage, job.job_id, exc)
+        _log_control_failure(activation.current, job.job_id, exc)
         abandon_before_finish(lost=turn_admitted or context_invalid, detail=failure_detail)
         report_failure()
         return 2
     except Exception as exc:
         failure_detail = f"shared live chat failed unexpectedly: {exc}"
-        _log_control_failure(stage, job.job_id, exc)
+        _log_control_failure(activation.current, job.job_id, exc)
         abandon_before_finish(lost=turn_admitted, detail=failure_detail)
         report_failure()
         return 2

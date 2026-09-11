@@ -23,7 +23,12 @@ from cloud_agent.admin_observability import (
     resolve_run_window,
 )
 from cloud_agent.api.deps import get_agent_job_store, get_client_ip, verify_admin_access
-from cloud_agent.api.routes import _attempt_duration_ms, _attempt_resources, _require_store
+from cloud_agent.api.routes import (
+    _attempt_activation,
+    _attempt_duration_ms,
+    _attempt_resources,
+    _require_store,
+)
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry
@@ -147,6 +152,7 @@ async def get_admin_resources(
         context_status=telemetry.get("context_status"),
         duration_ms=_attempt_duration_ms(telemetry),
         resources=_attempt_resources(telemetry),
+        activation=_attempt_activation(telemetry),
     )
 
 

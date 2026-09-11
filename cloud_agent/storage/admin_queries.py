@@ -398,12 +398,21 @@ class AdminRunQueries:
         return AdminActivityPage(events=page, next_cursor=next_cursor)
 
     async def resources(self, job_id: str, attempt_id: int) -> dict[str, Any] | None:
-        """Read one attempt's resource rows with their original source and gaps."""
+        """Read one attempt's resource rows with their original source and gaps.
+
+        The activation columns ride along because they are the other half of
+        the same question — what did this execution spend, and on what — and
+        they live on the attempt row this read already fetches. Reading them
+        here rather than in a second query keeps the run-detail page to one
+        request per attempt.
+        """
         async with self._read() as conn:
             row = await conn.fetchrow(
                 f"""
                 SELECT a.id AS attempt_id, a.attempt_no, a.started_at, a.finished_at,
-                       a.continuity_mode, a.context_status, {_RESOURCE_COLUMNS}
+                       a.continuity_mode, a.context_status,
+                       a.activation_ms, a.activation_stages, a.activation_failed_stage,
+                       {_RESOURCE_COLUMNS}
                 FROM agent_attempts a
                 LEFT JOIN agent_attempt_resources r ON r.attempt_id = a.id
                 WHERE a.job_id = $1 AND a.id = $2
@@ -414,6 +423,10 @@ class AdminRunQueries:
             if row is None:
                 return None
             telemetry = dict(row)
+            # asyncpg hands JSONB back as text unless a codec says otherwise,
+            # so the breakdown is decoded here rather than left for a caller
+            # that would have to know which columns are documents.
+            telemetry["activation_stages"] = _load_json(row["activation_stages"])
             calls = await conn.fetch(
                 f"SELECT {_CALL_COLUMNS} FROM agent_tool_call_resources "
                 "WHERE attempt_id = $1 ORDER BY call_seq LIMIT $2",

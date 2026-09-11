@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import asyncpg
 import pytest
 import pytest_asyncio
 
@@ -3698,6 +3700,108 @@ async def test_a_resource_rollup_upserts_rather_than_accumulating(store: AgentJo
     assert telemetry["attempt_id"] == claim["attempt_id"]
     assert telemetry["cpu_usec"] == 1_000, "a retried post accumulated instead of replacing"
     assert telemetry["net_rx_bytes"] == 4_096
+
+
+async def test_an_activation_report_replaces_rather_than_accumulating(store: AgentJobStore):
+    """A retried post is one closed window said twice.
+
+    Same reasoning as the resource rollup above: a dict-backed fake is
+    idempotent by construction, so only the real ``UPDATE`` can show that a
+    second report overwrites the first instead of adding to it.
+    """
+    await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+
+    assert await store.record_attempt_activation(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        activation={
+            "total_ms": 4200,
+            "stages": {"supervisor_acquire": 900, "checkout": 2800},
+            "failed_stage": None,
+        },
+    )
+    assert await store.record_attempt_activation(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        activation={
+            "total_ms": 4200,
+            "stages": {"supervisor_acquire": 900, "checkout": 2800},
+            "failed_stage": None,
+        },
+    )
+
+    async with store._pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT activation_ms, activation_stages, activation_failed_stage "
+            "FROM agent_attempts WHERE id = $1",
+            claim["attempt_id"],
+        )
+    assert row["activation_ms"] == 4200
+    # asyncpg returns JSONB as text unless a codec says otherwise. Decoding it
+    # here is deliberate: asserting on a dict would need the codec, and this
+    # test is about what the UPDATE wrote, not about how it is read back.
+    assert json.loads(row["activation_stages"]) == {
+        "supervisor_acquire": 900,
+        "checkout": 2800,
+    }
+    assert row["activation_failed_stage"] is None
+
+
+async def test_an_unreported_activation_stays_null_rather_than_zero(store: AgentJobStore):
+    """The distinction the column's nullability exists to preserve."""
+    await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+
+    async with store._pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT activation_ms, activation_stages FROM agent_attempts WHERE id = $1",
+            claim["attempt_id"],
+        )
+    assert row["activation_ms"] is None
+    assert row["activation_stages"] is None
+
+
+async def test_a_superseded_attempt_cannot_report_an_activation(store: AgentJobStore):
+    """Fenced like every other worker write, at the SQL not the router."""
+    await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+
+    assert not await store.record_attempt_activation(
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"] + 1,
+        activation={"total_ms": 900, "stages": {"checkout": 900}, "failed_stage": None},
+    )
+    async with store._pool.acquire() as conn:
+        stored = await conn.fetchval(
+            "SELECT activation_ms FROM agent_attempts WHERE id = $1", claim["attempt_id"]
+        )
+    assert stored is None
+
+
+async def test_the_schema_refuses_an_activation_breakdown_without_its_total(
+    store: AgentJobStore,
+):
+    """The coherence check is a constraint, not a convention.
+
+    A future writer that skips ``WorkerActivationRequest`` must still be unable
+    to store a breakdown whose total is missing: a reader summing the stages
+    would otherwise be reading a number nobody ever measured.
+    """
+    await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None
+
+    async with store._pool.acquire() as conn:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                "UPDATE agent_attempts SET activation_stages = $2::jsonb WHERE id = $1",
+                claim["attempt_id"],
+                json.dumps({"checkout": 900}),
+            )
 
 
 async def test_retry_telemetry_is_read_back_per_attempt(store: AgentJobStore):

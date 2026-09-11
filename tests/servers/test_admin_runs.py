@@ -102,6 +102,13 @@ def setup(monkeypatch):
                 "finished_at": END,
                 "sampler_version": "shared-member-v1",
                 "coverage": 0,
+                "activation_ms": 1840,
+                "activation_stages": {
+                    "checkout": 900,
+                    "supervisor_acquire": 600,
+                    "resident_start": 340,
+                },
+                "activation_failed_stage": None,
                 "tool_calls": [
                     {
                         "call_seq": 1,
@@ -256,6 +263,86 @@ async def test_resource_read_keeps_message_timing_and_unavailable_whole_turn(set
     queries.resources.assert_awaited_once_with("ajob_other", 10)
     queries.event_content.assert_not_awaited()
     store.get_job.assert_not_awaited()
+
+
+async def test_activation_read_reports_the_host_measurement_by_stage(setup):
+    app, _, _, _ = setup
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other/attempts/10/resources", headers=ADMIN)
+    assert response.status_code == 200
+    activation = response.json()["activation"]
+    assert activation["total_ms"] == 1840
+    # The page sorts, but the wire keeps every measured stage; a stage that did
+    # not run is absent rather than zero and must stay that way.
+    assert activation["stages"] == {
+        "checkout": 900,
+        "supervisor_acquire": 600,
+        "resident_start": 340,
+    }
+    assert activation["failed_stage"] is None
+
+
+async def test_activation_is_absent_rather_than_zero_when_never_measured(setup):
+    app, queries, _, _ = setup
+    unmeasured = dict(queries.resources.return_value)
+    unmeasured["activation_ms"] = None
+    unmeasured["activation_stages"] = None
+    unmeasured["activation_failed_stage"] = None
+    queries.resources.return_value = unmeasured
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other/attempts/10/resources", headers=ADMIN)
+    assert response.status_code == 200
+    # None, not a zero total: an attempt nobody measured must not read as an
+    # activation that took no time.
+    assert response.json()["activation"] is None
+
+
+async def test_activation_drops_stage_values_a_reader_cannot_render(setup):
+    app, queries, _, _ = setup
+    hostile = dict(queries.resources.return_value)
+    hostile["activation_stages"] = {
+        "checkout": 900,
+        "setup": -1,
+        "resident_start": "fast",
+        "prompt_admission": True,
+    }
+    queries.resources.return_value = hostile
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other/attempts/10/resources", headers=ADMIN)
+    assert response.status_code == 200
+    # One malformed entry must not take the page down with it, and must not be
+    # coerced into a number: a boolean is not a duration.
+    assert response.json()["activation"]["stages"] == {"checkout": 900}
+
+
+async def test_activation_decodes_a_breakdown_that_arrived_as_text(setup):
+    """asyncpg hands JSONB back as text unless a codec says otherwise.
+
+    The query decodes it, and the shaper decodes it again. This pins the
+    second half: a reader that trusted the first would raise on every attempt
+    rather than render a number the host measured.
+    """
+    app, queries, _, _ = setup
+    textual = dict(queries.resources.return_value)
+    textual["activation_stages"] = '{"checkout": 900, "setup": 250}'
+    queries.resources.return_value = textual
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other/attempts/10/resources", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json()["activation"]["stages"] == {"checkout": 900, "setup": 250}
+
+
+async def test_activation_renders_a_total_when_its_breakdown_is_unreadable(setup):
+    """A total nobody can split is still a measurement worth showing."""
+    app, queries, _, _ = setup
+    broken = dict(queries.resources.return_value)
+    broken["activation_stages"] = "not json at all"
+    queries.resources.return_value = broken
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other/attempts/10/resources", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json()["activation"]["total_ms"] == 1840
+    assert response.json()["activation"]["stages"] == {}
 
 
 @pytest.mark.parametrize("browser", [False, True])

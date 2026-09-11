@@ -781,3 +781,158 @@ def test_runner_source_contains_no_push_or_legacy_execution_path():
     assert "def run_agent" not in source
     assert "AGENT_RESTARTABLE_SANDBOX" not in source
     assert "AGENT_SHARED_LIVE_SANDBOX" not in source
+
+
+class _Clock:
+    """A monotonic clock the test advances by hand."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture()
+def activation_clock(monkeypatch) -> _Clock:
+    clock = _Clock()
+    monkeypatch.setattr(runner_mod, "time", clock)
+    return clock
+
+
+def test_activation_recorder_splits_one_window_into_its_stages(activation_clock):
+    recorder = runner_mod.ActivationRecorder()
+    activation_clock.now = 0.250
+    recorder.enter("supervisor_acquire")
+    activation_clock.now = 1.500
+    recorder.enter("checkout")
+    activation_clock.now = 2.000
+    recorder.finish()
+
+    payload = recorder.report()
+    assert payload["total_ms"] == 2000
+    assert payload["stages"] == {
+        "reservation": 250,
+        "supervisor_acquire": 1250,
+        "checkout": 500,
+    }
+    assert payload["failed_stage"] is None
+    # The wire schema rejects a breakdown larger than its window, so the
+    # recorder has to hold that invariant on its own rather than rely on it.
+    assert sum(payload["stages"].values()) <= payload["total_ms"]
+
+
+def test_activation_recorder_stops_measuring_once_the_window_closes(activation_clock):
+    recorder = runner_mod.ActivationRecorder()
+    activation_clock.now = 2.0
+    recorder.finish()
+
+    activation_clock.now = 60.0
+    recorder.enter("turn_stream")
+    activation_clock.now = 120.0
+    recorder.finish()
+
+    payload = recorder.report()
+    assert payload["total_ms"] == 2000
+    assert "turn_stream" not in payload["stages"]
+    # The label still moves: a failure log has to name where the turn died,
+    # and the same word has to mean the same thing in a duration and a log.
+    assert recorder.current == "turn_stream"
+
+
+def test_activation_recorder_refuses_to_report_an_open_window():
+    with pytest.raises(RuntimeError, match="must be finished"):
+        runner_mod.ActivationRecorder().report()
+
+
+def test_activation_recorder_names_the_stage_a_failed_activation_died_in(activation_clock):
+    recorder = runner_mod.ActivationRecorder()
+    activation_clock.now = 0.100
+    recorder.enter("checkout")
+    activation_clock.now = 0.900
+    recorder.finish(failed=True)
+
+    payload = recorder.report()
+    assert payload["failed_stage"] == "checkout"
+    assert payload["total_ms"] == 900
+    # A partial breakdown is only readable as partial because of the stage
+    # above; without it this payload would look like a fast activation.
+    assert payload["stages"] == {"reservation": 100, "checkout": 800}
+
+
+def test_activation_recorder_accumulates_a_stage_it_re_enters(activation_clock):
+    recorder = runner_mod.ActivationRecorder()
+    activation_clock.now = 0.100
+    recorder.enter("checkout")
+    activation_clock.now = 0.200
+    recorder.enter("setup")
+    activation_clock.now = 0.300
+    recorder.enter("checkout")
+    activation_clock.now = 0.500
+    recorder.finish()
+
+    payload = recorder.report()
+    assert payload["stages"] == {"reservation": 100, "checkout": 300, "setup": 100}
+    assert sum(payload["stages"].values()) == payload["total_ms"] == 500
+
+
+def test_activation_recorder_keeps_a_partial_breakdown_for_a_cancelled_stage(activation_clock):
+    """A failure in the first stage still names that stage, not an empty one."""
+    recorder = runner_mod.ActivationRecorder()
+    activation_clock.now = 0.400
+    recorder.finish(failed=True)
+
+    payload = recorder.report()
+    assert payload["failed_stage"] == "reservation"
+    assert payload["stages"] == {"reservation": 400}
+
+
+def test_activation_recorder_keeps_its_total_above_its_rounded_stages(activation_clock):
+    """Rounding each stage cannot make the breakdown larger than the window.
+
+    Five stages of 0.6ms each are 3ms of window, which rounds once to 3ms —
+    but they round on their own to 5ms. The wire schema refuses a breakdown
+    larger than its total, so getting this wrong would not cost a millisecond:
+    it would cost the entire measurement, silently, on the best-effort path.
+    """
+    recorder = runner_mod.ActivationRecorder()
+    for stage in ("supervisor_acquire", "checkout", "setup", "resident_start"):
+        activation_clock.now += 0.0006
+        recorder.enter(stage)
+    activation_clock.now += 0.0006
+    recorder.finish()
+
+    payload = recorder.report()
+    assert set(payload["stages"]) == {
+        "reservation",
+        "supervisor_acquire",
+        "checkout",
+        "setup",
+        "resident_start",
+    }
+    assert set(payload["stages"].values()) == {1}
+    # The window alone would have rounded to 3ms. The total moves to what its
+    # own parts add up to, which is rounding the stages already applied — not
+    # an invented duration.
+    assert round(0.003 * 1000) == 3
+    assert payload["total_ms"] == sum(payload["stages"].values()) == 5
+
+
+def test_runner_reports_activation_before_the_attempt_can_settle():
+    """The write is fenced on the attempt still running, so order matters.
+
+    The control plane fences this on ``status = 'running'``, which means a
+    report sent after ``finish_attempt`` would be rejected and the measurement
+    silently lost. Pinning the order here keeps a later refactor from moving
+    the report to a tidier-looking place after settlement.
+    """
+    source = __import__("inspect").getsource(runner_mod._run_shared_live_attempt)
+    assert 'activation.enter("prompt_admission")' in source
+    admitted = source.index("turn_admitted = True")
+    reported = source.index("report_activation(failed=False)")
+    streamed = source.index('activation.enter("turn_stream")')
+    assert admitted < reported < streamed
+    # Every failure path funnels through the abandonment helper, which is the
+    # one place a partial activation is still writable.
+    abandon = source.index("def abandon_before_finish")
+    assert source.index("report_activation(failed=True)", abandon) > abandon

@@ -64,6 +64,7 @@ class FakeAgentJobStore:
         self.pinned_threads: dict[str, datetime] = {}
         self.turn_telemetry: dict[str, dict[str, Any]] = {}
         self.attempt_telemetry: dict[str, list[dict[str, Any]]] = {}
+        self.attempt_activations: dict[int, dict[str, Any]] = {}
         self.attempt_jobs: dict[int, str] = {}
         self.live_fence: tuple[int, int] | None = None
         self.attempt_grants: dict[int, str] = {}
@@ -626,6 +627,19 @@ class FakeAgentJobStore:
             **rollup,
             "attempt_id": attempt_id,
         }
+        return True
+
+    async def record_attempt_activation(
+        self, *, attempt_id: int, lease_generation: int, activation: dict[str, Any]
+    ) -> bool:
+        """Store the host's activation measurement under the same worker fence."""
+        if not self._fenced(attempt_id, lease_generation):
+            return False
+        if attempt_id not in self.attempt_jobs:
+            return False
+        # Replace, never merge: the report describes one closed window, so a
+        # retry that lists fewer stages means fewer stages.
+        self.attempt_activations[attempt_id] = dict(activation)
         return True
 
     async def admit_thread_sandbox_turn(self, **kwargs: Any) -> bool:
@@ -5365,6 +5379,130 @@ async def test_a_rollup_is_the_same_window_said_twice_not_two_windows(
 
     job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
     assert job["resources"]["cpu_usec"] == 1_000, "a retried post doubled the turn's CPU"
+
+
+async def test_the_runner_records_how_long_the_sandbox_took_to_start(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """The measurement an operator needs before they can shorten it."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    ack = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/activation",
+        json={
+            "total_ms": 4200,
+            "stages": {"supervisor_acquire": 900, "checkout": 2800, "resident_start": 500},
+            "failed_stage": None,
+        },
+        headers=auth,
+    )
+
+    assert ack.status_code == 200
+    assert store.attempt_activations[claim["attempt_id"]] == {
+        "total_ms": 4200,
+        "stages": {"supervisor_acquire": 900, "checkout": 2800, "resident_start": 500},
+        "failed_stage": None,
+    }
+
+
+async def test_a_failed_activation_records_the_stage_it_died_in(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """A partial breakdown has to say it is partial, or it reads as a fast one."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    ack = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/activation",
+        json={
+            "total_ms": 31_000,
+            "stages": {"supervisor_acquire": 30_800},
+            "failed_stage": "supervisor_acquire",
+        },
+        headers=auth,
+    )
+
+    assert ack.status_code == 200
+    assert store.attempt_activations[claim["attempt_id"]]["failed_stage"] == "supervisor_acquire"
+
+
+async def test_an_activation_breakdown_larger_than_its_window_is_refused(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Two numbers measured against different clocks cannot both be trusted."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    refused = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/activation",
+        json={"total_ms": 100, "stages": {"checkout": 900}},
+        headers=auth,
+    )
+
+    assert refused.status_code == 422
+    assert store.attempt_activations == {}
+
+
+async def test_an_unknown_activation_stage_is_refused(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """The stage names are the runner's own vocabulary, and they are closed.
+
+    A typo would otherwise store a stage no reader knows how to label, and the
+    page would quietly show a row named after a bug.
+    """
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+
+    refused = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/activation",
+        json={"total_ms": 900, "stages": {"chekout": 900}},
+        headers=auth,
+    )
+
+    assert refused.status_code == 422
+    assert store.attempt_activations == {}
+
+
+async def test_a_superseded_attempt_cannot_report_how_the_live_one_started(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Fenced like every other worker write."""
+    job_id = await _create_job(client)
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
+    store.live_fence = (101, 2)
+
+    refused = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/activation",
+        json={"total_ms": 900, "stages": {"checkout": 900}},
+        headers=auth,
+    )
+
+    assert refused.status_code == 409
+    assert store.attempt_activations == {}
+
+
+async def test_an_unmeasured_activation_reports_nothing_rather_than_zero(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """The distinction the whole measurement rests on.
+
+    An attempt whose host never reported has no activation at all. A zero here
+    would be the one number an operator reads as good news, and it would be
+    indistinguishable from an attempt that genuinely started instantly.
+    """
+    job_id = await _create_job(client)
+
+    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
+
+    assert "activation" not in job
+    assert store.attempt_activations == {}
 
 
 async def test_a_superseded_attempt_cannot_relabel_what_the_live_one_used(

@@ -118,6 +118,7 @@ from cloud_agent.schemas import (
     AgentThreadStatsResponse,
     AgentWorkspaceResponse,
     AgentWorkspaceWriteRequest,
+    AttemptActivation,
     AttemptResources,
     GitHubConnectionResponse,
     GitHubConnectRequest,
@@ -133,6 +134,7 @@ from cloud_agent.schemas import (
     SourceControlRepository,
     ToolCallResources,
     WorkerAckResponse,
+    WorkerActivationRequest,
     WorkerClaimRequest,
     WorkerClaimResponse,
     WorkerContinuityRequest,
@@ -159,7 +161,13 @@ from cloud_agent.source_control import (
     github_authorization_url,
     issue_oauth_state,
 )
-from cloud_agent.storage.store import RUNNING, SUCCEEDED, TERMINAL_STATES, request_fingerprint
+from cloud_agent.storage.store import (
+    RUNNING,
+    SUCCEEDED,
+    TERMINAL_STATES,
+    _load_json,
+    request_fingerprint,
+)
 from cloud_agent.task_titles import generate_thread_title
 from cloud_agent.terminal_coordination import resume_settled_terminal
 from cloud_agent.thread_stats import summarize_thread
@@ -414,6 +422,35 @@ def _attempt_resources(telemetry: dict[str, Any] | None) -> AttemptResources | N
         process_events_lost=int(telemetry.get("process_events_lost") or 0),
         processes_truncated=bool(telemetry.get("processes_truncated")),
         processes=[ProcessObservation(**process) for process in telemetry.get("processes") or []],
+    )
+
+
+def _attempt_activation(telemetry: dict[str, Any] | None) -> AttemptActivation | None:
+    """Shape the host's activation measurement, or None when none was reported.
+
+    None is "not measured", never "instant": an attempt that ran before this
+    was recorded, or whose host never reached the report, has no activation at
+    all, and rendering that as zero would invent the one number an operator
+    would read as good news.
+    """
+    if not telemetry or telemetry.get("activation_ms") is None:
+        return None
+    # Decoded rather than assumed: asyncpg hands JSONB back as text unless a
+    # codec says otherwise, and a reader that got a string here would raise on
+    # every attempt instead of rendering the number the host measured.
+    stages = _load_json(telemetry.get("activation_stages")) or {}
+    if not isinstance(stages, dict):
+        stages = {}
+    return AttemptActivation(
+        total_ms=int(telemetry["activation_ms"]),
+        # The stored document is host-written JSON. Keep only entries a reader
+        # can render, so one malformed key cannot break the whole page.
+        stages={
+            str(name): int(value)
+            for name, value in stages.items()
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        },
+        failed_stage=telemetry.get("activation_failed_stage"),
     )
 
 
@@ -4062,6 +4099,35 @@ async def worker_abandon_thread_sandbox(
             with contextlib.suppress(Exception):
                 await grants.revoke(released)
     return WorkerThreadSandbox(**row)
+
+
+@router.post("/worker/jobs/{job_id}/activation", response_model=WorkerAckResponse)
+async def worker_report_activation(
+    job_id: str,
+    body: WorkerActivationRequest,
+    authorization: str | None = Header(None),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> WorkerAckResponse:
+    """Record how long one attempt spent starting its sandbox.
+
+    Accepted while the attempt is still running, unlike the resource rollup:
+    the activation is over as soon as the prompt reaches the Agent CLI, and a
+    turn that goes on to time out is exactly when this number is wanted.
+
+    Fenced like every other worker write, and idempotent: the report describes
+    one closed window in the host's own monotonic clock.
+    """
+    job_store = _require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    recorded = await job_store.record_attempt_activation(
+        attempt_id=claims["attempt_id"],
+        lease_generation=claims["lease_generation"],
+        activation=body.model_dump(),
+    )
+    if not recorded:
+        raise _lease_lost()
+    return WorkerAckResponse(ok=True)
 
 
 @router.post("/worker/jobs/{job_id}/resources", response_model=WorkerAckResponse)

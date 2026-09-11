@@ -270,6 +270,50 @@ class AttemptResources(BaseModel):
     processes: list[ProcessObservation] = Field(default_factory=list)
 
 
+#: The stages one sandbox activation can be measured in, in the order the
+#: runner enters them. The names are the runner's own failure-log vocabulary
+#: (``cloud_agent_host/runner.py``), kept identical on purpose: a duration here
+#: and a "failed at checkout" log line have to name the same moment.
+#:
+#: The window closes at ``prompt_admission``. Building the prompt's turn
+#: (``turn_stream``) and settling the workspace afterwards are the turn, not
+#: its activation, and a report that included them would grow with how long
+#: the model took — the one number this measurement exists to hold apart.
+ActivationStage = Literal[
+    "reservation",
+    "supervisor_acquire",
+    "sandbox_running",
+    "terminal_suspend",
+    "workspace_reset",
+    "checkout",
+    "setup",
+    "workspace_permissions",
+    "native_workspace_resume",
+    "runtime_preflight",
+    "agent_network",
+    "terminal_resume",
+    "resident_start",
+    "prompt_admission",
+]
+
+
+class AttemptActivation(BaseModel):
+    """How long one execution spent starting its sandbox, split by stage.
+
+    Read back from the host's own monotonic measurement, not re-derived from
+    event timestamps. See ``migrations/versions/0007_attempt_activation_timing``
+    for why the two are not the same number.
+    """
+
+    total_ms: int
+    #: Stage name to milliseconds. A stage that did not run is absent, never
+    #: zero — see ``WorkerActivationRequest``.
+    stages: dict[str, int] = Field(default_factory=dict)
+    #: The stage running when the activation failed; null when the prompt
+    #: reached the CLI. A partial breakdown without this reads as a fast one.
+    failed_stage: str | None = None
+
+
 class AgentAttemptSummary(BaseModel):
     """Identity, continuity and duration without unselected resource details."""
 
@@ -284,6 +328,10 @@ class AgentAttemptTelemetry(AgentAttemptSummary):
     """Measurements fetched for one selected execution attempt."""
 
     resources: AttemptResources | None = None
+    #: The host's measurement of this execution's sandbox activation. None on
+    #: an attempt that ran before this was measured, which is not the same
+    #: statement as an activation that took no time.
+    activation: AttemptActivation | None = None
 
 
 class AgentJobResponse(BaseModel):
@@ -1229,6 +1277,45 @@ class WorkerProcessObservation(BaseModel):
             )
         ):
             raise ValueError("a process that has not exited cannot carry exit counters")
+        return self
+
+
+class WorkerActivationRequest(BaseModel):
+    """One attempt's sandbox activation, as the host that waited measured it.
+
+    Reported as soon as the prompt reaches the Agent CLI, which is why a turn
+    that later times out still carries the measurement of how it started.
+
+    Times are host-side monotonic deltas in milliseconds, taken in the runner
+    process. They are deliberately not derived from control-plane receipt
+    timestamps: that would add a round trip to every boundary and could not
+    see a stage that never produced a receipt.
+
+    A stage that did not run is **absent**, never ``0``. ``workspace_reset``
+    and ``checkout`` do not happen on a follow-up turn and ``setup`` does not
+    happen without a setup script; writing zero for them would claim those
+    stages ran instantly, which is the one thing they certainly did not do.
+    """
+
+    total_ms: int = Field(..., ge=0)
+    #: Stage name to milliseconds. Bounded to the vocabulary above so the
+    #: stored document stays queryable and a typo cannot invent a stage.
+    stages: dict[ActivationStage, int] = Field(default_factory=dict)
+    #: The stage running when the activation failed. Null means the prompt
+    #: reached the CLI, so the breakdown describes a complete activation.
+    failed_stage: ActivationStage | None = None
+
+    @model_validator(mode="after")
+    def stages_fit_inside_their_total(self) -> WorkerActivationRequest:
+        """Refuse a breakdown that could not have happened in one window."""
+        if any(value < 0 for value in self.stages.values()):
+            raise ValueError("activation stage durations cannot be negative")
+        if sum(self.stages.values()) > self.total_ms:
+            # Every stage is a slice of the same window, so their sum cannot
+            # exceed it. A report that says otherwise is not a rounding
+            # artefact: one of the two numbers was measured against a
+            # different clock, and neither can be trusted afterwards.
+            raise ValueError("activation stages cannot sum to more than the total")
         return self
 
 
