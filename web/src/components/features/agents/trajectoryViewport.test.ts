@@ -11,7 +11,7 @@ import {
   valueAtFraction,
   viewportAfterStep,
   viewportAfterWheel,
-  viewportWithValue,
+  viewportWithSpan,
   windowDuration,
   type TimelineViewport,
 } from './trajectoryViewport';
@@ -123,28 +123,49 @@ describe('shiftedWindow', () => {
   });
 });
 
-describe('viewportWithValue', () => {
-  it('keeps a window that already shows the value, by identity', () => {
+describe('viewportWithSpan', () => {
+  const span = (start: number, end = start): DomainRange => ({ start, end });
+
+  it('keeps a window that already shows the span, by identity', () => {
     const viewport = { start: 10_000, end: 20_000 };
 
-    expect(viewportWithValue(viewport, 15_000, DOMAIN, MINIMUM_WINDOW)).toBe(viewport);
+    expect(viewportWithSpan(viewport, span(15_000), DOMAIN, MINIMUM_WINDOW)).toBe(viewport);
   });
 
-  it('pans the shortest way to a value outside it', () => {
+  it('leaves a margin, so a mark is not parked on the clipped edge', () => {
     const viewport = { start: 10_000, end: 20_000 };
 
-    expect(viewportWithValue(viewport, 25_000, DOMAIN, MINIMUM_WINDOW)).toEqual({
-      start: 15_000,
-      end: 25_000,
+    // Eight percent of a ten-second window: the mark lands inside the track
+    // instead of on the boundary where it has no visible width.
+    expect(viewportWithSpan(viewport, span(25_000), DOMAIN, MINIMUM_WINDOW)).toEqual({
+      start: 15_800,
+      end: 25_800,
     });
-    expect(viewportWithValue(viewport, 5_000, DOMAIN, MINIMUM_WINDOW)).toEqual({
-      start: 5_000,
-      end: 15_000,
+    expect(viewportWithSpan(viewport, span(5_000), DOMAIN, MINIMUM_WINDOW)).toEqual({
+      start: 4_200,
+      end: 14_200,
     });
+  });
+
+  it('shows a span wider than the window from its start', () => {
+    const viewport = { start: 10_000, end: 20_000 };
+
+    expect(
+      viewportWithSpan(viewport, { start: 22_000, end: 40_000 }, DOMAIN, MINIMUM_WINDOW),
+    ).toEqual({ start: 21_200, end: 31_200 });
   });
 
   it('does nothing while the whole domain is visible', () => {
-    expect(viewportWithValue(FITTED, 25_000, DOMAIN, MINIMUM_WINDOW)).toBeNull();
+    expect(viewportWithSpan(FITTED, span(25_000), DOMAIN, MINIMUM_WINDOW)).toBeNull();
+  });
+
+  it('does not move a window already pinned to the domain edge', () => {
+    const viewport = { start: 0, end: 10_000 };
+
+    expect(viewportWithSpan(viewport, span(1_000), DOMAIN, MINIMUM_WINDOW)).toBe(viewport);
+    // The clamp pins the window at zero, so the mark cannot be given its margin;
+    // the window stays where it is rather than reporting a move it did not make.
+    expect(viewportWithSpan(viewport, span(0), DOMAIN, MINIMUM_WINDOW)).toBe(viewport);
   });
 });
 

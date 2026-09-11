@@ -9,7 +9,10 @@ import type { AgentThreadEventApi } from '@/lib/api/agents';
 import { TrajectoryView } from './TrajectoryView';
 import { buildTrajectorySteps, type StoredEvent } from './trajectorySteps';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 /** A pointer event built from a mouse event, for a jsdom without PointerEvent. */
 function fallbackPointer(type: string, init: PointerEventInit): PointerEvent {
@@ -239,6 +242,27 @@ const MANY = Array.from({ length: 8 }, (_, index) =>
   event({ id: index + 1, payload: { text: `step ${index + 1}` } }),
 );
 
+/** A call with a recorded duration, answered a moment after it finished. */
+const TIMED_REPLY = [
+  event({
+    id: 1,
+    event_type: 'tool_use',
+    payload: { id: 't1', name: 'Bash', input: { command: 'cargo build' } },
+    created_at: '2026-08-19T10:00:00.000Z',
+  }),
+  event({
+    id: 2,
+    event_type: 'tool_result',
+    payload: { tool_use_id: 't1', content: 'Compiling' },
+    created_at: '2026-08-19T10:00:15.000Z',
+  }),
+  event({
+    id: 3,
+    payload: { text: 'the build passes' },
+    created_at: '2026-08-19T10:00:16.000Z',
+  }),
+];
+
 describe('TrajectoryView overview', () => {
   /** The projected layer: its width against the track is the zoom. */
   function domain(): HTMLElement {
@@ -399,5 +423,116 @@ describe('TrajectoryView overview', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
 
     expect(mark).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('pans from the window at pointer-down, never from the last move', () => {
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    pointer('pointerdown', { button: 2, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 220, clientY: 10 });
+    const panned = domain().style.left;
+    // The same coordinate again is no further movement, not the same
+    // displacement applied a second time.
+    pointer('pointermove', { pointerId: 1, clientX: 220, clientY: 10 });
+
+    expect(panned).not.toBe('-0%');
+    expect(domain().style.left).toBe(panned);
+  });
+
+  it('does not carry an interval from one projection into the other', () => {
+    const { container } = render(<Harness events={MANY} />);
+    withTrackWidth();
+
+    drag(0, 100);
+    expect(container.querySelectorAll('[data-timeline-focus="outside"]').length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Time' }));
+
+    // Operations are not milliseconds: the interval that meant five steps must
+    // not be read as five milliseconds.
+    expect(container.querySelectorAll('[data-timeline-focus="outside"]')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: /of 8 · Clear/ })).toBeNull();
+  });
+
+  it('brings a selected mark inside the right edge of the track', () => {
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    const rows = document.querySelectorAll<HTMLElement>('[data-step-key]');
+
+    fireEvent.click(rows[rows.length - 1]);
+
+    const mark = document.querySelector<HTMLElement>('[data-span-key][aria-pressed="true"]');
+    expect(mark).not.toBeNull();
+    const left = Number.parseFloat(domain().style.left);
+    const width = Number.parseFloat(domain().style.width);
+    const markLeft = Number.parseFloat((mark as HTMLElement).style.left);
+    // Where the mark lands on the track once the layer's own projection is
+    // applied. On the edge it has no visible width at all.
+    expect(left + markLeft * (width / 100)).toBeLessThan(100);
+  });
+
+  it('keeps the last zero-duration mark inside the track', () => {
+    render(<Harness events={TIMED_REPLY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Time' }));
+
+    // The reply follows the call with no recorded duration, so once the idle
+    // time is compressed it sits exactly at the end of the domain, where a mark
+    // drawn rightward from that point is clipped away entirely.
+    const reply = screen.getByRole('button', { name: 'Assistant message (assistant, step 2)' });
+    expect(reply).toHaveAttribute('data-edge-anchored', 'true');
+    expect(reply.style.transform).toBe('translateX(-100%)');
+  });
+
+  it('does not pull an unchanged selection back when a step arrives', () => {
+    const { rerender } = render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    fireEvent.click(document.querySelectorAll<HTMLElement>('[data-step-key]')[0]);
+    // The reader then pans somewhere else entirely.
+    pointer('pointerdown', { button: 2, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 60, clientY: 10 });
+    pointer('pointerup', { pointerId: 1, clientX: 60, clientY: 10 });
+    const parked = domain().style.left;
+
+    rerender(<Harness events={[...MANY, event({ id: 99, payload: { text: 'new step' } })]} />);
+
+    expect(domain().style.left).toBe(parked);
+  });
+
+  it('does not scroll back to an unchanged interval when a step arrives', () => {
+    const { rerender } = render(<Harness events={MANY} />);
+    withTrackWidth();
+    const first = document.querySelectorAll<HTMLElement>('[data-step-key]')[0];
+    const scroll = vi.fn();
+    first.scrollIntoView = scroll;
+
+    drag(0, 100);
+    expect(scroll).toHaveBeenCalledTimes(1);
+    scroll.mockClear();
+
+    rerender(<Harness events={[...MANY, event({ id: 99, payload: { text: 'new step' } })]} />);
+
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it('keeps walking the window while the pointer is held past an edge', () => {
+    vi.useFakeTimers();
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    pointer('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 410, clientY: 10 });
+    const first = domain().style.left;
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+
+    expect(domain().style.left).not.toBe(first);
   });
 });

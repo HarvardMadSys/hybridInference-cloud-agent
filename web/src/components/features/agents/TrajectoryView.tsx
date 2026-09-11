@@ -47,7 +47,7 @@ import {
   valueAtFraction,
   viewportAfterStep,
   viewportAfterWheel,
-  viewportWithValue,
+  viewportWithSpan,
   windowDuration,
   type TimelineViewport,
 } from './trajectoryViewport';
@@ -81,9 +81,10 @@ const MARK_HEIGHT_PX = 14;
 const OPERATION_MARK_WIDTH_PX = 16;
 /** A click that moved less than this selects; more than this drags a range. */
 const MINIMUM_DRAG_PX = 3;
-/** While dragging near an edge, the window follows at this strength and speed. */
+/** While dragging past an edge, the window follows at this strength and speed. */
 const EDGE_PAN_ZONE_FRACTION = 0.08;
-const EDGE_PAN_STEP_FRACTION = 0.025;
+/** Window widths walked per animation frame, so about 0.6 a second at 60fps. */
+const EDGE_PAN_FRAME_FRACTION = 0.01;
 const MAXIMUM_EDGE_PAN_PX = 32;
 
 /** A control above the picture: quiet, small, and secondary to it. */
@@ -163,13 +164,31 @@ function ExecutionOverview({
   const panRef = useRef<{
     pointerId: number;
     anchorClientX: number;
+    /** The window at pointer-down. A pan is measured from there, never from
+     * the window the previous move already produced. */
+    anchorStart: number;
+    span: number;
     moved: boolean;
   } | null>(null);
+  /** The edge the pointer is held past while dragging, and at what strength. */
+  const edgeRef = useRef<{
+    direction: -1 | 0 | 1;
+    strength: number;
+    fraction: number;
+  } | null>(null);
+  const edgeFrameRef = useRef<number | null>(null);
   const [viewport, setViewport] = useState<TimelineViewport>(null);
+  // The frame loop advances between renders, so it keeps its own copy of the
+  // window rather than reading a closure the last render produced.
+  const viewportRef = useRef<TimelineViewport>(null);
   const [animate, setAnimate] = useState(false);
   const [hover, setHover] = useState<{ fraction: number; key: string | null } | null>(null);
   const [draft, setDraft] = useState<DomainRange | null>(null);
   const [panning, setPanning] = useState(false);
+
+  useEffect(() => {
+    viewportRef.current = viewport;
+  }, [viewport]);
 
   const window_ = activeWindow(viewport, model, model.minimumWindow);
   const windowSpan = windowDuration(window_);
@@ -233,13 +252,19 @@ function ExecutionOverview({
   }, [mode]);
 
   // A selection made anywhere — the picture, a hierarchy link, the chat's "View
-  // execution" — has to be on screen, so the window follows it when it is not.
+  // execution" — has to be on screen, so the window follows it. Only a new
+  // selection moves the window: an event arriving over SSE rebuilds the steps
+  // and would otherwise drag a reader who has looked somewhere else back.
+  const followedKey = useRef<string | null>(null);
   useEffect(() => {
-    if (selectedSpan === null) return;
+    if (selectedSpan === null) {
+      followedKey.current = null;
+      return;
+    }
+    if (followedKey.current === selectedSpan.key) return;
+    followedKey.current = selectedSpan.key;
     setAnimate(true);
-    setViewport((current) =>
-      viewportWithValue(current, selectedSpan.start, model, model.minimumWindow),
-    );
+    setViewport((current) => viewportWithSpan(current, selectedSpan, model, model.minimumWindow));
   }, [model, selectedSpan]);
 
   const commitRange = (next: DomainRange | null): void => {
@@ -266,11 +291,59 @@ function ExecutionOverview({
     return clampFraction((event.clientX - rect.left) / Math.max(1, rect.width));
   };
 
+  const stopEdgePan = (): void => {
+    edgeRef.current = null;
+    if (edgeFrameRef.current !== null) {
+      cancelAnimationFrame(edgeFrameRef.current);
+      edgeFrameRef.current = null;
+    }
+  };
+
+  /**
+   * Walk the window while the pointer is held past an edge.
+   *
+   * A pointermove only arrives when the pointer moves, so a reader who drags to
+   * the edge and stops would otherwise get one step and then nothing, and could
+   * never select past what is on screen. The loop runs on frames and stops when
+   * the pointer leaves the edge zone, the window hits the end of the domain, or
+   * the gesture ends.
+   */
+  const runEdgePan = (): void => {
+    if (edgeFrameRef.current !== null) return;
+    const step = (): void => {
+      edgeFrameRef.current = null;
+      const edge = edgeRef.current;
+      if (edge === null || edge.direction === 0) return;
+      const current = viewportRef.current;
+      if (current === null) return;
+      const next = shiftedWindow(
+        current,
+        -edge.direction * EDGE_PAN_FRAME_FRACTION * edge.strength,
+        model,
+        model.minimumWindow,
+      );
+      if (next.start === current.start) return;
+      viewportRef.current = next;
+      setAnimate(false);
+      setViewport(next);
+      const drag = dragRef.current;
+      if (drag !== null) {
+        setDraft(orderedRange(drag.anchorValue, valueAtFraction(next, edge.fraction)));
+      }
+      edgeFrameRef.current = requestAnimationFrame(step);
+    };
+    edgeFrameRef.current = requestAnimationFrame(step);
+  };
+
+  useEffect(() => stopEdgePan, []);
+
   const onPointerDown = (event: PointerEvent<HTMLDivElement>): void => {
     if (event.button === 2) {
       panRef.current = {
         pointerId: event.pointerId,
         anchorClientX: event.clientX,
+        anchorStart: window_.start,
+        span: windowSpan,
         moved: false,
       };
       setAnimate(false);
@@ -301,9 +374,11 @@ function ExecutionOverview({
     if (pan !== null && pan.pointerId === event.pointerId) {
       if (Math.abs(event.clientX - pan.anchorClientX) >= MINIMUM_DRAG_PX) pan.moved = true;
       if (viewport === null) return;
+      // Measured from the window at pointer-down: shifting the window the last
+      // move produced would apply the same displacement again on every move.
       setViewport(
         shiftedWindow(
-          window_,
+          { start: pan.anchorStart, end: pan.anchorStart + pan.span },
           (event.clientX - pan.anchorClientX) / Math.max(1, rect.width),
           model,
           model.minimumWindow,
@@ -313,32 +388,26 @@ function ExecutionOverview({
     }
     const drag = dragRef.current;
     if (drag === null || drag.pointerId !== event.pointerId) return;
-    let dragged = window_;
-    if (viewport !== null) {
-      // Dragging past an edge walks the window along, so a selection can be
-      // made wider than what is currently on screen.
-      const localX = event.clientX - rect.left;
-      const edge = Math.min(MAXIMUM_EDGE_PAN_PX, Math.max(1, rect.width * EDGE_PAN_ZONE_FRACTION));
-      const direction = localX < edge ? -1 : localX > rect.width - edge ? 1 : 0;
-      if (direction !== 0) {
-        const distance = direction < 0 ? edge - localX : localX - (rect.width - edge);
-        const strength = clampFraction(distance / edge);
-        dragged = shiftedWindow(
-          window_,
-          -direction * EDGE_PAN_STEP_FRACTION * Math.max(0.2, strength),
-          model,
-          model.minimumWindow,
-        );
-        if (dragged.start !== window_.start) {
-          setAnimate(false);
-          setViewport(dragged);
-        }
-      }
+    const localX = event.clientX - rect.left;
+    const edge = Math.min(MAXIMUM_EDGE_PAN_PX, Math.max(1, rect.width * EDGE_PAN_ZONE_FRACTION));
+    const direction: -1 | 0 | 1 =
+      viewport === null ? 0 : localX < edge ? -1 : localX > rect.width - edge ? 1 : 0;
+    if (direction === 0) {
+      stopEdgePan();
+    } else {
+      const distance = direction < 0 ? edge - localX : localX - (rect.width - edge);
+      edgeRef.current = {
+        direction,
+        strength: Math.max(0.2, clampFraction(distance / edge)),
+        fraction,
+      };
+      runEdgePan();
     }
-    setDraft(orderedRange(drag.anchorValue, valueAtFraction(dragged, fraction)));
+    setDraft(orderedRange(drag.anchorValue, valueAtFraction(window_, fraction)));
   };
 
   const onPointerEnd = (event: PointerEvent<HTMLDivElement>): void => {
+    stopEdgePan();
     const pan = panRef.current;
     if (pan !== null && pan.pointerId === event.pointerId) {
       panRef.current = null;
@@ -354,7 +423,10 @@ function ExecutionOverview({
     if (drag === null || drag.pointerId !== event.pointerId) return;
     dragRef.current = null;
     const fraction = fractionAt(event);
-    const point = valueAtFraction(window_, fraction);
+    // The window may have been walked by the edge loop, so read it rather than
+    // the render this handler was created in.
+    const endWindow = activeWindow(viewportRef.current, model, model.minimumWindow);
+    const point = valueAtFraction(endWindow, fraction);
     const selected = orderedRange(drag.anchorValue, point);
     setDraft(null);
     const click = Math.abs(event.clientX - drag.anchorClientX) < MINIMUM_DRAG_PX;
@@ -529,6 +601,11 @@ function ExecutionOverview({
                   mode === 'steps'
                     ? `${OPERATION_MARK_WIDTH_PX}px`
                     : `max(2px, calc(${((span.end - span.start) / fullSpan) * 100}% - 2px))`;
+                // A point mark at the end of the window would be drawn from the
+                // clip edge rightward and be invisible. It is anchored by its
+                // right edge instead, without making its recorded duration up.
+                const point = span.end <= span.start;
+                const atWindowEnd = point && span.start >= window_.end;
                 const lane = laneIndex.get(span.lane) ?? 0;
                 return (
                   <button
@@ -539,6 +616,7 @@ function ExecutionOverview({
                     data-recorded-width={
                       mode !== 'steps' && span.end > span.start ? 'true' : undefined
                     }
+                    data-edge-anchored={atWindowEnd ? 'true' : undefined}
                     aria-label={`${span.label} (${span.kind}, step ${span.stepNo})`}
                     aria-pressed={open}
                     title={`${span.label} (${span.kind})${span.durationMs !== null ? ` · ${formatDuration(span.durationMs)}` : ''}`}
@@ -561,6 +639,7 @@ function ExecutionOverview({
                       width,
                       top: lane * LANE_PITCH_PX + (LANE_HEIGHT_PX - MARK_HEIGHT_PX) / 2,
                       height: MARK_HEIGHT_PX,
+                      transform: atWindowEnd ? 'translateX(-100%)' : undefined,
                     }}
                   />
                 );
@@ -651,13 +730,25 @@ export function TrajectoryView({
 
   // An interval selected on the picture is a reading position in the list: the
   // first step inside it comes into view, and the rows outside it step back.
+  // Only a newly committed interval moves the list: an event arriving over SSE
+  // rebuilds the focus set and would otherwise pull a reader who has scrolled
+  // elsewhere back to an interval they already read.
+  const scrolledRange = useRef<DomainRange | null>(null);
   useEffect(() => {
-    if (focused === null || focused.size === 0) return;
+    if (range === null || focused === null || focused.size === 0) {
+      scrolledRange.current = null;
+      return;
+    }
+    if (scrolledRange.current === range) return;
     const first = steps.find((step) => focused.has(step.key));
     if (first === undefined) return;
     const node = document.querySelector<HTMLElement>(`[data-step-key="${escapeKey(first.key)}"]`);
-    node?.scrollIntoView?.({ block: 'nearest' });
-  }, [focused, steps]);
+    // Hidden by the search right now: leave the interval unhandled so its first
+    // row is still reached when the filter stops hiding it.
+    if (node === null) return;
+    node.scrollIntoView?.({ block: 'nearest' });
+    scrolledRange.current = range;
+  }, [focused, range, steps]);
 
   function download() {
     const blob = new Blob([toSessionLog(events)], { type: 'application/x-ndjson' });
@@ -705,7 +796,14 @@ export function TrajectoryView({
           <ExecutionOverview
             model={model}
             mode={mode}
-            onModeChange={setMode}
+            onModeChange={(next) => {
+              if (next === mode) return;
+              setMode(next);
+              // The two projections count different things — operations and
+              // milliseconds — so an interval chosen in one means nothing in
+              // the other and must not survive the switch.
+              setRange(null);
+            }}
             timed={timed}
             range={range}
             onRangeChange={setRange}

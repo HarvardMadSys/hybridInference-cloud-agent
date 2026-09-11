@@ -138,21 +138,33 @@ export function shiftedWindow(
 }
 
 /**
- * A window that shows `value`, keeping the reader's zoom and moving as little
- * as it can. The same viewport comes back when the value is already visible, so
- * a caller can use identity to decide whether anything moved.
+ * A window that shows `span`, keeping the reader's zoom and moving as little as
+ * it can. The span is kept a margin inside the window rather than exactly on its
+ * edge, because a mark is drawn from its start rightward: a span parked on the
+ * right edge has no visible width at all. The same viewport comes back when the
+ * span is already comfortably visible, so a caller can use identity to decide
+ * whether anything moved.
  */
-export function viewportWithValue(
+export function viewportWithSpan(
   viewport: TimelineViewport,
-  value: number,
+  span: DomainRange,
   domain: DomainRange,
   minimumWindow: number,
+  marginFraction = 0.08,
 ): TimelineViewport {
   if (viewport === null) return null;
-  const window = activeWindow(viewport, domain, minimumWindow);
-  if (value >= window.start && value <= window.end) return viewport;
-  const start = value < window.start ? value : value - windowDuration(window);
-  return clampWindow({ start, end: start + windowDuration(window) }, domain, minimumWindow);
+  const window_ = activeWindow(viewport, domain, minimumWindow);
+  const duration = windowDuration(window_);
+  const margin = duration * marginFraction;
+  if (span.start >= window_.start + margin && span.end <= window_.end - margin) return viewport;
+  // A span wider than the window is shown from its start: the reader asked for
+  // the beginning of it, not for its end.
+  const wanted =
+    span.end - span.start + 2 * margin > duration || span.start < window_.start + margin
+      ? span.start - margin
+      : span.end + margin - duration;
+  const next = clampWindow({ start: wanted, end: wanted + duration }, domain, minimumWindow);
+  return next.start === window_.start ? viewport : next;
 }
 
 /** Whether two viewports show the same amount of the domain. */
