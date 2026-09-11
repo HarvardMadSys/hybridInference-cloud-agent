@@ -31,3 +31,10 @@ regexTarget = "line"
 regexes = [
   '''_MCP_TOKEN_SECRET = "e2e-signing-secret-32-bytes-long"''',
 ]
+
+[[allowlists]]
+description = "Fixed conversation row identifier in sidebar status tests."
+regexTarget = "line"
+regexes = [
+  '''^\s*key: 'conversation-1',$''',
+]
