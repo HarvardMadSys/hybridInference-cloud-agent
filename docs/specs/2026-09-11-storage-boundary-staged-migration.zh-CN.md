@@ -1,6 +1,6 @@
 # Cloud Agent 存储边界重建：分阶段实施设计
 
-日期：2026-09-11。状态：**供实施的设计；不是完成报告。**
+日期：2026-09-11。状态：**已实施**（阶段 1–3 全部完成，见文末《实施结果》）。
 目标仓库：`HarvardMadSys/freeinference-cloud-agent`，分支 `dev`。
 设计基线：`59bf2cc`（`feat(web): inspect the harness a runtime reported at init (#194)`）。
 
@@ -341,3 +341,42 @@ disconnect 只使用各自 port；R7 fork 失败清理的闭包引用不被同�
 
 另需覆盖 heartbeat、release-claim、MCP registry/resolve 的未配置依赖路径；至少保留一条错接 port
 负例与一条 Boundary 错映射负例。
+
+---
+
+## 11. 实施结果（2026-09-11）
+
+三个阶段全部落地。`cloud_agent/storage/store.py` 已删除。
+
+### 11.1 与设计的差异
+
+| 设计 | 实际做法 | 为什么 |
+|---|---|---|
+| §5 G3 的共享私有 helper，建议顺序 (c) → (a) | 直接做 (a)：`_insert_event` 与两个 `_fail_*_follow_ups` 迁入 `storage/_sql`，`conn` 作首参 | 实测三者都不碰 `self`，(a) 是搬移而非改造，不需要 (c) 的调查作前置 |
+| — | `_release_host_slot` 也迁入 `_sql/hosts.py` | 它写 `agent_runner_hosts`，调用方全是 attempt——与 `insert_event` 同形，不应让 AttemptCommands 拥有 host 表的语句 |
+| — | 十六个实现统一加 `Postgres` 前缀 | port 与实现原本同名（16 个里 10 个）；阶段 3 的装配根需要同时提到两者 |
+| §6.1「删除三处 `_require_store`」 | 保留各模块自己的 `_require_store`，但没有一个再以具体类为类型 | 它只做去 `None`，本身不是越界；越界的是"以 monolith 为类型" |
+| §6.1「两处 `._pool` 穿透」 | 两个 admin 读模型进入装配（`storage.admin_runs` / `storage.admin_usage`） | 穿透的成因是它们无处可取；给它们一个归属比禁止取用更根本。二者仍是具体类，装配处注明「尚无 port」 |
+
+### 11.2 关于「方法体零改动」
+
+搬运用逐行拷贝，不用 `textwrap.dedent`：dedent 会连三引号 SQL 字面量内部的缩进一起左移，
+Postgres 收到的语句就不再是原来的语句（§7 已警告过这一点）。校验方式是重新解析两侧比对：
+方法体、参数、返回标注、async 性逐字相同，docstring 按 `clean=True` 比（它确实要跟着函数走）。
+共校验 114 个公开方法 + 12 个私有 helper，零差异。
+
+### 11.3 边界的持续约束
+
+| 测试 | 约束 |
+|---|---|
+| `tests/unit/test_storage_ports.py` | port 与 repository 签名/docstring 逐字一致；每个公开方法恰属一个 port；port 不 import storage；从调用点反扫覆盖 |
+| `tests/unit/test_storage_ports_gate.py` | mypy 必须拒绝刻意错接的 fixture（含「十个方法齐全、一个关键字拼写不同」——`runtime_checkable` 会放行的那种） |
+| `tests/unit/test_storage_boundary.py` | 旧入口在生产与测试中都不存在；`storage/` 之外无越界 pool 访问；`Postgres*` 只在装配与 repositories 中出现；装配的属性与 port 一一对应 |
+| `tests/unit/test_schema_baseline.py` | 原先只扫 `store.py`，现扫整个 `cloud_agent/storage/`——同样的断言，覆盖面更大 |
+
+### 11.4 验收
+
+`ruff format` / `ruff check` / `mypy`（99 文件，0 错误）/ `pydocstyle` 全绿；
+`pytest -m "not external and not dbtest"` **2756 passed**（原 2750 + 6 个新边界测试）；
+`TEST_DB_NAME=cloud_agent_storage_test_db pytest -m dbtest` **371 passed**。
+两个数字与拆分前一致。Docker 与 stack smoke 仍未执行（§9.3 的限制不变）。
