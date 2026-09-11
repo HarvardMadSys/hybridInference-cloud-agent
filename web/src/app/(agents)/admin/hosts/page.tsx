@@ -63,7 +63,7 @@ import {
   monotonicNow,
   reasonLabel,
 } from './capacity';
-import { formatAge, runtimeMenu, serverInventory } from './format';
+import { curveSource, curveSourceHosts, formatAge, runtimeMenu, serverInventory } from './format';
 import { AdminNavigation } from '../AdminNavigation';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
@@ -455,17 +455,26 @@ function HostsView() {
 
   const openServer = expanded === null ? null : (servers.find((s) => s.name === expanded) ?? null);
   const openFacts = openServer === null ? null : groupCapacityFacts(openServer.members, elapsedMs);
-  // Every enrollment behind this physical name is a candidate curve, because a
-  // server that reports as one row can be several deployments and only the
-  // operator knows which one they came to look at. The default is the source
-  // the row's own CPU and memory came from, so the panel opens on the machine
-  // the numbers above it describe.
-  const openSources = openServer === null ? [] : openServer.members.map((member) => member.host);
+  // Every live enrollment behind this physical name is a candidate curve,
+  // because a server that reports as one row can be several deployments and
+  // only the operator knows which one they came to look at. A removed one is
+  // not: its row survives for the attempts and history that name it, but it is
+  // not an environment to read a curve from. The default is the source the
+  // row's own CPU and memory came from, so the panel opens on the machine the
+  // numbers above it describe.
+  const openMembers = openServer === null ? [] : curveSourceHosts(openServer.members);
+  const openSources = openMembers.map((member) => member.host);
   const chosenSource =
-    sourceChoice === null || openServer === null
+    sourceChoice === null
       ? null
-      : (openServer.members.find((member) => member.host === sourceChoice) ?? null);
-  const openSource = chosenSource ?? openFacts?.source ?? openServer?.host ?? null;
+      : (openMembers.find((member) => member.host === sourceChoice) ?? null);
+  const openSource =
+    chosenSource ??
+    curveSource(
+      openServer?.members ?? [],
+      openFacts?.source?.host ?? null,
+      openServer?.host?.host ?? null,
+    );
   // The enrollment whose history the panel reads, named by the three things a
   // response has to match to be drawn: a curve is only ever shown under the
   // host, generation and window it was requested for.
@@ -577,7 +586,12 @@ function HostsView() {
     // measured yet the panel opens on the representative enrollment, and
     // leaving the choice null would let the first enrollment to report — a
     // different machine — take the chart without anybody asking.
-    const opened = facts.source ?? servers.find((item) => item.name === server)?.host ?? null;
+    const group = servers.find((item) => item.name === server);
+    const opened = curveSource(
+      group?.members ?? [],
+      facts.source?.host ?? null,
+      group?.host?.host ?? null,
+    );
     setSourceChoice(opened?.host ?? null);
     // Recorded so a re-enrollment while the panel is open can be named as
     // such, rather than looking like a curve that lost its history.

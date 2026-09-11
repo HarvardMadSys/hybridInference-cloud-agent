@@ -80,3 +80,44 @@ export function serverInventory(hosts: AgentRunnerHost[], profile: string) {
     };
   });
 }
+
+/**
+ * The enrollments a capacity curve may be drawn from.
+ *
+ * A physical name groups identities for display, and one of them can be an
+ * environment that has been removed: its row survives on purpose — attempts
+ * name it and its history stays in the API — but its credential is revoked and
+ * it is no longer a machine anyone can read a curve from. Offering it is how
+ * the panel's source control came to look like the server's own name repeated
+ * with a suffix, and how a retired environment came to be mistaken for a
+ * second one.
+ *
+ * Offline is not removed, and is deliberately kept. A host that missed its
+ * heartbeats may be rebooting, its last curve is still this machine's, and the
+ * stale marker is what says how old the reading is.
+ */
+export function curveSourceHosts(members: AgentRunnerHost[]): AgentRunnerHost[] {
+  return members.filter((member) => member.status !== 'disabled');
+}
+
+/**
+ * Which enrollment a curve opens on.
+ *
+ * The row's CPU and memory come from `preferredHost`, so the curve starts
+ * there — unless that reading came from an environment this list does not
+ * offer, in which case the representative stands in. Returns null when the
+ * server has no environment a curve could be drawn from at all.
+ */
+export function curveSource(
+  members: AgentRunnerHost[],
+  preferredHost: string | null,
+  representativeHost: string | null | undefined,
+): AgentRunnerHost | null {
+  const offered = curveSourceHosts(members);
+  return (
+    offered.find((member) => member.host === preferredHost) ??
+    offered.find((member) => member.host === representativeHost) ??
+    offered[0] ??
+    null
+  );
+}
