@@ -760,3 +760,45 @@ async def test_a_migrated_session_advertises_and_confirms_everything(monkeypatch
     ]
     assert held.json()["error"]["code"] == -32601
     assert len(store.created_invocations) == 1
+
+
+# -- the deployment switch ---------------------------------------------
+
+
+async def test_the_switch_closes_both_ways_in(client, upstream, monkeypatch):
+    """The operator's lever has to reach every door, not the one that was open.
+
+    Checked on both endpoints because they are two routes onto the same fence:
+    a withdrawal that stopped the per-connection relay and left the merged host
+    answering would be a kill switch with a way round it.
+    """
+    monkeypatch.setenv("AGENT_MCP_ENABLED", "0")
+
+    per_connection = await client.post(
+        f"/v1/agent/mcp/{_ALIAS}", json=_rpc("tools/list"), headers=_auth()
+    )
+    merged = await client.post("/v1/agent/mcp", json=_rpc("tools/list"), headers=_auth())
+
+    assert per_connection.status_code == 503
+    assert merged.status_code == 503
+    # Named, because the agent must not read this as a broken server and the
+    # person debugging it must not have to guess which lever was pulled.
+    assert "turned off" in per_connection.json()["detail"]["error"]["message"]
+    # And nothing was dialled: the switch is checked before the fence, so a
+    # withdrawn deployment does not spend an upstream request deciding.
+    assert upstream.requests == []
+
+
+async def test_the_switch_is_checked_before_the_token(client, monkeypatch):
+    """A withdrawn deployment says so, rather than reporting a stale token.
+
+    Ordering matters to whoever is reading: with the token checked first, an
+    operator who turned MCP off and then tried a call would be told their job
+    token was invalid, and would go looking in the wrong place.
+    """
+    monkeypatch.setenv("AGENT_MCP_ENABLED", "off")
+
+    response = await client.post(f"/v1/agent/mcp/{_ALIAS}", json=_rpc("tools/list"))
+
+    assert response.status_code == 503
+    assert "turned off" in response.json()["detail"]["error"]["message"]

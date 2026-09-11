@@ -285,6 +285,48 @@ that reason, in the same way a managed-worker connection is refused for having
 no worker. The configuration is real and inspectable; the execution is not, and
 nothing here claims otherwise.
 
+**Deploying this, and backing it out.** Three things have to be true in order,
+and the middle one is the one people skip.
+
+*Order the schema first.* `0005_generic_mcp_connections` drops
+`UNIQUE(user_id, server)`, renames `server` to `template`, adds the connection's
+transport, location, endpoint / launch spec and auth profile, moves the legacy
+`agent_threads.mcp_servers` list onto explicit bindings, and drops that column.
+Deploy it, and drain the old instances, **before** anything writes the new
+shape: an old instance still resolves tools by provider name and ignores the
+status and revision columns, so a connection it cannot see the state of is a
+connection it authorizes anyway. A deployment that cannot drain should keep the
+old API unreachable rather than rely on the new rows being ignored.
+
+*Migrate, do not guess.* The revision maps a legacy name only where the thread's
+owner has exactly one connection for that provider, and writes everything else
+into `agent_mcp_legacy_bindings` with `no_connection` or `ambiguous_connection`.
+Those rows are the list of sessions whose tools a human has to look at; they are
+not cleaned up automatically, because silently dropping them and silently
+guessing which connection a name meant are the same mistake from two sides.
+
+*The switch withdraws use, not data.* `AGENT_MCP_ENABLED=0` refuses
+authorization, session binding, connector binding and every relay call, while
+listing, capabilities and disconnection keep working. It is read from the
+environment, so it is **not in force until every instance has restarted** —
+turning it off and stopping there is not a withdrawal. A deployment that cannot
+prove all instances restarted has to isolate the old listener as well.
+
+*Rolling back* means turning the switch off and returning to a version that
+reads the schema compatibly. It does not mean a downgrade: `0005`'s own
+`downgrade()` re-derives the legacy name list and drops the new tables, so it
+loses every binding made since and cannot represent two connections to one
+service. Leave the schema in place, keep the switch off, and fix forward. The
+switch never deletes a connection, and it never restores a secret somebody
+revoked — a disconnect clears the ciphertext in the same statement that
+tombstones the row.
+
+Two things this feature deliberately does not add: no new dependency for model
+inference (MCP and connectors sit beside the gateway path, not inside it), and
+no second encryption root — connection credentials are wrapped with the same
+`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under their own domain separator, so one
+key to rotate and two credential kinds that cannot be read as each other.
+
 **An adapter may claim MCP only when it can do both halves**: point the CLI at
 the platform's relay, *and* stop it reading any other MCP source. A runtime that
 could be given servers but not stopped from picking up the repository's own

@@ -43,6 +43,7 @@ from cloud_agent.api.routes import require_agent_owner
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import config_import, launch, oauth
 from cloud_agent.mcp.authorization import binding_from_selection
+from cloud_agent.mcp.availability import DISABLED_MESSAGE, mcp_enabled
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
 from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
 from cloud_agent.mcp.models import (
@@ -478,6 +479,23 @@ def _not_found(message: str) -> HTTPException:
     )
 
 
+def _require_mcp_enabled() -> None:
+    """Refuse to *use* MCP when the deployment has withdrawn it.
+
+    Called only by the endpoints that use it -- starting an authorization,
+    writing a credential, binding a session or a connector -- and deliberately
+    not by the ones that read. The design asks the switch to cover
+    authorization, binding and the relay while leaving inspection and
+    disconnection open, because an operator who turns a feature off still has to
+    be able to see what is configured and take it away.
+    """
+    if not mcp_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"type": "server_error", "message": DISABLED_MESSAGE}},
+        )
+
+
 def _bad_request(message: str) -> HTTPException:
     """A request whose input cannot be turned into a connection."""
     return HTTPException(
@@ -755,6 +773,7 @@ async def set_connection_secret(
     store: AgentJobStore | None = Depends(get_agent_job_store),
 ) -> ConnectionView:
     """Set or replace a static credential."""
+    _require_mcp_enabled()
     job_store = _require_store(store)
     row = await job_store.get_mcp_connection(connection_id=connection_id, user_id=user["user_id"])
     if row is None:
@@ -961,6 +980,7 @@ async def authorize_connection(
     """
     from cloud_agent.mcp.transports import HttpMetadataFetcher, TransportError
 
+    _require_mcp_enabled()
     job_store = _require_store(store)
     row = await job_store.get_mcp_connection(connection_id=connection_id, user_id=user["user_id"])
     if row is None:
@@ -1333,6 +1353,7 @@ async def replace_thread_bindings(
     connection the user names must be theirs, which is what makes the
     connection id safe to accept from a client.
     """
+    _require_mcp_enabled()
     job_store = _require_store(store)
     await _require_thread(job_store, thread_id=thread_id, user_id=user["user_id"])
     prepared: list[dict[str, Any]] = []
@@ -1759,6 +1780,7 @@ async def bind_connector_connection(
     platform could reach directly, sent the long way round -- and a
     managed-worker connection belongs to a worker that is not the user's.
     """
+    _require_mcp_enabled()
     job_store = _require_store(store)
     await _require_connector(job_store, connector_id=connector_id, user_id=user["user_id"])
     row = await job_store.get_mcp_connection(

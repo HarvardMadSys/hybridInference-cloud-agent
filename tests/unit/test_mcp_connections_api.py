@@ -1039,6 +1039,97 @@ class TestConnectors:
         assert response.status_code == 404
 
 
+class TestTheDeploymentSwitch:
+    """Turning MCP off has to close use without closing the door behind you."""
+
+    def test_authorizing_and_binding_are_refused_with_the_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every way to *use* MCP, and the message names the lever."""
+        monkeypatch.setenv("AGENT_MCP_ENABLED", "0")
+        store = FakeStore()
+        connection = _seed(store)
+        store.threads["thread-1"] = {"id": "thread-1", "user_id": _OWNER}
+        with _client(store) as client:
+            responses = {
+                "secret": client.post(
+                    f"/v1/agent/mcp/connections/{connection}/secret",
+                    json={"expected_authorization_epoch": 1, "secret": "s"},
+                ),
+                "authorize": client.post(f"/v1/agent/mcp/connections/{connection}/authorize"),
+                "bindings": client.put(
+                    "/v1/agent/mcp/threads/thread-1/bindings",
+                    json={"bindings": [{"connection_id": connection, "tools": {}}]},
+                ),
+                "connector": client.post(
+                    "/v1/agent/mcp/connectors/1/connections", json={"connection_id": connection}
+                ),
+            }
+        assert {name: response.status_code for name, response in responses.items()} == {
+            "secret": 503,
+            "authorize": 503,
+            "bindings": 503,
+            "connector": 503,
+        }
+        assert all(
+            "turned off" in response.json()["detail"]["error"]["message"]
+            for response in responses.values()
+        )
+
+    def test_listing_and_disconnecting_still_work(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A withdrawal that hides the configuration cannot be undone.
+
+        The design asks the switch to leave inspection and disconnection open,
+        which is the difference between an operator withdrawing a feature and
+        an operator losing the ability to clean it up.
+        """
+        monkeypatch.setenv("AGENT_MCP_ENABLED", "0")
+        store = FakeStore()
+        connection = _seed(store)
+        with _client(store) as client:
+            listed = client.get("/v1/agent/mcp/connections")
+            capabilities = client.get(f"/v1/agent/mcp/connections/{connection}/capabilities")
+            removed = client.delete(f"/v1/agent/mcp/connections/{connection}")
+        assert listed.status_code == 200
+        assert listed.json()["connections"][0]["id"] == connection
+        assert capabilities.status_code == 200
+        assert removed.status_code == 204
+
+    def test_an_unset_switch_leaves_everything_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The default has to be the behaviour a deployment already had."""
+        monkeypatch.delenv("AGENT_MCP_ENABLED", raising=False)
+        store = FakeStore()
+        connection = _seed(store)
+        with _client(store) as client:
+            response = client.post(
+                f"/v1/agent/mcp/connections/{connection}/secret",
+                json={
+                    "expected_authorization_epoch": 1,
+                    "secret": "ghp_abcdefghijklmnop",
+                    "replaces_identity": False,
+                },
+            )
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", "off"])
+    def test_the_false_spellings_all_read_as_off(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """An operator's spelling of "off" is not a vocabulary test."""
+        from cloud_agent.mcp.availability import mcp_enabled
+
+        monkeypatch.setenv("AGENT_MCP_ENABLED", value)
+        assert mcp_enabled() is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "", "anything"])
+    def test_everything_else_reads_as_on(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        """Including a typo, which is the safe direction only if we say so."""
+        from cloud_agent.mcp.availability import mcp_enabled
+
+        monkeypatch.setenv("AGENT_MCP_ENABLED", value)
+        assert mcp_enabled() is True
+
+
 class TestCapabilitySelectionSemantics:
     """The policy vocabulary the API accepts."""
 

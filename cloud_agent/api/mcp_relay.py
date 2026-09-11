@@ -47,6 +47,7 @@ from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
+from cloud_agent.mcp.availability import DISABLED_MESSAGE, mcp_enabled
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey, arguments_digest
 from cloud_agent.mcp.invocations import deadline_for
 from cloud_agent.mcp.jsonrpc import INTERNAL_ERROR, INVALID_REQUEST, PARSE_ERROR
@@ -196,7 +197,15 @@ async def _authorize_fence(
     bindings many times, and re-reading the fence per tool would make a
     revocation take effect at a different moment depending on which endpoint
     asked.
+
+    The deployment switch is checked first, and here rather than at each route,
+    so that every way in -- the per-connection relay and the merged host alike
+    -- is closed by one line. A withdrawn deployment that still answered on the
+    endpoint nobody remembered to guard is how a kill switch fails.
     """
+    if not mcp_enabled():
+        raise _refused(503, "server_error", DISABLED_MESSAGE)
+
     token = _bearer(authorization)
 
     try:

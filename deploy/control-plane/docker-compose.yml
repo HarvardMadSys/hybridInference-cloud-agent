@@ -155,6 +155,15 @@ services:
       # container's own address, which is why it cannot be derived here.
       AGENT_SANDBOX_MCP_URL: ${AGENT_SANDBOX_MCP_URL:-}
 
+      # The deployment's MCP kill switch. Unset means enabled; set it to 0 to
+      # withdraw MCP *use* -- authorization, session binding and the relay all
+      # refuse -- while leaving every read and every disconnect working, so an
+      # owner can still see what is configured and take it away. It is read
+      # from the environment rather than stored, so turning it off is not in
+      # force until every instance has restarted; a deployment that cannot
+      # prove that must isolate the old listeners as well.
+      AGENT_MCP_ENABLED: ${AGENT_MCP_ENABLED:-}
+
       # The browser-facing address this service builds OAuth callbacks from.
       # Configured rather than derived from the request: a redirect URI is
       # registered with the authorization server in advance, so a value taken
