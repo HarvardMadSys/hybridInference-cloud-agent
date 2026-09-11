@@ -1,0 +1,13 @@
+# What the recipe's own helpers import on a deploy host.
+#
+# The images carry their own dependencies; this list is only for the two scripts
+# that turn a release manifest into Compose input and environment values. Kept
+# here, in the archive, rather than in the project's dev group: a host that has
+# no source checkout installs from this file, and a missing entry is a deploy
+# that fails with an ImportError instead of a refusal.
+#
+# `jsonschema` is what checks a manifest against deploy/release/manifest.schema.json
+# before anything is deployed; `release_env.py` refuses to run without it rather
+# than skipping the check.
+jsonschema>=4.21
+PyYAML>=6.0
