@@ -17,9 +17,6 @@ export type TimelineViewport = DomainRange | null;
  */
 export const ZOOM_SENSITIVITY = 0.0015;
 
-/** Wheel delta a zoom button stands in for: about 1.5x a press. */
-export const ZOOM_STEP_DELTA_Y = 270;
-
 export function clampFraction(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -105,25 +102,6 @@ export function viewportAfterWheel(
   const duration = zoomedWindowDuration(viewport, deltaY, domain, minimumWindow);
   if (duration >= windowDuration(domain) * 0.999) return null;
   return anchoredWindow(duration, anchorValue, anchorFraction, domain, minimumWindow);
-}
-
-/** The viewport after a zoom button press; `direction` is 1 in, -1 out. */
-export function viewportAfterStep(
-  viewport: TimelineViewport,
-  direction: 1 | -1,
-  anchorValue: number,
-  anchorFraction: number,
-  domain: DomainRange,
-  minimumWindow: number,
-): TimelineViewport {
-  return viewportAfterWheel(
-    viewport,
-    -direction * ZOOM_STEP_DELTA_Y,
-    anchorValue,
-    anchorFraction,
-    domain,
-    minimumWindow,
-  );
 }
 
 /** The window shifted by a fraction of its own width, clamped to the domain. */

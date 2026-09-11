@@ -45,7 +45,6 @@ import {
   sameZoom,
   shiftedWindow,
   valueAtFraction,
-  viewportAfterStep,
   viewportAfterWheel,
   viewportWithSpan,
   windowDuration,
@@ -77,8 +76,11 @@ const STATUS_TONE: Partial<Record<TrajectoryStep['status'], string>> = {
 const LANE_PITCH_PX = 26;
 const LANE_HEIGHT_PX = 20;
 const MARK_HEIGHT_PX = 14;
-/** Width of an operation mark, which stays a mark however far the view zooms. */
-const OPERATION_MARK_WIDTH_PX = 16;
+/**
+ * Width of a mark whose interval is a single instant. Everything wider fills
+ * the slot its step owns, so a lane reads as the band of work it is.
+ */
+const POINT_MARK_WIDTH_PX = 2;
 /** A click that moved less than this selects; more than this drags a range. */
 const MINIMUM_DRAG_PX = 3;
 /** While dragging past an edge, the window follows at this strength and speed. */
@@ -199,7 +201,6 @@ function ExecutionOverview({
   const window_ = activeWindow(viewport, model, model.minimumWindow);
   const windowSpan = windowDuration(window_);
   const fullSpan = windowDuration(model);
-  const canZoomIn = windowSpan > model.minimumWindow * 1.0001;
   const activeRange = draft ?? range;
   const painted = activeRange === null ? null : rangeFraction(activeRange, window_);
   const selectedSpan =
@@ -276,14 +277,6 @@ function ExecutionOverview({
   const commitRange = (next: DomainRange | null): void => {
     setAnimate(false);
     onRangeChange(next);
-  };
-
-  const zoomBy = (direction: 1 | -1): void => {
-    const anchor = valueAtFraction(window_, 0.5);
-    const next = viewportAfterStep(viewport, direction, anchor, 0.5, model, model.minimumWindow);
-    if (sameZoom(next, viewport, model)) return;
-    setAnimate(false);
-    setViewport(next);
   };
 
   const fitAll = (): void => {
@@ -482,7 +475,7 @@ function ExecutionOverview({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2">
         <div className="flex items-center gap-1" role="group" aria-label="Overview projection">
           <button
             type="button"
@@ -506,38 +499,6 @@ function ExecutionOverview({
             className={CONTROL}
           >
             Time
-          </button>
-        </div>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            aria-label="Zoom out"
-            title="Zoom out"
-            disabled={viewport === null}
-            onClick={() => zoomBy(-1)}
-            className={CONTROL}
-          >
-            −
-          </button>
-          <button
-            type="button"
-            aria-label="Zoom in"
-            title="Zoom in"
-            disabled={!canZoomIn}
-            onClick={() => zoomBy(1)}
-            className={CONTROL}
-          >
-            +
-          </button>
-          <button
-            type="button"
-            aria-label="Fit every step"
-            title="Fit every step"
-            disabled={viewport === null && range === null}
-            onClick={fitAll}
-            className={CONTROL}
-          >
-            Fit
           </button>
         </div>
       </div>
@@ -618,12 +579,13 @@ function ExecutionOverview({
                   (span.start <= activeRange.end && span.end >= activeRange.start);
                 const matches = searchMatchKeys === null || searchMatchKeys.has(span.key);
                 const muted = !inRange || !matches;
-                // An operation mark keeps its width wherever the zoom goes; a
-                // recorded interval is as wide as it was long.
-                const width =
-                  mode === 'steps'
-                    ? `${OPERATION_MARK_WIDTH_PX}px`
-                    : `max(2px, calc(${((span.end - span.start) / fullSpan) * 100}% - 2px))`;
+                // Every mark is as wide as the interval it stands for: one
+                // operation in `steps`, its recorded interval in `time`. A lane
+                // therefore reads as the band of work it is, adjacent marks meet
+                // at a single transparent pixel, and zooming widens the marks
+                // with the projection instead of parting them.
+                const share = (span.end - span.start) / fullSpan;
+                const width = share > 0 ? `${share * 100}%` : `${POINT_MARK_WIDTH_PX}px`;
                 // A point mark at the end of the window would be drawn from the
                 // clip edge rightward and be invisible. It is anchored by its
                 // right edge instead, without making its recorded duration up.
@@ -644,7 +606,7 @@ function ExecutionOverview({
                     aria-pressed={open}
                     title={`${span.label} (${span.kind})${span.durationMs !== null ? ` · ${formatDuration(span.durationMs)}` : ''}`}
                     onClick={() => onSelect(span.key)}
-                    className={`absolute rounded-[3px] transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-700 focus-visible:ring-offset-2 dark:focus-visible:ring-gray-200 dark:focus-visible:ring-offset-gray-900 ${
+                    className={`absolute rounded-[3px] border-r border-transparent bg-clip-padding transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-700 focus-visible:ring-offset-2 dark:focus-visible:ring-gray-200 dark:focus-visible:ring-offset-gray-900 ${
                       span.isError
                         ? 'bg-rose-400'
                         : LANES.find((entry) => entry.key === span.lane)?.tone
@@ -660,6 +622,7 @@ function ExecutionOverview({
                     style={{
                       left: `${((span.start - model.start) / fullSpan) * 100}%`,
                       width,
+                      minWidth: POINT_MARK_WIDTH_PX,
                       top: lane * LANE_PITCH_PX + (LANE_HEIGHT_PX - MARK_HEIGHT_PX) / 2,
                       height: MARK_HEIGHT_PX,
                       transform: atWindowEnd ? 'translateX(-100%)' : undefined,

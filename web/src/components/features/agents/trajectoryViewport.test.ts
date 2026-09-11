@@ -9,7 +9,6 @@ import {
   sameZoom,
   shiftedWindow,
   valueAtFraction,
-  viewportAfterStep,
   viewportAfterWheel,
   viewportWithSpan,
   windowDuration,
@@ -81,25 +80,6 @@ describe('viewportAfterWheel', () => {
   it('leaves a fitted overview fitted when the wheel zooms out', () => {
     expect(viewportAfterWheel(FITTED, 100, 30_000, 0.5, DOMAIN, MINIMUM_WINDOW)).toBeNull();
     expect(sameZoom(FITTED, FITTED, DOMAIN)).toBe(true);
-  });
-});
-
-describe('viewportAfterStep', () => {
-  it('moves further a press than one wheel notch does', () => {
-    const wheeled = viewportAfterWheel(FITTED, -100, 30_000, 0.5, DOMAIN, MINIMUM_WINDOW);
-    const stepped = viewportAfterStep(FITTED, 1, 30_000, 0.5, DOMAIN, MINIMUM_WINDOW);
-
-    expect(stepped).not.toBeNull();
-    expect(windowDuration(stepped as DomainRange)).toBeLessThan(
-      windowDuration(wheeled as DomainRange),
-    );
-    expect(windowDuration(DOMAIN) / windowDuration(stepped as DomainRange)).toBeCloseTo(1.5, 2);
-  });
-
-  it('zooms back out to the whole domain', () => {
-    const zoomed = viewportAfterStep(FITTED, 1, 30_000, 0.5, DOMAIN, MINIMUM_WINDOW);
-
-    expect(viewportAfterStep(zoomed, -1, 30_000, 0.5, DOMAIN, MINIMUM_WINDOW)).toBeNull();
   });
 });
 

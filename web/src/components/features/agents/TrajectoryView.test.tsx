@@ -316,9 +316,25 @@ describe('TrajectoryView overview', () => {
 
     expect(domain().style.left).toBe('0%');
     expect(domain().style.width).toBe('100%');
-    // Two steps are already the narrowest window the overview allows.
-    expect(screen.getByRole('button', { name: 'Zoom in' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Zoom out' })).toBeDisabled();
+  });
+
+  it('gives every step its own slot, so marks meet and zoom widens them', () => {
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    const mark = screen.getByRole('button', { name: 'Assistant message (assistant, step 1)' });
+
+    // One operation out of eight: the mark owns its whole slot, and the hairline
+    // against its neighbour is the transparent border, not a gap in the layout.
+    expect(mark.style.width).toBe('12.5%');
+    expect(mark.style.minWidth).toBe('2px');
+    expect(mark.className).toContain('bg-clip-padding');
+
+    wheel(-100);
+
+    // The projection scales, and the mark keeps its share of it, so the mark
+    // itself gets wider rather than being left behind at a fixed size.
+    expect(Number.parseFloat(domain().style.width)).toBeGreaterThan(100);
+    expect(mark.style.width).toBe('12.5%');
   });
 
   it('gives the wheel to the page when there is nothing left to zoom out to', () => {
@@ -336,25 +352,6 @@ describe('TrajectoryView overview', () => {
 
     expect(wheel(100)).toBe(true);
     expect(domain().style.width).toBe('100%');
-  });
-
-  it('steps with the buttons, and fits every step again', () => {
-    render(<Harness events={MANY} />);
-    const zoomIn = screen.getByRole('button', { name: 'Zoom in' });
-    const zoomOut = screen.getByRole('button', { name: 'Zoom out' });
-    const fit = screen.getByRole('button', { name: 'Fit every step' });
-
-    expect(zoomOut).toBeDisabled();
-    expect(fit).toBeDisabled();
-
-    fireEvent.click(zoomIn);
-    expect(Number.parseFloat(domain().style.width)).toBeGreaterThan(100);
-    expect(zoomOut).toBeEnabled();
-    expect(fit).toBeEnabled();
-
-    fireEvent.click(fit);
-    expect(domain().style.width).toBe('100%');
-    expect(zoomOut).toBeDisabled();
   });
 
   it('selects an interval on a drag and steps the rows outside it back', () => {
@@ -423,7 +420,7 @@ describe('TrajectoryView overview', () => {
     const mark = screen.getByRole('button', { name: 'Assistant message (assistant, step 1)' });
 
     fireEvent.click(mark);
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    wheel(-100);
 
     expect(mark).toHaveAttribute('aria-pressed', 'true');
   });
@@ -431,7 +428,7 @@ describe('TrajectoryView overview', () => {
   it('pans from the window at pointer-down, never from the last move', () => {
     render(<Harness events={MANY} />);
     withTrackWidth();
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    wheel(-100);
 
     pointer('pointerdown', { button: 2, pointerId: 1, clientX: 200, clientY: 10 });
     pointer('pointermove', { pointerId: 1, clientX: 220, clientY: 10 });
@@ -462,8 +459,8 @@ describe('TrajectoryView overview', () => {
   it('brings a selected mark inside the right edge of the track', () => {
     render(<Harness events={MANY} />);
     withTrackWidth();
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    wheel(-100);
+    wheel(-100);
     const rows = document.querySelectorAll<HTMLElement>('[data-step-key]');
 
     fireEvent.click(rows[rows.length - 1]);
@@ -494,7 +491,7 @@ describe('TrajectoryView overview', () => {
   it('does not pull an unchanged selection back when a step arrives', () => {
     const { rerender } = render(<Harness events={MANY} />);
     withTrackWidth();
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    wheel(-100);
     fireEvent.click(document.querySelectorAll<HTMLElement>('[data-step-key]')[0]);
     // The reader then pans somewhere else entirely.
     pointer('pointerdown', { button: 2, pointerId: 1, clientX: 200, clientY: 10 });
@@ -527,7 +524,7 @@ describe('TrajectoryView overview', () => {
     vi.useFakeTimers();
     render(<Harness events={MANY} />);
     withTrackWidth();
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    wheel(-100);
 
     pointer('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 10 });
     pointer('pointermove', { pointerId: 1, clientX: 410, clientY: 10 });
@@ -566,7 +563,7 @@ describe('TrajectoryView overview', () => {
     vi.useFakeTimers();
     const { container } = render(<Harness events={MANY} />);
     withTrackWidth();
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    wheel(-100);
     drag(0, 100);
     expect(container.querySelector('[data-timeline-focus="outside"]')).not.toBeNull();
 
@@ -593,7 +590,7 @@ describe('TrajectoryView overview', () => {
     vi.useFakeTimers();
     const { rerender } = render(<Harness events={MANY} />);
     withTrackWidth();
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    wheel(-100);
 
     pointer('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 10 });
     pointer('pointermove', { pointerId: 1, clientX: 410, clientY: 10 });
