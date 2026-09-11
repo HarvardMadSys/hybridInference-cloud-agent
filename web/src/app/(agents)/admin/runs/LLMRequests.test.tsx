@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -412,5 +412,110 @@ describe('LLM requests panel', () => {
     );
     await vi.advanceTimersByTimeAsync(30_000);
     expect(requests).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not append a page that belongs to the source it replaced', async () => {
+    sources.mockResolvedValue(
+      sourcesPage([
+        source(),
+        source({ source_id: '43', attempt_id: 11, attempt_no: 2, window_state: 'open' }),
+      ]),
+    );
+    requests.mockResolvedValueOnce(page([row({ request_id: 'req_a' })], 'cursor-a'));
+    renderPanel();
+    await expand();
+    const selector = await screen.findByRole('combobox');
+    fireEvent.change(selector, { target: { value: '42' } });
+    await screen.findByText('req_a');
+
+    const late = deferred<AdminLlmRequestPage>();
+    requests.mockReturnValueOnce(late.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+
+    requests.mockResolvedValueOnce(page([row({ request_id: 'req_b' })], 'cursor-b'));
+    fireEvent.change(selector, { target: { value: '43' } });
+    await screen.findByText('req_b');
+
+    await act(async () => {
+      late.resolve(page([row({ request_id: 'req_late_a' })], 'cursor-a'));
+      await late.promise;
+    });
+    expect(screen.queryByText('req_late_a')).not.toBeInTheDocument();
+    expect(screen.queryByText('req_a')).not.toBeInTheDocument();
+    expect(screen.getByText(/Loaded 1 record/)).toBeInTheDocument();
+
+    // The continuation is the page on screen, not the one that arrived late.
+    requests.mockResolvedValue(page([]));
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() =>
+      expect(requests).toHaveBeenLastCalledWith(
+        'job-1',
+        { source_id: '43', limit: 50, cursor: 'cursor-b' },
+        expect.anything(),
+      ),
+    );
+  });
+
+  it('leaves the page button usable when a refresh cancels a page in flight', async () => {
+    requests.mockResolvedValueOnce(page([row()], 'cursor-1'));
+    renderPanel();
+    await expand();
+    await screen.findByRole('button', { name: 'Load more' });
+
+    const late = deferred<AdminLlmRequestPage>();
+    requests.mockReturnValueOnce(late.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    expect(await screen.findByRole('button', { name: 'Loading…' })).toBeDisabled();
+
+    requests.mockResolvedValueOnce(page([row({ request_id: 'req_refreshed' })], 'cursor-2'));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('req_refreshed');
+    expect(await screen.findByRole('button', { name: 'Load more' })).toBeEnabled();
+
+    await act(async () => {
+      late.resolve(page([row({ request_id: 'req_late' })]));
+      await late.promise;
+    });
+    expect(screen.queryByText('req_late')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled();
+  });
+
+  it('does not start a refresh while a page is already in flight', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    requests.mockResolvedValueOnce(page([row()], 'cursor-1'));
+    renderPanel({ running: true });
+    await expand();
+    await screen.findByRole('button', { name: 'Load more' });
+
+    const late = deferred<AdminLlmRequestPage>();
+    requests.mockReturnValueOnce(late.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    const started = requests.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(requests.mock.calls.length).toBe(started);
+
+    await act(async () => {
+      late.resolve(page([]));
+      await late.promise;
+    });
+  });
+
+  it('keeps the window that produced the rows when a refresh fails', async () => {
+    requests.mockResolvedValueOnce(page([row()]));
+    renderPanel();
+    await expand();
+    await screen.findByText('req_example');
+    expect(screen.getByText(/3:20:00 AM/)).toBeInTheDocument();
+    expect(screen.getByText(/3:21:00 AM/)).toBeInTheDocument();
+
+    // The stored reference now covers a longer window, but the read failed, so
+    // the rows on screen still belong to the window they were read from.
+    sources.mockResolvedValue(sourcesPage([source({ window_until: '2026-09-11T03:30:00Z' })]));
+    requests.mockRejectedValueOnce(new APIError('SERVICE_UNAVAILABLE', 'unavailable', 503));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText(/Service temporarily unavailable/);
+    expect(screen.getByText(/3:21:00 AM/)).toBeInTheDocument();
+    expect(screen.queryByText(/3:30:00 AM/)).not.toBeInTheDocument();
+    expect(screen.getByText('req_example')).toBeInTheDocument();
   });
 });

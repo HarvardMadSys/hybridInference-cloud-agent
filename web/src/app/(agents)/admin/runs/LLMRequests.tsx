@@ -97,12 +97,37 @@ export function LLMRequests({
   const [restart, setRestart] = useState(false);
   const [stale, setStale] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
-  const selection = useRef<AbortController | null>(null);
-  const more = useRef<AbortController | null>(null);
+  const sourcesRequest = useRef<AbortController | null>(null);
+  const pageRequest = useRef<AbortController | null>(null);
+  const moreRequest = useRef<AbortController | null>(null);
   const generation = useRef(0);
 
   const key = `${jobId}:${attemptId ?? ''}:${sourceId ?? ''}`;
   const loadedKey = useRef('');
+
+  /**
+   * Retire every read that belongs to the selection being replaced.
+   *
+   * The generation is bumped here rather than only where a read starts, so a
+   * response that is already in flight cannot be mistaken for one of the new
+   * selection: it is dropped, not appended, and its cursor never replaces the
+   * current one.
+   */
+  const retire = useCallback(() => {
+    sourcesRequest.current?.abort();
+    sourcesRequest.current = null;
+    pageRequest.current?.abort();
+    pageRequest.current = null;
+    moreRequest.current?.abort();
+    moreRequest.current = null;
+    // Every flag a retired request would have cleared is cleared here, so a
+    // cancelled read can never leave a control disabled for good.
+    setLoading(false);
+    setLoadingSources(false);
+    setMoreLoading(false);
+    generation.current += 1;
+    return generation.current;
+  }, []);
 
   const fail = useCallback(
     (caught: unknown) => {
@@ -125,9 +150,8 @@ export function LLMRequests({
   useEffect(() => {
     if (!expanded) return;
     const controller = new AbortController();
-    const current = ++generation.current;
-    selection.current?.abort();
-    more.current?.abort();
+    const current = retire();
+    sourcesRequest.current = controller;
     setLoadingSources(true);
     setSources(null);
     setSourceReason(null);
@@ -153,8 +177,11 @@ export function LLMRequests({
       .finally(() => {
         if (!controller.signal.aborted && generation.current === current) setLoadingSources(false);
       });
-    return () => controller.abort();
-  }, [expanded, jobId, attemptId, revision, fail]);
+    return () => {
+      controller.abort();
+      if (sourcesRequest.current === controller) sourcesRequest.current = null;
+    };
+  }, [expanded, jobId, attemptId, revision, retire, fail]);
 
   // One page at a time, for one reference. A refresh keeps the rows that are
   // already on screen until the new ones arrive; switching reference clears
@@ -163,8 +190,7 @@ export function LLMRequests({
     if (!expanded || !sourceId) return;
     const controller = new AbortController();
     const current = generation.current;
-    selection.current?.abort();
-    selection.current = controller;
+    pageRequest.current = controller;
     const sameSelection = loadedKey.current === key;
     loadedKey.current = key;
     if (!sameSelection) {
@@ -194,33 +220,40 @@ export function LLMRequests({
       .finally(() => {
         if (!controller.signal.aborted && generation.current === current) setLoading(false);
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (pageRequest.current === controller) pageRequest.current = null;
+    };
   }, [expanded, jobId, sourceId, revision, key, fail]);
 
-  // Only a visible first page of a running execution keeps re-reading itself.
-  // After "load more" the page set is a deliberate read and stops moving.
+  // Changing job, execution or source retires every in-flight read first, so a
+  // page that arrives late is dropped instead of being appended to a list it
+  // does not describe. The same cleanup covers unmounting the panel.
+  useEffect(
+    () => () => {
+      retire();
+    },
+    [key, retire],
+  );
+
+  // Only a visible first page of a running execution keeps re-reading itself,
+  // and never while a read is already in flight. After "load more" the page set
+  // is a deliberate read and stops moving.
   useEffect(() => {
     if (!expanded || !sourceId || !running || pagesLoaded !== 1 || restart) return;
+    if (loading || moreLoading) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       setRevision((value) => value + 1);
     }, AUTO_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [expanded, sourceId, running, pagesLoaded, restart]);
-
-  useEffect(
-    () => () => {
-      selection.current?.abort();
-      more.current?.abort();
-    },
-    [],
-  );
+  }, [expanded, sourceId, running, pagesLoaded, restart, loading, moreLoading]);
 
   async function loadMore() {
     if (!page?.next_cursor || !sourceId || moreLoading) return;
     const controller = new AbortController();
     const current = generation.current;
-    more.current = controller;
+    moreRequest.current = controller;
     setMoreLoading(true);
     setError(null);
     try {
@@ -239,13 +272,26 @@ export function LLMRequests({
       // retrying, and a failed page is not the end of the result.
       if (!controller.signal.aborted && generation.current === current) fail(caught);
     } finally {
-      if (!controller.signal.aborted) setMoreLoading(false);
+      // Cleared whenever this call is still the one the panel is waiting on,
+      // including when a refresh or a selection change cancelled it. Leaving
+      // the flag set on an aborted request disables "Load more" for good.
+      if (moreRequest.current === controller) {
+        moreRequest.current = null;
+        setMoreLoading(false);
+      }
     }
   }
 
   const queryable = (sources ?? []).filter((source) => source.availability === 'queryable');
   const unavailable = (sources ?? []).filter((source) => source.availability !== 'queryable');
   const selected = (sources ?? []).find((source) => source.source_id === sourceId) ?? null;
+  // The rows on screen were read from one fixed window. Fresh source metadata
+  // describes the read that has not happened yet, so a failed refresh must not
+  // relabel rows that belong to the window before it.
+  // The page wins over the source: those are the rows on screen.
+  const shownAttemptNo = page?.attempt_no ?? selected?.attempt_no ?? null;
+  const shownSince = page?.window.since ?? selected?.window_since ?? null;
+  const shownUntil = page?.window.until ?? selected?.window_until ?? null;
 
   return (
     <section aria-labelledby="llm-requests-heading" className="mt-8">
@@ -265,8 +311,8 @@ export function LLMRequests({
         <div className="border-t border-gray-100 px-5 py-4 dark:border-white/5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-gray-500 dark:text-gray-400">
-              {selected
-                ? `Execution ${selected.attempt_no} · Window ${dateTime(selected.window_since)} – ${dateTime(selected.window_until)}`
+              {shownAttemptNo !== null
+                ? `Execution ${shownAttemptNo} · Window ${dateTime(shownSince)} – ${dateTime(shownUntil)}`
                 : `Execution ${attemptId ?? 'unavailable'}`}
             </p>
             <button
