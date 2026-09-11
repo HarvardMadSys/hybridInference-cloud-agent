@@ -22,10 +22,19 @@ export interface AgentAttempt {
   };
 }
 
+/**
+ * One rendered row of the run's activity.
+ *
+ * `sourceEventId` is the stored event's global id, kept so a row that survives
+ * folding keeps a durable identity. The conversation's reading anchor is
+ * restored by row, so an identity that shifts when a tool result is folded in
+ * — or when React re-keys the list — would move a reader who never scrolled.
+ * Display-only: it is never sent back to the server or to the model.
+ */
 export type AgentEvent =
-  | { kind: 'lifecycle'; text: string; attemptNo?: number }
-  | { kind: 'thinking'; text: string; attemptNo?: number }
-  | { kind: 'message'; text: string; attemptNo?: number }
+  | { kind: 'lifecycle'; text: string; attemptNo?: number; sourceEventId?: number }
+  | { kind: 'thinking'; text: string; attemptNo?: number; sourceEventId?: number }
+  | { kind: 'message'; text: string; attemptNo?: number; sourceEventId?: number }
   | {
       kind: 'tool_use';
       tool: string;
@@ -44,6 +53,7 @@ export type AgentEvent =
       /** e.g. "+12 −3" for Edit rows. */
       diffStat?: string;
       attemptNo?: number;
+      sourceEventId?: number;
     }
   | {
       kind: 'tool_result';
@@ -53,10 +63,23 @@ export type AgentEvent =
       /** Event time, ISO — paired with its tool_use to time the call. */
       at?: string | null;
       attemptNo?: number;
+      sourceEventId?: number;
     }
-  | { kind: 'terminal'; text: string; isError?: boolean; attemptNo?: number }
-  | { kind: 'egress_denied'; host: string; attempts: number; attemptNo?: number }
-  | { kind: 'usage'; text: string; attemptNo?: number };
+  | {
+      kind: 'terminal';
+      text: string;
+      isError?: boolean;
+      attemptNo?: number;
+      sourceEventId?: number;
+    }
+  | {
+      kind: 'egress_denied';
+      host: string;
+      attempts: number;
+      attemptNo?: number;
+      sourceEventId?: number;
+    }
+  | { kind: 'usage'; text: string; attemptNo?: number; sourceEventId?: number };
 
 export interface AgentThreadMessage {
   id: number;
@@ -70,6 +93,12 @@ export interface AgentThreadMessage {
 export interface AgentHistoryTurn {
   jobId: string;
   turnNo: number;
+  /**
+   * State of the job that produced this turn, when the thread reported one.
+   * Absent on older payloads; a preview says nothing rather than guessing that
+   * a turn it cannot classify succeeded.
+   */
+  state?: AgentJobState;
   /** Only a completed native assistant boundary is a valid fork anchor. */
   forkable: boolean;
   messages: AgentThreadMessage[];

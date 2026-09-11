@@ -127,6 +127,23 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.language.title': '语言',
   'settings.language.label': '界面语言',
 
+  // ── Conversation turn navigation ────────────────────────────────────────
+  'turnNavigation.rail': '对话轮次',
+  'turnNavigation.directory': '轮次',
+  'turnNavigation.directoryLabel': '本对话的轮次',
+  'turnNavigation.turn': '第 {turn} 轮',
+  'turnNavigation.attempt': '第 {attempt} 次运行',
+  'turnNavigation.jump': '跳转到第 {turn} 轮',
+  'turnNavigation.backToBottom': '回到底部',
+  'turnNavigation.newContent': '有新内容',
+  'turnNavigation.unavailable': '该轮内容暂不可定位。',
+  'turnNavigation.state.queued': '排队中',
+  'turnNavigation.state.running': '运行中',
+  'turnNavigation.state.needsReview': '已完成',
+  'turnNavigation.state.done': '已完成',
+  'turnNavigation.state.failed': '失败',
+  'turnNavigation.state.cancelled': '已停止',
+
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': '已归档会话',
   'archive.subtitle': '找回之前的工作，或整理不再需要的会话。',

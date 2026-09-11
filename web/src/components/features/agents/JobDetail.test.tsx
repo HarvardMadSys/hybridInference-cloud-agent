@@ -2016,3 +2016,100 @@ describe('sending a follow-up', () => {
     expect(box).not.toBeDisabled();
   });
 });
+
+describe('conversation turn navigation', () => {
+  beforeEach(() => {
+    navigation.push.mockReset();
+    vi.mocked(forkAgentJob).mockReset();
+  });
+  afterEach(() => cleanup());
+
+  const EARLIER_TURN = {
+    jobId: 'ajob_0',
+    turnNo: 1,
+    forkable: false,
+    messages: [
+      {
+        id: 1,
+        role: 'user' as const,
+        content: 'Earlier question',
+        jobId: 'ajob_0',
+        createdAt: null,
+      },
+      {
+        id: 2,
+        role: 'assistant' as const,
+        content: 'Earlier answer',
+        jobId: 'ajob_0',
+        createdAt: null,
+      },
+    ],
+    events: [{ kind: 'message' as const, text: 'Earlier answer', attemptNo: 1, sourceEventId: 11 }],
+  };
+
+  // Turn two of a conversation that already has turn one behind it.
+  function multiTurnJob() {
+    return makeJob({ turnNo: 2, historyTurns: [EARLIER_TURN] });
+  }
+
+  it('offers a directory only once there is more than one turn to navigate', () => {
+    const { rerender } = render(<JobDetail job={makeJob()} />);
+    expect(screen.queryByRole('button', { name: 'Turns' })).not.toBeInTheDocument();
+
+    rerender(<JobDetail job={multiTurnJob()} />);
+    expect(screen.getByRole('button', { name: 'Turns' })).toBeInTheDocument();
+  });
+
+  it('lists exactly the turns the transcript renders, in order', async () => {
+    render(<JobDetail job={multiTurnJob()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
+
+    const panel = screen.getByRole('dialog', { name: 'Turns in this chat' });
+    const rows = within(panel).getAllByRole('button');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Earlier question');
+    expect(rows[0]).toHaveTextContent('Earlier answer');
+    expect(rows[1]).toHaveTextContent('Current task');
+    // Which turn the reader is on is measured a frame after layout rather than
+    // guessed from the click that opened this panel.
+    await waitFor(() =>
+      expect(within(panel).getAllByRole('button')[1]).toHaveAttribute('aria-current', 'true'),
+    );
+  });
+
+  it('anchors every rendered turn and row for the scroll controller', () => {
+    const { container } = render(<JobDetail job={multiTurnJob()} />);
+
+    // The rail addresses turns by job id; the reading position is restored by
+    // row, so both identities have to be on the elements the transcript draws.
+    const turnKeys = [...container.querySelectorAll('[data-turn-key]')].map((element) =>
+      element.getAttribute('data-turn-key'),
+    );
+    expect(turnKeys).toEqual(['ajob_0', 'ajob_1']);
+    expect(container.querySelector('[data-block-key="ajob_0:m1"]')).not.toBeNull();
+    expect(container.querySelector('[data-block-key="ajob_0:e11"]')).not.toBeNull();
+    expect(container.querySelector('[data-block-key="ajob_1:prompt"]')).not.toBeNull();
+  });
+
+  it('jumps inside the chat without navigating, forking or switching attempts', async () => {
+    render(<JobDetail job={multiTurnJob()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button')[0]);
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    // The queued frame that recalibrates the mark runs outside this commit.
+    await waitFor(() =>
+      expect(screen.queryByText('That turn could not be located.')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('takes the directory away with the Chat view', () => {
+    render(<JobDetail job={multiTurnJob()} />);
+    expect(screen.getByRole('button', { name: 'Turns' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    expect(screen.queryByRole('button', { name: 'Turns' })).not.toBeInTheDocument();
+  });
+});

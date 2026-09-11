@@ -128,6 +128,23 @@ export const en = {
   'settings.language.title': 'Language',
   'settings.language.label': 'Display language',
 
+  // ── Conversation turn navigation ────────────────────────────────────────
+  'turnNavigation.rail': 'Conversation turns',
+  'turnNavigation.directory': 'Turns',
+  'turnNavigation.directoryLabel': 'Turns in this chat',
+  'turnNavigation.turn': 'Turn {turn}',
+  'turnNavigation.attempt': 'Attempt {attempt}',
+  'turnNavigation.jump': 'Go to turn {turn}',
+  'turnNavigation.backToBottom': 'Back to bottom',
+  'turnNavigation.newContent': 'New content',
+  'turnNavigation.unavailable': 'That turn could not be located.',
+  'turnNavigation.state.queued': 'Queued',
+  'turnNavigation.state.running': 'Running',
+  'turnNavigation.state.needsReview': 'Completed',
+  'turnNavigation.state.done': 'Done',
+  'turnNavigation.state.failed': 'Failed',
+  'turnNavigation.state.cancelled': 'Cancelled',
+
   // ── Archived sessions ───────────────────────────────────────────────────
   'archive.title': 'Archived sessions',
   'archive.subtitle': 'Revisit past work or organize sessions you no longer need.',
