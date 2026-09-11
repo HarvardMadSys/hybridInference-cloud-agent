@@ -31,6 +31,7 @@ def _host(
     daemon_root: str = "/var/lib/docker",
     capability: str = "shared-sandbox-v1,native-fork-at-anchor-v1",
     credential_rejected: bool = False,
+    attest_exit: int = 0,
 ) -> dict[str, str]:
     app_dir = tmp_path / "app"
     app_dir.mkdir()
@@ -65,7 +66,7 @@ def _host(
         "  'info') exit 0 ;;\n"
         f"  *' ps -q runner') printf '%s\\n' '{runner_ids}' ;;\n"
         f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
-        f"  exec*'_shared_live_host_capabilities'*) echo '{capability}' ;;\n"
+        f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
         f"  exec*'retained_docker_data_root'*) echo '{daemon_root}' ;;\n"
         "  exec*'AGENT_CONTROL_PLANE_URL'*) echo '200' ;;\n"
         "  run*) printf '200' ;;\n"
@@ -506,6 +507,24 @@ def test_every_failing_replica_is_reported_not_just_the_first(tmp_path: Path) ->
         assert f"runner-{index} did not attest shared-sandbox-v1" in result.stderr
 
 
+def test_a_runner_whose_preflight_cannot_run_reports_the_exit_code(tmp_path: Path) -> None:
+    """125/126/127 mean the container or the exec is gone, not that a check failed.
+
+    The status has to be captured with `|| rc=$?`. Read from `$?` after the
+    command it is never written at all: the script is `set -Eeuo pipefail`, so a
+    failing `docker exec` ends the subshell where it stands — on the only path
+    that reads the file. That left every failure with an absent status, which
+    the reader below happens to treat as a failure; the next reader may not.
+    """
+    result = _run(_host(tmp_path, attest_exit=125), "check")
+
+    assert result.returncode != 0
+    assert "could not complete sandbox preflight" in result.stderr
+    assert "docker exec status: 125" in result.stderr, (
+        "the exit code is what tells a vanished container from a preflight that raised"
+    )
+
+
 def test_the_attestation_cleanup_belongs_to_the_shell_that_created_it() -> None:
     """`cmd_up` runs these checks in a subshell, and a subshell resets traps.
 
@@ -517,11 +536,19 @@ def test_the_attestation_cleanup_belongs_to_the_shell_that_created_it() -> None:
     script = SANDBOX_HOST.read_text()
     function = script.index("check_shared_live_stack() {")
     check = script[function : script.index("# ── Isolation")]
+    registered = "trap cleanup_attest_dir EXIT"
 
-    assert "trap cleanup_attest_dir EXIT" not in script[:function], (
-        "the cleanup is registered at the top level, where the subshell in cmd_up resets it"
+    # Exactly one, and inside the function. Asserting only that it is absent
+    # *before* the function passes for a registration after it, which is the
+    # same top-level trap and the same leak.
+    assert script.count(registered) == 1, (
+        f"the cleanup is registered {script.count(registered)} times; it belongs once, "
+        "in the shell that creates the directory"
     )
-    assert "trap cleanup_attest_dir EXIT" in check, "no shell cleans the attestation directory up"
+    assert registered in check, (
+        "the cleanup is registered outside check_shared_live_stack, where the subshell in "
+        "cmd_up resets it and a failed `up` leaks its directory"
+    )
 
 
 def test_a_failed_attestation_prints_the_end_of_the_traceback() -> None:

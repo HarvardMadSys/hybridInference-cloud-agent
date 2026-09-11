@@ -497,6 +497,12 @@ class HostHeartbeat:
         #: heartbeat carries that SHA back. Read here as well as per beat so
         #: the baseline is the state this runner started in: without it the
         #: first poll would read an unchanged marker as a change.
+        #:
+        #: Waking early only carries that SHA when `capabilities` is a
+        #: callable: the marker reaches the control plane through the
+        #: capability list, so a static list would beat sooner with an answer
+        #: computed once at startup and the fence would still wait out the
+        #: interval, silently. The runner passes a lambda for that reason.
         self._readiness_marker = (readiness_marker or "").strip() or None
         self._readiness_marker_value = self._read_readiness_marker()
         # Freshly asked on every beat — a static list would report sandboxes

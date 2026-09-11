@@ -556,8 +556,14 @@ check_shared_live_stack() {
   # runner, in listing order, so a failure names the container it came from
   # and the first replica is still the one asked about the broker below.
   #
-  # The status of each `docker exec` goes to a file because `wait` is reaped in
-  # a second pass, after every replica has been started.
+  # Each replica's exit status goes to a file because `wait` is reaped in a
+  # second pass, after every replica has been started — and it is captured with
+  # `|| rc=$?` rather than read from `$?` after the command: under `set -e` a
+  # failing `docker exec` ends this subshell where it stands, so a status
+  # written after it would never be written at all, on the only path that reads
+  # it. The code is carried into the verdict because 125/126/127 mean the
+  # container or the exec itself is gone, which is a different problem from a
+  # preflight that raised.
   ATTEST_DIR="$(mktemp -d)" \
     || die "could not create a directory for per-replica attestation output"
   # Registered here and not at the top of the script, because a trap belongs to
@@ -572,10 +578,11 @@ check_shared_live_stack() {
   for id in $runner_ids; do
     [[ -n "$first_id" ]] || first_id="$id"
     (
+      attest_rc=0
       docker exec "$id" python -c \
         'from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities; from cloud_agent_host.sandbox import build_backend_from_env; backend = build_backend_from_env(); backend.preflight(); print(",".join(capabilities(backend, backend.version_stamp())))' \
-        >"${ATTEST_DIR}/${id}.capability" 2>"${ATTEST_DIR}/${id}.stderr"
-      printf '%s' "$?" >"${ATTEST_DIR}/${id}.status"
+        >"${ATTEST_DIR}/${id}.capability" 2>"${ATTEST_DIR}/${id}.stderr" || attest_rc=$?
+      printf '%s' "${attest_rc}" >"${ATTEST_DIR}/${id}.status"
     ) &
     attest_ids+=("$id")
     attest_pids+=("$!")
@@ -595,7 +602,7 @@ check_shared_live_stack() {
       attest_status="$(<"${ATTEST_DIR}/${id}.status")"
     fi
     if [[ "$attest_status" != "0" ]]; then
-      verdicts+=("runner $id could not complete sandbox preflight and shared-live capability attestation")
+      verdicts+=("runner $id could not complete sandbox preflight and shared-live capability attestation (docker exec status: ${attest_status:-not written})")
       continue
     fi
     capability="$(<"${ATTEST_DIR}/${id}.capability")"

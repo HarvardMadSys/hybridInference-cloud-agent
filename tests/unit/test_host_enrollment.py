@@ -424,6 +424,12 @@ def test_the_runner_watches_the_marker_the_deployment_publishes(monkeypatch) -> 
     notice. A runner that mounts the marker and reads it on the beat alone
     leaves the rollout fence waiting for the next scheduled heartbeat, which is
     silent and is what the interval-sized wait above costs.
+
+    The other half is that the capabilities are recomputed. `HostHeartbeat`
+    accepts a static list as well as a callable, and the marker reaches the
+    control plane *through* that list: given a static one, waking early would
+    only send an answer computed once at startup, and the fence would wait out
+    the interval anyway — the optimization silently becoming nothing.
     """
     monkeypatch.setenv("AGENT_SHARED_LIVE_READY_FILE", "/run/cloud-agent/shared-live-ready")
 
@@ -433,6 +439,10 @@ def test_the_runner_watches_the_marker_the_deployment_publishes(monkeypatch) -> 
     pool = source[source.index("pool = HostHeartbeat(") : source.index("pool.start()")]
     assert "readiness_marker=_shared_live_ready_file()" in pool, (
         "the runner builds its host heartbeat without the marker it was given"
+    )
+    assert "capabilities=lambda:" in pool, (
+        "the host heartbeat was given a static capability list, so a marker-driven beat "
+        "would report the capabilities this runner started with"
     )
 
 
