@@ -537,3 +537,70 @@ def test_physical_server_is_reported_separately_from_enrolled_identity(monkeypat
     monkeypatch.delenv("AGENT_PHYSICAL_HOST")
     enrollment.heartbeat(base_url="http://cp", identity=identity)
     assert calls[-1][0]["physical_host"] is None
+
+
+def test_capacity_is_read_fresh_on_every_beat(monkeypatch) -> None:
+    """The age travels with the beat, not with the sample.
+
+    A cached block re-read on the next beat must carry the age it has *now*,
+    otherwise a stalled collector would keep presenting an old observation as
+    current — which is the one failure this whole feature exists to expose.
+    """
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    bodies: list[dict] = []
+    ages = iter([10, 20])
+    beat = enrollment.HostHeartbeat(
+        base_url="http://cp",
+        identity=identity,
+        capacity_beats=lambda: {"schema_version": 1, "sample_age_ms": next(ages)},
+    )
+
+    def record(url, body, bearer=""):
+        bodies.append(body)
+        if len(bodies) == 2:
+            beat._stop.set()
+        return {"status": "online", "heartbeat_interval_seconds": 0.001}
+
+    monkeypatch.setattr(enrollment, "_post", record)
+    beat._run()
+
+    assert [body["capacity"]["sample_age_ms"] for body in bodies] == [10, 20]
+
+
+def test_a_host_with_no_sample_sends_no_capacity_at_all(monkeypatch) -> None:
+    """``None`` omits the field; it never sends a placeholder block."""
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    bodies: list[dict] = []
+    beat = enrollment.HostHeartbeat(
+        base_url="http://cp",
+        identity=identity,
+        capacity_beats=lambda: None,
+    )
+
+    def record(url, body, bearer=""):
+        bodies.append(body)
+        beat._stop.set()
+        return {"status": "online", "heartbeat_interval_seconds": 0.001}
+
+    monkeypatch.setattr(enrollment, "_post", record)
+    beat._run()
+
+    assert bodies[0]["capacity"] is None
+    assert bodies[0]["slots_total"] is None
+
+
+def test_a_host_without_a_collector_sends_an_absent_block(monkeypatch) -> None:
+    """An older runner's beat is unchanged: the key is present and null."""
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    beat = enrollment.HostHeartbeat(base_url="http://cp", identity=identity)
+    bodies: list[dict] = []
+
+    def record(url, body, bearer=""):
+        bodies.append(body)
+        beat._stop.set()
+        return {"status": "online", "heartbeat_interval_seconds": 0.001}
+
+    monkeypatch.setattr(enrollment, "_post", record)
+    beat._run()
+
+    assert bodies[0]["capacity"] is None

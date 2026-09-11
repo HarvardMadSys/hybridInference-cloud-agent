@@ -112,7 +112,12 @@ async def authenticate_host(
     )
     if host is None:
         raise _unauthorized("This host credential is no longer valid.")
-    return host
+    # The digest rides along in the authentication context and nowhere else.
+    # The capacity half of a heartbeat re-checks it inside the statement that
+    # writes, which is what refuses a delayed request from a credential that
+    # has since been replaced by a re-enrollment of the same name; it is never
+    # logged, never stored in a snapshot and never returned to a caller.
+    return {**host, "credential_hash": hash_secret(token)}
 
 
 def _checked_broker_url(url: str | None) -> str | None:
@@ -219,6 +224,12 @@ async def heartbeat_host(
     job_store = _require_store(store)
     updated = await job_store.record_host_heartbeat(
         host=host["host"],
+        credential_hash=host.get("credential_hash"),
+        # An unusable block was already dropped by the request model, so this
+        # is either a validated observation or nothing at all. The store
+        # decides whether it is new enough to keep.
+        capacity=None if body.capacity is None else body.capacity.model_dump(mode="json"),
+        capacity_sample_age_ms=None if body.capacity is None else body.capacity.sample_age_ms,
         physical_host=body.physical_host,
         slots_total=body.slots_total,
         runner_version=body.runner_version,

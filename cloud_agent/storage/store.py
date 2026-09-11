@@ -38,10 +38,11 @@ import hashlib
 import json
 import secrets
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from cloud_agent.capacity_protocol import CapacityHistoryPointWrite, history_window
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
     ExecutionProfile,
@@ -61,6 +62,9 @@ from cloud_agent.host_pool import (
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.task_titles import fallback_title
 from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 logger = get_logger(__name__)
 
@@ -527,6 +531,30 @@ _QUALIFIED_HOST_COLUMNS = (
     ", ".join(f"h.{column}" for column in _HOST_COLUMN_NAMES)
     + ", (h.credential_hash IS NOT NULL) AS enrolled"
 )
+
+#: The latest host-capacity observation, projected only where it is read.
+#:
+#: Deliberately *not* part of ``_HOST_COLUMN_NAMES``. That list is also what
+#: every broker request resolves a host through — a file read, a terminal, a
+#: git operation — and an 8 KiB monitoring snapshot has no business riding
+#: along on any of them. The admin pool read and the capacity history task ask
+#: for these columns by name; nothing else does.
+_CAPACITY_COLUMN_NAMES = (
+    "capacity_snapshot",
+    "capacity_received_at",
+    "capacity_sampled_at",
+    "capacity_epoch",
+)
+_HOST_CAPACITY_COLUMNS = ", ".join(_CAPACITY_COLUMN_NAMES)
+
+#: How old a stored observation may be and still be written into history. Three
+#: heartbeat intervals: a host that has stopped reporting must stop adding
+#: points rather than have its last reading copied forward minute after minute.
+CAPACITY_HISTORY_MAX_AGE_S = 90.0
+
+#: History retention. The page serves at most 24 hours, so anything older is
+#: deleted rather than merely hidden.
+CAPACITY_HISTORY_RETENTION_S = 24 * 60 * 60.0
 
 
 class AgentJobStore:
@@ -3145,7 +3173,9 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             return await conn.fetchval("SELECT active_host FROM agent_runner_policy WHERE id")
 
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
+    async def runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], datetime]:
         """The pool, the pinned host and the version selection, read together.
 
         One transaction because all three are shown side by side: read
@@ -3154,14 +3184,30 @@ class AgentJobStore:
         the operator is using to fix a bug. The version selection joined that
         for the same reason — a page offering a menu that no longer contains
         the selection it displays is the same failure wearing a different hat.
+
+        **Repeatable read, and read-only.** The pool is the page an operator
+        reads while changing things, so a claim, a pin and a drain landing
+        between the policy read and the host read used to be able to produce a
+        list that never existed: slots already spent shown against a pin not
+        yet switched. One snapshot for all of it removes that class of answer,
+        and ``observed_at`` is the database's own instant for the same
+        snapshot, so the ages the page renders are measured from the moment the
+        data was taken rather than from whenever the client's clock says.
+
+        Returns:
+            ``(hosts, active_host, selected_versions, observed_at)``.
         """
-        async with self._pool.acquire() as conn, conn.transaction():
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            observed_at = await conn.fetchval("SELECT NOW()")
             policy = await conn.fetchrow(
                 "SELECT active_host, runtime_versions FROM agent_runner_policy WHERE id"
             )
             rows = await conn.fetch(
                 f"""
-                SELECT {_HOST_COLUMNS}
+                SELECT {_HOST_COLUMNS}, {_HOST_CAPACITY_COLUMNS}
                 FROM agent_runner_hosts
                 ORDER BY last_seen_at DESC
                 """
@@ -3172,6 +3218,7 @@ class AgentJobStore:
             [{**self._host_row_to_dict(row), "is_active": row["host"] == active} for row in rows],
             active,
             selected,
+            observed_at,
         )
 
     async def deployment_runner_pool(
@@ -3216,7 +3263,7 @@ class AgentJobStore:
 
     async def list_runner_hosts(self) -> list[dict[str, Any]]:
         """Return every host seen polling, most recent poll first."""
-        hosts, _, _ = await self.runner_pool()
+        hosts, _, _, _ = await self.runner_pool()
         return hosts
 
     async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
@@ -3350,6 +3397,11 @@ class AgentJobStore:
         # None (never reported) and {} (reported: no labels) stay distinct.
         host["runtime_versions"] = _load_json(host.get("runtime_versions"))
         host["runtime_versions_available"] = _load_json(host.get("runtime_versions_available"))
+        # Absent from most projections, so read with ``.get``: a row that never
+        # selected the capacity columns must decode to "no observation", not
+        # raise a KeyError on a path that has nothing to do with capacity.
+        if "capacity_snapshot" in host:
+            host["capacity_snapshot"] = _load_json(host["capacity_snapshot"])
         return host
 
     async def issue_enroll_token(
@@ -3449,6 +3501,12 @@ class AgentJobStore:
         name. :meth:`consume_enroll_token` will only spend a token under the
         name an admin bound to it, so reaching this method under a live host's
         name is an operator's decision rather than a machine's.
+
+        Re-enrollment also **rotates the capacity epoch and clears the stored
+        observation**. A rebuilt machine keeps its name, so nothing else
+        distinguishes the new box from the one it replaced; without the
+        rotation the admin chart would join the two machines' histories into
+        one line that no machine ever drew.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -3466,6 +3524,11 @@ class AgentJobStore:
                     labels = EXCLUDED.labels,
                     credential_hash = EXCLUDED.credential_hash,
                     last_heartbeat_at = NULL,
+                    capacity_snapshot = NULL,
+                    capacity_received_at = NULL,
+                    capacity_sampled_at = NULL,
+                    capacity_sample_id = NULL,
+                    capacity_epoch = gen_random_uuid(),
                     slots_used = (
                         SELECT count(*) FROM agent_attempts
                         WHERE host_id = EXCLUDED.host AND status = 'running'
@@ -3507,6 +3570,9 @@ class AgentJobStore:
         self,
         *,
         host: str,
+        credential_hash: str | None = None,
+        capacity: Mapping[str, Any] | None = None,
+        capacity_sample_age_ms: int | None = None,
         physical_host: str | None = None,
         slots_total: int | None = None,
         runner_version: str | None = None,
@@ -3529,8 +3595,39 @@ class AgentJobStore:
         Returns ``None`` for an unknown host. Every field is optional and only
         overwrites when supplied, so a heartbeat that carries nothing but
         liveness does not blank out what enrollment declared.
+
+        **The capacity block is written by a second statement, deliberately.**
+        Its acceptance conditions are not the heartbeat's: the credential must
+        still be the one this request authenticated with, the sample must not
+        be one already stored, and an older observation must not overwrite a
+        younger one. They are enforced in SQL rather than here because the
+        sequence they guard against is a race — credential A authenticates, an
+        operator re-enrolls the name under credential B, and A's delayed
+        request arrives afterwards. Checking "is this still the right
+        credential" outside the write would let exactly that request through.
+        A rejected capacity block costs the host nothing: the liveness half of
+        the same call has already committed.
+
+        Args:
+            host: The authenticated host name.
+            credential_hash: Digest the request authenticated with. The
+                capacity write is refused unless the row still holds it.
+            capacity: The validated, normalized capacity block to store.
+            capacity_sample_age_ms: How old the observation was when sent.
+            physical_host: Admin grouping label; never an identity.
+            slots_total: Claim ceiling this host now reports.
+            runner_version: Runner build the host is running.
+            broker_url: Address the control plane reaches this host's broker.
+            capabilities: What this host can run.
+            sandbox_runtime: Attested container runtime.
+            sandbox_image_digest: Digest of the sandbox image it launches.
+            runtime_versions: Default CLI version per runtime.
+            runtime_versions_available: Every CLI version its image holds.
+
+        Returns:
+            The updated host row, or ``None`` when the host no longer exists.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_runner_hosts
@@ -3570,7 +3667,276 @@ class AgentJobStore:
                 ),
                 json.dumps({"physical_host": physical_host} if physical_host is not None else {}),
             )
-        return None if row is None else self._host_row_to_dict(row)
+            if row is None:
+                return None
+            if (
+                capacity is not None
+                and capacity_sample_age_ms is not None
+                and credential_hash is not None
+            ):
+                await self._record_host_capacity(
+                    conn,
+                    host=host,
+                    credential_hash=credential_hash,
+                    capacity=capacity,
+                    sample_age_ms=capacity_sample_age_ms,
+                )
+        return self._host_row_to_dict(row)
+
+    @staticmethod
+    async def _record_host_capacity(
+        conn: Any,
+        *,
+        host: str,
+        credential_hash: str,
+        capacity: Mapping[str, Any],
+        sample_age_ms: int,
+    ) -> None:
+        """Store a capacity observation, iff it is new, newer, and still ours.
+
+        Three conditions, all in the predicate rather than in a prior read:
+
+        * ``credential_hash`` still matches — a re-enrollment between
+          authentication and this write has cleared the row, and the delayed
+          request must not repopulate it with the previous machine's numbers.
+        * ``sample_id`` differs — the same observation arriving again (a
+          retried heartbeat, a second replica replaying a cached block) does
+          not refresh its timestamps and so cannot be made to look fresh.
+        * ``sampled_at`` is newer than what is stored — replicas report
+          independently and out of order, and the older report must not
+          overwrite the younger one merely because it arrived later.
+
+        ``sampled_at`` is derived from the server's own ``NOW()`` minus the
+        reported age. The runner's wall clock is never trusted, and the two
+        timestamps therefore come from one clock that cannot jump.
+        """
+        await conn.execute(
+            """
+            UPDATE agent_runner_hosts
+            SET capacity_snapshot = $3::jsonb,
+                capacity_received_at = NOW(),
+                capacity_sampled_at = NOW() - make_interval(secs => $4::double precision),
+                capacity_sample_id = $5::uuid
+            WHERE host = $1
+              AND credential_hash = $2
+              AND capacity_sample_id IS DISTINCT FROM $5::uuid
+              AND (
+                  capacity_sampled_at IS NULL
+                  OR capacity_sampled_at < NOW() - make_interval(secs => $4::double precision)
+              )
+            """,
+            host,
+            credential_hash,
+            json.dumps(capacity),
+            sample_age_ms / 1000.0,
+            str(capacity["sample_id"]),
+        )
+
+    async def list_capacity_history_candidates(
+        self, *, after_host: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return one page of hosts whose stored observation is still fresh.
+
+        Keyset pagination on the host name, not ``OFFSET``: the history task
+        walks the pool every minute, and an offset it restarts from would
+        re-read the same prefix forever while the hosts behind it are never
+        sampled.
+
+        The snapshot's scalars are projected as text rather than cast in SQL.
+        A cast would make one corrupt document fail the whole batch, and a
+        batch that fails at the same row never gets past it; parsing happens
+        where a bad value costs a single point.
+
+        Args:
+            after_host: Last host of the previous page, or ``None`` to start.
+            limit: Page size ceiling.
+
+        Returns:
+            Rows ordered by host, each carrying its epoch, sample identity and
+            projected scalars.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT host,
+                       capacity_epoch,
+                       capacity_sample_id,
+                       capacity_sampled_at,
+                       capacity_snapshot #>> '{linux_boot_id}' AS linux_boot_id,
+                       capacity_snapshot #>> '{cpu_percent}' AS cpu_percent,
+                       capacity_snapshot #>> '{cpu_logical_count}' AS cpu_logical_count,
+                       capacity_snapshot #>> '{cpu_window_seconds}' AS cpu_window_seconds,
+                       capacity_snapshot #>> '{missing,cpu}' AS cpu_missing_reason,
+                       capacity_snapshot #>> '{memory_total_bytes}' AS memory_total_bytes,
+                       capacity_snapshot #>> '{memory_available_bytes}' AS memory_available_bytes,
+                       capacity_snapshot #>> '{missing,memory}' AS memory_missing_reason
+                FROM agent_runner_hosts
+                WHERE capacity_snapshot IS NOT NULL
+                  AND capacity_sample_id IS NOT NULL
+                  AND capacity_sampled_at IS NOT NULL
+                  AND capacity_sampled_at
+                      >= NOW() - make_interval(secs => $2::double precision)
+                  AND host > COALESCE($1, '')
+                ORDER BY host
+                LIMIT $3
+                """,
+                after_host,
+                CAPACITY_HISTORY_MAX_AGE_S,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def record_capacity_history_point(
+        self,
+        *,
+        host: str,
+        capacity_epoch: Any,
+        point: CapacityHistoryPointWrite,
+    ) -> bool:
+        """Keep one observation for a host, epoch and minute.
+
+        ``ON CONFLICT DO NOTHING`` against both the primary key and the sample
+        uniqueness constraint, and that is the whole correctness argument: the
+        first fresh observation selected for a minute is the one that is kept.
+        Later ones in the same minute are not averaged, not summed and not
+        allowed to replace it — three runner replicas report independently, and
+        a chart built from whichever of them wrote last would move for reasons
+        that have nothing to do with the machine.
+
+        Args:
+            host: The host the observation belongs to.
+            capacity_epoch: The generation it was observed under. Passed
+                through from the row that was read, never re-derived, so a
+                delayed write cannot stamp an old sample with a new epoch.
+            point: The scalar observation.
+
+        Returns:
+            ``True`` when this call inserted the minute's point.
+        """
+        async with self._pool.acquire() as conn:
+            inserted = await conn.fetchval(
+                """
+                INSERT INTO agent_host_capacity_history (
+                    host, capacity_epoch, bucket_at, sampled_at, sample_id, linux_boot_id,
+                    cpu_percent, cpu_logical_count, cpu_window_seconds, cpu_missing_reason,
+                    memory_total_bytes, memory_available_bytes, memory_missing_reason
+                )
+                VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7, $8, $9, $10, $11, $12, $13)
+                ON CONFLICT DO NOTHING
+                RETURNING bucket_at
+                """,
+                host,
+                capacity_epoch,
+                point.bucket_at,
+                point.sampled_at,
+                point.sample_id,
+                point.linux_boot_id,
+                point.cpu_percent,
+                point.cpu_logical_count,
+                point.cpu_window_seconds,
+                point.cpu_missing_reason,
+                point.memory_total_bytes,
+                point.memory_available_bytes,
+                point.memory_missing_reason,
+            )
+        return inserted is not None
+
+    async def prune_capacity_history(
+        self, *, older_than_seconds: float = CAPACITY_HISTORY_RETENTION_S, limit: int = 2000
+    ) -> int:
+        """Delete one bounded batch of history older than the retention window.
+
+        Bounded because this runs beside the reaper and the publisher on the
+        same database: an unbounded ``DELETE`` after a control-plane outage
+        would hold locks for as long as it took to remove the backlog, and the
+        work it delayed is recovering jobs.
+
+        Args:
+            older_than_seconds: Retention window.
+            limit: Rows this call may remove.
+
+        Returns:
+            How many rows were removed.
+        """
+        async with self._pool.acquire() as conn:
+            # The delete is a data-modifying CTE and the count comes from the
+            # outer SELECT. Returning the deleted rows and calling ``fetchval``
+            # would yield the first row — that is, ``1`` for every batch — and
+            # a retention pass that always reports one row looks like it is
+            # keeping up while the table grows without bound.
+            removed = await conn.fetchval(
+                """
+                WITH expired AS (
+                    SELECT ctid FROM agent_host_capacity_history
+                    WHERE bucket_at < NOW() - make_interval(secs => $1::double precision)
+                    LIMIT $2
+                ), removed AS (
+                    DELETE FROM agent_host_capacity_history h
+                    USING expired
+                    WHERE h.ctid = expired.ctid
+                    RETURNING 1
+                )
+                SELECT count(*) FROM removed
+                """,
+                older_than_seconds,
+                limit,
+            )
+        return 0 if removed is None else int(removed)
+
+    async def host_capacity_history(
+        self, *, host: str, range_seconds: int
+    ) -> dict[str, Any] | None:
+        """Read one host's stored capacity history for the current epoch.
+
+        The epoch and the points come from a single read-only repeatable-read
+        view, which is what stops a re-enrollment landing between them from
+        returning a window labelled with one generation and filled from
+        another.
+
+        Args:
+            host: Enrollment name.
+            range_seconds: Window length ending at the read's own minute.
+
+        Returns:
+            ``{"capacity_epoch", "since", "until", "observed_at", "rows"}``,
+            or ``None`` when no such host exists. A host that has never
+            reported capacity answers with an empty point list rather than
+            ``None``: it exists, and "not measured" is a different answer from
+            "not here".
+        """
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            observed_at = await conn.fetchval("SELECT NOW()")
+            epoch = await conn.fetchval(
+                "SELECT capacity_epoch FROM agent_runner_hosts WHERE host = $1", host
+            )
+            if epoch is None:
+                return None
+            since, until = history_window(now=observed_at, seconds=range_seconds)
+            rows = await conn.fetch(
+                """
+                SELECT bucket_at, sampled_at, linux_boot_id, cpu_percent,
+                       cpu_logical_count, cpu_window_seconds, cpu_missing_reason,
+                       memory_total_bytes, memory_available_bytes, memory_missing_reason
+                FROM agent_host_capacity_history
+                WHERE host = $1 AND capacity_epoch = $2
+                  AND bucket_at >= $3 AND bucket_at <= $4
+                ORDER BY bucket_at
+                """,
+                host,
+                epoch,
+                since,
+                until,
+            )
+        return {
+            "capacity_epoch": epoch,
+            "since": since,
+            "until": until,
+            "observed_at": observed_at,
+            "rows": [dict(row) for row in rows],
+        }
 
     async def set_host_status(self, *, host: str, status: str) -> str:
         """Move a host to ``status``, refusing transitions the table forbids.

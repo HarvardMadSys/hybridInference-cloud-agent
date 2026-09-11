@@ -57,6 +57,7 @@ from cloud_agent_host.drivers import (
     driver_for,
 )
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
+from cloud_agent_host.host_capacity import HostCapacityCollector, capacity_enabled
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.resident_transport import ResidentLaunch
@@ -2133,6 +2134,37 @@ def _runner_version() -> str:
     return (os.environ.get("AGENT_RUNNER_VERSION") or "").strip()
 
 
+def _start_host_capacity_collector(backend: SandboxBackend) -> HostCapacityCollector | None:
+    """Start sampling this host's load, or return ``None`` when disabled.
+
+    Sampling is best effort by construction: it observes a machine, it never
+    gates a claim, and a deployment that has not mounted the host's proc files
+    gets "not measured" rather than a fabricated reading. That is why a failure
+    here is a log line and not a startup error — a runner that cannot report
+    CPU must still be able to run jobs.
+
+    One collector per process, on its own daemon thread. Three replicas on one
+    machine therefore sample independently and each keeps its own CPU baseline;
+    the control plane keeps one latest report per host and never adds replicas
+    together, because they are three views of one machine, not three machines.
+    """
+    if not capacity_enabled():
+        logger.info(
+            "agent_host_capacity_disabled",
+            extra={"event": "agent_host_capacity_disabled"},
+        )
+        return None
+    collector = HostCapacityCollector(
+        # The same namespace the sandbox manager stamps on every container it
+        # creates, read off the same backend object, so a host can never count
+        # a sibling deployment's containers as its own.
+        namespace=getattr(backend, "sandbox_namespace", "") or "",
+        docker_binary=getattr(backend, "docker_binary", "docker"),
+    )
+    collector.start()
+    return collector
+
+
 def run_forever(
     *,
     base_url: str,
@@ -2191,6 +2223,7 @@ def run_forever(
             "configure AGENT_ENROLL_TOKEN or a persisted host credential"
         )
 
+    capacity = _start_host_capacity_collector(backend)
     pool = HostHeartbeat(
         base_url=base_url,
         identity=identity,
@@ -2203,11 +2236,28 @@ def run_forever(
         runtime_versions=stamp.get("runtime_versions"),
         runtime_versions_available=stamp.get("runtime_versions_available"),
         retained_sandbox_beats=_retained_sandbox_heartbeat_rows,
+        # Read per beat, so the age it carries is the age it had when the beat
+        # was built. ``None`` before the first sample, and once the newest one
+        # is older than the protocol allows: an unsent observation reads as
+        # stale on the page, which is the truth.
+        capacity_beats=None if capacity is None else lambda: capacity.latest()[0],
         on_residencies_lost=_handle_host_residencies_lost,
         on_retained_sandboxes_stop=_stop_retained_sandboxes,
     )
     pool.start()
     _drain_on_sigterm()
+
+    def stop_all() -> None:
+        """Stop heartbeating and sampling, in that order.
+
+        The sampler never joins a heartbeat in flight, so the pool is stopped
+        first and the thread that fed it second; neither call can block on the
+        other, which is what keeps a shut-down runner from waiting on a Docker
+        daemon it no longer needs.
+        """
+        pool.stop()
+        if capacity is not None:
+            capacity.stop()
 
     print(
         f"agent runner {worker_id} started on host {identity.host} (enrolled; "
@@ -2218,7 +2268,7 @@ def run_forever(
     while True:
         if _STOPPING.is_set():
             print("agent runner: stopping after the current job", file=sys.stderr, flush=True)
-            pool.stop()
+            stop_all()
             return 0
 
         if not pool.claimable:
@@ -2228,7 +2278,7 @@ def run_forever(
                     file=sys.stderr,
                     flush=True,
                 )
-                pool.stop()
+                stop_all()
                 return 0
             time.sleep(idle_sleep_s)
             continue
@@ -2252,7 +2302,7 @@ def run_forever(
                 host=identity.host,
             )
         except KeyboardInterrupt:
-            pool.stop()
+            stop_all()
             return 0
         except ClaimUnreachable as exc:
             print(
