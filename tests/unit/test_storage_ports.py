@@ -25,6 +25,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PORTS_DIR = REPO_ROOT / "cloud_agent" / "ports"
 STORE_PATH = REPO_ROOT / "cloud_agent" / "storage" / "store.py"
+REPOSITORIES_DIR = REPO_ROOT / "cloud_agent" / "storage" / "repositories"
 
 #: ``initialize`` is the store's own lifecycle call, not a capability any caller
 #: asks a port for. It leaves with the startup path in stage 3.
@@ -54,18 +55,40 @@ def _port_files() -> list[Path]:
     return sorted(p for p in PORTS_DIR.glob("*.py") if p.name != "__init__.py")
 
 
+def _repository_files() -> list[Path]:
+    """Capabilities that have moved out of the store into their own class."""
+    if not REPOSITORIES_DIR.is_dir():
+        return []
+    return sorted(p for p in REPOSITORIES_DIR.glob("*.py") if p.name != "__init__.py")
+
+
+def _implementations() -> dict[str, tuple[str, str, str, str]]:
+    """Every method a port can be satisfied by, repositories taking precedence.
+
+    Stage 2 moves one capability at a time: the statements go to a
+    repository and the store keeps a delegating stub. The port describes the
+    statements, so it is the repository that has to match it once one exists.
+    """
+    found: dict[str, tuple[str, str, str, str]] = {}
+    for path in _repository_files():
+        found.update(_methods(path))
+    for name, described in _methods(STORE_PATH, "AgentJobStore").items():
+        found.setdefault(name, described)
+    return found
+
+
 def test_the_ports_directory_is_not_empty() -> None:
     """A scan that silently matches nothing would pass every test below."""
     assert len(_port_files()) == 16
 
 
 @pytest.mark.parametrize("path", _port_files(), ids=lambda p: p.stem)
-def test_every_port_method_matches_the_store(path: Path) -> None:
+def test_every_port_method_matches_its_implementation(path: Path) -> None:
     """Same name, same async-ness, same signature, same documented contract."""
-    store = _methods(STORE_PATH, "AgentJobStore")
+    store = _implementations()
     port = _methods(path)
     missing = sorted(name for name in port if name not in store)
-    assert not missing, f"{path.name}: not on AgentJobStore: {missing}"
+    assert not missing, f"{path.name}: implemented nowhere: {missing}"
     for name, described in port.items():
         actual = store[name]
         assert described[0] == actual[0], f"{path.name}.{name}: async-ness differs"
@@ -115,7 +138,7 @@ def test_the_ports_cover_every_capability_the_callers_reach_for() -> None:
     the same name is counted too. That direction is safe here -- a false
     positive can only make this test stricter, never more permissive.
     """
-    store = _methods(STORE_PATH, "AgentJobStore")
+    store = _implementations()
     public = {name for name in store if not name.startswith("_")}
     claimed = {name for path in _port_files() for name in _methods(path)}
 
