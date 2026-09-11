@@ -30,6 +30,7 @@ from cloud_agent.capacity_protocol import (
     bucket_for,
 )
 from cloud_agent.host_pool import HOST_ONLINE, hash_secret
+from cloud_agent.storage.repositories.host_capacity import HostCapacityRepository
 from cloud_agent.storage.store import AgentJobStore
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
@@ -60,7 +61,7 @@ def _db_config() -> dict[str, object]:
 
 
 @pytest_asyncio.fixture
-async def store():
+async def db():
     """A clean store over the shared test database, left empty afterwards."""
     config = _db_config()
     try:
@@ -77,13 +78,25 @@ async def store():
 
     await _reset()
     try:
-        yield AgentJobStore(pool)
+        yield pool
     finally:
         # One test walks the schema backwards; the shared per-worker database
         # is expected at head by every other test whatever happened here.
         apply_migrations(config)
         await _reset()
         await pool.close()
+
+
+@pytest_asyncio.fixture
+async def store(db):
+    """Everything else this test needs, to enrol a host and beat for it."""
+    return AgentJobStore(db)
+
+
+@pytest_asyncio.fixture
+async def capacity(db):
+    """The capability under test, on the repository that now owns it."""
+    return HostCapacityRepository(db)
 
 
 def capacity_block(
@@ -254,13 +267,15 @@ async def test_re_enrollment_clears_the_observation_and_rotates_the_epoch(store)
     assert after["capacity_epoch"] != before["capacity_epoch"]
 
 
-async def test_the_candidate_read_only_returns_fresh_observations(store):
+async def test_the_candidate_read_only_returns_fresh_observations(
+    store, capacity: HostCapacityRepository
+):
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=120_000)
 
     # Older than the ninety-second window: a host that stopped reporting must
     # stop adding points rather than have its last reading copied forward.
-    assert await store.list_capacity_history_candidates() == []
+    assert await capacity.list_capacity_history_candidates() == []
 
     await _beat(
         store,
@@ -269,20 +284,20 @@ async def test_the_candidate_read_only_returns_fresh_observations(store):
         block=capacity_block("00000000-0000-4000-8000-000000000009"),
         age_ms=100,
     )
-    (candidate,) = await store.list_capacity_history_candidates()
+    (candidate,) = await capacity.list_capacity_history_candidates()
     assert candidate["host"] == "runner-a"
     assert candidate["cpu_percent"] == "37.2"
     assert candidate["memory_available_bytes"] == str(86 * 1024**3)
 
 
-async def test_the_candidate_read_pages_by_host_name(store):
+async def test_the_candidate_read_pages_by_host_name(store, capacity: HostCapacityRepository):
     for name in ("runner-a", "runner-b", "runner-c"):
         digest = await _enrol(store, name)
         await _beat(store, name, digest, block=capacity_block(), age_ms=100)
 
-    first = await store.list_capacity_history_candidates(limit=2)
+    first = await capacity.list_capacity_history_candidates(limit=2)
     assert [row["host"] for row in first] == ["runner-a", "runner-b"]
-    second = await store.list_capacity_history_candidates(after_host="runner-b", limit=2)
+    second = await capacity.list_capacity_history_candidates(after_host="runner-b", limit=2)
     assert [row["host"] for row in second] == ["runner-c"]
 
 
@@ -291,6 +306,7 @@ async def test_the_candidate_read_pages_by_host_name(store):
 
 async def _record_point(
     store: AgentJobStore,
+    capacity: HostCapacityRepository,
     host: str,
     *,
     minutes_ago: int = 0,
@@ -303,7 +319,7 @@ async def _record_point(
     # projection, which is the only read that carries the capacity columns.
     host_row = next(row for row in await store.list_runner_hosts() if row["host"] == host)
     sampled_at = datetime.now(UTC) - timedelta(minutes=minutes_ago)
-    return await store.record_capacity_history_point(
+    return await capacity.record_capacity_history_point(
         host=host,
         capacity_epoch=host_row["capacity_epoch"],
         point=CapacityHistoryPointWrite(
@@ -322,14 +338,17 @@ async def _record_point(
     )
 
 
-async def test_one_minute_keeps_the_first_observation_selected(store):
+async def test_one_minute_keeps_the_first_observation_selected(
+    store, capacity: HostCapacityRepository
+):
     """Three replicas report the same minute; the chart must not wobble."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
-    assert await _record_point(store, "runner-a", cpu_percent=10.0) is True
+    assert await _record_point(store, capacity, "runner-a", cpu_percent=10.0) is True
     assert (
         await _record_point(
             store,
+            capacity,
             "runner-a",
             sample_id="00000000-0000-4000-8000-0000000000bb",
             cpu_percent=90.0,
@@ -337,21 +356,23 @@ async def test_one_minute_keeps_the_first_observation_selected(store):
         is False
     )
 
-    history = await store.host_capacity_history(host="runner-a", range_seconds=3600)
+    history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
     assert history is not None
     assert len(history["rows"]) == 1
     assert history["rows"][0]["cpu_percent"] == pytest.approx(10.0)
 
 
-async def test_the_same_sample_cannot_produce_a_second_point(store):
+async def test_the_same_sample_cannot_produce_a_second_point(
+    store, capacity: HostCapacityRepository
+):
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
-    assert await _record_point(store, "runner-a", minutes_ago=0) is True
+    assert await _record_point(store, capacity, "runner-a", minutes_ago=0) is True
     # A retry a minute later is still the same observation.
-    assert await _record_point(store, "runner-a", minutes_ago=1) is False
+    assert await _record_point(store, capacity, "runner-a", minutes_ago=1) is False
 
 
-async def test_a_cpu_gap_still_stores_its_memory_half(store):
+async def test_a_cpu_gap_still_stores_its_memory_half(store, capacity: HostCapacityRepository):
     """A CPU that is warming up must not hide a perfectly good memory reading."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
@@ -359,6 +380,7 @@ async def test_a_cpu_gap_still_stores_its_memory_half(store):
     assert (
         await _record_point(
             store,
+            capacity,
             "runner-a",
             sample_id="00000000-0000-4000-8000-0000000000cc",
             cpu_percent=None,
@@ -367,7 +389,7 @@ async def test_a_cpu_gap_still_stores_its_memory_half(store):
         is True
     )
 
-    history = await store.host_capacity_history(host="runner-a", range_seconds=3600)
+    history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
     assert history is not None
     (point,) = history["rows"]
     assert point["cpu_percent"] is None
@@ -375,75 +397,84 @@ async def test_a_cpu_gap_still_stores_its_memory_half(store):
     assert point["memory_total_bytes"] == 128 * 1024**3
 
 
-async def test_history_is_scoped_to_the_current_epoch(store):
+async def test_history_is_scoped_to_the_current_epoch(store, capacity: HostCapacityRepository):
     """A rebuilt machine keeps its name; the old curve is not its curve."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
-    await _record_point(store, "runner-a", cpu_percent=11.0)
+    await _record_point(store, capacity, "runner-a", cpu_percent=11.0)
 
     await _enrol(store, "runner-a")
     digest = hash_secret("cred-runner-a")
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
     await _record_point(
-        store, "runner-a", sample_id="00000000-0000-4000-8000-0000000000dd", cpu_percent=88.0
+        store,
+        capacity,
+        "runner-a",
+        sample_id="00000000-0000-4000-8000-0000000000dd",
+        cpu_percent=88.0,
     )
 
-    history = await store.host_capacity_history(host="runner-a", range_seconds=3600)
+    history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
     assert history is not None
     assert [row["cpu_percent"] for row in history["rows"]] == [pytest.approx(88.0)]
 
 
-async def test_a_host_with_no_history_is_an_empty_window_not_a_missing_host(store):
+async def test_a_host_with_no_history_is_an_empty_window_not_a_missing_host(
+    store, capacity: HostCapacityRepository
+):
     await _enrol(store)
-    history = await store.host_capacity_history(host="runner-a", range_seconds=3600)
+    history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
     assert history is not None
     assert history["rows"] == []
     assert history["capacity_epoch"] is not None
-    assert await store.host_capacity_history(host="nobody", range_seconds=3600) is None
+    assert await capacity.host_capacity_history(host="nobody", range_seconds=3600) is None
 
 
-async def test_pruning_removes_only_expired_rows_and_is_bounded(store):
+async def test_pruning_removes_only_expired_rows_and_is_bounded(
+    store, capacity: HostCapacityRepository
+):
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
     for index in range(4):
         await _record_point(
             store,
+            capacity,
             "runner-a",
             minutes_ago=index,
             sample_id=f"00000000-0000-4000-8000-0000000000{index:02d}",
         )
 
-    assert await store.prune_capacity_history(older_than_seconds=3600, limit=2000) == 0
-    assert await store.prune_capacity_history(older_than_seconds=0, limit=2) == 2
-    history = await store.host_capacity_history(host="runner-a", range_seconds=86400)
+    assert await capacity.prune_capacity_history(older_than_seconds=3600, limit=2000) == 0
+    assert await capacity.prune_capacity_history(older_than_seconds=0, limit=2) == 2
+    history = await capacity.host_capacity_history(host="runner-a", range_seconds=86400)
     assert history is not None
     assert len(history["rows"]) == 2
 
 
-async def test_removing_a_host_keeps_its_history(store):
+async def test_removing_a_host_keeps_its_history(store, capacity: HostCapacityRepository):
     """``Remove`` revokes a credential; it does not rewrite the record."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
-    await _record_point(store, "runner-a")
+    await _record_point(store, capacity, "runner-a")
 
     assert await store.remove_host(host="runner-a") == "ok"
 
-    history = await store.host_capacity_history(host="runner-a", range_seconds=3600)
+    history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
     assert history is not None
     assert len(history["rows"]) == 1
 
 
-async def test_forgetting_a_host_takes_its_history_with_it(store):
+async def test_forgetting_a_host_takes_its_history_with_it(store, capacity: HostCapacityRepository):
     """The one hard delete in the lifecycle, and the graph goes with it."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
-    await _record_point(store, "runner-a")
+    await _record_point(store, capacity, "runner-a")
     (row,) = await store.list_runner_hosts()
     epoch = row["capacity_epoch"]
 
     assert await store.forget_runner_host(host="runner-a") == "deleted"
 
-    assert await store.host_capacity_history(host="runner-a", range_seconds=3600) is None
+    assert await capacity.host_capacity_history(host="runner-a", range_seconds=3600) is None
     async with store._pool.acquire() as conn:
         remaining = await conn.fetchval(
             "SELECT count(*) FROM agent_host_capacity_history WHERE capacity_epoch = $1", epoch
@@ -483,7 +514,9 @@ async def test_a_block_the_database_refuses_cannot_roll_back_the_heartbeat(store
     assert listed["capacity_snapshot"] is None
 
 
-async def test_the_history_endpoint_maps_real_database_rows(store):
+async def test_the_history_endpoint_maps_real_database_rows(
+    store, capacity: HostCapacityRepository
+):
     """The route's own mapping, over the types a real database hands back.
 
     asyncpg returns a UUID column as a ``UUID`` object, and the response model
@@ -495,7 +528,7 @@ async def test_the_history_endpoint_maps_real_database_rows(store):
 
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
-    assert await _record_point(store, "runner-a") is True
+    assert await _record_point(store, capacity, "runner-a") is True
 
     response = await admin_hosts.get_agent_runner_host_capacity_history(
         host="runner-a", window="1h", _admin_id="admin", store=store
