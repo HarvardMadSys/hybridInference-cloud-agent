@@ -1571,24 +1571,36 @@ def test_deployment_builds_disable_provenance_attestations() -> None:
     host = (REPO_ROOT / "deploy/host/sandbox_host.sh").read_text()
     control = _CONTROL_PLANE_DEPLOY.read_text()
 
+    # `in`, not `startswith`: the host passes its image and replica count as a
+    # command prefix, so the line can legitimately read
+    # `AGENT_SANDBOX_IMAGE=… compose build …`. It happens to be a continuation
+    # line today, which is the only reason `startswith` finds it — joining those
+    # two lines, an ordinary tidy-up, would retire this assertion in silence.
+    # Comments are skipped because three of them name these commands while
+    # explaining the flag.
     compose_builds = [
         line.strip()
         for line in (host + control).splitlines()
-        if line.strip().startswith("compose build")
+        if "compose build" in line and not line.strip().startswith("#")
     ]
     assert compose_builds, "no compose build command found — has it moved?"
     for line in compose_builds:
         assert "--provenance=false" in line, f"compose build without the flag: {line!r}"
 
     sandbox_builds = [
-        line.strip() for line in host.splitlines() if line.strip().startswith("docker build")
+        line.strip()
+        for line in host.splitlines()
+        if "docker build" in line and not line.strip().startswith("#")
     ]
     assert sandbox_builds, "no sandbox image build found — has it moved?"
     for line in sandbox_builds:
         assert "--provenance=false" in line, f"sandbox image build without the flag: {line!r}"
 
     for compose in (_COMPOSE, _CONTROL_PLANE_COMPOSE):
-        assert "provenance" not in compose.read_text(), (
+        # The *key*, not the word: a comment recording why `build.provenance`
+        # cannot be used here is exactly what the next reader needs, and a
+        # substring check would fail the file for carrying it.
+        assert not re.search(r"^\s*provenance\s*:", compose.read_text(), re.MULTILINE), (
             f"{compose.name} sets build.provenance, which compose accepts and then ignores; "
             "the flag has to be on the build command"
         )
