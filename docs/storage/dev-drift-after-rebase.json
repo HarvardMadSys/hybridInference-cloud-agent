@@ -1,34 +1,51 @@
 {
-  "dev_sha": "d4bcec0fd8b5511e0fe0c21d93ddc84e7d0ecb2b",
-  "dev_public_methods": 124,
-  "implemented": 111,
-  "missing": [
-    "_attempts_spent",
-    "_capture_attempt_ledger",
-    "_create_follow_up",
-    "_fail_discontinuous_follow_ups",
-    "_fail_unrunnable_follow_ups",
-    "_host_row_to_dict",
-    "_insert_event",
-    "_release_host_slot",
-    "_reserve_shared_thread_sandbox",
-    "_session_fork_details",
-    "_transition_job",
-    "initialize",
-    "replayed_submission",
-    "sweep_queued_follow_ups"
+  "measured_on": "d2754055cdb0d66ef14928dbf5d0003887291cad",
+  "dev": "d4bcec0fd8b5511e0fe0c21d93ddc84e7d0ecb2b",
+  "equivalence": "72/108",
+  "meaning": "tools/equivalence_check.py compares each emitted method against the SAME-NAMED method in cloud_agent/storage/store.py, which after the rebase is dev's current copy. 72 of 108 appendix operations still match dev byte-for-byte; 36 do not, because they were split from the fork point and dev's migrations 0003/0004/0005 changed the SQL they run.",
+  "different": [
+    "abandon_thread_sandbox",
+    "admit_thread_sandbox_turn",
+    "claim_due_sandbox_snapshot",
+    "claim_for_publish",
+    "claim_job",
+    "create_follow_up",
+    "create_job",
+    "deployment_runner_pool",
+    "establish_residency",
+    "establish_session_fork_residencies",
+    "finalize_session_fork",
+    "get_thread_for_job",
+    "heartbeat_residency",
+    "link_residency_grant",
+    "list_conversations",
+    "list_jobs",
+    "list_projects",
+    "mark_thread_sandbox_running",
+    "pending_snapshot_base_import",
+    "prepare_session_fork",
+    "reap_expired",
+    "reap_expired_residencies",
+    "reap_stalled_session_forks",
+    "record_shared_thread_residency",
+    "record_snapshot_publish",
+    "record_thread_sandbox_process",
+    "release_claim",
+    "release_residency",
+    "release_shared_residency_if_quiescent",
+    "remove_host",
+    "request_cancel",
+    "resident_host",
+    "resolve_model_credential",
+    "settle_thread_sandbox",
+    "thread_workspace_ready",
+    "transition"
   ],
-  "signature_drift": {
-    "create_job": [
-      "client_request_id",
-      "client_request_fingerprint"
-    ],
-    "create_follow_up": [
-      "client_request_id",
-      "client_request_fingerprint"
-    ],
-    "record_admin_action": [
-      "actor_id"
-    ]
-  }
+  "generator_drift": [
+    "dev's store has 111 public methods; the appendix mapped 108, so split_store.py refuses to run until replayed_submission and sweep_queued_follow_ups are given a home (done in a reverted attempt; not committed).",
+    "HELPER_MOVES has no entry for dev's _create_follow_up, _fail_discontinuous_follow_ups or _transition_job.",
+    "GLOBAL_MOVES and the status constant list still name WAITING and PUBLISHING; dev's monolith no longer defines either, so the splitter asserts on them.",
+    "The splitter expects _JOB_COLUMNS; dev renamed it to _JOB_OWN_COLUMNS and derived _QUALIFIED_JOB_COLUMNS through _THREAD_CONFIG_COLUMNS."
+  ],
+  "how_to_finish": "Resolve the four generator drifts, run tools/split_store.py --write against dev's store.py, and then re-apply by hand what the generator cannot produce: the ports' Protocols, bootstrap.py, api/deps.py, the boundary-enforced test doubles, and the eight review fixes recorded in the commit log. The equivalence checker is the acceptance test for the first half."
 }
