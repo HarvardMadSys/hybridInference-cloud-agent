@@ -127,9 +127,11 @@ def main() -> None:
     if effort:
         model_entry["options"] = {"reasoningEffort": effort}
     config = {
-        # One reviewed source, written every run -- including when it is empty.
-        # The project config is disabled below, so this is the only MCP source
-        # the CLI will see.
+        # Written every run, and empty in practice: the adapter refuses MCP on
+        # this runtime because KILO_DISABLE_PROJECT_CONFIG does not cover the
+        # fork's legacy migrator, which reads <project>/.kilo/mcp.json whatever
+        # the flags say. The merge stays here so the wrapper needs no second
+        # review once that path is shut out.
         "mcp": mcp_servers(),
         "provider": {
             "freeinference": {

@@ -1357,8 +1357,13 @@ def test_kilo_wrapper_writes_config_sets_offline_flags_and_execs(tmp_path):
     assert seen["env"]["KILO_CONFIG"].startswith(str(activation))
 
 
-#: One entry per wrapper that publishes the platform's MCP relay, with the
+#: One entry per wrapper that can publish the platform's MCP relay, with the
 #: environment variable its CLI reads the merged config from.
+#:
+#: Kilo is here even though its adapter refuses MCP today: the wrapper's merge
+#: is the same reviewed code, and leaving it untested would mean the next
+#: attempt at that runtime starts from an unverified half. What the adapter
+#: refuses, and why, is pinned in ``test_agent_runtimes``.
 _MCP_WRAPPERS = (
     ("opencode", _OPENCODE_WRAPPER, "OPENCODE", "OPENCODE_GATEWAY_MODEL", "OPENCODE_CONFIG"),
     ("kilo", _KILO_WRAPPER, "KILO", "KILO_GATEWAY_MODEL", "KILO_CONFIG"),
@@ -1525,6 +1530,51 @@ def test_the_wrapper_refuses_an_endpoint_map_it_cannot_read(
     )
     assert result.returncode == 64
     assert "AGENT_MCP_SERVERS" in result.stderr
+
+
+def test_the_pi_bridge_is_shipped_where_the_adapter_loads_it_from():
+    """A path that drifts between the image and the adapter is a silent no-op.
+
+    pi is given `-e <this path>` on every run. If the image copied the bridge
+    somewhere else, pi would start with an extension path that does not exist:
+    with `--no-extensions` the MCP tools would simply be absent, and the agent
+    would work around them rather than fail. Read from both files so the two
+    cannot disagree without a test failing.
+    """
+    from cloud_agent_host import runtimes as _runtimes
+
+    dockerfile = (
+        Path(__file__).resolve().parents[2] / "deploy/sandbox/Dockerfile.agent-sandbox"
+    ).read_text()
+    source = Path(__file__).resolve().parents[2] / "deploy/sandbox/pi-mcp-bridge.ts"
+    assert source.is_file(), "the bridge is not in the build context"
+
+    destination = f"COPY deploy/sandbox/pi-mcp-bridge.ts {_runtimes.PI_MCP_BRIDGE}"
+    assert destination in dockerfile, (
+        f"the image does not copy the bridge to {_runtimes.PI_MCP_BRIDGE}, which is "
+        "where PiRuntime loads it from"
+    )
+    # Read-only, and outside any writable path: the extension talks to the relay
+    # with the job token, so nothing in the sandbox may replace it.
+    assert f"chmod 0444 {_runtimes.PI_MCP_BRIDGE}" in dockerfile
+
+
+def test_the_pi_bridge_only_ever_reads_its_endpoints_from_the_environment():
+    """The bridge must not be able to name a server of its own.
+
+    Its whole authority is the environment the control plane writes: the relay
+    endpoints and the `mcp`-scoped job token. A hardcoded URL or a fallback
+    would be a second source, and one the platform's binding check does not
+    cover.
+    """
+    source = (Path(__file__).resolve().parents[2] / "deploy/sandbox/pi-mcp-bridge.ts").read_text()
+    assert 'MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"' in source
+    assert 'MCP_TOKEN_ENV = "AGENT_MCP_TOKEN"' in source
+    assert "process.env[MCP_SERVERS_ENV]" in source
+    assert "process.env[MCP_TOKEN_ENV]" in source
+    # No literal endpoint of any kind: every URL the bridge dials comes from
+    # the environment the control plane wrote.
+    assert "http://" not in source and "https://" not in source
 
 
 def test_kilo_wrapper_refuses_to_run_half_configured(tmp_path):

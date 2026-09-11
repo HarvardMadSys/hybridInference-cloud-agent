@@ -3567,6 +3567,12 @@ class AgentJobStore:
         The bindings are read fresh on every call rather than carried on the
         job, so narrowing a session takes effect on its next tool call instead
         of at its next turn.
+
+        Disabled bindings are filtered out here rather than refused later. A
+        binding turned off with no capabilities selected would otherwise be
+        handed to the runner as a server whose every call fails, and the model
+        would spend its budget discovering that one tool at a time instead of
+        being offered nothing at all.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -3597,7 +3603,7 @@ class AgentJobStore:
                        c.deleted_at, c.label, c.transport, c.location
                 FROM agent_mcp_thread_bindings b
                 JOIN agent_mcp_connections c ON c.id = b.connection_id
-                WHERE b.thread_id = $1
+                WHERE b.thread_id = $1 AND b.enabled
                 ORDER BY b.alias, b.connection_id
                 """,
                 row["thread_id"],

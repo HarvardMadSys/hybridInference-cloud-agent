@@ -826,12 +826,66 @@ def test_only_runtimes_that_can_also_shut_out_repo_config_report_mcp():
     fail the second half at their pinned versions and say so, rather than
     running with dropped tools or somebody else's servers.
     """
-    assert runtimes_supporting_mcp() == ["claude-code", "kilo", "opencode"]
+    assert runtimes_supporting_mcp() == ["claude-code", "opencode", "pi"]
     assert ClaudeCodeRuntime().capabilities().mcp is True
     assert OpencodeRuntime().capabilities().mcp is True
-    assert KiloRuntime().capabilities().mcp is True
+    assert PiRuntime().capabilities().mcp is True
     assert CodexRuntime().capabilities().mcp is False
-    assert PiRuntime().capabilities().mcp is False
+    assert KiloRuntime().capabilities().mcp is False
+
+
+def test_pi_loads_the_images_bridge_and_nothing_else():
+    """The only extension pi may load is the one the image was built with.
+
+    pi has no MCP client, so the bridge is the platform's MCP path on this
+    runtime -- and, because a project-local extension would otherwise be loaded
+    from the checkout, `--no-extensions` has to be in the same argv as the
+    explicit `-e`. Verified against 0.73.1: with both flags a repository's
+    `.pi/extensions/*.ts` does not load and the bridge's tools do.
+    """
+    argv, env = PiRuntime().prepare(
+        workdir="/w",
+        task_prompt="do it",
+        model="glm-5.1",
+        gateway_base_url=_MCP_GATEWAY,
+        credential="inference-credential",
+        mcp_config=RuntimeMCPConfig(
+            server_ids=("github",),
+            base_url=_MCP_GATEWAY,
+            credential="mcp-token",
+        ),
+    )
+    assert "--no-extensions" in argv
+    assert argv[argv.index("-e") + 1].endswith("pi-mcp-bridge.ts")
+    assert json.loads(env["AGENT_MCP_SERVERS"]) == {"github": f"{_MCP_GATEWAY}/v1/agent/mcp/github"}
+    assert env["AGENT_MCP_TOKEN"] == "mcp-token"
+    assert "mcp-token" not in " ".join(argv)
+
+
+def test_kilo_refuses_mcp_because_its_kill_switch_misses_the_legacy_path():
+    """The fork's documented switch does not cover its legacy MCP migrator.
+
+    In 7.4.17, ``KilocodeConfig.loadLegacyConfigs`` runs at the top of the
+    config load and passes ``projectDir`` with no flag check, and
+    ``McpMigrator.migrate`` reads ``<project>/.kilocode/mcp.json`` and
+    ``<project>/.kilo/mcp.json`` unconditionally. A repository that commits one
+    would be handing the agent tools of its own choosing -- the exact outcome
+    this path exists to prevent -- so the runtime refuses the whole feature
+    rather than promising a bound it does not have.
+    """
+    with pytest.raises(RuntimeMCPUnavailableError):
+        KiloRuntime().prepare(
+            workdir="/w",
+            task_prompt="do it",
+            model="glm-5.1",
+            gateway_base_url=_MCP_GATEWAY,
+            credential="inference-credential",
+            mcp_config=RuntimeMCPConfig(
+                server_ids=("github",),
+                base_url=_MCP_GATEWAY,
+                credential="mcp-token",
+            ),
+        )
 
 
 def test_a_wrapper_runtime_publishes_the_relay_urls_and_the_token_reference():
@@ -884,9 +938,7 @@ def test_the_resident_path_carries_the_same_relay_config():
             credential="mcp-token",
         ),
     )
-    assert json.loads(env["AGENT_MCP_SERVERS"]) == {
-        "github": f"{_MCP_GATEWAY}/v1/agent/mcp/github"
-    }
+    assert json.loads(env["AGENT_MCP_SERVERS"]) == {"github": f"{_MCP_GATEWAY}/v1/agent/mcp/github"}
     assert env["AGENT_MCP_TOKEN"] == "mcp-token"
     assert argv[0] == "http-agent-live-bridge"
 

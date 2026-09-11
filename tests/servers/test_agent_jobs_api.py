@@ -4697,7 +4697,7 @@ async def test_the_composer_is_told_which_connections_and_which_runtimes(
     assert [entry["label"] for entry in config["mcp_connections"]] == ["DeepWiki", "GitHub"]
     # The composer is told the same list the create path enforces, so a picker
     # cannot offer a runtime that would then be refused.
-    assert config["mcp_runtimes"] == ["claude-code", "kilo", "opencode"]
+    assert config["mcp_runtimes"] == ["claude-code", "opencode", "pi"]
     assert [entry["tool_count"] for entry in config["mcp_connections"]] == [1, 1]
     assert all(entry["available"] for entry in config["mcp_connections"])
     assert _UPSTREAM_TOKEN not in json.dumps(config)

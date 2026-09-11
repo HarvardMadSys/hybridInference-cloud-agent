@@ -987,6 +987,16 @@ class GenericRuntime(AgentRuntime):
         return NormalizedEvent(RAW, {"text": line[:4000]})
 
 
+#: The reviewed MCP bridge, shipped in the sandbox image and loaded explicitly.
+#: It lives beside the other image helpers rather than in the workspace, so the
+#: code that talks to the relay is the code the image was built and reviewed
+#: with. Verified against pi 0.73.1: with `--no-extensions -e <this>` the relay
+#: is discovered, its tools are registered under `<alias>__<tool>`, a call
+#: reaches the upstream with the un-namespaced name, and a repository's own
+#: `.pi/extensions/*.ts` does not load.
+PI_MCP_BRIDGE = "/usr/local/libexec/pi-mcp-bridge.ts"
+
+
 class PiRuntime(GenericRuntime):
     """Tier 1: the pi coding agent, ``--mode json`` normalized.
 
@@ -1037,10 +1047,14 @@ class PiRuntime(GenericRuntime):
         super().__init__(
             "pi-freeinference --provider freeinference --model {model} "
             # pi has no native MCP client at the pinned version; MCP arrives
-            # through executable extensions, including project-local ones.
-            # Disable their discovery until the gateway supplies a reviewed
-            # extension explicitly.
-            "--mode json --no-extensions -p {prompt}",
+            # through executable extensions, and a project-local one is as easy
+            # to commit as a file in the checkout. `--no-extensions` disables
+            # discovery entirely -- the project's `.pi/extensions/`, the global
+            # directory, and anything a settings file names -- leaving the
+            # explicit `-e` below as the only way in.
+            "--mode json --no-extensions "
+            f"-e {PI_MCP_BRIDGE} "
+            "-p {prompt}",
             binary="pi-freeinference",
         )
         # One adapter instance per job (see get_runtime), so the suppression
@@ -1071,9 +1085,14 @@ class PiRuntime(GenericRuntime):
             gateway_base_url=gateway_base_url,
             credential=credential,
             provides_isolation=provides_isolation,
-            mcp_config=mcp_config,
+            # The relay endpoints are published below rather than by the base
+            # class, because pi is the one runtime whose MCP client is not the
+            # CLI: the bridge extension reads them, and handing a server set to
+            # a CLI that cannot read it would be a silent no-op.
+            mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
             reasoning_effort=reasoning_effort,
         )
+        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
         # models.json wants the model listed under the provider; the wrapper
         # cannot parse it back out of pi's argv without reimplementing pi's
         # option handling, so hand it over explicitly.
@@ -1285,6 +1304,21 @@ class PiRuntime(GenericRuntime):
         self._check_effort(effort)
         return []
 
+    def _accept_mcp(
+        self, config: RuntimeMCPConfig, *, gateway_base_url: str, env: dict[str, str]
+    ) -> None:
+        """Publish the relay endpoints for the image's own bridge to read.
+
+        Both halves hold, and both were checked against the pinned binary
+        rather than assumed: `--no-extensions` leaves the explicit `-e` as the
+        only loadable extension, so the bridge is the only MCP source, and the
+        flag is passed whether or not the run has servers -- the bridge returns
+        immediately on an empty map, which keeps the argv identical between a
+        run with tools and one without, so an injected extension has nowhere to
+        hide behind a turn that did not need one.
+        """
+        self._wrapper_mcp_env(config, gateway_base_url=gateway_base_url, env=env)
+
     def capabilities(self) -> RuntimeCapabilities:
         """Tier 1 events and no trusted cost attribution.
 
@@ -1299,7 +1333,7 @@ class PiRuntime(GenericRuntime):
             cost_report=False,
             normalized_events=True,
             tier=1,
-            mcp=False,
+            mcp=True,
             reasoning_efforts=self.EFFORT_LEVELS,
         )
 
@@ -1590,19 +1624,36 @@ class KiloRuntime(GenericRuntime):
     def _accept_mcp(
         self, config: RuntimeMCPConfig, *, gateway_base_url: str, env: dict[str, str]
     ) -> None:
-        """The fork gets its own switch, not the parent's.
+        """Refused: the fork's project-config switch does not cover its legacy MCP path.
 
-        Kilo renamed every kill switch to ``KILO_*``, and the wrapper exports
-        ``KILO_DISABLE_PROJECT_CONFIG``. Reading the shared mechanism as "the
-        same as OpenCode" is exactly how a fork silently loses a control: the
-        wrapper is verified against the pinned fork, so the claim is made here
-        for this runtime and not inherited from its sibling.
+        ``KILO_DISABLE_PROJECT_CONFIG=1`` covers the project ``kilo.json`` and the
+        project ``.kilo``/``.kilocode`` directories, which is what it says it
+        covers. It does **not** cover the fork's legacy migrator: in the pinned
+        7.4.17, ``KilocodeConfig.loadLegacyConfigs`` runs at the very top of the
+        config load with ``projectDir`` and no flag check, and
+        ``McpMigrator.migrate`` reads ``<project>/.kilocode/mcp.json`` and
+        ``<project>/.kilo/mcp.json`` unconditionally. The legacy config is merged
+        first, so it loses on conflicting names -- but a server name that exists
+        *only* in the repository's file is simply added.
+
+        So a job on this runtime could be handed tools the repository chose,
+        which is the one outcome the MCP path exists to prevent. The wrapper
+        still publishes the endpoints, because it is the same wrapper for every
+        deployment; the refusal is here, where the capability is declared, so
+        the job is turned away at creation instead of running without the tools
+        it was written around.
+
+        The escape hatches are narrow: a repository cannot write outside the
+        checkout, so this becomes reachable by mounting the worktree without the
+        legacy paths or by removing project write access -- a deployment
+        decision, not an adapter flag.
         """
-        self._wrapper_mcp_env(config, gateway_base_url=gateway_base_url, env=env)
+        del gateway_base_url, env
+        self._require_empty_mcp_config(config)
 
     def capabilities(self) -> RuntimeCapabilities:
-        """Tier 2 mechanics, but this one control is verified and wired."""
-        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS, mcp=True)
+        """Tier 2 mechanics; MCP stays off until the legacy path is shut out."""
+        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS)
 
 
 _REGISTRY: dict[str, type[AgentRuntime]] = {
