@@ -1577,7 +1577,7 @@ class RepoBranchesResponse(BaseModel):
 # split. Copied unchanged.
 
 
-class AgentRunnerHost(BaseModel):  # type: ignore[no-any-unimported]
+class AgentRunnerHost(BaseModel):
     """One machine in the agent runner pool.
 
     Everything below ``seconds_since_seen`` arrived with the dynamic pool
@@ -1675,7 +1675,7 @@ class AgentRunnerHost(BaseModel):  # type: ignore[no-any-unimported]
     )
 
 
-class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported]
+class ListAgentRunnerHostsResponse(BaseModel):
     """Runner pool, new-chat placement, and selected CLI versions."""
 
     execution_profile: str = Field(
@@ -1707,7 +1707,7 @@ class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported
     )
 
 
-class SetActiveAgentRunnerHostRequest(BaseModel):  # type: ignore[no-any-unimported]
+class SetActiveAgentRunnerHostRequest(BaseModel):
     """Pin new-chat placement to one host, or unpin with ``null``."""
 
     host: str | None = Field(
@@ -1717,7 +1717,7 @@ class SetActiveAgentRunnerHostRequest(BaseModel):  # type: ignore[no-any-unimpor
     )
 
 
-class SetRuntimeVersionRequest(BaseModel):  # type: ignore[no-any-unimported]
+class SetRuntimeVersionRequest(BaseModel):
     """Choose the CLI version this deployment runs for one runtime."""
 
     runtime: str = Field(
@@ -1747,7 +1747,7 @@ class SetRuntimeVersionRequest(BaseModel):  # type: ignore[no-any-unimported]
 HOST_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 
 
-class IssueHostEnrollTokenRequest(BaseModel):  # type: ignore[no-any-unimported]
+class IssueHostEnrollTokenRequest(BaseModel):
     """Admin request for a one-time host enrollment token."""
 
     host: str = Field(
@@ -1775,7 +1775,7 @@ class IssueHostEnrollTokenRequest(BaseModel):  # type: ignore[no-any-unimported]
     )
 
 
-class IssueHostEnrollTokenResponse(BaseModel):  # type: ignore[no-any-unimported]
+class IssueHostEnrollTokenResponse(BaseModel):
     """The enrollment token, shown exactly once."""
 
     enroll_token: str = Field(
@@ -1795,7 +1795,7 @@ class IssueHostEnrollTokenResponse(BaseModel):  # type: ignore[no-any-unimported
     expires_at: datetime
 
 
-class HostRegisterRequest(BaseModel):  # type: ignore[no-any-unimported]
+class HostRegisterRequest(BaseModel):
     """A machine presenting an enrollment token to join the pool."""
 
     enroll_token: str = Field(..., min_length=1, max_length=512)
@@ -1838,7 +1838,7 @@ class HostRegisterRequest(BaseModel):  # type: ignore[no-any-unimported]
     labels: dict[str, str] = Field(default_factory=dict)
 
 
-class HostRegisterResponse(BaseModel):  # type: ignore[no-any-unimported]
+class HostRegisterResponse(BaseModel):
     """The host's identity and the credential it authenticates with."""
 
     host: str
@@ -1862,14 +1862,14 @@ class HostRegisterResponse(BaseModel):  # type: ignore[no-any-unimported]
     )
 
 
-class ResidencyBeat(BaseModel):  # type: ignore[no-any-unimported]
+class ResidencyBeat(BaseModel):
     """One hot sandbox a host reports alive."""
 
     thread_id: str = Field(..., min_length=1, max_length=128)
     generation: int = Field(..., ge=1)
 
 
-class RetainedSandboxBeat(BaseModel):  # type: ignore[no-any-unimported]
+class RetainedSandboxBeat(BaseModel):
     """Docker-observed lifecycle of one retained chat sandbox on this host."""
 
     thread_id: str = Field(..., min_length=1, max_length=128)
@@ -1899,7 +1899,7 @@ class RetainedSandboxBeat(BaseModel):  # type: ignore[no-any-unimported]
     members: list[WorkerSandboxMember] = Field(default_factory=list, max_length=128)
 
 
-class RetainedSandboxStop(BaseModel):  # type: ignore[no-any-unimported]
+class RetainedSandboxStop(BaseModel):
     """Exact durable fence authorizing a host to stop one retained container."""
 
     thread_id: str = Field(..., min_length=1, max_length=128)
@@ -1913,7 +1913,7 @@ class RetainedSandboxStop(BaseModel):  # type: ignore[no-any-unimported]
     shared_live: Literal[True] = True
 
 
-class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
+class HostHeartbeatRequest(BaseModel):
     """A host reporting that it is still there, and what it now looks like.
 
     Every field is optional and only overwrites when present, so a heartbeat
@@ -2023,7 +2023,7 @@ class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
         return data
 
 
-class HostResidencyEstablishResponse(BaseModel):  # type: ignore[no-any-unimported]
+class HostResidencyEstablishResponse(BaseModel):
     """Attempt-fenced residency granted to a supervisor-owned member process."""
 
     thread_id: str
@@ -2033,7 +2033,7 @@ class HostResidencyEstablishResponse(BaseModel):  # type: ignore[no-any-unimport
     model: str | None = None
 
 
-class HostHeartbeatResponse(BaseModel):  # type: ignore[no-any-unimported]
+class HostHeartbeatResponse(BaseModel):
     """What the control plane thinks of this host after the heartbeat."""
 
     host: str
@@ -2077,7 +2077,7 @@ class HostHeartbeatResponse(BaseModel):  # type: ignore[no-any-unimported]
 # ── Session (E8) ───────────────────────────────────────────────────────
 
 
-class SessionUserResponse(BaseModel):  # type: ignore[no-any-unimported]
+class SessionUserResponse(BaseModel):
     """Who the session says the caller is.
 
     ``id`` rather than ``user_id``: this is the shape ``web/src/lib/api/

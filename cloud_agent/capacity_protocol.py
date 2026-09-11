@@ -339,7 +339,7 @@ def parse_capacity_block(raw: object) -> HostCapacityReport | None:
     try:
         return HostCapacityReport.model_validate(raw)
     except ValidationError as exc:
-        first = exc.errors()[0] if exc.errors() else {}
+        first: Mapping[str, Any] = exc.errors()[0] if exc.errors() else {}
         _log_dropped(
             "invalid",
             detail=f"{'.'.join(str(part) for part in first.get('loc', ()))}:{first.get('type')}",

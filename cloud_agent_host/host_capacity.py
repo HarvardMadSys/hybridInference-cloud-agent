@@ -61,7 +61,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from cloud_agent_host.logging_utils import get_logger
 
@@ -72,11 +72,11 @@ logger = get_logger(__name__)
 
 #: The wire version of the ``capacity`` block in a host heartbeat. A control
 #: plane that does not know a version drops the block and keeps the heartbeat.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION: Final = 1
 
 #: Names the observation method, so a future remote-Docker or rootless adapter
 #: is distinguishable from this one in stored history.
-SOURCE = "linux_host_proc_and_docker_list"
+SOURCE: Final = "linux_host_proc_and_docker_list"
 
 #: Set to a falsey value to stop sampling on this host. Absent means enabled:
 #: the compose file mounts the proc files, and an operator who did not ask for
@@ -133,12 +133,12 @@ MAX_SAMPLE_AGE_MS = 300_000
 #: Missing-measurement vocabulary for the CPU and memory halves. Closed sets:
 #: the control plane stores the string and the page explains it, so a new value
 #: is a protocol change rather than a log line.
-CPU_MISSING_WARMING_UP = "warming_up"
-CPU_MISSING_COUNTER_RESET = "counter_reset"
-CPU_MISSING_SOURCE_UNAVAILABLE = "source_unavailable"
-CPU_MISSING_INVALID_SAMPLE = "invalid_sample"
-MEMORY_MISSING_SOURCE_UNAVAILABLE = "source_unavailable"
-MEMORY_MISSING_INVALID_SAMPLE = "invalid_sample"
+CPU_MISSING_WARMING_UP: Final = "warming_up"
+CPU_MISSING_COUNTER_RESET: Final = "counter_reset"
+CPU_MISSING_SOURCE_UNAVAILABLE: Final = "source_unavailable"
+CPU_MISSING_INVALID_SAMPLE: Final = "invalid_sample"
+MEMORY_MISSING_SOURCE_UNAVAILABLE: Final = "source_unavailable"
+MEMORY_MISSING_INVALID_SAMPLE: Final = "invalid_sample"
 
 #: Inventory outcomes.
 INVENTORY_AVAILABLE = "available"

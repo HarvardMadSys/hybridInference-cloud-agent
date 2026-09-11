@@ -211,7 +211,7 @@ def looks_like_agent_token(api_key: str | None) -> bool:
     reaches, so that an expired session stays a session failure instead of
     being retried as something else.
     """
-    return bool(api_key) and api_key.startswith(AGENT_TOKEN_PREFIX)
+    return bool(api_key and api_key.startswith(AGENT_TOKEN_PREFIX))
 
 
 def bearer_token(authorization: str | None) -> str | None:

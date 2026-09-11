@@ -49,13 +49,15 @@ DERIVED_AMOUNT_CHARS = 384
 DISPLAY_AMOUNT_PLACES = 10
 
 
-def _money(max_length: int) -> Any:
-    """Build the amount field for one width without duplicating its pattern."""
-    return Annotated[StrictStr, Field(pattern=r"^[0-9]+(?:\.[0-9]+)?$", max_length=max_length)]
+#: The amount shape, named once so the two widths cannot drift apart. It has to
+#: be spelled inside each alias rather than returned by a helper: a type alias
+#: mypy cannot evaluate is a variable, and a variable is not valid as a type.
+_AMOUNT_PATTERN = r"^[0-9]+(?:\.[0-9]+)?$"
 
-
-Money = _money(REPORT_AMOUNT_CHARS)
-DerivedAmount = _money(DERIVED_AMOUNT_CHARS)
+Money = Annotated[StrictStr, Field(pattern=_AMOUNT_PATTERN, max_length=REPORT_AMOUNT_CHARS)]
+DerivedAmount = Annotated[
+    StrictStr, Field(pattern=_AMOUNT_PATTERN, max_length=DERIVED_AMOUNT_CHARS)
+]
 #: A count a browser can hold without losing precision. The gateway's request
 #: columns are 32-bit today; this refuses a future widening rather than letting
 #: JavaScript round a token count silently.

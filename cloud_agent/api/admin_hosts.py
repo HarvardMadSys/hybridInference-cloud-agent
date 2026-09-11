@@ -20,7 +20,7 @@ all.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
@@ -80,7 +80,7 @@ def _require_store(store: AgentJobStore | None) -> AgentJobStore:
     return store
 
 
-def _to_item(row: dict, *, now: datetime | None = None) -> AgentRunnerHost:
+def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunnerHost:
     last_seen: datetime = row["last_seen_at"]
     read_at = datetime.now(UTC) if now is None else now
     # The column is TIMESTAMPTZ, so asyncpg hands back an aware datetime; a
