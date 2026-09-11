@@ -297,6 +297,10 @@ def _create_invocations() -> None:
             thread_id TEXT NOT NULL,
             connection_id BIGINT NOT NULL REFERENCES agent_mcp_connections (id) ON DELETE CASCADE,
             capability_name TEXT NOT NULL,
+            -- Which surface the name belongs to. Without it a tool called
+            -- "search" and a prompt called "search" are one row, and an
+            -- approval of one would authorize the other.
+            capability_kind TEXT NOT NULL DEFAULT 'tool',
             arguments_digest TEXT NOT NULL,
             arguments_ciphertext TEXT,
             status TEXT NOT NULL DEFAULT 'pending'

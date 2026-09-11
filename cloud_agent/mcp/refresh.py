@@ -247,7 +247,14 @@ def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oa
     identity = oauth.ClientIdentity(
         client_id=str(settings.get("client_id") or ""),
         registration=str(row.get("registration") or "dcr"),  # type: ignore[arg-type]
-        client_secret=_decrypt(cipher, row.get("client_secret_ciphertext")),
+        # A different key domain from the tokens below. The client secret is
+        # written by the authorization flow under the OAuth cipher -- it is the
+        # secret this deployment holds *for the authorization server* -- while
+        # the access and refresh tokens are written under the MCP one. Reading
+        # both with a single cipher fails for every confidential client, and it
+        # fails at decryption, so it looks like a corrupt credential rather than
+        # a wrong key.
+        client_secret=_decrypt(_client_secret_cipher(cipher), row.get("client_secret_ciphertext")),
         auth_method=str(row.get("client_auth_method") or "none"),
     )
     return oauth.refresh_request(
@@ -259,7 +266,26 @@ def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oa
     )
 
 
-def _decrypt(cipher: SourceControlCipher, value: Any) -> str | None:
+def _client_secret_cipher(cipher: SourceControlCipher | None) -> SourceControlCipher | None:
+    """The cipher a connection's client secret was written under.
+
+    Separate from the token cipher by design and not by accident: the two are
+    different credential kinds and the deployment wraps them under different
+    domains so that one cannot be read as the other. Returns ``None`` when the
+    deployment has no key, which leaves the secret unread rather than raising
+    here -- the caller decides whether a client secret was required.
+    """
+    if cipher is not None:
+        return cipher
+    try:
+        from cloud_agent.mcp.registry import oauth_cipher
+
+        return oauth_cipher()
+    except SourceControlError:
+        return None
+
+
+def _decrypt(cipher: SourceControlCipher | None, value: Any) -> str | None:
     """Decrypt one stored secret, or ``None`` when there is nothing to read."""
     if not value:
         return None

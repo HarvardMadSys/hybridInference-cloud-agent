@@ -542,6 +542,69 @@ _QUALIFIED_HOST_COLUMNS = (
 )
 
 
+def fence_params(
+    *,
+    config_revision: int | None = None,
+    authorization_epoch: int | None = None,
+    capability_revision: int | None = None,
+    policy_revision: int | None = None,
+    attempt_id: int | None = None,
+    lease_generation: int | None = None,
+) -> list[Any]:
+    """The values :func:`_invocation_fence_sql` numbered, in its order.
+
+    Kept as one pair so the clauses and their arguments cannot drift apart: a
+    fence whose ``$n`` refers to the wrong value silently matches the wrong
+    rows, which is worse than not checking at all because it looks like it does.
+    """
+    values: list[Any] = []
+    for value in (config_revision, authorization_epoch, capability_revision, policy_revision):
+        if value is not None:
+            values.append(int(value))
+    if attempt_id is not None:
+        values.append(attempt_id)
+    if lease_generation is not None:
+        values.append(lease_generation)
+    return values
+
+
+def _invocation_fence_sql(
+    *,
+    first_index: int,
+    config_revision: int | None = None,
+    authorization_epoch: int | None = None,
+    capability_revision: int | None = None,
+    policy_revision: int | None = None,
+    attempt_id: int | None = None,
+    lease_generation: int | None = None,
+) -> str:
+    """The ``AND`` clauses binding an approval to the state it was given for.
+
+    Every clause is optional so a caller that has nothing to compare against --
+    a migration, a repair script -- can still address the row. The API never
+    omits them.
+    """
+    clauses: list[str] = []
+    index = first_index
+    for column, value in (
+        ("config_revision", config_revision),
+        ("authorization_epoch", authorization_epoch),
+        ("capability_revision", capability_revision),
+        ("policy_revision", policy_revision),
+    ):
+        if value is not None:
+            clauses.append(f" AND {column} = ${index}")
+            index += 1
+    if attempt_id is not None:
+        # A job may have no attempt recorded, and ``= NULL`` is never true.
+        clauses.append(f" AND attempt_id IS NOT DISTINCT FROM ${index}")
+        index += 1
+    if lease_generation is not None:
+        clauses.append(f" AND lease_generation = ${index}")
+        index += 1
+    return "".join(clauses)
+
+
 class AgentJobStore:
     """Postgres-backed store for jobs, attempts, events, and retained groups."""
 
@@ -1150,14 +1213,32 @@ class AgentJobStore:
         auth_config_patch: Mapping[str, Any] | None = None,
         bump_epoch: bool = False,
         clear_refresh: bool = False,
+        expected_oauth_generation: int | None = None,
+        expected_config_revision: int | None = None,
     ) -> bool:
-        """Write a credential, conditional on the authorization epoch.
+        """Write a credential, conditional on the state the flow started in.
 
         The epoch condition is what makes a late OAuth callback harmless: a
         flow that started before a disconnect carries the epoch it started
         under, and by the time it returns the row has moved past it, so the
         write matches no row instead of restoring a credential the owner
         removed.
+
+        ``expected_oauth_generation`` and ``expected_config_revision`` close the
+        window the epoch alone leaves open. A callback spends real time on the
+        network between "this flow is still the current one" and "write what it
+        returned", and in that window a *newer* flow can finish: the epoch is
+        unchanged, because a re-authorization is not a change of target, so the
+        late write would land on top of the newer token while the row still
+        records the newer generation. Checking both here makes the two writes
+        race for one row in a single statement, which is the only place a race
+        can be settled.
+
+        ``clear_refresh`` means the *previous* refresh token is gone -- an
+        issuer that rotates invalidates it. It is not a request to discard the
+        one being written: a rotating issuer returns a new refresh token in the
+        same response, and writing NULL over it, which is what this column did,
+        leaves every connection unable to renew once its access token expires.
 
         ``bump_epoch`` is for a *manual* replacement, where the identity behind
         the credential may be a different account and every approval made
@@ -1170,7 +1251,9 @@ class AgentJobStore:
                 UPDATE agent_mcp_connections SET
                     access_token_ciphertext = $3,
                     refresh_token_ciphertext = CASE
-                        WHEN $4::boolean THEN NULL ELSE COALESCE($5, refresh_token_ciphertext) END,
+                        WHEN $5::text IS NOT NULL THEN $5::text
+                        WHEN $4::boolean THEN NULL
+                        ELSE refresh_token_ciphertext END,
                     client_secret_ciphertext = COALESCE($6, client_secret_ciphertext),
                     expires_at = $7,
                     scopes = COALESCE($8, scopes),
@@ -1187,6 +1270,8 @@ class AgentJobStore:
                     authorization_epoch = authorization_epoch + CASE WHEN $18::boolean THEN 1 ELSE 0 END,
                     updated_at = NOW()
                 WHERE id = $1 AND authorization_epoch = $2 AND deleted_at IS NULL
+                  AND oauth_generation = COALESCE($19::bigint, oauth_generation)
+                  AND config_revision = COALESCE($20::bigint, config_revision)
                 RETURNING id
                 """,
                 connection_id,
@@ -1207,6 +1292,8 @@ class AgentJobStore:
                 registration_endpoint,
                 json.dumps(dict(auth_config_patch or {})),
                 bump_epoch,
+                expected_oauth_generation,
+                expected_config_revision,
             )
         return updated is not None
 
@@ -1571,6 +1658,7 @@ class AgentJobStore:
         capability_revision: int,
         policy_revision: int,
         expires_at: Any,
+        capability_kind: str = "tool",
     ) -> dict[str, Any]:
         """Record a call that is waiting for its owner."""
         async with self._pool.acquire() as conn:
@@ -1578,10 +1666,10 @@ class AgentJobStore:
                 """
                 INSERT INTO agent_mcp_invocations
                     (job_id, attempt_id, lease_generation, thread_id, connection_id,
-                     capability_name, arguments_digest, arguments_ciphertext,
-                     config_revision, authorization_epoch, capability_revision,
-                     policy_revision, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                     capability_name, capability_kind, arguments_digest,
+                     arguments_ciphertext, config_revision, authorization_epoch,
+                     capability_revision, policy_revision, expires_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 RETURNING *
                 """,
                 job_id,
@@ -1590,6 +1678,7 @@ class AgentJobStore:
                 thread_id,
                 connection_id,
                 capability_name,
+                capability_kind,
                 arguments_digest,
                 arguments_ciphertext,
                 config_revision,
@@ -1614,11 +1703,23 @@ class AgentJobStore:
         job_id: str | None = None,
         thread_id: str | None = None,
         statuses: list[str] | None = None,
+        user_id: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """Invocations filtered by job, thread or state, newest first."""
+        """Invocations filtered by job, thread, state or owner, newest first.
+
+        ``user_id`` scopes through the job rather than a column on the
+        invocation, because an invocation belongs to whoever owns the job that
+        made it. Filtering the *list* is not a convenience: the rows carry the
+        decrypted arguments, so a listing that does not scope by owner hands one
+        user another user's tool call bodies. Callers that serve a request must
+        pass it.
+        """
         clauses: list[str] = []
         params: list[Any] = []
+        if user_id is not None:
+            params.append(user_id)
+            clauses.append(f"job_id IN (SELECT id FROM agent_jobs WHERE user_id = ${len(params)})")
         if job_id is not None:
             params.append(job_id)
             clauses.append(f"job_id = ${len(params)}")
@@ -1673,7 +1774,17 @@ class AgentJobStore:
                 )
         return dict(row) if row is not None else None
 
-    async def claim_mcp_invocation(self, *, invocation_id: int) -> dict[str, Any] | None:
+    async def claim_mcp_invocation(
+        self,
+        *,
+        invocation_id: int,
+        config_revision: int | None = None,
+        authorization_epoch: int | None = None,
+        capability_revision: int | None = None,
+        policy_revision: int | None = None,
+        attempt_id: int | None = None,
+        lease_generation: int | None = None,
+    ) -> dict[str, Any] | None:
         """Take exclusive ownership of dispatching one approved call.
 
         The single ``UPDATE ... WHERE status = 'approved'`` is the whole
@@ -1681,16 +1792,40 @@ class AgentJobStore:
         row, the other matches nothing and must not send. ``dispatch_generation``
         is bumped so that a worker whose lease was superseded can be refused by
         the upstream side even if it still holds this record.
+
+        The fence is in the same predicate, for the same reason the status is:
+        the window between "this approval is still valid" and "I am dispatching
+        it" is exactly where a connection gets repointed, and a check performed
+        before the ``UPDATE`` is a check that races with it. Requiring the
+        versions here means an approval whose target moved is not merely
+        discouraged but unmatchable.
         """
+        fence = _invocation_fence_sql(
+            config_revision=config_revision,
+            authorization_epoch=authorization_epoch,
+            capability_revision=capability_revision,
+            policy_revision=policy_revision,
+            attempt_id=attempt_id,
+            lease_generation=lease_generation,
+            first_index=2,
+        )
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 UPDATE agent_mcp_invocations
                 SET status = 'dispatching', dispatch_generation = dispatch_generation + 1
-                WHERE id = $1 AND status = 'approved' AND expires_at > NOW()
+                WHERE id = $1 AND status = 'approved' AND expires_at > NOW(){fence}
                 RETURNING *
                 """,
                 invocation_id,
+                *fence_params(
+                    config_revision=config_revision,
+                    authorization_epoch=authorization_epoch,
+                    capability_revision=capability_revision,
+                    policy_revision=policy_revision,
+                    attempt_id=attempt_id,
+                    lease_generation=lease_generation,
+                ),
             )
         return dict(row) if row is not None else None
 
@@ -1727,20 +1862,43 @@ class AgentJobStore:
         connection_id: int,
         capability_name: str,
         arguments_digest: str,
+        capability_kind: str = "tool",
+        config_revision: int | None = None,
+        authorization_epoch: int | None = None,
+        capability_revision: int | None = None,
+        policy_revision: int | None = None,
+        attempt_id: int | None = None,
+        lease_generation: int | None = None,
     ) -> dict[str, Any] | None:
-        """The oldest approval that matches one call and has not been used.
+        """The oldest approval of one call that is still valid for it.
 
         Matching on the argument digest as well as the name is what makes an
         approval an approval *of something*: a session-wide "allow" is a rule,
         while this is one decision about one call, and reusing it for different
         arguments would turn a single confirmation into a standing grant.
+
+        The fence is part of the lookup, not a check after it. An approval was
+        given for a target, a catalogue and a session *as they were*, and the
+        owner agreed to that call and nothing else -- so once the connection is
+        repointed, the catalogue grows or the job changes hands, the approval
+        describes something that no longer exists and must not be found at all.
         """
+        fence = _invocation_fence_sql(
+            config_revision=config_revision,
+            authorization_epoch=authorization_epoch,
+            capability_revision=capability_revision,
+            policy_revision=policy_revision,
+            attempt_id=attempt_id,
+            lease_generation=lease_generation,
+            first_index=6,
+        )
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT * FROM agent_mcp_invocations
                 WHERE job_id = $1 AND connection_id = $2 AND capability_name = $3
-                  AND arguments_digest = $4 AND status = 'approved' AND expires_at > NOW()
+                  AND arguments_digest = $4 AND capability_kind = $5
+                  AND status = 'approved' AND expires_at > NOW(){fence}
                 ORDER BY id
                 LIMIT 1
                 """,
@@ -1748,6 +1906,15 @@ class AgentJobStore:
                 connection_id,
                 capability_name,
                 arguments_digest,
+                capability_kind,
+                *fence_params(
+                    config_revision=config_revision,
+                    authorization_epoch=authorization_epoch,
+                    capability_revision=capability_revision,
+                    policy_revision=policy_revision,
+                    attempt_id=attempt_id,
+                    lease_generation=lease_generation,
+                ),
             )
         return dict(row) if row is not None else None
 

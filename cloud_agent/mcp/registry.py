@@ -476,6 +476,24 @@ def server_for(
     """
     connection = resolved.connection
     allowed = tools if tools is not None else reachable_tools(resolved, binding)
+    # The other two surfaces are resolved with the same function as the tools,
+    # because "what may this session reach" must have one answer per kind and
+    # not one answer for tools plus a hopeful default for the rest.
+    snapshot = resolved.snapshot
+    resources = (
+        visible_capabilities(
+            binding, snapshot.of_kind(CapabilityKind.RESOURCE), CapabilityKind.RESOURCE
+        )
+        if snapshot
+        else ()
+    )
+    prompts = (
+        visible_capabilities(
+            binding, snapshot.of_kind(CapabilityKind.PROMPT), CapabilityKind.PROMPT
+        )
+        if snapshot
+        else ()
+    )
     headers: dict[str, str] = {}
     secret = resolved.credential.get("secret")
     if secret and connection.auth.kind is AuthKind.STATIC:
@@ -489,6 +507,8 @@ def server_for(
         transport=connection.config.transport,
         headers=headers,
         tools=frozenset(capability.name for capability in allowed),
+        resources=frozenset(capability.name for capability in resources),
+        prompts=frozenset(capability.name for capability in prompts),
         description=connection.label,
         request_timeout_s=connection.request_timeout_s,
         location=connection.config.location,

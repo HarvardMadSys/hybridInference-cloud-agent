@@ -141,23 +141,38 @@ def plan_request(body: bytes, server: McpServer) -> RequestPlan:
 
 
 def filter_message(payload: Any, server: McpServer) -> Any:
-    """Drop disallowed tools from anything shaped like a ``tools/list`` result."""
+    """Drop what this session cannot reach from anything shaped like a listing.
+
+    All three surfaces, not only tools. The design gives resources and prompts
+    their own scopes, and a listing that shows a resource the session turned off
+    is the same defect as one that shows a turned-off tool: the model is told it
+    can do something it cannot, and the next call fails for no visible reason.
+    """
     if not isinstance(payload, dict):
         return payload
     result = payload.get("result")
     if not isinstance(result, dict):
         return payload
-    tools = result.get("tools")
-    if not isinstance(tools, list):
+    filtered = result
+    for key, field, allowed in (
+        ("tools", "name", server.allows),
+        ("resources", "uri", server.allows_resource),
+        ("resourceTemplates", "uriTemplate", server.allows_resource),
+        ("prompts", "name", server.allows_prompt),
+    ):
+        entries = filtered.get(key)
+        if not isinstance(entries, list):
+            continue
+        kept = [
+            entry
+            for entry in entries
+            if not isinstance(entry, dict) or allowed(str(entry.get(field) or ""))
+        ]
+        if len(kept) != len(entries):
+            filtered = {**filtered, key: kept}
+    if filtered is result:
         return payload
-    kept = [
-        tool
-        for tool in tools
-        if not isinstance(tool, dict) or server.allows(str(tool.get("name") or ""))
-    ]
-    if len(kept) == len(tools):
-        return payload
-    return {**payload, "result": {**result, "tools": kept}}
+    return {**payload, "result": filtered}
 
 
 def filter_json_body(body: bytes, server: McpServer) -> bytes:

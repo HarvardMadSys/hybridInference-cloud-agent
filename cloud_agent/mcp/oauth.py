@@ -39,7 +39,7 @@ import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from cloud_agent.mcp.models import AuthKind, AuthProfile, OAuthProfile
 from cloud_agent.mcp.net_policy import (
@@ -511,21 +511,35 @@ class TokenRequest:
     def form(self) -> dict[str, str]:
         """The form body, with client authentication applied.
 
-        A confidential client sends its secret in the body rather than as HTTP
-        Basic: the specification allows both, and the body keeps the secret out
-        of every proxy log that records an ``Authorization`` header.
+        Which mechanism is used is what the authorization server *said* it
+        supports, not what this platform would prefer. The two are alternatives
+        under the specification, not a choice the client gets to make twice: a
+        server that lists ``client_secret_basic`` and receives a secret in the
+        body rejects the exchange, and sending both is not a way round it.
         """
         body = {key: str(value) for key, value in self.data.items()}
-        if self.client.client_secret:
+        if self.client.client_secret and not self.uses_basic_auth():
             body["client_secret"] = self.client.client_secret
         return body
 
+    def uses_basic_auth(self) -> bool:
+        """Whether this client authenticates with an ``Authorization`` header."""
+        return bool(self.client.client_secret) and self.client.auth_method == "client_secret_basic"
+
     def headers(self) -> dict[str, str]:
-        """The request headers for a token-endpoint call."""
-        return {
+        """The request headers, including Basic credentials when negotiated."""
+        headers = {
             "content-type": "application/x-www-form-urlencoded",
             "accept": "application/json",
         }
+        if self.uses_basic_auth():
+            # Form-encoded, per RFC 6749 section 2.3.1: the id and secret are
+            # percent-encoded *before* being joined and base64-ed, which is not
+            # what a naive f-string produces for a secret containing a colon.
+            credentials = f"{quote(self.client.client_id, safe='')}:{quote(self.client.client_secret or '', safe='')}"
+            encoded = base64.b64encode(credentials.encode()).decode()
+            headers["authorization"] = f"Basic {encoded}"
+        return headers
 
 
 @dataclass(frozen=True)
@@ -799,12 +813,14 @@ def client_metadata_document(
 
 
 def redirect_uri(base_url: str, provider: str) -> str:
-    """The exact callback this connection will use.
+    """The exact callback one connection will use.
 
-    Carries the provider rather than the connection id, because the callback
-    arrives before we know which connection it belongs to -- the state is what
-    says that -- and because a connection id in a redirect URI would have to be
-    registered with the authorization server.
+    ``provider`` is whatever this deployment puts in the path to tell its
+    callbacks apart; the state parameter is what identifies the flow, because a
+    callback arrives before anything else is known about it. Whatever the value,
+    the registration request has to carry *this* string: an authorization server
+    compares the ``redirect_uri`` it is asked for against the one registered for
+    the client, and refuses one that differs.
     """
     return f"{base_url.rstrip('/')}/v1/agent/mcp/oauth/callback/{provider}"
 

@@ -38,7 +38,11 @@ _OTHER = "someone-else"
 _THREAD = "athr_abc"
 _JOB = "ajob_abc"
 _FENCE = {"job_id": _JOB, "attempt_id": 5, "lease_generation": 2}
-_UPSTREAM = "https://mcp.example.com/mcp"
+# A loopback literal, because the relay now validates the target it dials and a
+# name that does not resolve would be refused before the mocked client sees it.
+# The policy that admits it is set in the fixture below.
+_UPSTREAM = "http://127.0.0.1:9/mcp"
+_UPSTREAM_HOST = "127.0.0.1:9"
 _UPSTREAM_SECRET = "ghs_deployment_secret"
 _ENCRYPTION_KEY = "mcp-relay-test-encryption-key"
 _CONNECTION_ID = 7
@@ -181,6 +185,7 @@ class FakeJobStore:
         self.created_invocations: list[dict[str, Any]] = []
         self.looked_up: list[dict[str, Any]] = []
         self.claimed: list[int] = []
+        self.fenced: list[dict[str, Any]] = []
 
     async def resolve_model_credential(
         self, *, job_id: str, attempt_id: int, lease_generation: int
@@ -219,7 +224,12 @@ class FakeJobStore:
         self.looked_up.append(kwargs)
         return self.approved
 
-    async def claim_mcp_invocation(self, *, invocation_id: int) -> dict[str, Any] | None:
+    async def claim_mcp_invocation(
+        self, *, invocation_id: int, **fence: Any
+    ) -> dict[str, Any] | None:
+        # The fence is recorded so a test can assert it travelled; the fake has
+        # one approval and no versions to disagree with.
+        self.fenced.append(fence)
         if (
             not self.claim_race_won
             or self.approved is None
@@ -262,7 +272,14 @@ class Upstream:
 
 @contextlib.asynccontextmanager
 async def _relay(monkeypatch, store: FakeJobStore, upstream: Upstream):
-    """Mount the relay router with a mocked upstream and the fake store."""
+    """Mount the relay router with a mocked upstream and the fake store.
+
+    The target is loopback, so the deployment has to admit private plain-HTTP
+    targets for the guard to let it through -- which is what the guard is *for*,
+    and the two tests that assert a target is refused set them back.
+    """
+    monkeypatch.setenv("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "1")
+    monkeypatch.setenv("AGENT_MCP_ALLOW_PLAIN_HTTP", "1")
     monkeypatch.setattr(
         agent_mcp_router,
         "build_upstream_client",
@@ -334,8 +351,8 @@ async def test_the_upstream_address_never_reaches_the_sandbox(client):
     response = await client.post(
         f"/v1/agent/mcp/{_ALIAS}", json=_rpc("initialize"), headers=_auth()
     )
-    assert "mcp.example.com" not in json.dumps(dict(response.headers))
-    assert "mcp.example.com" not in response.text
+    assert _UPSTREAM_HOST not in json.dumps(dict(response.headers))
+    assert _UPSTREAM_HOST not in response.text
     # The session id has to survive or streamable HTTP does not work at all.
     assert response.headers["mcp-session-id"] == "sess-1"
 

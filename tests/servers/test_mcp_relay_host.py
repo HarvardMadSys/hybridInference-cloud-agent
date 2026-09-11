@@ -55,6 +55,10 @@ def _secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provide the signing secret and the key connection credentials use."""
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "mcp-host-secret-value-32-bytes-xx")
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _ENCRYPTION_KEY)
+    # The target above is loopback and plain HTTP, so the deployment has to
+    # admit both for the guard to let the per-connection route through.
+    monkeypatch.setenv("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "1")
+    monkeypatch.setenv("AGENT_MCP_ALLOW_PLAIN_HTTP", "1")
     yield
 
 
@@ -67,7 +71,9 @@ def _connection(connection_id: int, label: str, **overrides: Any) -> dict[str, A
         "template": label.lower(),
         "transport": "streamable-http",
         "location": "remote",
-        "url": f"https://{label.lower()}.example.com/mcp",
+        # A loopback literal: the relay validates the target it dials, and a
+        # name that does not resolve is refused before the stub host sees it.
+        "url": "http://127.0.0.1:9/mcp",
         "launch_spec": None,
         "auth_kind": "static",
         "auth_config": {"header_name": "Authorization", "scheme": "Bearer"},
@@ -225,7 +231,9 @@ class FakeStore:
     async def find_approved_mcp_invocation(self, **kwargs: Any) -> dict[str, Any] | None:
         return self.approved
 
-    async def claim_mcp_invocation(self, *, invocation_id: int) -> dict[str, Any] | None:
+    async def claim_mcp_invocation(
+        self, *, invocation_id: int, **fence: Any
+    ) -> dict[str, Any] | None:
         if self.approved is None or int(self.approved["id"]) != int(invocation_id):
             return None
         self.claimed.append(invocation_id)

@@ -274,22 +274,7 @@ class _HttpCore:
 
     async def _guard(self, url: str) -> NormalizedEndpoint:
         """Validate a URL and the addresses it resolves to before dialling it."""
-        endpoint = validate_endpoint(url, self._config.policy)
-        if endpoint.origin != self._config.endpoint.origin:
-            raise TransportError(
-                f"{endpoint.origin} is not the origin this connection's credential belongs to",
-                kind="blocked_target",
-            )
-        try:
-            loop = asyncio.get_running_loop()
-            infos = await loop.getaddrinfo(endpoint.host, endpoint.port, type=0)
-            addresses = {info[4][0] for info in infos}
-            check_addresses(endpoint.host, addresses, self._config.policy)
-        except EndpointRejected as exc:
-            raise TransportError(str(exc), kind=exc.kind) from exc
-        except OSError as exc:
-            raise TransportError(f"{endpoint.host} could not be resolved: {exc}") from exc
-        return endpoint
+        return await guard_target(url, self._config.policy, origin=self._config.endpoint.origin)
 
     async def _answer_server_request(self, message: Any) -> bytes | None:
         """Answer a server-initiated request, or refuse it explicitly."""
@@ -379,6 +364,41 @@ class _HttpCore:
         if found is not None:
             return [found]
         return results
+
+
+async def guard_target(
+    url: str,
+    policy: EgressPolicy,
+    *,
+    origin: str | None = None,
+) -> NormalizedEndpoint:
+    """Validate a URL and every address it resolves to before anything dials it.
+
+    Module level rather than a method because there is more than one place that
+    dials: the transports, and the per-connection relay that forwards a caller's
+    raw JSON-RPC. A rule enforced at one of them and not the other is not a
+    rule -- the path that skips it becomes the way in.
+
+    ``origin`` binds the target to the one the credential belongs to. It is
+    optional because the relay validates a target the registry already chose,
+    and required by the transports, which follow URLs a server hands them.
+    """
+    endpoint = validate_endpoint(url, policy)
+    if origin is not None and endpoint.origin != origin:
+        raise TransportError(
+            f"{endpoint.origin} is not the origin this connection's credential belongs to",
+            kind="blocked_target",
+        )
+    try:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(endpoint.host, endpoint.port, type=0)
+        addresses = {info[4][0] for info in infos}
+        check_addresses(endpoint.host, addresses, policy)
+    except EndpointRejected as exc:
+        raise TransportError(str(exc), kind=exc.kind) from exc
+    except OSError as exc:
+        raise TransportError(f"{endpoint.host} could not be resolved: {exc}") from exc
+    return endpoint
 
 
 class StreamableHttpTransport(_HttpCore):
@@ -1019,6 +1039,7 @@ __all__ = [
     "build_headers",
     "connect_legacy_sse",
     "connect_streamable",
+    "guard_target",
     "iter_sse",
     "merge_headers",
 ]

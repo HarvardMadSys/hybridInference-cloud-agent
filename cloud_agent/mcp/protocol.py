@@ -52,6 +52,8 @@ RESOURCES_READ = "resources/read"
 RESOURCES_TEMPLATES_LIST = "resources/templates/list"
 PROMPTS_LIST = "prompts/list"
 PROMPTS_GET = "prompts/get"
+RESOURCES_SUBSCRIBE = "resources/subscribe"
+RESOURCES_UNSUBSCRIBE = "resources/unsubscribe"
 #: Mandatory for a stateless-era server, and the only way to read its
 #: capabilities: there is no handshake to declare them in.
 SERVER_DISCOVER = "server/discover"
@@ -687,7 +689,9 @@ __all__ = [
     "PROMPTS_LIST",
     "RESOURCES_LIST",
     "RESOURCES_READ",
+    "RESOURCES_SUBSCRIBE",
     "RESOURCES_TEMPLATES_LIST",
+    "RESOURCES_UNSUBSCRIBE",
     "RESULT_TYPE_COMPLETE",
     "RESULT_TYPE_INPUT_REQUIRED",
     "ROOTS_LIST",

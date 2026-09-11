@@ -60,6 +60,7 @@ from cloud_agent.mcp.registry import (
     resolve_connection,
     server_for,
 )
+from cloud_agent.mcp.transports import TransportError, guard_target
 from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
     METHOD_NOT_FOUND,
@@ -429,14 +430,27 @@ async def _decide_call(
         return _error_reply(request_id, decision.message or "this tool is not enabled")
 
     digest = arguments_digest(arguments if isinstance(arguments, dict) else None)
+    # What the approval would have to have been given for. Every one of these
+    # moves when something the owner agreed to changes: the target, the
+    # catalogue, the session's own rules, or whose job this is.
+    fence = {
+        "config_revision": authorized.connection.config_revision,
+        "authorization_epoch": authorized.connection.authorization_epoch,
+        "capability_revision": authorized.connection.capability_revision,
+        "policy_revision": authorized.binding.policy_revision,
+        "attempt_id": attempt_id,
+        "lease_generation": lease_generation or None,
+    }
     approved = await store.find_approved_mcp_invocation(
         job_id=authorized.job_id,
         connection_id=authorized.connection_id,
         capability_name=name,
         arguments_digest=digest,
+        capability_kind=kind.value,
+        **fence,
     )
     if approved is not None:
-        claimed = await store.claim_mcp_invocation(invocation_id=int(approved["id"]))
+        claimed = await store.claim_mcp_invocation(invocation_id=int(approved["id"]), **fence)
         if claimed is not None:
             # Exactly one dispatcher ever wins this UPDATE, which is why a
             # retry storm cannot send a write twice.
@@ -448,6 +462,7 @@ async def _decide_call(
         thread_id=authorized.thread_id,
         connection_id=authorized.connection_id,
         capability_name=name,
+        capability_kind=kind.value,
         arguments_digest=digest,
         arguments_ciphertext=_protect_arguments(arguments),
         config_revision=authorized.connection.config_revision,
@@ -473,6 +488,32 @@ async def _decide_call(
     )
 
 
+#: Methods that reach a capability, and what kind it is. The value is the
+#: params field that names it: a tool and a prompt by name, a resource by URI,
+#: because that is what the server itself uses as the identifier.
+_CAPABILITY_METHODS: dict[str, tuple[CapabilityKind, str]] = {
+    protocol.TOOLS_CALL: (CapabilityKind.TOOL, "name"),
+    protocol.RESOURCES_READ: (CapabilityKind.RESOURCE, "uri"),
+    protocol.RESOURCES_SUBSCRIBE: (CapabilityKind.RESOURCE, "uri"),
+    protocol.RESOURCES_UNSUBSCRIBE: (CapabilityKind.RESOURCE, "uri"),
+    protocol.PROMPTS_GET: (CapabilityKind.PROMPT, "name"),
+}
+
+#: Methods that reach no capability: housekeeping, and the catalogue reads whose
+#: *responses* are filtered down to the reachable set on the way back.
+_UNDECIDED_METHODS = frozenset(
+    {
+        protocol.INITIALIZE,
+        protocol.INITIALIZED,
+        protocol.PING,
+        protocol.TOOLS_LIST,
+        protocol.RESOURCES_LIST,
+        protocol.RESOURCES_TEMPLATES_LIST,
+        protocol.PROMPTS_LIST,
+    }
+)
+
+
 async def _capability_decision(
     authorized: Authorized,
     store: AgentJobStore,
@@ -481,10 +522,19 @@ async def _capability_decision(
     attempt_id: int | None,
     lease_generation: int,
 ) -> Any | None:
-    """Decide one relayed body's ``tools/call``, or ``None`` to forward it.
+    """Decide one relayed body, or ``None`` to forward it.
 
-    A thin adapter over :func:`_decide_call` for the per-connection route, whose
-    caller speaks raw JSON-RPC rather than tool names.
+    Every method reaches this, not only ``tools/call``. The per-connection route
+    is a direct line to a user's server carrying that user's credential, so a
+    method that skips the decision is a way to reach something the session
+    turned off -- which is exactly what a proxy that authorized tools and
+    forwarded everything else did with ``resources/read`` and ``prompts/get``.
+
+    A method this deployment has no authorization story for is *refused*, not
+    forwarded. Forwarding it would be the same mistake in the other direction:
+    the platform would be proxying a capability it cannot reason about, with a
+    credential it is responsible for. Notifications are the exception, because
+    they ask for nothing and carry no reply.
     """
     try:
         document = json.loads(body or b"{}")
@@ -492,15 +542,25 @@ async def _capability_decision(
         return None
     payloads = document if isinstance(document, list) else [document]
     for payload in payloads:
-        if not isinstance(payload, dict) or payload.get("method") != protocol.TOOLS_CALL:
+        if not isinstance(payload, dict):
             continue
+        method = str(payload.get("method") or "")
+        if not method or method in _UNDECIDED_METHODS or method.startswith("notifications/"):
+            continue
+        entry = _CAPABILITY_METHODS.get(method)
+        if entry is None:
+            return _error_reply(
+                payload.get("id"),
+                f"This deployment does not proxy {method!r}. It carries the calls it "
+                "can authorize; anything else is refused rather than forwarded.",
+            )
+        kind, key = entry
         params = payload.get("params")
-        name = str(params.get("name") or "") if isinstance(params, dict) else ""
-        arguments = params.get("arguments") if isinstance(params, dict) else None
+        name = str(params.get(key) or "") if isinstance(params, dict) else ""
         capability = next(
             (
                 item
-                for item in (authorized.snapshot.tools if authorized.snapshot else ())
+                for item in (authorized.snapshot.of_kind(kind) if authorized.snapshot else ())
                 if item.name == name
             ),
             None,
@@ -509,11 +569,12 @@ async def _capability_decision(
             authorized,
             store,
             name=name,
-            arguments=arguments,
+            arguments=params.get("arguments") if isinstance(params, dict) else None,
             capability=capability,
             attempt_id=attempt_id,
             lease_generation=lease_generation,
             request_id=payload.get("id"),
+            kind=kind,
         )
         if held is not None:
             return held
@@ -586,7 +647,31 @@ async def _proxy(
     method: str,
     body: bytes = b"",
 ) -> Any:
-    """Forward one request upstream and stream or filter the reply back."""
+    """Forward one request upstream and stream or filter the reply back.
+
+    The target is validated here, at the dial, and not only when the connection
+    was saved. A URL that was acceptable when it was typed may resolve somewhere
+    else now, and this route is the one that actually opens the socket -- a
+    check that lives only in the save path is a check the call path does not
+    have.
+    """
+    try:
+        await guard_target(server.url or "", policy_from_environment())
+    except TransportError as exc:
+        logger.warning(
+            "agent_mcp_relay_target_refused",
+            extra={
+                "event": "agent_mcp_relay_target_refused",
+                "job_id": job_id,
+                "connection_id": server.connection_id,
+                "detail": exc.kind,
+            },
+        )
+        raise _refused(
+            503,
+            "server_error",
+            f"The {server.name!r} MCP connection could not be reached: {exc}",
+        ) from exc
     client = build_upstream_client(server.request_timeout_s)
     upstream_request = client.build_request(
         method,

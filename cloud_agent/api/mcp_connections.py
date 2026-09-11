@@ -1062,7 +1062,9 @@ async def authorize_connection(
         raise _bad_request(str(exc)) from exc
 
     if identity.registration == "dcr":
-        identity = await _register_client(fetcher, metadata, policy=policy, base_url=base_url)
+        identity = await _register_client(
+            fetcher, metadata, policy=policy, base_url=base_url, connection_id=connection_id
+        )
 
     scopes = oauth.default_scopes(
         resource_metadata, metadata, connection.auth.oauth.scopes if connection.auth.oauth else ()
@@ -1079,7 +1081,7 @@ async def authorize_connection(
         client=identity,
         metadata=metadata,
         resource=connection.config.url,
-        redirect_uri=oauth.redirect_uri(base_url, f"{connection_id}"),
+        redirect_uri=_callback_url(base_url, connection_id),
         scopes=scopes,
     )
     cipher = oauth_cipher()
@@ -1116,6 +1118,7 @@ async def _register_client(
     *,
     policy: EgressPolicy,
     base_url: str,
+    connection_id: int,
 ) -> oauth.ClientIdentity:
     """Register dynamically, when the server supports nothing better."""
     from cloud_agent.mcp.transports import TransportError
@@ -1124,7 +1127,12 @@ async def _register_client(
         raise _bad_request("this authorization server has no registration endpoint")
     body = oauth.registration_request_body(
         client_name="HybridInference Cloud Agent",
-        redirect_uris=[f"{base_url}/v1/agent/mcp/oauth/callback"],
+        # The URI the redirect will actually use, computed the same way, not
+        # the bare path. A server that checks the registered value against the
+        # one in the authorization request -- which the specification requires
+        # it to -- refuses the two that differ, and the mismatch is invisible
+        # until somebody tries to connect.
+        redirect_uris=[_callback_url(base_url, connection_id)],
         scopes=metadata.scopes_supported,
     )
     try:
@@ -1277,7 +1285,21 @@ async def oauth_callback(
         token_endpoint=metadata.token_endpoint,
         revocation_endpoint=metadata.revocation_endpoint,
         registration_endpoint=metadata.registration_endpoint,
+        # The previous refresh token is dead -- this is an authorization, so
+        # whatever was there before belonged to a different grant. The one in
+        # this response is not: it is what the connection renews with, and the
+        # store keeps it.
         clear_refresh=True,
+        # Re-checked here rather than only before the exchange. The token
+        # request took real time, and a newer flow may have completed inside it:
+        # the epoch would not catch that, because re-authorizing the same
+        # connection is not a change of target.
+        expected_oauth_generation=int(flow["oauth_generation"])
+        if flow.get("oauth_generation") is not None
+        else None,
+        expected_config_revision=int(flow["config_revision"])
+        if flow.get("config_revision") is not None
+        else None,
     )
     if not written:
         return _callback_redirect(
@@ -1315,6 +1337,18 @@ async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Ma
 
         raise TransportError("the token response is not an object")
     return document
+
+
+def _callback_url(base_url: str, connection_id: int) -> str:
+    """The one redirect URI for a connection, used for register, authorize and redeem.
+
+    Defined once because the three have to agree. A server compares the
+    ``redirect_uri`` in the authorization request against the one registered
+    for the client -- the specification requires it to -- so a registration that
+    used a different string, even a prefix of the right one, fails the flow at
+    the browser with nothing in this service's logs.
+    """
+    return oauth.redirect_uri(base_url, str(connection_id))
 
 
 def _callback_redirect(provider: str, *, ok: bool, message: str) -> Response:
@@ -1489,13 +1523,28 @@ async def list_invocations(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: AgentJobStore | None = Depends(get_agent_job_store),
 ) -> InvocationsResponse:
-    """Calls that needed a decision, for one job or one conversation."""
+    """Calls that needed a decision, for one job or one conversation.
+
+    The owner is part of the query, not a check after it. These rows carry the
+    tool call's arguments decrypted for display -- code, documents, whatever the
+    model was about to send -- so a listing that trusts the caller's ``job_id``
+    is a way to read another user's calls by guessing an id. The named job is
+    checked first so a caller learns "not yours" the same way it learns "does
+    not exist": with a 404 that says nothing about which it was.
+    """
     job_store = _require_store(store)
     if job_id is None and thread_id is None:
         raise _bad_request("name a job or a conversation")
+    if job_id is not None:
+        job = await job_store.get_job(job_id)
+        if job is None or str(job.get("user_id")) != user["user_id"]:
+            raise _not_found("no such job")
     statuses = [InvocationStatus.PENDING.value] if pending_only else None
     rows = await job_store.list_mcp_invocations(
-        job_id=job_id, thread_id=thread_id, statuses=statuses
+        job_id=job_id,
+        thread_id=thread_id,
+        statuses=statuses,
+        user_id=user["user_id"],
     )
     return InvocationsResponse(invocations=[await _invocation_view(job_store, row) for row in rows])
 

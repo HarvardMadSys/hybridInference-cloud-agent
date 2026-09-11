@@ -643,6 +643,12 @@ class McpServer:
     transport: Transport
     headers: Mapping[str, str] = field(default_factory=dict)
     tools: frozenset[str] = frozenset()
+    #: The resource URIs and prompt names this session enabled. Kept beside the
+    #: tools rather than derived from them, because the design gives the three
+    #: surfaces their own scopes: a session that turned a resource off must not
+    #: reach it just because the tools beside it are reachable.
+    resources: frozenset[str] = frozenset()
+    prompts: frozenset[str] = frozenset()
     description: str = ""
     protocol_version: str = PREFERRED_PROTOCOL_VERSION
     #: The bound on one call, in seconds, or ``None`` for the relay's default.
@@ -665,6 +671,14 @@ class McpServer:
         allowed tools has no reachable tools.
         """
         return False
+
+    def allows_resource(self, uri: str) -> bool:
+        """Whether a resource read may reach this server."""
+        return uri in self.resources
+
+    def allows_prompt(self, name: str) -> bool:
+        """Whether a prompt fetch may reach this server."""
+        return name in self.prompts
 
     def allows(self, tool: str) -> bool:
         """Whether ``tool`` was allowed by this server's binding."""
