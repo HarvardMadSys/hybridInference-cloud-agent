@@ -1,0 +1,34 @@
+{
+  "dev_sha": "d4bcec0fd8b5511e0fe0c21d93ddc84e7d0ecb2b",
+  "dev_public_methods": 124,
+  "implemented": 111,
+  "missing": [
+    "_attempts_spent",
+    "_capture_attempt_ledger",
+    "_create_follow_up",
+    "_fail_discontinuous_follow_ups",
+    "_fail_unrunnable_follow_ups",
+    "_host_row_to_dict",
+    "_insert_event",
+    "_release_host_slot",
+    "_reserve_shared_thread_sandbox",
+    "_session_fork_details",
+    "_transition_job",
+    "initialize",
+    "replayed_submission",
+    "sweep_queued_follow_ups"
+  ],
+  "signature_drift": {
+    "create_job": [
+      "client_request_id",
+      "client_request_fingerprint"
+    ],
+    "create_follow_up": [
+      "client_request_id",
+      "client_request_fingerprint"
+    ],
+    "record_admin_action": [
+      "actor_id"
+    ]
+  }
+}
