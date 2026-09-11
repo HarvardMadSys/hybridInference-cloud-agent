@@ -13,7 +13,6 @@ import {
   DetailRows,
   DetailSection,
   EmptyNote,
-  StoredRecord,
   TabPanel,
   TextBlock,
   TruncationNote,
@@ -151,14 +150,6 @@ export function ToolStepDetails({
           <EmptyNote>Payload was not recorded.</EmptyNote>
         )}
         {step.truncated && callEvent ? <TruncationNote payload={callEvent.payload ?? {}} /> : null}
-        {callEvent ? (
-          <DetailSection title="Stored call event">
-            <StoredRecord
-              title={`#${callEvent.id} · ${callEvent.event_type} · seq ${callEvent.seq} · attempt ${callEvent.attempt_id}`}
-              event={callEvent}
-            />
-          </DetailSection>
-        ) : null}
         <button
           type="button"
           onClick={() =>
@@ -197,18 +188,10 @@ export function ToolStepDetails({
             </DetailRows>
             {step.ambiguity === 'duplicate_result' ? (
               <p role="note" className="text-[11px] text-amber-700 dark:text-amber-300">
-                More than one result was stored for this call. All of them are kept below, so the
-                pairing is not verified and neither a status nor a duration is claimed.
+                More than one result was stored for this call, so the pairing is not verified and
+                neither a status nor a duration is claimed.
               </p>
             ) : null}
-            {resultEvents.map((event) => (
-              <DetailSection key={event.id} title="Stored result event">
-                <StoredRecord
-                  title={`#${event.id} · ${event.event_type} · seq ${event.seq} · attempt ${event.attempt_id}`}
-                  event={event}
-                />
-              </DetailSection>
-            ))}
           </>
         ) : (
           <>
