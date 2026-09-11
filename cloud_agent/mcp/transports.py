@@ -540,15 +540,41 @@ class LegacySseTransport(_HttpCore):
         config: RemoteTransportConfig,
         client: httpx.AsyncClient,
         *,
-        message_url: str,
+        message_url: str | None = None,
     ) -> None:
-        """Build a transport already pointed at the announced message endpoint."""
+        """Build a transport, optionally already knowing where requests go."""
         super().__init__(config, client)
         self._message_url = message_url
+        self._announcement: asyncio.Future[str] | None = None
         self._next_id = 0
         self._stream_task: asyncio.Task[None] | None = None
         self._inbox: dict[str, Any] = {}
         self._waiters: dict[str, asyncio.Event] = {}
+        #: Set when the stream has ended, so a waiter can tell "no reply yet"
+        #: from "there is no longer anything that could reply".
+        self._ended = False
+
+    def announcement(self) -> asyncio.Future[str]:
+        """The message endpoint, resolved when the stream names one.
+
+        A future rather than a value because the announcement arrives on the
+        same stream the replies do, and the stream can only be read once: this
+        transport owns that reader, so the connection waits on an event it
+        resolves instead of opening a second pass over the bytes -- which httpx
+        refuses outright, and which a server would never send twice anyway.
+        """
+        if self._announcement is None:
+            self._announcement = asyncio.get_running_loop().create_future()
+            if self._message_url:
+                self._announcement.set_result(self._message_url)
+        return self._announcement
+
+    def announced(self, message_url: str) -> None:
+        """Record the endpoint the stream announced, once."""
+        self._message_url = message_url
+        future = self.announcement()
+        if not future.done():
+            future.set_result(message_url)
 
     def _new_id(self) -> str:
         """Allocate a request id."""
@@ -581,10 +607,15 @@ class LegacySseTransport(_HttpCore):
         key = id_key(request_id)
         waiter = self._waiter(key)
         config = self._config_with_state()
-        await self._guard(self._message_url)
+        # The validated endpoint, not the announcement as it arrived: the
+        # raw value is a path until the connection has checked it against the
+        # origin and the egress policy, and a request must never go to the
+        # unchecked form.
+        message_url = self._message_url or await self.announcement()
+        await self._guard(message_url)
         try:
             response = await self._client.post(
-                self._message_url,
+                message_url,
                 content=encode_request(request_id, method, params),
                 headers=build_headers(config, body=True),
             )
@@ -623,6 +654,15 @@ class LegacySseTransport(_HttpCore):
             ) from exc
         message = self._inbox.pop(key, None)
         if message is None:
+            # A stream that ended is a different diagnosis from a reply that
+            # never came, and the caller has a different action for each: one is
+            # a server that went away, the other a server that is answering
+            # something this connection cannot match.
+            if self._ended:
+                raise TransportError(
+                    f"the server's stream ended before it answered {method!r}",
+                    kind="unreachable",
+                )
             raise TransportError(
                 f"the server's reply to {method!r} was lost", kind="protocol_incompatible"
             )
@@ -631,10 +671,11 @@ class LegacySseTransport(_HttpCore):
     async def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:
         """Send one notification on the message endpoint."""
         config = self._config_with_state()
-        await self._guard(self._message_url)
+        message_url = self._message_url or await self.announcement()
+        await self._guard(message_url)
         try:
             response = await self._client.post(
-                self._message_url,
+                message_url,
                 content=encode_notification(method, params),
                 headers=build_headers(config, body=True),
             )
@@ -654,17 +695,18 @@ class LegacySseTransport(_HttpCore):
         finally:
             # Every waiter is released on stream end. Leaving one blocked would
             # hold a job's request open until its own timeout for a connection
-            # that is already gone.
-            for key, waiter in list(self._waiters.items()):
-                self._inbox.setdefault(
-                    key,
-                    _lost(key),
-                )
+            # that is already gone. Releasing them is not the same as answering
+            # them, which is why the flag is set before they wake.
+            self._ended = True
+            for waiter in list(self._waiters.values()):
                 waiter.set()
             await response.aclose()
 
     async def _handle_event(self, event: Any) -> None:
-        """Route one stream event."""
+        """Route one stream event, including the announcement that opens the flow."""
+        if event.event == "endpoint" and event.data:
+            self.announced(event.data.strip())
+            return
         if not event.data:
             return
         try:
@@ -686,8 +728,9 @@ class LegacySseTransport(_HttpCore):
         """POST a pre-encoded payload, used for replying to server requests."""
         config = self._config_with_state()
         try:
+            message_url = self._message_url or await self.announcement()
             response = await self._client.post(
-                self._message_url, content=payload, headers=build_headers(config, body=True)
+                message_url, content=payload, headers=build_headers(config, body=True)
             )
             await response.aread()
         except httpx.HTTPError:
@@ -703,19 +746,6 @@ class LegacySseTransport(_HttpCore):
                 await task
             except (asyncio.CancelledError, Exception):
                 return
-
-
-def _lost(key: str) -> Any:
-    """Build the synthetic failure a stream's end delivers to its waiters."""
-    return decode(
-        json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": key,
-                "error": {"code": -32603, "message": "the server's stream ended"},
-            }
-        )
-    )[0]
 
 
 @dataclass(frozen=True)
@@ -852,47 +882,26 @@ async def connect_legacy_sse(
         await http.aclose()
         raise TransportError(f"the server could not be reached: {exc}") from exc
 
-    decoder = SseDecoder()
-    message_url: str | None = None
-    pending: list[Any] = []
-
-    async def read_announcement() -> None:
-        nonlocal message_url
-        async for chunk in response.aiter_bytes():
-            for event in decoder.feed(chunk):
-                if event.event in ("endpoint", "message") and event.data:
-                    candidate = event.data.strip()
-                    if event.event == "endpoint":
-                        message_url = candidate
-                        return
-                    pending.append(event)
-            if message_url:
-                return
-
+    # The stream is read exactly once, by the transport, because httpx will not
+    # hand the same response body to a second reader -- and because reading it
+    # here and again there is how the bytes between the two passes go missing.
+    transport = LegacySseTransport(config, http)
+    stream_task = asyncio.create_task(transport.consume(response))
+    transport.attach_stream(stream_task)
     try:
         async with asyncio.timeout(config.connect_timeout * 3):
-            await read_announcement()
+            announced = await transport.announcement()
     except TimeoutError as exc:
-        await response.aclose()
+        await transport.aclose()
         await http.aclose()
         raise TransportError(
             "the server never announced a message endpoint on its stream",
             kind="protocol_incompatible",
         ) from exc
-    if not message_url:
-        await response.aclose()
-        await http.aclose()
-        raise TransportError(
-            "the server's stream did not announce a message endpoint",
-            kind="protocol_incompatible",
-        )
 
-    resolved = _resolve_message_url(config, message_url)
-    transport = LegacySseTransport(config, http, message_url=resolved)
-    stream_task = asyncio.create_task(transport.consume(response))
-    transport.attach_stream(stream_task)
-    for event in pending:
-        await transport._handle_event(event)
+    # Validated before anything is sent to it: the announcement is precisely
+    # where a server can point this connection's credential somewhere else.
+    transport.announced(_resolve_message_url(config, announced))
     try:
         handshake = await initialize(transport)
     except BaseException:
