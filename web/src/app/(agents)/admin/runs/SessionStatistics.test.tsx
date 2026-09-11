@@ -29,7 +29,7 @@ describe('session statistics', () => {
     expect(section.getByText('108m 10s')).toBeVisible();
     expect(section.getByText('2.9s')).toBeVisible();
     expect(section.getByText('257 tok/s')).toBeVisible();
-    expect(section.getByText(/Estimates from recorded activity/)).toBeVisible();
+    expect(section.queryByText(/Estimates from recorded activity/)).not.toBeInTheDocument();
     expect(section.getByText('LLM time')).toHaveAttribute(
       'title',
       expect.stringContaining('overhead'),

@@ -48,10 +48,6 @@ export function SessionStatistics({ statistics }: { statistics?: AdminSessionSta
       >
         Session statistics
       </h2>
-      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        Estimates from recorded activity across all executions in this run, independent of the
-        execution selected above. LLM time includes agent overhead.
-      </p>
       <dl
         className={`${CARD} mt-4 divide-y divide-gray-100 overflow-hidden text-sm dark:divide-white/5`}
       >

@@ -676,7 +676,7 @@ describe('admin run observation', () => {
       expect(fn).not.toHaveBeenCalled();
   });
 
-  it('shows session statistics and one token usage summary, with source diagnostics collapsed until opened', async () => {
+  it('shows session statistics and one token usage summary without usage diagnostics', async () => {
     render(<AdminRunPage />);
     await screen.findByRole('article', { name: 'Execution 1 event 1' });
     expect(getAdminRunActivity).toHaveBeenCalledWith(
@@ -692,21 +692,21 @@ describe('admin run observation', () => {
     const totals = within(screen.getByRole('table', { name: 'Token usage totals' }));
     expect(totals.getByRole('row', { name: 'Model calls 2' })).toBeVisible();
     expect(totals.getByText('$0.0097')).toHaveAttribute('title', '0.00978569');
-    expect(screen.getByText('Not finalized')).toBeInTheDocument();
-    expect(screen.getByText(/Rows missing metrics: reasoning: 2/)).not.toBeVisible();
-    expect(screen.getByText('Gateway ledger')).not.toBeVisible();
-    expect(screen.getByText('Runtime reported')).not.toBeVisible();
-    expect(screen.getByText('Attribution windows')).not.toBeVisible();
-    expect(screen.getByText(/Snapshot:/)).not.toBeVisible();
-    const details = screen.getByText('Usage details').closest('details')!;
-    expect(details).not.toHaveAttribute('open');
-    fireEvent.click(screen.getByText('Usage details'));
-    expect(details).toHaveAttribute('open');
-    expect(screen.getByText('Gateway ledger')).toBeVisible();
-    expect(screen.getByText('Runtime reported')).toBeVisible();
-    expect(screen.getByText('Attribution windows')).toBeVisible();
-    const comparison = within(screen.getByRole('table', { name: 'Usage source comparison' }));
-    expect(comparison.getByRole('row', { name: 'Model calls 2 Unavailable' })).toBeVisible();
+    expect(screen.queryByText(/Gateway totals for this run/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Estimates from recorded activity/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Gateway:/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Finalized')).not.toBeInTheDocument();
+    expect(screen.queryByText('Not finalized')).not.toBeInTheDocument();
+    expect(screen.queryByText('Accounting update in progress')).not.toBeInTheDocument();
+    expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
+    expect(screen.queryByText('Gateway ledger')).not.toBeInTheDocument();
+    expect(screen.queryByText('Runtime reported')).not.toBeInTheDocument();
+    expect(screen.queryByText('Attribution windows')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Snapshot:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Rows missing metrics:/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('table', { name: 'Usage source comparison' }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText('LLM requests')).toBeInTheDocument();
     // Collapsed by default: naming the surface must not read the gateway.
     expect(getAdminLlmRequestSources).not.toHaveBeenCalled();
@@ -717,7 +717,7 @@ describe('admin run observation', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('keeps incomplete, estimated and unavailable usage clear even while diagnostics are closed', async () => {
+  it('keeps incomplete, estimated and unavailable usage clear in the summary', async () => {
     const partial = usage();
     partial.ledger.missing_attempts = 1;
     partial.ledger.estimated_calls = 2;
@@ -739,7 +739,7 @@ describe('admin run observation', () => {
     expect(totals.getByRole('row', { name: 'Reasoning tokens Unavailable' })).toBeVisible();
     expect(screen.getByText('1 execution(s) have no gateway totals.')).toBeVisible();
     expect(screen.getByText('2 calls contain estimated usage.')).toBeVisible();
-    expect(screen.getByText('Usage details').closest('details')).not.toHaveAttribute('open');
+    expect(screen.queryByText('Usage details')).not.toBeInTheDocument();
   });
 
   it('keeps zero-coverage totals unavailable and exposes timing provenance and incomplete process evidence', async () => {

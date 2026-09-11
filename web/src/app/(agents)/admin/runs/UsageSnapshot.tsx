@@ -1,39 +1,34 @@
 import type { AgentJobUsageApi } from '@/lib/api/agents';
 
-import { CARD, dateTime, metric, money, number } from './shared';
+import { CARD, metric, money, number } from './shared';
 
 /** Pure presentation: admin reads never invoke owner loaders or refresh accounting. */
 export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
-  const { ledger, runtime } = usage;
+  const { ledger } = usage;
   const totals = ledger.totals;
   const unknownRows = ledger.unknown_rows;
   const cost = money(totals?.spent_usd);
-  const rows: { label: string; gateway: string; runtime: string; title?: string }[] = [
-    { label: 'Model calls', gateway: number(totals?.calls), runtime: 'Unavailable' },
+  const rows: { label: string; gateway: string; title?: string }[] = [
+    { label: 'Model calls', gateway: number(totals?.calls) },
     {
       label: 'Input tokens (including cache)',
       gateway: metric(totals?.tokens_in, unknownRows?.tokens_in),
-      runtime: number(runtime.normalized_input_tokens),
     },
     {
       label: 'Output tokens',
       gateway: metric(totals?.tokens_out, unknownRows?.tokens_out),
-      runtime: number(runtime.output_tokens),
     },
     {
       label: 'Cache read tokens',
       gateway: metric(totals?.cache_read, unknownRows?.cache_read),
-      runtime: number(runtime.cache_read_tokens),
     },
     {
       label: 'Cache write tokens',
       gateway: metric(totals?.cache_write, unknownRows?.cache_write),
-      runtime: 'Unavailable',
     },
     {
       label: 'Reasoning tokens',
       gateway: metric(totals?.reasoning, unknownRows?.reasoning),
-      runtime: 'Unavailable',
     },
     {
       label: 'Cost (USD)',
@@ -41,11 +36,9 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
         cost.exact && unknownRows?.spent_usd
           ? `${cost.display} (${number(unknownRows.spent_usd)} unknown)`
           : cost.display,
-      runtime: 'Unavailable',
       title: cost.exact ?? undefined,
     },
   ];
-  const unknown = Object.entries(unknownRows ?? {}).filter(([, count]) => count > 0);
 
   return (
     <section aria-labelledby="token-usage-heading" className="mt-8">
@@ -55,26 +48,19 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
       >
         Token usage
       </h2>
-      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        Gateway totals for this run across all its executions, independent of the execution selected
-        above.
-      </p>
       <div className={`${CARD} mt-4 overflow-hidden`}>
-        <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-          <span>
-            Gateway: <strong className="font-medium">{ledger.status}</strong>
-          </span>
-          <span>{ledger.finalized ? 'Finalized' : 'Not finalized'}</span>
-          {ledger.refreshing && <span>Accounting update in progress</span>}
-          {ledger.missing_attempts > 0 && (
-            <span className="text-amber-700 dark:text-amber-400">
-              {ledger.missing_attempts} execution(s) have no gateway totals.
-            </span>
-          )}
-          {ledger.estimated_calls > 0 && (
-            <span>{number(ledger.estimated_calls)} calls contain estimated usage.</span>
-          )}
-        </div>
+        {(ledger.missing_attempts > 0 || ledger.estimated_calls > 0) && (
+          <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
+            {ledger.missing_attempts > 0 && (
+              <span className="text-amber-700 dark:text-amber-400">
+                {ledger.missing_attempts} execution(s) have no gateway totals.
+              </span>
+            )}
+            {ledger.estimated_calls > 0 && (
+              <span>{number(ledger.estimated_calls)} calls contain estimated usage.</span>
+            )}
+          </div>
+        )}
         <table aria-label="Token usage totals" className="w-full text-left text-sm">
           <tbody className="divide-y divide-gray-100 dark:divide-white/5">
             {rows.map((row) => (
@@ -92,87 +78,6 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
             ))}
           </tbody>
         </table>
-        <details className="border-t border-gray-100 text-xs dark:border-white/5">
-          <summary className="cursor-pointer px-5 py-4 font-medium text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson dark:text-gray-400 dark:focus-visible:ring-crimson-light">
-            Usage details
-          </summary>
-          <div className="space-y-2 px-5 pb-4 text-gray-500 dark:text-gray-400">
-            <p>Snapshot: {dateTime(ledger.queried_at)}</p>
-            <p>
-              Gateway totals use each execution’s grant time window. Runtime totals are deduplicated
-              reports from the agent, provided for comparison; do not add the two sources together.
-              Activity messages are not model-call counts.
-            </p>
-            {unknown.length > 0 && (
-              <p>
-                Rows missing metrics:{' '}
-                {unknown.map(([key, count]) => `${key}: ${count}`).join(' · ')}
-              </p>
-            )}
-            {ledger.attempts.some((attempt) => attempt.reason) && (
-              <p>
-                Availability:{' '}
-                {Array.from(
-                  new Set(ledger.attempts.map((attempt) => attempt.reason).filter(Boolean)),
-                ).join(', ')}
-              </p>
-            )}
-          </div>
-          <div className="overflow-x-auto">
-            <table aria-label="Usage source comparison" className="w-full text-left text-sm">
-              <thead className="text-xs text-gray-500 dark:text-gray-400">
-                <tr>
-                  <th scope="col" className="px-5 py-3 font-medium">
-                    Metric
-                  </th>
-                  <th scope="col" className="px-5 py-3 font-medium">
-                    Gateway ledger
-                  </th>
-                  <th scope="col" className="px-5 py-3 font-medium">
-                    Runtime reported
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-white/5">
-                {rows.map((row) => (
-                  <tr key={row.label}>
-                    <th
-                      scope="row"
-                      className="px-5 py-2.5 font-normal text-gray-600 dark:text-gray-400"
-                    >
-                      {row.label}
-                    </th>
-                    <td className="px-5 py-2.5 tabular-nums" title={row.title}>
-                      {row.gateway}
-                    </td>
-                    <td className="px-5 py-2.5 tabular-nums">{row.runtime}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="border-t border-gray-100 px-5 py-4 dark:border-white/5">
-            <h3 className="font-medium text-gray-600 dark:text-gray-400">Attribution windows</h3>
-            <ul className="mt-3 space-y-3 text-gray-500 dark:text-gray-400">
-              {ledger.attempts.map((attempt) => (
-                <li key={attempt.attempt_id}>
-                  <p>
-                    Execution {attempt.attempt_no} · {attempt.status}
-                  </p>
-                  {attempt.windows.length ? (
-                    attempt.windows.map((window, index) => (
-                      <p key={index} className="mt-1">
-                        {dateTime(window.since)} – {dateTime(window.until)} · request start time
-                      </p>
-                    ))
-                  ) : (
-                    <p className="mt-1">Attribution window unavailable.</p>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </details>
       </div>
     </section>
   );
