@@ -157,6 +157,12 @@ def test_a_failed_run_leaves_nothing_behind() -> None:
         "containers first: an image with a container still referencing it is not removed, "
         "even with -f, so the other order silently leaves both"
     )
+    assert "docker image rm -f" not in run, (
+        "not forced: two runs of the same commit build the same image id under different "
+        "tags on a shared runner, and a forced removal takes their containers with it. That "
+        "is how the egress cell's container disappeared between `docker run` and its first "
+        "`docker inspect`."
+    )
 
 
 def test_the_gate_waits_for_the_image_jobs() -> None:

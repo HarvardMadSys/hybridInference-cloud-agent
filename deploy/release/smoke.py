@@ -275,7 +275,16 @@ def http_status(url: str) -> tuple[int | None, str]:
         return None, str(error)
 
 
-def wait_for_http(url: str, timeout: int = STARTUP_TIMEOUT_S) -> tuple[int, str]:
+def wait_for_http(
+    url: str, timeout: int = STARTUP_TIMEOUT_S, container: Container | None = None
+) -> tuple[int, str]:
+    """Poll until something answers, then say why nothing did.
+
+    A connection refused for ninety seconds is not a diagnosis. The container's
+    state and its own log are, so a failure carries them rather than sending the
+    reader to the Actions log to find out that the process died on a missing
+    variable.
+    """
     deadline = time.monotonic() + timeout
     last = "no attempt made"
     while time.monotonic() < deadline:
@@ -284,7 +293,11 @@ def wait_for_http(url: str, timeout: int = STARTUP_TIMEOUT_S) -> tuple[int, str]
             return status, body
         last = body
         time.sleep(POLL_INTERVAL_S)
-    raise SmokeFailure(f"{url} did not answer within {timeout}s: {last}")
+
+    detail = ""
+    if container is not None:
+        detail = f"\nstate={container.state()}\n{container.logs()[-4000:]}"
+    raise SmokeFailure(f"{url} did not answer within {timeout}s: {last}{detail}")
 
 
 def image_labels(image: str) -> dict[str, str]:
@@ -293,6 +306,20 @@ def image_labels(image: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------- the artifacts
+
+
+def _drop_image(image: str) -> None:
+    """Remove this run's image tag, and never at another run's expense.
+
+    Not `-f`. Two runs of the same commit build the same image *id* under
+    different tags, and a forced removal takes the containers using it with it —
+    which is how this check's own egress cell failed on a shared runner: its
+    container vanished between `docker run` and the first `docker inspect`
+    because an earlier run's cleanup had force-removed the image underneath it.
+    A plain `rm` refuses while a container still references the image, so the
+    worst case here is a leftover image rather than somebody else's dead job.
+    """
+    run("docker", "image", "rm", image, check=False)
 
 
 def verify_web(image: str, *, variant: str, suffix: str, keep: bool) -> list[str]:
@@ -319,7 +346,7 @@ def verify_web(image: str, *, variant: str, suffix: str, keep: bool) -> list[str
             },
             publish=(3000,),
         )
-        status, body = wait_for_http(container.url(3000, f"{base_path}/login"))
+        status, body = wait_for_http(container.url(3000, f"{base_path}/login"), container=container)
         if status != 200:
             raise SmokeFailure(f"{base_path}/login answered {status}\n{container.logs()}")
         if "Smoke Test Agent" not in body:
@@ -350,7 +377,7 @@ def verify_web(image: str, *, variant: str, suffix: str, keep: bool) -> list[str
     finally:
         container.stop()
         if not keep:
-            run("docker", "image", "rm", "-f", image, check=False)
+            _drop_image(image)
 
 
 def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
@@ -407,7 +434,7 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
                 migrate.stop()
 
             app.start(image, env=common, network=network.name, publish=(8000,))
-            status, _ = wait_for_http(app.url(8000, "/healthz"))
+            status, _ = wait_for_http(app.url(8000, "/healthz"), container=app)
             if status != 200:
                 raise SmokeFailure(f"/healthz answered {status}\n{app.logs()}")
             return [
@@ -418,7 +445,7 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
         app.stop()
         postgres.stop()
         if not keep:
-            run("docker", "image", "rm", "-f", image, check=False)
+            _drop_image(image)
 
 
 def _control_environment(dsn: str) -> dict[str, str]:
@@ -495,7 +522,7 @@ def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
     finally:
         container.stop()
         if not keep:
-            run("docker", "image", "rm", "-f", image, check=False)
+            _drop_image(image)
 
 
 def verify_sandbox(image: str, *, suffix: str, keep: bool) -> list[str]:
@@ -557,7 +584,7 @@ def verify_sandbox(image: str, *, suffix: str, keep: bool) -> list[str]:
         finally:
             container.stop()
     if not keep:
-        run("docker", "image", "rm", "-f", image, check=False)
+        _drop_image(image)
     return evidence
 
 
@@ -604,7 +631,7 @@ def verify_tunnel(image: str, *, suffix: str, keep: bool) -> list[str]:
     finally:
         hop.stop()
         if not keep:
-            run("docker", "image", "rm", "-f", image, check=False)
+            _drop_image(image)
 
 
 def verify_egress(image: str, *, suffix: str, keep: bool, workdir: Path) -> list[str]:
@@ -644,7 +671,7 @@ def verify_egress(image: str, *, suffix: str, keep: bool, workdir: Path) -> list
         container.stop()
         config.unlink(missing_ok=True)
         if not keep:
-            run("docker", "image", "rm", "-f", image, check=False)
+            _drop_image(image)
 
 
 def verify_identity(image: str, role: str, variant: str | None, revision: str | None) -> list[str]:
