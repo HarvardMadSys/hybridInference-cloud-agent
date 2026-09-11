@@ -10,11 +10,20 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
 
 from cloud_agent.admin_observability import LlmRequestSourceCursor, cursor_scope
 from cloud_agent.storage.admin_queries import AdminRunQueries
+from cloud_agent.storage.store import AgentJobStore
 from tests.integration.storage.test_agent_job_store import _create_job
-from tests.integration.storage.test_attempt_ledger import _seed_attempt, store as store
+from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
+
+
+@pytest_asyncio.fixture
+async def store(db):
+    """Everything these tests need, to set a claim up."""
+    return AgentJobStore(db)
+
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

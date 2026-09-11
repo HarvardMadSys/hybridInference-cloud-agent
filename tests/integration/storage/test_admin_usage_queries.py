@@ -11,6 +11,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -23,8 +24,9 @@ from cloud_agent.admin_usage import (
 from cloud_agent.api import admin_usage
 from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
+from cloud_agent.storage.store import AgentJobStore
 from tests.integration.storage.test_agent_job_store import _create_job
-from tests.integration.storage.test_attempt_ledger import _seed_attempt, store as store
+from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
 from tests.unit.test_ledger_snapshots import END, START, report_payload
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -104,6 +106,12 @@ def _client(store) -> AsyncClient:
     )
     app.dependency_overrides[get_agent_job_store] = lambda: store
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+@pytest_asyncio.fixture
+async def store(db):
+    """Everything these tests need, to set a claim up."""
+    return AgentJobStore(db)
 
 
 @pytest.fixture
