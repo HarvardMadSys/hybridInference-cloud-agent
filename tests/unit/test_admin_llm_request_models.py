@@ -7,25 +7,33 @@ whether a continuation still describes the query it was minted for.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from cloud_agent import identity
 from cloud_agent.admin_observability import (
+    MAX_ADMIN_RESPONSE_BYTES,
     MAX_REQUEST_CURSOR_BYTES,
     REQUEST_CURSOR_TTL,
     SOURCE_REASON_ATTRIBUTION_UNAVAILABLE,
     SOURCE_REASON_BINDING_CHANGED,
     SOURCE_REASON_INVALID_WINDOW,
+    AdminLlmRequest,
+    AdminLlmRequestPage,
+    AdminLlmRequestWindow,
     LlmRequestCursor,
     RequestCursorError,
+    RequestCursorTooLong,
     decode_llm_request_cursor,
     encode_llm_request_cursor,
     expected_gateway_job_id,
     llm_request_source_view,
     request_source_fingerprint,
+    response_body_bytes,
 )
+from cloud_agent.grant_usage import MAX_REQUEST_PAGE_BYTES
 
 START = datetime(2026, 9, 11, 3, 20, tzinfo=UTC)
 END = START + timedelta(minutes=1)
@@ -266,3 +274,50 @@ def test_the_cursor_key_is_separated_from_sessions() -> None:
     with pytest.raises(identity.IdentityError):
         identity.verify_session(token)
     assert identity.admin_llm_request_cursor_secret() != SECRET
+
+
+def test_a_cursor_this_service_would_refuse_is_never_signed() -> None:
+    """Signing inflates; a page must not hand back a link it cannot resume."""
+    with pytest.raises(RequestCursorTooLong):
+        encode_llm_request_cursor(cursor(request_id="😀" * 256, gateway_cursor="c" * 2048))
+
+
+def test_a_legal_cursor_stays_inside_the_input_ceiling() -> None:
+    token = encode_llm_request_cursor(cursor(gateway_cursor="c" * 2048))
+    assert len(token.encode("utf-8")) <= MAX_REQUEST_CURSOR_BYTES
+    assert decode(token).gateway_cursor == "c" * 2048
+
+
+def test_the_response_ceiling_matches_what_the_service_reads() -> None:
+    """A page it could not forward is a page it must not claim to have answered."""
+    assert MAX_ADMIN_RESPONSE_BYTES == MAX_REQUEST_PAGE_BYTES
+
+
+def test_the_response_ceiling_counts_the_finished_body() -> None:
+    page = AdminLlmRequestPage(
+        job_id="ajob_one",
+        source_id="42",
+        attempt_id=10,
+        attempt_no=1,
+        window=AdminLlmRequestWindow(since=START, until=END),
+        fetched_at=END,
+        gateway_as_of=END,
+        requests=[
+            AdminLlmRequest(
+                request_id="req_😀",
+                request_started_at=START,
+                logged_at=END,
+                model='a"b\\c',
+                spent_usd="0.00000001",
+            )
+        ],
+        next_cursor="cursor",
+    )
+    serialized = json.dumps(
+        page.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert response_body_bytes(page) == len(serialized)
+    # The identifiers and the continuation are part of the body, so a ceiling
+    # over the gateway's model alone would not bound what the browser receives.
+    without_cursor = page.model_copy(update={"next_cursor": None})
+    assert response_body_bytes(page) > response_body_bytes(without_cursor)

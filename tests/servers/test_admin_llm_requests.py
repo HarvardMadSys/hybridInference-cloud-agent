@@ -21,12 +21,17 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import identity
 from cloud_agent.admin_observability import (
+    MAX_ADMIN_RESPONSE_BYTES,
     MAX_REQUEST_CURSOR_BYTES,
     REQUEST_CURSOR_TTL,
+    AdminLlmRequest,
+    AdminLlmRequestPage,
+    AdminLlmRequestWindow,
     LlmRequestCursor,
     cursor_scope,
     encode_llm_request_cursor,
     request_source_fingerprint,
+    response_body_bytes,
 )
 from cloud_agent.api import admin_llm_requests
 from cloud_agent.api.deps import get_gateway_client, get_grant_client
@@ -550,3 +555,96 @@ async def test_refusals_the_framework_generates_are_not_storable(monkeypatch):
     assert wrong_shape.status_code == 422
     for response in (anonymous, malformed, wrong_shape):
         assert response.headers["cache-control"] == "no-store"
+
+
+def oversized_page(rows: int, cursor: str) -> GrantUsageRequestPage:
+    """A page built from legal field widths, sized by how many rows it carries."""
+    return gateway_page(
+        [
+            request_row(
+                request_id=f"req_{index:04d}" + "x" * 247,
+                request_started_at=(SINCE + timedelta(milliseconds=index)).isoformat(),
+                model="m" * 1024,
+                served_model_id="s" * 1024,
+                spent_usd="1" * 128,
+            )
+            for index in range(rows)
+        ],
+        next_cursor=cursor,
+    )
+
+
+def forwarded(page: GrantUsageRequestPage, cursor: str | None) -> AdminLlmRequestPage:
+    """The response this service would build for a gateway page."""
+    return AdminLlmRequestPage(
+        job_id="ajob_one",
+        source_id="42",
+        attempt_id=10,
+        attempt_no=1,
+        window=AdminLlmRequestWindow(since=SINCE, until=UNTIL),
+        fetched_at=UNTIL,
+        gateway_as_of=UNTIL,
+        requests=[AdminLlmRequest.model_validate(row.model_dump()) for row in page.requests],
+        next_cursor=cursor,
+    )
+
+
+def minted(page: GrantUsageRequestPage, *, limit: int) -> str:
+    """The exact continuation the route would sign for this page."""
+    last = page.requests[-1]
+    return encode_llm_request_cursor(
+        LlmRequestCursor(
+            admin="admin-token",
+            job_id="ajob_one",
+            source_id="42",
+            fingerprint=request_source_fingerprint(source_row()),
+            since=SINCE,
+            until=UNTIL,
+            limit=limit,
+            request_started_at=last.request_started_at,
+            request_id=last.request_id,
+            gateway_cursor=page.next_cursor,
+        )
+    )
+
+
+async def test_the_final_response_is_bounded_after_the_cursor_is_attached(setup):
+    """The ceiling is over what the browser receives, continuation included."""
+    app, _queries, grants, _ = setup
+    page = None
+    for rows in range(100, 0, -1):
+        candidate = oversized_page(rows, "c" * 2048)
+        if (
+            response_body_bytes(forwarded(candidate, None))
+            < MAX_ADMIN_RESPONSE_BYTES
+            <= response_body_bytes(forwarded(candidate, minted(candidate, limit=100)))
+        ):
+            page = candidate
+            break
+    assert page is not None, "no page straddles the response ceiling"
+    grants.usage_requests.return_value = page
+    response = await _get(app, REQUESTS + "?source_id=42&limit=100")
+    assert response.status_code == 502
+    assert response.json()["detail"]["error"]["type"] == "request_page_too_large"
+    # The refusal itself is small: an over-limit page is never echoed back.
+    assert len(response.content) < 4096
+
+
+async def test_a_page_that_fits_is_returned_under_the_ceiling(setup):
+    app, _queries, grants, _ = setup
+    grants.usage_requests.return_value = oversized_page(40, "c" * 200)
+    response = await _get(app, REQUESTS + "?source_id=42&limit=100")
+    assert response.status_code == 200
+    assert len(response.content) <= MAX_ADMIN_RESPONSE_BYTES
+    assert response.json()["next_cursor"]
+
+
+async def test_a_continuation_too_large_to_resume_is_not_signed(setup):
+    app, _queries, grants, _ = setup
+    grants.usage_requests.return_value = gateway_page(
+        [request_row(request_id="😀" * 256)], next_cursor="c" * 2048
+    )
+    response = await _get(app, REQUESTS + "?source_id=42")
+    assert response.status_code == 502
+    assert response.json()["detail"]["error"]["type"] == "request_page_too_large"
+    assert "next_cursor" not in response.text

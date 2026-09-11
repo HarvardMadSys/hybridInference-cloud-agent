@@ -17,12 +17,9 @@ from typing import Any
 import httpx
 import pytest
 
+from cloud_agent import grants as grants_module
 from cloud_agent.gateway import GatewayError
-from cloud_agent.grant_usage import (
-    MAX_REQUEST_PAGE_BYTES,
-    GrantUsageRequestPage,
-    parse_usage_request_page,
-)
+from cloud_agent.grant_usage import MAX_REQUEST_PAGE_BYTES, GrantUsageRequestPage
 from cloud_agent.grants import GrantClient
 
 SINCE = datetime(2026, 9, 11, 3, 20, tzinfo=UTC)
@@ -362,27 +359,67 @@ async def test_an_oversized_body_is_refused_before_it_is_parsed() -> None:
     assert raised.value.error_type == "usage_response_too_large"
 
 
-async def test_a_page_that_cannot_fit_this_services_own_response_is_refused() -> None:
-    """The ceiling is on the forwarded page, not only on what was read."""
-    rows = [
-        request_row(
-            request_id=f"req_{index}",
-            request_started_at=(SINCE + timedelta(milliseconds=index)).isoformat(),
-            model='"' * 1024,
-            served_model_id='"' * 1024,
-        )
-        for index in range(100)
-    ]
+class _SlowBody(httpx.AsyncByteStream):
+    """A body that keeps trickling: every operation succeeds, the call does not."""
+
+    def __init__(self, chunks: list[bytes], delay: float) -> None:
+        self._chunks = chunks
+        self._delay = delay
+
+    async def __aiter__(self):  # type: ignore[override]
+        for chunk in self._chunks:
+            yield chunk
+            await asyncio.sleep(self._delay)
+
+
+async def test_a_slow_drip_cannot_outlive_the_whole_deadline(monkeypatch) -> None:
+    """A per-operation timeout never fires on a body that always makes progress."""
+    monkeypatch.setattr(grants_module, "_REQUEST_PAGE_DEADLINE_S", 0.05)
+    body = json.dumps(page_payload()).encode()
+    half = len(body) // 2
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_SlowBody([body[:half], body[half:]], 0.2))
+
     with pytest.raises(GatewayError) as raised:
-        parse_usage_request_page(
-            page_payload(rows),
-            grant_id=GRANT,
-            since=SINCE,
-            until=UNTIL,
-            limit=100,
-            external_job_id=JOB,
+        await _client(handler).usage_requests(
+            GRANT, since=SINCE, until=UNTIL, limit=50, external_job_id=JOB
         )
-    assert raised.value.error_type == "usage_response_too_large"
+    assert raised.value.error_type == "usage_unavailable"
+
+
+async def test_the_deadline_covers_waiting_for_a_slot(monkeypatch) -> None:
+    """Queueing behind other administrators is time this call also promised."""
+    in_flight = 0
+    release = asyncio.Event()
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal in_flight
+        in_flight += 1
+        await release.wait()
+        in_flight -= 1
+        return httpx.Response(200, json=page_payload([]))
+
+    client = _client(handler)
+    held = [
+        asyncio.create_task(
+            client.usage_requests(GRANT, since=SINCE, until=UNTIL, limit=50, external_job_id=JOB)
+        )
+        for _ in range(4)
+    ]
+    for _ in range(200):
+        if in_flight == 4:
+            break
+        await asyncio.sleep(0.01)
+    assert in_flight == 4
+
+    monkeypatch.setattr(grants_module, "_REQUEST_PAGE_DEADLINE_S", 0.05)
+    with pytest.raises(GatewayError) as raised:
+        await client.usage_requests(GRANT, since=SINCE, until=UNTIL, limit=50, external_job_id=JOB)
+    assert raised.value.error_type == "usage_unavailable"
+
+    release.set()
+    await asyncio.gather(*held)
 
 
 @pytest.mark.parametrize(

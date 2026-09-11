@@ -60,12 +60,18 @@ ENV_GRANT_BINDING_ID = "GATEWAY_GRANT_BINDING_ID"
 _DEFAULT_GRANT_BASE_PATH = "/internal/agent-grants"
 
 #: Request pages are a bounded administrator read, not scheduling work. Four in
-#: flight per control-plane process keeps a browser refreshing a panel from
-#: crowding out the grant renewals and ledger refreshes that share the gateway
-#: with it. The limit is per process, so it holds however many workers a
-#: deployment runs.
+#: flight at once keeps a browser refreshing a panel from crowding out the grant
+#: renewals and ledger refreshes that share the gateway with it. The control
+#: plane holds one grant client per process, so a per-client limit is the
+#: process limit -- and unlike a module global it cannot be bound to a loop that
+#: has already closed.
 _MAX_CONCURRENT_REQUEST_PAGES = 4
-_REQUEST_PAGE_SLOTS = asyncio.Semaphore(_MAX_CONCURRENT_REQUEST_PAGES)
+
+#: Total budget for one request page, from waiting for a slot to the last byte
+#: of the body. ``httpx.Timeout`` cannot express this: its read timeout applies
+#: between chunks, so a gateway that trickles bytes forever never trips it, and
+#: it says nothing about how long the slot above took to free up.
+_REQUEST_PAGE_DEADLINE_S = _TIMEOUT_S
 
 
 def _validated_window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
@@ -217,6 +223,7 @@ class GrantClient:
         binding = json.dumps(binding_parts, separators=(",", ":"))
         self._binding_id = "gw_" + hashlib.sha256(binding.encode()).hexdigest()
         self._client = client
+        self._request_page_slots = asyncio.Semaphore(_MAX_CONCURRENT_REQUEST_PAGES)
 
     @property
     def configured(self) -> bool:
@@ -438,8 +445,9 @@ class GrantClient:
             The validated page.
 
         Raises:
-            GatewayError: If unconfigured, unreachable, refused, oversized, or
-                not a valid page for this exact query.
+            GatewayError: If unconfigured, unreachable, refused, oversized,
+                slower than this call's whole deadline, or not a valid page for
+                this exact query.
         """
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise GatewayError(
@@ -461,8 +469,12 @@ class GrantClient:
         url = f"{self._base_url}{path}"
         headers = {"Authorization": f"Bearer {self._token}"}
         timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
-        async with _REQUEST_PAGE_SLOTS:
-            try:
+        try:
+            # One deadline over everything this call waits for on the wire:
+            # the slot, the connection, and every chunk of the body. Without it
+            # a slow-drip response holds a slot until the gateway decides to
+            # finish, whatever the per-operation timeout says.
+            async with asyncio.timeout(_REQUEST_PAGE_DEADLINE_S), self._request_page_slots:
                 if self._client is not None:
                     status, payload = await _bounded_json(
                         self._client, url, params, headers, timeout
@@ -470,10 +482,14 @@ class GrantClient:
                 else:
                     async with httpx.AsyncClient(timeout=timeout) as client:
                         status, payload = await _bounded_json(client, url, params, headers, timeout)
-            except httpx.HTTPError:
-                raise GatewayError(
-                    "gateway request details are unreachable", error_type="usage_unavailable"
-                ) from None
+        except TimeoutError:
+            raise GatewayError(
+                "gateway request details timed out", error_type="usage_unavailable"
+            ) from None
+        except httpx.HTTPError:
+            raise GatewayError(
+                "gateway request details are unreachable", error_type="usage_unavailable"
+            ) from None
         if status != 200:
             raise GatewayError(
                 "gateway refused the request-detail query",

@@ -277,11 +277,6 @@ class GrantUsageRequestPage(GrantUsageReport):
     next_cursor: GatewayCursor | None
 
 
-#: Headroom kept for this service's own envelope, so a page it forwards to a
-#: browser stays under the same ceiling as the page it parsed.
-REQUEST_PAGE_ENVELOPE_BYTES = 1024
-
-
 def parse_usage_request_page(
     payload: Any,
     *,
@@ -318,8 +313,7 @@ def parse_usage_request_page(
         GatewayError: ``usage_unsupported_schema`` if the gateway does not
             speak v1, ``request_details_unsupported`` if its v1 response has no
             ``requests``/``next_cursor``, ``usage_response_mismatch`` if it
-            describes another grant, window or job, ``usage_response_too_large``
-            if a page cannot fit this service's own response ceiling, and
+            describes another grant, window or job, and
             ``usage_invalid_response`` for an internally inconsistent page.
     """
     if not isinstance(payload, dict):
@@ -353,14 +347,6 @@ def parse_usage_request_page(
             error_type="usage_response_mismatch",
         )
     _check_request_page(page, limit=limit, since=since, until=until, cursor=cursor, after=after)
-    if (
-        len(page.model_dump_json().encode("utf-8")) + REQUEST_PAGE_ENVELOPE_BYTES
-        > MAX_REQUEST_PAGE_BYTES
-    ):
-        raise GatewayError(
-            "gateway returned more request detail than one page may carry",
-            error_type="usage_response_too_large",
-        )
     return page
 
 

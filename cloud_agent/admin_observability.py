@@ -263,6 +263,12 @@ REQUEST_CURSOR_TTL = timedelta(minutes=30)
 #: this ceiling is about the signed envelope, not about what it carries.
 MAX_REQUEST_CURSOR_BYTES = 4096
 
+#: The largest admin page response this service will serialize. It matches the
+#: ceiling the gateway read is bounded by, and a test holds the two together: a
+#: page this service could not forward is a page it must not claim to have
+#: answered.
+MAX_ADMIN_RESPONSE_BYTES = 256 * 1024
+
 
 class AdminLlmRequestSource(BaseModel):
     """One stored attribution reference for a run's gateway request rows.
@@ -386,6 +392,17 @@ class RequestCursorError(ValueError):
         self.reason = reason
 
 
+class RequestCursorTooLong(ValueError):
+    """A continuation this service would refuse on the way back in.
+
+    Signing always inflates: JWT escapes non-ASCII identifiers and appends a
+    signature, so a page whose identifiers are all legal can still produce a
+    cursor past ``MAX_REQUEST_CURSOR_BYTES``. Issuing one would hand a browser a
+    link that fails on the very next page, so the page that would have produced
+    it is refused instead.
+    """
+
+
 def expected_gateway_job_id(*, thread_id: str | None) -> str | None:
     """Return the attribution key a stored reference implies, if it implies one.
 
@@ -468,14 +485,36 @@ def llm_request_source_view(
 def encode_llm_request_cursor(
     cursor: LlmRequestCursor, *, issued_at: datetime | None = None
 ) -> str:
-    """Sign one continuation envelope with this service's own session secret."""
+    """Sign one continuation envelope with this service's own session secret.
+
+    Raises:
+        RequestCursorTooLong: If the signed envelope is larger than this
+            service accepts as input, so a cursor it could not resume is never
+            minted in the first place.
+        identity.IdentityNotConfigured: If this deployment cannot sign.
+    """
     now = issued_at or datetime.now(UTC)
     claims = {
         **cursor.model_dump(mode="json"),
         "iat": int(now.timestamp()),
         "exp": int((now + REQUEST_CURSOR_TTL).timestamp()),
     }
-    return jwt.encode(claims, identity.admin_llm_request_cursor_secret(), algorithm="HS256")
+    token = jwt.encode(claims, identity.admin_llm_request_cursor_secret(), algorithm="HS256")
+    if len(token.encode("utf-8")) > MAX_REQUEST_CURSOR_BYTES:
+        raise RequestCursorTooLong("the continuation would exceed its own input limit")
+    return token
+
+
+def response_body_bytes(page: AdminLlmRequestPage) -> int:
+    """Size of an admin page as it will actually be serialized, in UTF-8 bytes.
+
+    Measured on the finished model, after the continuation is attached and with
+    the same encoder the response uses. A ceiling checked against the gateway's
+    model plus a guessed headroom is not a ceiling over what the browser
+    receives: identifiers, the window and a signed cursor all ride along.
+    """
+    body = json.dumps(page.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+    return len(body.encode("utf-8"))
 
 
 def decode_llm_request_cursor(

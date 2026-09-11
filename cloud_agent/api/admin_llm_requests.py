@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from cloud_agent import identity
 from cloud_agent.admin_observability import (
+    MAX_ADMIN_RESPONSE_BYTES,
     MAX_LLM_REQUEST_PAGE,
     MAX_REQUEST_CURSOR_BYTES,
     SOURCE_REASON_BINDING_CHANGED,
@@ -32,6 +33,7 @@ from cloud_agent.admin_observability import (
     LlmRequestCursor,
     LlmRequestSourceCursor,
     RequestCursorError,
+    RequestCursorTooLong,
     cursor_scope,
     decode_cursor,
     decode_llm_request_cursor,
@@ -40,6 +42,7 @@ from cloud_agent.admin_observability import (
     expected_gateway_job_id,
     llm_request_source_view,
     request_source_fingerprint,
+    response_body_bytes,
 )
 from cloud_agent.api.admin_runs import _no_store, _run, get_admin_run_queries
 from cloud_agent.api.deps import get_grant_client, verify_admin_access
@@ -321,16 +324,8 @@ async def list_admin_llm_requests(
             },
         )
         raise _gateway_refusal(exc) from None
-    return AdminLlmRequestPage(
-        job_id=job_id,
-        source_id=str(source_id),
-        attempt_id=row["attempt_id"],
-        attempt_no=row["attempt_no"],
-        window=AdminLlmRequestWindow(since=since, until=until),
-        fetched_at=datetime.now(UTC),
-        gateway_as_of=page.as_of,
-        requests=[AdminLlmRequest.model_validate(item.model_dump()) for item in page.requests],
-        next_cursor=_encode_next_cursor(
+    try:
+        next_cursor = _encode_next_cursor(
             page,
             admin=admin,
             job_id=job_id,
@@ -339,8 +334,36 @@ async def list_admin_llm_requests(
             limit=limit,
             since=since,
             until=until,
-        ),
+        )
+    except RequestCursorTooLong:
+        # The continuation is part of the page. Returning the rows without one
+        # would strand the reader mid-window, and returning a cursor that fails
+        # on the next request is worse, so the page is refused whole.
+        raise _refuse(
+            502,
+            "request_page_too_large",
+            "This page's identifiers are too large to continue from; the page was refused whole.",
+        ) from None
+    response = AdminLlmRequestPage(
+        job_id=job_id,
+        source_id=str(source_id),
+        attempt_id=row["attempt_id"],
+        attempt_no=row["attempt_no"],
+        window=AdminLlmRequestWindow(since=since, until=until),
+        fetched_at=datetime.now(UTC),
+        gateway_as_of=page.as_of,
+        requests=[AdminLlmRequest.model_validate(item.model_dump()) for item in page.requests],
+        next_cursor=next_cursor,
     )
+    if response_body_bytes(response) > MAX_ADMIN_RESPONSE_BYTES:
+        # Measured on the finished body, continuation included: the ceiling is
+        # over what the browser receives, not over part of it.
+        raise _refuse(
+            502,
+            "request_page_too_large",
+            "The gateway returned more request detail than one page may carry; the page was refused whole.",
+        )
+    return response
 
 
 def _encode_next_cursor(
