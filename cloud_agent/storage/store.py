@@ -74,10 +74,13 @@ from cloud_agent.host_pool import (
     HOST_ONLINE,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.jobs import (
     JOB_SELECT,
     QUALIFIED_JOB_COLUMNS,
     SESSION_DELETE_BLOCK_SQL,
+    fail_discontinuous_follow_ups,
+    fail_unrunnable_follow_ups,
 )
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABILITY_JSON, THREAD_SANDBOX_SOURCE
@@ -122,74 +125,6 @@ class AgentJobStore:
         self._host_capacity = HostCapacityRepository(pool)
         self._grants = GrantRepository(pool)
 
-    @staticmethod
-    async def _fail_unrunnable_follow_ups(
-        conn: Any,
-        *,
-        thread_id: str,
-        detail: str = "not run because an earlier turn lost the retained sandbox context",
-    ) -> None:
-        """Give queued descendants a terminal answer when continuity is LOST.
-
-        A retained chat cannot be claimed again after its context becomes
-        indeterminate. Leaving already-submitted turns in ``queued`` would
-        therefore create a permanent queue entry rather than
-        a recoverable retry. Every LOST transition calls this helper in the
-        same transaction that fences the sandbox row.
-        """
-        await conn.execute(
-            """
-            UPDATE agent_jobs
-            SET state = 'failed', detail = $2, updated_at = NOW()
-            WHERE thread_id = $1 AND state = 'queued'
-            """,
-            thread_id,
-            detail[:2000],
-        )
-
-    @staticmethod
-    async def _fail_discontinuous_follow_ups(
-        conn: Any,
-        *,
-        parent_job_id: str | None = None,
-    ) -> None:
-        """Fail queued descendants that cannot preserve native continuity.
-
-        A successful parent requires a usable shared membership. The whole
-        pending tail fails if that membership is missing or lost. Terminal
-        writers scope this cleanup to the parent they just changed; the
-        periodic sweep handles legacy rows. Scheduling itself only checks
-        eligibility and never needs to promote a queued turn.
-        """
-        await conn.execute(
-            """
-            WITH invalid_threads AS (
-                SELECT DISTINCT child.thread_id
-                FROM agent_jobs child
-                JOIN agent_jobs parent ON parent.id = child.parent_job_id
-                WHERE child.state = 'queued'
-                  AND parent.state = 'succeeded'
-                  AND ($1::text IS NULL OR parent.id = $1)
-                  AND NOT EXISTS (
-                        SELECT 1
-                        FROM agent_thread_sandbox_memberships m
-                        JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                        WHERE m.thread_id = child.thread_id
-                          AND m.context_status <> 'lost'
-                          AND m.native_state <> 'lost'
-                          AND g.state NOT IN ('stopped_dirty', 'lost')
-                  )
-            )
-            UPDATE agent_jobs pending
-            SET state = 'failed',
-                detail = 'not run because its parent predates retained-session continuity',
-                updated_at = NOW()
-            WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
-              AND pending.state = 'queued'
-            """,
-            parent_job_id,
-        )
-
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.
 
@@ -198,7 +133,7 @@ class AgentJobStore:
         indexes, without a cleanup scan on every claim poll.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._fail_discontinuous_follow_ups(conn)
+            await fail_discontinuous_follow_ups(conn)
 
     async def initialize(self) -> None:
         """No-op: schema and backfills are Alembic's now, not startup's.
@@ -2529,7 +2464,7 @@ class AgentJobStore:
             # has no foreign key, so a mismatched (job_id, attempt_id) pair would
             # write a control event into a different job's stream — potentially a
             # different tenant's.
-            await self._insert_event(
+            await insert_event(
                 conn,
                 job_id=released,
                 attempt_id=attempt_id,
@@ -2568,7 +2503,7 @@ class AgentJobStore:
                 # A cancelled parent is a turn boundary like any other
                 # terminal outcome: fail any child that cannot preserve
                 # continuity in this transaction.
-                await self._fail_discontinuous_follow_ups(conn, parent_job_id=released)
+                await fail_discontinuous_follow_ups(conn, parent_job_id=released)
         return True
 
     async def heartbeat(
@@ -2852,7 +2787,7 @@ class AgentJobStore:
                             "UPDATE agent_attempts SET context_status = 'lost' WHERE id = $1",
                             attempt_id,
                         )
-                        await self._fail_unrunnable_follow_ups(
+                        await fail_unrunnable_follow_ups(
                             conn,
                             thread_id=updated["thread_id"],
                         )
@@ -2878,7 +2813,7 @@ class AgentJobStore:
                     sandbox_transition is not None
                     and sandbox_transition["context_status"] == "lost"
                 ):
-                    await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
+                    await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
         return True
 
     async def append_event(
@@ -2921,7 +2856,7 @@ class AgentJobStore:
                     "UPDATE agent_attempts SET terminal_ready = FALSE WHERE id = $1",
                     attempt_id,
                 )
-            return await self._insert_event(
+            return await insert_event(
                 conn,
                 job_id=attempt["job_id"],
                 attempt_id=attempt_id,
@@ -3248,72 +3183,6 @@ class AgentJobStore:
         return await self._execution_queries.list_events_after(
             job_id=job_id, after_id=after_id, limit=limit
         )
-
-    async def _insert_event(
-        self,
-        conn: Any,
-        *,
-        job_id: str,
-        attempt_id: int,
-        event_type: str,
-        payload: dict[str, Any] | None,
-        client_seq: int | None = None,
-    ) -> int:
-        """Insert one event row inside the caller's transaction.
-
-        A ``client_seq`` the attempt has already stored is a retry of a
-        response that never arrived: answer with the stored row's id and do
-        not run the thread-message mirror again — it ran when the row landed.
-        """
-        if client_seq is not None:
-            existing = await conn.fetchval(
-                "SELECT id FROM agent_job_events WHERE attempt_id = $1 AND client_seq = $2",
-                attempt_id,
-                client_seq,
-            )
-            if existing is not None:
-                return int(existing)
-        event_id = await conn.fetchval(
-            """
-            INSERT INTO agent_job_events (job_id, attempt_id, seq, event_type, payload, client_seq)
-            VALUES (
-                $1, $2,
-                (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_job_events WHERE attempt_id = $2),
-                $3, $4::jsonb, $5
-            )
-            RETURNING id
-            """,
-            job_id,
-            attempt_id,
-            event_type,
-            json.dumps(payload) if payload is not None else None,
-            client_seq,
-        )
-        text = (payload or {}).get("text")
-        if event_type == "message" and isinstance(text, str) and text.strip():
-            await conn.execute(
-                """
-                INSERT INTO agent_thread_messages
-                    (thread_id, job_id, role, content, source_event_id)
-                SELECT thread_id, id, 'assistant', $2, $3
-                FROM agent_jobs
-                WHERE id = $1 AND thread_id IS NOT NULL
-                ON CONFLICT (source_event_id) DO NOTHING
-                """,
-                job_id,
-                text,
-                event_id,
-            )
-            await conn.execute(
-                """
-                UPDATE agent_threads t
-                SET updated_at = NOW()
-                FROM agent_jobs j
-                WHERE j.id = $1 AND t.id = j.thread_id
-                """,
-                job_id,
-            )
-        return event_id
 
     # ── Restartable thread sandbox ─────────────────────────────────────
 
@@ -4388,7 +4257,7 @@ class AgentJobStore:
                     attempt_id,
                     lease_generation,
                 )
-                await self._fail_unrunnable_follow_ups(conn, thread_id=thread_id)
+                await fail_unrunnable_follow_ups(conn, thread_id=thread_id)
             current = await conn.fetchrow(
                 f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread_id,
@@ -4689,7 +4558,7 @@ class AgentJobStore:
                     "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
                     job_id,
                 )
-                await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
+                await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 return CANCELLED
             if state == RUNNING:
                 await conn.execute(
@@ -5116,7 +4985,7 @@ class AgentJobStore:
                     snapshot["id"],
                 )
                 if attempt_id is not None:
-                    await self._insert_event(
+                    await insert_event(
                         conn,
                         job_id=snapshot["id"],
                         attempt_id=attempt_id,
@@ -5226,7 +5095,7 @@ class AgentJobStore:
                 row["anchor_job_id"],
             )
             if attempt_id is not None:
-                await self._insert_event(
+                await insert_event(
                     conn,
                     job_id=row["anchor_job_id"],
                     attempt_id=attempt_id,
@@ -5278,7 +5147,7 @@ class AgentJobStore:
                 row["anchor_job_id"],
             )
             if attempt_id is not None:
-                await self._insert_event(
+                await insert_event(
                     conn,
                     job_id=row["anchor_job_id"],
                     attempt_id=attempt_id,
@@ -5486,7 +5355,7 @@ class AgentJobStore:
                 # many reaper passes overlap — which is what makes the slot
                 # release safe here without a second predicate.
                 await self._release_host_slot(conn, row["host_id"])
-                await self._insert_event(
+                await insert_event(
                     conn,
                     job_id=job_id,
                     attempt_id=attempt_id,
@@ -5622,7 +5491,7 @@ class AgentJobStore:
                         "UPDATE agent_attempts SET context_status = 'lost' WHERE id = $1",
                         attempt_id,
                     )
-                    await self._fail_unrunnable_follow_ups(
+                    await fail_unrunnable_follow_ups(
                         conn,
                         thread_id=sandbox_thread_id,
                     )
@@ -5730,7 +5599,7 @@ class AgentJobStore:
                     # boundary as ``transition``. Keep the linear chat moving
                     # when the context is usable; the LOST branch above has
                     # already failed every unrunnable descendant instead.
-                    await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
+                    await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 action_result: dict[str, Any] = {
                     "job_id": job_id,
                     "attempt_id": attempt_id,
