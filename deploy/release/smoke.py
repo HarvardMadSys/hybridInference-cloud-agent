@@ -508,6 +508,12 @@ def _control_environment(dsn: str) -> dict[str, str]:
         "AGENT_CONTROL_TOKEN_SECRET": base64.b64encode(os.urandom(32)).decode(),
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _fernet_key(),
         "AGENT_WORKSPACE_BROKER_TOKEN": "smoke-broker-token",
+        # Required once a gateway is configured at all: the app refuses to start
+        # without it, because verifying identity is the whole point of the
+        # service it fronts. `deploy/control-plane/.env.example` is the
+        # authority for this list, and a deployment supplies it in the host's
+        # `.env`.
+        "GATEWAY_ISSUER": "https://gateway.smoke.invalid",
         "GATEWAY_BASE_URL": "https://gateway.smoke.invalid",
         "GATEWAY_JWKS_URL": "https://gateway.smoke.invalid/v1/identity/jwks",
         "GATEWAY_AUTHORIZE_URL": "https://gateway.smoke.invalid/authorize",
