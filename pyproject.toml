@@ -129,6 +129,25 @@ add-ignore = [
 match = ".+\\.py"
 match-dir = "(?!tests|\\.venv|node_modules|web|migrations|docs).*"
 
+# Type checking the control plane, and blocking. `store.py` is included on
+# purpose: a checker that cannot see the class it is validating callers against
+# proves nothing about the wiring, which is the whole point of the storage
+# ports. `follow_imports = "silent"` keeps `cloud_agent_host` -- outside this
+# gate -- out of the report while still giving these files its real types;
+# `skip` would substitute `Any` and quietly disable the check. `ignore_missing_
+# imports` covers asyncpg, which ships no stubs.
+[tool.mypy]
+python_version = "3.12"
+files = ["cloud_agent"]
+follow_imports = "silent"
+ignore_missing_imports = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_unused_ignores = true
+show_error_codes = true
+
 [dependency-groups]
 dev = [
   "httpx>=0.27.0",
