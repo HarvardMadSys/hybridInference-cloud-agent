@@ -9,6 +9,7 @@ transaction ownership it has here.
 from __future__ import annotations
 
 from cloud_agent.storage.repositories.audit import AuditRepository
+from cloud_agent.storage.repositories.conversation_queries import ConversationQueries
 from cloud_agent.storage.repositories.credential_queries import CredentialQueries
 from cloud_agent.storage.repositories.execution_queries import ExecutionQueries
 from cloud_agent.storage.repositories.grants import GrantRepository
@@ -20,6 +21,7 @@ from cloud_agent.storage.repositories.source_control import SourceControlReposit
 
 __all__ = [
     "AuditRepository",
+    "ConversationQueries",
     "CredentialQueries",
     "ExecutionQueries",
     "GrantRepository",
