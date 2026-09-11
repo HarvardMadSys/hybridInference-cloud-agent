@@ -36,11 +36,19 @@
 
 set -Eeuo pipefail
 
+AGENT_DEPLOY_MODE="${AGENT_DEPLOY_MODE:-source}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="deploy/host/docker-compose.sandbox.yml"
 APP_DIR="${APP_DIR:-$(pwd)}"
 cd "$APP_DIR"
 
 log() { printf '[sandbox-host] %s\n' "$*"; }
 die() { printf '[sandbox-host] ERROR: %s\n' "$*" >&2; exit 1; }
+
+case "$AGENT_DEPLOY_MODE" in
+  source|artifacts) ;;
+  *) die "AGENT_DEPLOY_MODE must be source or artifacts" ;;
+esac
 
 env_or_dotenv() {
   # A value may come from the environment or from .env; compose reads both, so
@@ -104,6 +112,13 @@ case "${1:-}" in
   up|check|status|down|mark-ready) load_compose_environment ;;
 esac
 
+if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+  source "$SCRIPT_DIR/../release/artifact_env.sh"
+  prepare_artifact_deployment host "$_COMPOSE_ENVIRONMENT"
+  _COMPOSE_ENVIRONMENT_LOADED=0
+  load_compose_environment
+fi
+
 # Read through env_or_dotenv, and therefore only after it exists. Taking these
 # from the shell environment alone silently ignored `.env` — the file this
 # script's own header tells you to configure — so `up` built and ran the
@@ -129,12 +144,19 @@ COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
 # to answer "can this host isolate a sandbox" because of how the containers are
 # to be labelled.
 compose() {
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    case "$1" in
+      build) die "artifact deployments cannot build images" ;;
+      up) shift; set -- up --pull never "$@" ;;
+      run) shift; set -- run --pull never "$@" ;;
+    esac
+  fi
   [[ -n "$COMPOSE_PROJECT" ]] || die \
     "COMPOSE_PROJECT is not set — export it or put it in .env (e.g. freeinference-cloud-agent-sandbox-staging). It is what keeps this stack apart from the other environment on this machine."
   if [[ -f .env ]]; then
     docker compose \
       -p "$COMPOSE_PROJECT" \
-      -f deploy/host/docker-compose.sandbox.yml \
+      -f "$COMPOSE_FILE" \
       --env-file .env "$@"
   else
     # Compose already receives exported configuration from this process. Do not
@@ -143,7 +165,7 @@ compose() {
     # deploy-root .env so credentials survive non-interactive service restarts.
     docker compose \
       -p "$COMPOSE_PROJECT" \
-      -f deploy/host/docker-compose.sandbox.yml "$@"
+      -f "$COMPOSE_FILE" "$@"
   fi
 }
 
@@ -575,6 +597,9 @@ check_shared_live_stack() {
 
 KATA_RUNTIME="io.containerd.kata.v2"
 KATA_SETUP_SCRIPT="${KATA_SETUP_SCRIPT:-deploy/host/setup_kata_runtime.sh}"
+if [[ "$AGENT_DEPLOY_MODE" == "artifacts" && "$KATA_SETUP_SCRIPT" == "deploy/host/setup_kata_runtime.sh" ]]; then
+  KATA_SETUP_SCRIPT="$SCRIPT_DIR/setup_kata_runtime.sh"
+fi
 
 warn() { printf '[sandbox-host] WARNING: %s\n' "$*" >&2; }
 
@@ -680,23 +705,28 @@ cmd_up() {
         "(set AGENT_RUNNER_HOST in .env to rename it)"
   fi
 
-  # Only extra, operator-approved menu entries are passed. The defaults fall
-  # through to the Dockerfile's reviewed pins and are attested as one protocol
-  # unit by both the runner and control plane.
-  local build_args=() name
-  for name in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
-              OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
-    [[ -n "${!name}" ]] || continue
-    log "runtime menu: ${name}=${!name} (adds to the reviewed Dockerfile default)"
-    build_args+=(--build-arg "${name}=${!name}")
-  done
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    log "pulling sandbox image (${SANDBOX_IMAGE})"
+    docker pull "$SANDBOX_IMAGE"
+  else
+    # Only extra, operator-approved menu entries are passed. The defaults fall
+    # through to the Dockerfile's reviewed pins and are attested as one protocol
+    # unit by both the runner and control plane.
+    local build_args=() name
+    for name in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
+                OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
+      [[ -n "${!name}" ]] || continue
+      log "runtime menu: ${name}=${!name} (adds to the reviewed Dockerfile default)"
+      build_args+=(--build-arg "${name}=${!name}")
+    done
 
-  log "building the sandbox image (${SANDBOX_IMAGE})"
-  # The `+` guard is load-bearing under `set -u`: with no overrides at all,
-  # a bare `"${build_args[@]}"` is an unbound reference on bash before 4.4,
-  # and this script also runs on developer machines.
-  docker build ${build_args[@]+"${build_args[@]}"} \
-    -f deploy/sandbox/Dockerfile.agent-sandbox -t "$SANDBOX_IMAGE" .
+    log "building the sandbox image (${SANDBOX_IMAGE})"
+    # The `+` guard is load-bearing under `set -u`: with no overrides at all,
+    # a bare `"${build_args[@]}"` is an unbound reference on bash before 4.4,
+    # and this script also runs on developer machines.
+    docker build ${build_args[@]+"${build_args[@]}"} \
+      -f deploy/sandbox/Dockerfile.agent-sandbox -t "$SANDBOX_IMAGE" .
+  fi
 
   kata_smoke_test
 
@@ -704,9 +734,14 @@ cmd_up() {
   # Only after all builds and the Kata probe succeed do we invalidate its
   # marker and drain runners. That keeps a failed build from pausing the queue
   # and prevents Compose from replacing the broker underneath an active turn.
-  log "building host services"
-  AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
-    compose build
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    log "pulling host release images"
+    compose pull
+  else
+    log "building host services"
+    AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
+      compose build
+  fi
   prepare_shared_live_marker
   if [[ -n "$(compose ps -q runner 2>/dev/null || true)" ]]; then
     log "draining existing runners before replacing their workspace broker"

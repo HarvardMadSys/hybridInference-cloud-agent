@@ -63,6 +63,21 @@ class ComposeError(Exception):
     """Raised when a stack cannot be rendered from this manifest."""
 
 
+def image_placeholder(role: str) -> str:
+    """The only unbound image reference permitted in a packaged recipe."""
+    return f"${{AGENT_{role.upper()}_IMAGE:?release manifest must supply {role}}}"
+
+
+def recipe_template(document: Mapping[str, Any], stack: str) -> dict[str, Any]:
+    """Remove builds before archiving; bind the release's digests when deploying."""
+    return render(
+        document,
+        stack,
+        {role: image_placeholder(role) for role in STACKS[stack]},
+        "root" if stack == "control-plane" else None,
+    )
+
+
 def images_from_manifest(manifest: Mapping[str, Any], variant: str | None = None) -> dict[str, str]:
     """The digest reference for each role this manifest carries.
 
@@ -81,7 +96,7 @@ def images_from_manifest(manifest: Mapping[str, Any], variant: str | None = None
             # different deployment of the same release.
             continue
         reference = artifact.get("image", "")
-        if not _IMAGE_RE.match(reference):
+        if not _IMAGE_RE.fullmatch(reference):
             raise ComposeError(
                 f"artifact {role!r} is {reference!r}: a release deploys digests, and a "
                 "recipe generated from a tag would deploy whatever that tag points at"
@@ -123,14 +138,13 @@ def render(
                     f"service {name!r} is mapped to role {role!r} but the Compose file has "
                     "no such service; the mapping and the stack have drifted apart"
                 )
-            if "build" not in service:
+            if "build" not in service and service.get("image") != image_placeholder(role):
                 raise ComposeError(
-                    f"service {name!r} has no `build`, so it is not a service this generator "
-                    "converts — either it is third-party (leave it out of the mapping) or the "
-                    "stack changed shape"
+                    f"service {name!r} has neither a source build nor the recipe's {role!r} "
+                    "image placeholder; the mapping and the stack have drifted apart"
                 )
             rendered["services"][name]["image"] = images[role]
-            del rendered["services"][name]["build"]
+            rendered["services"][name].pop("build", None)
 
     leftovers = sorted(
         name

@@ -154,13 +154,73 @@ committed as written. Recorded here rather than edited into it:
   Moving them to a neutral namespace is a dual-read migration of its own (D8),
   not something a release should force.
 
+## Deploying a recipe
+
+The recipe contains deployment helpers, configuration examples, and Compose
+templates with no `build:` entries. Image variables in those templates are bound
+to the manifest's digests before any Compose startup command. The same recipe
+supports both Web variants; select `AGENT_WEB_VARIANT=root` or `agents` in the
+deployment configuration. If omitted, the existing `AGENT_WEB_BASE_PATH` selects
+the variant, with an empty/unset path selecting `root`.
+
+Extract the archive into a release directory. Install its
+`deploy/release/requirements.txt` into a Python 3.12+ virtual environment and
+point `AGENT_DEPLOY_PYTHON` at that interpreter. The host needs Docker Compose
+and its existing Kata provisioning; the deployment does not install a runtime.
+
+Keep `DEPLOY_ROOT` stable across releases. Its `.env`, `.deployed-sha`, and
+`.shared-live-ready` belong to the deployment, while the extracted recipe can
+live in a different directory. Keep the existing Compose project name, host
+enrollment root, and Docker data root when migrating an existing installation.
+Generated Compose files live under the stable deployment root so relative
+mounts continue to point at the same data. The edge proxy's configuration is
+read from the selected recipe.
+
+For the control plane:
+
+```bash
+AGENT_DEPLOY_MODE=artifacts \
+AGENT_RELEASE_MANIFEST=/opt/cloud-agent/release/release.json \
+AGENT_DEPLOY_PYTHON=/opt/cloud-agent/deployer/bin/python \
+DEPLOY_ROOT=/srv/cloud-agent-control \
+bash /opt/cloud-agent/release/recipe/deploy/control-plane/deploy.sh
+```
+
+For the execution host, use the same release and interpreter with that host's
+own persistent root:
+
+```bash
+AGENT_DEPLOY_MODE=artifacts \
+AGENT_RELEASE_MANIFEST=/opt/cloud-agent/release/release.json \
+AGENT_DEPLOY_PYTHON=/opt/cloud-agent/deployer/bin/python \
+DEPLOY_ROOT=/srv/cloud-agent-host \
+bash /opt/cloud-agent/release/recipe/deploy/host/deploy.sh
+```
+
+The manifest supplies the commit and all owned image references. Any conflicting
+effective Compose configuration is refused before pulling or replacing services.
+Remove old image/commit overrides when switching to artifact mode. The default
+`source` mode continues to support the existing checkout-based workflows.
+
+Image pulls and the host's Kata probe precede runner drain. Migrations, the
+identity namespace check, exact-commit readiness, reverse broker probes, and
+deferred host readiness publication retain their existing ordering. A failed
+readiness gate does not activate the replacement control-plane stack.
+
+The script tests execute an extracted recipe with Docker actions recorded and
+failure-injected. They also exercise the real Compose environment parser when
+available. These tests do not establish that a particular Linux host, registry
+release, or live Kata runtime is ready; that remains the environment cutover
+acceptance.
+
 ## What is still owed
 
 * **P2b**: the publication workflow — build and start each artifact, push by
-  digest on a green `dev`, publish the manifest as a release asset; plus the two
-  web variants in the CI build matrix, which is where the image is first
-  verified on its own architecture rather than only as a bundle.
-* **P3**: artifact-mode deployment — recipes without `build:`, `pull` plus
-  `up --no-build`, and the same host-side protocol checks.
+  digest on a green `dev`, and publish the manifest and recipe as release assets.
+  The seven-artifact CI smoke matrix, including both Web variants, is already
+  implemented.
+* **P3 acceptance**: run the packaged deployment against real candidate images
+  on the intended control-plane and Kata hosts, including failure/recovery
+  checks. The source-free script path is covered by the tests above.
 * **P4**: the resolver — the registry-side half of these checks, and
   `agent.lock` pinning this document's hash.

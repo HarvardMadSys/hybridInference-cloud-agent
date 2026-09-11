@@ -275,7 +275,7 @@ def test_host_deploy_publishes_readiness_only_after_recording_the_target() -> No
     script = HOST_DEPLOY.read_text()
     deferred_up = script.index("DEFER_SHARED_READY_MARKER=1")
     deployed_sha = script.index("printf '%s\\n' \"${SHA}\" > .deployed-sha")
-    mark_ready = script.index('bash deploy/host/sandbox_host.sh mark-ready "${SHA}"')
+    mark_ready = script.index('bash "$SANDBOX_HOST_SCRIPT" mark-ready "${SHA}"')
 
     assert 'AGENT_DEPLOYMENT_SHA="${SHA}"' in script
     assert deferred_up < deployed_sha < mark_ready

@@ -290,6 +290,18 @@ def test_an_agreeing_host_environment_is_fine() -> None:
             id="a short commit",
         ),
         pytest.param(
+            lambda m: m.update(source_commit=COMMIT + "\n"),
+            "control-plane",
+            "agents",
+            id="a commit with a trailing newline",
+        ),
+        pytest.param(
+            lambda m: m["artifacts"][0].update(image=image("control") + "\n"),
+            "control-plane",
+            "agents",
+            id="an image with a trailing newline",
+        ),
+        pytest.param(
             lambda m: m["artifacts"].append(dict(m["artifacts"][0])),
             "control-plane",
             "agents",

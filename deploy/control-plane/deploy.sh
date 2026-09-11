@@ -16,8 +16,12 @@
 #   DEPLOY_ROOT   where the deployed checkout lives (default /srv/freeinference-cloud-agent)
 #   COMPOSE_PROJECT  compose project name (default cloudagent)
 #   ALLOW_DIRTY=1 deploy over local modifications instead of refusing
+#   AGENT_DEPLOY_MODE=artifacts uses AGENT_RELEASE_MANIFEST and the packaged
+#   recipe; DEPLOY_ROOT remains the persistent deployment/configuration root.
 set -euo pipefail
 
+AGENT_DEPLOY_MODE="${AGENT_DEPLOY_MODE:-source}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHA="${1:-${DEPLOY_SHA:-}}"
 SOURCE_REPO="${SOURCE_REPO:-${GITHUB_WORKSPACE:-}}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/srv/freeinference-cloud-agent}"
@@ -30,7 +34,11 @@ DEPLOY_PROTOCOL="shared-live-exact-sha-v3"
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
 
-[ -n "${SHA}" ] || die "no commit given: deploy.sh <sha>"
+case "$AGENT_DEPLOY_MODE" in
+  source) [ -n "${SHA}" ] || die "no commit given: deploy.sh <sha>" ;;
+  artifacts) ;;
+  *) die "AGENT_DEPLOY_MODE must be source or artifacts" ;;
+esac
 [[ "${HEALTH_TIMEOUT}" =~ ^[1-9][0-9]*$ ]] \
   || die "HEALTH_TIMEOUT must be a positive integer (got '${HEALTH_TIMEOUT}')"
 [[ "${SHARED_READY_TIMEOUT}" =~ ^[1-9][0-9]*$ ]] \
@@ -38,66 +46,85 @@ die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
 
 cd "${DEPLOY_ROOT}" 2>/dev/null || die "${DEPLOY_ROOT} does not exist"
 
-# This directory was an rsync drop until CD existed, and `git reset --hard`
-# against a non-checkout silently does nothing useful. Fail rather than deploy
-# something that is not what the caller asked for.
-git rev-parse --git-dir >/dev/null 2>&1 \
-  || die "${DEPLOY_ROOT} is not a git checkout — convert it once before enabling CD (see deploy/control-plane/README-cd.md)"
+if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+  [ -f .env ] || die ".env is missing from ${DEPLOY_ROOT}"
+  source "$SCRIPT_DIR/../release/artifact_env.sh"
+  prepare_artifact_deployment control-plane
+  COMPOSE_PROJECT="$(artifact_env_value COMPOSE_PROJECT)"
+  COMPOSE_PROJECT="${COMPOSE_PROJECT:-cloudagent}"
+  PREVIOUS="$(cat .deployed-sha 2>/dev/null || echo unknown)"
+  log "previous: ${PREVIOUS}"
+  log "target:   ${SHA}"
+else
+  # This directory was an rsync drop until CD existed, and `git reset --hard`
+  # against a non-checkout silently does nothing useful. Fail rather than deploy
+  # something that is not what the caller asked for.
+  git rev-parse --git-dir >/dev/null 2>&1 \
+    || die "${DEPLOY_ROOT} is not a git checkout — convert it once before enabling CD (see deploy/control-plane/README-cd.md)"
 
-# The reason this check exists is #29: four files that only ever existed on this
-# host were found by diffing it against dev, and a rebuild would have reverted
-# both of the fixes in them without a word. `git reset --hard` overwrites
-# modified tracked files. Untracked files (.env, .deployed-sha) it leaves alone,
-# which is why they are not in this check.
-DIRTY="$(git status --porcelain --untracked-files=no)"
-if [ -n "${DIRTY}" ]; then
-  printf '[deploy] local modifications in %s:\n%s\n' "${DEPLOY_ROOT}" "${DIRTY}" >&2
-  if [ "${ALLOW_DIRTY:-0}" != "1" ]; then
-    die "refusing to overwrite them. Get them into git, or re-run with ALLOW_DIRTY=1 to discard."
+  # The reason this check exists is #29: four files that only ever existed on this
+  # host were found by diffing it against dev, and a rebuild would have reverted
+  # both of the fixes in them without a word. `git reset --hard` overwrites
+  # modified tracked files. Untracked files (.env, .deployed-sha) it leaves alone,
+  # which is why they are not in this check.
+  DIRTY="$(git status --porcelain --untracked-files=no)"
+  if [ -n "${DIRTY}" ]; then
+    printf '[deploy] local modifications in %s:\n%s\n' "${DEPLOY_ROOT}" "${DIRTY}" >&2
+    if [ "${ALLOW_DIRTY:-0}" != "1" ]; then
+      die "refusing to overwrite them. Get them into git, or re-run with ALLOW_DIRTY=1 to discard."
+    fi
+    log "ALLOW_DIRTY=1 — discarding the above"
   fi
-  log "ALLOW_DIRTY=1 — discarding the above"
-fi
 
-[ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this deployment's secrets and is deliberately not in git"
+  [ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this deployment's secrets and is deliberately not in git"
+
+  PREVIOUS="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  log "previous: ${PREVIOUS}"
+  log "target:   ${SHA}"
+
+  # Fetched from a clone on this machine rather than from GitHub. The runner's
+  # workspace is already a full checkout of exactly this commit, authenticated by
+  # the job's own token, and it is on the same disk — so the deployment host needs
+  # no credential of its own for a private repository. A deploy key here would be
+  # a standing secret on the box, existing only to re-download something already
+  # present a few directories away.
+  [ -n "${SOURCE_REPO}" ] \
+    || die "no SOURCE_REPO and no GITHUB_WORKSPACE — point SOURCE_REPO at a local clone holding ${SHA}"
+  [ -d "${SOURCE_REPO}/.git" ] || [ -f "${SOURCE_REPO}/.git" ] \
+    || die "SOURCE_REPO=${SOURCE_REPO} is not a git repository"
+
+  SOURCE_HEAD="$(git -C "${SOURCE_REPO}" rev-parse HEAD)"
+  [ "${SOURCE_HEAD}" = "${SHA}" ] \
+    || die "SOURCE_REPO is at ${SOURCE_HEAD}, not the requested ${SHA} — refusing to deploy something other than what was asked for"
+  TARGET_DEPLOY_PROTOCOL="$(git -C "${SOURCE_REPO}" show "${SHA}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
+  [ "${TARGET_DEPLOY_PROTOCOL}" = "${DEPLOY_PROTOCOL}" ] \
+    || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; it is pre-fence or protocol-incompatible, so online deployment was refused before changing the deployment"
+
+  log "fetching ${SHA} from ${SOURCE_REPO}"
+  git fetch --quiet "${SOURCE_REPO}" HEAD
+  git reset --hard --quiet FETCH_HEAD
+
+  NOW="$(git rev-parse HEAD)"
+  [ "${NOW}" = "${SHA}" ] || die "checkout landed on ${NOW}, expected ${SHA}"
+  log "checkout now at ${NOW}"
+fi
 
 # Read one value from the deployment's persistent, untracked .env.
 from_env() {
   local value
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    if [[ "${!1+x}" == "x" ]]; then
+      printf '%s' "${!1}"
+    else
+      artifact_env_value "$1"
+    fi
+    return 0
+  fi
   value="$(grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
   value="${value%\"}"; value="${value#\"}"
   value="${value%\'}"; value="${value#\'}"
   printf '%s' "$value"
 }
-
-PREVIOUS="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-log "previous: ${PREVIOUS}"
-log "target:   ${SHA}"
-
-# Fetched from a clone on this machine rather than from GitHub. The runner's
-# workspace is already a full checkout of exactly this commit, authenticated by
-# the job's own token, and it is on the same disk — so the deployment host needs
-# no credential of its own for a private repository. A deploy key here would be
-# a standing secret on the box, existing only to re-download something already
-# present a few directories away.
-[ -n "${SOURCE_REPO}" ] \
-  || die "no SOURCE_REPO and no GITHUB_WORKSPACE — point SOURCE_REPO at a local clone holding ${SHA}"
-[ -d "${SOURCE_REPO}/.git" ] || [ -f "${SOURCE_REPO}/.git" ] \
-  || die "SOURCE_REPO=${SOURCE_REPO} is not a git repository"
-
-SOURCE_HEAD="$(git -C "${SOURCE_REPO}" rev-parse HEAD)"
-[ "${SOURCE_HEAD}" = "${SHA}" ] \
-  || die "SOURCE_REPO is at ${SOURCE_HEAD}, not the requested ${SHA} — refusing to deploy something other than what was asked for"
-TARGET_DEPLOY_PROTOCOL="$(git -C "${SOURCE_REPO}" show "${SHA}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
-[ "${TARGET_DEPLOY_PROTOCOL}" = "${DEPLOY_PROTOCOL}" ] \
-  || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; it is pre-fence or protocol-incompatible, so online deployment was refused before changing the deployment"
-
-log "fetching ${SHA} from ${SOURCE_REPO}"
-git fetch --quiet "${SOURCE_REPO}" HEAD
-git reset --hard --quiet FETCH_HEAD
-
-NOW="$(git rev-parse HEAD)"
-[ "${NOW}" = "${SHA}" ] || die "checkout landed on ${NOW}, expected ${SHA}"
-log "checkout now at ${NOW}"
 
 # The target API uses the same exact generation as the deployment waiter when
 # deciding whether a replica may materialize a new retained group. Export it
@@ -106,6 +133,13 @@ AGENT_DEPLOYMENT_SHA="${SHA}"
 export AGENT_DEPLOYMENT_SHA
 
 compose() {
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    case "$1" in
+      build) die "artifact deployments cannot build images" ;;
+      up) shift; set -- up --no-build --pull never "$@" ;;
+      run) shift; set -- run --pull never "$@" ;;
+    esac
+  fi
   docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}" "$@"
 }
 
@@ -150,8 +184,13 @@ cleanup_failed_bootstrap() {
 }
 trap cleanup_failed_bootstrap EXIT
 
-log "building images"
-compose build
+if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+  log "pulling release images"
+  compose pull
+else
+  log "building images"
+  compose build
+fi
 
 # Readiness itself uses the agent-owned database. Bring up only that durable
 # dependency and migrate it before evaluating the host fence. This ordering is

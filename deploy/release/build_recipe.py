@@ -32,6 +32,13 @@ import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import yaml
+
+if __package__:
+    from .artifact_compose import recipe_template
+else:  # direct execution from the release directory
+    from artifact_compose import recipe_template
+
 if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
     from collections.abc import Sequence
 
@@ -61,6 +68,7 @@ RECIPE_FILES: tuple[str, ...] = (
     "deploy/host/.env.example",
     "deploy/reverse-proxy/agents-under-gateway.conf",
     "deploy/release/artifact_compose.py",
+    "deploy/release/artifact_env.sh",
     "deploy/release/release_env.py",
     "deploy/release/manifest.schema.json",
     "deploy/release/requirements.txt",
@@ -114,6 +122,11 @@ def build(root: Path = REPO_ROOT, prefix: str = "recipe") -> bytes:
         for path in sorted(files):
             info = tarfile.TarInfo(name=f"{prefix}/{path.relative_to(root)}")
             data = path.read_bytes()
+            if path.name in {"docker-compose.yml", "docker-compose.sandbox.yml"}:
+                stack = "host" if path.name == "docker-compose.sandbox.yml" else "control-plane"
+                data = yaml.safe_dump(
+                    recipe_template(yaml.safe_load(data), stack), sort_keys=False
+                ).encode()
             info.size = len(data)
             # Fixed metadata, so the same tree hashes the same way. Owners are
             # zeroed rather than recorded: the person who built the archive is

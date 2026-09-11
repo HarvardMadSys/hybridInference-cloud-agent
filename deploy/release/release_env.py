@@ -72,7 +72,7 @@ class ReleaseEnvError(Exception):
 
 
 def _checked(name: str, value: str, pattern: re.Pattern[str], what: str) -> str:
-    if not pattern.match(value or ""):
+    if not pattern.fullmatch(value or ""):
         raise ReleaseEnvError(f"{name} is {value!r}, which is not {what}")
     return value
 
@@ -88,17 +88,14 @@ def parsed_ambient(pairs: Sequence[str]) -> dict[str, str]:
     Compose lets the environment win, so a host that named another image passed
     the check and then deployed it.
 
-    Quoting is Compose's too: it prints values that need quoting with double
-    quotes around them, and one layer of those is removed here so a comparison
-    is against the value rather than its spelling.
+    Values are already resolved; quotes in the output belong to the value.
+    Removing them would accept an explicitly configured, invalid image or SHA.
     """
     values: dict[str, str] = {}
     for pair in pairs:
         key, separator, value = pair.partition("=")
         if not separator or not key:
             raise ReleaseEnvError(f"--ambient expects KEY=VALUE, got {pair!r}")
-        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
-            value = value[1:-1]
         values[key] = value
     return values
 

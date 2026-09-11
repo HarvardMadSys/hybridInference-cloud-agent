@@ -22,8 +22,13 @@
 #   SOURCE_REPO   a local clone holding <sha> (default: $GITHUB_WORKSPACE)
 #   REPLICAS      runner count (default: whatever .env says, else the script's)
 #   COMPOSE_PROJECT  this stack's compose project (default: from the deploy root's .env)
+#   AGENT_DEPLOY_MODE=artifacts uses AGENT_RELEASE_MANIFEST and the packaged
+#   recipe; DEPLOY_ROOT remains the persistent deployment/configuration root.
 set -euo pipefail
 
+AGENT_DEPLOY_MODE="${AGENT_DEPLOY_MODE:-source}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SANDBOX_HOST_SCRIPT="deploy/host/sandbox_host.sh"
 SHA="${1:-${DEPLOY_SHA:-}}"
 SOURCE_REPO="${SOURCE_REPO:-${GITHUB_WORKSPACE:-}}"
 DEPLOY_ROOT="${DEPLOY_ROOT:-}"
@@ -32,51 +37,68 @@ DEPLOY_PROTOCOL="shared-live-exact-sha-v3"
 log() { printf '[deploy-host] %s\n' "$*"; }
 die() { printf '[deploy-host] ERROR: %s\n' "$*" >&2; exit 1; }
 
-[ -n "${SHA}" ] || die "no commit given: deploy.sh <sha>"
+case "$AGENT_DEPLOY_MODE" in
+  source) [ -n "${SHA}" ] || die "no commit given: deploy.sh <sha>" ;;
+  artifacts) ;;
+  *) die "AGENT_DEPLOY_MODE must be source or artifacts" ;;
+esac
+export AGENT_DEPLOY_MODE
 [ -n "${DEPLOY_ROOT}" ] || die "DEPLOY_ROOT is not set (repository variable AGENT_HOST_DEPLOY_ROOT)"
 
 cd "${DEPLOY_ROOT}" 2>/dev/null || die "${DEPLOY_ROOT} does not exist"
 
-git rev-parse --git-dir >/dev/null 2>&1 \
-  || die "${DEPLOY_ROOT} is not a git checkout — convert it once first (deploy/control-plane/README-cd.md)"
+if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+  [ -f .env ] || die ".env is missing from ${DEPLOY_ROOT}"
+  source "$SCRIPT_DIR/../release/artifact_env.sh"
+  prepare_artifact_deployment host
+  SANDBOX_HOST_SCRIPT="$SCRIPT_DIR/sandbox_host.sh"
+  APP_DIR="$PWD"
+  export APP_DIR
+  PREVIOUS="$(cat .deployed-sha 2>/dev/null || echo unknown)"
+  log "previous: ${PREVIOUS}"
+  log "target:   ${SHA}"
+else
+  git rev-parse --git-dir >/dev/null 2>&1 \
+    || die "${DEPLOY_ROOT} is not a git checkout — convert it once first (deploy/control-plane/README-cd.md)"
 
-# Same guard, same reason as the control plane's: this tree was populated by
-# rsync, and on 2026-08-06 it still held files from two branches that had been
-# deleted from the remote without ever being proposed. One of them was the fix
-# for a live sign-in failure. A deploy that silently overwrote them would have
-# destroyed the only copy.
-DIRTY="$(git status --porcelain --untracked-files=no)"
-if [ -n "${DIRTY}" ]; then
-  printf '[deploy-host] local modifications in %s:\n%s\n' "${DEPLOY_ROOT}" "${DIRTY}" >&2
-  if [ "${ALLOW_DIRTY:-0}" != "1" ]; then
-    die "refusing to overwrite them. Get them into git, or re-run with ALLOW_DIRTY=1 to discard."
+  # Same guard, same reason as the control plane's: this tree was populated by
+  # rsync, and on 2026-08-06 it still held files from two branches that had been
+  # deleted from the remote without ever being proposed. One of them was the fix
+  # for a live sign-in failure. A deploy that silently overwrote them would have
+  # destroyed the only copy.
+  DIRTY="$(git status --porcelain --untracked-files=no)"
+  if [ -n "${DIRTY}" ]; then
+    printf '[deploy-host] local modifications in %s:\n%s\n' "${DEPLOY_ROOT}" "${DIRTY}" >&2
+    if [ "${ALLOW_DIRTY:-0}" != "1" ]; then
+      die "refusing to overwrite them. Get them into git, or re-run with ALLOW_DIRTY=1 to discard."
+    fi
+    log "ALLOW_DIRTY=1 — discarding the above"
   fi
-  log "ALLOW_DIRTY=1 — discarding the above"
+
+  [ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this host's credentials and is deliberately not in git"
+
+  # Fetched from a clone on this machine: the runner's workspace is already a
+  # checkout of exactly this commit, so the host needs no git credential of its
+  # own for a private repository.
+  [ -n "${SOURCE_REPO}" ] \
+    || die "no SOURCE_REPO and no GITHUB_WORKSPACE — point SOURCE_REPO at a local clone holding ${SHA}"
+  SOURCE_HEAD="$(git -C "${SOURCE_REPO}" rev-parse HEAD)"
+  [ "${SOURCE_HEAD}" = "${SHA}" ] \
+    || die "SOURCE_REPO is at ${SOURCE_HEAD}, not the requested ${SHA} — refusing to deploy something other than what was asked for"
+  TARGET_DEPLOY_PROTOCOL="$(git -C "${SOURCE_REPO}" show "${SHA}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
+  [ "${TARGET_DEPLOY_PROTOCOL}" = "${DEPLOY_PROTOCOL}" ] \
+    || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; it is pre-fence or protocol-incompatible, so online deployment was refused before changing the host"
+
+  PREVIOUS="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  log "previous: ${PREVIOUS}"
+  log "target:   ${SHA}"
+
+  git fetch --quiet "${SOURCE_REPO}" HEAD
+  git reset --hard --quiet FETCH_HEAD
+  NOW="$(git rev-parse HEAD)"
+  [ "${NOW}" = "${SHA}" ] || die "checkout landed on ${NOW}, expected ${SHA}"
+  log "checkout now at ${NOW}"
 fi
-
-[ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this host's credentials and is deliberately not in git"
-
-# Fetched from a clone on this machine: the runner's workspace is already a
-# checkout of exactly this commit, so the host needs no git credential of its
-# own for a private repository.
-[ -n "${SOURCE_REPO}" ] \
-  || die "no SOURCE_REPO and no GITHUB_WORKSPACE — point SOURCE_REPO at a local clone holding ${SHA}"
-SOURCE_HEAD="$(git -C "${SOURCE_REPO}" rev-parse HEAD)"
-[ "${SOURCE_HEAD}" = "${SHA}" ] \
-  || die "SOURCE_REPO is at ${SOURCE_HEAD}, not the requested ${SHA} — refusing to deploy something other than what was asked for"
-TARGET_DEPLOY_PROTOCOL="$(git -C "${SOURCE_REPO}" show "${SHA}:deploy/DEPLOY_PROTOCOL" 2>/dev/null || true)"
-[ "${TARGET_DEPLOY_PROTOCOL}" = "${DEPLOY_PROTOCOL}" ] \
-  || die "target ${SHA} does not implement ${DEPLOY_PROTOCOL}; it is pre-fence or protocol-incompatible, so online deployment was refused before changing the host"
-
-PREVIOUS="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-log "previous: ${PREVIOUS}"
-log "target:   ${SHA}"
-
-git fetch --quiet "${SOURCE_REPO}" HEAD
-git reset --hard --quiet FETCH_HEAD
-NOW="$(git rev-parse HEAD)"
-[ "${NOW}" = "${SHA}" ] || die "checkout landed on ${NOW}, expected ${SHA}"
-log "checkout now at ${NOW}"
 
 # Every heartbeat carries this exact commit only after sandbox_host.sh has
 # proved all runner replicas and the broker. The control-plane deployment uses
@@ -89,6 +111,14 @@ export AGENT_DEPLOYMENT_SHA
 # the bring-up can never disagree about which containers are ours.
 from_env() {
   local value
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    if [[ "${!1+x}" == "x" ]]; then
+      printf '%s' "${!1}"
+    else
+      artifact_env_value "$1"
+    fi
+    return 0
+  fi
   value="$(grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
   # Match Compose and sandbox_host.sh: one quoted pair is syntax, not part of
   # a project name. Without this, COMPOSE_PROJECT="host-prod" makes this guard
@@ -131,6 +161,9 @@ STRAY="$(docker ps --format '{{.Label "com.docker.compose.project"}} {{.Names}}'
       }')"
 if [ -n "${STRAY}" ]; then
   printf '[deploy-host] containers from another compose project are running this same stack:\n%s\n' "${STRAY}" >&2
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    die "refusing to add a second stack; name legitimate siblings in SIBLING_COMPOSE_PROJECTS or stop the stray stack"
+  fi
   if [ "${ALLOW_STRAY_STACK:-0}" != "1" ]; then
     die "refusing to add a second stack beside them. If that is the other environment, add its project to SIBLING_COMPOSE_PROJECTS. Otherwise stop it first:
   docker compose -p <that project> -f deploy/host/docker-compose.sandbox.yml --env-file .env down
@@ -145,11 +178,11 @@ fi
 # broken tunnel into a red deploy instead of jobs that claim and then fail.
 log "handing over to sandbox_host.sh up"
 if [ -n "${REPLICAS:-}" ]; then
-  DEFER_SHARED_READY_MARKER=1 bash deploy/host/sandbox_host.sh up "${REPLICAS}"
+  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up "${REPLICAS}"
 else
-  DEFER_SHARED_READY_MARKER=1 bash deploy/host/sandbox_host.sh up
+  DEFER_SHARED_READY_MARKER=1 bash "$SANDBOX_HOST_SCRIPT" up
 fi
 
 printf '%s\n' "${SHA}" > .deployed-sha
-bash deploy/host/sandbox_host.sh mark-ready "${SHA}"
+bash "$SANDBOX_HOST_SCRIPT" mark-ready "${SHA}"
 log "deployed ${SHA} (was ${PREVIOUS})"
