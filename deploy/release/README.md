@@ -51,8 +51,39 @@ Two invariants worth naming because they cannot be enforced in the same place:
 
 ## Producing one
 
-The publication job (P2b) builds each artifact with
-`--build-arg SOURCE_COMMIT=<sha>`, then writes one input file:
+`.github/workflows/publish.yml` produces a release for every CI run that
+concludes green on a push to `dev`, and for a `workflow_dispatch` naming a dev
+commit whose own CI is green. In order:
+
+1. **Vet the commit.** It has to be on `dev`, its own CI has to have concluded
+   success on a push, and no release may exist for it yet. A release that
+   exists is left exactly as it is: a manifest that could be overwritten is
+   one whose sha256 nobody can pin.
+2. **Build, push and start each artifact** — one cell per artifact, on the
+   architecture it is deployed to, from the same matrix CI verifies
+   (`test_publish_workflow.py` fails if the two differ). Each cell pushes by
+   digest with `--build-arg SOURCE_COMMIT=<sha>`, pulls that digest back, and
+   runs `smoke.py` on the pulled image: the check is applied to the bytes the
+   registry holds, and the pull is the first proof they can be pulled at all.
+   It then records the digest and the image's own labels in one small file.
+3. **Assemble the manifest.** `publish_inputs.py assemble` turns the seven
+   records into the generator's input (below), `build_recipe.py` packages the
+   recipe, and `release_manifest.py` writes the document — only if every
+   check passes.
+4. **Publish a release** tagged `agent-<sha>`, created as a draft, with
+   `recipe.tar.gz` and `release.json` attached, and made visible only once
+   both assets are on it. The release notes and the run summary carry the
+   sha256 of `release.json`, which is the value a distribution's lock pins.
+
+Nothing on this path deploys, and nothing on it is reachable from a pull
+request: there is no `pull_request` trigger, and `workflow_run` executes the
+copy of the file on the default branch. That is also the one operational
+caveat: `workflow_run` fires only for a workflow file that is on the default
+branch, so until `publish.yml` has been synced to `main`, dev pushes do not
+publish on their own and a dispatch on `dev` is how a release is produced.
+
+The generator's input, written by `publish_inputs.py assemble` from the cell
+records:
 
 ```json
 {
@@ -117,12 +148,16 @@ storage layout rather than interface. The role is carried by the image's own
 `io.hybridinference.artifact.role` label, not by the repository path, so the
 layout can change without the manifest becoming a lie.
 
-The plan, decided when the first push happens:
+Decided, and written into `publish.yml`:
 
 | Package | Contents | Why |
 |---|---|---|
 | `ghcr.io/harvardmadsys/cloud-agent` | control, web (both variants), runner, tunnel, egress — one tag per role and commit | Access control in GHCR is per package, and none of these needs to differ. |
 | `ghcr.io/harvardmadsys/cloud-agent-sandbox` | sandbox | It bundles third-party Agent CLIs whose redistribution is a separate question, so it needs a visibility switch of its own. |
+
+Each digest also gets one tag for people, `<cell>-<sha>` — `control-<sha>`,
+`web-agents-<sha>`, `sandbox-<sha>` and so on — written only after the image
+has started. Nothing selects on it.
 
 Moving between layouts later is possible but not free: a faithful copy of a
 multi-architecture index keeps its digests, while re-creating an index — a
@@ -215,10 +250,6 @@ acceptance.
 
 ## What is still owed
 
-* **P2b**: the publication workflow — build and start each artifact, push by
-  digest on a green `dev`, and publish the manifest and recipe as release assets.
-  The seven-artifact CI smoke matrix, including both Web variants, is already
-  implemented.
 * **P3 acceptance**: run the packaged deployment against real candidate images
   on the intended control-plane and Kata hosts, including failure/recovery
   checks. The source-free script path is covered by the tests above.

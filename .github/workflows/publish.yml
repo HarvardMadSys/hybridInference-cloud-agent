@@ -1,0 +1,581 @@
+name: Publish
+
+# One green push to dev becomes one release: seven images pushed by digest,
+# the deployment recipe archived, and one manifest naming all of it, published
+# as a GitHub release whose tag is the commit. Nothing here deploys. The
+# distribution that deploys pins the sha256 of the manifest's bytes
+# (deploy/release/README.md) and goes and looks at the registry itself.
+#
+# Two ways in, and both end at the same check: the commit is on dev, and CI
+# concluded success for that exact commit. `workflow_run` is CI finishing on a
+# dev push, which is the routine path; `workflow_dispatch` names a commit by
+# hand — for the first release, or for a commit whose own push run was
+# cancelled by the push that followed it. A pull request cannot reach this
+# file: there is no `pull_request` trigger, and a `workflow_run` executes the
+# copy of this file on the default branch, never a pull request's copy. That is
+# what keeps a publishing credential out of the path that runs unreviewed code.
+#
+# Publishing is idempotent per commit. A release that already exists is left
+# exactly as it is: a manifest that could be overwritten is one whose sha256 a
+# distribution cannot rely on.
+#
+# `workflow_run` fires only for a workflow file that is on the default branch,
+# which is main. Until this file has been synced there, dev pushes do not
+# publish on their own, and a dispatch on dev is how a release is produced.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [dev]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit on dev to publish (defaults to this branch's head). Its own CI must be green.
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_VERSION: "0.9.7"
+  # Where the images go. Which package an image lives in is storage layout —
+  # a deployment addresses artifacts by digest and reads the role from the
+  # image's own label — so this is a decision about GHCR access control, not
+  # part of the manifest contract. The sandbox is a package of its own because
+  # it bundles third-party Agent CLIs, whose redistribution is a separate
+  # question from this repository's own code, and GHCR visibility is per
+  # package. See deploy/release/README.md, "Registry layout".
+  IMAGE_REPOSITORY: ghcr.io/harvardmadsys/cloud-agent
+  SANDBOX_REPOSITORY: ghcr.io/harvardmadsys/cloud-agent-sandbox
+
+jobs:
+  # ------------------------------------------------------------------ commit
+  commit:
+    name: Vet the commit
+    # Both triggers end here. For `workflow_run` the event itself says what
+    # finished: CI, on a push, to dev, in this repository, green. A dispatch
+    # names a commit, and the steps below prove the same facts about it.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'dev' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success') }}
+    runs-on: [self-hosted, Linux, ci-general]
+    # `actions: read` is what lets a job ask the API whether CI passed. The
+    # default token grants nothing but what is listed.
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
+      tag: ${{ steps.target.outputs.tag }}
+      existing: ${{ steps.existing.outputs.existing }}
+    steps:
+      # dev, whatever branch the dispatch form was left on: the check below is
+      # against dev's history, and a `workflow_run` job is filed under the
+      # default branch, which is main and lags dev by weeks.
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Resolve the commit to publish
+        id: target
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          requested="${INPUT_SHA:-${RUN_SHA:-${GITHUB_SHA}}}"
+          # A release is a dev commit and nothing else. The tag names the full
+          # commit, every image's revision label is compared against it, and
+          # the ancestry check is what stops a dispatch on a feature branch —
+          # or on main, which lags — from publishing something dev never had.
+          if ! sha="$(git rev-parse --verify --quiet "${requested}^{commit}")"; then
+            echo "::error title=Publish::${requested} is not a commit on dev"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${sha}" origin/dev 2>/dev/null; then
+            echo "::error title=Publish::${sha} is not on dev; a release is a dev commit, and nothing else"
+            exit 1
+          fi
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "tag=agent-${sha}" >> "${GITHUB_OUTPUT}"
+          echo "publishing ${sha}"
+
+      # For a `workflow_run` this restates what the event said; for a dispatch
+      # it is the only thing standing between "a commit on dev" and "a commit
+      # CI passed". Asked for the exact commit on a push, not for the latest
+      # green run of something called CI: CI cancels an in-progress dev run
+      # when the next push arrives, so a commit on dev may never have finished
+      # its own run — and that commit is not releasable, the next one is.
+      - name: Require the commit's own CI to be green
+        uses: actions/github-script@v7
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+        with:
+          script: |
+            const sha = process.env.SHA;
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ci.yml',
+              head_sha: sha,
+              event: 'push',
+              status: 'success',
+              per_page: 1,
+            });
+            if (runs.data.total_count < 1) {
+              core.setFailed(`no green CI run exists for ${sha} on a push; a release is built from a commit CI passed, not one it merely saw`);
+              return;
+            }
+            core.info(`CI is green for ${sha}: ${runs.data.workflow_runs[0].html_url}`);
+
+      # A release is immutable once it exists. Re-running this workflow for a
+      # published commit — a re-run of CI, a dispatch by hand — must produce
+      # nothing, not a second set of images and a rewritten manifest whose
+      # sha256 no longer matches what a distribution pinned.
+      - name: Refuse to overwrite a published release
+        id: existing
+        uses: actions/github-script@v7
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+        with:
+          script: |
+            const tag = process.env.TAG;
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              core.notice(`${tag} is already published (${release.data.html_url}); a release is immutable, so nothing is rebuilt or rewritten`);
+              core.setOutput('existing', 'true');
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+              core.setOutput('existing', '');
+              core.info(`${tag} does not exist yet`);
+            }
+
+  # --------------------------------------------------------------- artifacts
+  # One cell per artifact, on the architecture it is deployed to: the same
+  # matrix CI verifies, and `test_publish_workflow.py` fails if the two ever
+  # differ. Each cell pushes by digest, pulls that digest back, and only then
+  # starts it — so the smoke is applied to the bytes the registry holds, and
+  # the pull is the first proof that they can be pulled at all.
+  artifacts:
+    name: ${{ matrix.artifact.name }} (${{ matrix.artifact.arch }})
+    needs: commit
+    if: needs.commit.outputs.existing == ''
+    runs-on: ${{ fromJSON(matrix.artifact.runner) }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        artifact:
+          # The web image is built twice, and only here is either variant built
+          # in CI: a mount prefix is resolved while the bundle is compiled, so
+          # the two are different images and neither was verified before this.
+          - name: control
+            arch: arm64
+            smoke_args: --role control
+            dockerfile: deploy/control-plane/Dockerfile
+            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
+            build_args: ""
+          - name: web-root
+            arch: arm64
+            smoke_args: --role web --variant root
+            dockerfile: deploy/control-plane/Dockerfile.web
+            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
+            build_args: |
+              NEXT_PUBLIC_BASE_PATH=
+              NEXT_PUBLIC_AGENT_API_URL=/api
+          - name: web-agents
+            arch: arm64
+            smoke_args: --role web --variant agents
+            dockerfile: deploy/control-plane/Dockerfile.web
+            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
+            build_args: |
+              NEXT_PUBLIC_BASE_PATH=/agents
+              NEXT_PUBLIC_AGENT_API_URL=/agents/api
+          - name: runner
+            arch: amd64
+            smoke_args: --role runner
+            dockerfile: deploy/host/Dockerfile.agent-runner
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            build_args: ""
+          - name: sandbox
+            arch: amd64
+            smoke_args: --role sandbox
+            dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            build_args: ""
+          - name: tunnel
+            arch: amd64
+            smoke_args: --role tunnel
+            dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            build_args: ""
+          - name: egress
+            arch: amd64
+            smoke_args: --role egress
+            dockerfile: deploy/host/Dockerfile.agent-egress-proxy
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            build_args: ""
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.commit.outputs.sha }}
+          fetch-depth: 0
+
+      # Named per run, artifact included: several cells land on the same
+      # Docker host, and the cleanup below removes containers by this label.
+      - name: Name this cell's artifacts
+        run: |
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
+          echo "IMAGE_TAG=${{ matrix.artifact.name }}:publish-${suffix}" >> "${GITHUB_ENV}"
+          echo "SUFFIX=${suffix}" >> "${GITHUB_ENV}"
+          echo "SHA=${{ needs.commit.outputs.sha }}" >> "${GITHUB_ENV}"
+          # The sandbox has a package of its own; see the env block at the top.
+          if [ "${{ matrix.artifact.name }}" = "sandbox" ]; then
+            echo "PUBLISH_REPOSITORY=${SANDBOX_REPOSITORY}" >> "${GITHUB_ENV}"
+          else
+            echo "PUBLISH_REPOSITORY=${IMAGE_REPOSITORY}" >> "${GITHUB_ENV}"
+          fi
+
+      # Authenticated base-image pulls: the anonymous allowance is per IP and
+      # shared with the other repository's CI, and it ran out twice in one day.
+      # Before the builder step, because creating a builder pulls
+      # `moby/buildkit` from Docker Hub too.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The job's own token, scoped by the `packages: write` above. A package
+      # first pushed this way is created private and linked to this
+      # repository; making it visible is a decision, not a side effect.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same per-runner builder CI uses, for the same reasons: its layer
+      # cache outlives the job, and its name carries the runner so two runners
+      # on one host cannot delete each other's buildkitd.
+      - name: Reuse this runner's builder, or make one
+        run: |
+          set -euo pipefail
+          buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
+          mkdir -p "${buildx_config}"
+          export BUILDX_CONFIG="${buildx_config}"
+          echo "BUILDX_CONFIG=${buildx_config}" >> "${GITHUB_ENV}"
+          builder="ci-${RUNNER_NAME}"
+          if ! docker buildx inspect "${builder}" --bootstrap >/dev/null 2>&1; then
+            docker buildx rm "${builder}" >/dev/null 2>&1 || true
+            docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
+            docker buildx inspect "${builder}" --bootstrap >/dev/null
+          fi
+          docker buildx use "${builder}" >/dev/null
+          echo "BUILDER=${builder}" >> "${GITHUB_ENV}"
+          echo "builder ${builder} ready in ${buildx_config}"
+
+      # Pushed by digest and nothing else: no tag is written here, so no tag
+      # can be moved out from under a deployment. `SOURCE_COMMIT` is what every
+      # Dockerfile writes into `org.opencontainers.image.revision`, and the
+      # smoke below asserts it arrived — a release whose images cannot name
+      # their commit is refused by every resolver.
+      - name: Build ${{ matrix.artifact.name }} and push it by digest
+        id: push
+        # A build can fail for reasons of its own; one more attempt is cheaper
+        # than a red cell. Nothing after the retry is allowed to fail quietly.
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          builder: ${{ env.BUILDER }}
+          context: .
+          file: ${{ matrix.artifact.dockerfile }}
+          platforms: linux/${{ matrix.artifact.arch }}
+          outputs: type=image,name=${{ env.PUBLISH_REPOSITORY }},name-canonical=true,push-by-digest=true,push=true
+          build-args: |
+            SOURCE_COMMIT=${{ env.SHA }}
+            ${{ matrix.artifact.build_args }}
+
+      - name: Build ${{ matrix.artifact.name }} and push it by digest (retry)
+        id: push_retry
+        if: steps.push.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          builder: ${{ env.BUILDER }}
+          context: .
+          file: ${{ matrix.artifact.dockerfile }}
+          platforms: linux/${{ matrix.artifact.arch }}
+          outputs: type=image,name=${{ env.PUBLISH_REPOSITORY }},name-canonical=true,push-by-digest=true,push=true
+          build-args: |
+            SOURCE_COMMIT=${{ env.SHA }}
+            ${{ matrix.artifact.build_args }}
+
+      - name: Record the digest the registry holds
+        env:
+          FIRST: ${{ steps.push.outputs.digest }}
+          RETRY: ${{ steps.push_retry.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="${FIRST:-${RETRY:-}}"
+          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=Publish::the build reported no digest, so nothing was pushed"
+            exit 1
+          fi
+          echo "IMAGE_REF=${PUBLISH_REPOSITORY}@${digest}" >> "${GITHUB_ENV}"
+          echo "pushed ${PUBLISH_REPOSITORY}@${digest}"
+
+      # The smoke runs on what the registry holds, not on what the builder
+      # had. Pulling the digest back is also the first proof that it can be
+      # pulled at all — a push that succeeded into a package nobody can read
+      # from would otherwise be found by the first deployment.
+      - name: Pull the pushed digest back
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE_REF}"
+          docker tag "${IMAGE_REF}" "${IMAGE_TAG}"
+
+      - name: Isolate uv cache dir
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          prune-cache: false
+
+      # The same script, and the same checks, as CI runs on a pull request —
+      # applied here to the bytes that are being published.
+      - name: Start it, and assert what only starting shows
+        run: |
+          set -euo pipefail
+          uv run --with-editable . python deploy/release/smoke.py \
+            ${{ matrix.artifact.smoke_args }} \
+            --image "${IMAGE_TAG}" \
+            --suffix "${SUFFIX}" \
+            --revision "${SHA}"
+
+      # What the publish job assembles the manifest from: the digest, and the
+      # labels of the image that carries it — read from the pulled digest, so
+      # the manifest describes the image that was published rather than the
+      # arguments the build was given. A file rather than a job output, because
+      # seven cells of one matrix share one output namespace.
+      - name: Record what this cell published
+        run: |
+          set -euo pipefail
+          mkdir -p cells
+          docker image inspect --format '{{json .Config.Labels}}' "${IMAGE_REF}" > labels.json
+          uv run --with-editable . python -m deploy.release.publish_inputs record \
+            --name "${{ matrix.artifact.name }}" \
+            --image "${IMAGE_REF}" \
+            --platform "linux/${{ matrix.artifact.arch }}" \
+            --labels labels.json \
+            --source-commit "${SHA}" \
+            --output "cells/${{ matrix.artifact.name }}.json"
+
+      # A tag for people. Nothing selects on it — the manifest names the
+      # digest — but `docker pull …/cloud-agent:control-<sha>` is how a person
+      # looks at what a release contains, and an untagged manifest is a version
+      # the registry's UI can only show as a hash. Written after the smoke, so
+      # a tag exists only for an image that started.
+      - name: Tag the digest for humans
+        run: docker buildx imagetools create --tag "${PUBLISH_REPOSITORY}:${{ matrix.artifact.name }}-${SHA}" "${IMAGE_REF}"
+
+      - name: Hand the record to the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-cell-${{ matrix.artifact.name }}
+          path: cells/${{ matrix.artifact.name }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+      # Containers first — an image with a container still referencing it is
+      # not removed even with -f. Scoped by this cell's label: a shared runner
+      # hosts several cells at once. Not forced: a forced removal untags an
+      # image another run may still be starting containers from.
+      - name: Drop this run's containers and image
+        if: always()
+        run: |
+          docker ps -aq --filter "label=io.hybridinference.smoke.run=${SUFFIX}" \
+            | xargs -r docker rm -f || true
+          docker image rm "${IMAGE_TAG}" >/dev/null 2>&1 || true
+          docker image rm "${IMAGE_REF}" >/dev/null 2>&1 || true
+
+  # ----------------------------------------------------------------- publish
+  # Runs only when every cell succeeded — `needs` skips it otherwise, and it
+  # has no `if: always()` to bring it back. A release with six images is not a
+  # smaller release; it is one that leaves a machine half updated.
+  publish:
+    name: Publish the release
+    needs: [commit, artifacts]
+    if: needs.commit.outputs.existing == ''
+    runs-on: [self-hosted, Linux, ci-general]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.commit.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Isolate uv cache dir
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          prune-cache: false
+
+      # The dev group too: `jsonschema` is what validates the manifest against
+      # the published schema, and the generator refuses to run without it.
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Collect what the cells published
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-cell-*
+          merge-multiple: true
+          path: cells
+
+      # Reproducible for a given tree, so the sha256 written into the manifest
+      # is the sha256 of the archive a deployment will download.
+      - name: Package the recipe
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          uv run python deploy/release/build_recipe.py --output release/recipe.tar.gz --report
+          echo "RECIPE_SHA256=$(sha256sum release/recipe.tar.gz | cut -d' ' -f1)" >> "${GITHUB_ENV}"
+
+      - name: Assemble the manifest's inputs
+        env:
+          SHA: ${{ needs.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          uv run python -m deploy.release.publish_inputs assemble \
+            --cells cells \
+            --source-commit "${SHA}" \
+            --output release/inputs.json
+
+      # The recipe URL is the release asset's, known before the release exists
+      # because GitHub's download URLs are a function of tag and file name. The
+      # run URL is this run: the manifest points at the process that produced
+      # it rather than at whoever handed it over.
+      - name: Write the manifest
+        env:
+          TAG: ${{ needs.commit.outputs.tag }}
+        run: |
+          set -euo pipefail
+          uv run python deploy/release/release_manifest.py \
+            --inputs release/inputs.json \
+            --recipe-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/recipe.tar.gz" \
+            --recipe-sha256 "${RECIPE_SHA256}" \
+            --publisher-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --output release/release.json
+          echo "MANIFEST_SHA256=$(sha256sum release/release.json | cut -d' ' -f1)" >> "${GITHUB_ENV}"
+
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          uv run python -m deploy.release.publish_inputs notes \
+            --manifest release/release.json \
+            --manifest-sha256 "${MANIFEST_SHA256}" \
+            --output release/notes.md
+
+      # A draft first, and visible only once both assets are on it: a release
+      # whose manifest names a recipe that is not there yet is a document with
+      # a correct-looking hash and nothing behind it. If anything fails after
+      # the draft is created, the draft is deleted rather than left half-made.
+      - name: Publish the release
+        id: release
+        uses: actions/github-script@v7
+        env:
+          SHA: ${{ needs.commit.outputs.sha }}
+          TAG: ${{ needs.commit.outputs.tag }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const sha = process.env.SHA;
+            const tag = process.env.TAG;
+            const assets = ['recipe.tar.gz', 'release.json'];
+            const notes = fs.readFileSync('release/notes.md', 'utf8');
+            const draft = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: sha,
+              name: `Cloud Agent ${sha.slice(0, 12)}`,
+              body: notes,
+              draft: true,
+              prerelease: false,
+              make_latest: 'false',
+            });
+            try {
+              for (const name of assets) {
+                const data = fs.readFileSync(`release/${name}`);
+                const uploaded = await github.rest.repos.uploadReleaseAsset({
+                  owner,
+                  repo,
+                  release_id: draft.data.id,
+                  name,
+                  data,
+                  headers: { 'content-type': 'application/octet-stream', 'content-length': data.length },
+                });
+                if (uploaded.data.state !== 'uploaded' || uploaded.data.size !== data.length) {
+                  throw new Error(`${name}: ${uploaded.data.size} bytes in state ${uploaded.data.state}; expected ${data.length} bytes uploaded`);
+                }
+                core.info(`${name}: ${data.length} bytes uploaded`);
+              }
+              const published = await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: draft.data.id,
+                draft: false,
+              });
+              core.setOutput('url', published.data.html_url);
+              core.info(`published ${published.data.html_url}`);
+            } catch (error) {
+              await github.rest.repos.deleteRelease({ owner, repo, release_id: draft.data.id });
+              throw error;
+            }
+
+      - name: What a distribution pins
+        env:
+          TAG: ${{ needs.commit.outputs.tag }}
+          URL: ${{ steps.release.outputs.url }}
+        run: |
+          {
+            echo "### Published ${TAG}"
+            echo
+            echo "${URL}"
+            echo
+            echo "\`release.json\` sha256 — the value a distribution's lock pins:"
+            echo
+            echo "    ${MANIFEST_SHA256}"
+            echo
+            cat release/notes.md
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "published ${TAG}: ${URL}"
+          echo "release.json sha256 ${MANIFEST_SHA256}"
