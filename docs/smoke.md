@@ -18,6 +18,15 @@ pull request on a scratch repository.
 > session paths; it does not prove an external provider or real pull-request
 > publication.
 >
+> What staging did prove, on 2026-08-06 (`ajob_8b0be5f9e7ff9ad5`, recorded in
+> `MIGRATION.md` and `cutover.md`): §4 enrolment, §5 job create → remote claim →
+> broker workspace → a tool-calling run → `succeeded`, and the **renewal** half
+> of §6 with a grant minted, renewed four times and revoked after the job
+> settled. **What is still unproven on the real stack is §5's publish step,
+> §6's mid-run cancel, and the rest of §6's fail-closed trio.** Those three are
+> why the log rows below stay blank; §6's fail-closed cases were separately
+> exercised against a local Postgres without Docker (see the partial run).
+>
 > The remaining staging steps were written from code and deployment files.
 > Until someone runs them and fills in the log, treat each as a claim to check,
 > not a route known to work — and fix any incorrect step in the same sitting.
@@ -33,9 +42,11 @@ sign-in, an inference grant, a host enrolment).
 
 **Does not prove:** anything about migrated data (that is H1 and the cutover
 smoke in [cutover.md](cutover.md)), anything about concurrency or host loss
-(G7), or that the gateway's side is deployed — at the time of writing the
-gateway contracts live in unmerged pull requests, so **the very first thing to
-check is that they are live on the staging gateway you are pointing at**.
+(G7), or that the gateway's side is deployed. The three gateway contracts
+landed on the gateway's `dev` and are recorded as live on both staging and
+production in [cutover.md](cutover.md), so the checks in §0 are a health check
+on the gateway you are pointing at rather than a gate waiting on an unmerged
+branch — but a stale deployment is still the first thing to rule out.
 
 ## 0. Preconditions
 
@@ -48,10 +59,13 @@ check is that they are live on the staging gateway you are pointing at**.
       ```
       Then, with the dispatch token, check
       `/internal/model-catalog?user_id=<a real user>` and
-      `/internal/users/<id>/status`. The old `/internal/mcp-registry` endpoint
-      was removed: MCP configuration is owned by this service and requiring
-      that path would make the smoke fail before it began. A 404 on either
-      remaining gateway lookup means the gateway side has not landed; **stop
+      `/internal/users/<id>/agent-access`. The old `/internal/mcp-registry`
+      endpoint was removed — MCP configuration is owned by this service and
+      requiring that path would make the smoke fail before it began — and
+      `/agent-access` is the lookup that replaced the retired
+      `/internal/users/<id>/status`: admission no longer comes from an account
+      profile. A 404 on either remaining gateway lookup means the gateway side
+      has not landed; **stop
       here** — everything below will fail closed correctly.
 - [ ] A scratch GitHub repository this run may open pull requests against, and
       a token that can. Not a repository anyone depends on: the point of this
@@ -106,7 +120,10 @@ missing gateway contract shows up as a human-visible failure.
 - [ ] Open the web UI, choose sign-in, and land on the **gateway's**
       `/authorize` page.
 - [ ] Approve. You return to this service with a session.
-- [ ] `GET /v1/session/me` reports your gateway user id and role.
+- [ ] `GET /v1/session/me` reports your gateway user id plus the explicit
+      `agent_access` decision (`allowed`, `permissions`). Roles are
+      deliberately absent: an account role confers nothing, and the session
+      carries no profile.
 - [ ] Nothing in the control plane's logs or database contains a gateway
       session token. It exchanged a code for a short-lived identity token,
       minted its own cookie, and kept neither.
@@ -118,8 +135,11 @@ credential bound to the name an admin chose for it.
 
 - [ ] `POST /admin/agent/runner-hosts/enroll-token` with the host's name,
       using `ADMIN_TOKEN`.
-- [ ] Start the host stack from
-      `deploy/host/docker-compose.sandbox.yml` with that token.
+- [ ] Start the host stack from `deploy/host/docker-compose.sandbox.yml` with
+      that token, after filling `deploy/host/.env.example`: `COMPOSE_PROJECT`
+      and `AGENT_SANDBOX_IMAGE` are required and unset values stop the render,
+      and the three tunnel destinations with their own keys and known-hosts
+      files are needed even for a single-machine run.
 - [ ] `GET /admin/agent/runner-hosts` shows the host `online` with a broker URL.
 - [ ] Confirm the token cannot be reused under a different name — register a
       second machine under a typo of the first and watch it be refused
@@ -147,9 +167,13 @@ credential bound to the name an admin chose for it.
 
 Cheap to check now, expensive to discover at cutover:
 
-- [ ] **Renewal.** Leave a job running longer than the grant TTL (300 s by
-      default). It must keep working. If it dies at ~5 minutes, the renewal
-      loop is not running and every long job on this deployment is broken.
+- [ ] **Renewal.** Leave a job running longer than the grant TTL — this service
+      mints for `GRANT_TTL_S` = **120 s** (30-second renewal interval × four
+      headroom passes; `grants.py`), not the gateway's 300-second renewal step,
+      which is what one *renewal* buys. A lost renewal therefore surfaces at
+      roughly two minutes, not five. It must keep working; if it dies near
+      120 s, the renewal loop is not running and every long job on this
+      deployment is broken.
 - [ ] **Revocation.** Cancel a job mid-run; the grant is revoked within a
       reaper pass rather than living to its TTL.
 - [ ] **Fail-closed.** Point `GATEWAY_BASE_URL` at a port nothing listens on
@@ -193,8 +217,11 @@ sandbox in it.
 
 **Verified**
 
-- `alembic upgrade head` against an empty database reaches `0001_schema_baseline`
-  and creates 24 tables (re-verified on the rewritten baseline, 2026-09-10). The bare `postgresql://` DSN the compose file produces
+- `alembic upgrade head` against an empty database reaches
+  `0004_residency_on_membership`, the head of the chain that replaced the old
+  one on 2026-09-10, and leaves 24 tables. The baseline revision
+  `0001_schema_baseline` creates 25; `0004` drops `agent_thread_residencies`.
+  (Re-verified on the rewritten baseline, 2026-09-10.) The bare `postgresql://` DSN the compose file produces
   is the one that was used, which is what the driver rewrite exists for.
 - The process starts and `GET /healthz` answers 200.
 - **It stays up with the gateway completely unreachable** — `GATEWAY_BASE_URL`
@@ -249,6 +276,15 @@ transcription had gone stale in the same direction as the client, so comparing
 the two records proved nothing. A response from the gateway's own route
 function is a second *source*.
 
+> **This section belongs to the pre-split gateway and is kept as history.** It
+> exercised `internal_lookups.user_status`, a route this service no longer
+> calls and no longer has a contract for. Admission now comes from
+> `/internal/users/{user_id}/agent-access`, whose decision is
+> `{user_id, allowed, permissions}` and deliberately carries no account
+> profile — so the `status` / `role` / `email` rows below describe a retired
+> route rather than current behaviour. What still applies is the method:
+> compare the contract against a real route function, not against the client.
+
 Called `internal_lookups.user_status` and `internal_lookups.model_catalog`
 directly, with stub stores, and fed what came back to this service's readers.
 
@@ -274,7 +310,7 @@ unknown-user branch omits.
 | Step | Needs |
 |---|---|
 | The control-plane image | A Docker daemon. CI's `Build control-plane` job passes, which proves the Dockerfile but not the compose wiring. |
-| Sections 3–7 | A staging gateway serving the identity and grant contracts, a host, and a scratch repository. |
+| Sections 3–7 | A staging gateway serving the identity, grant and agent-access contracts, a host, and a scratch repository. |
 | The two-relay egress topology | Two machines and the tunnels between them. `docker compose config` renders it and the network assertions hold, which is not the same as traffic flowing. |
 
 **Corrections made to this runbook during the run:** none. Sections 1 and 2

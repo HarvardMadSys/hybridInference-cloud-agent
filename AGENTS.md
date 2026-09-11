@@ -31,6 +31,30 @@ tests/{unit,servers,integration,external}/  # plus fixtures/ and support/
 docs/
 ```
 
+Not every module is worth a line here; these are the ones a newcomer needs to
+find early. The control plane's database schema is **one baseline revision plus
+additive ones** (`migrations/versions/0001_schema_baseline.py` and on), not a
+long chain — `MIGRATION.md` § *Schema baseline rewrite* explains why, and
+`docs/operations.md` § *Rebuilding the agent database* is the runbook for a
+database stamped with the chain that predates it.
+
+| Module | What it owns |
+|---|---|
+| `cloud_agent/app.py` | The two listeners: the main API and the MCP-only one |
+| `cloud_agent/api/` | One router module per surface — jobs, hosts, admin, session, MCP relay |
+| `cloud_agent/storage/store.py` | The Postgres store: claims, fences, residency, publication |
+| `cloud_agent/grants.py`, `ledger.py`, `grant_usage.py` | Gateway inference grants, and the usage snapshots read back from them |
+| `cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |
+| `cloud_agent/identity_namespace.py` | Which Gateway minted the `user_id`s this database is keyed by |
+| `cloud_agent/mcp_catalogue.py`, `mcp_registry.py`, `mcp_proxy.py` | The reviewed MCP catalogue, per-user connections, and the relay |
+| `cloud_agent/publisher.py`, `publish_worker.py`, `source_control.py` | Branch and draft-PR publication, and the GitHub/GitLab credentials behind it |
+| `cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
+| `cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
+| `cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
+| `cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
+| `cloud_agent_host/egress.py`, `egress_proxy.py` | The two egress phases and the setup allowlist proxy |
+| `cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
+
 ## 3. Quality gates
 
 ```bash

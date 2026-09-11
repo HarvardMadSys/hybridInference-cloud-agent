@@ -33,9 +33,16 @@ need a gateway secret here, the design is wrong — stop and escalate.
 
 | | |
 |---|---|
-| Staging values provisioned | ☐ not yet |
-| Production values provisioned | ☐ not yet |
+| Staging values provisioned | ✅ 2026-08-06 (`docs/cutover.md`, H2) |
+| Production values provisioned | ✅ 2026-08-07 (`docs/cutover.md`, H3) |
 | Secret storage | deploy host environment / unit env files, and read-only file mounts for keys. **Never** in git. |
+
+Both environments have been serving traffic since those dates: `README.md`,
+`docs/cutover.md` and `deploy/control-plane/README-cd.md` are the deployment
+record. This table is about the *values* being in place, not about a particular
+release being deployed — a pending rollout belongs in that record, not here.
+What is still missing on the production side is spelled out in
+`deploy/control-plane/README-cd.md` § *Production — what is still missing*.
 
 ## Control plane (`cloud_agent`)
 
@@ -54,7 +61,7 @@ it before deployment; it needs no model API key or deployed-service setting.
 | Variable | New? | Value / who provisions |
 |---|---|---|
 | `AGENT_DATABASE_URL` | **NEW** | Postgres DSN for the agent-owned database. Must be a database this service owns outright — sharing one with the gateway would reintroduce the coupling the split exists to remove. |
-| `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | **NEW** | Used by `make test-db` only — the `dbtest` fixtures read these five, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. `TEST_DB_NAME` must contain `_test_`; the fixtures refuse to run otherwise, so they cannot be pointed at a real database by a stray environment. Under `pytest -n`, each xdist worker appends its own id and needs that database to already exist — which is why CI runs this tier serially. |
+| `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | **NEW** | Read by the `dbtest` tier — `make test-db` locally, and the same tier run directly in CI. The fixtures read these five, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. `TEST_DB_NAME` must contain `_test_`; the fixtures refuse to run otherwise, so they cannot be pointed at a real database by a stray environment. Under `pytest -n`, each xdist worker appends its own id and needs that database to already exist — which is why CI runs this tier serially. |
 
 ### Gateway contracts
 
@@ -142,7 +149,7 @@ are all about *reaching* the relay, never about what it may reach.
 | Variable | New? | Notes |
 |---|---|---|
 | `AGENT_HOST_CREDENTIAL` | **NEW** | What `/v1/agent/host/register` hands back. Authenticates this machine's heartbeats and claims and names it; there is no shared claim credential or request-body host fallback. Revoked by removing the host. The runner normally reads the persisted file instead of setting this variable. |
-| `AGENT_LEASE_TTL` | existing | Attempt lease horizon. Grant TTL is derived from this (task E9) — changing one without the other creates either dead grants or grants outliving their attempt. |
+| `AGENT_LEASE_TTL` | existing | Attempt lease horizon (default 120 s). **Not** the source of the grant TTL, which this row used to claim: the grant TTL is derived from the renewal cadence — `grants.GRANT_TTL_S = RENEWAL_INTERVAL_S × RENEWAL_HEADROOM_PASSES` = 30 × 4 = 120 s — and the reaper's pass *is* `RENEWAL_INTERVAL_S`. The two are independent clocks that happen to agree; changing this one shortens the attempt lease and does not touch how long a grant lives. |
 | `AGENT_TIMEOUT_S` | existing | Hard watchdog for one actively executing Agent CLI turn (default 3600 seconds). Hitting it fails/fences that turn; it does not mean the chat was idle and is not an alternate sandbox lifecycle timeout. |
 | `AGENT_RUNNER_HOST` | existing | Execution environment name redeemed by `AGENT_ENROLL_TOKEN` on first registration and shared by its runner replicas. After enrollment, the credential is authoritative; changing this value does not rename the environment. Use `AGENT_PHYSICAL_HOST` to group environments for display without changing existing identities. |
 
@@ -175,7 +182,7 @@ compose, because they name the stack rather than configure it.
 | `AGENT_SHARED_RESIDENT_CAPACITY` | **NEW** | Number of credential-isolated member UID/private-tmpfs slots built into each new shared container. Default 8; accepted range 2–128. Fork reserves a free slot before any native mutation. This bounds resident chats in one group, while `AGENT_HOST_SLOTS` separately bounds simultaneously claimed turns on the machine. |
 | `AGENT_CHAT_IDLE_TIMEOUT_S` | **NEW** | The single product-level inactivity clock for a retained chat group. Defaults to 1800 seconds (30 minutes). Turn/file/Git completion and terminal activity advance the same group deadline; activity tokens prevent a mid-operation stop without stacking another full timeout. When the settled clock expires, the host issues `docker stop`, releases that group's phase bridge, and retains the same container/writable layer. It never authorizes `docker rm`. Wake recreates the correct phase bridge before `docker start`. `AGENT_TIMEOUT_S` and terminal TTLs are resource watchdogs, not alternate chat lifecycle clocks. |
 | `AGENT_ENROLL_TOKEN` | **NEW** | One-time host enrollment token (task G2). Minted at `POST /admin/agent/runner-hosts/enroll-token`, redeemed once at `POST /v1/agent/host/register`, then replaced by the returned host credential. 15-minute TTL, hashed at rest, and shown exactly once — losing it means issuing another, not looking it up. **The token names the host it may register**: the admin minting it supplies `host`, and registration under any other name is refused without spending the token, so a typo cannot revoke a live machine's credential. The runner-side enrollment client is implemented: it serializes first registration across replicas, writes the host credential mode 0600 at `AGENT_HOST_CREDENTIAL_FILE`, and uses authenticated heartbeats thereafter. |
-| `AGENT_HOST_CREDENTIAL_FILE` | **NEW** | Where the host credential is kept between restarts. Default `/var/lib/hybridinference/agent-host-credential`, written mode 0600 before any byte reaches it — this machine runs untrusted repository code next door. `AGENT_HOST_CREDENTIAL` in the environment wins over the file, for deployments that inject it another way. |
+| `AGENT_HOST_CREDENTIAL_FILE` | **NEW** | Where the host credential is kept between restarts, written mode 0600 before any byte reaches it — this machine runs untrusted repository code next door. The code default is `/var/lib/hybridinference/agent-host-credential`, but the supported host Compose overrides it to `${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/credential`, so **on a deployed host the file lives under `AGENT_HOST_STATE_ROOT`** and that is the path the rebuild runbook and any re-enrolment step must name. `AGENT_HOST_CREDENTIAL` in the environment wins over the file, for deployments that inject it another way. |
 | `AGENT_DEPLOYMENT_SHA` / `AGENT_SHARED_LIVE_READY_FILE` | **NEW** | Deployment-script-managed rolling fence, not operator-selected topology. The control plane requires the same exact SHA described above. `deploy/host/deploy.sh` supplies it and `sandbox_host.sh` keeps the marker under `AGENT_HOST_STATE_ROOT`. A valid runner keeps advertising the base shared-sandbox/native-fork protocol while the marker is pending so host readiness can inspect it, but it does not poll for work until the exact `shared-sandbox-deployment:<sha>` marker is complete. This runner-side pause also protects the previous API, which does not know the new exact-SHA claim field during a parallel rollout. Do not set either to choose behavior: retained/shared-live is unconditional. |
 | `AGENT_HOST_SLOTS` | **NEW** | Concurrent attempts this machine accepts, reported at registration and on every heartbeat. Defaults to 3, must be at least 2, and cannot exceed `AGENT_RUNNER_REPLICAS`, because one runner process executes one claimed turn synchronously. |
 | `AGENT_RUNNER_REPLICAS` | existing | Number of synchronous runner executors started by the host Compose stack (default 3). Shared-live requires at least two, passes this value into each runner's claim attestation, and verifies that the configured number of containers are actually running before deployment succeeds. |
@@ -190,14 +197,14 @@ compose, because they name the stack rather than configure it.
 | `AGENT_SANDBOX_RUNTIME` | existing | Unset or `runc` for trusted internal repos. The enforced public/untrusted profile currently requires exactly `io.containerd.kata.v2`; gVisor needs its own future execution profile and is not accepted as Kata evidence. |
 | `AGENT_SANDBOX_IMAGE` | existing | Tag it per environment (`freeinference-cloud-agent-job:staging` / `:prod`) on a machine that runs both, or a rebuild on one side replaces the image the other is running. `-job` and not `-sandbox`, so it cannot be read as `…-sandbox-<env>-runner`, the image the runner container itself is built from. |
 | `AGENT_SANDBOX_NAMESPACE` | **NEW** | Stable deployment namespace stamped onto retained containers and private bridges so sibling Compose stacks on one Docker daemon cannot discover, stop, or prune each other's chats. The host stack requires its unique Compose project; the complete local stack derives it from `LOCAL_PROJECT_NAME`. Direct embeddings default to `default` and must override it when sharing a daemon. |
-| `AGENT_SANDBOX_NETWORK` | existing | |
+| `AGENT_SANDBOX_NETWORK` | existing | Legacy alias for the `platform_only` discovery backplane, honoured so an existing deployment keeps working; the current setting is `AGENT_EGRESS_NETWORK_PLATFORM_ONLY`. It has **no default on purpose** — an unset value used to mean the Docker bridge, i.e. unrestricted egress for untrusted repository code — so a tier that resolves to no network is a preflight failure rather than a fall back to a more open one. |
 | `AGENT_SANDBOX_DOCKER` | existing | |
 | `AGENT_SANDBOX_HOME` | existing | |
 | `AGENT_SANDBOX_UID` / `AGENT_SANDBOX_GID` | existing | Non-root inside the sandbox. |
 | `AGENT_SANDBOX_EXTRA_ARGS` | existing | |
 | `AGENT_MEMBER_PROCESS_REAPER_SOURCE` | **NEW (internal)** | Trusted runner-side path to the root-owned `member-process-reaper` helper copied into a retained container created by an older compatible image. The runner image supplies `/usr/local/libexec/member-process-reaper`; operators normally never set this. It is infrastructure compatibility material, not chat data or a host workspace mount. |
 | `AGENT_SANDBOX_ALLOW_OPEN_NETWORK` | existing | ⚠️ Isolation escape hatch. Must be unset in any environment reachable by untrusted repositories. |
-| `AGENT_SANDBOX_ALLOW_UNISOLATED` | existing | ⚠️ Same. |
+| `AGENT_SANDBOX_ALLOW_UNISOLATED` | existing | ⚠️ Isolation escape hatch, and narrower than the row above: it only opens the `process` backend, which is a non-claimable test seam and can never serve a retained chat. Must be unset in any environment reachable by untrusted repositories. |
 | `AGENT_EGRESS_SETUP_TIER` | existing | Egress during dependency setup. The standalone host defaults to `trusted`, backed by its checked-in Squid allowlist proxy. Set `platform_only` only when setup needs no registry access. |
 | `AGENT_EGRESS_AGENT_TIER` | existing | Egress during the agent run. `platform_only` is the required safe production default. `trusted` adds the package allowlist proxy, `custom` delegates reachability to an operator network, and `full` is unrestricted; all three widen the reviewed agent-phase boundary. |
 | `AGENT_EGRESS_ALLOWLIST` | existing | Extra domains added to the built-in Trusted package-registry list. Malformed entries and agent-vendor telemetry domains fail closed before Squid starts. |
@@ -253,9 +260,41 @@ its defaults, which is where every deployment starts.
 
 The same exactness rule applies, and so does the parser one, harder: putting a
 version on the menu is a claim that `runtimes.py` can read its event stream.
-Run `pytest -m external tests/external/test_runtime_stream_conformance.py`
-against it before adding it — a version nobody checked, offered in a dropdown,
-is one click from a job that dies at its first turn.
+
+`tests/external/test_runtime_stream_conformance.py` is the gate for that claim,
+and the way to point it at a candidate is to **put the version on the
+Dockerfile's `ARG` line**:
+
+```bash
+# deploy/sandbox/Dockerfile.agent-sandbox, beside the reviewed default
+ARG CLAUDE_CODE_VERSION=2.1.220
+ARG CLAUDE_CODE_EXTRA_VERSIONS=2.2.0
+
+# then, from the checkout — no image build and no deployment needed
+uv run pytest -m external tests/external/test_runtime_stream_conformance.py
+```
+
+The suite derives its parametrization from those `ARG` lines
+(`test_runtime_stream_conformance.py::_menu`, `_DOCKERFILE`), not from an
+environment variable, not from a built image and not from the deployed `.env`:
+setting `CLAUDE_CODE_EXTRA_VERSIONS=2.2.0` in the shell changes nothing about
+what runs. It then fetches each version with `npx` at exactly that version and
+drives it against a fake gateway, so the measurement is of the real binary — but
+it is a measurement of the **repository's** Dockerfile, so the candidate must be
+on that `ARG` line first.
+
+Two limits worth knowing before trusting a green run:
+
+- **`claude-code` only.** This is the one runtime with a stream-conformance
+  suite; the other four have contract fixtures and their adapters' unit tests,
+  and no equivalent gate. Adding a version for them is currently a review
+  obligation rather than a test.
+- **It proves the parser, not the option.** A pass means the version's event
+  shape is intelligible to our normalizer. It does not exercise the deployed
+  image, the sandbox, or the dropdown.
+
+A version nobody checked, offered in a dropdown, is one click from a job that
+dies at its first turn.
 
 | Variable | New? | Notes |
 |---|---|---|
@@ -334,9 +373,8 @@ one place to be read from end to end.
 | Variable | Task | Notes |
 |---|---|---|
 | `IDENTITY_JWT_PRIVATE_KEY` | C1 | RS256 private key, PEM. Public half is served at `/v1/identity/jwks`. |
-| `IDENTITY_JWT_RETIRING_PUBLIC_KEYS` | C1 (review) | Optional. PEM public keys still published in JWKS during a signing-key rotation, so tokens minted with the old key stay verifiable until they expire. |
+| `IDENTITY_JWT_RETIRING_PUBLIC_KEYS` | C1 | Optional. Public PEMs of previously-active signing keys, concatenated and published alongside the current key so tokens issued before a rotation still verify. Keep a key here for at least the maximum token lifetime plus the JWKS cache window, then drop it. Public halves only — a retiring key must not be able to sign. |
 | `IDENTITY_ISSUER` | C3 | The `iss` claim in identity tokens. Falls back to the gateway's `base_url`; unset means issuance is switched off rather than tokens minted with an empty `iss`. Must equal the value this service verifies against. |
-| `IDENTITY_JWT_RETIRING_PUBLIC_KEYS` | C1 | Public PEMs of previously-active signing keys, concatenated. Published alongside the current key so tokens issued before a rotation still verify. Keep a key here for at least the maximum token lifetime plus the JWKS cache window, then drop it. Public halves only — a retiring key must not be able to sign. |
 | `IDENTITY_ALLOWED_REDIRECTS` | C2 | Comma-separated exact-match redirect URIs. Matching is equality — no prefix, no suffix — so the agent web callback must be listed verbatim before F5. |
 | `GATEWAY_GRANT_DISPATCH_TOKEN` | C5 | Same value as the control plane's copy above. |
 

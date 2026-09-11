@@ -27,7 +27,10 @@ content.
 
 ## Database identity boundary
 
-Migration `0029_identity_namespace` adds one singleton record. It does not
+The identity namespace binding is one singleton record in
+`agent_identity_namespace`, created by the `0001_schema_baseline` revision that
+replaced the pre-2026-09-10 migration chain (it was `0029_identity_namespace`
+in that chain, which no longer exists). It does not
 rewrite owners or infer the original issuer from a URL, a user ID, or old data.
 At startup both control-plane and MCP listeners compare `GATEWAY_ISSUER` with
 that record before starting background workers. A mismatch, or removing the
@@ -59,10 +62,15 @@ the database contents do not reveal which issuer originally owned them.
    `GATEWAY_ISSUER` to the same value in the Agent deployment's `.env`. Do not
    infer either value from a transport hostname or from another environment.
 2. Back up the Agent database. Use a checkout and image containing this change
-   to run the additive migration and explicit adoption against the existing
+   to migrate it to head and to run the explicit adoption against the existing
    Agent database. Keep the original Gateway configuration unchanged during
    preparation; the old API and MCP relay may remain running because this
    only records their existing identity namespace, without rewriting owners.
+   On a database still stamped with the pre-2026-09-10 chain, `upgrade head`
+   cannot run: those databases are rebuilt from `0001_schema_baseline` first,
+   as `docs/operations.md` § *Rebuilding the agent database* describes — and
+   that rebuild runs `identity_namespace --check` before either listener
+   starts, so the issuer must be settled before it, not after.
 3. In the same deployment environment, explicitly acknowledge that ownership:
 
    ```sh
@@ -114,10 +122,39 @@ For the local Docker demo, `dev.sh` supplies its fixed `freeinference-local`
 issuer. An existing demo database still needs explicit adoption with that issuer;
 updating the example environment does not silently authorize its history.
 
-The namespace migration's downgrade retains the identity record. Re-upgrading
-preserves it. Rolling back to an old Agent binary would restore profile cookies
-and would not enforce this record, so it is not a safe identity-boundary rollback;
-prefer a compatible fix or stop Agent while leaving the Gateway running.
+**A downgrade is not a way back through this boundary.** The rewritten
+`0001_schema_baseline` drops its tables — `agent_identity_namespace` among them
+— so a `downgrade` deletes the record that says which Gateway minted the
+`user_id`s in the database. **It deletes the owner data with it**: the rewrite is
+one baseline revision, so `downgrade base` drops `agent_threads`, the
+connections and everything else, not just the binding. There is no partial
+downgrade that keeps the rows and drops the record.
+
+What happens on the way back up depends on whether the rows come back with it,
+and the two cases are not the same:
+
+- **Re-upgrade with nothing restored** — the database is empty, so it takes the
+  empty-database path: `identity_namespace --check` binds whatever
+  `GATEWAY_ISSUER` is configured at that moment and exits 0. Verified on a
+  throwaway database: issuer A and one thread, `downgrade base`, `upgrade head`,
+  then `--check` under issuer B — exit 0, bound to B, zero rows. **A downgrade
+  round trip is a total data loss, and the rebind to a different issuer is
+  silent**; nothing here refuses it, because there is no history left to
+  attribute to anyone.
+- **Re-upgrade with owner data restored but not the binding** — this is the case
+  the guard exists for. `_has_owner_data()` finds a row keyed by `user_id`,
+  `--check` exits 1 with "existing owner data but no identity issuer", and the
+  deploy stops before either listener starts. Recovery is the explicit adoption
+  below, with the *original* issuer. Verified on the same probe: one thread, no
+  binding, issuer B configured — exit 1.
+
+So the guard protects a restore, not the downgrade itself: restoring owner rows
+without the matching `agent_identity_namespace` row is what stops the
+deployment, and it stops it for the right reason. Rolling back to an old
+Agent binary is worse still: it would restore profile cookies and would not
+enforce this record. Neither a downgrade nor an old binary is a safe
+identity-boundary rollback; prefer a compatible fix, or stop Agent while
+leaving the Gateway running.
 
 ## Local verification (2026-09-10)
 
