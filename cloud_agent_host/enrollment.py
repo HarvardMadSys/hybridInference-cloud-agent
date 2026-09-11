@@ -65,6 +65,12 @@ DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 #: A heartbeat is a small write; something is wrong long before this expires.
 _TIMEOUT_S = 15.0
 
+#: How often the deployment readiness marker is re-read while waiting for the
+#: next scheduled beat. It is a small file on a local mount and it changes at
+#: most twice per deployment; the poll exists so a rollout does not have to
+#: wait out an interval to hear a fact that is already true.
+READINESS_MARKER_POLL_S = 1.0
+
 #: The one status in which this runner may ask for work — a **mirror** of
 #: ``cloud_agent.host_pool.CLAIMABLE_STATUSES``, which the control plane
 #: enforces and the schema's CHECK constraint bounds.
@@ -469,6 +475,7 @@ class HostHeartbeat:
         sandbox_image_digest: str | None = None,
         runtime_versions: dict[str, str] | None = None,
         runtime_versions_available: dict[str, list[str]] | None = None,
+        readiness_marker: str | None = None,
         residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
         retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
         capacity_beats: Callable[[], dict[str, Any] | None] | None = None,
@@ -485,6 +492,13 @@ class HostHeartbeat:
         self._sandbox_image_digest = sandbox_image_digest
         self._runtime_versions = runtime_versions
         self._runtime_versions_available = runtime_versions_available
+        #: The deployment publishes the exact target SHA by rewriting this
+        #: file, and the control plane's rollout fence admits nothing until a
+        #: heartbeat carries that SHA back. Read here as well as per beat so
+        #: the baseline is the state this runner started in: without it the
+        #: first poll would read an unchanged marker as a change.
+        self._readiness_marker = (readiness_marker or "").strip() or None
+        self._readiness_marker_value = self._read_readiness_marker()
         # Freshly asked on every beat — a static list would report sandboxes
         # the pool has already torn down.
         self._residency_beats = residency_beats
@@ -611,7 +625,51 @@ class HostHeartbeat:
                     "agent_host_heartbeat_crashed",
                     extra={"event": "agent_host_heartbeat_crashed", "host": self._identity.host},
                 )
+            self._wait_for_next_beat()
+
+    def _wait_for_next_beat(self) -> None:
+        """Sleep one interval, waking early when the readiness marker moves.
+
+        A deployment publishes the exact target SHA by rewriting the marker
+        file every runner already mounts, and the control plane's rollout fence
+        admits nothing until a heartbeat carries that SHA back. Sleeping the
+        whole interval first made that fence wait on a timer instead of on the
+        fact it was waiting for: measured on staging, 15.2s of a 46s host
+        deployment, drawn from a range of zero to one full interval.
+
+        Nothing else about the cadence changes. The beat is the same request,
+        a deployment rewrites the marker at most twice, and a missed wake-up
+        costs exactly what the runner pays today.
+        """
+        if self._readiness_marker is None:
             self._stop.wait(self._identity.interval_s)
+            return
+        deadline = time.monotonic() + self._identity.interval_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if self._stop.wait(min(READINESS_MARKER_POLL_S, remaining)):
+                return
+            if self._readiness_marker_moved():
+                return
+
+    def _readiness_marker_moved(self) -> bool:
+        """Whether the readiness marker changed since the last beat."""
+        current = self._read_readiness_marker()
+        if current == self._readiness_marker_value:
+            return False
+        self._readiness_marker_value = current
+        return True
+
+    def _read_readiness_marker(self) -> str:
+        """The marker's current value, or an empty string when it is unreadable."""
+        if self._readiness_marker is None:
+            return ""
+        try:
+            return Path(self._readiness_marker).read_text().strip()
+        except OSError:
+            return ""
 
 
 def sleep_until(deadline: float) -> None:  # pragma: no cover - trivial

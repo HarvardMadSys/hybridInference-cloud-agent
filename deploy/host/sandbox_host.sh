@@ -516,6 +516,21 @@ probe_sandbox_relay() {
   done
 }
 
+# Per-replica attestation output, created by check_shared_live_stack and
+# removed by the trap below. Deliberately not `local` to that function: `local`
+# is gone by the time an EXIT trap runs, and `set -u` would then turn a failed
+# deployment's cleanup into a second, unrelated error.
+ATTEST_DIR=""
+
+cleanup_attest_dir() {
+  if [[ -n "${ATTEST_DIR}" ]]; then
+    rm -rf -- "${ATTEST_DIR}"
+    ATTEST_DIR=""
+  fi
+}
+
+trap cleanup_attest_dir EXIT
+
 check_shared_live_stack() {
   local deadline="${1:-$SECONDS}"
   # Ask every running replica to complete the same executable preflight as its
@@ -534,11 +549,46 @@ check_shared_live_stack() {
   expected_replicas="${expected_replicas:-3}"
   [[ "$running_replicas" -ge "$expected_replicas" ]] \
     || die "only $running_replicas of $expected_replicas configured runner replicas are running; shared-live concurrency is not ready"
+
+  # Replicas attest at the same time. The preflight is dominated by the real
+  # request it makes through the tunnels, not by anything the replicas share,
+  # and no replica reads another's answer — so the order the serial loop
+  # imposed bought nothing and cost the sum of three waits: measured on
+  # staging, 16.6s of a 46s host deployment. Verdicts are still reported per
+  # runner, in listing order, so a failure names the container it came from
+  # and the first replica is still the one asked about the broker below.
+  #
+  # The status of each `docker exec` goes to a file because `wait` is reaped in
+  # a second pass, after every replica has been started.
+  ATTEST_DIR="$(mktemp -d)" \
+    || die "could not create a directory for per-replica attestation output"
+  local -a attest_ids=() attest_pids=()
+  local index attest_status
   for id in $runner_ids; do
     [[ -n "$first_id" ]] || first_id="$id"
-    capability="$(docker exec "$id" python -c \
-      'from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities; from cloud_agent_host.sandbox import build_backend_from_env; backend = build_backend_from_env(); backend.preflight(); print(",".join(capabilities(backend, backend.version_stamp())))')" \
-      || die "runner $id could not complete sandbox preflight and shared-live capability attestation"
+    (
+      docker exec "$id" python -c \
+        'from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities; from cloud_agent_host.sandbox import build_backend_from_env; backend = build_backend_from_env(); backend.preflight(); print(",".join(capabilities(backend, backend.version_stamp())))' \
+        >"${ATTEST_DIR}/${id}.capability" 2>"${ATTEST_DIR}/${id}.stderr"
+      printf '%s' "$?" >"${ATTEST_DIR}/${id}.status"
+    ) &
+    attest_ids+=("$id")
+    attest_pids+=("$!")
+  done
+  for index in "${!attest_pids[@]}"; do
+    wait "${attest_pids[index]}" || true
+  done
+  for index in "${!attest_ids[@]}"; do
+    id="${attest_ids[index]}"
+    attest_status=""
+    if [[ -r "${ATTEST_DIR}/${id}.status" ]]; then
+      attest_status="$(<"${ATTEST_DIR}/${id}.status")"
+    fi
+    if [[ "$attest_status" != "0" ]]; then
+      sed -n '1,20p' "${ATTEST_DIR}/${id}.stderr" >&2 || true
+      die "runner $id could not complete sandbox preflight and shared-live capability attestation"
+    fi
+    capability="$(<"${ATTEST_DIR}/${id}.capability")"
     case ",${capability}," in
       *,shared-sandbox-v1,*) ;;
       *) die "runner $id did not attest shared-sandbox-v1 (reported '${capability:-no capability}'); check slots, runtime/helper pins, sandbox image labels and broker configuration" ;;
@@ -548,6 +598,7 @@ check_shared_live_stack() {
       *) die "runner $id did not attest native-fork-at-anchor-v1 (reported '${capability:-no capability}'); historical Fork/Edit & rewind is not deployment-ready" ;;
     esac
   done
+  cleanup_attest_dir
 
   # Capability attestation proves the runner is configured to dial the broker;
   # make the dial as well. This catches a broker crash-loop (including a
@@ -764,10 +815,14 @@ cmd_up() {
   AGENT_SANDBOX_IMAGE="$SANDBOX_IMAGE" AGENT_RUNNER_REPLICAS="$replicas" \
     compose up -d --no-build --remove-orphans
 
-  # The runner's preflight now makes a real request to the gateway through the
-  # tunnel, so a tunnel that came up without a working upstream fails here
-  # rather than one job at a time. Give it a moment and surface the verdict.
-  sleep 5
+  # The probes below wait for what they need instead of being preceded by a
+  # fixed pause: `compose up -d` has already created and started every
+  # container, and a tunnel whose upstream is not answering yet fails its
+  # first attempt and is retried three seconds later. The five seconds this
+  # used to sleep were paid in full by every deployment — 5.1s measured from
+  # `up -d` returning to the retained-storage line, with the first probe
+  # succeeding immediately after it.
+  #
   # In a subshell, because `die` calls `exit` and from a function that ends the
   # whole script — the logs below are exactly what explains a failed probe, so
   # they must still print. But the verdict is kept: swallowing it printed the

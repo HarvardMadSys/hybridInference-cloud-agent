@@ -1528,3 +1528,24 @@ def test_the_tunnel_forwards_one_fixed_destination():
     assert "-L " in script
     for proxy_flag in ("-D ", "DynamicForward", "ProxyCommand"):
         assert proxy_flag not in script, proxy_flag
+
+
+def test_the_egress_proxy_does_not_inherit_the_docker_stop_timeout(compose: dict) -> None:
+    """Squid winds down on SIGTERM, and this container is replaced every deploy.
+
+    Left unset it takes the Docker default of ten seconds: measured on two
+    consecutive staging rollouts at 10.30s and 10.31s, against 0.1-0.3s for
+    every other container in this stack — and it sits upstream of the runners
+    in the dependency order, so the whole rollout waited on it.
+    """
+    declared = str(compose["services"]["agent-egress-proxy"]["stop_grace_period"])
+    default = re.search(r":-(\d+)s\}", declared)
+
+    assert default, (
+        "the egress proxy declares no bounded stop_grace_period, so a Squid that "
+        f"does not exit on SIGTERM costs the ten-second Docker default: {declared!r}"
+    )
+    assert int(default.group(1)) <= 5, (
+        f"a stateless egress proxy does not need {default.group(1)} to drain; "
+        "the runners it serves are already stopped by then"
+    )

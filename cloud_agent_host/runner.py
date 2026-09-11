@@ -951,6 +951,19 @@ def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str
     )
 
 
+def _shared_live_ready_file() -> str:
+    """The deployment-readiness marker this runner was started with.
+
+    Written by ``sandbox_host.sh`` — ``pending:<sha>`` while a rollout is still
+    checking the host, the bare ``<sha>`` once it has passed — and mounted
+    read-only into every replica. Read on every beat for the exact-SHA
+    capability, and watched between beats so the control plane's rollout fence
+    hears about that SHA as soon as it is published rather than at the next
+    scheduled heartbeat.
+    """
+    return (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
+
+
 def _shared_live_host_capabilities(
     backend: SandboxBackend,
     stamp: dict[str, Any],
@@ -1014,7 +1027,7 @@ def _shared_live_host_capabilities(
             return []
     capabilities = [SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
-    ready_file = (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
+    ready_file = _shared_live_ready_file()
     if deployment_sha and ready_file:
         try:
             ready_sha = pathlib.Path(ready_file).read_text().strip()
@@ -2235,6 +2248,7 @@ def run_forever(
         sandbox_image_digest=stamp.get("sandbox_image_digest"),
         runtime_versions=stamp.get("runtime_versions"),
         runtime_versions_available=stamp.get("runtime_versions_available"),
+        readiness_marker=_shared_live_ready_file() or None,
         retained_sandbox_beats=_retained_sandbox_heartbeat_rows,
         # Read per beat, so the age it carries is the age it had when the beat
         # was built. ``None`` before the first sample, and once the newest one

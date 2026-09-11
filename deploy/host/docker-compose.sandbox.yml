@@ -190,6 +190,18 @@ services:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-egress-proxy
     restart: unless-stopped
+    # Squid treats SIGTERM as a graceful shutdown and does not exit while it
+    # winds down, so this container is the one the Docker default applies to.
+    # Measured on two consecutive staging rollouts: 10.30s and 10.31s from
+    # `Recreate` to `Recreated`, against 0.1-0.3s for every other container in
+    # this stack, and this one sits upstream of the runners in the dependency
+    # order — so the whole rollout waited on it.
+    #
+    # A short bound is enough because there is nothing here to drain: the proxy
+    # stores no state, and the runners are already stopped before Compose
+    # replaces it. Anything still in flight loses a connection it would have
+    # lost anyway when this container was recreated.
+    stop_grace_period: ${AGENT_EGRESS_STOP_GRACE:-2s}
     environment:
       # Squid reads only the generated file, but Compose needs the inputs on
       # this long-running service too. Otherwise it reruns the renderer while

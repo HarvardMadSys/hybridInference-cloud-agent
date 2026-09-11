@@ -73,7 +73,11 @@ run on the sandbox host (x86_64). They are deployed by
 the control database migration overlap with host deployment. The host marks the
 exact target SHA ready only after every runner, broker, tunnel, isolation check,
 and Docker data-root check passes. The control-plane script waits for a fresh
-matching heartbeat from every new-chat placement host. It also dials every
+matching heartbeat from every new-chat placement host. Every replica watches
+that marker, so a host that has just passed its checks heartbeats at once
+instead of at the next scheduled interval — otherwise the fence spends up to
+thirty seconds of the rollout waiting on a timer rather than on the fact it is
+waiting for. It also dials every
 online host that still owns a retained group, even after the admin placement
 pin moved elsewhere, before it replaces any running API container. The protocol
 gate therefore preserves host-before-API compatibility without putting the

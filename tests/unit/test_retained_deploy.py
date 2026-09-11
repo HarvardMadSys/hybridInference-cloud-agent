@@ -419,6 +419,22 @@ def test_shared_live_check_runs_the_real_sandbox_preflight_before_attesting() ->
     assert check.index("backend.preflight()") < check.index("backend.version_stamp()")
 
 
+def test_the_replica_attestations_start_before_any_is_waited_on() -> None:
+    """The preflights must overlap rather than queue.
+
+    Each one makes a real request through the tunnels from inside its own
+    container and none reads another's answer, so running them in series bought
+    nothing and cost the sum of three waits: 16.6s of a 46s host deployment.
+    """
+    script = SANDBOX_HOST.read_text()
+    check = script[script.index("check_shared_live_stack() {") : script.index("# ── Isolation")]
+    launched = check.index("docker exec")
+    waited = check.index('wait "${attest_pids')
+
+    assert launched < waited, "the replica attestations were serialized again"
+    assert "&" in check[launched:waited], "the attestation does not run in the background"
+
+
 def test_retained_mode_requires_an_enrolled_host_identity(tmp_path: Path) -> None:
     result = _run(_host(tmp_path, credential=False), "preflight")
 
@@ -474,6 +490,25 @@ def test_host_up_waits_for_parallel_control_bootstrap_but_manual_check_is_immedi
     assert 'readiness_wait="${readiness_wait:-900}"' in up
     assert '( cmd_check "$readiness_wait" )' in up
     assert "check) cmd_check 0" in dispatch
+
+
+def test_host_up_probes_the_tunnels_instead_of_pausing_first() -> None:
+    """`up` must reach the probe, not sleep on the way to it.
+
+    `compose up -d` has already created and started every container, and the
+    probe retries until the readiness deadline, so a fixed pause before it buys
+    nothing and is paid in full by every deployment: 5.1s measured from `up -d`
+    returning to the retained-storage line, with the first probe succeeding
+    immediately after it.
+    """
+    script = SANDBOX_HOST.read_text()
+    up = script[script.index("cmd_up() {") : script.index("cmd_check() {")]
+    # Statements, not the word: the comment above the probe explains the pause
+    # that was removed, and a substring search over the function would fail on
+    # the strength of the sentence describing it.
+    pauses = [line for line in up.splitlines() if line.strip().startswith("sleep")]
+
+    assert not pauses, f"the host start pauses before probing; the probe already retries: {pauses}"
 
 
 def test_shared_live_check_fails_when_runner_does_not_advertise(tmp_path: Path) -> None:
