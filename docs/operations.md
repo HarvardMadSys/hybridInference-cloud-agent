@@ -244,6 +244,25 @@ Five things about this that look like details and are not:
   is a worse outcome than the failure that caused it — while the per-connection
   route still refuses loudly for the server that is actually broken.
 
+**The whole chain has been run end to end**, against a real listener, a real
+database and a real CLI rather than a fake at each seam. What was exercised:
+the sandbox listener on its own port, `AGENT_DATABASE_URL` pointing at a
+migrated database, one seeded connection with a static credential and a
+discovery snapshot, one live job whose attempt holds the fence, and pi 0.73.1
+driving the bridge at `/v1/agent/mcp`. The model was advertised exactly
+`session__github__get_issue`; the upstream server saw `server/discover`,
+`initialize` and `tools/call`, every one carrying the *connection's* credential
+rather than the sandbox token; the call reached it as `get_issue` with the
+model's own arguments; and the tool result the model received was the upstream's
+text. Two details that only a live run shows: the era probe falls back to the
+handshake against a server that answers `-32601`, and the tool's *namespaced*
+name never leaves the platform — the upstream is addressed by its own.
+
+Reproducing that needs a Postgres, the pinned pi, and a stub upstream; the
+seams it crosses are exactly the ones the per-layer tests do not, which is why
+it is worth redoing after any change to the merged endpoint, the host, or the
+bridge.
+
 **An adapter may claim MCP only when it can do both halves**: point the CLI at
 the platform's relay, *and* stop it reading any other MCP source. A runtime that
 could be given servers but not stopped from picking up the repository's own
