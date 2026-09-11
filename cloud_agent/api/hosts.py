@@ -250,25 +250,25 @@ async def heartbeat_host(
     # so a beat from a taken-over residency extends nothing — it comes back in
     # residencies_lost and the host tears that sandbox down.
     lost: list[ResidencyBeat] = []
-    for beat in body.residencies or []:
+    for residency in body.residencies or []:
         extended = await job_store.heartbeat_residency(
-            thread_id=beat.thread_id,
-            generation=beat.generation,
+            thread_id=residency.thread_id,
+            generation=residency.generation,
             host=updated["host"],
             ttl_seconds=RESIDENCY_TTL_S,
         )
         if extended and grants is not None:
-            # The credential lives exactly as long as the residency: the beat
+            # The credential lives exactly as long as the residency: the residency
             # that extends the lease extends the grant. Best-effort — a missed
             # renewal starves hot turns into warm, never into an outage.
             with contextlib.suppress(Exception):
                 await grants.renew(extended)
         if extended is None:
-            # Echo the generation back (review finding 5): a beat carrying
+            # Echo the generation back (review finding 5): a residency carrying
             # gen N can be answered after the host re-established gen N+1,
             # and a thread-id-only loss would let the stale answer kill the
             # successor. The host drops only on an exact generation match.
-            lost.append(beat)
+            lost.append(residency)
     # Docker is the lifecycle authority for retained chat containers; the
     # database is the scheduling/fencing authority.  Heartbeats join those
     # views without treating absence as deletion. In particular, a broker's
@@ -276,31 +276,31 @@ async def heartbeat_host(
     # the turn has expired, so host authentication is the durable path for
     # recording that STOPPED transition.
     retained_stops: list[dict[str, Any]] = []
-    for beat in body.retained_sandboxes or []:
+    for retained in body.retained_sandboxes or []:
         await job_store.reconcile_thread_sandbox_observation(
-            thread_id=beat.thread_id,
+            thread_id=retained.thread_id,
             host=updated["host"],
-            sandbox_id=beat.sandbox_id,
-            container_id=beat.container_id,
-            sandbox_generation=beat.generation,
-            running=beat.running,
-            activity_active=beat.activity_active,
-            idle_remaining_seconds=beat.idle_remaining_seconds,
-            members=[member.model_dump() for member in beat.members],
+            sandbox_id=retained.sandbox_id,
+            container_id=retained.container_id,
+            sandbox_generation=retained.generation,
+            running=retained.running,
+            activity_active=retained.activity_active,
+            idle_remaining_seconds=retained.idle_remaining_seconds,
+            members=[member.model_dump() for member in retained.members],
         )
-        for member in beat.members:
+        for member in retained.members:
             if member.residency_generation <= 0:
                 continue
             # A stopped group has no process that can legitimately use a
             # residency credential. Release and revoke it instead of renewing
             # it forever. The database fences this against concurrent starts.
-            if not beat.running or member.resident_state in {"stopped", "lost"}:
+            if not retained.running or member.resident_state in {"stopped", "lost"}:
                 released = await job_store.release_shared_residency_if_quiescent(
                     thread_id=member.thread_id,
                     generation=member.residency_generation,
                     process_generation=member.process_generation,
                     host=updated["host"],
-                    sandbox_id=beat.sandbox_id,
+                    sandbox_id=retained.sandbox_id,
                 )
                 if released and grants is not None:
                     with contextlib.suppress(Exception):
@@ -330,13 +330,13 @@ async def heartbeat_host(
                         generation=member.residency_generation,
                     )
                 )
-        if beat.running:
+        if retained.running:
             due = await job_store.due_thread_sandbox_stop(
-                thread_id=beat.thread_id,
+                thread_id=retained.thread_id,
                 host=updated["host"],
-                sandbox_id=beat.sandbox_id,
-                container_id=beat.container_id,
-                sandbox_generation=beat.generation,
+                sandbox_id=retained.sandbox_id,
+                container_id=retained.container_id,
+                sandbox_generation=retained.generation,
             )
             if due is not None:
                 retained_stops.append(due)
