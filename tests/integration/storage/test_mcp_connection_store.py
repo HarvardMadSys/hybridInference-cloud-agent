@@ -14,6 +14,10 @@ Postgres, and each item below is a race or a scope that a fake cannot fail:
 - **A credential write is conditional on the authorization epoch.** A refresh
   that started before a disconnect must match no row, or it restores what the
   owner removed.
+- **A refresh claim is a lease, not a version bump.** The version is unchanged
+  by the claim, so a second worker that reads the row afterwards claims the same
+  version and is refused by the lease alone; a write that lost its lease matches
+  no row. Both are single ``UPDATE ... WHERE`` statements.
 - **A flow is consumed exactly once, and an approved call is claimed exactly
   once.** Both are single ``UPDATE ... WHERE`` statements, which is the whole
   mutual-exclusion mechanism; a check-then-write passes every sequential test
@@ -825,37 +829,178 @@ async def test_a_disconnected_connection_is_listed_only_when_asked_for(
     assert sorted(row["id"] for row in everything) == sorted([live["id"], gone["id"]])
 
 
-async def test_an_abandoned_refresh_claim_can_be_taken_again(
+async def test_a_live_refresh_lease_is_exclusive_and_an_expired_one_is_not(
     store: AgentJobStore,
 ) -> None:
-    """Nothing is locked, so a refresher that dies leaves no lease to reap.
+    """The race a version fence cannot see, because it is sequential.
 
-    The claim bumps the version it matched. A winner that never writes anything
-    therefore leaves the row claimable at the *new* version, which is what stops
-    one crashed refresh from freezing a connection until somebody notices.
+    A claims the row and goes to the token endpoint. B arrives while A is on the
+    network, reads the row *after* A's claim committed, and claims the version
+    it just read. Under a version-only fence that is a winning claim -- the
+    version B carries is the one A left behind -- and both workers then spend
+    the same refresh token, which a rotating issuer invalidates the moment it is
+    used twice. Only the lease refuses B.
+
+    (Two claims issued at the same instant are not the interesting case: they
+    take the row lock in turn and the second re-evaluates its predicate against
+    the committed row, so the version fence alone settles that one.)
+
+    A crashed winner is the other half: the lease expires, and the row is
+    claimable again at the next generation rather than frozen until somebody
+    notices.
     """
     connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
     version = int(connection["credential_version"])
-
     winner = await store.claim_mcp_refresh(
-        connection_id=connection["id"], expected_credential_version=version
+        connection_id=connection["id"],
+        expected_credential_version=version,
+        lease_seconds=60,
     )
     assert winner is not None
-    # A second caller holding the version it read before loses.
-    assert (
-        await store.claim_mcp_refresh(
-            connection_id=connection["id"], expected_credential_version=version
-        )
-        is None
-    )
-    # But the row is not stuck: the winner's own version claims it again.
+    assert winner["refresh_generation"] == int(connection["refresh_generation"]) + 1
+    # Nothing has been written yet, so the version has not moved: it reports a
+    # credential change, and a claim is not one.
+    assert winner["credential_version"] == version
+
+    seen = await store.get_mcp_connection(connection_id=connection["id"])
     assert (
         await store.claim_mcp_refresh(
             connection_id=connection["id"],
-            expected_credential_version=int(winner["credential_version"]),
+            expected_credential_version=int(seen["credential_version"]),
+            lease_seconds=60,
         )
-        is not None
+        is None
     )
+
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_mcp_connections "
+            "SET refresh_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+            connection["id"],
+        )
+    replacement = await store.claim_mcp_refresh(
+        connection_id=connection["id"],
+        expected_credential_version=int(seen["credential_version"]),
+        lease_seconds=60,
+    )
+    assert replacement is not None
+    assert replacement["refresh_generation"] == winner["refresh_generation"] + 1
+
+
+async def test_a_superseded_refresh_cannot_write_over_its_successor(
+    store: AgentJobStore,
+) -> None:
+    """The slow worker's answer came from a token that is already replaced."""
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    version = int(connection["credential_version"])
+    first = await store.claim_mcp_refresh(
+        connection_id=connection["id"],
+        expected_credential_version=version,
+        lease_seconds=60,
+    )
+    assert first is not None
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_mcp_connections "
+            "SET refresh_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+            connection["id"],
+        )
+    successor = await store.claim_mcp_refresh(
+        connection_id=connection["id"],
+        expected_credential_version=version,
+        lease_seconds=60,
+    )
+    assert successor is not None
+
+    assert not await store.set_mcp_credential(
+        connection_id=connection["id"],
+        expected_authorization_epoch=int(first["authorization_epoch"]),
+        access_token_ciphertext="stale-access",
+        expected_refresh_generation=int(first["refresh_generation"]),
+    )
+    assert await store.set_mcp_credential(
+        connection_id=connection["id"],
+        expected_authorization_epoch=int(successor["authorization_epoch"]),
+        access_token_ciphertext="fresh-access",
+        expected_refresh_generation=int(successor["refresh_generation"]),
+    )
+    row = await store.get_mcp_connection(connection_id=connection["id"])
+    assert row["access_token_ciphertext"] == "fresh-access"
+    # The write that landed was the lease holder's, and it released the lease on
+    # its way out: the next refresh does not wait for a timer.
+    assert row["refresh_lease_expires_at"] is None
+    assert row["credential_version"] == version + 1
+
+
+async def test_a_refresh_does_not_overwrite_a_newer_authorization(
+    store: AgentJobStore,
+) -> None:
+    """The callback fence, from the other side.
+
+    A refresh spends the same time on the network as an authorization-code
+    exchange, and the owner can start a new authorization inside that window.
+    Both writes carry the same epoch -- re-authorizing is not a change of target
+    -- so the OAuth generation the refresh claimed is what says its answer
+    describes the account the owner has just replaced. Without it the slower
+    write wins.
+    """
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    claim = await store.claim_mcp_refresh(
+        connection_id=connection["id"],
+        expected_credential_version=int(connection["credential_version"]),
+        lease_seconds=60,
+    )
+    assert claim is not None
+    # A new authorization begins while the refresh is still on the network.
+    assert await store.set_mcp_client_registration(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        client_id="client-2",
+        client_secret_ciphertext=None,
+    )
+    assert not await store.set_mcp_credential(
+        connection_id=connection["id"],
+        expected_authorization_epoch=int(claim["authorization_epoch"]),
+        access_token_ciphertext="stale-access",
+        expected_oauth_generation=int(claim["oauth_generation"]),
+        expected_config_revision=int(claim["config_revision"]),
+        expected_refresh_generation=int(claim["refresh_generation"]),
+    )
+    row = await store.get_mcp_connection(connection_id=connection["id"])
+    assert row["access_token_ciphertext"] != "stale-access"
+    # A refused write does not release the lease; the refresher still owns it.
+    assert row["refresh_lease_expires_at"] is not None
+
+
+async def test_releasing_a_refresh_claim_is_fenced_on_its_generation(
+    store: AgentJobStore,
+) -> None:
+    """A failed attempt hands the row back; a late one must not hand it further."""
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    version = int(connection["credential_version"])
+    first = await store.claim_mcp_refresh(
+        connection_id=connection["id"],
+        expected_credential_version=version,
+        lease_seconds=60,
+    )
+    assert first is not None
+    assert await store.release_mcp_refresh_claim(
+        connection_id=connection["id"], refresh_generation=int(first["refresh_generation"])
+    )
+    # Released, so the row is claimable now rather than when the lease ran out.
+    second = await store.claim_mcp_refresh(
+        connection_id=connection["id"],
+        expected_credential_version=version,
+        lease_seconds=60,
+    )
+    assert second is not None
+    # The first worker's lease is superseded, so its release must not clear the
+    # live one and leave a third caller free to spend the same token.
+    assert not await store.release_mcp_refresh_claim(
+        connection_id=connection["id"], refresh_generation=int(first["refresh_generation"])
+    )
+    live = await store.get_mcp_connection(connection_id=connection["id"])
+    assert live["refresh_lease_expires_at"] is not None
 
 
 async def test_a_refresh_cannot_claim_a_connection_that_was_disconnected(
@@ -870,6 +1015,7 @@ async def test_a_refresh_cannot_claim_a_connection_that_was_disconnected(
         await store.claim_mcp_refresh(
             connection_id=connection["id"],
             expected_credential_version=int(refreshed["credential_version"]),
+            lease_seconds=60,
         )
         is None
     )

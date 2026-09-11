@@ -1,7 +1,8 @@
 # Per-user MCP: conformance against the design
 
 - Date: 2026-09-11.
-- Baseline: `ba27315` on `realtmxi/codex/mcp-v1-design`.
+- Baseline: `ba27315` on `realtmxi/codex/mcp-v1-design`, plus the review fixes
+  through `4c8fb37` and the two P2 items below (`0006_mcp_refresh_lease`).
 - Design: [`2026-09-11-per-user-mcp-v1-design.zh.md`](2026-09-11-per-user-mcp-v1-design.zh.md).
 
 This is an audit, not a plan. It states, dimension by dimension, what the code
@@ -25,8 +26,8 @@ are outside this repository.
 | Auth: none / static / OAuth | Done | `mcp/net_policy.py`, `mcp/oauth.py`, `mcp/refresh.py` | — |
 | Auth: stdio env or secret reference | **Stored only** | `secret://NAME` recorded in the launch spec, ciphertexts in `set_mcp_launch_spec` | `launch.resolve_env` is never called: nothing resolves a reference into a process environment, because nothing starts one |
 | Multiple instances per service | Done | no `UNIQUE(user_id, server)`; `test_the_same_service_twice_is_two_connections` | — |
-| Dynamic tools / resources / prompts | Done | `protocol.discover`, `_host_listing`, `_host_fetch` | — |
-| All five coding agents | **3 of 5** | `runtimes_supporting_mcp()` | Codex and Kilo; see below |
+| Dynamic tools / resources / prompts | Done | `protocol.discover`, `_host_listing`, `_host_fetch`; the merged endpoint's handshake advertises all three families, which is what makes a client ask |
+| All five coding agents | **3 of 5** | `runtimes_supporting_mcp()`; all three are given the merged endpoint as a single entry | Codex and Kilo; see below |
 | Optional capabilities reported as native / bridge / unsupported | Done | `protocol.support_states`, stored in the snapshot | — |
 
 ### Protocol profiles (design §2, second table)
@@ -66,31 +67,38 @@ are outside this repository.
 | Area | State |
 | --- | --- |
 | §4.1 add / import / templates decoupled | Done: JSON and TOML dialects, preview before save, masked secrets |
-| §4.2 auth and connection diagnosis | Done: staged diagnostics recorded on the connection; OAuth with discovery, registration precedence, PKCE, `resource`, single-use state, refresh and revocation |
+| §4.2 auth and connection diagnosis | Done: staged diagnostics recorded on the connection; OAuth with discovery, registration precedence, PKCE, `resource`, single-use state, refresh and revocation. A refresh is claimed under a lease with a generation (`0006`), so two workers cannot spend one rotating token, and a superseded refresher's write matches no row |
 | §4.3 network constraints for arbitrary URLs | Done: resolve-then-check every address, credential bound to an origin, redirects refused |
 | §5 stdio, local and private MCP | Configuration and validation only; see above |
-| §6 connection model and authorization versions | Done: `0005`, five version columns, config / authorization / capability / policy revisions, legacy name list mapped and quarantined |
+| §6 connection model and authorization versions | Done: `0005`, five version columns, config / authorization / capability / policy revisions, legacy name list mapped and quarantined. `credential_version` moves only when a credential is written |
 | §7 dynamic capabilities and read-write authorization | Done: `deny` / `confirm` / `allow` per capability, fingerprints, held calls with a single-winner claim |
 | §8.3 attempt, follow-up and fork | Done: bindings read per call, fork copies the selection, the claim carries aliases |
 | §9 API and interface contract | Done, including the connector API; 19 routes in `create_app()` |
 | §10 migration and deployment | Done as a deployment switch plus the operating notes; no staging run |
-| §11 quality gate | `ruff check`, `ruff format --check`, `pydocstyle`, 2532 non-database and 297 database tests, and one external end-to-end test |
+| §11 quality gate | `ruff check`, `ruff format --check`, `pydocstyle`, 2559 non-database and 304 database tests, and one external end-to-end test |
 
 ## Runtimes (design §8.2)
 
+Every adapter that reports MCP points its CLI at `/v1/agent/mcp` — the merged
+host — as a single entry named `session`. The per-connection route
+(`/v1/agent/mcp/<alias>`) is not used by any of them: it forwards one
+connection's protocol untouched, which is a service a legacy SSE server cannot
+answer (its SSE address replies 405 to the POST) and a surface that cannot merge
+or namespace several connections.
+
 | Runtime | MCP | Why |
 | --- | --- | --- |
-| `claude-code` 2.1.220 | Yes | `--mcp-config` with `--strict-mcp-config` |
+| `claude-code` 2.1.220 | Yes | `--mcp-config` with `--strict-mcp-config`; the entry is `http` at the merged endpoint, the token referenced as `${AGENT_MCP_TOKEN}` |
 | `opencode` 1.18.9 | Yes | reviewed wrapper writes `OPENCODE_CONFIG`; `OPENCODE_DISABLE_PROJECT_CONFIG` covers the project file, the project directory and its plugins |
-| `pi` 0.73.1 | Yes | reviewed `pi-mcp-bridge.ts` loaded with `-e`; `--no-extensions` shuts out every other source. Verified end to end against the pinned CLI |
-| `codex` 0.145.0 | No | `/etc/codex/requirements.toml` gates MCP by name **and exact URL identity** (`RawMcpServerUrlIdentity { url }`; no prefix or regex matcher in the pinned binary), the file is baked into the image, and the relay URL is a runtime value. Enabling it is a packaging change, not an adapter flag |
+| `pi` 0.73.1 | Yes | reviewed `pi-mcp-bridge.ts` loaded with `-e`; `--no-extensions` shuts out every other source. Verified end to end against the pinned CLI, at the merged endpoint |
+| `codex` 0.145.0 | No | `/etc/codex/requirements.toml` gates MCP by name **and exact URL identity** (`RawMcpServerUrlIdentity { url }`; no prefix or regex matcher in the pinned binary), the file is baked into the image, and the relay URL is a runtime value. The merged host is the shape that *can* satisfy it — one fixed name and URL — but shipping it is a packaging change, not an adapter flag |
 | `kilo` 7.4.17 | No | `KILO_DISABLE_PROJECT_CONFIG` does not cover the fork's legacy migrator, which reads `<project>/.kilo/mcp.json` unconditionally. A repository could hand the agent tools of its own choosing, so the runtime refuses rather than promise a bound it does not have |
 
 ## What "done" would still require
 
 1. **Codex**: build the image — or mount a config over `/etc/codex/` — with that
-   deployment's exact relay URL in the allowlist. Needs a docker build to
-   verify.
+   deployment's exact relay URL (`<base>/v1/agent/mcp`, one fixed name) in the
+   allowlist. Needs a docker build to verify.
 2. **Kilo**: close the legacy MCP path, either upstream or by not exposing
    `.kilo/mcp.json` to the sandbox.
 3. **stdio execution**: a managed worker and a user connector runtime. New
@@ -103,12 +111,17 @@ are outside this repository.
    rather than accepting the notification silently.
 6. **Deployment acceptance**: a staging run, a real OAuth round trip, and
    interoperation with two real third-party servers and one real stdio server.
+7. **A rebase onto `dev`**: this branch's `0005_generic_mcp_connections` and
+   `0006_mcp_refresh_lease` both hang off `0004_residency_on_membership`, while
+   `dev` has taken `0005` and `0006` for other work. The chain is linear *within
+   this branch* and the tests pin that, so it has to be renumbered onto `dev`'s
+   head when the branch is rebased — otherwise the merge has two heads.
 
 ## How to check this document
 
 ```bash
-uv run pytest -q -m "not external and not dbtest"   # 2532
-uv run pytest -q -m dbtest                          # 297, needs Postgres
+uv run pytest -q -m "not external and not dbtest"   # 2559
+uv run pytest -q -m dbtest                          # 304, needs Postgres
 uv run pytest -q tests/external/test_agent_mcp_end_to_end.py  # 1, needs npm and Postgres
 ```
 

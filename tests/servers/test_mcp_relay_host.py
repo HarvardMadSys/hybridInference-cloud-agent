@@ -493,6 +493,28 @@ class TestTheHandshake:
         assert result["protocolVersion"] == "2025-11-25"
         assert result["capabilities"]["tools"] == {"listChanged": False}
 
+    async def test_every_surface_this_endpoint_answers_is_advertised(
+        self, client: AsyncClient
+    ) -> None:
+        """A well-behaved client asks for what the handshake claimed, and no more.
+
+        This surface answers ``tools/*``, ``resources/*`` and ``prompts/*``. A
+        handshake that named only ``tools`` left the other two never asked for,
+        and a capability the platform serves but does not claim is, from the
+        client's side, indistinguishable from one it does not have.
+        """
+        response = await client.post(
+            _HOST_URL,
+            json=_rpc("initialize", protocolVersion="2025-11-25"),
+            headers=_auth(),
+        )
+        capabilities = _result(response)["capabilities"]
+        assert set(capabilities) == {"tools", "resources", "prompts"}
+        # The sub-flags are the honest half: this surface is request/response,
+        # so it can neither push a change nor hold a subscription open.
+        assert capabilities["resources"] == {"subscribe": False, "listChanged": False}
+        assert capabilities["prompts"] == {"listChanged": False}
+
     async def test_an_unknown_revision_gets_the_newest_we_implement(
         self, client: AsyncClient
     ) -> None:

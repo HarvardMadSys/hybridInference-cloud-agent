@@ -10,9 +10,16 @@
  *
  * It is a client, not a proxy. Every call goes to the same relay the other
  * agents use, carrying the same `mcp`-scoped job token, so pi sees exactly the
- * servers its conversation enabled and nothing else -- the relay resolves the
+ * servers its conversation enabled and nothing else -- the relay resolves each
  * alias against that job's own bindings and holds anything the owner marked for
  * confirmation.
+ *
+ * One entry, at the relay's merged endpoint. That endpoint answers for every
+ * connection of the job and namespaces what it lists as `<alias>__<tool>`, so
+ * the map this bridge reads holds a single URL: one entry per connection would
+ * register each connection's tools once per connection, and the alias this
+ * bridge prefixes onto a tool name is the relay's own namespace, not a second
+ * one the sandbox invented.
  *
  * Two properties are worth stating because the alternative is silent:
  *
@@ -28,7 +35,7 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
-/** The relay endpoints, as `{alias: url}`. Written by the control plane. */
+/** The relay entry, as `{name: url}`. Written by the control plane. */
 const MCP_SERVERS_ENV = "AGENT_MCP_SERVERS";
 
 /** The `mcp`-scoped job token, referenced here rather than in any config. */
@@ -381,7 +388,15 @@ function sanitize(value: string): string {
   return cleaned || "tool";
 }
 
-/** The name pi sees, namespaced by the binding alias. */
+/**
+ * The name pi sees, namespaced by the relay entry.
+ *
+ * At the merged endpoint the tool name already carries the connection's alias,
+ * so the composed name reads `<entry>__<alias>__<tool>`. The prefix is kept
+ * rather than skipped for the one entry this platform publishes: a name that
+ * only sometimes carries a server component is a name nothing downstream can
+ * take apart, and pi's registry is the only place a collision would show up.
+ */
 function presented(alias: string, tool: string): string {
   const combined = `${sanitize(alias)}__${sanitize(tool)}`;
   return combined.length <= 64 ? combined : combined.slice(0, 64);

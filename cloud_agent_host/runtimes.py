@@ -53,8 +53,8 @@ RAW = "raw"
 # so the credential never becomes a process argument.
 MCP_TOKEN_ENV = "AGENT_MCP_TOKEN"
 
-# Where the relay endpoints are handed to an image-shipped wrapper, as one JSON
-# object of ``{alias: {type, url, headers}}``.
+# Where the relay entry is handed to an image-shipped wrapper, as one JSON
+# object of ``{name: url}``.
 #
 # The wrapper merges it into the config file it already writes, under whichever
 # key its CLI spells MCP with. That split is deliberate: the address and the
@@ -63,6 +63,22 @@ MCP_TOKEN_ENV = "AGENT_MCP_TOKEN"
 # binary. Writing each dialect's file from Python would put five vendor schemas
 # in one module and no way to review them beside the versions they describe.
 MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
+
+# The name every runtime knows the platform's MCP surface by.
+#
+# **One entry, not one per connection.** The relay's bare prefix is a merged
+# host: it answers ``initialize`` itself and presents every connection of the
+# job as a single catalogue whose tool and prompt names carry the connection's
+# alias. A per-connection entry would therefore present that same catalogue once
+# per connection, and a client that fanned out over them would offer every tool
+# as many times as the conversation has servers.
+#
+# The name is a label the CLI prefixes onto tool names, not an alias the relay
+# resolves -- aliases stay in the control plane, where a per-conversation name
+# cannot be guessed from the sandbox. It is fixed rather than derived from the
+# connection list because two of the five CLIs gate their MCP entries by name
+# and exact URL identity, which a run-time-varying name cannot satisfy.
+MERGED_MCP_SERVER_NAME = "session"
 
 
 @dataclass(frozen=True)
@@ -113,10 +129,14 @@ class RuntimeCapabilities:
 
 @dataclass(frozen=True)
 class RuntimeMCPConfig:
-    """The MCP connection aliases available to one agent run, and where they are.
+    """The MCP connections available to one agent run, and where they are.
 
-    The aliases are opaque to the runtime: each names a conversation's binding,
-    which the relay resolves against that job's own list.
+    ``server_ids`` decides *whether* the run has MCP at all, and which
+    connections it may be offered; the relay resolves each alias against that
+    job's own bindings when the catalogue is built. The endpoints themselves no
+    longer depend on those names — see :meth:`AgentRuntime.relay_urls` — so a
+    runtime is never told a per-connection address it could reconstruct an
+    alias from.
 
     **A separate address and a separate credential from inference.** MCP is
     served by the cloud agent's own relay, model calls by the FreeInference
@@ -218,12 +238,28 @@ class AgentRuntime:
 
     @staticmethod
     def relay_urls(config: RuntimeMCPConfig, *, gateway_base_url: str) -> dict[str, str]:
-        """Resolve opaque aliases into sandbox-local relay URLs.
+        """Resolve one run's MCP configuration into the sandbox-local relay URL.
 
         The agent is told this service's fixed MCP-only relay URL, and nothing
-        else: not the upstream address, not the user's credential that reaches
-        it. Both stay in the control plane, which is what lets a sandbox with
-        no general egress use these servers at all.
+        else: not an upstream address, not the user's credential that reaches
+        them. All of that stays in the control plane, which is what lets a
+        sandbox with no general egress use these servers at all.
+
+        **The merged host, which is what makes a connection generic.** The
+        relay's per-connection route forwards one connection's protocol
+        untouched, so it can only serve a server that already speaks the shape
+        the CLI speaks: a legacy SSE server, a stateless-era server, or one that
+        answers a call with ``InputRequiredResult`` is a 405 or a protocol error
+        there. The bare prefix is the platform speaking MCP itself -- it opens
+        the session in whichever era the server turned out to speak, merges
+        every connection of the job into one catalogue, and routes a call back
+        to its own server. Pointing a runtime at a per-connection alias would
+        put the protocol back in the CLI's hands, which is the whole design
+        decision this replaced.
+
+        Empty when the run has asked for no servers, which is not a relay with
+        nothing in it: a run told about an endpoint it must not use would call
+        it.
 
         **No header and no credential here.** How a CLI is told to put a bearer
         token on a request is a dialect question, and every one of them spells
@@ -233,7 +269,9 @@ class AgentRuntime:
         here and the reference is written next to the CLI that has to expand
         it, which is also where it can be checked against the pinned binary.
         """
-        if config.server_ids and not config.base_url:
+        if not config.server_ids:
+            return {}
+        if not config.base_url:
             # No relay address is not a reason to fall back to the inference
             # one: that is a different service which does not answer for MCP.
             # Silently pointing the sandbox at it would produce 404s from an
@@ -241,7 +279,7 @@ class AgentRuntime:
             raise RuntimeMCPUnavailableError(
                 "MCP was requested but no relay address was configured for this run"
             )
-        if config.server_ids and not config.credential:
+        if not config.credential:
             # Every config below references the token rather than embedding it,
             # so a missing one expands to the empty string and the relay refuses
             # each call with 401 -- which reads to the agent as a broken server
@@ -250,13 +288,13 @@ class AgentRuntime:
                 "MCP was requested but no relay credential was minted for this run"
             )
         base = config.base_url.rstrip("/").removesuffix("/v1")
-        return {server_id: f"{base}/v1/agent/mcp/{server_id}" for server_id in config.server_ids}
+        return {MERGED_MCP_SERVER_NAME: f"{base}/v1/agent/mcp"}
 
     @classmethod
     def _mcp_endpoints(
         cls, config: RuntimeMCPConfig, *, gateway_base_url: str
     ) -> dict[str, dict[str, Any]]:
-        """The relay endpoints in Claude Code's own dialect and header syntax.
+        """The relay endpoint in Claude Code's own dialect and header syntax.
 
         **The token is referenced, not embedded.** ``${AGENT_MCP_TOKEN}`` is
         expanded by the CLI from the environment, so the credential never
@@ -316,7 +354,7 @@ class AgentRuntime:
         gateway_base_url: str,
         env: dict[str, str],
     ) -> None:
-        """Publish the relay endpoints for an image-shipped wrapper to merge.
+        """Publish the relay endpoint for an image-shipped wrapper to merge.
 
         Written even when the run has no servers. A key that appears only
         sometimes would leave the run with whatever MCP sources the CLI finds
@@ -1017,8 +1055,9 @@ class GenericRuntime(AgentRuntime):
 #: It lives beside the other image helpers rather than in the workspace, so the
 #: code that talks to the relay is the code the image was built and reviewed
 #: with. Verified against pi 0.73.1: with `--no-extensions -e <this>` the relay
-#: is discovered, its tools are registered under `<alias>__<tool>`, a call
-#: reaches the upstream with the un-namespaced name, and a repository's own
+#: is discovered at its merged endpoint, the tools it lists are registered under
+#: that one entry's name followed by the relay's own `<alias>__<tool>`, a call
+#: reaches the upstream with the bare name, and a repository's own
 #: `.pi/extensions/*.ts` does not load.
 PI_MCP_BRIDGE = "/usr/local/libexec/pi-mcp-bridge.ts"
 

@@ -7,12 +7,15 @@ response omits a rotated token, and must not race a disconnect.
 
 Three rules, and each is a failure the naive version has:
 
-**One refresher.** The claim is an ``UPDATE ... WHERE credential_version = ?``
-that bumps the version it matched. Two workers arriving together produce one
-winner and one ``None``; the loser reports "somebody else is refreshing" rather
-than issuing a second call with the same refresh token. An authorization server
-that rotates tokens invalidates the first one, so the second call would destroy
-the connection it was trying to save.
+**One refresher, holding a lease.** A claim that only bumped the credential
+version was not exclusive: the bump is a write, so the next worker to read the
+row claims it while the first is still on the network with the same refresh
+token. An authorization server that rotates tokens invalidates the first one,
+and the second call destroys the connection it was trying to save. The claim is
+now a lease with a generation -- taken only when no live lease is held, fenced
+on the way back in -- so the second worker is told "somebody else is refreshing"
+instead of issuing a second call, and a refresher that dies mid-flight leaves a
+lease that expires rather than a lock.
 
 **The rotation contract decides what is kept.** Whether an issuer rotates is
 recorded on the connection, and a response that omits a refresh token means
@@ -46,6 +49,15 @@ logger = get_logger(__name__)
 #: Refresh this long before expiry, so a call that starts just before the
 #: boundary does not fail just after it. A tool call can take minutes.
 REFRESH_MARGIN_SECONDS = 120
+
+#: How long one worker may hold the exclusive claim on a refresh.
+#:
+#: Comfortably longer than the token request's own 20-second timeout, because a
+#: lease that expires while its holder is still waiting would let a second
+#: caller spend the same refresh token -- the race the lease exists to prevent.
+#: Short enough that a worker which died mid-flight blocks the connection for a
+#: minute rather than until somebody notices.
+REFRESH_LEASE_SECONDS = 60.0
 
 
 class RefreshRefused(RuntimeError):
@@ -135,25 +147,20 @@ async def refresh_credential(
     claimed = await store.claim_mcp_refresh(
         connection_id=int(row["id"]),
         expected_credential_version=int(row.get("credential_version") or 1),
+        lease_seconds=REFRESH_LEASE_SECONDS,
     )
     if claimed is None:
         # Somebody else is doing it, or the connection moved. Reporting rather
         # than retrying: a second call with a rotating refresh token would
-        # invalidate theirs.
+        # invalidate theirs. The credential this caller read is near expiry,
+        # not past it -- that is what the margin above buys -- so the caller
+        # re-reads the row and uses what it finds there.
         return RefreshOutcome(refreshed=False, contended=True)
 
-    token_request = _build_request(claimed, cipher=credential_cipher)
     try:
+        token_request = _build_request(claimed, cipher=credential_cipher)
         payload = await _post(token_request, policy=policy or EgressPolicy(), fetcher=fetcher)
         tokens = oauth.parse_token_response(payload)
-    except (TransportError, oauth.OAuthError) as exc:
-        logger.warning(
-            "agent_mcp_refresh_failed",
-            extra={"event": "agent_mcp_refresh_failed", "connection_id": claimed["id"]},
-        )
-        raise RefreshRefused(f"this connection could not be refreshed: {exc}") from exc
-
-    try:
         merged = oauth.apply_refresh(
             {
                 "refresh_token": _decrypt(
@@ -165,12 +172,24 @@ async def refresh_credential(
             tokens,
             rotates=bool(claimed.get("refresh_rotates")),
         )
-    except oauth.OAuthError as exc:
-        # A rotating issuer that sent no new refresh token. Converted here so a
-        # caller sees one refusal type rather than two, and so nothing is
-        # written: keeping the old token would look like success until the next
-        # refresh, hours later.
-        raise RefreshRefused(str(exc)) from exc
+    except RefreshRefused:
+        # Refused before anything was sent -- no recorded token endpoint, or an
+        # unreadable credential. The lease is released so the next call retries,
+        # rather than waiting out a timer for an attempt that never happened.
+        await _release(store, claimed)
+        raise
+    except (TransportError, oauth.OAuthError) as exc:
+        await _release(store, claimed)
+        logger.warning(
+            "agent_mcp_refresh_failed",
+            extra={"event": "agent_mcp_refresh_failed", "connection_id": claimed["id"]},
+        )
+        # A rotating issuer that sent no new refresh token lands here too.
+        # Converted so a caller sees one refusal type rather than two, and so
+        # nothing is written: keeping the old token would look like success
+        # until the next refresh, hours later.
+        raise RefreshRefused(f"this connection could not be refreshed: {exc}") from exc
+
     written = await store.set_mcp_credential(
         connection_id=int(claimed["id"]),
         expected_authorization_epoch=int(claimed["authorization_epoch"]),
@@ -186,16 +205,57 @@ async def refresh_credential(
         resource=claimed.get("resource"),
         refresh_rotates=bool(merged.get("refresh_rotates")),
         clear_refresh=False,
+        # The lease, not just the row: this answer was computed from a refresh
+        # token that a superseding claim has since replaced. Without the fence a
+        # slow refresher rewrites the credential its successor is replacing, and
+        # the successor's own write is then the one that looks stale.
+        expected_refresh_generation=int(claimed["refresh_generation"]),
+        # The mirror of the callback fence. A refresh spends the same time on the
+        # network as an authorization code exchange, and the owner can start a
+        # new authorization inside that window -- which is a newer credential for
+        # the same connection. Both writes then carry the epoch, because
+        # re-authorizing is not a change of target, so the generation the flow
+        # started under is what tells them apart.
+        expected_oauth_generation=int(claimed.get("oauth_generation") or 0),
+        expected_config_revision=int(claimed.get("config_revision") or 1),
     )
     if not written:
-        # The owner disconnected while this ran. Their decision wins, and the
-        # credential they removed is not restored.
-        raise RefreshRefused("this connection was disconnected while it was refreshing")
+        # The owner disconnected, re-authorized, or the lease expired and
+        # somebody else took it. Either way this result is not the current one,
+        # and releasing is fenced on the generation so it cannot clear a live
+        # successor's lease.
+        await _release(store, claimed)
+        raise RefreshRefused(
+            "this connection moved while its credential was refreshing -- "
+            "disconnected, re-authorized, or refreshed by another worker -- "
+            "so the credential this attempt obtained was not written"
+        )
     logger.info(
         "agent_mcp_refreshed",
         extra={"event": "agent_mcp_refreshed", "connection_id": claimed["id"]},
     )
     return RefreshOutcome(refreshed=True, expires_at=tokens.expires_at)
+
+
+async def _release(store: AgentJobStore, claimed: Mapping[str, Any]) -> None:
+    """Drop a lease this call still holds, best effort.
+
+    Best effort on purpose: the caller is already on its way to a refusal, and
+    failing it over the bookkeeping would replace a diagnosis the owner can act
+    on with one they cannot. An unreleased lease is not lost work either -- it
+    expires.
+    """
+    try:
+        await store.release_mcp_refresh_claim(
+            connection_id=int(claimed["id"]),
+            refresh_generation=int(claimed["refresh_generation"]),
+        )
+    except Exception:  # pragma: no cover - defensive, the lease expires anyway
+        logger.warning(
+            "agent_mcp_refresh_release_failed",
+            extra={"event": "agent_mcp_refresh_release_failed", "connection_id": claimed["id"]},
+            exc_info=True,
+        )
 
 
 async def ensure_fresh(
@@ -214,8 +274,12 @@ async def ensure_fresh(
         return row
     outcome = await refresh_credential(store, row=row, policy=policy)
     if outcome.contended:
-        # Another instance is mid-refresh. Re-read rather than wait: whatever
-        # is there now is at least as fresh as what this caller held.
+        # Another instance holds the lease. Re-read rather than wait: whatever is
+        # there now is at least as fresh as what this caller held, and the row
+        # this caller read was inside the refresh *margin* -- near expiry, not
+        # past it -- so the credential it already has is still usable for the
+        # call that is about to be made. Blocking on the lease would trade that
+        # for a wait as long as the lease itself.
         refreshed = await store.get_mcp_connection(connection_id=int(row["id"]))
         return refreshed or row
     if not outcome.refreshed:
@@ -329,6 +393,7 @@ async def _post(
 
 
 __all__ = [
+    "REFRESH_LEASE_SECONDS",
     "REFRESH_MARGIN_SECONDS",
     "RefreshOutcome",
     "RefreshRefused",

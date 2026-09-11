@@ -961,7 +961,8 @@ class AgentJobStore:
         "revocation_endpoint, registration_endpoint, client_auth_method, "
         "registration, credential_version, config_revision, authorization_epoch, "
         "oauth_generation, capability_revision, account_label, last_checked_at, "
-        "request_timeout_s, created_at, updated_at, deleted_at"
+        "request_timeout_s, refresh_generation, refresh_lease_expires_at, "
+        "created_at, updated_at, deleted_at"
     )
 
     @staticmethod
@@ -1215,6 +1216,7 @@ class AgentJobStore:
         clear_refresh: bool = False,
         expected_oauth_generation: int | None = None,
         expected_config_revision: int | None = None,
+        expected_refresh_generation: int | None = None,
     ) -> bool:
         """Write a credential, conditional on the state the flow started in.
 
@@ -1233,6 +1235,15 @@ class AgentJobStore:
         records the newer generation. Checking both here makes the two writes
         race for one row in a single statement, which is the only place a race
         can be settled.
+
+        ``expected_refresh_generation`` is the same fence for the automatic
+        refresh, which is the one caller that cannot see a newer flow finish:
+        it holds a lease, spends the same time on the network, and its token
+        response is worthless the moment that lease is superseded. Requiring the
+        generation *and* a lease that has not expired means a slow refresher
+        writes nothing rather than reviving the credential its successor is
+        replacing -- and the successful write clears the lease, because the
+        refresher that lands is done holding it.
 
         ``clear_refresh`` means the *previous* refresh token is gone -- an
         issuer that rotates invalidates it. It is not a request to discard the
@@ -1268,10 +1279,15 @@ class AgentJobStore:
                     auth_config = auth_config || $17::jsonb,
                     credential_version = credential_version + 1,
                     authorization_epoch = authorization_epoch + CASE WHEN $18::boolean THEN 1 ELSE 0 END,
+                    refresh_lease_expires_at = CASE
+                        WHEN $21::bigint IS NULL THEN refresh_lease_expires_at
+                        ELSE NULL END,
                     updated_at = NOW()
                 WHERE id = $1 AND authorization_epoch = $2 AND deleted_at IS NULL
                   AND oauth_generation = COALESCE($19::bigint, oauth_generation)
                   AND config_revision = COALESCE($20::bigint, config_revision)
+                  AND ($21::bigint IS NULL
+                       OR (refresh_generation = $21 AND refresh_lease_expires_at > NOW()))
                 RETURNING id
                 """,
                 connection_id,
@@ -1294,6 +1310,7 @@ class AgentJobStore:
                 bump_epoch,
                 expected_oauth_generation,
                 expected_config_revision,
+                expected_refresh_generation,
             )
         return updated is not None
 
@@ -1332,32 +1349,82 @@ class AgentJobStore:
         return updated is not None
 
     async def claim_mcp_refresh(
-        self, *, connection_id: int, expected_credential_version: int
+        self,
+        *,
+        connection_id: int,
+        expected_credential_version: int,
+        lease_seconds: float,
     ) -> dict[str, Any] | None:
         """Take exclusive ownership of refreshing one connection's credential.
 
-        The predicate is the whole mechanism: two workers arriving together both
-        read version N, both try to claim it, and one matches. The loser must
-        not call the token endpoint, because an authorization server that
-        rotates refresh tokens would invalidate the winner's token and destroy
-        the connection both were trying to keep.
+        Two conditions, and they answer different questions. The version says
+        *the row I read is still the row I read* -- a credential written since
+        then means this caller would be spending a token that has already been
+        replaced. The lease says *nobody else is on the network with it right
+        now*, which the version cannot: bumping a version is a write, not a
+        lock, and it is visible the instant it commits, so a second caller that
+        reads afterwards claims the row while the first is still waiting on the
+        token endpoint. A rotating authorization server invalidates the first
+        refresh token the moment the second call uses it, so that is the
+        connection destroyed rather than merely refreshed twice.
 
-        Bumping the version in the claim rather than in the write means a
-        refresher that dies mid-flight leaves the row claimable again at the
-        next attempt: nothing is locked, and no lease has to be reaped.
+        The lease is also what keeps the property the version bump was chosen
+        for: a refresher that dies mid-flight leaves a lease that expires, not a
+        lock somebody has to clear, and the row is claimable again at the *new*
+        generation. That retry is bounded by ``lease_seconds`` instead of
+        immediate, which is the whole difference between the two mechanisms.
+
+        The generation is bumped here and returned to the caller, which hands it
+        back to :meth:`set_mcp_credential`. A claim that was superseded while it
+        was on the network therefore cannot write its answer over its
+        successor's, and the lease that successor holds is untouched.
         """
+        if lease_seconds <= 0:
+            raise ValueError("an MCP refresh lease must be positive")
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_mcp_connections
-                SET credential_version = credential_version + 1, updated_at = NOW()
+                SET refresh_generation = refresh_generation + 1,
+                    refresh_lease_expires_at = NOW() + make_interval(secs => $3),
+                    updated_at = NOW()
                 WHERE id = $1 AND credential_version = $2 AND deleted_at IS NULL
+                  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= NOW())
                 RETURNING {self._MCP_CONNECTION_COLUMNS}
                 """,
                 connection_id,
                 expected_credential_version,
+                lease_seconds,
             )
         return self._mcp_connection(row) if row is not None else None
+
+    async def release_mcp_refresh_claim(
+        self, *, connection_id: int, refresh_generation: int
+    ) -> bool:
+        """Give up a refresh lease early, after an attempt that wrote nothing.
+
+        Called on the failure paths only. A refused or unreachable token
+        endpoint rotated nothing, so holding the lease would only make the owner
+        wait out a timer for a refresh that never happened.
+
+        Fenced on the generation it was issued under: a lease that has since
+        been superseded belongs to the worker now holding it, and a late
+        releaser must not hand the row to a third caller while that one is still
+        on the network.
+        """
+        async with self._pool.acquire() as conn:
+            updated = await conn.fetchval(
+                """
+                UPDATE agent_mcp_connections
+                SET refresh_lease_expires_at = NULL, updated_at = NOW()
+                WHERE id = $1 AND refresh_generation = $2 AND deleted_at IS NULL
+                  AND refresh_lease_expires_at IS NOT NULL
+                RETURNING id
+                """,
+                connection_id,
+                refresh_generation,
+            )
+        return updated is not None
 
     async def get_mcp_capabilities(self, *, connection_id: int) -> dict[str, Any] | None:
         """The stored capability snapshot for one connection."""

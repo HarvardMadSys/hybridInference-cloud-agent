@@ -936,6 +936,16 @@ async def _host_initialize(payload: dict[str, Any], identity: dict[str, Any]) ->
     implement, the newest we do is offered instead: a client that understands
     the list will pick from it, and one that does not is at least told what it
     is talking to rather than being driven with a guessed header.
+
+    **Every surface this endpoint answers is advertised.** The three families
+    are declared together because the client's next request comes from here: a
+    handshake that named only ``tools`` would leave ``resources/list`` and
+    ``prompts/list`` never asked for, and a capability the platform serves but
+    does not claim is indistinguishable from one it does not have. The two
+    sub-flags are the honest part of the claim -- ``listChanged`` is false
+    because this surface is request/response and cannot push, and
+    ``subscribe`` is false because it holds no resource subscription open
+    between calls.
     """
     params = payload.get("params")
     requested = str(params.get("protocolVersion") or "") if isinstance(params, dict) else ""
@@ -943,7 +953,11 @@ async def _host_initialize(payload: dict[str, Any], identity: dict[str, Any]) ->
     aliases = sorted(str(row.get("alias") or "") for row in identity.get("mcp_bindings") or [])
     return {
         "protocolVersion": agreed,
-        "capabilities": {"tools": {"listChanged": False}},
+        "capabilities": {
+            "tools": {"listChanged": False},
+            "resources": {"subscribe": False, "listChanged": False},
+            "prompts": {"listChanged": False},
+        },
         "serverInfo": {"name": "hybridinference-cloud-agent", "version": "1"},
         "instructions": (
             "Tools are named <connection>"

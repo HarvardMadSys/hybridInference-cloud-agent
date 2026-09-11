@@ -25,9 +25,10 @@ import os
 import sys
 
 
-#: The environment variable the control plane publishes the relay endpoints in,
-#: as ``{alias: url}``. Kept in step with ``MCP_SERVERS_ENV`` in
-#: ``cloud_agent_host/runtimes.py``.
+#: The environment variable the control plane publishes the relay entry in, as
+#: ``{name: url}`` -- one entry, at the relay's merged endpoint, which answers
+#: for every connection the job bound rather than for one alias each. Kept in
+#: step with ``MCP_SERVERS_ENV`` in ``cloud_agent_host/runtimes.py``.
 MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
 
 #: The per-attempt token, referenced from the config rather than written into
@@ -50,6 +51,11 @@ _UNSAFE_IN_TOKEN = ('"', "\\")
 
 def mcp_servers() -> dict[str, object]:
     """Build the platform's MCP entries from the environment.
+
+    Normally one entry, at the relay's merged endpoint, rather than one key per
+    connection: that endpoint lists every connection's tools from the single
+    URL, already namespaced by alias, so a key per connection would register the
+    same catalogue once per connection.
 
     An empty mapping is written when the run has no connections, and the key is
     written either way: a config that declared MCP only sometimes would leave

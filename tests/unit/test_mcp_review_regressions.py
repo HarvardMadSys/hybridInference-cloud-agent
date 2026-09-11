@@ -13,7 +13,11 @@ same shape: a check that existed, in the wrong place, or for one surface only.
   transports enforce was not in the call path at all;
 - an approval was matched on job, connection and arguments, and its versions
   were written down but never compared, so a v1 approval authorized a v2 target;
-- ``set_mcp_credential`` wrote NULL over a refresh token it had just been given.
+- ``set_mcp_credential`` wrote NULL over a refresh token it had just been given;
+- every adapter pointed its CLI at the per-connection relay rather than the
+  merged host, so a connection only the host can drive -- a legacy SSE server
+  above all -- was reached by a route that forwards the protocol instead of
+  speaking it.
 """
 
 from __future__ import annotations
@@ -296,3 +300,135 @@ class _Store:
 
     async def create_mcp_invocation(self, **kwargs: Any) -> Any:
         return {"id": 1, **kwargs}
+
+
+class TestTheRuntimeRelayEntry:
+    """Which endpoint the adapters point a CLI at.
+
+    Every adapter published one entry per connection, at the relay's
+    per-connection route. That route forwards one connection's protocol
+    untouched, so it can only serve a server that already speaks the shape the
+    CLI speaks: a legacy SSE server answers the CLI's POST with 405, and one
+    that replies to a call with ``InputRequiredResult`` is a protocol error the
+    CLI has no way to continue. The merged endpoint is where the platform speaks
+    the protocol itself, opening each session in whichever era its server turned
+    out to speak, and it answers for every connection of the job.
+    """
+
+    _BASE = "http://agent-mcp:8000"
+
+    def _config(self, server_ids: tuple[str, ...]) -> Any:
+        from cloud_agent_host.runtimes import RuntimeMCPConfig
+
+        return RuntimeMCPConfig(server_ids=server_ids, base_url=self._BASE, credential="ajt-token")
+
+    def test_claude_code_gets_one_entry_at_the_merged_endpoint(self) -> None:
+        """The exact URL matters: an alias in it would put the protocol back in the CLI."""
+        from cloud_agent_host.runtimes import MERGED_MCP_SERVER_NAME, ClaudeCodeRuntime
+
+        argv, _env = ClaudeCodeRuntime().prepare(
+            workdir="/w",
+            task_prompt="do it",
+            model="glm-5.1",
+            gateway_base_url="http://backend:8080",
+            credential="agr-credential",
+            mcp_config=self._config(("github", "docs")),
+        )
+        servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+        assert servers == {
+            MERGED_MCP_SERVER_NAME: {
+                "type": "http",
+                "url": f"{self._BASE}/v1/agent/mcp",
+                "headers": {"Authorization": "Bearer ${AGENT_MCP_TOKEN}"},
+            }
+        }
+
+    @pytest.mark.parametrize("runtime_name", ["OpencodeRuntime", "PiRuntime"])
+    def test_the_wrapper_runtimes_get_the_same_single_entry(self, runtime_name: str) -> None:
+        """Two connections, one URL: the merged host already namespaces by alias."""
+        from cloud_agent_host import runtimes
+
+        runtime = getattr(runtimes, runtime_name)()
+        _argv, env = runtime.prepare(
+            workdir="/w",
+            task_prompt="do it",
+            model="glm-5.1",
+            gateway_base_url="http://backend:8080",
+            credential="agr-credential",
+            mcp_config=self._config(("github", "docs")),
+        )
+        assert json.loads(env[runtimes.MCP_SERVERS_ENV]) == {
+            runtimes.MERGED_MCP_SERVER_NAME: f"{self._BASE}/v1/agent/mcp"
+        }
+
+    def test_a_run_with_no_connections_is_not_told_about_the_relay(self) -> None:
+        """An endpoint a run must not use is an endpoint it should not be given."""
+        from cloud_agent_host.runtimes import ClaudeCodeRuntime
+
+        argv, _env = ClaudeCodeRuntime().prepare(
+            workdir="/w",
+            task_prompt="do it",
+            model="glm-5.1",
+            gateway_base_url="http://backend:8080",
+            credential="agr-credential",
+            mcp_config=self._config(()),
+        )
+        assert json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"] == {}
+
+
+class TestTheMergedHostDrivesWhatAPipeCannot:
+    """Why the endpoint matters, not just that it changed.
+
+    The per-connection route posted the CLI's own body at the connection's URL.
+    A legacy SSE server has no such URL: its SSE address answers 405 to that
+    POST, and the address that would have accepted it is the message endpoint
+    the stream names after connecting. Only a client that reads the era first
+    can serve one, which is what the host does and what the route did not.
+    """
+
+    def _connection(self, transport: Any) -> Any:
+        from cloud_agent.mcp.models import (
+            ConnectionConfig,
+            ExecutionLocation,
+            McpConnection,
+            Transport,
+        )
+
+        declared = Transport.HTTP_SSE if transport == "http-sse" else Transport.STREAMABLE_HTTP
+        return McpConnection(
+            connection_id="7",
+            user_id="u1",
+            label="Legacy",
+            config=ConnectionConfig(
+                transport=declared,
+                location=ExecutionLocation.REMOTE,
+                url="http://127.0.0.1:9/sse"
+                if declared is Transport.HTTP_SSE
+                else "http://127.0.0.1:9/mcp",
+            ),
+        )
+
+    @pytest.mark.parametrize(
+        ("transport", "expected"),
+        [("http-sse", "legacy"), ("streamable-http", "streamable")],
+    )
+    @pytest.mark.asyncio
+    async def test_the_transport_the_connection_declares_is_the_one_opened(
+        self, transport: str, expected: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cloud_agent.mcp import host as host_module
+
+        calls: list[str] = []
+
+        async def legacy(config: Any, **kwargs: Any) -> Any:
+            calls.append("legacy")
+            return ("transport", "handshake", None)
+
+        async def streamable(config: Any, **kwargs: Any) -> Any:
+            calls.append("streamable")
+            return ("transport", "handshake")
+
+        monkeypatch.setattr(host_module, "connect_legacy_sse", legacy)
+        monkeypatch.setattr(host_module, "connect_streamable", streamable)
+        await host_module.McpHost()._connect(self._connection(transport), secret="token")
+        assert calls == [expected]

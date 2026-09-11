@@ -57,6 +57,10 @@ def _row(**overrides: Any) -> dict[str, Any]:
         "registration": "preregistered",
         "credential_version": 4,
         "authorization_epoch": 2,
+        "oauth_generation": 3,
+        "config_revision": 5,
+        "refresh_generation": 0,
+        "refresh_lease_expires_at": None,
         "deleted_at": None,
     }
     row.update(overrides)
@@ -64,30 +68,73 @@ def _row(**overrides: Any) -> dict[str, Any]:
 
 
 class FakeStore:
-    """A store whose claim is a real compare-and-set."""
+    """A store whose claim is a real lease, and whose write is fenced on it.
+
+    The lease is modelled here rather than asserted against, so the cases below
+    exercise ``refresh``'s handling of it: contended, released, superseded. The
+    SQL that implements the same contract is pinned against a real database in
+    ``tests/integration/storage/test_mcp_connection_store.py``.
+    """
 
     def __init__(self, row: dict[str, Any]) -> None:
-        """Hold one row and count the claims that were attempted."""
+        """Hold one row, count the claims, and remember which leases are held."""
         self.row = row
         self.claims = 0
         self.writes: list[dict[str, Any]] = []
+        self.leased: set[int] = set()
+        self.released: list[int] = []
 
     async def claim_mcp_refresh(
-        self, *, connection_id: int, expected_credential_version: int
+        self,
+        *,
+        connection_id: int,
+        expected_credential_version: int,
+        lease_seconds: float,
     ) -> dict[str, Any] | None:
         self.claims += 1
         if self.row["credential_version"] != expected_credential_version:
             return None
-        self.row["credential_version"] += 1
+        generation = int(self.row.get("refresh_generation") or 0)
+        if generation in self.leased:
+            # Somebody is already on the network with this token.
+            return None
+        if lease_seconds <= 0:
+            raise ValueError("an MCP refresh lease must be positive")
+        self.row["refresh_generation"] = generation + 1
+        self.leased.add(generation + 1)
         return dict(self.row)
+
+    async def release_mcp_refresh_claim(
+        self, *, connection_id: int, refresh_generation: int
+    ) -> bool:
+        if refresh_generation not in self.leased:
+            return False
+        self.leased.discard(refresh_generation)
+        self.released.append(refresh_generation)
+        return True
 
     async def set_mcp_credential(self, **kwargs: Any) -> bool:
         self.writes.append(kwargs)
         if self.row["authorization_epoch"] != kwargs["expected_authorization_epoch"]:
             return False
+        generation = kwargs.get("expected_refresh_generation")
+        if generation is not None:
+            if int(self.row.get("refresh_generation") or 0) != generation:
+                return False
+            if generation not in self.leased:
+                return False
+            self.leased.discard(generation)
+        for key, column in (
+            ("expected_oauth_generation", "oauth_generation"),
+            ("expected_config_revision", "config_revision"),
+        ):
+            expected = kwargs.get(key)
+            if expected is not None and int(self.row.get(column) or 0) != expected:
+                return False
         self.row["access_token_ciphertext"] = kwargs.get("access_token_ciphertext")
         if kwargs.get("refresh_token_ciphertext"):
             self.row["refresh_token_ciphertext"] = kwargs["refresh_token_ciphertext"]
+        self.row["credential_version"] = int(self.row["credential_version"]) + 1
         return True
 
     async def get_mcp_connection(self, *, connection_id: int) -> dict[str, Any] | None:
@@ -158,6 +205,141 @@ class TestRefresh:
         assert outcome.contended
         assert not outcome.refreshed
         assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_a_second_refresher_is_refused_while_the_lease_is_held(self, monkeypatch) -> None:
+        """The race the credential version could not see.
+
+        A second worker arrives while the first is on the network with the
+        refresh token. It reads the row *after* the first claimed it, so the
+        version it sees is the version it claims -- a claim no longer moves that
+        column, which is exactly why it could not be the lock. Only the lease
+        tells it that somebody is already spending the token both of them read,
+        and a rotating issuer invalidates that token the moment it is used
+        twice.
+        """
+        store = FakeStore(_row())
+        nested: list[Any] = []
+        arrived = False
+
+        async def post_that_races(request: Any, *, policy: Any, fetcher: Any) -> dict[str, Any]:
+            nonlocal arrived
+            if not arrived:
+                arrived = True
+                nested.append(
+                    await refresh.refresh_credential(
+                        store,
+                        row=await store.get_mcp_connection(connection_id=7),
+                        policy=policy,
+                    )
+                )
+            return {"access_token": "new-access", "expires_in": 3600}
+
+        monkeypatch.setattr(refresh, "_post", post_that_races)
+        first = await refresh.refresh_credential(
+            store,
+            row=store.row,
+            policy=EgressPolicy(),  # type: ignore[arg-type]
+        )
+        assert first.refreshed
+        assert len(nested) == 1
+        assert nested[0].contended
+        assert not nested[0].refreshed
+
+    @pytest.mark.asyncio
+    async def test_a_superseded_refresher_cannot_write_its_answer(self, monkeypatch) -> None:
+        """The lease expired under it, and a successor claimed the row.
+
+        The answer it holds was computed from a token the successor has already
+        replaced, so writing it would leave the row holding the *older* of the
+        two credentials while the newer one is discarded.
+        """
+        store = FakeStore(_row())
+
+        async def post_that_supersedes(
+            request: Any, *, policy: Any, fetcher: Any
+        ) -> dict[str, Any]:
+            store.leased.clear()
+            store.row["refresh_generation"] = 99
+            return {"access_token": "stale-access", "expires_in": 3600}
+
+        monkeypatch.setattr(refresh, "_post", post_that_supersedes)
+        with pytest.raises(refresh.RefreshRefused):
+            await refresh.refresh_credential(
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
+            )
+        cipher = mcp_cipher(_KEY)
+        assert cipher.decrypt(store.row["access_token_ciphertext"]) == "old-access"
+
+    @pytest.mark.asyncio
+    async def test_a_refused_refresh_releases_the_lease(self, monkeypatch) -> None:
+        """Nothing rotated, so the next call must not wait out the timer."""
+        store = FakeStore(_row())
+
+        async def failing_post(request: Any, *, policy: Any, fetcher: Any) -> dict[str, Any]:
+            raise TransportError("the token endpoint answered 400")
+
+        monkeypatch.setattr(refresh, "_post", failing_post)
+        with pytest.raises(refresh.RefreshRefused):
+            await refresh.refresh_credential(
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
+            )
+        assert store.leased == set()
+        assert store.released == [1]
+        # And the row is claimable again: a failed attempt is not a lock.
+        _patch_token_response(monkeypatch, {"access_token": "new-access", "expires_in": 3600})
+        outcome = await refresh.refresh_credential(
+            store,
+            row=store.row,
+            policy=EgressPolicy(),  # type: ignore[arg-type]
+        )
+        assert outcome.refreshed
+
+    @pytest.mark.asyncio
+    async def test_a_refresh_fences_its_write_on_what_it_claimed(self, monkeypatch) -> None:
+        """The callback fence, seen from the other side.
+
+        A refresh spends the same time on the network as an authorization-code
+        exchange, and the owner can start a new authorization inside that
+        window. Both writes carry the epoch, because re-authorizing is not a
+        change of target, so the generation the flow began under is what tells
+        them apart -- without it the slower write wins and the owner's newer
+        account is replaced by an answer computed from the older one.
+        """
+        store = FakeStore(_row(oauth_generation=3, config_revision=5))
+        _patch_token_response(monkeypatch, {"access_token": "new-access", "expires_in": 3600})
+        await refresh.refresh_credential(
+            store,
+            row=store.row,
+            policy=EgressPolicy(),  # type: ignore[arg-type]
+        )
+        write = store.writes[0]
+        assert write["expected_refresh_generation"] == 1
+        assert write["expected_oauth_generation"] == 3
+        assert write["expected_config_revision"] == 5
+
+        store = FakeStore(_row(oauth_generation=3, config_revision=5))
+
+        async def post_that_reauthorizes(
+            request: Any, *, policy: Any, fetcher: Any
+        ) -> dict[str, Any]:
+            # A newer flow finishes while this refresh is still on the network.
+            store.row["oauth_generation"] = 4
+            return {"access_token": "stale-access", "expires_in": 3600}
+
+        monkeypatch.setattr(refresh, "_post", post_that_reauthorizes)
+        with pytest.raises(refresh.RefreshRefused):
+            await refresh.refresh_credential(
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
+            )
+        cipher = mcp_cipher(_KEY)
+        assert cipher.decrypt(store.row["access_token_ciphertext"]) == "old-access"
 
     @pytest.mark.asyncio
     async def test_a_non_rotating_issuer_keeps_the_refresh_token(self, monkeypatch) -> None:

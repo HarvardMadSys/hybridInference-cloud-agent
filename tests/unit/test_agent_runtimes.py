@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from cloud_agent_host.runtimes import (
+    MERGED_MCP_SERVER_NAME,
     ClaudeCodeRuntime,
     CodexRuntime,
     GenericRuntime,
@@ -550,7 +551,7 @@ def test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential():
     assert env["ANTHROPIC_API_KEY"] == "agr-inference-grant-must-not-leak"
     assert env["AGENT_MCP_TOKEN"] != env["ANTHROPIC_API_KEY"]
     servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
-    assert servers["github"]["url"] == "http://agent-mcp:8000/v1/agent/mcp/github"
+    assert servers[MERGED_MCP_SERVER_NAME]["url"] == "http://agent-mcp:8000/v1/agent/mcp"
     assert "--strict-mcp-config" in argv
 
 
@@ -797,7 +798,7 @@ def test_the_relay_base_url_is_normalized_once():
         ),
     )
     servers = _mcp_config_of(argv)["mcpServers"]
-    assert servers["github"]["url"] == f"{_MCP_GATEWAY}/v1/agent/mcp/github"
+    assert servers[MERGED_MCP_SERVER_NAME]["url"] == f"{_MCP_GATEWAY}/v1/agent/mcp"
 
 
 def test_requesting_mcp_with_no_relay_address_refuses_rather_than_guessing():
@@ -857,7 +858,9 @@ def test_pi_loads_the_images_bridge_and_nothing_else():
     )
     assert "--no-extensions" in argv
     assert argv[argv.index("-e") + 1].endswith("pi-mcp-bridge.ts")
-    assert json.loads(env["AGENT_MCP_SERVERS"]) == {"github": f"{_MCP_GATEWAY}/v1/agent/mcp/github"}
+    assert json.loads(env["AGENT_MCP_SERVERS"]) == {
+        MERGED_MCP_SERVER_NAME: f"{_MCP_GATEWAY}/v1/agent/mcp"
+    }
     assert env["AGENT_MCP_TOKEN"] == "mcp-token"
     assert "mcp-token" not in " ".join(argv)
 
@@ -889,12 +892,16 @@ def test_kilo_refuses_mcp_because_its_kill_switch_misses_the_legacy_path():
 
 
 def test_a_wrapper_runtime_publishes_the_relay_urls_and_the_token_reference():
-    """The Python half: addresses here, the dialect reference in the wrapper.
+    """The Python half: address here, the dialect reference in the wrapper.
 
     How a CLI spells "read this from the environment" is not portable -- Claude
     Code expands ``${VAR}``, the OpenCode family expands ``{env:VAR}`` -- so the
     endpoint map is neutral and each wrapper adds the header in its own syntax,
     next to the pinned binary that has to expand it.
+
+    The run names two connections here and still gets one entry: the relay's
+    bare prefix answers for all of them and namespaces what it lists by alias,
+    so one entry per connection would register the same catalogue twice.
     """
     argv, env = OpencodeRuntime().prepare(
         workdir="/w",
@@ -909,8 +916,7 @@ def test_a_wrapper_runtime_publishes_the_relay_urls_and_the_token_reference():
         ),
     )
     assert json.loads(env["AGENT_MCP_SERVERS"]) == {
-        "github": f"{_MCP_GATEWAY}/v1/agent/mcp/github",
-        "docs": f"{_MCP_GATEWAY}/v1/agent/mcp/docs",
+        MERGED_MCP_SERVER_NAME: f"{_MCP_GATEWAY}/v1/agent/mcp"
     }
     # The token travels in the environment the wrapper interpolates from, never
     # in argv, and never in the endpoint map that becomes a config file.
@@ -938,7 +944,9 @@ def test_the_resident_path_carries_the_same_relay_config():
             credential="mcp-token",
         ),
     )
-    assert json.loads(env["AGENT_MCP_SERVERS"]) == {"github": f"{_MCP_GATEWAY}/v1/agent/mcp/github"}
+    assert json.loads(env["AGENT_MCP_SERVERS"]) == {
+        MERGED_MCP_SERVER_NAME: f"{_MCP_GATEWAY}/v1/agent/mcp"
+    }
     assert env["AGENT_MCP_TOKEN"] == "mcp-token"
     assert argv[0] == "http-agent-live-bridge"
 

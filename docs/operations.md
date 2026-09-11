@@ -188,7 +188,7 @@ sandbox ──[attempt-fenced mcp token]──▶ MCP-only relay ──[owner cr
 
 The MCP listener is a separate FastAPI app on port 8001; it does not expose the
 job, host, session, admin, or inference APIs. The sandbox authenticates to
-`/v1/agent/mcp/<name>` over its second fixed relay, so **`platform_only` stays
+`/v1/agent/mcp` over its second fixed relay, so **`platform_only` stays
 closed**: inference and MCP are the only agent-phase destinations. The upstream
 address and the owner's credential stay in the control plane.
 
@@ -233,7 +233,13 @@ Five things about this that look like details and are not:
   with names namespaced `<alias>__<tool>`, and routes a call back to its own
   server. It exists because a runtime whose MCP entries are gated by a
   name-and-identity allowlist cannot be given a per-conversation alias at run
-  time, and one fixed name and URL is the shape that fits. Both routes call the
+  time, and one fixed name and URL is the shape that fits. **Every adapter is
+  given that endpoint and nothing else, as one entry named `session`**: an entry
+  per connection would present this same merged catalogue once per connection,
+  and the per-connection route is left for a client that wants exactly one
+  connection's protocol passed through untouched — which no runtime asks for,
+  because a legacy SSE server cannot initialize through a pipe at all. Both
+  routes call the
   same `decide`, so an approval granted on the Integrations page is consumed by
   whichever surface the retry arrives on, and neither is a way around the other.
   Routing on the merged surface is a lookup in the catalogue built from the
