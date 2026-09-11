@@ -11,10 +11,15 @@ Three properties, none of which a reviewer can confirm by reading the diff once:
   replaces something a user can reach. This walks whatever jobs the file has
   rather than the two that exist today: a third job added later would otherwise
   reach a host with no gate at all.
-* **Fail-closed.** Only an explicit `true` deploys. An unset variable, a deleted
-  one, or a typo (`True`, `yes`) skips the jobs. A fuse that fires when it
-  cannot read itself is not a fuse, and the opposite choice — deploying because
-  the switch was misspelled — fails in the direction this exists to prevent.
+* **Fail-closed.** Only `true` deploys: `false`, `yes`, `1`, an empty value, a
+  deleted variable and an unset variable all skip the jobs. A fuse that fires
+  when it cannot read itself is not a fuse, and the opposite choice — deploying
+  because the switch could not be read — fails in the direction this exists to
+  prevent. GitHub's `==` *ignores case* when comparing strings, so `True` and
+  `TRUE` deploy as well; that half is an expression-language semantic rather
+  than something this file can enforce, which is why
+  `test_the_documented_switch_matches_github_semantics` pins it where a person
+  reads it.
 * **One environment per switch.** Staging's variable must not appear in
   production's workflow. A single value that disarmed both would take the
   rehearsed rollback path with it.
@@ -81,7 +86,7 @@ def test_the_fuse_fails_closed(workflow: str, variable: str) -> None:
         for fail_open in ("!= 'false'", '!= "false"', "|| true", "|| 'true'"):
             assert fail_open not in condition, (
                 f"{workflow}: job `{job}` is gated fail-open (`{fail_open}`), so a "
-                f"typo or a deletion in {variable} deploys instead of skipping: "
+                f"deleted or unreadable {variable} deploys instead of skipping: "
                 f"{condition!r}"
             )
 
@@ -145,4 +150,27 @@ def test_the_switch_is_written_down(workflow: str, variable: str) -> None:
     assert f"`{variable}`" in doc, (
         f"{variable} disarms {workflow} and appears nowhere an operator would "
         f"look for it: add it to {_CD_DOC.relative_to(REPO_ROOT)}"
+    )
+
+
+def test_the_documented_switch_matches_github_semantics() -> None:
+    """The one property of this fuse that the YAML cannot state.
+
+    An Actions `==` comparison ignores case when comparing strings, so
+    `== 'true'` accepts `True` and `TRUE` — the operator is not the strict
+    literal match it reads as. That was wrong in this file's first draft and in
+    the workflows' own comments, which is why the document is checked: no
+    assertion over the YAML can catch a semantic of the expression language,
+    and the next person to read `== 'true'` will assume exactly what the first
+    draft assumed.
+    """
+    doc = _CD_DOC.read_text()
+    assert "ignores case" in doc, (
+        f"{_CD_DOC.relative_to(REPO_ROOT)} no longer records that GitHub's `==` "
+        "ignores case, so `True` and `TRUE` deploy. A reviewer reading "
+        "`== 'true'` will assume they skip, and the YAML cannot correct them."
+    )
+    assert "`True`" in doc, (
+        f"{_CD_DOC.relative_to(REPO_ROOT)} should name the accepted spellings it "
+        "documents (at least `True`), not assert the rule abstractly"
     )

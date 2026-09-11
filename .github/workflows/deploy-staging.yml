@@ -49,12 +49,16 @@ jobs:
     #
     # **The fuse.** `LEGACY_DIRECT_STAGING_DEPLOY` is the migration switch that
     # hands this environment to FreeInference: while it is `true`, merging to
-    # `dev` deploys exactly as it always has; the moment it is `false` — or
-    # unset, or spelled `True` — both jobs skip and no host is touched.
-    # Fail-closed on purpose: a fuse that fires when it cannot read itself is
-    # not a fuse. It sits on the job rather than on a step, because a
-    # step-level check still allocates the runner and lets every other step of
-    # the job run.
+    # `dev` deploys exactly as it always has; `false`, `yes`, an empty value, or
+    # no variable at all skips both jobs and touches no host. Fail-closed on
+    # purpose: a fuse that fires when it cannot read itself is not a fuse.
+    #
+    # Case is GitHub's, not ours — its `==` ignores case when comparing
+    # strings, so `True` and `TRUE` deploy as well. Recorded rather than fought:
+    # the half that matters is the other one, and it fails closed.
+    #
+    # The gate sits on the job rather than on a step, because a step-level check
+    # still allocates the runner and runs every other step of the job.
     #
     # It is a migration artifact, not the terminal architecture: this workflow
     # is deleted once FreeInference deploys staging from its own lock.

@@ -53,11 +53,15 @@ jobs:
     # serializing image builds and migrations in Actions.
     #
     # **The fuse.** `LEGACY_DIRECT_PRODUCTION_DEPLOY` is the migration switch
-    # that hands production to FreeInference. Fail-closed: only an explicit
-    # `true` deploys, so an unset variable, a deleted one, or a typo (`True`,
-    # `yes`) leaves the hosts untouched rather than shipping on a value nobody
-    # meant. Set it to `true` before this guard lands; set it to `false` as the
-    # last step of the production handover, once the private deploy has been
+    # that hands production to FreeInference. Fail-closed: `false`, `yes`, an
+    # empty value, a deleted variable or no variable at all leaves the hosts
+    # untouched rather than shipping on a value nobody meant. GitHub's `==`
+    # ignores case when comparing strings, so `True` and `TRUE` deploy as well;
+    # that is its semantics rather than a choice made here, and the direction
+    # that matters is the one that fails closed.
+    #
+    # Set it to `true` before this guard lands; set it to `false` as the last
+    # step of the production handover, once the private deploy has been
     # exercised and rolled back.
     #
     # A migration artifact, not the terminal architecture: this workflow is

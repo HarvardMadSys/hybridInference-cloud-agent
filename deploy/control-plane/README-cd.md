@@ -24,11 +24,17 @@ proven, each environment carries a switch:
 
 Both are fail-closed and both gate *every* job in their workflow, because an
 environment is handed over whole: a switch that left half of one deploying would
-be a second control plane in everything but name. A value that is set but
-misspelled (`True`, `yes`) skips rather than deploys — the failure this guards
-against is shipping because the switch could not be read.
-`tests/unit/test_legacy_deploy_fuse.py` holds all of that, including that the
-fuse did not replace the conditions the deploy already had.
+be a second control plane in everything but name. Only `true` deploys — `false`,
+`yes`, `1`, an empty value, a deleted variable and an unset variable all skip,
+which is the direction that matters: nothing ships because the switch could not
+be read.
+
+One caveat, and it is GitHub's rather than a choice made here: an Actions `==`
+comparison **ignores case**, so `True` and `TRUE` deploy as well. It is written
+down because a reviewer reading `== 'true'` will reasonably assume otherwise,
+and because `tests/unit/test_legacy_deploy_fuse.py` can check the YAML but
+cannot check an expression language — this paragraph is the only place that
+semantic is visible to a person. The same test requires the paragraph to stay.
 
 The sequence is deliberate:
 
