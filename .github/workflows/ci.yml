@@ -814,6 +814,23 @@ jobs:
           echo "IMAGE_TAG=${{ matrix.artifact.name }}:ci-${suffix}" >> "${GITHUB_ENV}"
           echo "SUFFIX=${suffix}" >> "${GITHUB_ENV}"
 
+      # Authenticated pulls. Rate limits are per *account* once logged in and
+      # per *IP* when not — and this machine's egress address is shared with the
+      # other repository's CI, so the anonymous allowance is spent by two
+      # projects. It ran out twice today and took every image cell with it.
+      # Authenticated it is 200 pulls an hour, attributed to the account:
+      # verified on spark2, `docker-ratelimit-source: realtmxi`,
+      # `x-ratelimit-limit: 200;w=3600`.
+      #
+      # Before the builder step, not before the build: creating a builder pulls
+      # `moby/buildkit` from Docker Hub too, and that was the first thing the
+      # 429 blocked.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       # Reused across jobs, and self-healing: a builder whose buildkitd will not
       # start is removed and recreated rather than failing every later cell.
       # `--bootstrap` is what proves it started, so it doubles as the check.
