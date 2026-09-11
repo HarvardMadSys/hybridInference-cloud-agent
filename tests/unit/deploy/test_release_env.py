@@ -126,18 +126,16 @@ def test_a_partial_document_is_not_a_manifest(tmp_path: Path) -> None:
 def test_the_fragment_reaches_a_child_process_and_a_host_conflict_is_refused(
     tmp_path: Path,
 ) -> None:
-    """The handoff, executed: dotenv in, bash in between, environment out.
+    """The handoff, executed: Compose's resolved values in, bash in between, environment out.
 
-    Review reproduced the gap this closes — a host `.env` naming a different SHA
-    was invisible to a helper reading `os.environ`, the fragment was sourced over
-    the top of it, and the values never reached a child process at all. A unit
-    test that passes an ambient dictionary cannot see any of that, so this one
-    runs the real thing.
+    Review reproduced the gap this closes — a host that named a different SHA was
+    invisible to a helper reading `os.environ`, the fragment was sourced over the
+    top of it, and the values never reached a child process at all. A unit test
+    that passes an ambient dictionary cannot see any of that, so this one runs
+    the real thing.
     """
     manifest_path = tmp_path / "release.json"
     manifest_path.write_text(json.dumps(full_manifest()))
-    dotenv = tmp_path / ".env"
-    dotenv.write_text(f"AGENT_DEPLOYMENT_SHA={'b' * 40}\n")
     fragment = tmp_path / "release.env"
 
     refused = re_.main(
@@ -146,8 +144,8 @@ def test_the_fragment_reaches_a_child_process_and_a_host_conflict_is_refused(
             str(manifest_path),
             "--stack",
             "host",
-            "--ambient-file",
-            str(dotenv),
+            "--ambient",
+            f"AGENT_DEPLOYMENT_SHA={'b' * 40}",
             "--output",
             str(fragment),
         ]
@@ -155,7 +153,6 @@ def test_the_fragment_reaches_a_child_process_and_a_host_conflict_is_refused(
     assert refused == 1, "a host that names another release must not be deployed over"
     assert not fragment.exists()
 
-    dotenv.write_text("AGENT_HOST_SLOTS=3\n")
     assert (
         re_.main(
             [
@@ -163,8 +160,8 @@ def test_the_fragment_reaches_a_child_process_and_a_host_conflict_is_refused(
                 str(manifest_path),
                 "--stack",
                 "host",
-                "--ambient-file",
-                str(dotenv),
+                "--ambient",
+                "AGENT_HOST_SLOTS=3",
                 "--output",
                 str(fragment),
             ]
@@ -227,6 +224,39 @@ def test_a_host_that_disagrees_with_the_release_is_refused(key: str, value: str)
     with pytest.raises(re_.ReleaseEnvError) as raised:
         re_.environment_for(manifest(), "control-plane", "agents", ambient={key: value})
     assert key in str(raised.value)
+
+
+def test_the_resolved_value_answers_the_check_not_the_ambient_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose's precedence, or its opposite — the difference is a silent deploy.
+
+    A shell variable beats a `.env` entry in Compose, so the resolved value is
+    what the deployment will use. Comparing against anything else either misses a
+    host that named another image (the file said the right thing, the environment
+    said otherwise) or refuses a host that is fine (the file disagreed, the
+    environment matched).
+    """
+    monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "b" * 40)
+    # Compose resolved this to the release's commit, because the environment wins.
+    assert (
+        re_.environment_for(
+            manifest(),
+            "control-plane",
+            "agents",
+            ambient={"AGENT_DEPLOYMENT_SHA": COMMIT},
+        )["AGENT_DEPLOYMENT_SHA"]
+        == COMMIT
+    )
+
+    # And when Compose resolved it to something else, that is what is refused.
+    with pytest.raises(re_.ReleaseEnvError):
+        re_.environment_for(
+            manifest(),
+            "control-plane",
+            "agents",
+            ambient={"AGENT_DEPLOYMENT_SHA": "b" * 40},
+        )
 
 
 def test_an_agreeing_host_environment_is_fine() -> None:

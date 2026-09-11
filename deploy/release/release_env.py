@@ -77,34 +77,28 @@ def _checked(name: str, value: str, pattern: re.Pattern[str], what: str) -> str:
     return value
 
 
-def ambient_from_files(paths: Sequence[Path]) -> dict[str, str]:
-    """The values a deploy host has already configured, read the way it reads them.
-
-    The deploy scripts load `.env` into *shell variables*, not into the
-    environment, so `os.environ` is the wrong place to look for a conflict: a
-    host that named a different image is invisible there, the fragment is
-    sourced over the top of it, and the deployment runs a release nobody
-    reviewed. Passing the same files the script loads is what closes that.
-    """
-    from dotenv import dotenv_values
-
-    values: dict[str, str] = {}
-    for path in paths:
-        if not path.exists():
-            raise ReleaseEnvError(f"{path} does not exist, so its values cannot be honoured")
-        for key, value in dotenv_values(path).items():
-            if value is not None:
-                values[key] = value
-    return values
-
-
 def parsed_ambient(pairs: Sequence[str]) -> dict[str, str]:
-    """`KEY=VALUE` arguments, for values that came from somewhere else entirely."""
+    """The **resolved** environment, as `docker compose config --environment` prints it.
+
+    Not a dotenv file, and deliberately so. Compose resolves interpolation by its
+    own rules — an exported variable beats a `.env` entry, `$VAR` and `${VAR}`
+    both expand, and a value may be built from another one in the same file.
+    Reading `.env` here would be a second implementation of those rules, and the
+    first thing it got wrong was the precedence: this module let the file win,
+    Compose lets the environment win, so a host that named another image passed
+    the check and then deployed it.
+
+    Quoting is Compose's too: it prints values that need quoting with double
+    quotes around them, and one layer of those is removed here so a comparison
+    is against the value rather than its spelling.
+    """
     values: dict[str, str] = {}
     for pair in pairs:
         key, separator, value = pair.partition("=")
         if not separator or not key:
             raise ReleaseEnvError(f"--ambient expects KEY=VALUE, got {pair!r}")
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
         values[key] = value
     return values
 
@@ -222,20 +216,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--stack", required=True, choices=sorted(STACK_ROLES))
     parser.add_argument("--variant", choices=("root", "agents"), default=None)
     parser.add_argument(
-        "--ambient-file",
-        type=Path,
-        action="append",
-        default=[],
-        help="A dotenv file this host has already loaded. Repeatable; passed by the deploy "
-        "scripts so a conflict is found where it happens rather than in os.environ, which "
-        "never sees a shell variable.",
-    )
-    parser.add_argument(
         "--ambient",
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="An already-resolved value from somewhere that is not a file. Repeatable.",
+        help="One line of `docker compose config --environment` output. The deploy scripts "
+        "pass what Compose resolved, so the check and the deployment read the same values "
+        "under the same rules. Repeatable.",
     )
     parser.add_argument(
         "--output",
@@ -248,11 +235,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         manifest = json.loads(arguments.manifest.read_text())
         validate_manifest(manifest)
-        ambient = {
-            **os.environ,
-            **ambient_from_files(arguments.ambient_file),
-            **parsed_ambient(arguments.ambient),
-        }
+        # `os.environ` is a fallback, not an authority: what Compose resolved is
+        # what the deployment will use, and where the two disagree the resolved
+        # value is the one to compare against.
+        ambient = {**os.environ, **parsed_ambient(arguments.ambient)}
         environment = environment_for(manifest, arguments.stack, arguments.variant, ambient=ambient)
     except (ReleaseEnvError, json.JSONDecodeError) as error:
         print(f"refusing to configure this deployment: {error}", file=sys.stderr)
