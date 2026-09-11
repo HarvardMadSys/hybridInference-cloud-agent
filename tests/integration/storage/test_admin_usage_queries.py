@@ -21,7 +21,6 @@ from cloud_agent.admin_usage import (
     MAX_USAGE_SNAPSHOT_BYTES,
 )
 from cloud_agent.api import admin_usage
-from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, store as store
@@ -102,7 +101,6 @@ def _client(store) -> AsyncClient:
     app.dependency_overrides[admin_runs.get_admin_run_queries] = lambda: AdminRunQueries(
         store._pool
     )
-    app.dependency_overrides[get_agent_job_store] = lambda: store
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
@@ -364,7 +362,6 @@ async def test_the_cohort_and_its_snapshots_come_from_one_read_view(
     app = FastAPI()
     app.include_router(admin_usage.router)
     app.dependency_overrides[admin_usage.get_admin_usage_queries] = lambda: queries
-    app.dependency_overrides[get_agent_job_store] = lambda: store
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         request = asyncio.create_task(

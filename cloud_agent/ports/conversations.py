@@ -27,6 +27,8 @@ class ConversationCommands(Protocol):
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_servers: list[str] | None = None,
+        client_request_id: str | None = None,
+        client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it."""
         ...
@@ -41,8 +43,20 @@ class ConversationCommands(Protocol):
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
+        client_request_id: str | None = None,
+        client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
         """Append a user turn and create the run that will answer it."""
+        ...
+
+    async def replayed_submission(
+        self,
+        *,
+        user_id: str,
+        client_request_id: str,
+        fingerprint: str | None,
+    ) -> dict[str, Any] | None:
+        """The job an owner's key already made, a conflict, or ``None``."""
         ...
 
     async def set_sessions_archived(

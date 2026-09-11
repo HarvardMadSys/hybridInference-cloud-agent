@@ -180,9 +180,7 @@ async def test_run_status_filters_exact_states_before_pagination(store, monkeypa
                 START,
             )
     monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
-    app = FastAPI()
-    app.include_router(admin_runs.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app = _admin_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         for selected in (None, *states):
             expected = states if selected is None else (selected,)

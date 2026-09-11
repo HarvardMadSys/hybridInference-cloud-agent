@@ -15,6 +15,7 @@ class PostgresAuditRepository(PostgresRepository):
         self,
         *,
         action: str,
+        actor_id: str,
         admin_ip: str,
         target_user_id: str | None = None,
         details: dict[str, Any] | None = None,
@@ -28,6 +29,7 @@ class PostgresAuditRepository(PostgresRepository):
 
         Args:
             action: Dotted action name, e.g. ``agent.runner_host.drain``.
+            actor_id: The authenticated administrator who acted.
             admin_ip: Best-effort caller address.
             target_user_id: The user acted upon, where there is one.
             details: Structured context. Never a credential.
@@ -40,8 +42,8 @@ class PostgresAuditRepository(PostgresRepository):
             return await conn.fetchval(
                 """
                 INSERT INTO agent_admin_audit_log
-                    (action, admin_ip, target_user_id, details, success)
-                VALUES ($1, $2, $3, $4::jsonb, $5)
+                    (action, actor_id, admin_ip, target_user_id, details, success)
+                VALUES ($1, $6, $2, $3, $4::jsonb, $5)
                 RETURNING id
                 """,
                 action,
@@ -49,4 +51,5 @@ class PostgresAuditRepository(PostgresRepository):
                 target_user_id,
                 json.dumps(details) if details is not None else None,
                 success,
+                actor_id,
             )

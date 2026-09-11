@@ -618,16 +618,14 @@ class PostgresSessionForkRepository(PostgresRepository):
                     await conn.execute(
                         """
                         INSERT INTO agent_jobs (
-                            id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, repo,
-                            base_sha, task_prompt, setup_script, runtime, model,
-                            execution_profile, reasoning_effort, state,
+                            id, thread_id, parent_job_id, turn_no, native_turn_no, user_id,
+                            base_sha, task_prompt, runtime, model, reasoning_effort, state,
                             published_pr_url, published_commit_sha, detail, metadata,
-                            fork_source_job_id, mcp_servers, retained_followup_eligible,
-                            created_at, updated_at
+                            fork_source_job_id, created_at, updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                            $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21,
-                            TRUE, clock_timestamp(), clock_timestamp()
+                            $13, $14, $15, $16::jsonb, $17,
+                            clock_timestamp(), clock_timestamp()
                         )
                         """,
                         copy_id,

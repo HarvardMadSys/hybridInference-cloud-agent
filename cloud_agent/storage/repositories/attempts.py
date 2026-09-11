@@ -130,10 +130,6 @@ class PostgresAttemptCommands(PostgresRepository):
                 and bool(guest_kernel.strip())
                 and host_kernel.strip() != guest_kernel.strip()
             )
-            # Follow-ups may be submitted while a run is active. Promote only
-            # those whose direct parent has settled; a chain therefore
-            # advances one turn at a time even with multiple waiting messages.
-            await _followups.advance_waiting_follow_ups(conn)
             job_row = await conn.fetchrow(
                 f"""
                 SELECT {_rows._QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox,
@@ -626,7 +622,7 @@ class PostgresAttemptCommands(PostgresRepository):
                     sandbox_transition is not None
                     and sandbox_transition["context_status"] == "lost"
                 ):
-                    await _followups.advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                    await _followups.fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
         return True
 
     async def request_cancel(self, *, job_id: str, user_id: str | None = None) -> str | None:
@@ -653,7 +649,7 @@ class PostgresAttemptCommands(PostgresRepository):
                     "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
                     job_id,
                 )
-                await _followups.advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                await _followups.fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 return _execution.CANCELLED
             if state in (_execution.RUNNING, _execution.PUBLISHING):
                 await conn.execute(
@@ -959,10 +955,10 @@ class PostgresAttemptCommands(PostgresRepository):
                     )
                 if action in _execution.TERMINAL_STATES and not retained_activation_expired:
                     # A terminal reaper outcome is semantically the same turn
-                    # boundary as ``transition``. Keep the linear chat moving
-                    # when the context is usable; the LOST branch above has
+                    # boundary as ``transition``: the pending tail fails if the
+                    # shared membership is gone, and the LOST branch above has
                     # already failed every unrunnable descendant instead.
-                    await _followups.advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                    await _followups.fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 action_result: dict[str, Any] = {
                     "job_id": job_id,
                     "attempt_id": attempt_id,

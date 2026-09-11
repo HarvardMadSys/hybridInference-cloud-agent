@@ -5,13 +5,24 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import asyncpg
+
 import cloud_agent.domain.execution as _execution
 import cloud_agent.domain.ids as _ids
+import cloud_agent.storage._sql.getters as _getters
 import cloud_agent.storage._sql.rows as _rows
 import cloud_agent.storage._sql.sessions as _sessions
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.storage.repositories._base import PostgresRepository
 from cloud_agent.task_titles import fallback_title
+
+
+def _check_client_request(client_request_id: str | None, fingerprint: str | None) -> None:
+    """A submission key travels with its fingerprint, or not at all."""
+    if (client_request_id is None) != (fingerprint is None):
+        raise ValueError("client_request_id and client_request_fingerprint come together")
+    if client_request_id is not None and not 1 <= len(client_request_id) <= 256:
+        raise ValueError("client_request_id must be 1-256 characters")
 
 
 class PostgresConversationCommands(PostgresRepository):
@@ -31,6 +42,8 @@ class PostgresConversationCommands(PostgresRepository):
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
         mcp_servers: list[str] | None = None,
+        client_request_id: str | None = None,
+        client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it.
 
@@ -38,46 +51,115 @@ class PostgresConversationCommands(PostgresRepository):
         server-owned default.  This matters for internal producers that call
         the store directly: bypassing the HTTP route must not silently turn a
         secure deployment's jobs into ``trusted-v1`` work.
+
+        ``client_request_id`` is the caller's key for this one submission,
+        unique per owner, with ``client_request_fingerprint`` describing what
+        was submitted under it. A resend with the same pair returns the job
+        the first send created; the same key with a different fingerprint
+        returns ``{"error": "client_request_conflict"}`` instead of someone
+        else's task. Both or neither.
         """
+        _check_client_request(client_request_id, client_request_fingerprint)
+        if client_request_id is not None:
+            replayed = await self.replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            if replayed is not None:
+                return replayed
+        try:
+            return await self._create_job(
+                user_id=user_id,
+                repo=repo,
+                task_prompt=task_prompt,
+                runtime=runtime,
+                model=model,
+                execution_profile=execution_profile,
+                reasoning_effort=reasoning_effort,
+                base_sha=base_sha,
+                setup_script=setup_script,
+                metadata=metadata,
+                mcp_servers=mcp_servers,
+                client_request_id=client_request_id,
+                client_request_fingerprint=client_request_fingerprint,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            # Two sends of one submission racing: the loser reads the winner.
+            if exc.constraint_name != "uq_agent_jobs_client_request":
+                raise
+            # The violated index is partial on a non-null key, so this key is
+            # the one that raced and the replay below is always a real lookup.
+            assert client_request_id is not None
+            replayed = await self.replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            assert replayed is not None
+            return replayed
+
+    async def _create_job(
+        self,
+        *,
+        user_id: str,
+        repo: str,
+        task_prompt: str,
+        runtime: str,
+        model: str,
+        execution_profile: str | None,
+        reasoning_effort: str | None,
+        base_sha: str | None,
+        setup_script: str | None,
+        metadata: dict[str, Any] | None,
+        mcp_servers: list[str] | None,
+        client_request_id: str | None,
+        client_request_fingerprint: str | None,
+    ) -> dict[str, Any]:
+        """The one-transaction body of :meth:`create_job`."""
         if execution_profile is None:
             execution_profile = default_execution_profile().value
         job_id = _ids._new_job_id()
         thread_id = _ids._new_thread_id()
         async with self._pool.acquire() as conn, conn.transaction():
+            # What every turn of this conversation shares is written once,
+            # here, on the thread; the turns below carry only their own.
             await conn.execute(
                 """
-                INSERT INTO agent_threads (id, user_id, repo, title, title_source)
-                VALUES ($1, $2, $3, $4, 'fallback')
+                INSERT INTO agent_threads
+                    (id, user_id, repo, title, title_source,
+                     setup_script, execution_profile, mcp_servers)
+                VALUES ($1, $2, $3, $4, 'fallback', $5, $6, $7)
                 """,
                 thread_id,
                 user_id,
                 repo,
                 fallback_title(task_prompt),
+                setup_script,
+                execution_profile,
+                list(mcp_servers or []),
             )
-            row = await conn.fetchrow(
-                f"""
+            await conn.execute(
+                """
                 INSERT INTO agent_jobs
-                    (id, thread_id, turn_no, user_id, repo, base_sha, task_prompt,
-                     setup_script, runtime, model, execution_profile, reasoning_effort,
-                     metadata, mcp_servers, retained_followup_eligible)
-                VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                        $12::jsonb, $13, TRUE)
-                RETURNING {_rows._JOB_COLUMNS}
+                    (id, thread_id, turn_no, user_id, base_sha, task_prompt,
+                     runtime, model, reasoning_effort, metadata,
+                     client_request_id, client_request_fingerprint)
+                VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
                 """,
                 job_id,
                 thread_id,
                 user_id,
-                repo,
                 base_sha,
                 task_prompt,
-                setup_script,
                 runtime,
                 model,
-                execution_profile,
                 reasoning_effort,
                 json.dumps(metadata) if metadata is not None else None,
-                list(mcp_servers or []),
+                client_request_id,
+                client_request_fingerprint,
             )
+            row = await conn.fetchrow(f"{_rows._JOB_SELECT} WHERE j.id = $1", job_id)
             await conn.execute(
                 """
                 INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
@@ -102,20 +184,105 @@ class PostgresConversationCommands(PostgresRepository):
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
+        client_request_id: str | None = None,
+        client_request_fingerprint: str | None = None,
     ) -> dict[str, Any] | None:
         """Append a user turn and create the run that will answer it.
 
         ``reasoning_effort`` overrides the inherited depth; omitting it keeps
         the parent's, as an omitted model does. ``reset_reasoning_effort``
-        clears it back to Auto — the one thing a null override cannot express,
+        clears it back to Auto -- the one thing a null override cannot express,
         since null is what "inherit" already sends.
 
-        A follow-up submitted while the latest turn is active is stored as
-        ``waiting``. The thread row is locked before selecting that turn, so
+        Every follow-up is ``queued`` until all earlier turns have finished.
+        The thread row is locked before selecting the latest turn, so
         concurrent submissions form one linear chain instead of siblings that
         could later mutate the same branch at once. A request made from an old
         turn also appends to the current tip, matching chat semantics.
+
+        ``client_request_id`` and ``client_request_fingerprint`` work as for
+        :meth:`create_job`: a resend returns the turn the first send made,
+        the same key under different content returns
+        ``{"error": "client_request_conflict"}``.
         """
+        _check_client_request(client_request_id, client_request_fingerprint)
+        if client_request_id is not None:
+            replayed = await self.replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            if replayed is not None:
+                return replayed
+        try:
+            return await self._create_follow_up(
+                parent_job_id=parent_job_id,
+                user_id=user_id,
+                prompt=prompt,
+                runtime=runtime,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                reset_reasoning_effort=reset_reasoning_effort,
+                client_request_id=client_request_id,
+                client_request_fingerprint=client_request_fingerprint,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name != "uq_agent_jobs_client_request":
+                raise
+            # The violated index is partial on a non-null key, so this key is
+            # the one that raced and the replay below is always a real lookup.
+            assert client_request_id is not None
+            replayed = await self.replayed_submission(
+                user_id=user_id,
+                client_request_id=client_request_id,
+                fingerprint=client_request_fingerprint,
+            )
+            assert replayed is not None
+            return replayed
+
+    async def replayed_submission(
+        self, *, user_id: str, client_request_id: str, fingerprint: str | None
+    ) -> dict[str, Any] | None:
+        """The job an owner's key already made, a conflict, or ``None`` for a new key.
+
+        Public because the routes ask it *before* their checks that can change
+        between two sends of one submission -- model resolution, repo
+        entitlement, tool-server connections, whether the session is still
+        open. A resend must reach the job the first send made whatever has
+        happened since; only a key that has never been used runs those checks.
+        :meth:`create_job` and :meth:`create_follow_up` still ask it
+        themselves, so a race that slips past the route is still resolved by
+        the unique index rather than by a second task.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, client_request_fingerprint FROM agent_jobs "
+                "WHERE user_id = $1 AND client_request_id = $2",
+                user_id,
+                client_request_id,
+            )
+        if row is None:
+            return None
+        if row["client_request_fingerprint"] != fingerprint:
+            return {"error": "client_request_conflict"}
+        job_id = str(row["id"])
+        async with self._pool.acquire() as conn:
+            return await _getters.get_job_projection(conn, job_id)
+
+    async def _create_follow_up(
+        self,
+        *,
+        parent_job_id: str,
+        user_id: str,
+        prompt: str,
+        runtime: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+        reset_reasoning_effort: bool,
+        client_request_id: str | None,
+        client_request_fingerprint: str | None,
+    ) -> dict[str, Any] | None:
+        """The one-transaction body of :meth:`create_follow_up`."""
         job_id = _ids._new_job_id()
         async with self._pool.acquire() as conn, conn.transaction():
             requested = await conn.fetchrow(
@@ -137,8 +304,8 @@ class PostgresConversationCommands(PostgresRepository):
                 return {"error": "session_archived"}
             thread_id = thread["id"]
             parent = await conn.fetchrow(
-                f"SELECT {_rows._JOB_COLUMNS} FROM agent_jobs WHERE thread_id = $1 "
-                "ORDER BY turn_no DESC LIMIT 1 FOR UPDATE",
+                f"{_rows._JOB_SELECT} WHERE j.thread_id = $1 "
+                "ORDER BY j.turn_no DESC LIMIT 1 FOR UPDATE OF j",
                 thread_id,
             )
             if parent is None:  # Defensive: every thread is created with turn one.
@@ -167,29 +334,14 @@ class PostgresConversationCommands(PostgresRepository):
                 SELECT g.state, m.context_status, TRUE AS shared_live
                 FROM agent_thread_sandbox_memberships m
                 JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                WHERE m.thread_id = $1 AND g.mode = 'shared_live'
+                WHERE m.thread_id = $1
                 FOR UPDATE OF g
                 """,
                 thread_id,
             )
-            if sandbox is None:
-                historical_sandbox = await conn.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM agent_thread_sandboxes WHERE thread_id = $1)",
-                    thread_id,
-                )
-                if historical_sandbox:
-                    return {"error": "sandbox_context_lost"}
             if sandbox is not None and (
                 sandbox["context_status"] == "lost" or sandbox["state"] in {"stopped_dirty", "lost"}
             ):
-                return {"error": "sandbox_context_lost"}
-            if sandbox is None and parent["retained_followup_eligible"] is not True:
-                # Migration 0025 leaves every pre-cutover row NULL. It may
-                # still be in flight on a disposable runner, so accepting a
-                # waiting child now could later promote that child into a new
-                # retained group and silently fabricate continuity. Only an
-                # explicit post-cutover TRUE may proceed without an existing
-                # retained membership.
                 return {"error": "sandbox_context_lost"}
             if sandbox is None and parent["state"] == _execution.SUCCEEDED:
                 # A successful native turn must have settled inside its group.
@@ -197,45 +349,38 @@ class PostgresConversationCommands(PostgresRepository):
                 # source from which the new runtime can fabricate continuity.
                 return {"error": "sandbox_context_lost"}
             turn_no = parent["turn_no"] + 1
-            parent_ready = parent["state"] in (_execution.FAILED, _execution.CANCELLED) or (
-                parent["state"] == _execution.SUCCEEDED and sandbox is not None
-            )
-            state = _execution.QUEUED if parent_ready else _execution.WAITING
-            row = await conn.fetchrow(
-                f"""
+            # Repo, setup script, execution profile and tool servers are the
+            # thread's, not copied per turn: the next turn of a conversation
+            # runs with the surface the thread has been running with, and a
+            # follow-up cannot quietly gain a server the owner never chose.
+            await conn.execute(
+                """
                 INSERT INTO agent_jobs
-                    (id, thread_id, parent_job_id, turn_no, user_id, repo, base_sha,
-                     task_prompt, setup_script, runtime, model, execution_profile,
-                     reasoning_effort, state, metadata, mcp_servers,
-                     retained_followup_eligible)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                        $14, $15::jsonb, $16, TRUE)
-                RETURNING {_rows._JOB_COLUMNS}
+                    (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
+                     task_prompt, runtime, model, reasoning_effort, state, metadata,
+                     client_request_id, client_request_fingerprint)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14)
                 """,
                 job_id,
                 thread_id,
                 parent["id"],
                 turn_no,
                 user_id,
-                parent["repo"],
                 parent["published_commit_sha"] or parent["base_sha"],
                 prompt,
-                parent["setup_script"],
                 runtime or parent["runtime"],
                 model or parent["model"],
-                parent["execution_profile"],
                 None
                 if reset_reasoning_effort
                 else (reasoning_effort or parent["reasoning_effort"]),
-                state,
+                _execution.QUEUED,
                 json.dumps(_rows.load_json(parent["metadata"]))
                 if parent["metadata"] is not None
                 else None,
-                # Inherited, not re-resolved: the next turn of a conversation
-                # gets the tool surface the thread has been running with, so a
-                # follow-up cannot quietly gain a server the owner never chose.
-                list(parent["mcp_servers"] or []),
+                client_request_id,
+                client_request_fingerprint,
             )
+            row = await conn.fetchrow(f"{_rows._JOB_SELECT} WHERE j.id = $1", job_id)
             await conn.execute(
                 """
                 INSERT INTO agent_thread_messages (thread_id, job_id, role, content)

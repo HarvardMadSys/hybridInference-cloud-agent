@@ -17,6 +17,7 @@ class AuditRepository(Protocol):
         self,
         *,
         action: str,
+        actor_id: str,
         admin_ip: str,
         target_user_id: str | None = None,
         details: dict[str, Any] | None = None,

@@ -77,3 +77,7 @@ class ConversationQueries(Protocol):
     ) -> dict[str, Any]:
         """Page complete conversations independently of their number of turns."""
         ...
+
+    async def sweep_queued_follow_ups(self) -> None:
+        """Fail queued follow-ups whose earlier native context is unavailable."""
+        ...

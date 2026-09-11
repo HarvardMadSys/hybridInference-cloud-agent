@@ -52,7 +52,6 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "state": row["state"],
         "cancel_requested": row["cancel_requested"],
         "terminal_resume_pending": row["terminal_resume_pending"],
-        "retained_followup_eligible": row["retained_followup_eligible"],
         "current_attempt_id": row["current_attempt_id"],
         "published_pr_url": row["published_pr_url"],
         "published_commit_sha": row["published_commit_sha"],
@@ -74,17 +73,32 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
 
 
 _JOB_COLUMNS = (
-    "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, repo, base_sha, task_prompt, "
-    "setup_script, runtime, model, execution_profile, reasoning_effort, state, "
-    "cancel_requested, terminal_resume_pending, retained_followup_eligible, current_attempt_id, "
+    "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, base_sha, task_prompt, "
+    "runtime, model, reasoning_effort, state, "
+    "cancel_requested, terminal_resume_pending, current_attempt_id, "
     "published_pr_url, published_commit_sha, detail, "
-    "metadata, fork_source_job_id, mcp_servers, "
+    "metadata, fork_source_job_id, "
     "created_at, updated_at"
 )
 
+#: The four fields a conversation owns rather than a turn. Migration 0003 moved
+#: them to ``agent_threads``, so a job read takes them from the join.
+_THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile, t.mcp_servers"
 
-_QUALIFIED_JOB_COLUMNS = ", ".join(
-    f"j.{column.strip()}" for column in _rows._JOB_COLUMNS.split(",")
+
+_QUALIFIED_JOB_COLUMNS = (
+    ", ".join(f"j.{column.strip()}" for column in _rows._JOB_COLUMNS.split(","))
+    + ", "
+    + _THREAD_CONFIG_COLUMNS
+)
+
+
+#: A job read that answers :func:`job_row_to_dict` on its own: the thread is
+#: joined because the title, the title source and the pin live there, and a
+#: creation that returns a job reports all three.
+_JOB_SELECT = (
+    f"SELECT {_rows._QUALIFIED_JOB_COLUMNS}, t.title, t.title_source, t.pinned_at"
+    " FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id"
 )
 
 

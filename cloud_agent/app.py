@@ -682,7 +682,7 @@ async def reap_expired_attempts(
         # Normal ordering is enforced at claim time; this cleanup uses the
         # partial queued indexes instead of running on every runner poll.
         try:
-            await store.sweep_queued_follow_ups()
+            await conversations.sweep_queued_follow_ups()
         except Exception:
             logger.warning("Queued follow-up sweep failed", exc_info=True)
         try:
@@ -847,6 +847,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
     from cloud_agent.storage.admin_queries import AdminRunQueries
+    from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 
     dsn = os.environ.get(ENV_DATABASE_URL, "")
     if not dsn:
@@ -876,6 +877,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     # open their own read-only transaction, and a route reaching for a pool to
     # build one is what this refactor removes.
     app.state.admin_queries = AdminRunQueries(pool)
+    app.state.admin_usage_queries = AdminUsageQueries(pool)
 
     app.state.gateway = GatewayClient()
     # The sandbox's credential is minted at the gateway now (E9), so the claim

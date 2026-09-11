@@ -9,7 +9,7 @@ missing and is visible as coverage rather than as zero usage.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import AwareDatetime  # noqa: TC002 — FastAPI resolves this at runtime.
@@ -28,18 +28,14 @@ from cloud_agent.admin_usage import (
     prepare_jobs,
     resolve_usage_window,
 )
-from cloud_agent.api.deps import get_agent_job_store, verify_admin_access
-from cloud_agent.api.routes import _require_store
+from cloud_agent.api.deps import verify_admin_access
+from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage.admin_usage_queries import (
     AdminUsageQueries,
     UsageQueryTooLarge,
     UsageQueryUnavailable,
 )
-from cloud_agent.storage.store import TERMINAL_STATES
-
-if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
 
@@ -57,11 +53,14 @@ def _no_store(response: Response) -> None:
 router = APIRouter(prefix="/admin/agent/usage", dependencies=[Depends(_no_store)])
 
 
-def get_admin_usage_queries(
-    store: AgentJobStore | None = Depends(get_agent_job_store),
-) -> AdminUsageQueries:
-    """Expose only the bounded aggregate projections to this route."""
-    return AdminUsageQueries(_require_store(store)._pool)
+def get_admin_usage_queries(request: Request) -> AdminUsageQueries | None:
+    """Expose only the bounded aggregate projections to this route.
+
+    Built by the lifespan over the pool it owns, like ``AdminRunQueries``: a
+    route reaching for a pool to build its own read-only queries is the access
+    this refactor removes, and this object opens a transaction of its own.
+    """
+    return getattr(request.app.state, "admin_usage_queries", None)
 
 
 def _error(status: int, error_type: str, message: str) -> HTTPException:
@@ -82,7 +81,7 @@ async def get_admin_usage(
     runtime: str | None = Query(None, max_length=128),
     repo: str | None = Query(None, max_length=256),
     _admin: str = Depends(verify_admin_access),
-    queries: AdminUsageQueries = Depends(get_admin_usage_queries),
+    queries: AdminUsageQueries | None = Depends(get_admin_usage_queries),
 ) -> AdminUsageResponse:
     """Aggregate cached usage for runs created in ``[since, until)``.
 
@@ -108,6 +107,8 @@ async def get_admin_usage(
     # One clock reading for the window and for the response, so a client can
     # tell when the cached numbers were read rather than when the ledger was.
     generated_at = datetime.now(UTC)
+    if queries is None:
+        raise _error(503, _UNAVAILABLE, "Usage could not be read right now. Please try again.")
 
     try:
         cohort, rows = await queries.selection(

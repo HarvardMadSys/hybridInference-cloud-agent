@@ -7,6 +7,7 @@ import hashlib
 import json
 from typing import Any
 
+import cloud_agent.storage._sql.followups as _followups
 import cloud_agent.storage._sql.rows as _rows
 import cloud_agent.storage._sql.sessions as _sessions
 from cloud_agent.storage.repositories._base import PostgresRepository
@@ -356,3 +357,13 @@ class PostgresConversationQueries(PostgresRepository):
                 else None
             ),
         }
+
+    async def sweep_queued_follow_ups(self) -> None:
+        """Fail queued follow-ups whose earlier native context is unavailable.
+
+        Claiming already excludes these rows. This periodic safety net gives
+        legacy pending turns a terminal answer using the partial queued
+        indexes, without a cleanup scan on every claim poll.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await _followups.fail_discontinuous_follow_ups(conn)
