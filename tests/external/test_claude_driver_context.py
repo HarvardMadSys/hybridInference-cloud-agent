@@ -169,7 +169,15 @@ def test_driver_flushes_last_reply_before_immediate_resume_and_failed_turn_retry
     assert session.runtime.session_id == session_id
     _assert_history(gateway.requests[-1], expected)
 
-    gateway.response_status = 401
+    # 400, not 401: the pinned CLI answers an auth failure with a long
+    # credential-refresh retry, so a 401 turn settles as failed only after
+    # about three minutes of silence — and settling is all this line needs.
+    # The retry is not what this test asserts; it asserts the flush, the close
+    # and the resume that follow, and the 400 drives those identically (the
+    # gateway's error body is the same for any non-200). A credential failure
+    # worth asserting belongs in test_credential_rotation.py, where it would
+    # arrive with an assertion rather than a wait.
+    gateway.response_status = 400
     failed, events = _turn(session, "Retry continuity probe.")
     assert any(event.event_type == ERROR for event in events)
     assert failed.status == "failed"

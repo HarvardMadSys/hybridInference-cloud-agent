@@ -475,6 +475,12 @@ describe('capacity columns', () => {
     expect(within(row).getByText('12s ago')).toBeInTheDocument();
     // The poll-time column it replaced is gone.
     expect(screen.queryByText('Last polled')).not.toBeInTheDocument();
+    // Each load figure carries a bar on the chart's own 0-100 scale, so the
+    // fleet is read down the column without reading the numbers. The bar is
+    // the unrounded reading, which is why it is not 37.
+    expect(
+      within(row).getByText('37%').closest('div')!.querySelector('span[aria-hidden] > span'),
+    ).toHaveStyle({ width: '37.24%' });
   });
 
   it('names the reason a value is missing instead of printing zero', async () => {
@@ -492,6 +498,15 @@ describe('capacity columns', () => {
     const warm = (await screen.findByRole('rowheader', { name: 'warm' })).closest('tr')!;
     expect(within(warm).getByText('Warming up')).toBeInTheDocument();
     expect(within(warm).queryByText('0%')).not.toBeInTheDocument();
+    // No reading, no bar: an empty track beside "Warming up" would draw the
+    // zero this cell exists to refuse. The memory reading beside it is real,
+    // so its bar is still there.
+    expect(
+      within(warm).getByText('Warming up').closest('div')!.querySelector('[aria-hidden]'),
+    ).toBeNull();
+    expect(
+      within(warm).getByText('33% · 42 / 128 GiB').closest('div')!.querySelector('[aria-hidden]'),
+    ).not.toBeNull();
     const silent = screen.getByRole('rowheader', { name: 'silent' }).closest('tr')!;
     // Both load cells say so, and the sandbox cell does not claim zero.
     expect(within(silent).getAllByText('Not measured').length).toBeGreaterThanOrEqual(2);
@@ -835,6 +850,85 @@ describe('capacity panel', () => {
       expect(mocked.history).toHaveBeenCalledWith('box-b', '1h', expect.anything()),
     );
     expect(screen.queryByText(/re-enrolled/)).not.toBeInTheDocument();
+  });
+
+  it('does not offer a removed enrollment as a curve source', async () => {
+    // One live environment and one that has been removed, sharing a physical
+    // name. The retired row is not an alternative to switch to: showing it is
+    // what turned this control into the server's own name with a suffix.
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          host: 'rtx6000b-kata',
+          labels: { physical_host: 'rtx6000b' },
+          capacity: capacity(),
+        }),
+        host({
+          host: 'rtx6000b',
+          labels: { physical_host: 'rtx6000b' },
+          status: 'disabled',
+          capacity: null,
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    await openPanel('rtx6000b');
+
+    await vi.waitFor(() => expect(screen.getByText('Curve: rtx6000b-kata')).toBeInTheDocument());
+    expect(screen.queryByLabelText('Curve source')).not.toBeInTheDocument();
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('rtx6000b-kata', '1h', expect.anything()),
+    );
+  });
+
+  it('moves off a source that is removed while the panel is open', async () => {
+    // The operator had selected the second environment; it is removed a poll
+    // later. The panel must fall back to a live one rather than keep asking
+    // for the history of an enrollment it no longer offers.
+    vi.useFakeTimers();
+    const onBox = (name: string, status: string, sampledAt: string) =>
+      host({
+        host: name,
+        labels: { physical_host: 'box' },
+        status,
+        capacity: capacity({ sampled_at: sampledAt }),
+      });
+    mocked.list.mockResolvedValue(
+      pool([
+        onBox('box-a', 'online', '2026-09-11T12:34:30Z'),
+        onBox('box-b', 'online', '2026-09-11T12:34:00Z'),
+      ]),
+    );
+    mocked.history.mockImplementation(async (name: string) => history({ host: name }));
+    render(<AdminHostsPage />);
+
+    await openPanel('box');
+    await vi.waitFor(() => expect(screen.getByLabelText('Curve source')).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText('Curve source'), { target: { value: 'box-b' } });
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-b', '1h', expect.anything()),
+    );
+
+    mocked.history.mockClear();
+    mocked.list.mockResolvedValue(
+      pool([
+        onBox('box-a', 'online', '2026-09-11T12:34:30Z'),
+        host({
+          host: 'box-b',
+          labels: { physical_host: 'box' },
+          status: 'disabled',
+          capacity: null,
+        }),
+      ]),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything()),
+    );
+    expect(mocked.history).not.toHaveBeenCalledWith('box-b', '1h', expect.anything());
+    expect(screen.queryByLabelText('Curve source')).not.toBeInTheDocument();
   });
 
   it('stops polling a panel that has been closed', async () => {

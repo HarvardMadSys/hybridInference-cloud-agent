@@ -916,12 +916,17 @@ export interface ChartView {
   bottom: number;
 }
 
+// Flat on purpose: the y axis is fixed at 0-100, so a machine at 8% draws near
+// the baseline and everything above it is the empty headroom that says so. A
+// tall box turns that headroom into most of the panel and reads as a chart that
+// failed to load. `bottom` clears the tick labels and the axis title under
+// them; `left` clears "100%", the widest thing in the y-axis label column.
 export const CHART_VIEW: ChartView = {
   width: 520,
-  height: 220,
+  height: 148,
   left: 44,
   right: 12,
-  top: 12,
+  top: 8,
   bottom: 30,
 };
 

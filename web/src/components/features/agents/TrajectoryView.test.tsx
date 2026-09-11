@@ -1,15 +1,27 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { useState } from 'react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { useMemo, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentThreadEventApi } from '@/lib/api/agents';
 import { TrajectoryView } from './TrajectoryView';
 import { buildTrajectorySteps, type StoredEvent } from './trajectorySteps';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+/** A pointer event built from a mouse event, for a jsdom without PointerEvent. */
+function fallbackPointer(type: string, init: PointerEventInit): PointerEvent {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true });
+  for (const [key, value] of Object.entries(init)) {
+    Object.defineProperty(event, key, { value, configurable: true });
+  }
+  return event as PointerEvent;
+}
 
 function event(over: Partial<AgentThreadEventApi> & { id: number }): AgentThreadEventApi {
   return {
@@ -54,7 +66,10 @@ function Harness({
 }) {
   const [query, setQuery] = useState(initialQuery);
   const [selected, setSelected] = useState<string | null>(null);
-  const steps = buildTrajectorySteps(events);
+  // Memoized the way the page memoizes them: a query change must not rebuild
+  // the steps, or an effect that depends on them would hide the difference
+  // between "the list changed" and "the filter changed".
+  const steps = useMemo(() => buildTrajectorySteps(events), [events]);
   return (
     <TrajectoryView
       events={events}
@@ -222,5 +237,384 @@ describe('TrajectoryView', () => {
     );
     expect(secondScroll).toHaveBeenCalledTimes(1);
     expect(firstScroll).not.toHaveBeenCalled();
+  });
+});
+
+/** Eight distinct assistant messages: eight steps, with no pairing to reason about. */
+const MANY = Array.from({ length: 8 }, (_, index) =>
+  event({ id: index + 1, payload: { text: `step ${index + 1}` } }),
+);
+
+/** A call with a recorded duration, answered a moment after it finished. */
+const TIMED_REPLY = [
+  event({
+    id: 1,
+    event_type: 'tool_use',
+    payload: { id: 't1', name: 'Bash', input: { command: 'cargo build' } },
+    created_at: '2026-08-19T10:00:00.000Z',
+  }),
+  event({
+    id: 2,
+    event_type: 'tool_result',
+    payload: { tool_use_id: 't1', content: 'Compiling' },
+    created_at: '2026-08-19T10:00:15.000Z',
+  }),
+  event({
+    id: 3,
+    payload: { text: 'the build passes' },
+    created_at: '2026-08-19T10:00:16.000Z',
+  }),
+];
+
+describe('TrajectoryView overview', () => {
+  /** The projected layer: its width against the track is the zoom. */
+  function domain(): HTMLElement {
+    const node = document.querySelector<HTMLElement>('[data-timeline-domain]');
+    if (node === null) throw new Error('the overview rendered no domain layer');
+    return node;
+  }
+
+  function track(): HTMLElement {
+    return screen.getByRole('group', { name: /execution overview/i });
+  }
+
+  /** jsdom lays nothing out, so the track is given the width a card would have. */
+  function withTrackWidth(width = 400): void {
+    track().getBoundingClientRect = () =>
+      ({ left: 0, right: width, top: 0, bottom: 40, width, height: 40, x: 0, y: 0 }) as DOMRect;
+  }
+
+  /** Dispatch a wheel step and report whether the overview took it. */
+  function wheel(deltaY: number): boolean {
+    const event = new WheelEvent('wheel', { deltaY, bubbles: true, cancelable: true });
+    act(() => {
+      track().dispatchEvent(event);
+    });
+    return event.defaultPrevented;
+  }
+
+  /** A pointer event, whether or not the environment has a PointerEvent class. */
+  function pointer(type: string, init: PointerEventInit): void {
+    const event =
+      typeof PointerEvent === 'function'
+        ? new PointerEvent(type, { bubbles: true, cancelable: true, ...init })
+        : fallbackPointer(type, init);
+    act(() => {
+      track().dispatchEvent(event);
+    });
+  }
+
+  /** A left-button drag across the track, in client pixels. */
+  function drag(fromX: number, toX: number): void {
+    pointer('pointerdown', { button: 0, pointerId: 1, clientX: fromX, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: toX, clientY: 10 });
+    pointer('pointerup', { pointerId: 1, clientX: toX, clientY: 10 });
+  }
+
+  it('projects the whole run into the track while nothing is zoomed', () => {
+    render(<Harness events={EVENTS} />);
+
+    expect(domain().style.left).toBe('0%');
+    expect(domain().style.width).toBe('100%');
+    // Two steps are already the narrowest window the overview allows.
+    expect(screen.getByRole('button', { name: 'Zoom in' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Zoom out' })).toBeDisabled();
+  });
+
+  it('gives the wheel to the page when there is nothing left to zoom out to', () => {
+    render(<Harness events={MANY} />);
+
+    expect(wheel(100)).toBe(false);
+    expect(domain().style.width).toBe('100%');
+  });
+
+  it('zooms in around the pointer, and back out to the whole run', () => {
+    render(<Harness events={MANY} />);
+
+    expect(wheel(-100)).toBe(true);
+    expect(Number.parseFloat(domain().style.width)).toBeGreaterThan(100);
+
+    expect(wheel(100)).toBe(true);
+    expect(domain().style.width).toBe('100%');
+  });
+
+  it('steps with the buttons, and fits every step again', () => {
+    render(<Harness events={MANY} />);
+    const zoomIn = screen.getByRole('button', { name: 'Zoom in' });
+    const zoomOut = screen.getByRole('button', { name: 'Zoom out' });
+    const fit = screen.getByRole('button', { name: 'Fit every step' });
+
+    expect(zoomOut).toBeDisabled();
+    expect(fit).toBeDisabled();
+
+    fireEvent.click(zoomIn);
+    expect(Number.parseFloat(domain().style.width)).toBeGreaterThan(100);
+    expect(zoomOut).toBeEnabled();
+    expect(fit).toBeEnabled();
+
+    fireEvent.click(fit);
+    expect(domain().style.width).toBe('100%');
+    expect(zoomOut).toBeDisabled();
+  });
+
+  it('selects an interval on a drag and steps the rows outside it back', () => {
+    const { container } = render(<Harness events={MANY} />);
+    withTrackWidth();
+
+    drag(0, 100);
+
+    expect(container.querySelectorAll('[data-timeline-focus="inside"]').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('[data-timeline-focus="outside"]').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /of 8 · Clear/ })).toBeInTheDocument();
+  });
+
+  it('clears the interval on Escape, and from the control that counts it', () => {
+    const { container } = render(<Harness events={MANY} />);
+    withTrackWidth();
+
+    drag(0, 100);
+    expect(container.querySelector('[data-timeline-focus="outside"]')).not.toBeNull();
+
+    fireEvent.keyDown(track(), { key: 'Escape' });
+    expect(container.querySelector('[data-timeline-focus="outside"]')).toBeNull();
+
+    drag(0, 100);
+    fireEvent.click(screen.getByRole('button', { name: /of 8 · Clear/ }));
+    expect(container.querySelector('[data-timeline-focus="outside"]')).toBeNull();
+  });
+
+  it('draws a boundary where a turn starts', () => {
+    const twoTurns = [
+      event({ id: 1, job_id: 'ajob_0', turn_no: 1, payload: { text: 'first turn' } }),
+      event({ id: 2, job_id: 'ajob_1', turn_no: 2, payload: { text: 'second turn' } }),
+    ];
+    const { container } = render(<Harness events={twoTurns} />);
+
+    expect(container.querySelectorAll('[data-turn-boundary]')).toHaveLength(2);
+  });
+
+  it('projects recorded time when the reader asks for it', () => {
+    render(<Harness events={EVENTS} />);
+
+    const steps = screen.getByRole('button', { name: 'Steps' });
+    const time = screen.getByRole('button', { name: 'Time' });
+    expect(steps).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(time);
+
+    expect(time).toHaveAttribute('aria-pressed', 'true');
+    expect(steps).toHaveAttribute('aria-pressed', 'false');
+    // A recorded interval is as wide as it was long, so the mark is a share of
+    // the domain rather than one operation. (The width itself is a `max()`
+    // expression jsdom's CSS parser drops, hence the data attribute.)
+    const bash = screen.getByRole('button', { name: 'Bash (tool, step 1)' });
+    expect(bash).toHaveAttribute('data-recorded-width', 'true');
+    expect(bash).not.toHaveAttribute('data-equal-duration');
+  });
+
+  it('says so when the run recorded no timing to project', () => {
+    render(<Harness events={MANY.map((item) => ({ ...item, created_at: '' }))} />);
+
+    expect(screen.getByRole('button', { name: 'Time' })).toBeDisabled();
+  });
+
+  it('keeps the step a mark names selected while the window moves', () => {
+    render(<Harness events={MANY} />);
+    const mark = screen.getByRole('button', { name: 'Assistant message (assistant, step 1)' });
+
+    fireEvent.click(mark);
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    expect(mark).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('pans from the window at pointer-down, never from the last move', () => {
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    pointer('pointerdown', { button: 2, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 220, clientY: 10 });
+    const panned = domain().style.left;
+    // The same coordinate again is no further movement, not the same
+    // displacement applied a second time.
+    pointer('pointermove', { pointerId: 1, clientX: 220, clientY: 10 });
+
+    expect(panned).not.toBe('-0%');
+    expect(domain().style.left).toBe(panned);
+  });
+
+  it('does not carry an interval from one projection into the other', () => {
+    const { container } = render(<Harness events={MANY} />);
+    withTrackWidth();
+
+    drag(0, 100);
+    expect(container.querySelectorAll('[data-timeline-focus="outside"]').length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Time' }));
+
+    // Operations are not milliseconds: the interval that meant five steps must
+    // not be read as five milliseconds.
+    expect(container.querySelectorAll('[data-timeline-focus="outside"]')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: /of 8 · Clear/ })).toBeNull();
+  });
+
+  it('brings a selected mark inside the right edge of the track', () => {
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    const rows = document.querySelectorAll<HTMLElement>('[data-step-key]');
+
+    fireEvent.click(rows[rows.length - 1]);
+
+    const mark = document.querySelector<HTMLElement>('[data-span-key][aria-pressed="true"]');
+    expect(mark).not.toBeNull();
+    const left = Number.parseFloat(domain().style.left);
+    const width = Number.parseFloat(domain().style.width);
+    const markLeft = Number.parseFloat((mark as HTMLElement).style.left);
+    // Where the mark lands on the track once the layer's own projection is
+    // applied. On the edge it has no visible width at all.
+    expect(left + markLeft * (width / 100)).toBeLessThan(100);
+  });
+
+  it('keeps the last zero-duration mark inside the track', () => {
+    render(<Harness events={TIMED_REPLY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Time' }));
+
+    // The reply follows the call with no recorded duration, so once the idle
+    // time is compressed it sits exactly at the end of the domain, where a mark
+    // drawn rightward from that point is clipped away entirely.
+    const reply = screen.getByRole('button', { name: 'Assistant message (assistant, step 2)' });
+    expect(reply).toHaveAttribute('data-edge-anchored', 'true');
+    expect(reply.style.transform).toBe('translateX(-100%)');
+  });
+
+  it('does not pull an unchanged selection back when a step arrives', () => {
+    const { rerender } = render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    fireEvent.click(document.querySelectorAll<HTMLElement>('[data-step-key]')[0]);
+    // The reader then pans somewhere else entirely.
+    pointer('pointerdown', { button: 2, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 60, clientY: 10 });
+    pointer('pointerup', { pointerId: 1, clientX: 60, clientY: 10 });
+    const parked = domain().style.left;
+
+    rerender(<Harness events={[...MANY, event({ id: 99, payload: { text: 'new step' } })]} />);
+
+    expect(domain().style.left).toBe(parked);
+  });
+
+  it('does not scroll back to an unchanged interval when a step arrives', () => {
+    const { rerender } = render(<Harness events={MANY} />);
+    withTrackWidth();
+    const first = document.querySelectorAll<HTMLElement>('[data-step-key]')[0];
+    const scroll = vi.fn();
+    first.scrollIntoView = scroll;
+
+    drag(0, 100);
+    expect(scroll).toHaveBeenCalledTimes(1);
+    scroll.mockClear();
+
+    rerender(<Harness events={[...MANY, event({ id: 99, payload: { text: 'new step' } })]} />);
+
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it('keeps walking the window while the pointer is held past an edge', () => {
+    vi.useFakeTimers();
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    pointer('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 410, clientY: 10 });
+    const first = domain().style.left;
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+
+    expect(domain().style.left).not.toBe(first);
+  });
+
+  it('brings the interval into view once the search stops hiding its first row', () => {
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+    const original = HTMLElement.prototype.scrollIntoView;
+    const scroll = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scroll;
+    try {
+      // The interval covers the first steps and the search hides all of them,
+      // so there is no row to bring into view yet.
+      fireEvent.change(screen.getByLabelText('Search steps'), { target: { value: 'step 8' } });
+      drag(0, 100);
+      expect(screen.getByRole('button', { name: /of 8 · Clear/ })).toBeInTheDocument();
+
+      scroll.mockClear();
+      fireEvent.change(screen.getByLabelText('Search steps'), { target: { value: '' } });
+
+      // Clearing the query rebuilds the visible rows, not the steps.
+      expect(scroll).toHaveBeenCalled();
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
+  it('cancels the gesture in flight on Escape, edge pan included', () => {
+    vi.useFakeTimers();
+    const { container } = render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    drag(0, 100);
+    expect(container.querySelector('[data-timeline-focus="outside"]')).not.toBeNull();
+
+    pointer('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 410, clientY: 10 });
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    fireEvent.keyDown(track(), { key: 'Escape' });
+
+    const parked = domain().style.left;
+    expect(container.querySelector('[data-timeline-selection][data-dragging="true"]')).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(domain().style.left).toBe(parked);
+
+    // The release must not commit the selection the reader just cancelled.
+    pointer('pointerup', { pointerId: 1, clientX: 410, clientY: 10 });
+    expect(container.querySelector('[data-timeline-focus="outside"]')).toBeNull();
+  });
+
+  it('walks into steps appended while the pointer is held at an edge', () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<Harness events={MANY} />);
+    withTrackWidth();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+
+    pointer('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 410, clientY: 10 });
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+
+    const grown = [
+      ...MANY,
+      ...MANY.map((item, index) =>
+        event({ id: index + 9, payload: { text: `new step ${index + 9}` } }),
+      ),
+    ];
+    rerender(<Harness events={grown} />);
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    pointer('pointerup', { pointerId: 1, clientX: 410, clientY: 10 });
+
+    // A gesture that had reached the old end carries on into the steps that
+    // arrived while it was held.
+    expect(document.querySelectorAll('[data-timeline-focus="inside"]').length).toBeGreaterThan(8);
   });
 });

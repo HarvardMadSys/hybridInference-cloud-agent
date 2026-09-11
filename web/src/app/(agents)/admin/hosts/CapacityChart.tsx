@@ -134,9 +134,12 @@ export default function CapacityChart({
     if (index >= 0) select(index);
   };
 
-  const labelTicks = [since, midpoint(since, until), until].filter(
-    (value): value is string => value !== null,
-  );
+  // The two ends of the window, and nothing between them: the middle tick sat
+  // exactly where an axis title belongs, and a tick and a title on the same
+  // column read as one label that wrapped. Two ends are what this axis is for —
+  // the window is stated in the panel above it, and the reader is reading a
+  // shape, not a value off the axis.
+  const labelTicks = [since, until];
   const wideGaps = gaps
     .filter((gap) => gap.endX - gap.startX >= MIN_GAP_LABEL_WIDTH)
     .slice(0, MAX_GAP_LABELS);
@@ -145,12 +148,16 @@ export default function CapacityChart({
 
   return (
     <figure className="m-0 flex min-w-0 flex-col">
-      <figcaption className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <span className="text-sm font-medium text-gray-800 dark:text-gray-100">{title}</span>
+      {/* Title and its figure on the same line, next to each other. Pushed to
+          opposite ends of a half-width column, this row put the CPU peak
+          directly against the memory chart's title, where it read as the
+          memory number. */}
+      <figcaption className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span className="text-sm font-semibold text-gray-900 dark:text-gray-50">{title}</span>
         <span className="text-[11px] text-gray-500 dark:text-gray-400">
           {highest === null
-            ? `${observed} observations`
-            : `Highest observed in range: ${highest.toFixed(1)}%`}
+            ? `· ${observed} observations`
+            : `· Highest observed in range: ${highest.toFixed(1)}%`}
         </span>
       </figcaption>
 
@@ -164,7 +171,11 @@ export default function CapacityChart({
       <div className="relative mt-2">
         <svg
           viewBox={`0 0 ${CHART_VIEW.width} ${CHART_VIEW.height}`}
-          className={`aspect-[520/220] w-full touch-pan-y select-none ${stale ? 'opacity-70' : ''}`}
+          // Derived from the view box rather than written twice: a class value
+          // here and a constant in capacity.ts drift silently, and the drift
+          // shows up as tick labels that no longer line up with the plot.
+          style={{ aspectRatio: `${CHART_VIEW.width} / ${CHART_VIEW.height}` }}
+          className={`w-full touch-pan-y select-none ${stale ? 'opacity-70' : ''}`}
           role="img"
           aria-labelledby={titleId}
           aria-describedby={summaryId}
@@ -180,15 +191,15 @@ export default function CapacityChart({
                   x2={geometry.plotRight}
                   y1={y}
                   y2={y}
-                  className="stroke-gray-100 dark:stroke-white/10"
+                  className="stroke-gray-200/80 dark:stroke-white/10"
                   strokeWidth={1}
                 />
                 <text
                   x={geometry.plotLeft - 6}
-                  y={y + 3}
+                  y={y + 3.5}
                   textAnchor="end"
-                  fontSize={9}
-                  className="fill-gray-400 dark:fill-gray-500"
+                  fontSize={10}
+                  className="fill-gray-500 dark:fill-gray-400"
                 >
                   {tick}%
                 </text>
@@ -217,24 +228,29 @@ export default function CapacityChart({
             <text
               key={tick}
               x={chartXForTime(Date.parse(tick), sinceMs, untilMs)}
-              y={geometry.plotBottom + 14}
+              y={geometry.plotBottom + 15}
               textAnchor={
                 index === 0 ? 'start' : index === labelTicks.length - 1 ? 'end' : 'middle'
               }
-              fontSize={9}
-              className="fill-gray-400 dark:fill-gray-500"
+              fontSize={10}
+              className="fill-gray-500 dark:fill-gray-400"
             >
               {formatUtcAxisTick(tick, range)}
             </text>
           ))}
           {/* The zone is spelled out rather than implied: an operator reading
-              this beside a machine's own logs must not have to guess. */}
+              this beside a machine's own logs must not have to guess. It is
+              centred under the axis as its title, which is what it is. At the
+              right end it landed on a second line under "09:58" and read as a
+              tick label that wrapped; left-aligned it landed under the first
+              tick and read the same way; in the label column it read as that
+              tick's prefix. */}
           <text
-            x={geometry.plotRight}
-            y={geometry.plotBottom + 25}
-            textAnchor="end"
-            fontSize={9}
-            className="fill-gray-400 dark:fill-gray-500"
+            x={(geometry.plotLeft + geometry.plotRight) / 2}
+            y={geometry.plotBottom + 27}
+            textAnchor="middle"
+            fontSize={10}
+            className="fill-gray-500 dark:fill-gray-400"
           >
             UTC
           </text>
@@ -251,15 +267,30 @@ export default function CapacityChart({
                 className={lineClass(stale)}
               />
             ) : (
-              <polyline
-                key={segment[0].point.bucketAt}
-                points={segment.map((point) => `${point.x},${point.y}`).join(' ')}
-                fill="none"
-                strokeWidth={1.5}
-                strokeLinejoin="round"
-                strokeLinecap="round"
-                className={lineClass(stale)}
-              />
+              // The run is filled down to the baseline before it is stroked.
+              // On a fixed 0-100 axis an idle machine's line sits within a few
+              // pixels of the baseline, and without the fill a working chart
+              // and an empty one look the same at a glance. The polygon takes
+              // the segment's own points, so a gap is still a gap: nothing is
+              // filled across a minute nobody observed.
+              <g key={segment[0].point.bucketAt}>
+                <polygon
+                  points={[
+                    ...segment.map((point) => `${point.x},${point.y}`),
+                    `${segment[segment.length - 1].x},${geometry.plotBottom}`,
+                    `${segment[0].x},${geometry.plotBottom}`,
+                  ].join(' ')}
+                  className={areaClass(stale)}
+                />
+                <polyline
+                  points={segment.map((point) => `${point.x},${point.y}`).join(' ')}
+                  fill="none"
+                  strokeWidth={1.5}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  className={lineClass(stale)}
+                />
+              </g>
             ),
           )}
 
@@ -306,10 +337,18 @@ export default function CapacityChart({
         {selected && tooltip && (
           // aria-hidden because the slider below announces the same sentence:
           // reading it twice is worse than not reading it here.
+          //
+          // The bubble is centred on its point except near either edge of the
+          // plot, where centring it put half of it outside the panel and the
+          // text was clipped mid-word. Switching the anchor by position — not
+          // by measuring the bubble — needs no layout pass and cannot disagree
+          // with what is painted.
           <div
             aria-hidden
             style={{ left: `${(selected.x / CHART_VIEW.width) * 100}%` }}
-            className="pointer-events-none absolute top-0 -translate-x-1/2 whitespace-nowrap rounded-md border border-gray-200 bg-white px-2 py-0.5 text-[11px] text-gray-700 shadow-sm dark:border-white/10 dark:bg-gray-900 dark:text-gray-200"
+            className={`pointer-events-none absolute top-0 whitespace-nowrap rounded-md border border-gray-200 bg-white px-2 py-0.5 text-[11px] text-gray-700 shadow-sm dark:border-white/10 dark:bg-gray-900 dark:text-gray-200 ${tooltipAnchor(
+              selected.x,
+            )}`}
           >
             {tooltip}
           </div>
@@ -348,10 +387,23 @@ function lineClass(stale: boolean): string {
     : 'stroke-crimson dark:stroke-crimson-light';
 }
 
-/** The instant halfway between two ISO timestamps, or null if either is bad. */
-function midpoint(since: string, until: string): string | null {
-  const from = Date.parse(since);
-  const to = Date.parse(until);
-  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
-  return new Date((from + to) / 2).toISOString();
+/** The wash under a stroked run. Same colour, low enough to read as ground. */
+function areaClass(stale: boolean): string {
+  return stale ? 'fill-amber-500/10 dark:fill-amber-400/10' : 'fill-crimson/10';
+}
+
+/**
+ * How far from either edge of the plot the bubble must be to be centred safely.
+ *
+ * In SVG user units, and deliberately generous: the widest reading this chart
+ * draws is a memory tooltip carrying its byte detail, and half of that has to
+ * fit between the point and the edge. Being too generous only means the bubble
+ * stops centring slightly sooner, which costs nothing.
+ */
+const TOOLTIP_EDGE = 150;
+
+function tooltipAnchor(x: number): string {
+  if (x < CHART_VIEW.left + TOOLTIP_EDGE) return 'translate-x-0';
+  if (x > CHART_VIEW.width - CHART_VIEW.right - TOOLTIP_EDGE) return '-translate-x-full';
+  return '-translate-x-1/2';
 }

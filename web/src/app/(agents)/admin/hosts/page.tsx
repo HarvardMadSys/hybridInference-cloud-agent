@@ -63,7 +63,7 @@ import {
   monotonicNow,
   reasonLabel,
 } from './capacity';
-import { formatAge, runtimeMenu, serverInventory } from './format';
+import { curveSource, curveSourceHosts, formatAge, runtimeMenu, serverInventory } from './format';
 import { AdminNavigation } from '../AdminNavigation';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
@@ -104,7 +104,42 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function CapabilityCell({ cell, muted = false }: { cell: CapacityCell; muted?: boolean }) {
+/**
+ * A 0-100 reading as a bar under its number.
+ *
+ * The chart's own axis, at the size of a table cell. A fleet is read down this
+ * column, and "8%" and "82%" are the same shape of text; the bar is what makes
+ * the difference visible without reading. It is drawn only for a value that was
+ * measured — the same rule the number follows — and `aria-hidden`, because the
+ * number beside it is the accessible reading and an unlabelled bar is not.
+ */
+function Meter({ value, muted }: { value: number; muted: boolean }) {
+  const width = Math.min(100, Math.max(0, value));
+  return (
+    <span
+      aria-hidden
+      className="mt-1.5 block h-1 w-16 overflow-hidden rounded-full bg-gray-200/80 dark:bg-white/10"
+    >
+      <span
+        className={`block h-full rounded-full ${
+          muted ? 'bg-gray-400 dark:bg-gray-500' : 'bg-crimson/60 dark:bg-crimson-light/60'
+        }`}
+        style={{ width: `${width}%` }}
+      />
+    </span>
+  );
+}
+
+function CapabilityCell({
+  cell,
+  muted = false,
+  meter = null,
+}: {
+  cell: CapacityCell;
+  muted?: boolean;
+  /** The cell's own 0-100 reading, or null when nothing was measured. */
+  meter?: number | null;
+}) {
   return (
     <div
       // A stale observation keeps its number and loses its confidence: grey is
@@ -112,7 +147,8 @@ function CapabilityCell({ cell, muted = false }: { cell: CapacityCell; muted?: b
       className={muted ? 'text-gray-500 dark:text-gray-400' : 'text-gray-800 dark:text-gray-200'}
       title={cell.title ?? undefined}
     >
-      <span className="block whitespace-nowrap">{cell.text}</span>
+      <span className="block whitespace-nowrap tabular-nums">{cell.text}</span>
+      {meter !== null && <Meter value={meter} muted={muted} />}
       {cell.note !== null && (
         <span className="mt-0.5 block whitespace-nowrap text-[11px] text-gray-500 dark:text-gray-400">
           {cell.note}
@@ -455,17 +491,26 @@ function HostsView() {
 
   const openServer = expanded === null ? null : (servers.find((s) => s.name === expanded) ?? null);
   const openFacts = openServer === null ? null : groupCapacityFacts(openServer.members, elapsedMs);
-  // Every enrollment behind this physical name is a candidate curve, because a
-  // server that reports as one row can be several deployments and only the
-  // operator knows which one they came to look at. The default is the source
-  // the row's own CPU and memory came from, so the panel opens on the machine
-  // the numbers above it describe.
-  const openSources = openServer === null ? [] : openServer.members.map((member) => member.host);
+  // Every live enrollment behind this physical name is a candidate curve,
+  // because a server that reports as one row can be several deployments and
+  // only the operator knows which one they came to look at. A removed one is
+  // not: its row survives for the attempts and history that name it, but it is
+  // not an environment to read a curve from. The default is the source the
+  // row's own CPU and memory came from, so the panel opens on the machine the
+  // numbers above it describe.
+  const openMembers = openServer === null ? [] : curveSourceHosts(openServer.members);
+  const openSources = openMembers.map((member) => member.host);
   const chosenSource =
-    sourceChoice === null || openServer === null
+    sourceChoice === null
       ? null
-      : (openServer.members.find((member) => member.host === sourceChoice) ?? null);
-  const openSource = chosenSource ?? openFacts?.source ?? openServer?.host ?? null;
+      : (openMembers.find((member) => member.host === sourceChoice) ?? null);
+  const openSource =
+    chosenSource ??
+    curveSource(
+      openServer?.members ?? [],
+      openFacts?.source?.host ?? null,
+      openServer?.host?.host ?? null,
+    );
   // The enrollment whose history the panel reads, named by the three things a
   // response has to match to be drawn: a curve is only ever shown under the
   // host, generation and window it was requested for.
@@ -577,7 +622,12 @@ function HostsView() {
     // measured yet the panel opens on the representative enrollment, and
     // leaving the choice null would let the first enrollment to report — a
     // different machine — take the chart without anybody asking.
-    const opened = facts.source ?? servers.find((item) => item.name === server)?.host ?? null;
+    const group = servers.find((item) => item.name === server);
+    const opened = curveSource(
+      group?.members ?? [],
+      facts.source?.host ?? null,
+      group?.host?.host ?? null,
+    );
     setSourceChoice(opened?.host ?? null);
     // Recorded so a re-enrollment while the panel is open can be named as
     // such, rather than looking like a curve that lost its history.
@@ -675,9 +725,12 @@ function HostsView() {
             Actions still target the original deployment identity. */}
         <div className="mt-10">
           <div className="flex flex-wrap items-baseline gap-x-3">
-            <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">Servers</h2>
+            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">Servers</h2>
             {refreshFailed && (
-              <span aria-live="polite" className="text-[11px] text-amber-700 dark:text-amber-300">
+              <span
+                aria-live="polite"
+                className="ml-auto text-[11px] text-amber-700 dark:text-amber-300"
+              >
                 Refresh failed — showing the last successful read
                 {pool?.observedAt ? ` from ${formatUtcTimestamp(pool.observedAt)}` : ''}.
               </span>
@@ -745,7 +798,7 @@ function HostsView() {
           ) : (
             <div className="mt-4 overflow-x-auto rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 shadow-sm">
               <table className="min-w-[1080px] w-full text-left text-sm">
-                <thead className="border-b border-gray-100 dark:border-white/5 text-xs text-gray-500 dark:text-gray-400">
+                <thead className="border-b border-gray-100 bg-gray-50/60 text-xs text-gray-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-gray-400">
                   <tr>
                     <th className="px-6 py-3 font-medium">Server</th>
                     <th className="px-3 py-3 font-medium">Status</th>
@@ -813,10 +866,18 @@ function HostsView() {
                             <CapabilityCell cell={executionSlotsCell(host)} muted={facts.stale} />
                           </td>
                           <td className="px-3 py-4">
-                            <CapabilityCell cell={cpuCell(facts.capacity)} muted={facts.stale} />
+                            <CapabilityCell
+                              cell={cpuCell(facts.capacity)}
+                              muted={facts.stale}
+                              meter={facts.capacity?.cpu_percent ?? null}
+                            />
                           </td>
                           <td className="px-3 py-4">
-                            <CapabilityCell cell={memoryCell(facts.capacity)} muted={facts.stale} />
+                            <CapabilityCell
+                              cell={memoryCell(facts.capacity)}
+                              muted={facts.stale}
+                              meter={facts.capacity?.memory_used_percent ?? null}
+                            />
                           </td>
                           <td className="px-3 py-4" title={sandboxTitle || undefined}>
                             <span
@@ -836,7 +897,7 @@ function HostsView() {
                               </span>
                             )}
                           </td>
-                          <td className="px-3 py-4 whitespace-nowrap">
+                          <td className="px-3 py-4 whitespace-nowrap tabular-nums">
                             {ageSeconds === null ? (
                               <span className="text-gray-500 dark:text-gray-400">Not measured</span>
                             ) : (
@@ -851,7 +912,7 @@ function HostsView() {
                               </span>
                             )}
                             {facts.stale && (
-                              <span className="mt-0.5 block text-[11px] text-amber-700 dark:text-amber-300">
+                              <span className="mt-1 block text-[11px] font-medium text-amber-700 dark:text-amber-300">
                                 stale
                               </span>
                             )}
@@ -872,7 +933,7 @@ function HostsView() {
                                       : `${name} stops taking new work; running attempts finish.`,
                                   )
                                 }
-                                className="rounded-lg border border-gray-200 dark:border-white/10 px-2.5 py-1 text-xs disabled:opacity-40"
+                                className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson disabled:opacity-40 dark:border-white/10 dark:bg-transparent dark:text-gray-200 dark:hover:bg-white/5 dark:focus-visible:ring-crimson-light"
                               >
                                 {host.status === 'draining' ? 'Undrain' : 'Drain'}
                               </button>
@@ -880,7 +941,7 @@ function HostsView() {
                                 type="button"
                                 disabled={busy}
                                 onClick={() => handleRemove(host.host, host.slots_used)}
-                                className="rounded-lg px-2.5 py-1 text-xs text-red-600 dark:text-red-400 disabled:opacity-40"
+                                className="rounded-lg border border-transparent px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-500/10"
                               >
                                 Remove
                               </button>
@@ -888,8 +949,11 @@ function HostsView() {
                           </td>
                         </tr>
                         {open && openServer && openFacts && (
-                          <tr className="bg-gray-50/40 dark:bg-white/[0.02]">
-                            <td colSpan={8} className="px-4 pb-5">
+                          // No second card inside this one: the band is the
+                          // detail surface, and the panel draws on it directly
+                          // at the table's own first-column padding.
+                          <tr className="bg-gray-50/70 dark:bg-white/[0.03]">
+                            <td colSpan={8} className="px-6 pb-6 pt-4">
                               <CapacityPanel
                                 id={panelId}
                                 name={name}
@@ -969,7 +1033,7 @@ function HostsView() {
                 add one — is deployment documentation, in `.env.example` and
                 ENVIRONMENT.md, read by the person editing the `.env` rather
                 than by anyone standing on this page. */}
-            <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">
               Harness version
             </h2>
             <div className="mt-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900 px-6 shadow-sm">

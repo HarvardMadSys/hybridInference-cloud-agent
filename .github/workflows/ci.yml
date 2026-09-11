@@ -304,9 +304,16 @@ jobs:
             "@anthropic-ai/claude-code@${version}"
           echo "CLOUD_AGENT_TEST_CLAUDE_BINARY=${RUNNER_TEMP}/claude-context/node_modules/.bin/claude" >> "${GITHUB_ENV}"
 
+      # `-n 4 --dist load`, deliberately not the `--dist loadfile` the other
+      # suites use: loadfile groups by file, and here the file *is* the suite,
+      # so it would hand all four tests to a single worker and change nothing.
+      # Each test already gets its own tmp_path, its own HOME and config
+      # directory (monkeypatched), its own CLI process and its own loopback
+      # port — `FakeAnthropicGateway` binds port 0 — so there is nothing for
+      # parallel workers to collide over.
       - name: Native history survives close, restore and failed-turn retry
         timeout-minutes: 10
-        run: uv run pytest -q -m external tests/external/test_claude_driver_context.py
+        run: uv run pytest -q -n 4 --dist load -m external tests/external/test_claude_driver_context.py
 
   # The other half of that command. `test` above deselects `dbtest`, and until
   # this job existed nothing selected it — 158 tests that are written, green,
@@ -418,19 +425,56 @@ jobs:
                   password=os.environ["TEST_DB_PASSWORD"],
               )
               print(await conn.fetchval("SELECT version()"))
+              # A throwaway database does not need durability, and this one is
+              # asked to give it up hundreds of times a run: the fixtures
+              # truncate 25 tables around every test, and each TRUNCATE fsyncs
+              # a directory entry. Measured on this runner — 445ms per call
+              # with fsync on, 10ms with it off, across 329 tests. The
+              # container is deleted with the job; there is nothing to lose.
+              await conn.execute("ALTER SYSTEM SET fsync = off")
+              await conn.execute("SELECT pg_reload_conf()")
+              # The reload is asynchronous. Confirm it landed before pytest
+              # opens its own connections, or the saving disappears silently.
+              for _ in range(50):
+                  if await conn.fetchval("SHOW fsync") == "off":
+                      break
+                  await asyncio.sleep(0.1)
+              print("fsync:", await conn.fetchval("SHOW fsync"))
+              # One database per xdist worker. The fixtures already derive their
+              # name from PYTEST_XDIST_WORKER and each runs its own
+              # `alembic upgrade head`; the service container creates only the
+              # base one, so without these the parallel run cannot connect at
+              # all — and a fixture that cannot connect skips rather than
+              # fails. The "tier actually ran" step below is what would catch
+              # that, but creating them here is what makes it not happen.
+              for index in range(4):
+                  name = f"{os.environ['TEST_DB_NAME']}_gw{index}"
+                  exists = await conn.fetchval(
+                      "SELECT 1 FROM pg_database WHERE datname = $1", name
+                  )
+                  if not exists:
+                      await conn.execute(f'CREATE DATABASE "{name}"')
+                      print(f"created {name}")
               await conn.close()
 
           asyncio.run(main())
           PY
 
-      # Serial, and not `-n 4` like the job above. The fixtures derive a
-      # per-worker database name (`..._gw0`, `..._gw1`, …) so that xdist
-      # workers cannot truncate each other's tables — but the service
-      # container creates one database, so under `-n 4` all four workers would
-      # fail to connect and every test would skip. The tier runs in about 15
-      # seconds; there is nothing here worth sharding.
+      # `-n 4 --dist loadfile`, and loadfile is the load-bearing half: the
+      # fixtures shard by worker database (`..._gw0`…`..._gw3`, created above),
+      # and `reset_agent_tables` empties a whole schema with one
+      # `TRUNCATE ... CASCADE`. Sharding finer than a file would let two workers
+      # truncate the same database out from under each other; sharding by file
+      # also matches how the fixtures are written, since several files import
+      # another file's `store` fixture rather than opening their own.
+      #
+      # Serial until now for exactly one reason: the service container created a
+      # single database, so four workers would have failed to connect and
+      # skipped, and the guard below would have had to catch it. Measured on
+      # spark2 with the worker databases present: 343s serial, 166s this way,
+      # the same 329 tests, zero skips.
       - name: Pytest (dbtest tier)
-        run: uv run pytest -q -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml"
+        run: uv run pytest -q -n 4 --dist loadfile -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml"
 
       # The second half of the same guard. A fixture that skips on a database
       # it cannot reach turns a broken service container into a passing job,
@@ -681,6 +725,22 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     runs-on: ${{ fromJSON(matrix.artifact.runner) }}
+    # The builder lives in a config directory belonging to the *runner*, not to
+    # this job, because its layer cache is the only thing between a cell and
+    # re-downloading hundreds of megabytes. With a builder per job the cache
+    # dies with it: the sandbox cell spent 120s of its 162s pulling a single
+    # 522MB layer back out of `type=gha` at 4.4MB/s. Measured on spark2 with
+    # one builder used twice — 10.3s cold, 0.54s warm.
+    #
+    # Per runner is safe because a runner executes one job at a time, so
+    # nothing races for the pointer, and `RUNNER_NAME` keeps two runners on one
+    # host apart. The directory sits under `_work`, which the runner does not
+    # clean between jobs, unlike `RUNNER_TEMP`.
+    #
+    # None of this goes near `$HOME/.docker/buildx`. That pointer records no
+    # owner, and on 2026-09-11 a cell finishing while the staging deploy was
+    # mid-build deleted the builder out from under it — `target migrate:
+    # failed to receive status`, `graceful_stop`.
     strategy:
       fail-fast: false
       matrix:
@@ -754,7 +814,35 @@ jobs:
           echo "IMAGE_TAG=${{ matrix.artifact.name }}:ci-${suffix}" >> "${GITHUB_ENV}"
           echo "SUFFIX=${suffix}" >> "${GITHUB_ENV}"
 
-      - uses: docker/setup-buildx-action@v3
+      # Reused across jobs, and self-healing: a builder whose buildkitd will not
+      # start is removed and recreated rather than failing every later cell.
+      # `--bootstrap` is what proves it started, so it doubles as the check.
+      #
+      # The *name* carries the runner too, and that is not decoration. A config
+      # directory keeps the builder definitions apart, but buildx names the
+      # buildkitd container after the builder alone: two runners whose builder
+      # is both called `ci-persistent` share one
+      # `buildx_buildkit_ci-persistent0`, and one runner's self-heal deletes the
+      # container the other is building through. Verified on spark2 — with a
+      # shared name, removing A's builder takes the container with it; with
+      # `ci-<runner>` each keeps its own, and B's buildkitd start time does not
+      # move while A rebuilds.
+      - name: Reuse this runner's builder, or make one
+        run: |
+          set -euo pipefail
+          buildx_config="$(dirname "${RUNNER_WORKSPACE}")/buildx/${RUNNER_NAME}"
+          mkdir -p "${buildx_config}"
+          export BUILDX_CONFIG="${buildx_config}"
+          echo "BUILDX_CONFIG=${buildx_config}" >> "${GITHUB_ENV}"
+          builder="ci-${RUNNER_NAME}"
+          if ! docker buildx inspect "${builder}" --bootstrap >/dev/null 2>&1; then
+            docker buildx rm "${builder}" >/dev/null 2>&1 || true
+            docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
+            docker buildx inspect "${builder}" --bootstrap >/dev/null
+          fi
+          docker buildx use "${builder}" >/dev/null
+          echo "BUILDER=${builder}" >> "${GITHUB_ENV}"
+          echo "builder ${builder} ready in ${buildx_config}"
 
       # `push: false` still: nothing here publishes, and these images carry no
       # credentials. `load: true` is what puts the image on this runner's
@@ -766,11 +854,15 @@ jobs:
       # asserts it arrived.
       - name: Build ${{ matrix.artifact.name }}
         id: build
-        # A transient buildkit/runner recycle surfaces as graceful_stop on this
-        # pool. Recreate the builder and retry once before failing the cell.
+        # The graceful_stop this retry was written for is not a transient
+        # recycle: it is another job on this machine deleting the builder this
+        # cell is building through. That is fixed. The retry stays as a
+        # backstop, because a build can still fail for reasons of its own and
+        # running it once more is cheaper than a red cell.
         continue-on-error: true
         uses: docker/build-push-action@v6
         with:
+          builder: ${{ env.BUILDER }}
           context: .
           file: ${{ matrix.artifact.dockerfile }}
           push: false
@@ -786,14 +878,13 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.artifact.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.artifact.name }}
 
-      - name: Set up Docker Buildx (retry)
-        if: steps.build.outcome == 'failure'
-        uses: docker/setup-buildx-action@v3
-
+      # No builder work here: one that would not start was already replaced
+      # before the first attempt. What can still fail is the build itself.
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v6
         with:
+          builder: ${{ env.BUILDER }}
           context: .
           file: ${{ matrix.artifact.dockerfile }}
           push: false

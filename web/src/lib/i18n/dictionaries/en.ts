@@ -144,7 +144,6 @@ export const en = {
   'turnNavigation.state.failed': 'Failed',
   'turnNavigation.state.cancelled': 'Cancelled',
 
-  'conversation.status': 'Conversation status',
   'conversation.state.queued': 'Queued',
   'conversation.state.running': 'Running',
   'conversation.state.idle': 'Idle',

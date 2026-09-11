@@ -109,6 +109,25 @@ compose() {
   docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}" "$@"
 }
 
+# Build with the daemon's own builder, never one that another job on this
+# machine installed, made current, and will delete again.
+#
+# The runners, this deployment and any operator shell here share one `$HOME`,
+# and `docker buildx` keeps which builder is *current* under it.
+# `docker/setup-buildx-action` points that at a per-job builder and removes the
+# builder in its post step, with no way to know who else was building through
+# it. On 2026-09-11 a concurrent image-verify cell did exactly that four
+# seconds into this script's build, and the deploy died with `target migrate:
+# failed to receive status`, `Unavailable`, `graceful_stop`, EOF. No retry of
+# this script makes that safe; only not sharing the builder does.
+#
+# A config directory of our own makes the collision impossible instead of
+# unlikely: nothing else reads or writes it, so the current builder here is
+# always the built-in one. It also costs nothing to keep — no builder container
+# to create, retain or garbage-collect — and the build cache stays in the
+# daemon, where the next deploy can reuse it.
+export BUILDX_CONFIG="${DEPLOY_ROOT}/.buildx"
+
 # Ports come from .env when set; these defaults match the compose file.  The
 # control-plane port is needed before the compatibility fence only on a true
 # cold start, where there is no old API through which the newly deployed host

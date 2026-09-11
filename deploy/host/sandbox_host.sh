@@ -39,6 +39,14 @@ set -Eeuo pipefail
 APP_DIR="${APP_DIR:-$(pwd)}"
 cd "$APP_DIR"
 
+# Same collision, same fix as the control plane's deploy.sh: the runners on
+# this machine share this user's `$HOME`, so `~/.docker/buildx/current` is
+# shared mutable state and a CI cell that finishes deletes the builder it put
+# there — including one this bring-up is building through. A config directory
+# under the deploy root keeps the `docker build` and `compose build` below on
+# the daemon's own builder, which no other job can remove.
+export BUILDX_CONFIG="${APP_DIR}/.buildx"
+
 log() { printf '[sandbox-host] %s\n' "$*"; }
 die() { printf '[sandbox-host] ERROR: %s\n' "$*" >&2; exit 1; }
 
