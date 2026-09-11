@@ -11,7 +11,9 @@ whole job exists to distinguish.
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import subprocess
 import sys
 import tarfile
@@ -268,3 +270,66 @@ def test_the_deploy_never_inherits_a_commit_or_a_source_checkout(
     ]
     assert captured["AGENT_DEPLOY_MODE"] == "artifacts"
     assert captured["AGENT_DEPLOY_PYTHON"] == sys.executable
+
+
+# --------------------------------------------------------------- diagnosis
+
+
+def test_the_password_is_fixed_so_a_failure_can_be_reproduced() -> None:
+    """Random bought nothing here and cost a run to find that out.
+
+    The database is reachable only from the stack's own network, holds
+    synthetic data, and is removed with the project.
+    """
+    first = ac.synthetic_environment(COMPOSE, "agents", "one")
+    second = ac.synthetic_environment(COMPOSE, "agents", "two")
+    assert first["AGENT_POSTGRES_PASSWORD"] == second["AGENT_POSTGRES_PASSWORD"]
+    assert first["AGENT_DATABASE_URL"] == second["AGENT_DATABASE_URL"]
+    assert ac.ACCEPTANCE_PASSWORD in first["AGENT_DATABASE_URL"]
+
+
+def test_a_missing_stage_reports_the_whole_log() -> None:
+    """The tail is where a deploy ends; the cause is usually further up.
+
+    The second live acceptance failed with `password authentication failed`
+    after the migration had connected with the same setting — and the four
+    thousand characters this used to print began *after* the migration's own
+    output.
+    """
+    noise = "\n".join(f"line {index}" for index in range(600))
+    with pytest.raises(ac.AcceptanceFailure) as failure:
+        ac.check_stages(result(noise + "\n" + good_log().replace("pulling release images", "x")))
+    assert "line 0" in str(failure.value), "the earliest output is what explains a late failure"
+
+
+def test_the_credential_probe_compares_without_disclosing(monkeypatch) -> None:
+    """It runs in a log anyone can read, so it reports agreement, not values."""
+    secret = "hunter2-hunter2"
+
+    def fake_docker(*arguments: str, check: bool = True) -> str:
+        if arguments[0] == "ps":
+            service = arguments[arguments.index("--filter", 3) + 1].split("=")[-1]
+            return f"container-{service}"
+        if arguments[0] == "inspect" and "control-plane" in arguments[1]:
+            return json.dumps(
+                [f"AGENT_DATABASE_URL=postgresql://cloudagent:{secret}@postgres:5432/x"]
+            )
+        return json.dumps([f"POSTGRES_PASSWORD={secret}"])
+
+    monkeypatch.setattr(ac, "docker", fake_docker)
+    findings = ac.database_credentials("p")
+
+    assert len(findings) == 2
+    joined = " ".join(findings)
+    assert secret not in joined, "the probe must not print the password it compares"
+    digest = hashlib.sha256(secret.encode()).hexdigest()[:12]
+    assert joined.count(digest) == 2, "matching passwords report the same digest on both halves"
+    assert f"{len(secret)} characters" in joined
+
+
+def test_the_probe_says_so_when_there_is_nothing_to_inspect(monkeypatch) -> None:
+    monkeypatch.setattr(ac, "docker", lambda *a, **k: "")
+    assert ac.database_credentials("p") == [
+        "postgres: no container to inspect",
+        "control-plane: no container to inspect",
+    ]

@@ -44,11 +44,10 @@ Run it against a candidate before publishing, or against any published release:
 from __future__ import annotations
 
 import argparse
-import base64
+import hashlib
 import json
 import os
 import re
-import secrets
 import shutil
 import socket
 import subprocess
@@ -73,6 +72,10 @@ FENCE_TIMEOUT_S = 20
 
 #: How long a listener is given to answer `/healthz` after its container starts.
 HEALTH_TIMEOUT_S = 180
+
+#: The throwaway database's password. See `synthetic_environment` for why it is
+#: not generated.
+ACCEPTANCE_PASSWORD = "acceptance-only-not-a-secret"
 
 #: The mount shape each variant serves, and the browser path that goes with it.
 #: Both are asserted by the deployment — the health probe reads the first and
@@ -139,7 +142,11 @@ def synthetic_environment(compose: Path, variant: str, project: str) -> dict[str
             f"unknown variant {variant!r}; the release builds {sorted(VARIANTS)}"
         )
     base_path, api_url = VARIANTS[variant]
-    password = base64.urlsafe_b64encode(secrets.token_bytes(18)).decode().rstrip("=")
+    # Fixed, not random. This database is reachable only from the stack's own
+    # network, holds nothing, and is removed with the project — so a random
+    # value protects nothing, and a failure that cannot be reproduced costs
+    # exactly what the first control-plane crash here cost: a run to find out.
+    password = ACCEPTANCE_PASSWORD
 
     environment = dict(smoke._control_environment(""))
     # The release supplies it, and setting it here is what the negative case
@@ -237,7 +244,7 @@ def check_stages(result: subprocess.CompletedProcess[str]) -> list[str]:
         if found < 0:
             raise AcceptanceFailure(
                 f"the deployment never got as far as {marker!r} ({means}). Exit "
-                f"{result.returncode}.\n{log[-4000:]}"
+                f"{result.returncode}.\n{log}"
             )
         position, _ = found, evidence.append(means)
 
@@ -250,7 +257,7 @@ def check_stages(result: subprocess.CompletedProcess[str]) -> list[str]:
     if FENCE_REFUSAL not in log:
         raise AcceptanceFailure(
             f"the deployment failed after the fence was reached but not *at* it: {FENCE_REFUSAL!r} "
-            f"is absent. Exit {result.returncode}.\n{log[-4000:]}"
+            f"is absent. Exit {result.returncode}.\n{log}"
         )
     evidence.append("the host fence refused, as it must with no execution host")
     return evidence
@@ -314,6 +321,60 @@ def observed_services(project: str, services: Sequence[str]) -> dict[str, dict[s
     return observed
 
 
+def database_credentials(project: str) -> list[str]:
+    """Whether the stack's two halves agree about the database password.
+
+    Asked because the second live acceptance failed in a way that should be
+    impossible: `alembic upgrade head` connected, the identity check connected,
+    and then the service was refused with `password authentication failed`. The
+    three read one `.env`, but not with one parser — Alembic goes through
+    SQLAlchemy and psycopg, the service through asyncpg (`storage/dsn.py`
+    explains the split) — so the answer is in what each container was handed.
+
+    Reports agreement, never the values: this runs in a log anyone can read.
+    """
+    findings: list[str] = []
+    for service, variable in (
+        ("postgres", "POSTGRES_PASSWORD"),
+        ("control-plane", "AGENT_DATABASE_URL"),
+    ):
+        containers = [
+            line
+            for line in docker(
+                "ps",
+                "-aq",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+                "--filter",
+                f"label=com.docker.compose.service={service}",
+                check=False,
+            ).splitlines()
+            if line.strip()
+        ]
+        if not containers:
+            findings.append(f"{service}: no container to inspect")
+            continue
+        document = json.loads(
+            docker("inspect", containers[0], "--format", "{{json .Config.Env}}", check=False)
+            or "[]"
+        )
+        values = [entry.split("=", 1)[1] for entry in document if entry.startswith(variable + "=")]
+        if not values:
+            findings.append(f"{service}: {variable} is not set on the container")
+            continue
+        value = values[0]
+        secret = (
+            value.partition("://")[2].partition("@")[0].partition(":")[2]
+            if variable.endswith("URL")
+            else value
+        )
+        findings.append(
+            f"{service}: {variable} carries a password of {len(secret)} characters, "
+            f"sha256 {hashlib.sha256(secret.encode()).hexdigest()[:12]}"
+        )
+    return findings
+
+
 def teardown(project: str) -> None:
     """Remove this run's containers and its database volume, whatever happened.
 
@@ -355,7 +416,15 @@ def accept(
     write_env(root, environment)
 
     result = run_deploy(recipe_root, root, manifest_path, fence_timeout=FENCE_TIMEOUT_S)
-    evidence += check_stages(result)
+    try:
+        evidence += check_stages(result)
+    except AcceptanceFailure as failure:
+        # Two DSN parsers read one setting, so "which password did each half
+        # get" is worth answering here rather than over another run.
+        detail = "; ".join(database_credentials(project))
+        raise AcceptanceFailure(
+            f"{failure}\n\ndatabase credentials as the containers got them: {detail}"
+        ) from failure
     if (root / ".deployed-sha").exists():
         raise AcceptanceFailure(
             "the deployment recorded itself as deployed even though the fence refused; "
