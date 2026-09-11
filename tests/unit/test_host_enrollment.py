@@ -352,6 +352,28 @@ def test_the_readiness_marker_is_compared_with_the_value_at_startup(tmp_path) ->
     assert not missing._readiness_marker_moved(), "an unreadable marker woke the beat"
 
 
+def test_a_torn_read_of_the_marker_is_not_a_change(tmp_path) -> None:
+    """The deployment truncates this file in place, so a poll can see nothing.
+
+    Keeping the inode is deliberate — every replica has it bind-mounted — so
+    the empty window is inherent to the write. Beating on it would be a
+    heartbeat per poll for the duration of the write, and it would reset the
+    baseline to empty, making the value that landed look like a second change.
+    """
+    marker = tmp_path / "shared-live-ready"
+    marker.write_text("pending:target\n")
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    beat = enrollment.HostHeartbeat(
+        base_url="http://cp", identity=identity, readiness_marker=str(marker)
+    )
+
+    marker.write_text("")
+    assert not beat._readiness_marker_moved(), "a torn read woke the beat"
+
+    marker.write_text("target\n")
+    assert beat._readiness_marker_moved(), "the value that landed was swallowed by the torn read"
+
+
 def test_a_published_readiness_marker_pulls_the_next_beat_forward(tmp_path, monkeypatch) -> None:
     """The rollout fence must not wait out an interval for a fact already true.
 
@@ -366,7 +388,10 @@ def test_a_published_readiness_marker_pulls_the_next_beat_forward(tmp_path, monk
     marker = tmp_path / "shared-live-ready"
     marker.write_text("pending:target\n")
     identity = enrollment.HostIdentity(host="h1", credential="c")
-    identity.interval_s = 30.0
+    # A short interval on purpose: a regression waits it out, and the point is
+    # that it fails in seconds rather than in half a minute. The comparison
+    # below is against the interval, not a number chosen for this one.
+    identity.interval_s = 5.0
     beat = enrollment.HostHeartbeat(
         base_url="http://cp", identity=identity, readiness_marker=str(marker)
     )
@@ -380,13 +405,16 @@ def test_a_published_readiness_marker_pulls_the_next_beat_forward(tmp_path, monk
             threading.Timer(0.2, lambda: marker.write_text("target\n")).start()
         else:
             beat._stop.set()
-        return {"status": "online", "heartbeat_interval_seconds": 30}
+        return {"status": "online", "heartbeat_interval_seconds": 5}
 
     monkeypatch.setattr(enrollment, "_post", record)
     beat._run()
 
     assert len(sent) == 2, "the marker change did not produce a heartbeat"
-    assert sent[1] < 5.0, f"waited {sent[1]:.1f}s for a marker published 0.2s in"
+    assert sent[1] < identity.interval_s / 2, (
+        f"waited {sent[1]:.1f}s of a {identity.interval_s}s interval for a marker "
+        "published 0.2s in; that is the schedule, not the change"
+    )
 
 
 def test_the_runner_watches_the_marker_the_deployment_publishes(monkeypatch) -> None:
@@ -403,7 +431,7 @@ def test_the_runner_watches_the_marker_the_deployment_publishes(monkeypatch) -> 
 
     source = pathlib.Path(runner.__file__).read_text()
     pool = source[source.index("pool = HostHeartbeat(") : source.index("pool.start()")]
-    assert "readiness_marker=_shared_live_ready_file() or None" in pool, (
+    assert "readiness_marker=_shared_live_ready_file()" in pool, (
         "the runner builds its host heartbeat without the marker it was given"
     )
 

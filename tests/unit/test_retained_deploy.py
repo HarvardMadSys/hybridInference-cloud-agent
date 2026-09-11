@@ -492,6 +492,52 @@ def test_host_up_waits_for_parallel_control_bootstrap_but_manual_check_is_immedi
     assert "check) cmd_check 0" in dispatch
 
 
+def test_every_failing_replica_is_reported_not_just_the_first(tmp_path: Path) -> None:
+    """Run together, all three answers exist at once; report all of them.
+
+    "All three failed" is a configuration problem and "one failed" is that
+    machine, and the serial loop could only ever surface the first — which is
+    the pattern the reader needs to tell them apart.
+    """
+    result = _run(_host(tmp_path, capability=""), "check")
+
+    assert result.returncode != 0
+    for index in (1, 2, 3):
+        assert f"runner-{index} did not attest shared-sandbox-v1" in result.stderr
+
+
+def test_the_attestation_cleanup_belongs_to_the_shell_that_created_it() -> None:
+    """`cmd_up` runs these checks in a subshell, and a subshell resets traps.
+
+    A handler the script installs at the top level therefore never runs for the
+    `exit` that a failed check performs inside it — and `ATTEST_DIR` is set in
+    the subshell, so the parent's copy is still empty. The directory then leaks
+    on exactly the path that fails.
+    """
+    script = SANDBOX_HOST.read_text()
+    function = script.index("check_shared_live_stack() {")
+    check = script[function : script.index("# ── Isolation")]
+
+    assert "trap cleanup_attest_dir EXIT" not in script[:function], (
+        "the cleanup is registered at the top level, where the subshell in cmd_up resets it"
+    )
+    assert "trap cleanup_attest_dir EXIT" in check, "no shell cleans the attestation directory up"
+
+
+def test_a_failed_attestation_prints_the_end_of_the_traceback() -> None:
+    """The exception and its message are the *last* lines of a traceback.
+
+    Each replica's stderr goes to its own file now instead of streaming to the
+    terminal, so what gets printed is a choice — and the head of a Python
+    traceback is frames, which is the half that explains nothing.
+    """
+    script = SANDBOX_HOST.read_text()
+    check = script[script.index("check_shared_live_stack() {") : script.index("# ── Isolation")]
+
+    assert "tail -n 40" in check
+    assert "sed -n '1,20p'" not in check
+
+
 def test_host_up_probes_the_tunnels_instead_of_pausing_first() -> None:
     """`up` must reach the probe, not sleep on the way to it.
 

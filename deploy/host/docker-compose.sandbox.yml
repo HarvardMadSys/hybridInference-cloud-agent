@@ -201,6 +201,12 @@ services:
     # stores no state, and the runners are already stopped before Compose
     # replaces it. Anything still in flight loses a connection it would have
     # lost anyway when this container was recreated.
+    #
+    # This makes SIGKILL the outcome rather than a clean exit, and that is
+    # expected: Squid's own `shutdown_lifetime` is longer than this bound, so
+    # its logs will not show a shutdown line. An operator looking for one
+    # after a rollout is looking for something this stack never had — before
+    # this bound, the ten-second default killed it just the same.
     stop_grace_period: ${AGENT_EGRESS_STOP_GRACE:-2s}
     environment:
       # Squid reads only the generated file, but Compose needs the inputs on

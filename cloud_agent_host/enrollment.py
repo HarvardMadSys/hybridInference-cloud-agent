@@ -655,9 +655,19 @@ class HostHeartbeat:
                 return
 
     def _readiness_marker_moved(self) -> bool:
-        """Whether the readiness marker changed since the last beat."""
+        """Whether the readiness marker changed since the last beat.
+
+        An empty read is not a change. The deployment rewrites this file by
+        truncating it in place — deliberately, so the inode every replica has
+        bind-mounted survives — so a poll can land inside that write and see
+        nothing. Counting that as news would beat on a torn read and, worse,
+        reset the baseline to nothing, which would make the value that landed
+        look like a second change. It is also what "empty" means everywhere
+        else here: nothing to report, and the next scheduled beat reads
+        whatever arrived.
+        """
         current = self._read_readiness_marker()
-        if current == self._readiness_marker_value:
+        if not current or current == self._readiness_marker_value:
             return False
         self._readiness_marker_value = current
         return True

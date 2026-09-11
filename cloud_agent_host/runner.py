@@ -2248,7 +2248,7 @@ def run_forever(
         sandbox_image_digest=stamp.get("sandbox_image_digest"),
         runtime_versions=stamp.get("runtime_versions"),
         runtime_versions_available=stamp.get("runtime_versions_available"),
-        readiness_marker=_shared_live_ready_file() or None,
+        readiness_marker=_shared_live_ready_file(),
         retained_sandbox_beats=_retained_sandbox_heartbeat_rows,
         # Read per beat, so the age it carries is the age it had when the beat
         # was built. ``None`` before the first sample, and once the newest one

@@ -517,9 +517,9 @@ probe_sandbox_relay() {
 }
 
 # Per-replica attestation output, created by check_shared_live_stack and
-# removed by the trap below. Deliberately not `local` to that function: `local`
-# is gone by the time an EXIT trap runs, and `set -u` would then turn a failed
-# deployment's cleanup into a second, unrelated error.
+# removed by the trap that function registers. Deliberately not `local` to it:
+# `local` is gone by the time the trap runs, and under `set -u` that turns a
+# failed deployment's cleanup into a second, unrelated error.
 ATTEST_DIR=""
 
 cleanup_attest_dir() {
@@ -528,8 +528,6 @@ cleanup_attest_dir() {
     ATTEST_DIR=""
   fi
 }
-
-trap cleanup_attest_dir EXIT
 
 check_shared_live_stack() {
   local deadline="${1:-$SECONDS}"
@@ -562,6 +560,13 @@ check_shared_live_stack() {
   # a second pass, after every replica has been started.
   ATTEST_DIR="$(mktemp -d)" \
     || die "could not create a directory for per-replica attestation output"
+  # Registered here and not at the top of the script, because a trap belongs to
+  # the shell that ran the function. `cmd_up` runs these checks in a subshell —
+  # `( cmd_check ... ) || probe_ok=$?` — and a subshell resets traps to its
+  # parent's, so a handler installed by the script never runs for an `exit`
+  # inside it. Every failed `up` would leave its directory behind, and that is
+  # the path that fails.
+  trap cleanup_attest_dir EXIT
   local -a attest_ids=() attest_pids=()
   local index attest_status
   for id in $runner_ids; do
@@ -578,6 +583,11 @@ check_shared_live_stack() {
   for index in "${!attest_pids[@]}"; do
     wait "${attest_pids[index]}" || true
   done
+  # Collect every replica's verdict before failing on any of them. All of them
+  # have run by now, so all of their answers are available at once — which the
+  # serial loop could never offer — and "all three failed" (the configuration)
+  # is a different problem from "one failed" (that machine).
+  local -a verdicts=()
   for index in "${!attest_ids[@]}"; do
     id="${attest_ids[index]}"
     attest_status=""
@@ -585,19 +595,33 @@ check_shared_live_stack() {
       attest_status="$(<"${ATTEST_DIR}/${id}.status")"
     fi
     if [[ "$attest_status" != "0" ]]; then
-      sed -n '1,20p' "${ATTEST_DIR}/${id}.stderr" >&2 || true
-      die "runner $id could not complete sandbox preflight and shared-live capability attestation"
+      verdicts+=("runner $id could not complete sandbox preflight and shared-live capability attestation")
+      continue
     fi
     capability="$(<"${ATTEST_DIR}/${id}.capability")"
     case ",${capability}," in
       *,shared-sandbox-v1,*) ;;
-      *) die "runner $id did not attest shared-sandbox-v1 (reported '${capability:-no capability}'); check slots, runtime/helper pins, sandbox image labels and broker configuration" ;;
+      *) verdicts+=("runner $id did not attest shared-sandbox-v1 (reported '${capability:-no capability}'); check slots, runtime/helper pins, sandbox image labels and broker configuration") ;;
     esac
     case ",${capability}," in
       *,native-fork-at-anchor-v1,*) ;;
-      *) die "runner $id did not attest native-fork-at-anchor-v1 (reported '${capability:-no capability}'); historical Fork/Edit & rewind is not deployment-ready" ;;
+      *) verdicts+=("runner $id did not attest native-fork-at-anchor-v1 (reported '${capability:-no capability}'); historical Fork/Edit & rewind is not deployment-ready") ;;
     esac
   done
+  if [[ "${#verdicts[@]}" -gt 0 ]]; then
+    # The tail of stderr, not the head: the exception and its message are the
+    # last lines of a Python traceback, and the first ones are stack frames.
+    # Each replica's output goes to its own file, so a failure prints all of
+    # them instead of whichever one happened to run first.
+    for index in "${!attest_ids[@]}"; do
+      id="${attest_ids[index]}"
+      if [[ -s "${ATTEST_DIR}/${id}.stderr" ]]; then
+        printf '[sandbox-host] %s said:\n' "$id" >&2
+        tail -n 40 "${ATTEST_DIR}/${id}.stderr" >&2 || true
+      fi
+    done
+    die "$(printf '%s\n' "${verdicts[@]}")"
+  fi
   cleanup_attest_dir
 
   # Capability attestation proves the runner is configured to dial the broker;
