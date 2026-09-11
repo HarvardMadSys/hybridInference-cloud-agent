@@ -47,6 +47,12 @@ from cloud_agent.logging_utils import configure_process_logging, get_logger
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from cloud_agent.ports import (
+        AttemptCommands,
+        GrantRepository,
+        HostPoolRepository,
+        ResidencyRepository,
+    )
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
@@ -215,7 +221,7 @@ async def _reconcile_settled_terminals(store: AgentJobStore) -> None:
             )
 
 
-async def _revoke_dead_grants(store: AgentJobStore, grants: Any) -> None:
+async def _revoke_dead_grants(store: GrantRepository, grants: Any) -> None:
     """Withdraw the grants of attempts that are no longer current.
 
     Runs on the reaper's schedule rather than at the moment an attempt ends,
@@ -243,7 +249,7 @@ async def _revoke_dead_grants(store: AgentJobStore, grants: Any) -> None:
             )
 
 
-async def _abandon_unrenewable_attempt(store: AgentJobStore, row: dict[str, Any]) -> None:
+async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, Any]) -> None:
     """Stop an attempt whose grant the gateway will not renew.
 
     **Giving up has to be something the attempt notices.** Simply stopping the
@@ -433,7 +439,7 @@ async def _renew_live_grants(
         del failures[grant_id]
 
 
-async def _reap_offline_hosts(store: AgentJobStore) -> None:
+async def _reap_offline_hosts(store: HostPoolRepository) -> None:
     """Move hosts that stopped heartbeating to ``offline``.
 
     Runs on the same loop as the attempt reaper rather than on its own, because
@@ -453,7 +459,7 @@ async def _reap_offline_hosts(store: AgentJobStore) -> None:
         )
 
 
-async def _reap_lapsed_residencies(store: AgentJobStore, grants: Any | None) -> None:
+async def _reap_lapsed_residencies(store: ResidencyRepository, grants: Any | None) -> None:
     """Lapse residencies whose lease ran out — and kill their credentials.
 
     A lapsed residency's grant dies with it (retained-session design §6): the credential

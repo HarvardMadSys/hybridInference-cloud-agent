@@ -39,6 +39,8 @@ from cloud_agent_host.shared_protocol import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from cloud_agent.ports import HostPoolRepository
+
     BrokerProbe = Callable[..., Awaitable[str | None]]
 
 ENV_DATABASE_URL = "AGENT_DATABASE_URL"
@@ -96,7 +98,7 @@ def _host_rejection(
 
 
 async def shared_live_readiness(
-    store: AgentJobStore,
+    store: HostPoolRepository,
     *,
     not_before: datetime,
     broker_token: str,

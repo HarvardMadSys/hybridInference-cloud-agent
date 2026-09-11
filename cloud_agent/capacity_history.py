@@ -41,6 +41,7 @@ from cloud_agent.logging_utils import get_logger
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cloud_agent.ports import HostCapacityRepository
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
@@ -222,7 +223,7 @@ def _log_truncated() -> None:
 
 
 async def _write_point(
-    store: AgentJobStore, row: dict[str, Any], *, timeout_seconds: float
+    store: HostCapacityRepository, row: dict[str, Any], *, timeout_seconds: float
 ) -> None:
     """Persist one candidate row, isolating its failures from the round.
 
@@ -269,7 +270,7 @@ async def _write_point(
         )
 
 
-async def _prune(store: AgentJobStore, *, limit: int, timeout_seconds: float) -> None:
+async def _prune(store: HostCapacityRepository, *, limit: int, timeout_seconds: float) -> None:
     """Delete one bounded batch of expired history, or give up until next round.
 
     Retention failure is logged at warning level and never raised: a full disk

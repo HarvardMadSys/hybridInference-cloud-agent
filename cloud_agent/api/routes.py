@@ -201,6 +201,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from cloud_agent.gateway import GatewayClient
+    from cloud_agent.ports import ConversationQueries, HostPoolRepository, SandboxRepository
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
@@ -530,7 +531,7 @@ def _event_response(event: dict[str, Any]) -> AgentJobEvent:
 
 
 async def _owned_job(
-    store: AgentJobStore,
+    store: ConversationQueries,
     job_id: str,
     user: dict[str, Any],
 ) -> dict[str, Any]:
@@ -2648,7 +2649,9 @@ def _workspace_not_ready() -> HTTPException:
     )
 
 
-async def _require_mutable_workspace_ready(*, job: dict[str, Any], store: AgentJobStore) -> None:
+async def _require_mutable_workspace_ready(
+    *, job: dict[str, Any], store: SandboxRepository
+) -> None:
     """Fence retained mutations through the durable thread-wide barrier."""
     if job.get("thread_sandbox") is None:
         raise _workspace_not_ready()
@@ -3182,7 +3185,7 @@ _HOST_TOKEN_HINT = "aht."
 
 async def verify_claiming_host(
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: HostPoolRepository | None = Depends(get_agent_job_store),
 ) -> dict[str, str]:
     """Authenticate the enrolled host that is claiming retained work.
 
@@ -3792,7 +3795,7 @@ async def worker_report_continuity(
     return WorkerAckResponse(ok=True)
 
 
-async def _worker_thread_id(job_store: AgentJobStore, job_id: str) -> str:
+async def _worker_thread_id(job_store: ConversationQueries, job_id: str) -> str:
     """Resolve the claimed job's thread for restartable-sandbox writes."""
     job = await job_store.get_job(job_id)
     thread_id = None if job is None else job.get("thread_id")

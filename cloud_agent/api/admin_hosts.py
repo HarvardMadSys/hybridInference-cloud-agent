@@ -55,6 +55,7 @@ from cloud_agent.schemas import (
 )
 
 if TYPE_CHECKING:
+    from cloud_agent.ports import HostPoolRepository
     from cloud_agent.storage.store import AgentJobStore
 
 
@@ -124,7 +125,7 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
     )
 
 
-async def _snapshot(store: AgentJobStore) -> ListAgentRunnerHostsResponse:
+async def _snapshot(store: HostPoolRepository) -> ListAgentRunnerHostsResponse:
     """The pool as it stands — the response every endpoint here returns.
 
     Every part comes from one read. ``active_host`` is the policy's own value

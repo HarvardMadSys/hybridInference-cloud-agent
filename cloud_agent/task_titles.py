@@ -14,7 +14,7 @@ from cloud_agent.gateway import ENV_BASE_URL
 from cloud_agent.logging_utils import get_logger
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.ports import ConversationCommands
 
 logger = get_logger(__name__)
 
@@ -66,7 +66,7 @@ def normalize_generated_title(value: Any) -> str | None:
 
 
 async def generate_thread_title(
-    store: AgentJobStore,
+    store: ConversationCommands,
     *,
     job_id: str,
     attempt_id: int,
