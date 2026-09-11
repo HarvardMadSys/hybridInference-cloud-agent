@@ -4244,24 +4244,26 @@ async def worker_suspend_terminals(
 async def worker_resume_terminals(
     job_id: str,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> WorkerAckResponse:
     """Resume retained PTYs, then atomically publish workspace readiness."""
-    job_store = _require_store(store)
+    job_store = require_queries(conversations)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     job = await job_store.get_job(job_id)
     if job is None:
         raise _lease_lost()
     workspace_id = _workspace_id(job)
-    fenced = await job_store.fence_terminal_workspace(
+    fenced = await require_sandboxes(sandboxes).fence_terminal_workspace(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
     )
     if not fenced:
         raise _lease_lost()
     broker = await _worker_workspace_broker(
-        job_store, job, attempt_id=claims["attempt_id"], required=True
+        require_host_pool(hosts), job, attempt_id=claims["attempt_id"], required=True
     )
     try:
         await broker.resume_terminals(
@@ -4316,10 +4318,13 @@ async def worker_finish(
     job_id: str,
     body: WorkerFinishRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> WorkerAckResponse:
     """Drive the fenced terminal transition for this attempt."""
-    job_store = _require_store(store)
+    job_store = require_queries(conversations)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     job = await job_store.get_job(job_id)
@@ -4336,14 +4341,14 @@ async def worker_finish(
                 }
             },
         )
-    fenced = await job_store.fence_terminal_workspace(
+    fenced = await require_sandboxes(sandboxes).fence_terminal_workspace(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
     )
     if not fenced:
         raise _lease_lost()
     broker = await _worker_workspace_broker(
-        job_store, job, attempt_id=claims["attempt_id"], required=False
+        require_host_pool(hosts), job, attempt_id=claims["attempt_id"], required=False
     )
     if broker is not None:
         try:
@@ -4369,7 +4374,7 @@ async def worker_finish(
                 },
             ) from exc
     try:
-        ok = await job_store.transition(
+        ok = await require_attempts(attempts).transition(
             job_id=job_id,
             attempt_id=claims["attempt_id"],
             lease_generation=claims["lease_generation"],
