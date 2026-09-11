@@ -63,7 +63,7 @@ from cloud_agent.api.deps import (
     resolve_agent_access,
 )
 from cloud_agent.api.errors import AgentConfigurationError
-from cloud_agent.gateway import GatewayError
+from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import SessionUserResponse
 
@@ -295,7 +295,7 @@ async def session_callback(
     request: Request,
     code: str = Query(default=""),
     state: str = Query(default=""),
-    gateway=Depends(get_gateway_client),
+    gateway: GatewayClient = Depends(get_gateway_client),
 ) -> RedirectResponse:
     """Finish a sign-in: validate, exchange, and set the session cookie.
 

@@ -29,7 +29,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -94,15 +94,27 @@ _MAX_JSON_INT = 2**53 - 1
 _NO_CONTROL_CHARACTERS = r"^[^\x00-\x1f\x7f]*$"
 
 CpuMissingReason = Literal[
+    "warming_up",
+    "counter_reset",
+    "source_unavailable",
+    "invalid_sample",
+]
+MemoryMissingReason = Literal["source_unavailable", "invalid_sample"]
+
+# A Literal has to spell its members, so the runner's constants and this type
+# are two statements of one fact. Tied together here rather than left to drift:
+# a reason the runner can report and this type rejects would fail validation on
+# a heartbeat the runner considers valid.
+assert set(get_args(CpuMissingReason)) == {
     CPU_MISSING_WARMING_UP,
     CPU_MISSING_COUNTER_RESET,
     CPU_MISSING_SOURCE_UNAVAILABLE,
     CPU_MISSING_INVALID_SAMPLE,
-]
-MemoryMissingReason = Literal[
+}
+assert set(get_args(MemoryMissingReason)) == {
     MEMORY_MISSING_SOURCE_UNAVAILABLE,
     MEMORY_MISSING_INVALID_SAMPLE,
-]
+}
 InventoryStatus = Literal["available", "partial", "unavailable"]
 Freshness = Literal["fresh", "stale", "unavailable"]
 
@@ -494,7 +506,7 @@ class AgentHostCapacityHistoryResponse(BaseModel):
     )
     resolution_seconds: int = HISTORY_RESOLUTION_SECONDS
     semantics: Literal["sampled_observation"] = Field(
-        "sampled_observation",
+        default="sampled_observation",
         description=(
             "Each point is one observation per minute, not a continuous "
             "average and not a peak. A CPU point averages the interval before "

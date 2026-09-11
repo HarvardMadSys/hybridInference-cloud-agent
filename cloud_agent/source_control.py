@@ -96,7 +96,9 @@ async def issue_oauth_state(
         state_hash=_state_hash(state),
         user_id=user_id,
         provider=provider,
-        code_verifier_ciphertext=cipher.encrypt(code_verifier) if code_verifier else None,
+        code_verifier_ciphertext=(
+            cipher.encrypt(code_verifier) if code_verifier and cipher is not None else None
+        ),
         expires_at=datetime.now(timezone.utc) + OAUTH_STATE_TTL,
     )
     return state
@@ -285,6 +287,8 @@ class GitLabOAuthClient:
         created_at = token.get("created_at")
         expires_in = token.get("expires_in")
         try:
+            if created_at is None or expires_in is None:
+                raise ValueError("the token response carries no usable expiry")
             issued = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
             lifetime = max(1, int(expires_in))
         except (TypeError, ValueError, OSError):

@@ -207,7 +207,7 @@ def decode_cursor(cursor: str | None, schema: type[_Cursor], scope: str) -> _Cur
             raise ValueError
         raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
         parsed = schema.model_validate_json(raw)
-        if parsed.scope != scope:
+        if getattr(parsed, "scope", None) != scope:
             raise ValueError
         return parsed
     except (ValueError, binascii.Error, ValidationError):

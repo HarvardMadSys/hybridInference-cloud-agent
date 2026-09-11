@@ -198,6 +198,8 @@ from cloud_agent_host.workspace_browser import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
@@ -2951,7 +2953,7 @@ async def stream_agent_job_terminal(
     except WorkspaceBrokerError as exc:
         raise _terminal_broker_http_error(exc) from exc
 
-    async def relay():
+    async def relay() -> AsyncIterator[Any]:
         try:
             async for chunk in upstream:
                 if await request.is_disconnected():

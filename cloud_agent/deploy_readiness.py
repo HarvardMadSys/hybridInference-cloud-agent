@@ -178,11 +178,11 @@ async def shared_live_readiness(
     probe_rows = list(placement_rows)
     probed_hosts = {str(row.get("host")) for row in probe_rows}
     for owner in sorted(retained_hosts):
-        row = rows_by_host.get(owner)
-        if row is None or row.get("status") != HOST_ONLINE or owner in probed_hosts:
+        owner_row = rows_by_host.get(owner)
+        if owner_row is None or owner_row.get("status") != HOST_ONLINE or owner in probed_hosts:
             continue
         reason = _host_rejection(
-            row,
+            owner_row,
             not_before=not_before,
             expected_deployment_sha=expected_deployment_sha,
             require_target_deployment=False,
@@ -192,7 +192,7 @@ async def shared_live_readiness(
         if reason is not None:
             rejected.append(f"retained owner {owner}: {reason}")
             continue
-        probe_rows.append(row)
+        probe_rows.append(owner_row)
         probed_hosts.add(owner)
     if rejected:
         return SharedLiveReadiness(

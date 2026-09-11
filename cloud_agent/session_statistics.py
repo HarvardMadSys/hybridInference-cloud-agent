@@ -104,9 +104,10 @@ def summarize_session_statistics(
 
 def _has_complete_timing(ordered: Sequence[Mapping[str, Any]]) -> bool:
     """Require an observed event span and unambiguous, fully paired tool windows."""
-    timestamps = [event.get("created_at") for event in ordered]
-    if len(timestamps) < 2 or any(not isinstance(ts, datetime) for ts in timestamps):
+    observed = [event.get("created_at") for event in ordered]
+    if len(observed) < 2 or any(not isinstance(ts, datetime) for ts in observed):
         return False
+    timestamps = [ts for ts in observed if isinstance(ts, datetime)]
     if timestamps[-1] <= timestamps[0] or any(right < left for left, right in pairwise(timestamps)):
         return False
     if not any(event.get("event_type") in _FIRST_OUTPUT_KINDS for event in ordered):

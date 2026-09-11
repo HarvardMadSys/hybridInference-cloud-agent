@@ -38,6 +38,7 @@ from cloud_agent.schemas import (
     HostRegisterRequest,
     HostRegisterResponse,
     ResidencyBeat,
+    RetainedSandboxStop,
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 
@@ -275,7 +276,7 @@ async def heartbeat_host(
     # settled idle sweep can stop Docker after the worker token that settled
     # the turn has expired, so host authentication is the durable path for
     # recording that STOPPED transition.
-    retained_stops: list[dict[str, Any]] = []
+    retained_stops: list[RetainedSandboxStop] = []
     for retained in body.retained_sandboxes or []:
         await job_store.reconcile_thread_sandbox_observation(
             thread_id=retained.thread_id,
@@ -339,7 +340,7 @@ async def heartbeat_host(
                 sandbox_generation=retained.generation,
             )
             if due is not None:
-                retained_stops.append(due)
+                retained_stops.append(RetainedSandboxStop.model_validate(due))
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
