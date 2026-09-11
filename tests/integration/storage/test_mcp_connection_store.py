@@ -740,6 +740,227 @@ async def test_saving_capabilities_moves_the_revision_it_is_fenced_against(
 # -- the 0005 migration ------------------------------------------------
 
 
+async def test_an_edit_is_conditional_on_the_revision_that_was_read(
+    store: AgentJobStore,
+) -> None:
+    """A stale edit matches no row rather than merging into somebody else's.
+
+    The predicate is inside the ``UPDATE``, which is what makes two tabs -- or
+    two instances -- produce one winner and one refusal instead of a row that
+    reflects neither of them.
+    """
+    connection = await _connect(store, _OWNER)
+    revision = int(connection["config_revision"])
+
+    # A label is not a change of target, so nothing a decision is fenced on
+    # moves -- which also means a second label edit at the same revision is
+    # still valid rather than stale.
+    renamed = await store.update_mcp_connection(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        expected_config_revision=revision,
+        label="Renamed",
+    )
+    assert renamed is not None
+    assert renamed["config_revision"] == revision
+    assert renamed["authorization_epoch"] == connection["authorization_epoch"]
+
+    # A new target does move both, which is what invalidates the sessions
+    # approved against the old one.
+    moved = await store.update_mcp_connection(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        expected_config_revision=revision,
+        url="https://elsewhere.example.com/mcp",
+    )
+    assert moved is not None
+    assert moved["config_revision"] == revision + 1
+    assert moved["authorization_epoch"] == connection["authorization_epoch"] + 1
+
+    # And now the revision the caller read at the start is stale.
+    stale = await store.update_mcp_connection(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        expected_config_revision=revision,
+        label="Someone else's edit",
+    )
+    assert stale is None
+    unchanged = await store.get_mcp_connection(connection_id=connection["id"])
+    assert unchanged is not None
+    assert unchanged["label"] == "Renamed"
+
+
+async def test_a_connection_belonging_to_somebody_else_cannot_be_edited(
+    store: AgentJobStore,
+) -> None:
+    """Ownership is part of the write, not a check before it."""
+    connection = await _connect(store, _OWNER)
+    assert (
+        await store.update_mcp_connection(
+            connection_id=connection["id"],
+            user_id=_OTHER,
+            expected_config_revision=int(connection["config_revision"]),
+            label="Theirs now",
+        )
+        is None
+    )
+
+
+async def test_a_disconnected_connection_is_listed_only_when_asked_for(
+    store: AgentJobStore,
+) -> None:
+    """The page shows what is usable; the tombstone is for the record.
+
+    A disconnect that removed the row would lose the reason a session's binding
+    stopped resolving, and one that stayed in the ordinary list would offer a
+    server nobody can reach.
+    """
+    live = await _connect(store, _OWNER, label="GitHub")
+    gone = await _connect(store, _OWNER, label="DeepWiki", template="deepwiki")
+    assert await store.disconnect_mcp_connection(connection_id=gone["id"], user_id=_OWNER)
+
+    listed = await store.list_mcp_connections(user_id=_OWNER)
+    assert [row["id"] for row in listed] == [live["id"]]
+    everything = await store.list_mcp_connections(user_id=_OWNER, include_deleted=True)
+    assert sorted(row["id"] for row in everything) == sorted([live["id"], gone["id"]])
+
+
+async def test_an_abandoned_refresh_claim_can_be_taken_again(
+    store: AgentJobStore,
+) -> None:
+    """Nothing is locked, so a refresher that dies leaves no lease to reap.
+
+    The claim bumps the version it matched. A winner that never writes anything
+    therefore leaves the row claimable at the *new* version, which is what stops
+    one crashed refresh from freezing a connection until somebody notices.
+    """
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    version = int(connection["credential_version"])
+
+    winner = await store.claim_mcp_refresh(
+        connection_id=connection["id"], expected_credential_version=version
+    )
+    assert winner is not None
+    # A second caller holding the version it read before loses.
+    assert (
+        await store.claim_mcp_refresh(
+            connection_id=connection["id"], expected_credential_version=version
+        )
+        is None
+    )
+    # But the row is not stuck: the winner's own version claims it again.
+    assert (
+        await store.claim_mcp_refresh(
+            connection_id=connection["id"],
+            expected_credential_version=int(winner["credential_version"]),
+        )
+        is not None
+    )
+
+
+async def test_a_refresh_cannot_claim_a_connection_that_was_disconnected(
+    store: AgentJobStore,
+) -> None:
+    """A refresh in flight must not resurrect what its owner removed."""
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    await store.disconnect_mcp_connection(connection_id=connection["id"], user_id=_OWNER)
+    refreshed = await store.get_mcp_connection(connection_id=connection["id"])
+    assert refreshed is not None
+    assert (
+        await store.claim_mcp_refresh(
+            connection_id=connection["id"],
+            expected_credential_version=int(refreshed["credential_version"]),
+        )
+        is None
+    )
+
+
+async def test_recording_a_client_registration_moves_the_oauth_generation(
+    store: AgentJobStore,
+) -> None:
+    """A flow started by the previous client must not complete the new one.
+
+    The target is unchanged, so neither the config revision nor the
+    authorization epoch moves: a client id says who is asking, not what is being
+    reached.
+    """
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    assert await store.set_mcp_client_registration(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        client_id="our-client",
+        client_secret_ciphertext="wrapped-secret",
+    )
+    updated = await store.get_mcp_connection(connection_id=connection["id"])
+    assert updated is not None
+    assert updated["auth_config"]["client_id"] == "our-client"
+    assert updated["client_secret_ciphertext"] == "wrapped-secret"
+    assert updated["oauth_generation"] == connection["oauth_generation"] + 1
+    assert updated["config_revision"] == connection["config_revision"]
+    assert updated["authorization_epoch"] == connection["authorization_epoch"]
+
+
+async def test_expiring_held_calls_leaves_the_settled_ones_alone(
+    store: AgentJobStore,
+) -> None:
+    """A reaper that rewrote a completed call would erase what happened."""
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    overdue = await _invocation(store, job, connection, expires_in=timedelta(seconds=-1))
+    pending = await _invocation(store, job, connection)
+
+    assert await store.expire_mcp_invocations() == 1
+
+    settled = await store.get_mcp_invocation(invocation_id=int(overdue["id"]))
+    assert settled is not None
+    assert settled["status"] == "expired"
+    still_open = await store.get_mcp_invocation(invocation_id=int(pending["id"]))
+    assert still_open is not None
+    assert still_open["status"] == "pending"
+
+
+async def test_listing_calls_filters_by_job_and_state(store: AgentJobStore) -> None:
+    """The approvals page asks for what is waiting; the detail view asks for one
+    job's history, and neither should have to filter in Python."""
+    job = await _create_job(store)
+    other = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    mine = await _invocation(store, job, connection)
+    await _invocation(store, other, connection)
+
+    by_job = await store.list_mcp_invocations(job_id=str(job["id"]))
+    assert [row["id"] for row in by_job] == [mine["id"]]
+    waiting = await store.list_mcp_invocations(job_id=str(job["id"]), statuses=["pending"])
+    assert [row["id"] for row in waiting] == [mine["id"]]
+    assert await store.list_mcp_invocations(job_id=str(job["id"]), statuses=["approved"]) == []
+
+
+async def test_capabilities_cannot_be_saved_for_a_disconnected_connection(
+    store: AgentJobStore,
+) -> None:
+    """Discovery that finishes after a disconnect writes nothing.
+
+    Returning zero rather than raising is deliberate: the caller is a diagnostic
+    that has already dialled, and the honest answer is "that connection is gone",
+    which the row's own status now says.
+    """
+    connection = await _connect(store, _OWNER)
+    await store.disconnect_mcp_connection(connection_id=connection["id"], user_id=_OWNER)
+    revision = await store.save_mcp_capabilities(
+        connection_id=connection["id"],
+        config_revision=1,
+        protocol_version="2025-11-25",
+        server_name="github",
+        server_version="1",
+        tools=[],
+        resources=[],
+        resource_templates=[],
+        prompts=[],
+        support={},
+    )
+    assert revision == 0
+
+
 async def test_the_0005_migration_maps_legacy_server_names_onto_bindings() -> None:
     """Build the pre-0005 shape, upgrade over it, and read what it decided.
 
