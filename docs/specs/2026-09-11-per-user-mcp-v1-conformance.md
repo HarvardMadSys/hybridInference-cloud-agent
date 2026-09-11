@@ -70,15 +70,15 @@ are outside this repository.
 | Area | State |
 | --- | --- |
 | §4.1 add / import / templates decoupled | Done: JSON and TOML dialects, preview before save, masked secrets |
-| §4.2 auth and connection diagnosis | Done: staged diagnostics recorded on the connection; OAuth with discovery, registration precedence, PKCE, `resource`, single-use state, refresh and revocation. A refresh is claimed under a lease with a generation (`0006`), so two workers cannot spend one rotating token, and a superseded refresher's write matches no row |
+| §4.2 auth and connection diagnosis | Done: staged diagnostics recorded on the connection; OAuth with discovery, registration precedence, PKCE, `resource`, single-use state, refresh and revocation. A refresh is claimed under a lease with a generation (`0008`), so two workers cannot spend one rotating token, and a superseded refresher's write matches no row. The lease is released early only for a failure that could not have reached the issuer or a refusal the issuer named itself; a timeout, a gateway's 5xx or a 2xx carrying no usable token response keeps it, because in all three the token may already have rotated |
 | §4.3 network constraints for arbitrary URLs | Done: resolve-then-check every address, credential bound to an origin, redirects refused |
 | §5 stdio, local and private MCP | Configuration and validation only; see above |
-| §6 connection model and authorization versions | Done: `0005`, five version columns, config / authorization / capability / policy revisions, legacy name list mapped and quarantined. `credential_version` moves only when a credential is written |
+| §6 connection model and authorization versions | Done: `0007`, five version columns, config / authorization / capability / policy revisions, legacy name list mapped and quarantined. `credential_version` moves only when a credential is written |
 | §7 dynamic capabilities and read-write authorization | Done: `deny` / `confirm` / `allow` per capability, fingerprints, held calls with a single-winner claim |
 | §8.3 attempt, follow-up and fork | Done: bindings read per call, fork copies the selection, the claim carries aliases |
 | §9 API and interface contract | Done, including the connector API; 19 routes in `create_app()` |
 | §10 migration and deployment | Done as a deployment switch plus the operating notes; no staging run |
-| §11 quality gate | `ruff check`, `ruff format --check`, `pydocstyle`, 3034 non-database and 355 database tests, the web app's own gate (type-check, eslint, prettier, 1184 tests), and one external end-to-end test |
+| §11 quality gate | `ruff check`, `ruff format --check`, `pydocstyle`, 3038 non-database and 355 database tests, the web app's own gate (type-check, eslint, prettier, 1184 tests), and one external end-to-end test |
 
 ## Runtimes (design §8.2)
 
@@ -118,7 +118,7 @@ or namespace several connections.
 ## How to check this document
 
 ```bash
-uv run pytest -q -m "not external and not dbtest"   # 3034
+uv run pytest -q -m "not external and not dbtest"   # 3038
 uv run pytest -q -m dbtest                          # 355, needs Postgres
 uv run pytest -q tests/external/test_agent_mcp_end_to_end.py  # 1, needs npm and Postgres
 ```

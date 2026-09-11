@@ -5,7 +5,7 @@ valid, the refresh token still works, and the only thing that has to happen is
 one token-endpoint call -- which must not happen twice, must not be lost when a
 response omits a rotated token, and must not race a disconnect.
 
-Three rules, and each is a failure the naive version has:
+Four rules, and each is a failure the naive version has:
 
 **One refresher, holding a lease.** A claim that only bumped the credential
 version was not exclusive: the bump is a write, so the next worker to read the
@@ -16,6 +16,14 @@ now a lease with a generation -- taken only when no live lease is held, fenced
 on the way back in -- so the second worker is told "somebody else is refreshing"
 instead of issuing a second call, and a refresher that dies mid-flight leaves a
 lease that expires rather than a lock.
+
+**Only a refusal frees the token to be replayed.** The lease is given back early
+when an attempt could not have spent the refresh token -- it never reached the
+network, or the authorization server named an OAuth error at it. Everything else
+keeps it: a timeout, a gateway's 502 or 504, a 4xx whose body names nothing, or
+a 2xx that carries no usable token response. Each of those may be the answer to
+an exchange that completed, and replaying the token into that is what a rotating
+issuer's reuse detection reads as a stolen grant.
 
 **The rotation contract decides what is kept.** Whether an issuer rotates is
 recorded on the connection, and a response that omits a refresh token means
@@ -69,9 +77,15 @@ class RefreshRefused(RuntimeError):
     have reached the authorization server -- an unreadable credential, no token
     endpoint, a connection that was never established -- is certain: the refresh
     token was not spent, so the lease is released and the next call may retry.
-    A refusal *after* the request left is not: a rotating issuer may have
-    invalidated the token already, and using the copy in hand again is the one
-    thing an issuer's reuse detection treats as an attack on the grant.
+
+    The only other certain case is the issuer naming an OAuth error at us (see
+    :data:`_NAMED_REFUSALS`), because that is the authorization server saying it
+    did not exchange the grant. Everything else that follows a request on the
+    wire is uncertain: a timeout, a 5xx a gateway can produce after the issuer
+    acted, a 4xx whose body names nothing, or a 2xx that carries no usable token
+    response. In all of those a rotating issuer may already have invalidated the
+    token, and presenting the copy in hand again is what its reuse detection
+    reads as an attack on the grant.
     """
 
     def __init__(self, message: str, *, kind: str = "needs_authorization", uncertain: bool = False):
@@ -208,16 +222,20 @@ async def refresh_credential(
             )
         raise
     except (TransportError, oauth.OAuthError) as exc:
-        await _release(store, claimed)
         logger.warning(
             "agent_mcp_refresh_failed",
             extra={"event": "agent_mcp_refresh_failed", "connection_id": claimed["id"]},
         )
-        # A rotating issuer that sent no new refresh token lands here too.
-        # Converted so a caller sees one refusal type rather than two, and so
-        # nothing is written: keeping the old token would look like success
-        # until the next refresh, hours later.
-        raise RefreshRefused(f"this connection could not be refreshed: {exc}") from exc
+        # The answer arrived and could not be turned into a credential: no access
+        # token in it, or a rotating issuer that sent no new refresh token. Both
+        # are the shape of an exchange that *did* happen -- which is when the old
+        # refresh token stops working -- so this is not a refusal to retry
+        # immediately, and the lease stays. Converted here so a caller sees one
+        # refusal type rather than two, and so nothing is written: keeping the old
+        # token would look like success until the next refresh, hours later.
+        raise RefreshRefused(
+            f"this connection could not be refreshed: {exc}", uncertain=True
+        ) from exc
 
     written = await store.set_mcp_credential(
         connection_id=int(claimed["id"]),
@@ -403,6 +421,51 @@ def _decrypt(cipher: SourceControlCipher | None, value: Any) -> str | None:
 #: two are not the same refusal and do not get the same lease decision.
 _NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
+#: The error codes that mean *the authorization server refused this request*:
+#: RFC 6749 §5.2's token-endpoint vocabulary plus RFC 8707's ``invalid_target``,
+#: which is the one that applies to the ``resource`` this platform sends.
+#:
+#: Matched by name rather than by "the body had an ``error`` field", because a
+#: gateway's own error document is not the issuer saying it declined to exchange
+#: the grant -- and releasing the lease is the one action that needs that to be
+#: true.
+_NAMED_REFUSALS = frozenset(
+    {
+        "invalid_client",
+        "invalid_grant",
+        "invalid_request",
+        "invalid_scope",
+        "invalid_target",
+        "unauthorized_client",
+        "unsupported_grant_type",
+    }
+)
+
+
+def _named_refusal(response: httpx.Response) -> str:
+    """The OAuth error code an error response names, or an empty string.
+
+    **A status code is not a refusal.** A ``502`` or ``504`` is produced by
+    whatever sits in front of the issuer, and RFC 9110 describes both as the
+    upstream not producing a timely response -- not as it declining to act. The
+    issuer may have rotated the refresh token before that gateway gave up on the
+    answer, so a caller that treats the status code as "nothing happened" is one
+    step away from replaying a token that is already spent.
+
+    A 5xx therefore never names a refusal, whatever its body says, and neither
+    does a 4xx whose body is not the token endpoint's own error document.
+    """
+    if response.status_code >= 500:
+        return ""
+    try:
+        document = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(document, Mapping):
+        return ""
+    error = document.get("error")
+    return error if isinstance(error, str) and error in _NAMED_REFUSALS else ""
+
 
 async def _post(
     request: oauth.TokenRequest,
@@ -461,12 +524,18 @@ async def _post(
         ) from exc
 
     if response.status_code >= 400:
-        # An answer the endpoint chose to send, so the grant was refused rather
-        # than left in doubt. That is the other half of the distinction: it is a
-        # definite failure, and the lease is released for the next attempt.
+        refusal = _named_refusal(response)
         raise RefreshRefused(
-            f"the token endpoint answered {response.status_code}",
+            f"the token endpoint answered {response.status_code}"
+            + (f" ({refusal})" if refusal else ""),
             kind=ConnectionErrorKind.NEEDS_AUTHORIZATION.value,
+            # Released only for a refusal the authorization server itself named.
+            # Everything else -- a 5xx, which a gateway in front of the issuer
+            # produces without the issuer having declined anything, or a 4xx
+            # whose body names no error -- leaves "was the refresh token spent?"
+            # open, and the lease is what stops the next attempt from answering
+            # it with the same token a moment later.
+            uncertain=not refusal,
         )
     try:
         document = response.json()
@@ -479,7 +548,14 @@ async def _post(
             uncertain=True,
         ) from exc
     if not isinstance(document, Mapping):
-        raise RefreshRefused("the token response is not an object")
+        raise RefreshRefused(
+            "the token response is not an object",
+            kind=ConnectionErrorKind.PROTOCOL_INCOMPATIBLE.value,
+            # Same reasoning as an unreadable body: a 2xx that carries no token
+            # response is not the issuer declining, and the exchange it may have
+            # completed is exactly what a retry would replay.
+            uncertain=True,
+        )
     return document
 
 

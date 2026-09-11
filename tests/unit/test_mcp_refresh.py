@@ -315,32 +315,6 @@ class TestRefresh:
         assert cipher.decrypt(store.row["access_token_ciphertext"]) == "old-access"
 
     @pytest.mark.asyncio
-    async def test_a_refused_refresh_releases_the_lease(self, monkeypatch) -> None:
-        """Nothing rotated, so the next call must not wait out the timer."""
-        store = FakeStore(_row())
-
-        async def failing_post(request: Any, *, policy: Any, fetcher: Any) -> dict[str, Any]:
-            raise TransportError("the token endpoint answered 400")
-
-        monkeypatch.setattr(refresh, "_post", failing_post)
-        with pytest.raises(refresh.RefreshRefused):
-            await refresh.refresh_credential(
-                store,
-                row=store.row,
-                policy=EgressPolicy(),  # type: ignore[arg-type]
-            )
-        assert store.leased == set()
-        assert store.released == [1]
-        # And the row is claimable again: a failed attempt is not a lock.
-        _patch_token_response(monkeypatch, {"access_token": "new-access", "expires_in": 3600})
-        outcome = await refresh.refresh_credential(
-            store,
-            row=store.row,
-            policy=EgressPolicy(),  # type: ignore[arg-type]
-        )
-        assert outcome.refreshed
-
-    @pytest.mark.asyncio
     async def test_a_confidential_client_reads_its_secret_under_the_oauth_domain(
         self, monkeypatch
     ) -> None:
@@ -438,13 +412,18 @@ class TestRefresh:
         """Keeping the old token would look fine until the next refresh."""
         store = FakeStore(_row(refresh_rotates=True))
         _patch_token_response(monkeypatch, {"access_token": "new"})
-        with pytest.raises(refresh.RefreshRefused):
+        with pytest.raises(refresh.RefreshRefused) as raised:
             await refresh.refresh_credential(
                 store,
                 row=store.row,
                 policy=EgressPolicy(),  # type: ignore[arg-type]
             )
         assert store.writes == []
+        # The exchange is the shape of one that *did* happen -- which is when the
+        # old refresh token stops working -- so the next attempt waits out the
+        # lease rather than replaying it.
+        assert raised.value.uncertain
+        assert store.leased == {1}
 
     @pytest.mark.asyncio
     async def test_a_disconnect_during_a_refresh_is_not_undone(self, monkeypatch) -> None:
@@ -564,14 +543,65 @@ class TestTheLeaseAfterANetworkFailure:
 
     @pytest.mark.asyncio
     async def test_an_answered_refusal_releases_the_lease(self, monkeypatch) -> None:
-        """The other side of the line: the endpoint answered, and said no."""
+        """The other side of the line: the endpoint answered, and said no.
+
+        A named OAuth error is the authorization server itself declining to
+        exchange the grant, which is the one thing a response can prove. That is
+        what makes it safe to retry at once.
+        """
         store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
         _client_that_answers(monkeypatch, status_code=400, text='{"error": "invalid_grant"}')
         with pytest.raises(refresh.RefreshRefused) as raised:
             await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
         assert not raised.value.uncertain
         assert raised.value.kind == "needs_authorization"
+        assert "invalid_grant" in str(raised.value)
         assert store.released == [1]
+        # And the row is claimable again: a refused attempt is not a lock.
+        _patch_token_response(monkeypatch, {"access_token": "new-access", "expires_in": 3600})
+        outcome = await refresh.refresh_credential(
+            store,
+            row=store.row,
+            policy=_ALLOW_LOOPBACK,
+        )
+        assert outcome.refreshed
+
+    @pytest.mark.parametrize(
+        ("status", "body"),
+        [
+            (502, '{"error": "bad_gateway"}'),
+            (504, '{"error": "gateway_timeout"}'),
+            (400, '{"error": "bad_gateway"}'),
+            (200, "[]"),
+            (200, '{"refresh_token": "rotated"}'),
+        ],
+        ids=["bad-gateway", "gateway-timeout", "unnamed-4xx", "non-object", "no-access-token"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_response_that_proves_nothing_keeps_the_lease(
+        self, status: int, body: str, monkeypatch
+    ) -> None:
+        """A status code is not a refusal, and an answer is not a credential.
+
+        A 502 or 504 is produced by whatever sits in front of the issuer --
+        RFC 9110 describes both as the upstream failing to answer in time, not
+        as it declining to act -- and the issuer may have rotated the refresh
+        token before that gateway gave up. A 2xx that carries no usable token
+        response may likewise be an exchange that completed and an answer that
+        was mangled on the way. Releasing the lease on any of these replays the
+        token immediately, which is what a rotating issuer's reuse detection
+        reads as a stolen grant.
+        """
+        store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
+        _client_that_answers(monkeypatch, status_code=status, text=body)
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
+        assert raised.value.uncertain
+        assert store.released == []
+        assert store.leased == {1}
+        # The lease, not the network, is what the next caller meets.
+        second = await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
+        assert second.contended
 
     @pytest.mark.asyncio
     async def test_a_target_the_policy_refuses_releases_the_lease(self, monkeypatch) -> None:
