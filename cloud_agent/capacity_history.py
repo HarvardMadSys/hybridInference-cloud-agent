@@ -139,24 +139,31 @@ async def _record_round(
     database that has become slow turns one page into a hundred timeouts —
     a round that runs a hundred times longer than it was allowed to while
     still reporting that it finished. The cursor advances per host for the
-    same reason: whatever this round did manage to write is what the next one
-    resumes after, and nothing is measured twice or skipped.
+    same reason: each round visits every host in turn, and a host whose write
+    failed — a timeout, a corrupt snapshot — leaves a gap in its own curve
+    rather than stalling every host behind it. Missed minutes are not
+    reconstructed; that is the whole reason the cursor may move past one.
 
     Returns:
         The last host written, when the round stopped early with work left; or
         ``None`` when the pool was walked to its end, so the next round starts
         from the beginning and picks up hosts that appeared meanwhile.
     """
-    await _prune(store, limit=prune_batch_size, timeout_seconds=batch_timeout_seconds)
     deadline = clock() + round_budget_seconds
+    await _prune(
+        store,
+        limit=prune_batch_size,
+        timeout_seconds=_remaining(deadline, clock, batch_timeout_seconds),
+    )
     while True:
-        if clock() >= deadline:
+        remaining = _remaining(deadline, clock, batch_timeout_seconds)
+        if remaining <= 0:
             _log_truncated()
             return cursor
         try:
             rows = await asyncio.wait_for(
                 store.list_capacity_history_candidates(after_host=cursor, limit=batch_size),
-                timeout=batch_timeout_seconds,
+                timeout=remaining,
             )
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning(
@@ -178,13 +185,33 @@ async def _record_round(
         if not rows:
             return None
         for row in rows:
-            if clock() >= deadline:
+            remaining = _remaining(deadline, clock, batch_timeout_seconds)
+            if remaining <= 0:
                 _log_truncated()
                 return cursor
-            await _write_point(store, row, timeout_seconds=batch_timeout_seconds)
+            await _write_point(store, row, timeout_seconds=remaining)
             cursor = str(row["host"])
         if len(rows) < batch_size:
             return None
+
+
+def _remaining(deadline: float, clock: Callable[[], float], ceiling: float) -> float:
+    """How long this operation may take without overrunning the round.
+
+    A budget that only gates *whether* an operation starts is a soft one: the
+    last write still gets its full timeout, so a round configured for ten
+    seconds can run to twelve. Clamping each timeout to what is left makes the
+    budget the thing that actually bounds the round.
+
+    Args:
+        deadline: Monotonic instant the round must be done by.
+        clock: Monotonic seconds.
+        ceiling: The operation's own timeout, used when there is room for it.
+
+    Returns:
+        The smaller of the two, never negative. Zero means the round is over.
+    """
+    return max(0.0, min(ceiling, deadline - clock()))
 
 
 def _log_truncated() -> None:

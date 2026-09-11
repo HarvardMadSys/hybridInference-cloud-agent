@@ -11,6 +11,7 @@ rather than left to the database tier.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,6 +20,7 @@ import pytest
 from cloud_agent.capacity_history import (
     HISTORY_BATCH_SIZE,
     _record_round,
+    _remaining,
     collect_host_capacity_history,
 )
 from cloud_agent.capacity_protocol import bucket_for
@@ -211,6 +213,54 @@ async def test_a_full_page_keeps_paging_until_the_pool_is_walked() -> None:
     assert await run_round(store, None, batch_size=2) is None
     assert store.reads == [None, "host-1", "host-3"]
     assert len(store.written) == 5
+
+
+def test_remaining_clamps_an_operation_to_what_the_round_has_left() -> None:
+    """The budget has to bound the operation, not merely gate its start."""
+    assert _remaining(10.0, lambda: 0.0, 2.0) == 2.0
+    assert _remaining(10.0, lambda: 8.0, 2.0) == 2.0
+    assert _remaining(10.0, lambda: 9.0, 2.0) == 1.0
+    assert _remaining(10.0, lambda: 10.0, 2.0) == 0.0
+    assert _remaining(10.0, lambda: 12.0, 2.0) == 0.0
+
+
+async def test_the_round_budget_bounds_the_last_operation_too() -> None:
+    """A soft budget is not a budget.
+
+    Gating each operation on "is there time left" still lets the one that
+    starts with a millisecond to spare run its whole timeout, so a round
+    configured for ten seconds finishes in twelve. Here the operation never
+    completes on its own: only the round's own deadline can end it, and the
+    elapsed wall clock is what says whether the deadline or the timeout won.
+    """
+    budget_seconds, operation_ceiling = 0.2, 2.0
+    store = FakeStore([candidate("alpha"), candidate("beta")])
+
+    attempted: list[str] = []
+
+    class BlockingStore(FakeStore):
+        async def record_capacity_history_point(self, *, host: str, **_kwargs: Any) -> bool:
+            attempted.append(host)
+            await asyncio.sleep(3600)
+            return True  # pragma: no cover - only reached without a deadline
+
+    blocking = BlockingStore(store.rows)
+    started = time.monotonic()
+    cursor = await run_round(
+        blocking,
+        None,
+        batch_timeout_seconds=operation_ceiling,
+        round_budget_seconds=budget_seconds,
+        clock=time.monotonic,
+    )
+    elapsed = time.monotonic() - started
+
+    # Unclamped this waits the full two-second ceiling before giving up.
+    assert elapsed < budget_seconds * 2
+    # It stopped at the host it could not finish rather than starting another
+    # one it could not finish either, and the next round resumes after it.
+    assert attempted == ["alpha"]
+    assert cursor == "alpha"
 
 
 # ── Failure isolation ─────────────────────────────────────────────────
