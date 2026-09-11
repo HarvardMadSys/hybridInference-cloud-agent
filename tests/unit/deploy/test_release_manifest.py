@@ -413,21 +413,78 @@ def test_membership_is_the_invariant_the_schema_cannot_express() -> None:
 
 
 def test_the_schema_and_the_generator_refuse_the_same_thing() -> None:
-    """The two halves of the contract meet on the case that matters most.
+    """Completeness is a contract both halves have to carry.
 
-    A role dropped from the build is the failure a schema cannot see on its own
-    (a shorter list is still a valid list), which is why the generator counts
-    roles and the schema only requires the array to be non-empty. Both must
-    refuse it, from either side.
+    A role dropped from the build is the failure a schema cannot see by
+    counting: the list is still a list, and one of the right length holding the
+    wrong roles is the same broken release wearing a valid-looking shape.
+    Review found exactly that hole — `minItems: 7` accepted a build that lost
+    its sandbox and gained a second control plane — so the schema now states the
+    cardinality per role and per web variant, and both halves are checked
+    against the case that found it.
     """
-    manifest = build()
-    manifest["artifacts"] = [entry for entry in manifest["artifacts"] if entry["role"] != "sandbox"]
+    impostor = build()
+    impostor["artifacts"] = [
+        entry for entry in impostor["artifacts"] if entry["role"] != "sandbox"
+    ] + [dict(next(e for e in impostor["artifacts"] if e["role"] == "control"))]
     with pytest.raises(jsonschema.ValidationError):
-        # minItems is 7, so the schema catches this one by count as well.
-        jsonschema.validate(manifest, SCHEMA)
-
+        jsonschema.validate(impostor, SCHEMA)
     with pytest.raises(rm.ManifestError):
-        build(artifacts=[entry for entry in built_artifacts() if entry["role"] != "sandbox"])
+        build(
+            artifacts=[
+                *[e for e in built_artifacts() if e["role"] != "sandbox"],
+                artifact("control", seed="impostor"),
+            ]
+        )
+
+    # An eighth artifact of a role that is already present, same story.
+    eighth = build()
+    eighth["artifacts"].append(dict(eighth["artifacts"][0]))
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(eighth, SCHEMA)
+    with pytest.raises(rm.ManifestError):
+        build(artifacts=[*built_artifacts(), artifact("control", seed="eighth")])
+
+    # And a second web build of a variant the release already carries.
+    duplicated_variant = build()
+    duplicated_variant["artifacts"].append(
+        dict(next(e for e in duplicated_variant["artifacts"] if e.get("variant") == "root"))
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(duplicated_variant, SCHEMA)
+    with pytest.raises(rm.ManifestError):
+        build(artifacts=[*built_artifacts(), artifact("web", base_path="", seed="again")])
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"verified_upgrade_from": ["dev"]}, id="a branch name, not a commit"),
+        pytest.param({"verified_rollback_to": [COMMIT, COMMIT]}, id="a repeat"),
+        pytest.param(
+            {
+                "runtime_labels": {
+                    **labels(),
+                    f"{rm.RUNTIME_LABEL_PREFIX}codex{rm.RUNTIME_MENU_LABEL_SUFFIX}": "1.1.0,1.1.0",
+                }
+            },
+            id="a runtime version listed twice",
+        ),
+    ],
+)
+def test_the_generator_refuses_what_only_the_schema_catches(overrides: dict[str, Any]) -> None:
+    """The generator's own checks are not the whole contract, and must not be.
+
+    These three are expressible in the schema and nowhere in the code above: a
+    compatibility range that is not a commit, a list with a repeat, a runtime
+    menu naming one version twice. Review reproduced the first through the real
+    CLI — exit code 0, file written, and the release rejected by this PR's own
+    schema — which is why the generator now validates its output against the
+    published document before writing anything.
+    """
+    with pytest.raises(rm.ManifestError) as raised:
+        build(**overrides)
+    assert "does not satisfy" in str(raised.value)
 
 
 # ------------------------------------------------------------------- the CLI
@@ -496,4 +553,41 @@ def test_a_refused_run_writes_nothing(tmp_path: Path) -> None:
         )
         == 1
     )
+    assert not output.exists()
+
+
+def cli_arguments(inputs: Path, output: Path) -> list[str]:
+    return [
+        "--inputs",
+        str(inputs),
+        "--recipe-url",
+        "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/x/r.tgz",
+        "--recipe-sha256",
+        hexdigest("recipe"),
+        "--publisher-run-url",
+        RUN_URL,
+        "--output",
+        str(output),
+    ]
+
+
+def test_a_schema_invalid_manifest_is_never_written(tmp_path: Path) -> None:
+    """The case review reproduced against the real CLI.
+
+    `--verified-upgrade-from dev` reached the writer: exit code 0, file
+    written, and this PR's own schema rejecting the document a moment later. A
+    publication job that reports success while producing an unconsumable
+    release is the worst place for this to be discovered, so the CLI is checked
+    for it here rather than trusted to the library.
+    """
+    inputs = write_inputs(tmp_path / "inputs.json")
+    output = tmp_path / "release.json"
+    code = rm.main(
+        [
+            *cli_arguments(inputs, output),
+            "--verified-upgrade-from",
+            "dev",
+        ]
+    )
+    assert code == 1
     assert not output.exists()

@@ -14,6 +14,10 @@ What this module checks, and what it deliberately does not:
   digest references under this organization's registry. A missing artifact is
   not a smaller release — it is a release that would leave a machine half
   updated — so these are refusals, not warnings.
+* **It validates its own output against the published schema.** That schema is
+  the document a consumer holds, so the generator checks its own work against it
+  before writing anything: a publication job must not be able to produce a
+  manifest that a distribution refuses later, on a machine nobody is watching.
 * **It reads versions from their real sources.** `deploy_protocol` comes from
   `deploy/DEPLOY_PROTOCOL`, `database_revision` from Alembic's own script
   directory, and the runtime catalog from the sandbox image's labels, which the
@@ -62,6 +66,10 @@ REGISTRY_PREFIX = "ghcr.io/harvardmadsys/"
 DEPLOY_PROTOCOL_FILE = REPO_ROOT / "deploy" / "DEPLOY_PROTOCOL"
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 MIGRATIONS_DIR = REPO_ROOT / "migrations"
+
+#: The published contract, and the document this module validates its own output
+#: against before writing it.
+SCHEMA_PATH = REPO_ROOT / "deploy" / "release" / "manifest.schema.json"
 
 #: The roles a release must carry, and the platforms each is built on.
 #:
@@ -345,7 +353,52 @@ def build_manifest(
         },
         "publisher_run_url": publisher_run_url,
     }
+    validate_against_schema(manifest)
     return manifest
+
+
+def load_schema(path: Path = SCHEMA_PATH) -> dict[str, Any]:
+    """The published contract, read from the file a consumer validates against."""
+    return json.loads(path.read_text())
+
+
+def validate_against_schema(manifest: Mapping[str, Any], path: Path = SCHEMA_PATH) -> None:
+    """Refuse a document the published schema would reject.
+
+    The checks above and the schema are two implementations of one contract,
+    and the schema is the one a consumer holds. Validating here means a
+    publication job cannot write a document that a distribution refuses later:
+    the failure lands on the machine that produced it, while the build is still
+    in front of the person who can fix it.
+
+    The two do not overlap by accident. Anything expressible in the schema —
+    field types, digest and URL shapes, `uniqueItems` on the compatibility and
+    runtime-version lists, exactly one artifact per role — is checked there as
+    well, and this call is what keeps the generator from drifting away from it.
+    What the schema cannot express (a runtime default appearing in its own
+    menu) stays in the functions above.
+
+    `jsonschema` is a dev dependency, not a runtime one: it is needed here and
+    in the test suite, while the shipped images install only `pip install .`.
+    An environment that cannot import it fails rather than skipping the check —
+    an unvalidated manifest is exactly what this function exists to prevent.
+    """
+    try:
+        import jsonschema
+    except ImportError as error:  # pragma: no cover - the publication env has dev deps
+        raise ManifestError(
+            f"jsonschema is not installed, so this manifest cannot be validated against "
+            f"{path.name}. Install the dev dependencies in the environment that publishes "
+            "releases; a manifest that was never validated must not be written."
+        ) from error
+
+    try:
+        jsonschema.validate(instance=dict(manifest), schema=load_schema(path))
+    except jsonschema.ValidationError as error:
+        where = "/".join(str(part) for part in error.absolute_path) or "<document>"
+        raise ManifestError(
+            f"the manifest does not satisfy {path.name} at {where}: {error.message}"
+        ) from error
 
 
 def _inputs(path: Path) -> tuple[str, Sequence[Mapping[str, Any]], Mapping[str, Any]]:

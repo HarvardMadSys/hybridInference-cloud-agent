@@ -38,15 +38,124 @@
     "artifacts": {
       "type": "array",
       "minItems": 7,
-      "description": "Every image the deployment runs. One entry per role, except web, which has one entry per build variant because basePath is resolved at build time. A release is not consumable until all of them exist: a missing artifact is not a smaller release, it is a broken one.",
+      "description": "Every image the deployment runs: exactly one entry per role, and web exactly one per build variant because basePath is resolved at build time. A release is not consumable until all of them exist: a missing artifact is not a smaller release, it is a broken one, and a list of the right length holding the wrong roles is the same failure wearing a valid-looking shape. The cardinality is enforced with contains/minContains/maxContains per role rather than by counting entries.",
       "items": {
         "$ref": "#/$defs/artifact"
-      }
+      },
+      "maxItems": 7,
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "control"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "runner"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "sandbox"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "tunnel"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "egress"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "web"
+              },
+              "variant": {
+                "const": "root"
+              }
+            },
+            "required": [
+              "role",
+              "variant"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "web"
+              },
+              "variant": {
+                "const": "agents"
+              }
+            },
+            "required": [
+              "role",
+              "variant"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
     },
     "runtime_catalog": {
       "type": "object",
       "minProperties": 1,
-      "description": "The Agent CLIs the sandbox image actually contains, read from that image's own org.freeinference.runtime.* labels rather than from Dockerfile defaults — the labels are derived from the effective build arguments and cross-checked against the installed binaries at build time.",
+      "description": "The Agent CLIs the sandbox image actually contains, read from that image's own org.freeinference.runtime.* labels rather than from Dockerfile defaults \u2014 the labels are derived from the effective build arguments and cross-checked against the installed binaries at build time.",
       "additionalProperties": {
         "$ref": "#/$defs/runtime"
       }
@@ -72,18 +181,35 @@
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["role", "image", "platforms"],
+      "required": [
+        "role",
+        "image",
+        "platforms"
+      ],
       "properties": {
         "role": {
-          "enum": ["control", "web", "runner", "sandbox", "tunnel", "egress"],
+          "enum": [
+            "control",
+            "web",
+            "runner",
+            "sandbox",
+            "tunnel",
+            "egress"
+          ],
           "description": "What the image is for. Verified against the image's own io.hybridinference.artifact.role label, not against the registry path: which package or tag an image lives in is storage layout, and a deployment must not depend on it."
         },
         "variant": {
-          "enum": ["root", "agents"],
+          "enum": [
+            "root",
+            "agents"
+          ],
           "description": "Web only. The build variant, implied by basePath."
         },
         "base_path": {
-          "enum": ["", "/agents"],
+          "enum": [
+            "",
+            "/agents"
+          ],
           "description": "Web only. The prefix the app is built to serve under, which is a property of the image rather than of the deployment."
         },
         "image": {
@@ -96,7 +222,10 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "enum": ["linux/amd64", "linux/arm64"]
+            "enum": [
+              "linux/amd64",
+              "linux/arm64"
+            ]
           },
           "description": "The platforms this artifact was built and started on. Declared per artifact: a single-platform image is not a multi-architecture one, and the resolver verifies the index really carries them."
         }
@@ -109,10 +238,15 @@
                 "const": "web"
               }
             },
-            "required": ["role"]
+            "required": [
+              "role"
+            ]
           },
           "then": {
-            "required": ["variant", "base_path"],
+            "required": [
+              "variant",
+              "base_path"
+            ],
             "oneOf": [
               {
                 "properties": {
@@ -140,10 +274,14 @@
             "not": {
               "anyOf": [
                 {
-                  "required": ["variant"]
+                  "required": [
+                    "variant"
+                  ]
                 },
                 {
-                  "required": ["base_path"]
+                  "required": [
+                    "base_path"
+                  ]
                 }
               ]
             }
@@ -154,7 +292,10 @@
     "runtime": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["default", "versions"],
+      "required": [
+        "default",
+        "versions"
+      ],
       "properties": {
         "default": {
           "type": "string",
@@ -176,7 +317,11 @@
     "recipe": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["url", "sha256", "format_version"],
+      "required": [
+        "url",
+        "sha256",
+        "format_version"
+      ],
       "description": "The generic deployment recipe: Compose files, protocol files and host helpers, archived so a deployment can be prepared without a source checkout.",
       "properties": {
         "url": {
@@ -197,7 +342,11 @@
     "compatibility": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["minimum_deployer", "verified_upgrade_from", "verified_rollback_to"],
+      "required": [
+        "minimum_deployer",
+        "verified_upgrade_from",
+        "verified_rollback_to"
+      ],
       "description": "What this release has actually been exercised against. Deliberately not inferred from the Alembic revision: a schema that is backwards compatible says nothing about whether a rollback was rehearsed.",
       "properties": {
         "minimum_deployer": {

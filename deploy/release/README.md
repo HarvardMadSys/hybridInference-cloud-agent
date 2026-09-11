@@ -23,6 +23,13 @@ release — it is one that would leave a machine half updated — and one image
 answering for two roles is a build matrix that quietly stopped building
 something.
 
+That shape is stated twice — here and in `manifest.schema.json` — and the
+generator validates its own output against the schema before writing anything,
+so the two cannot drift apart quietly. The schema carries the cardinality per
+role and per web variant (`contains` with `minContains`/`maxContains`) rather
+than counting entries, because a release that lost its sandbox and gained a
+second control plane has exactly the right number of artifacts.
+
 It does **not** verify the images themselves. That a digest exists, that its
 index really carries the declared platforms, that each platform image's
 `org.opencontainers.image.revision` equals `source_commit`, and that its
@@ -35,7 +42,8 @@ Two invariants worth naming because they cannot be enforced in the same place:
 
 * **Membership.** `runtime_catalog.<runtime>.default` must appear in that
   runtime's `versions`. JSON Schema cannot express "this string is one of that
-  array", so the generator refuses it and the resolver has to check it again.
+  array", so the generator refuses it and the resolver has to check it again —
+  it is the one shape check the published schema does not carry.
 * **Provenance of versions.** `deploy_protocol` is read from
   `deploy/DEPLOY_PROTOCOL`, `database_revision` from Alembic's script directory,
   and the runtime catalog from the sandbox image's own labels. None is typed
