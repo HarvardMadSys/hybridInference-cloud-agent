@@ -117,7 +117,10 @@ def test_artifact_mode_does_not_offer_the_stray_stack_bypass() -> None:
     artifact, _, source = guard.partition("ALLOW_STRAY_STACK")
     assert "artifacts" in artifact, "the artifact branch refuses before the bypass is read"
     assert "die" in artifact
-    assert "source" in source or True  # the hatch still exists for source mode, one branch below
+    assert "ALLOW_STRAY_STACK" in source, (
+        "and the hatch stays available to source mode, whose operator is looking at the "
+        "machine rather than at a release"
+    )
 
 
 def test_artifact_mode_requires_a_manifest_and_names_its_variant() -> None:
