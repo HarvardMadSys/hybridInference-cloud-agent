@@ -38,6 +38,8 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
+from cloud_agent.mcp import refresh
+from cloud_agent.mcp.registry import mcp_cipher, oauth_cipher
 from cloud_agent.storage.store import AgentJobStore
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
@@ -1044,6 +1046,43 @@ async def test_recording_a_client_registration_moves_the_oauth_generation(
     assert updated["oauth_generation"] == connection["oauth_generation"] + 1
     assert updated["config_revision"] == connection["config_revision"]
     assert updated["authorization_epoch"] == connection["authorization_epoch"]
+
+
+async def test_a_client_identity_written_with_a_credential_reaches_the_refresh(
+    store: AgentJobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One field, written by the authorization and read by the renewal.
+
+    The API test asserts the callback passes the identity it authorized with;
+    what only Postgres can show is that the fenced write keeps it *and* that the
+    refresh path reads it back -- two statements the route tests model rather
+    than execute, which is how a dynamically registered client ended up with a
+    token and no client id.
+    """
+    key = "mcp-store-client-identity-key"
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", key)
+    connection = await _connect(store, _OWNER, auth_kind="oauth", access_token=None)
+    assert await store.set_mcp_credential(
+        connection_id=connection["id"],
+        expected_authorization_epoch=connection["authorization_epoch"],
+        access_token_ciphertext=mcp_cipher(key).encrypt("dynamic-access"),
+        refresh_token_ciphertext=mcp_cipher(key).encrypt("dynamic-refresh"),
+        client_secret_ciphertext=oauth_cipher(key).encrypt("dynamic-secret"),
+        client_auth_method="client_secret_basic",
+        registration="dcr",
+        issuer="https://issuer.example.com",
+        resource=_URL,
+        token_endpoint="https://issuer.example.com/token",
+        auth_config_patch={"client_id": "review-dynamic-client"},
+    )
+    stored = await store.get_mcp_connection(connection_id=connection["id"])
+    assert stored is not None
+    assert stored["auth_config"]["client_id"] == "review-dynamic-client"
+
+    request = refresh._build_request(stored, cipher=mcp_cipher(key))
+    assert request.client.client_id == "review-dynamic-client"
+    assert request.client.client_secret == "dynamic-secret"
+    assert request.client.auth_method == "client_secret_basic"
 
 
 async def test_expiring_held_calls_leaves_the_settled_ones_alone(

@@ -224,6 +224,42 @@ class HostLimits:
     max_continuations: int = 3
 
 
+@dataclass(frozen=True)
+class SessionFingerprint:
+    """What a live session was opened with, for deciding whether it still fits.
+
+    None of this can live in the key: the key is a digest of the connection, the
+    member and the owner lease generation, and every field here changes while
+    that key stays the same. So the host records the fingerprint and compares it
+    on the way back in, because a cache that answers anyway drives a transport
+    opened for something else -- an old credential, an old bound, or an old
+    *target*.
+
+    ``config_revision`` is the target: a connection's URL, transport, launch spec
+    and authentication profile all move it, and none of them touch
+    ``credential_version``. ``authorization_epoch`` moves when the authorization
+    behind the credential is replaced. Both matter here and neither is a secret,
+    which is why they are compared rather than assumed.
+    """
+
+    secret: str | None
+    request_timeout_s: float | None
+    credential_version: int
+    config_revision: int
+    authorization_epoch: int
+
+    @classmethod
+    def of(cls, connection: McpConnection, *, secret: str | None) -> SessionFingerprint:
+        """Read the fingerprint of one connection as a caller offers it."""
+        return cls(
+            secret=secret,
+            request_timeout_s=connection.request_timeout_s,
+            credential_version=connection.credential_version,
+            config_revision=connection.config_revision,
+            authorization_epoch=connection.authorization_epoch,
+        )
+
+
 class McpHost:
     """Opens sessions and drives the protocol for one connection at a time.
 
@@ -255,10 +291,10 @@ class McpHost:
         self._store = store
         self._sessions: dict[str, Session] = {}
         #: What each live session was opened with, so a caller that arrives with
-        #: a rotated token or a changed timeout is not silently handed the old
-        #: transport. Kept beside the sessions rather than on them because it is
-        #: the *caller's* state, not the protocol's.
-        self._opened_with: dict[str, tuple[str | None, float | None, int]] = {}
+        #: a rotated token, a changed timeout or a repointed connection is not
+        #: silently handed the old transport. Kept beside the sessions rather
+        #: than on them because it is the *caller's* state, not the protocol's.
+        self._opened_with: dict[str, SessionFingerprint] = {}
 
     def session(self, key: SessionKey) -> Session | None:
         """The live session for one member, if any."""
@@ -288,10 +324,10 @@ class McpHost:
         if existing is not None:
             # The key is unchanged -- same connection, same member, same owner --
             # but something the session was *opened with* is not. A refreshed
-            # token and a widened timeout both arrive under the same key, and a
-            # cache that answers with the old transport sends the old credential
-            # to the upstream and keeps the old bound, neither of which the
-            # caller asked for.
+            # token, a widened timeout and a repointed connection all arrive
+            # under the same key, and a cache that answers with the old transport
+            # sends the old credential to the old address under the old bound,
+            # none of which the caller asked for.
             del self._sessions[key.handle()]
             await existing.aclose()
         await self.reap_superseded(key)
@@ -300,11 +336,7 @@ class McpHost:
             key=key, transport=transport, handshake=handshake, stream_task=stream_task
         )
         self._sessions[key.handle()] = session
-        self._opened_with[key.handle()] = (
-            secret,
-            connection.request_timeout_s,
-            connection.credential_version,
-        )
+        self._opened_with[key.handle()] = SessionFingerprint.of(connection, secret=secret)
         await self._record(connection, session)
         return session
 
@@ -313,20 +345,19 @@ class McpHost:
     ) -> bool:
         """Whether a cached session was opened with what the caller just passed.
 
-        Compared rather than assumed because the key cannot carry either: the
-        credential is a secret the caller holds for this call and the timeout is
-        a property of the connection row, while the key is a digest of the
-        connection, the member and the owner.
+        Compared rather than assumed, because the key carries none of it: the
+        credential is a secret the caller holds for this call, the timeout is a
+        property of the connection row, and the revisions are how a connection
+        says its target or its authorization moved. Leaving the revisions out is
+        what let a session opened against one address keep answering after the
+        owner repointed the connection -- an update that deliberately does not
+        move ``credential_version``, so the two fields that would have caught it
+        are the ones that have to be compared.
         """
-        opened = self._opened_with.get(session.key.handle())
-        if opened is None:
+        recorded = self._opened_with.get(session.key.handle())
+        if recorded is None:
             return False
-        recorded_secret, recorded_timeout, recorded_credential = opened
-        return (
-            recorded_secret == secret
-            and recorded_timeout == connection.request_timeout_s
-            and recorded_credential == connection.credential_version
-        )
+        return recorded == SessionFingerprint.of(connection, secret=secret)
 
     async def reap_superseded(self, key: SessionKey) -> int:
         """Close what this member held under an older owner, and forget it.
@@ -710,6 +741,7 @@ __all__ = [
     "HostLimits",
     "McpHost",
     "Session",
+    "SessionFingerprint",
     "SessionKey",
     "ToolResult",
     "arguments_digest",

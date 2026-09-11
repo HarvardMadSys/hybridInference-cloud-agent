@@ -1145,23 +1145,40 @@ async def _register_client(
 async def _post_json(
     fetcher: Any, url: str, body: Mapping[str, Any], *, policy: EgressPolicy
 ) -> Mapping[str, Any]:
-    """POST a JSON body under the same egress policy as everything else."""
+    """POST a JSON body under the same egress policy as everything else.
+
+    Every failure leaves here as a request error the caller can report. A raw
+    ``httpx`` exception or a policy refusal escaping this helper becomes a 500
+    with no diagnosis -- from a URL the *authorization server's* metadata chose,
+    which is the one input in this path the user did not supply.
+    """
     import httpx
 
-    from cloud_agent.mcp.net_policy import check_addresses, validate_endpoint
+    from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
 
-    endpoint = validate_endpoint(url, policy)
-    loop_addresses = await _resolve(endpoint.host, endpoint.port)
-    check_addresses(endpoint.host, loop_addresses, policy)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), follow_redirects=False) as client:
-        response = await client.post(
-            endpoint.url, json=dict(body), headers={"accept": "application/json"}
-        )
-        if response.status_code >= 400:
-            raise _bad_request(
-                f"the authorization server answered {response.status_code} to registration"
+    try:
+        endpoint = validate_endpoint(url, policy)
+        loop_addresses = await _resolve(endpoint.host, endpoint.port)
+        check_addresses(endpoint.host, loop_addresses, policy)
+    except EndpointRejected as exc:
+        raise _bad_request(str(exc)) from exc
+    except OSError as exc:
+        raise _bad_request(f"that address could not be resolved: {exc}") from exc
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), follow_redirects=False) as client:
+            response = await client.post(
+                endpoint.url, json=dict(body), headers={"accept": "application/json"}
             )
+    except httpx.HTTPError as exc:
+        raise _bad_request(f"the authorization server could not be reached: {exc}") from exc
+    if response.status_code >= 400:
+        raise _bad_request(
+            f"the authorization server answered {response.status_code} to registration"
+        )
+    try:
         document = response.json()
+    except ValueError as exc:
+        raise _bad_request("the registration response is not JSON") from exc
     if not isinstance(document, Mapping):
         raise _bad_request("the registration response is not an object")
     del fetcher
@@ -1282,6 +1299,24 @@ async def oauth_callback(
         refresh_rotates=bool(tokens.refresh_token),
         client_auth_method=identity.auth_method,
         registration=identity.registration,
+        # The client this authorization actually used, written with the
+        # credential it obtained. A dynamic registration is decided while the
+        # browser is being sent away and lives only in the flow row until here,
+        # so without this the connection keeps a token it has no client id to
+        # renew: the first refresh sends an empty one, and the authorization
+        # server refuses a grant it never issued to "nobody".
+        #
+        # Merged into ``auth_config`` inside the fenced write rather than
+        # recorded through ``set_mcp_client_registration``, which is the manual
+        # path: that one bumps the OAuth generation to invalidate a flow already
+        # in flight, and this *is* the flow. Bumping it here would refuse the
+        # write this same call is making.
+        auth_config_patch={"client_id": identity.client_id},
+        # The flow's own ciphertext, under the OAuth domain it was written with.
+        # For a public client it is absent and any earlier secret is left alone:
+        # the authentication method written above is what decides whether one is
+        # sent, so a leftover secret cannot be used by accident.
+        client_secret_ciphertext=flow.get("client_secret_ciphertext"),
         token_endpoint=metadata.token_endpoint,
         revocation_endpoint=metadata.revocation_endpoint,
         registration_endpoint=metadata.registration_endpoint,
@@ -1316,25 +1351,48 @@ async def oauth_callback(
 
 
 async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Mapping[str, Any]:
-    """POST a token request under the egress policy."""
+    """POST a token request under the egress policy.
+
+    Raises only the caller's own refusal type. A policy refusal, a name that
+    does not resolve, a transport failure or an answer that is not JSON all end
+    as one, because the callback's job is to take the browser back to a page
+    that says what happened -- not to raise a 500 out of a redirect it cannot
+    send.
+    """
     import httpx
 
-    from cloud_agent.mcp.net_policy import check_addresses, validate_endpoint
+    from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
+    from cloud_agent.mcp.transports import TransportError
 
-    endpoint = validate_endpoint(request.url, policy)
-    check_addresses(endpoint.host, await _resolve(endpoint.host, endpoint.port), policy)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=False) as client:
-        response = await client.post(endpoint.url, data=request.form(), headers=request.headers())
-        if response.status_code >= 400:
-            from cloud_agent.mcp.transports import TransportError
+    try:
+        endpoint = validate_endpoint(request.url, policy)
+        check_addresses(endpoint.host, await _resolve(endpoint.host, endpoint.port), policy)
+    except EndpointRejected as exc:
+        raise TransportError(str(exc), kind=exc.kind) from exc
+    except OSError as exc:
+        raise TransportError(f"the token endpoint could not be resolved: {exc}") from exc
 
-            raise TransportError(
-                f"the token endpoint answered {response.status_code}", kind="needs_authorization"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=False) as client:
+            response = await client.post(
+                endpoint.url, data=request.form(), headers=request.headers()
             )
+    except httpx.HTTPError as exc:
+        # Normalized here rather than left to escape: this is the second HTTP
+        # client in the OAuth path, and the fetcher above already made this
+        # conversion. A raw transport error would leave the browser at a 500
+        # with no diagnosis, which is a worse version of the failure the caller
+        # already knows how to report.
+        raise TransportError(f"the token endpoint could not be reached: {exc}") from exc
+    if response.status_code >= 400:
+        raise TransportError(
+            f"the token endpoint answered {response.status_code}", kind="needs_authorization"
+        )
+    try:
         document = response.json()
+    except ValueError as exc:
+        raise TransportError("the token response is not JSON") from exc
     if not isinstance(document, Mapping):
-        from cloud_agent.mcp.transports import TransportError
-
         raise TransportError("the token response is not an object")
     return document
 

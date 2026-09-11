@@ -928,6 +928,52 @@ class TestSessionRecords:
         assert len(opened) == 3
 
     @pytest.mark.asyncio
+    async def test_a_repointed_connection_rebuilds_the_session(self) -> None:
+        """The target is part of what a cached session was opened for.
+
+        Repointing a connection -- a new URL, transport or auth profile -- moves
+        ``config_revision`` and deliberately leaves ``credential_version`` where
+        it is, because no credential changed. A cache that compares only the
+        credential therefore keeps driving a transport that is connected to the
+        address the owner just replaced, under an authorization the owner has
+        since re-made; both of those are revisions the key cannot carry.
+        """
+        store = self._Store()
+        built = self._host(store)
+        opened: list[object] = []
+
+        async def connect(connection: object, *, secret: object) -> tuple:
+            opened.append(connection)
+            return object(), protocol.Handshake(protocol_version="2025-11-25"), None
+
+        built._connect = connect  # type: ignore[method-assign]
+        key = host.SessionKey(connection_id="7", member="ajob:5")
+        original = self._connection()
+        first = await built.open(original, secret="token", key=key)
+        assert await built.open(original, secret="token", key=key) is first
+
+        repointed = self._connection(
+            config=ConnectionConfig(
+                transport=Transport.STREAMABLE_HTTP,
+                location=ExecutionLocation.REMOTE,
+                url="https://new.example.com/mcp",
+            ),
+            config_revision=2,
+        )
+        second = await built.open(repointed, secret="token", key=key)
+        assert second is not first
+        assert opened[-1] is repointed
+
+        # A re-made authorization is the other half, and moves its own revision.
+        reauthorized = self._connection(config_revision=2, authorization_epoch=2)
+        third = await built.open(reauthorized, secret="token", key=key)
+        assert third is not second
+        # Reused while both revisions still match, so this is a comparison and
+        # not an unconditional rebuild.
+        assert await built.open(reauthorized, secret="token", key=key) is third
+        assert len(opened) == 3
+
+    @pytest.mark.asyncio
     async def test_closing_a_session_removes_its_record(self) -> None:
         """A record nobody can serve is not a session."""
         store = self._Store()

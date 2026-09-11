@@ -153,6 +153,47 @@ def _patch_token_response(monkeypatch: pytest.MonkeyPatch, payload: dict[str, An
     return seen
 
 
+def _client_that_fails(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """Make the *real* ``_post`` meet a transport failure.
+
+    ``_post`` is deliberately not stubbed here: what these cases are about is
+    the half the rest of the suite replaces -- what the network layer raises and
+    what the refresh does with the lease as a result.
+    """
+    import httpx
+
+    real_client = httpx.AsyncClient
+
+    def factory(**kwargs: Any) -> Any:
+        def handler(request: Any) -> Any:
+            raise error
+
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+def _client_that_answers(monkeypatch: pytest.MonkeyPatch, *, status_code: int, text: str) -> None:
+    """Make the *real* ``_post`` receive an answer of this shape."""
+    import httpx
+
+    real_client = httpx.AsyncClient
+
+    def factory(**kwargs: Any) -> Any:
+        def handler(request: Any) -> Any:
+            return httpx.Response(status_code, text=text)
+
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+#: A token endpoint at a literal loopback address, so the real ``_post`` resolves
+#: nothing and the transport failure under test is the first thing it meets.
+_LOOPBACK_TOKEN_ENDPOINT = "https://127.0.0.1/token"
+_ALLOW_LOOPBACK = EgressPolicy(allow_private=True)
+
+
 class TestWhenToRefresh:
     """The margin, and what counts as refreshable."""
 
@@ -300,6 +341,44 @@ class TestRefresh:
         assert outcome.refreshed
 
     @pytest.mark.asyncio
+    async def test_a_confidential_client_reads_its_secret_under_the_oauth_domain(
+        self, monkeypatch
+    ) -> None:
+        """The client secret and the tokens are wrapped under different domains.
+
+        Reading the secret with the token cipher is not a subtly wrong value: it
+        fails at decryption, so every confidential client reported a credential
+        that "could not be read" and never reached the token endpoint at all.
+        The secret here is wrapped exactly where the authorization flow leaves
+        it, which is the part a test that hands in its own cipher cannot show.
+        """
+        import base64
+
+        from cloud_agent.mcp.registry import oauth_cipher
+
+        store = FakeStore(
+            _row(
+                client_secret_ciphertext=oauth_cipher(_KEY).encrypt("s3cret"),
+                client_auth_method="client_secret_basic",
+            )
+        )
+        seen = _patch_token_response(monkeypatch, {"access_token": "new", "expires_in": 3600})
+        outcome = await refresh.refresh_credential(
+            store,
+            row=store.row,
+            policy=EgressPolicy(),  # type: ignore[arg-type]
+        )
+        assert outcome.refreshed
+        assert len(seen) == 1
+        # Negotiated as basic, so the secret travels in the header and not in
+        # the body -- the mechanism the server agreed to, not a second one.
+        credentials = base64.b64decode(
+            seen[0].headers()["authorization"].removeprefix("Basic ")
+        ).decode()
+        assert credentials == "our-client:s3cret"
+        assert "client_secret" not in seen[0].form()
+
+    @pytest.mark.asyncio
     async def test_a_refresh_fences_its_write_on_what_it_claimed(self, monkeypatch) -> None:
         """The callback fence, seen from the other side.
 
@@ -424,6 +503,87 @@ class TestRefresh:
                 row=store.row,
                 policy=EgressPolicy(),  # type: ignore[arg-type]
             )
+
+
+class TestTheLeaseAfterANetworkFailure:
+    """What a transport failure does to the claim, through the real ``_post``.
+
+    A raw ``httpx`` exception used to leave this function -- no diagnosis for
+    the caller, and a lease nobody released, so the next attempt was told
+    "somebody else is refreshing" for the rest of the minute and then failed the
+    same way. The distinction that decides the lease is whether the request
+    could have reached the authorization server at all.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_connection_that_never_opened_releases_the_lease(self, monkeypatch) -> None:
+        """Nothing was sent, so nothing rotated: the next call may retry."""
+        import httpx
+
+        store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
+        _client_that_fails(monkeypatch, httpx.ConnectError("connection refused"))
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
+        assert not raised.value.uncertain
+        assert raised.value.kind == "unreachable"
+        assert store.released == [1]
+        assert store.leased == set()
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_after_the_request_left_keeps_the_lease(self, monkeypatch) -> None:
+        """The token may already have rotated, so nobody retries at once.
+
+        Holding the lease is what makes the retry *wait*: a second attempt with
+        the refresh token still in hand is what a rotating issuer's reuse
+        detection reads as a stolen grant, and the wait is bounded by the lease
+        rather than by anybody noticing.
+        """
+        import httpx
+
+        store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
+        _client_that_fails(monkeypatch, httpx.ReadTimeout("timed out"))
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
+        assert raised.value.uncertain
+        assert store.released == []
+        assert store.leased == {1}
+        # And the lease is what the next caller meets, rather than the network.
+        outcome = await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
+        assert outcome.contended
+
+    @pytest.mark.asyncio
+    async def test_an_answer_that_cannot_be_read_keeps_the_lease(self, monkeypatch) -> None:
+        """A 2xx we cannot parse may still have issued the tokens."""
+
+        store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
+        _client_that_answers(monkeypatch, status_code=200, text="<html>not json</html>")
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
+        assert raised.value.uncertain
+        assert store.leased == {1}
+
+    @pytest.mark.asyncio
+    async def test_an_answered_refusal_releases_the_lease(self, monkeypatch) -> None:
+        """The other side of the line: the endpoint answered, and said no."""
+        store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
+        _client_that_answers(monkeypatch, status_code=400, text='{"error": "invalid_grant"}')
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            await refresh.refresh_credential(store, row=store.row, policy=_ALLOW_LOOPBACK)
+        assert not raised.value.uncertain
+        assert raised.value.kind == "needs_authorization"
+        assert store.released == [1]
+
+    @pytest.mark.asyncio
+    async def test_a_target_the_policy_refuses_releases_the_lease(self, monkeypatch) -> None:
+        """Refused before the socket: certain, so the lease goes straight back."""
+        store = FakeStore(_row(token_endpoint=_LOOPBACK_TOKEN_ENDPOINT))
+        with pytest.raises(refresh.RefreshRefused) as raised:
+            # The default policy refuses a loopback target, and does so before
+            # anything is dialled.
+            await refresh.refresh_credential(store, row=store.row, policy=EgressPolicy())
+        assert raised.value.kind == "blocked_target"
+        assert not raised.value.uncertain
+        assert store.released == [1]
 
 
 class TestEnsureFresh:

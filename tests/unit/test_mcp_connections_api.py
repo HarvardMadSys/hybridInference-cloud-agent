@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from cloud_agent.api import mcp_connections, routes
 from cloud_agent.api.deps import get_agent_job_store
@@ -52,6 +53,10 @@ class FakeStore:
         self.created: list[dict[str, Any]] = []
         self.connectors: dict[int, dict[str, Any]] = {}
         self.connector_connections: dict[int, set[int]] = {}
+        #: One pending OAuth flow, keyed by the state hash the callback presents.
+        self.oauth_flow: dict[str, Any] | None = None
+        self.oauth_state_hash: str | None = None
+        self.credential_writes: list[dict[str, Any]] = []
         self._next = 1
         self._next_connector = 1
 
@@ -155,13 +160,37 @@ class FakeStore:
         row = self.connections.get(kwargs["connection_id"])
         if row is None or row["authorization_epoch"] != kwargs["expected_authorization_epoch"]:
             return False
+        self.credential_writes.append(dict(kwargs))
         row["access_token_ciphertext"] = kwargs.get("access_token_ciphertext")
+        if kwargs.get("refresh_token_ciphertext"):
+            row["refresh_token_ciphertext"] = kwargs["refresh_token_ciphertext"]
+        if kwargs.get("client_secret_ciphertext") is not None:
+            row["client_secret_ciphertext"] = kwargs["client_secret_ciphertext"]
         if kwargs.get("auth_config_patch"):
             row["auth_config"] = {**(row["auth_config"] or {}), **kwargs["auth_config_patch"]}
+        for key in (
+            "expires_at",
+            "issuer",
+            "resource",
+            "client_auth_method",
+            "registration",
+            "token_endpoint",
+            "revocation_endpoint",
+            "registration_endpoint",
+        ):
+            if kwargs.get(key) is not None:
+                row[key] = kwargs[key]
         if kwargs.get("bump_epoch"):
             row["authorization_epoch"] += 1
         row["credential_version"] += 1
         return True
+
+    async def consume_mcp_oauth_flow(self, *, state_hash: str) -> dict[str, Any] | None:
+        """Hand back a flow once, for the state hash the caller presents."""
+        if self.oauth_flow is None or state_hash != self.oauth_state_hash:
+            return None
+        flow, self.oauth_flow = self.oauth_flow, None
+        return flow
 
     async def set_mcp_launch_spec(self, **kwargs: Any) -> bool:
         row = self.connections.get(kwargs["connection_id"])
@@ -643,6 +672,129 @@ class TestAuthorization:
         config = store.connections[connection_id]["auth_config"]
         assert "client_secret" not in config
         assert "shh" not in json.dumps(config)
+
+
+class TestTheDynamicClientIdentity:
+    """What the callback does with the client the flow authorized as.
+
+    A dynamic registration is decided while the browser is being sent away, so
+    until the code comes back the client id exists only in the flow row. A
+    connection that stops there holds a token it cannot renew: the first refresh
+    presents an empty client id, and the authorization server refuses a grant it
+    never issued to "nobody". The identity is therefore written with the
+    credential it belongs to, under the same fence.
+    """
+
+    _STATE = "the-authorization-state"
+
+    def _flow(
+        self,
+        *,
+        connection_id: int,
+        client_id: str,
+        secret_ciphertext: str | None,
+    ) -> dict[str, Any]:
+        """One pending flow, as ``consume_mcp_oauth_flow`` returns it."""
+        from cloud_agent.mcp.registry import oauth_cipher
+
+        return {
+            "connection_id": str(connection_id),
+            "config_revision": 1,
+            "authorization_epoch": 1,
+            "oauth_generation": 1,
+            "code_verifier_ciphertext": oauth_cipher(_ENCRYPTION_KEY).encrypt("verifier"),
+            "client_id": client_id,
+            "client_secret_ciphertext": secret_ciphertext,
+            "client_auth_method": "client_secret_basic" if secret_ciphertext else "none",
+            "registration": "dcr",
+            "issuer": "https://auth.example.com",
+            "resource": "https://mcp.example.com/mcp",
+            "redirect_uri": "https://app.example.com/v1/agent/mcp/oauth/callback/1",
+            "scopes": ["read"],
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/token",
+            "revocation_endpoint": None,
+            "registration_endpoint": "https://auth.example.com/register",
+        }
+
+    async def _complete(
+        self, store: FakeStore, connection_id: int, monkeypatch: pytest.MonkeyPatch
+    ) -> str:
+        """Drive the real callback with a stub token exchange, and return its target."""
+        from cloud_agent.mcp import oauth
+
+        store.oauth_state_hash = oauth.state_hash(self._STATE)
+
+        async def token_exchange(request: Any, *, policy: Any) -> dict[str, Any]:
+            return {
+                "access_token": "dynamic-access",
+                "refresh_token": "dynamic-refresh",
+                "expires_in": 3600,
+            }
+
+        monkeypatch.setattr(mcp_connections, "_post_form", token_exchange)
+        response = await mcp_connections.oauth_callback(
+            str(connection_id),
+            Request({"type": "http"}),
+            state=self._STATE,
+            code="the-code",
+            error="",
+            store=store,
+        )
+        return str(response.headers["location"])
+
+    async def test_a_registered_client_is_stored_with_the_credential_it_obtained(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """And the first refresh uses it, which is the point of storing it."""
+        from cloud_agent.mcp import refresh
+        from cloud_agent.mcp.registry import mcp_cipher
+
+        store = FakeStore()
+        connection_id = _seed(store, auth_kind="oauth", auth_config={}, oauth_generation=1)
+        # The generation a started flow leaves on the row: starting one moves
+        # it, and the flow carries the value it moved to.
+        store.oauth_flow = self._flow(
+            connection_id=connection_id,
+            client_id="review-dynamic-client",
+            secret_ciphertext=None,
+        )
+        assert "mcp_authorized=1" in await self._complete(store, connection_id, monkeypatch)
+
+        stored = store.connections[connection_id]
+        assert stored["auth_config"]["client_id"] == "review-dynamic-client"
+        assert stored["registration"] == "dcr"
+        # The loop the finding was about: a refresh built from the row the
+        # callback left behind names the client the registration produced.
+        request = refresh._build_request(stored, cipher=mcp_cipher(_ENCRYPTION_KEY))
+        assert request.client.client_id == "review-dynamic-client"
+        assert request.client.auth_method == "none"
+
+    async def test_a_registered_secret_travels_with_the_identity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A confidential dynamic client keeps its secret under the OAuth domain."""
+        from cloud_agent.mcp import refresh
+        from cloud_agent.mcp.registry import mcp_cipher, oauth_cipher
+
+        secret_ciphertext = oauth_cipher(_ENCRYPTION_KEY).encrypt("dynamic-secret")
+        store = FakeStore()
+        connection_id = _seed(store, auth_kind="oauth", auth_config={}, oauth_generation=1)
+        # The generation a started flow leaves on the row: starting one moves
+        # it, and the flow carries the value it moved to.
+        store.oauth_flow = self._flow(
+            connection_id=connection_id,
+            client_id="review-confidential-client",
+            secret_ciphertext=secret_ciphertext,
+        )
+        assert "mcp_authorized=1" in await self._complete(store, connection_id, monkeypatch)
+
+        stored = store.connections[connection_id]
+        assert stored["client_secret_ciphertext"] == secret_ciphertext
+        request = refresh._build_request(stored, cipher=mcp_cipher(_ENCRYPTION_KEY))
+        assert request.client.client_id == "review-confidential-client"
+        assert request.client.client_secret == "dynamic-secret"
+        assert request.client.auth_method == "client_secret_basic"
 
 
 class TestImport:

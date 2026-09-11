@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import oauth
 from cloud_agent.mcp.models import AuthKind, ConnectionErrorKind
@@ -61,12 +63,23 @@ REFRESH_LEASE_SECONDS = 60.0
 
 
 class RefreshRefused(RuntimeError):
-    """Raised when a credential cannot be refreshed, with a reason to show."""
+    """Raised when a credential cannot be refreshed, with a reason to show.
 
-    def __init__(self, message: str, *, kind: str = "needs_authorization") -> None:
-        """Record the diagnosis kind alongside the message."""
+    ``uncertain`` is the lease's half of the diagnosis. A refusal that could not
+    have reached the authorization server -- an unreadable credential, no token
+    endpoint, a connection that was never established -- is certain: the refresh
+    token was not spent, so the lease is released and the next call may retry.
+    A refusal *after* the request left is not: a rotating issuer may have
+    invalidated the token already, and using the copy in hand again is the one
+    thing an issuer's reuse detection treats as an attack on the grant.
+    """
+
+    def __init__(self, message: str, *, kind: str = "needs_authorization", uncertain: bool = False):
+        """Record the diagnosis kind and whether the attempt's fate is unknown."""
         super().__init__(message)
         self.kind = kind
+        #: True when the token request may have been received by the server.
+        self.uncertain = uncertain
 
 
 @dataclass(frozen=True)
@@ -172,11 +185,27 @@ async def refresh_credential(
             tokens,
             rotates=bool(claimed.get("refresh_rotates")),
         )
-    except RefreshRefused:
-        # Refused before anything was sent -- no recorded token endpoint, or an
-        # unreadable credential. The lease is released so the next call retries,
-        # rather than waiting out a timer for an attempt that never happened.
-        await _release(store, claimed)
+    except RefreshRefused as exc:
+        if not exc.uncertain:
+            # Refused before anything could have been sent -- no recorded token
+            # endpoint, an unreadable credential, a target the policy refuses, a
+            # connection that was never established. The refresh token was not
+            # spent, so the lease is released and the next call may retry rather
+            # than waiting out a timer for an attempt that never happened.
+            await _release(store, claimed)
+        else:
+            # The request left and the answer never arrived. Holding the lease
+            # is the conservative half: the issuer may have rotated the token
+            # already, and a retry with the copy still in hand is what its reuse
+            # detection reads as a stolen grant. The lease expires on its own, so
+            # this delays the next attempt rather than forbidding it.
+            logger.warning(
+                "agent_mcp_refresh_outcome_unknown",
+                extra={
+                    "event": "agent_mcp_refresh_outcome_unknown",
+                    "connection_id": claimed["id"],
+                },
+            )
         raise
     except (TransportError, oauth.OAuthError) as exc:
         await _release(store, claimed)
@@ -311,14 +340,11 @@ def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oa
     identity = oauth.ClientIdentity(
         client_id=str(settings.get("client_id") or ""),
         registration=str(row.get("registration") or "dcr"),  # type: ignore[arg-type]
-        # A different key domain from the tokens below. The client secret is
-        # written by the authorization flow under the OAuth cipher -- it is the
-        # secret this deployment holds *for the authorization server* -- while
-        # the access and refresh tokens are written under the MCP one. Reading
-        # both with a single cipher fails for every confidential client, and it
-        # fails at decryption, so it looks like a corrupt credential rather than
-        # a wrong key.
-        client_secret=_decrypt(_client_secret_cipher(cipher), row.get("client_secret_ciphertext")),
+        # A different key domain from the tokens below, and resolved here rather
+        # than taken from the caller: the token cipher is already constructed by
+        # the time this runs, so passing it through would make the OAuth branch
+        # below unreachable -- which is exactly what it was.
+        client_secret=_decrypt(_client_secret_cipher(), row.get("client_secret_ciphertext")),
         auth_method=str(row.get("client_auth_method") or "none"),
     )
     return oauth.refresh_request(
@@ -330,17 +356,21 @@ def _build_request(row: Mapping[str, Any], *, cipher: SourceControlCipher) -> oa
     )
 
 
-def _client_secret_cipher(cipher: SourceControlCipher | None) -> SourceControlCipher | None:
+def _client_secret_cipher() -> SourceControlCipher | None:
     """The cipher a connection's client secret was written under.
 
-    Separate from the token cipher by design and not by accident: the two are
+    **Always the OAuth cipher, and never the token cipher.** The two are
     different credential kinds and the deployment wraps them under different
-    domains so that one cannot be read as the other. Returns ``None`` when the
-    deployment has no key, which leaves the secret unread rather than raising
-    here -- the caller decides whether a client secret was required.
+    domains so that one cannot be read as the other. A helper that returned its
+    argument when it had one therefore never resolved anything: the token cipher
+    is always constructed before a refresh builds its request, so the fallback
+    below was dead code and every confidential client failed at decryption --
+    which reads as a corrupt credential rather than as a wrong key.
+
+    Returns ``None`` when the deployment has no key, which leaves the secret
+    unread rather than raising here -- the caller decides whether a client
+    secret was required.
     """
-    if cipher is not None:
-        return cipher
     try:
         from cloud_agent.mcp.registry import oauth_cipher
 
@@ -353,6 +383,11 @@ def _decrypt(cipher: SourceControlCipher | None, value: Any) -> str | None:
     """Decrypt one stored secret, or ``None`` when there is nothing to read."""
     if not value:
         return None
+    if cipher is None:
+        # Nothing to decrypt with, and something to decrypt. Raised as a refusal
+        # rather than reached as an ``AttributeError`` on ``None``, because the
+        # caller is one diagnosis away from telling the owner what to fix.
+        raise RefreshRefused("this deployment has no key for the credential this connection holds")
     try:
         return cipher.decrypt(str(value))
     except SourceControlError as exc:
@@ -361,32 +396,88 @@ def _decrypt(cipher: SourceControlCipher | None, value: Any) -> str | None:
         ) from exc
 
 
+#: Transport failures that prove the request never left this process: the
+#: connection was refused, the name did not resolve, or the pool never gave us a
+#: socket. Everything else ``httpx`` raises is a failure *after* the request was
+#: written, where the authorization server may already have acted on it, so the
+#: two are not the same refusal and do not get the same lease decision.
+_NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+
 async def _post(
     request: oauth.TokenRequest,
     *,
     policy: EgressPolicy,
     fetcher: HttpMetadataFetcher | None,
 ) -> Mapping[str, Any]:
-    """Perform the token request under the same egress policy as everything else."""
+    """Perform the token request under the same egress policy as everything else.
+
+    Every failure leaves here as a :class:`RefreshRefused`, including the ones
+    ``httpx`` raises: an escaping transport exception is a refusal the caller
+    cannot diagnose and a lease nobody releases, which is how a single timeout
+    turns into a connection that reports "somebody else is refreshing" for the
+    rest of the minute and then fails the same way again.
+    """
     del fetcher  # Reserved for a caller that wants to inject a client.
-    import httpx
-
-    from cloud_agent.mcp.net_policy import check_addresses, validate_endpoint
-
-    endpoint = validate_endpoint(request.url, policy)
     import asyncio
 
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(endpoint.host, endpoint.port, type=0)
-    check_addresses(endpoint.host, {info[4][0] for info in infos}, policy)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=False) as client:
-        response = await client.post(endpoint.url, data=request.form(), headers=request.headers())
-        if response.status_code >= 400:
-            raise RefreshRefused(
-                f"the token endpoint answered {response.status_code}",
-                kind=ConnectionErrorKind.NEEDS_AUTHORIZATION.value,
+    from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
+
+    try:
+        endpoint = validate_endpoint(request.url, policy)
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(endpoint.host, endpoint.port, type=0)
+        check_addresses(endpoint.host, {info[4][0] for info in infos}, policy)
+    except EndpointRejected as exc:
+        # Refused by policy, or not a URL a request can be built for. Nothing
+        # was sent and nothing will be. The policy's own kind is carried through
+        # -- it distinguishes "your network refuses this address" from "that is
+        # not an address" -- and the refusal is certain, so the lease goes back.
+        raise RefreshRefused(str(exc), kind=str(exc.kind)) from exc
+    except OSError as exc:
+        # Resolution itself failed. Certain, because no socket was ever opened.
+        raise RefreshRefused(
+            f"the token endpoint could not be resolved: {exc}",
+            kind=ConnectionErrorKind.UNREACHABLE.value,
+        ) from exc
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=False) as client:
+            response = await client.post(
+                endpoint.url, data=request.form(), headers=request.headers()
             )
+    except _NOT_SENT_ERRORS as exc:
+        raise RefreshRefused(
+            f"the token endpoint could not be reached: {exc}",
+            kind=ConnectionErrorKind.UNREACHABLE.value,
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise RefreshRefused(
+            f"the token endpoint did not answer: {exc}",
+            kind=ConnectionErrorKind.UNREACHABLE.value,
+            # The request was on the wire. A rotating issuer may have spent the
+            # token it carried, so this is the refusal that keeps its lease.
+            uncertain=True,
+        ) from exc
+
+    if response.status_code >= 400:
+        # An answer the endpoint chose to send, so the grant was refused rather
+        # than left in doubt. That is the other half of the distinction: it is a
+        # definite failure, and the lease is released for the next attempt.
+        raise RefreshRefused(
+            f"the token endpoint answered {response.status_code}",
+            kind=ConnectionErrorKind.NEEDS_AUTHORIZATION.value,
+        )
+    try:
         document = response.json()
+    except ValueError as exc:
+        # A 2xx we cannot read. The exchange may well have completed, so this is
+        # treated like a timeout rather than like a refusal.
+        raise RefreshRefused(
+            "the token endpoint's answer could not be read",
+            kind=ConnectionErrorKind.PROTOCOL_INCOMPATIBLE.value,
+            uncertain=True,
+        ) from exc
     if not isinstance(document, Mapping):
         raise RefreshRefused("the token response is not an object")
     return document
