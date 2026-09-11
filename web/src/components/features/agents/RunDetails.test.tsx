@@ -286,6 +286,46 @@ describe('RunDetails', () => {
     expect(screen.queryByText('Available')).toBeInTheDocument();
   });
 
+  it('keeps reading an available ledger whose next refresh is already scheduled', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-11T10:00:00.000Z'));
+    const scheduled = usage({ next_refresh_at: '2026-09-11T10:00:05.000Z' });
+    vi.mocked(getAgentJobUsage).mockResolvedValue(scheduled);
+    vi.mocked(refreshAgentJobUsage).mockResolvedValue(scheduled);
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ledger-scheduled"
+          turnNo={2}
+          tab="usage"
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(screen.getByText('Available')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    });
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+
+    // Available but with a refresh the server has already scheduled is a
+    // snapshot that is going to change, so the panel reads it when it is due
+    // instead of caching the old total for the next open.
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+    });
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
+
+    // With nothing queued and nothing scheduled, the reads stop.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
+  });
+
   it('revalidates an unfinished cached ledger when the panel is reopened', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(pendingUsage());
     const element = (

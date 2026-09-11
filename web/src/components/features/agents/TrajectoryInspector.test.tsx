@@ -131,6 +131,55 @@ function toolKeyOf(events: StoredEvent[]): string {
   return step?.key ?? '';
 }
 
+/** One sandbox measurement of the fixture's call, as the attempt records it. */
+function measuredCall(durationMs: number) {
+  return {
+    call_seq: 1,
+    tool_use_id: 't1',
+    tool_name: 'Bash',
+    timing_source: 'exact',
+    duration_ms: durationMs,
+    sample_count: 0,
+    overlap_n: 1,
+    measured_span_ms: null,
+    cpu_usec_exclusive: null,
+    cpu_usec_shared: null,
+    mem_peak_exclusive_bytes: null,
+    mem_peak_shared_bytes: null,
+  };
+}
+
+function attemptTelemetry(toolCalls: Array<ReturnType<typeof measuredCall>>) {
+  return {
+    attempt_id: 1,
+    attempt_no: 1,
+    continuity_mode: null,
+    context_status: null,
+    duration_ms: null,
+    resources: {
+      cpu_usec: null,
+      mem_peak_bytes: null,
+      mem_avg_bytes: null,
+      io_read_bytes: null,
+      io_write_bytes: null,
+      net_rx_bytes: null,
+      net_tx_bytes: null,
+      sample_count: 0,
+      coverage: 1,
+      sampler_version: null,
+      tool_calls: toolCalls,
+    },
+  };
+}
+
+/** One call id stored twice in the same attempt, answered twice. */
+const REUSED_CALL = [
+  event({ id: 1, event_type: 'tool_use', payload: { id: 't1', name: 'Bash' } }),
+  event({ id: 2, event_type: 'tool_result', payload: { tool_use_id: 't1', content: 'first' } }),
+  event({ id: 3, event_type: 'tool_use', payload: { id: 't1', name: 'Bash' } }),
+  event({ id: 4, event_type: 'tool_result', payload: { tool_use_id: 't1', content: 'second' } }),
+];
+
 describe('TrajectoryInspector', () => {
   it('gives an assistant message exactly Summary, Preview and Raw', () => {
     render(
@@ -294,6 +343,43 @@ describe('TrajectoryInspector', () => {
 
     await waitFor(() => expect(screen.getByText('Tool execution hooks')).toBeInTheDocument());
     expect(screen.getByText('350ms')).toBeInTheDocument();
+  });
+
+  it('measures a call only when the attempt recorded one measurement for it', async () => {
+    vi.mocked(getAgentAttemptTelemetry).mockResolvedValue(
+      attemptTelemetry([measuredCall(350), measuredCall(900)]),
+    );
+    const key = toolKeyOf(ASSISTANT_WITH_TOOL);
+    render(
+      <Harness
+        events={ASSISTANT_WITH_TOOL}
+        initial={{ kind: 'step', stepKey: key, tab: 'timing' }}
+      />,
+    );
+
+    // Two readings for one call id name no single duration, so the tab falls
+    // back to the interval the stored records bracket instead of picking one.
+    await waitFor(() => expect(getAgentAttemptTelemetry).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText('Session timestamps')).toBeInTheDocument());
+    expect(screen.getByText('Duration').nextElementSibling).toHaveTextContent('2s');
+    expect(screen.queryByText('350ms')).not.toBeInTheDocument();
+    expect(screen.queryByText('900ms')).not.toBeInTheDocument();
+  });
+
+  it('attributes no measurement to a call whose records disagree', async () => {
+    vi.mocked(getAgentAttemptTelemetry).mockResolvedValue(attemptTelemetry([measuredCall(350)]));
+    const key = toolKeyOf(REUSED_CALL);
+    render(
+      <Harness events={REUSED_CALL} initial={{ kind: 'step', stepKey: key, tab: 'timing' }} />,
+    );
+
+    // The projection declines to claim a duration for this call, so the
+    // sandbox's own measurement cannot put one back.
+    await waitFor(() => expect(getAgentAttemptTelemetry).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getAllByText('Not recorded').length).toBeGreaterThan(1));
+    expect(screen.getByText('Duration').nextElementSibling).toHaveTextContent('Not recorded');
+    expect(screen.queryByText('350ms')).not.toBeInTheDocument();
+    expect(screen.getByText(/records for this call disagree/)).toBeInTheDocument();
   });
 
   it('keeps unrecorded assistant usage empty rather than zero', () => {

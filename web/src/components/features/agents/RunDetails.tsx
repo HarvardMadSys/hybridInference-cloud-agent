@@ -63,25 +63,36 @@ const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
  *
  * The Chat transcript polls its own usage for the turn it is showing; the
  * inspector reads the same resource only when it has a reason to: the snapshot
- * is unknown, the reader asked for a refresh, or the ledger still has queued
- * work. A settled snapshot is reused, so opening the panel repeatedly is free.
+ * is unknown, the reader asked for a refresh, or the ledger has work queued or
+ * scheduled. A settled snapshot with nothing pending is reused, so opening the
+ * panel repeatedly is free.
  */
 const usageCache = new Map<string, AgentJobUsageApi | null>();
 
 /** How long to wait before reading a ledger that has not settled yet. */
 const LEDGER_POLL_MS = 15_000;
+/** Floor for a scheduled read, so an overdue timestamp cannot spin. */
+const LEDGER_POLL_FLOOR_MS = 1_000;
 /** Reads to spend on a queued refresh before leaving its state as it is. */
 const MAX_LEDGER_POLLS = 8;
 
 /**
- * Whether the ledger still has work queued for it.
+ * How long until this ledger is worth reading again, or null when it is not.
  *
  * A refresh request only queues the work, and the answer to that request is the
- * snapshot from before the worker ran. Reading again — and again, until the
- * ledger settles — is what turns the queued answer into the finished one.
+ * snapshot from before the worker ran, so a read after it is what turns the
+ * queued answer into the finished one. The server also schedules its own
+ * refreshes: an `available` snapshot whose `next_refresh_at` is still ahead is
+ * going to change, and stopping here is what left a stale total in the cache
+ * for the next open.
  */
-function ledgerUnsettled(usage: AgentJobUsageApi | null): boolean {
-  return Boolean(usage && (usage.ledger.refreshing || usage.ledger.status === 'pending'));
+function ledgerReadDelay(usage: AgentJobUsageApi | null | undefined, now: number): number | null {
+  if (!usage) return null;
+  if (usage.ledger.refreshing || usage.ledger.status === 'pending') return LEDGER_POLL_MS;
+  if (!usage.ledger.next_refresh_at) return null;
+  const due = Date.parse(usage.ledger.next_refresh_at);
+  if (!Number.isFinite(due)) return null;
+  return Math.min(Math.max(due - now, LEDGER_POLL_FLOOR_MS), LEDGER_POLL_MS);
 }
 
 function useJobUsage(jobId: string): {
@@ -108,7 +119,8 @@ function useJobUsage(jobId: string): {
       polls.current = 0;
     }
     const known = usageCache.get(jobId);
-    const mustRead = requested.current || known === undefined || ledgerUnsettled(known);
+    const knownDelay = ledgerReadDelay(known, Date.now());
+    const mustRead = requested.current || known === undefined || knownDelay !== null;
     requested.current = false;
     setUsage(known ?? null);
     setLoaded(known !== undefined);
@@ -121,9 +133,10 @@ function useJobUsage(jobId: string): {
         usageCache.set(jobId, result);
         setUsage(result);
         setError(null);
-        if (ledgerUnsettled(result) && polls.current < MAX_LEDGER_POLLS) {
+        const delay = ledgerReadDelay(result, Date.now());
+        if (delay !== null && polls.current < MAX_LEDGER_POLLS) {
           polls.current += 1;
-          timer = setTimeout(() => setRead((value) => value + 1), LEDGER_POLL_MS);
+          timer = setTimeout(() => setRead((value) => value + 1), delay);
         }
       })
       .catch((cause: unknown) => {

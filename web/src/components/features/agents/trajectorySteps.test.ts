@@ -298,6 +298,28 @@ describe('buildTrajectorySteps', () => {
     ).toBe('not_recorded');
   });
 
+  it('does not keep a call waiting while the turn sits between attempts', () => {
+    const events = [
+      event({
+        id: 1,
+        job_id: 'a',
+        turn_no: 1,
+        attempt_id: 4,
+        event_type: 'tool_use',
+        payload: { id: 't1', name: 'Bash' },
+      }),
+    ];
+
+    // Superseded and not yet replaced: the row names no current attempt, so
+    // nothing is in flight and the call cannot still be answered.
+    const requeued = turnContextFromJobs([{ id: 'a', state: 'queued', current_attempt_id: null }]);
+    expect(buildTrajectorySteps(events, requeued)[0].status).toBe('not_recorded');
+
+    // A row that does not carry the field at all cannot rule the attempt out.
+    const notStated = turnContextFromJobs([{ id: 'a', state: 'running' }]);
+    expect(buildTrajectorySteps(events, notStated)[0].status).toBe('waiting');
+  });
+
   it('keeps the answering result reachable from the call step', () => {
     const steps = buildTrajectorySteps(
       [

@@ -63,7 +63,9 @@ export function normalizeStepTab(kind: TrajectoryStep['kind'], tab: StepTab): St
  *
  * It is an enrichment: when the attempt has no telemetry, or the request
  * fails, the Timing tab falls back to the stored event times rather than
- * blocking the panel.
+ * blocking the panel. A call id that the attempt measured more than once names
+ * no single measurement, so none is reported: picking one of them would
+ * attribute a duration to a call the reader cannot tell apart.
  */
 function useToolCallTelemetry(
   jobId: string,
@@ -82,9 +84,10 @@ function useToolCallTelemetry(
     getAgentAttemptTelemetry(jobId, attemptId, controller.signal)
       .then((data) => {
         if (controller.signal.aborted || data.attempt_id !== attemptId) return;
-        const match = (data.resources?.tool_calls ?? []).find(
+        const matches = (data.resources?.tool_calls ?? []).filter(
           (call) => call.tool_use_id === callId,
         );
+        const match = matches.length === 1 ? matches[0] : undefined;
         if (!match) {
           setLoaded({ key, value: null });
           return;

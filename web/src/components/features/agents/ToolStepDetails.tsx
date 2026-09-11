@@ -96,7 +96,12 @@ export function ToolStepDetails({
     () => step.sourceEvents.filter((event) => event.event_type === 'tool_result'),
     [step.sourceEvents],
   );
-  const exactTiming = telemetry?.timingSource === 'exact' && telemetry.durationMs !== null;
+  // A step whose records disagree names no single call, so the attempt's own
+  // measurement cannot be attributed to it either. Reading it anyway is what
+  // put the first duplicate's duration back under a status the projection had
+  // already declined to claim.
+  const exactTiming =
+    !step.ambiguity && telemetry?.timingSource === 'exact' && telemetry.durationMs !== null;
 
   const timingRows = (
     <DetailRows>
@@ -245,9 +250,11 @@ export function ToolStepDetails({
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
           {exactTiming
             ? 'The duration comes from the sandbox hooks that bracket the call. The exact start and finish boundaries are not exposed here, so only the recorded event time is shown separately.'
-            : step.timing.source === 'session_timestamps'
-              ? 'This interval runs from the stored call record to the stored result record. It includes queueing and runtime or forwarding delay, so it is not pure tool execution time.'
-              : 'No evidence for this call\u2019s execution window was recorded.'}
+            : step.ambiguity
+              ? 'The records for this call disagree, so no measurement is attributed to it: not the sandbox timing and not the interval between the stored records.'
+              : step.timing.source === 'session_timestamps'
+                ? 'This interval runs from the stored call record to the stored result record. It includes queueing and runtime or forwarding delay, so it is not pure tool execution time.'
+                : 'No evidence for this call\u2019s execution window was recorded.'}
         </p>
         {callEvent ? (
           <DetailSection title="Recorded at">

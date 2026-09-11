@@ -139,8 +139,13 @@ export interface TurnContext {
 const ACTIVE_JOB_STATES = new Set(['running', 'queued', 'publishing']);
 
 /**
- * Build the default context from thread job rows: the newest attempt of a live
- * turn is active, everything else has already stopped.
+ * Build the default context from thread job rows: the attempt a live turn names
+ * is active, everything else has already stopped.
+ *
+ * A row that names no current attempt is a turn between attempts — superseded
+ * and waiting for its replacement, or queued and not started. Nothing is in
+ * flight there, so a call that never got a result cannot still be waiting for
+ * one. Only a row that omits the field leaves the question open.
  */
 export function turnContextFromJobs(
   jobs: Array<{ id: string; state: string; current_attempt_id?: number | null }>,
@@ -150,9 +155,9 @@ export function turnContextFromJobs(
     isAttemptActive: (jobId, attemptId) => {
       const job = byId.get(jobId);
       if (!job || !ACTIVE_JOB_STATES.has(job.state)) return false;
-      return job.current_attempt_id === undefined || job.current_attempt_id === null
-        ? true
-        : job.current_attempt_id === attemptId;
+      if (job.current_attempt_id === null) return false;
+      if (job.current_attempt_id === undefined) return true;
+      return job.current_attempt_id === attemptId;
     },
   };
 }
