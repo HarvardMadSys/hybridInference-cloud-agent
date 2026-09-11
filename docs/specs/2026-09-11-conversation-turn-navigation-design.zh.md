@@ -374,7 +374,7 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 与设计相比的两点实现细节：
 
 1. 轮次描述层同时决定正文渲染哪些行与目录预览什么内容，`HistoryTurn` 的 fallback 规则（无事件消息时使用 durable assistant 消息）已从组件内移入该层，两处不再各写一套。
-2. 描述层每个渲染都重新派生（正确性优先），刻度列表的引用稳定性来自 `sameNavigationEntries`：把刚派生出的条目与上一批逐字段比较，相同则沿用旧数组。§8.1 的目标是"不因每个 token 重建几百个刻度"，这一点由引用稳定保证；而摘要式缓存需要预判刻度依赖的每个字段，漏一个（例如历史轮次后来才可 Fork）就会长期供出旧刻度，所以不采用。预览截断对 ASCII 走直接切片、只对含组合字符的文本启用 `Intl.Segmenter`，这是上述"每 token 全量派生"的主要开销来源。
+2. 描述层每个渲染都重新派生（正确性优先），刻度列表的引用稳定性来自 `sameNavigationEntries`：把刚派生出的条目与上一批逐字段比较，相同则沿用旧数组。§8.1 的目标是"不因每个 token 重建几百个刻度"，这一点由引用稳定保证；而摘要式缓存需要预判刻度依赖的每个字段，漏一个（例如历史轮次后来才可 Fork）就会长期供出旧刻度，所以不采用。预览截断只读到预算用尽为止（见 13.5），这是"每 token 全量派生"仍然可接受的前提。
 
 ### 13.2 已执行的自动化检查
 
@@ -385,14 +385,14 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 | `npm run lint`             | 0 error，0 warning            |
 | `npm run format:check`     | 全部文件符合 Prettier         |
 | `npm run type-check`       | 通过                          |
-| `npm test`                 | 66 个文件、944 个用例全部通过 |
+| `npm test`                 | 66 个文件、947 个用例全部通过 |
 | `npm run build`            | 通过                          |
 | `node scripts/check-server-only-guard.mjs` | 通过             |
 | `node scripts/check-runtime-site-config.mjs` | 通过           |
 
-新增用例：`conversationTurnNavigation.test.ts`（28）、`useConversationScroll.test.ts`（20，纯算术与 attempt 判定）、`useConversationScroll.dom.test.tsx`（14，注入盒模型的控制器行为）、`TurnNavigator.test.tsx`（19）、`JobDetail.test.tsx` 的对话导航用例（7），另在 `adapt.test.ts` 增加 1 例（历史轮次状态映射）。
+新增用例：`conversationTurnNavigation.test.ts`（31）、`useConversationScroll.test.ts`（20，纯算术与 attempt 判定）、`useConversationScroll.dom.test.tsx`（14，注入盒模型的控制器行为）、`TurnNavigator.test.tsx`（19）、`JobDetail.test.tsx` 的对话导航用例（7），另在 `adapt.test.ts` 增加 1 例（历史轮次状态映射）。
 
-### 13.3 两轮对抗性评审后的修正
+### 13.3 第一轮对抗性评审后的修正
 
 实现完成后做了一次对照本文的评审和一次针对控制器/组件的代码评审，以下问题在本次一并修正，并各自补了回归用例：
 
@@ -413,7 +413,7 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 | 当前轮的 durable 回复被 `historyIncludesPrompt` 一并门控                   | 该标记只决定 prompt 卡片是否让位，不再决定正文是否渲染 durable 行                          |
 | 滚动容器没有 `tabIndex`，纯键盘无法直接翻正文                             | 容器加入 tab 顺序（WAI-ARIA 可滚动区域惯例）                                              |
 
-四项需要真实浏览器才能定论的问题（预览卡与目录面板的实际遮挡、输入区真实高度下的落点像素、ResizeObserver 时序、触摸与指针行为）仍在 13.5 的人工清单里。
+四项需要真实浏览器才能定论的问题（预览卡与目录面板的实际遮挡、输入区真实高度下的落点像素、ResizeObserver 时序、触摸与指针行为）仍在 13.6 的人工清单里。
 
 ### 13.4 第二轮评审（针对已推送提交）后的修正
 
@@ -427,7 +427,15 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 
 五个问题各自补了回归用例，并逐个验证过"把修复改回去则用例变红"。
 
-### 13.5 尚未执行
+### 13.5 第三轮评审（性能）后的修正
+
+| 问题                                                                       | 修正                                                                                     |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 预览截断先把整段回复物化成字符簇数组再截取，中文回复（或含破折号的英文）每轮都要完整分割；100 轮 × 每轮 5,000 字复现为单次派生 26ms，10,000 字为 50.5ms | `previewText` 改为惰性读取字符簇，读满「预算 + 1 个字符」即停止；预算内的短文本仍走一次 `replace` 的快速路径 |
+
+修复前后在本机（Node 22）用同一组数据测量，200 轮 × 每轮 10,000 个中文字符的一次完整派生：修复前中位数 **175ms**，修复后 **5.6ms**（约 31×），且与回复长度无关（每轮约 28µs，其中约 12µs 是 `Intl.Segmenter` 每次调用的固定开销）。回归用例不用墙钟阈值，而是替换 `Intl.Segmenter` 统计实际读取的字符数，断言不超过预算 + 10：把"读到预算就停"改回去，该用例立即变红。
+
+### 13.6 尚未执行
 
 - 真实布局下的滚动行为。`useConversationScroll.dom.test.tsx` 用注入的盒模型覆盖了控制器的判断（落点、阅读轮次、布局补偿、跟随恢复、目标缺失），但那是给定的几何，不是浏览器算出来的：Markdown 换行重排、sticky 输入区的实际遮挡、ResizeObserver 的真实时序、指针与触摸事件，以及跳转落点的像素级误差（±4px）都仍未验证。可复现的人工步骤见 [conversation-navigation.md](../conversation-navigation.md#verifying-it-in-a-browser)。
 - 100+ 轮、两种 Chat 宽度、Fork 复制历史在真实数据下的表现。

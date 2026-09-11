@@ -118,26 +118,31 @@ function isTerminal(state: AgentJobState): boolean {
   return state !== 'queued' && state !== 'running';
 }
 
-/** Text with no clusters to protect: one code unit per character. */
-const ASCII_ONLY = /^[\u0020-\u007e]*$/;
-
 const GRAPHEME_SEGMENTER =
   typeof Intl === 'undefined' || typeof Intl.Segmenter !== 'function'
     ? null
     : new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
+const WHITESPACE = /\s/;
+
 /**
- * Split into user-perceived characters.
+ * The text's grapheme clusters, lazily.
  *
- * Slicing a JavaScript string by UTF-16 index would cut an emoji or a combining
- * mark in half; `Segmenter` is the only way to count what the reader counts.
- * The fallback still avoids splitting a surrogate pair.
+ * Lazily is the point: a caller that stops reading after a budget must not pay
+ * for the clusters behind it. Falling back to code points still avoids
+ * splitting a surrogate pair.
  */
-function graphemes(text: string): string[] {
-  if (GRAPHEME_SEGMENTER === null) return Array.from(text);
-  const parts: string[] = [];
-  for (const { segment } of GRAPHEME_SEGMENTER.segment(text)) parts.push(segment);
-  return parts;
+function* textCharacters(text: string): Generator<string> {
+  if (GRAPHEME_SEGMENTER === null) {
+    yield* text;
+    return;
+  }
+  for (const { segment } of GRAPHEME_SEGMENTER.segment(text)) yield segment;
+}
+
+/** One space per run of whitespace, and none at either end. */
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -145,23 +150,56 @@ function graphemes(text: string): string[] {
  *
  * Rendered text, not Markdown: the card shows the words the reader already
  * sees, and a stray `**` or backtick costs two of fifty characters.
+ *
+ * Reads only as far as the budget can reach. A stored reply is routinely tens
+ * of thousands of characters — a Chinese one is a cluster per character — and
+ * clustering all of them to show the first hundred and twenty cost tens of
+ * milliseconds per derivation, on every streamed token and every keystroke in
+ * the composer.
  */
 export function previewText(text: string, limit: number): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim();
-  if (collapsed === '') return '';
-  if (collapsed.length <= limit) return collapsed;
-  // Most previews are ASCII, and an ASCII string has no cluster to split:
-  // slicing it directly costs a comparison where segmentation costs an
-  // iterator, and the comparison is what proves the difference.
-  if (ASCII_ONLY.test(collapsed)) return `${collapsed.slice(0, limit - 1).trimEnd()}…`;
-  const parts = graphemes(collapsed);
-  if (parts.length <= limit) return collapsed;
+  const budget = Math.max(1, limit);
+  // Already within budget, which is the common case for a prompt: one pass,
+  // no clustering at all.
+  if (text.length <= budget) return collapseWhitespace(text);
+
+  let preview = '';
+  /** Where the budget's last character ended, for the clipped case. */
+  let cut = 0;
+  let counted = 0;
+  let space = false;
+  let clipped = false;
+
+  for (const character of textCharacters(text)) {
+    if (WHITESPACE.test(character)) {
+      // Leading whitespace is dropped; a run inside becomes one space.
+      if (counted > 0) space = true;
+      continue;
+    }
+    if (space) {
+      if (counted >= budget) {
+        clipped = true;
+        break;
+      }
+      preview += ' ';
+      counted += 1;
+      space = false;
+      if (counted === budget - 1) cut = preview.length;
+    }
+    if (counted >= budget) {
+      // One character past what the card can show: enough to know the ellipsis
+      // is honest, and no reason to read the rest of the reply.
+      clipped = true;
+      break;
+    }
+    preview += character;
+    counted += 1;
+    if (counted === budget - 1) cut = preview.length;
+  }
+
   // The ellipsis is part of the budget, so a clipped preview can never be
   // longer than the whole one it replaces.
-  return `${parts
-    .slice(0, Math.max(1, limit - 1))
-    .join('')
-    .trimEnd()}…`;
+  return clipped ? `${preview.slice(0, cut).trimEnd()}…` : preview;
 }
 
 /** The last non-empty message row among `events`, or empty. */

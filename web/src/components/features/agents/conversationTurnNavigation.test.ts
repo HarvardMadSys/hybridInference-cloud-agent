@@ -4,7 +4,7 @@
 // mark per rendered turn, in order, previewing the words that turn actually
 // shows — and never a mark for a turn the page does not draw.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   conversationNavigationScope,
@@ -92,6 +92,21 @@ describe('previewText', () => {
     );
     // A combining acute accent is part of the character it sits on.
     expect(previewText('e\u0301'.repeat(60), 10)).toBe(`${'e\u0301'.repeat(9)}…`);
+  });
+
+  it('keeps a long non-ASCII reply that fits, and clips the one that does not', () => {
+    // The budget boundary on the path that has to cluster: exactly at the
+    // limit is not clipped, one character past it is.
+    const fifty = '中'.repeat(PROMPT_PREVIEW_LIMIT);
+    expect(previewText(fifty, PROMPT_PREVIEW_LIMIT)).toBe(fifty);
+    expect(previewText(`${fifty}中`, PROMPT_PREVIEW_LIMIT)).toBe(
+      `${'中'.repeat(PROMPT_PREVIEW_LIMIT - 1)}…`,
+    );
+  });
+
+  it('collapses whitespace in a long reply without spending the whole budget on it', () => {
+    const reply = `${'中'.repeat(20)}${' '.repeat(500)}${'文'.repeat(20)}`;
+    expect(previewText(reply, PROMPT_PREVIEW_LIMIT)).toBe(`${'中'.repeat(20)} ${'文'.repeat(20)}`);
   });
 
   it('returns nothing for whitespace', () => {
@@ -410,5 +425,59 @@ describe('sameNavigationEntries', () => {
       ),
     ];
     expect(sameNavigationEntries(running, settled)).toBe(false);
+  });
+});
+
+describe('previewText work is bounded by the budget', () => {
+  afterEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  it('stops reading a reply once the budget is full', async () => {
+    // A reply is routinely tens of thousands of characters while the preview
+    // is the first line of it. Clustering all of it, on every streamed token
+    // and every keystroke, is what made a long conversation slow to draw; this
+    // pins the bound rather than a wall-clock threshold, so it cannot flake.
+    const original = Intl.Segmenter;
+    let read = 0;
+    class CountingSegmenter {
+      segment(text: string) {
+        return {
+          *[Symbol.iterator]() {
+            for (let index = 0; index < text.length; index += 1) {
+              read = index + 1;
+              yield { segment: text[index], index, input: text };
+            }
+          },
+        };
+      }
+    }
+    Object.defineProperty(Intl, 'Segmenter', {
+      value: CountingSegmenter,
+      configurable: true,
+      writable: true,
+    });
+    vi.resetModules();
+
+    try {
+      const fresh = await import('./conversationTurnNavigation');
+      const reply = '这是一个很长的回复。'.repeat(5000);
+      read = 0;
+
+      const preview = fresh.previewText(reply, 120);
+
+      expect([...preview]).toHaveLength(120);
+      expect(preview.endsWith('…')).toBe(true);
+      // One character past the budget is enough to know the ellipsis is honest.
+      expect(read).toBeGreaterThanOrEqual(120);
+      expect(read).toBeLessThanOrEqual(130);
+    } finally {
+      Object.defineProperty(Intl, 'Segmenter', {
+        value: original,
+        configurable: true,
+        writable: true,
+      });
+    }
   });
 });
