@@ -151,10 +151,27 @@ def test_a_manifest_that_cannot_configure_a_deployment_is_refused(
 def test_the_fragment_is_shell_and_carries_nothing_but_these_values() -> None:
     fragment = re_.render(re_.environment_for(manifest(), "host", ambient={}))
     for line in fragment.strip().splitlines():
+        prefix, _, line = line.partition(" ")
+        assert prefix == "export", "a plain assignment never reaches a child process"
         key, _, value = line.partition("=")
         assert key in {*re_.STACK_ROLES["host"].values(), "AGENT_DEPLOYMENT_SHA"}
         assert value == value.strip(), "no stray whitespace for the shell to keep"
     assert fragment.endswith("\n")
+
+
+def test_a_variant_and_a_base_path_must_agree() -> None:
+    """Both halves valid, the pair wrong — and the deployment probes the wrong mount.
+
+    Caught here because this is the code that acts on it, and stated in the
+    manifest schema as well. A helper that checked each half on its own accepted
+    `agents` with an empty base path.
+    """
+    document = manifest()
+    agents = next(a for a in document["artifacts"] if a.get("variant") == "agents")
+    agents["base_path"] = ""
+    with pytest.raises(re_.ReleaseEnvError) as raised:
+        re_.environment_for(document, "control-plane", "agents", ambient={})
+    assert "base path" in str(raised.value)
 
 
 def test_the_cli_writes_a_file_and_refuses_a_bad_manifest(tmp_path: Path) -> None:

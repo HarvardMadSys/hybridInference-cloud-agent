@@ -33,6 +33,13 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
     from collections.abc import Mapping, Sequence
 
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
+
+#: The mount shape each variant is built for. A variant and a base path are one
+#: decision: `agents` with an empty base path is a deployment whose health check
+#: probes `/` while its image serves `/agents`, and both halves look valid on
+#: their own. The manifest schema states this pairing too; it is repeated here
+#: because this is the code that would act on it.
+WEB_BASE_PATHS = {"root": "", "agents": "/agents"}
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 #: Which manifest roles become which variable, per stack. The names match the
@@ -101,10 +108,12 @@ def environment_for(
         if variant is None:
             raise ReleaseEnvError("the control-plane stack needs --variant: root or agents")
         base_path = by_role["web"].get("base_path")
-        if base_path not in {"", "/agents"}:
+        expected = WEB_BASE_PATHS[variant]
+        if base_path != expected:
             raise ReleaseEnvError(
-                f"the manifest's web artifact has base path {base_path!r}; a deployment probes "
-                "the shape its image was built for"
+                f"the manifest's web artifact is variant {variant!r} with base path "
+                f"{base_path!r}, and {variant!r} is built for {expected!r}. The two are one "
+                "decision: a mismatch probes a mount point the image does not serve."
             )
         environment["AGENT_WEB_VARIANT"] = variant
         # Quoted so an empty base path survives `source` as an empty string
@@ -123,8 +132,15 @@ def environment_for(
 
 
 def render(environment: Mapping[str, str]) -> str:
-    """A shell fragment, validated above, safe to `source`."""
-    return "".join(f"{key}={value}\n" for key, value in sorted(environment.items()))
+    """A shell fragment, validated above, safe to `source`.
+
+    `export`, not a bare assignment: the readiness probe, `deploy.sh`'s own
+    `from_env` lookups and Compose itself all read these from the environment of
+    a child process, and a shell variable that was never exported is invisible
+    to every one of them. Sourcing a fragment of plain assignments produced a
+    deployment whose SHA was set for the script and unset for the stack.
+    """
+    return "".join(f"export {key}={value}\n" for key, value in sorted(environment.items()))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
