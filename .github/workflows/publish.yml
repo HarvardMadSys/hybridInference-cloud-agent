@@ -173,7 +173,7 @@ jobs:
   # starts it — so the smoke is applied to the bytes the registry holds, and
   # the pull is the first proof that they can be pulled at all.
   artifacts:
-    name: ${{ matrix.artifact.name }} (${{ matrix.artifact.arch }})
+    name: Publish ${{ matrix.artifact.name }} (${{ matrix.artifact.arch }})
     needs: commit
     if: needs.commit.outputs.existing == ''
     runs-on: ${{ fromJSON(matrix.artifact.runner) }}
