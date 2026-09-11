@@ -27,6 +27,7 @@ from cloud_agent.host_pool import (
     HOST_ONLINE,
     hash_secret,
 )
+from cloud_agent.storage._sql.hosts import release_host_slot
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
@@ -1051,7 +1052,7 @@ async def test_concurrent_claims_never_oversubscribe_a_host(
 
 
 async def test_the_release_helper_refuses_to_decrement_past_zero(
-    store, hosts: PostgresHostPoolRepository
+    store, db, hosts: PostgresHostPoolRepository
 ):
     """Tested directly, because nothing above can currently reach it twice.
 
@@ -1060,22 +1061,26 @@ async def test_the_release_helper_refuses_to_decrement_past_zero(
     a guarded release from an unguarded one — and the guard would rot unnoticed
     until some future caller released a slot on a path the fence does not
     cover. Calling it straight is the only way to assert what it promises.
+
+    It is called as a statement rather than as a method because that is what it
+    now is: it writes ``agent_runner_hosts`` but every caller is an attempt
+    leaving ``running``, so it belongs to the host tables and to no capability.
     """
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
 
-    async with store._pool.acquire() as conn:
+    async with db.acquire() as conn:
         for _ in range(5):
-            await store._release_host_slot(conn, "runner-a")
+            await release_host_slot(conn, "runner-a")
 
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
-async def test_releasing_a_slot_for_no_host_is_a_no_op(store):
+async def test_releasing_a_slot_for_no_host_is_a_no_op(db):
     """The hostless-runner path reaches this with ``None`` on every finish."""
-    async with store._pool.acquire() as conn:
-        await store._release_host_slot(conn, None)
+    async with db.acquire() as conn:
+        await release_host_slot(conn, None)
 
 
 async def test_the_schema_itself_refuses_a_negative_slot_count(store, hosts):

@@ -21,8 +21,8 @@ import inspect
 import re
 from typing import Any
 
+from cloud_agent.domain.runtimes import resolve_runtime_version
 from cloud_agent.schemas import WorkerClaimAttestation, WorkerClaimResponse
-from cloud_agent.storage.store import resolve_runtime_version
 from cloud_agent_host.runner import (
     ClaimedJob,
     _claim_attestation,

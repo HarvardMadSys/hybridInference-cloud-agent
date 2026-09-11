@@ -8,6 +8,7 @@ transaction ownership it has here.
 
 from __future__ import annotations
 
+from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
 from cloud_agent.storage.repositories.audit import PostgresAuditRepository
 from cloud_agent.storage.repositories.conversation_commands import PostgresConversationCommands
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
@@ -21,6 +22,7 @@ from cloud_agent.storage.repositories.mcp import PostgresMcpConnectionRepository
 from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
 
 __all__ = [
+    "PostgresAttemptCommands",
     "PostgresAuditRepository",
     "PostgresConversationCommands",
     "PostgresConversationQueries",

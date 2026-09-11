@@ -7,6 +7,11 @@ can import them without importing the store.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Any
+
 # Everything a caller may see about a host. ``credential_hash`` is deliberately
 # not in it — reading it back out would make the row as good as the credential
 # — and is reported only as the boolean ``enrolled``.
@@ -58,3 +63,22 @@ CAPACITY_COLUMN_NAMES = (
 
 
 HOST_CAPACITY_COLUMNS = ", ".join(CAPACITY_COLUMN_NAMES)
+
+
+async def release_host_slot(conn: Any, host: str | None) -> None:
+    """Give one slot back, and never take the count below zero.
+
+    Called from inside the transaction that just moved an attempt out of
+    ``running``, and only when that move actually changed a row — so it
+    runs exactly once per attempt. The ``slots_used > 0`` predicate is the
+    second line of defence and the schema CHECK is the third: a counter
+    that drifts negative would make a host look permanently over-committed
+    and quietly stop it claiming, with nothing in the logs.
+    """
+    if host is None:
+        return
+    await conn.execute(
+        "UPDATE agent_runner_hosts SET slots_used = slots_used - 1 "
+        "WHERE host = $1 AND slots_used > 0",
+        host,
+    )
