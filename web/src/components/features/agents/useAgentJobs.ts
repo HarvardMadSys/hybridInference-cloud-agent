@@ -313,6 +313,14 @@ export function useAgentJob(jobId: string): {
   job: AgentJob | null;
   /** Every turn's stored stream, unfolded — what the trajectory view reads. */
   events: AgentThreadEventApi[];
+  /**
+   * The conversation's turn rows, as the API returned them.
+   *
+   * The display model keeps only what Chat renders, and the inspector needs the
+   * per-turn execution fields it drops — started/finished, attempts, the exact
+   * model. Returning them here avoids a second read of the same thread.
+   */
+  threadJobs: AgentJobApi[];
   loading: boolean;
   error: string | null;
   reload: () => void;
@@ -504,7 +512,7 @@ export function useAgentJob(jobId: string): {
   // Both shapes, deliberately: `job.events` is the chat view's *reading* of
   // the stream — folded, deduplicated, unknown kinds dropped — while the
   // trajectory needs the rows the platform actually stored.
-  return { job, events: threadEvents, loading, error, reload };
+  return { job, events: threadEvents, threadJobs: thread?.jobs ?? [], loading, error, reload };
 }
 
 /** One directory of the workspace tree, as far as it has been loaded. */

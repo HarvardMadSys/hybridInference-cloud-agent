@@ -17,7 +17,7 @@ export default function AgentJobPage() {
 }
 
 function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) {
-  const { job, events, loading, error, reload } = useAgentJob(jobId);
+  const { job, events, threadJobs, loading, error, reload } = useAgentJob(jobId);
   useEffect(() => {
     if (!userId || !job || job.id !== jobId || loading || error) return;
     markConversationRead(
@@ -78,5 +78,13 @@ function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) 
   // to reset by remounting is reset by an effect in JobDetail instead, so
   // moving to the next turn of a thread no longer throws away the view the
   // reader is looking at — including which tab they had open.
-  return <JobDetail key={job.threadId ?? job.id} job={job} events={events} onReload={reload} />;
+  return (
+    <JobDetail
+      key={job.threadId ?? job.id}
+      job={job}
+      events={events}
+      threadJobs={threadJobs}
+      onReload={reload}
+    />
+  );
 }

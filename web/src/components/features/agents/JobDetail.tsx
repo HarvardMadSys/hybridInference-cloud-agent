@@ -37,9 +37,17 @@ import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { ThreadActions } from './ThreadActions';
 import type { AgentEvent, AgentHistoryTurn, AgentJob, AgentThreadMessage } from './types';
-import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
+import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
 import { TrajectoryView } from './TrajectoryView';
+import {
+  TrajectoryInspector,
+  normalizeStepTab,
+  type InspectorSelection,
+  type RunTab,
+  type StepTab,
+} from './TrajectoryInspector';
+import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
@@ -52,6 +60,14 @@ const WORKSPACE_MAX_WIDTH = 1200;
 // The transcript is the reason the page exists; the workspace stops widening
 // before the conversation and its composer get squeezed into a column.
 const TRANSCRIPT_MIN_WIDTH = 400;
+
+// The inspector is narrower than the workspace: it holds one step's detail,
+// not a terminal. It still has to leave the trajectory list enough room to scan.
+export const INSPECTOR_WIDTH_STORAGE_KEY = 'agents.inspector.width';
+const INSPECTOR_DEFAULT_WIDTH = 400;
+const INSPECTOR_MIN_WIDTH = 320;
+const INSPECTOR_MAX_WIDTH = 640;
+const TRAJECTORY_MIN_WIDTH = 420;
 
 const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'git', label: 'Git' },
@@ -477,12 +493,14 @@ function HistoryTurn({
   busy,
   onFork,
   onRewind,
+  onOpenRun,
 }: {
   turn: AgentHistoryTurn;
   rewindAnchorJobId?: string;
   busy: boolean;
   onFork?: (jobId: string) => void;
   onRewind?: (jobId: string, prompt: string) => void;
+  onOpenRun?: (jobId: string, turnNo: number) => void;
 }) {
   const hasEventMessages = turn.events.some((event) => event.kind === 'message');
   const toolCalls = turn.events.filter((event) => event.kind === 'tool_use').length;
@@ -540,6 +558,15 @@ function HistoryTurn({
         <span>
           Turn {turn.turnNo} · {toolCalls} tool call{toolCalls === 1 ? '' : 's'}
         </span>
+        {onOpenRun ? (
+          <button
+            type="button"
+            onClick={() => onOpenRun(turn.jobId, turn.turnNo)}
+            className="rounded px-1.5 py-0.5 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-white/10 dark:hover:text-gray-100"
+          >
+            View execution
+          </button>
+        ) : null}
         <span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />
       </div>
     </section>
@@ -955,11 +982,14 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
 export function JobDetail({
   job,
   events = [],
+  threadJobs = [],
   onReload,
 }: {
   job: AgentJob;
   /** The stored stream, for the trajectory tab. Absent in fixtures. */
   events?: (AgentJobEventApi | AgentThreadEventApi)[];
+  /** The conversation's turn rows, so Run details can describe a past turn. */
+  threadJobs?: AgentJobApi[];
   onReload?: () => void;
 }) {
   const router = useRouter();
@@ -985,6 +1015,16 @@ export function JobDetail({
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('git');
+  // The right region holds either the workspace or one selected step, never
+  // both: two panels would hide the trajectory that explains either of them.
+  const [inspector, setInspector] = useState<InspectorSelection | null>(null);
+  const [trajectoryQuery, setTrajectoryQuery] = useState('');
+  const [focusJobId, setFocusJobId] = useState<string | null>(null);
+  const inspectorTriggerRef = useRef<HTMLElement | null>(null);
+  const trajectorySteps = useMemo(
+    () => buildTrajectorySteps(events, turnContextFromJobs(threadJobs)),
+    [events, threadJobs],
+  );
   const [followUp, setFollowUp] = useState('');
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
@@ -1005,6 +1045,15 @@ export function JobDetail({
     side: 'end',
     maxViewportFraction: 0.75,
     siblingMinWidth: TRANSCRIPT_MIN_WIDTH,
+  });
+  const inspectorPane = useResizablePane({
+    storageKey: INSPECTOR_WIDTH_STORAGE_KEY,
+    defaultWidth: INSPECTOR_DEFAULT_WIDTH,
+    minWidth: INSPECTOR_MIN_WIDTH,
+    maxWidth: INSPECTOR_MAX_WIDTH,
+    side: 'end',
+    maxViewportFraction: 0.6,
+    siblingMinWidth: TRAJECTORY_MIN_WIDTH,
   });
 
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);
@@ -1120,11 +1169,94 @@ export function JobDetail({
   function openWorkspace(tab: WorkspaceTab) {
     setWorkspaceTab(tab);
     setWorkspaceOpen(true);
+    setInspector(null);
   }
 
   const toggleWorkspace = useCallback(() => {
-    setWorkspaceOpen((current) => !current);
+    setWorkspaceOpen((current) => {
+      if (!current) setInspector(null);
+      return !current;
+    });
   }, []);
+
+  const closeInspector = useCallback(() => {
+    setInspector(null);
+    // Cleared so reopening the same turn scrolls back to it.
+    setFocusJobId(null);
+    const trigger = inspectorTriggerRef.current;
+    inspectorTriggerRef.current = null;
+    // Escape closes the panel, not the reader's place in it.
+    if (trigger && document.contains(trigger)) trigger.focus();
+  }, []);
+
+  // Remember what opened the panel so closing it can hand focus back.
+  const rememberInspectorTrigger = useCallback(() => {
+    const active = document.activeElement;
+    inspectorTriggerRef.current = active instanceof HTMLElement ? active : null;
+  }, []);
+
+  const selectStep = useCallback(
+    (stepKey: string) => {
+      const step = trajectorySteps.find((candidate) => candidate.key === stepKey);
+      rememberInspectorTrigger();
+      setWorkspaceOpen(false);
+      setInspector((current) => {
+        const keepTab = current?.kind === 'step' && current.stepKey === stepKey;
+        const tab: StepTab = keepTab ? current.tab : 'summary';
+        return { kind: 'step', stepKey, tab: step ? normalizeStepTab(step.kind, tab) : 'summary' };
+      });
+    },
+    [rememberInspectorTrigger, trajectorySteps],
+  );
+
+  const openRun = useCallback(
+    (jobId: string, turnNo: number) => {
+      rememberInspectorTrigger();
+      setWorkspaceOpen(false);
+      setInspector({ kind: 'run', jobId, turnNo, tab: 'overview' });
+      setTab('trajectory');
+      setFocusJobId(jobId);
+    },
+    [rememberInspectorTrigger],
+  );
+
+  const selectInspectorTab = useCallback((next: StepTab | RunTab) => {
+    setInspector((current) => {
+      if (!current) return current;
+      return current.kind === 'step'
+        ? { ...current, tab: next as StepTab }
+        : { ...current, tab: next as RunTab };
+    });
+  }, []);
+
+  // Step and run details explain the trajectory; Chat has no place to keep them.
+  useEffect(() => {
+    if (tab !== 'chat') return;
+    setInspector(null);
+    setFocusJobId(null);
+  }, [tab]);
+
+  // Escape closes this layer only. Controls that consume Escape themselves —
+  // the composer, the terminal, any dialog — keep it.
+  useEffect(() => {
+    if (!inspector) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.repeat || event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (
+        target?.closest(
+          'input, textarea, select, [contenteditable="true"], [role="dialog"], #job-workspace-pane',
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      closeInspector();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [closeInspector, inspector]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1293,6 +1425,9 @@ export function JobDetail({
   const currentRewindAnchor = historyTurns
     ? [...historyTurns].reverse().find((turn) => turn.forkable)?.jobId
     : undefined;
+  // The workspace and the inspector share one right-hand region, so either of
+  // them narrows the transcript in exactly the same way.
+  const panelOpen = workspaceOpen || inspector !== null;
   return (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
       <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
@@ -1432,19 +1567,34 @@ export function JobDetail({
 
       <div
         ref={workspacePane.containerRef}
-        className={`min-h-0 flex-1 overflow-hidden ${workspaceOpen ? 'block lg:flex' : 'flex'}`}
+        className={`min-h-0 flex-1 overflow-hidden ${panelOpen ? 'block lg:flex' : 'flex'}`}
       >
         <div
           role="region"
           aria-label="Task progress"
           className={`min-w-0 flex-1 flex-col overflow-y-auto ${
-            workspaceOpen ? 'hidden lg:flex' : 'flex'
+            panelOpen ? 'hidden lg:flex' : 'flex'
           }`}
         >
-          <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col px-6 pb-6 pt-7">
+          <div
+            className={`flex flex-1 flex-col px-6 pb-6 pt-7 ${
+              // Chat keeps a readable column; the trajectory is a wide table of
+              // steps that should use everything the inspector is not holding.
+              tab === 'trajectory' ? 'w-full' : 'mx-auto w-full max-w-4xl'
+            }`}
+          >
             {tab === 'trajectory' ? (
               <div className="flex-1">
-                <TrajectoryView events={events} />
+                <TrajectoryView
+                  events={events}
+                  steps={trajectorySteps}
+                  query={trajectoryQuery}
+                  onQueryChange={setTrajectoryQuery}
+                  selectedKey={inspector?.kind === 'step' ? inspector.stepKey : null}
+                  onSelectStep={selectStep}
+                  onOpenRun={openRun}
+                  focusJobId={focusJobId}
+                />
               </div>
             ) : (
               <div className="flex-1">
@@ -1468,6 +1618,7 @@ export function JobDetail({
                           ? (anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)
                           : undefined
                       }
+                      onOpenRun={openRun}
                     />
                   );
                 })}
@@ -1593,6 +1744,16 @@ export function JobDetail({
                 </div>
 
                 <AttemptTurnFooter job={job} attemptNo={attemptNo} />
+
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    onClick={() => openRun(job.id, job.turnNo ?? 1)}
+                    className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+                  >
+                    View execution · Turn {job.turnNo ?? 1}
+                  </button>
+                </div>
 
                 <OutcomeCard job={job} onOpenDiff={() => openWorkspace('git')} />
                 {selectedAttemptIsCurrent ? (
@@ -1829,6 +1990,42 @@ export function JobDetail({
           >
             <WorkspaceFiles job={job} active={workspaceOpen && workspaceTab === 'files'} />
           </div>
+        </aside>
+
+        {inspector ? (
+          <PaneResizer
+            pane={inspectorPane}
+            label="Resize step details"
+            controls="job-inspector-pane"
+            className="hidden lg:block"
+          />
+        ) : null}
+
+        <aside
+          id="job-inspector-pane"
+          role="region"
+          aria-label={inspector?.kind === 'run' ? 'Run details' : 'Step details'}
+          hidden={!inspector}
+          style={{ '--job-inspector-width': `${inspectorPane.width}px` } as CSSProperties}
+          className={`${
+            inspector ? 'flex' : 'hidden'
+          } min-h-0 min-w-0 flex-col overflow-hidden border-l border-gray-200 bg-white dark:border-white/10 dark:bg-gray-900 lg:w-[var(--job-inspector-width)] lg:shrink-0`}
+        >
+          {inspector ? (
+            <TrajectoryInspector
+              selection={inspector}
+              steps={trajectorySteps}
+              events={events}
+              jobs={threadJobs}
+              currentJob={job}
+              query={trajectoryQuery}
+              onClearQuery={() => setTrajectoryQuery('')}
+              onSelectTab={selectInspectorTab}
+              onSelectStep={selectStep}
+              onClose={closeInspector}
+              onOpenGitDiff={() => openWorkspace('git')}
+            />
+          ) : null}
         </aside>
       </div>
     </section>

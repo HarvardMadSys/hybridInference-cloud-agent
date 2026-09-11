@@ -8,6 +8,7 @@ import {
   cancelAgentJob,
   createAgentTerminal,
   deleteAgentTerminal,
+  getAgentAttemptTelemetry,
   followUpAgentJob,
   forkAgentJob,
   getAgentConfig,
@@ -50,6 +51,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJobFiles: vi.fn(),
   getAgentJobGit: vi.fn(),
   getAgentJobUsage: vi.fn(),
+  getAgentAttemptTelemetry: vi.fn(),
   getAgentThreadStats: vi.fn(),
   listAgentTerminals: vi.fn(),
   resizeAgentTerminal: vi.fn(),
@@ -1914,7 +1916,53 @@ describe('JobDetail reasoning effort', () => {
 });
 
 describe('the trajectory tab', () => {
+  beforeEach(() => {
+    vi.mocked(getAgentConfig).mockReset().mockResolvedValue(AGENT_CONFIG);
+    vi.mocked(getAgentJobGit).mockReset().mockResolvedValue({
+      available: false,
+      branch: '',
+      changes: [],
+      patch: '',
+      commits: [],
+    });
+    vi.mocked(getAgentJobUsage).mockReset().mockResolvedValue(null);
+    vi.mocked(refreshAgentJobUsage).mockReset().mockResolvedValue(null);
+    vi.mocked(getAgentThreadStats).mockReset().mockResolvedValue(null);
+    vi.mocked(getAgentAttemptTelemetry).mockReset().mockResolvedValue({
+      attempt_id: 1,
+      attempt_no: 1,
+      continuity_mode: null,
+      context_status: null,
+      duration_ms: null,
+      resources: null,
+    });
+    localStorage.clear();
+  });
+
   afterEach(() => cleanup());
+
+  const STORED_CALL = [
+    {
+      id: 1,
+      job_id: 'ajob_1',
+      turn_no: 1,
+      attempt_id: 1,
+      seq: 1,
+      event_type: 'tool_use',
+      payload: { id: 't1', name: 'Bash', input: { command: 'pytest -q' } },
+      created_at: '2026-08-19T10:00:00.000Z',
+    },
+    {
+      id: 2,
+      job_id: 'ajob_1',
+      turn_no: 1,
+      attempt_id: 1,
+      seq: 2,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 't1', content: '2 passed' },
+      created_at: '2026-08-19T10:00:05.000Z',
+    },
+  ] as never;
 
   it('switches between the reading of the stream and the stream itself', () => {
     const job = makeJob({ events: [{ kind: 'message', text: 'the build passes' }] });
@@ -1932,16 +1980,16 @@ describe('the trajectory tab', () => {
     render(<JobDetail job={job} events={stored} />);
 
     // Chat first: the reading, with no trajectory chrome.
-    expect(screen.queryByLabelText('Search events')).toBeNull();
+    expect(screen.queryByLabelText('Search steps')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByLabelText('Search events')).toBeInTheDocument();
+    expect(screen.getByLabelText('Search steps')).toBeInTheDocument();
     expect(screen.getByText('Bash')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'chat' }));
 
-    expect(screen.queryByLabelText('Search events')).toBeNull();
+    expect(screen.queryByLabelText('Search steps')).toBeNull();
   });
 
   it('separates stored events by conversation turn', () => {
@@ -1985,6 +2033,96 @@ describe('the trajectory tab', () => {
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
     expect(screen.getByText(/stored no events/)).toBeInTheDocument();
+  });
+
+  it('opens the selected step in the right-hand region, not under the row', () => {
+    render(<JobDetail job={makeJob()} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+
+    const panel = screen.getByRole('region', { name: 'Step details' });
+    expect(within(panel).getByText(/Tool · Turn 1 · Step 1/)).toBeInTheDocument();
+    expect(within(panel).getByRole('tab', { name: 'Schema' })).toBeInTheDocument();
+    // The result joined its call rather than becoming a second row.
+    expect(within(panel).getByText(/2 passed/)).toBeInTheDocument();
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
+  });
+
+  it('keeps one right-hand region: opening the workspace closes the details', () => {
+    render(<JobDetail job={makeJob()} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+
+    openWorkspace();
+
+    expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Bash'));
+
+    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+  });
+
+  it('closes the details on Escape without also stopping the run', () => {
+    render(<JobDetail job={makeJob({ state: 'running' })} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+
+    expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('leaves Escape alone while the reader is typing', () => {
+    render(<JobDetail job={makeJob()} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+
+    const search = screen.getByLabelText('Search steps');
+    search.focus();
+    fireEvent.keyDown(search, { key: 'Escape' });
+
+    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+  });
+
+  it('opens the turn the chat footer points at, even for an older turn', () => {
+    const job = makeJob({
+      turnNo: 2,
+      threadMessages: HISTORY,
+      historyTurns: [
+        {
+          jobId: 'ajob_0',
+          turnNo: 1,
+          forkable: true,
+          messages: HISTORY,
+          events: [{ kind: 'message', text: 'Earlier answer' }],
+        },
+      ],
+    });
+    render(<JobDetail job={job} events={STORED_CALL} threadJobs={[]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'View execution' }));
+
+    const panel = screen.getByRole('region', { name: 'Run details' });
+    expect(within(panel).getByRole('heading', { name: 'Run details' })).toBeInTheDocument();
+    expect(within(panel).getByText('Run · Turn 1')).toBeInTheDocument();
+  });
+
+  it('closes the details when the reader goes back to the conversation', () => {
+    render(<JobDetail job={makeJob()} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+
+    expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
   });
 });
 
