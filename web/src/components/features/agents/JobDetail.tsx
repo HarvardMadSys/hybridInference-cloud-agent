@@ -44,7 +44,7 @@ import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
-import { BackToBottom, TurnDirectory, TurnRail } from './TurnNavigator';
+import { BackToBottom, TurnRail } from './TurnNavigator';
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { ThreadActions } from './ThreadActions';
@@ -74,13 +74,13 @@ const WORKSPACE_MAX_WIDTH = 1200;
 // before the conversation and its composer get squeezed into a column.
 const TRANSCRIPT_MIN_WIDTH = 400;
 // The rail needs room to sit beside the text rather than over it, and a band
-// tall enough that its marks mean something. Below either, the same turns stay
-// reachable through the header's directory panel.
+// tall enough that its marks mean something. Otherwise the transcript keeps
+// its normal scrolling, without adding a second navigation surface.
 const RAIL_MIN_COLUMN_WIDTH = 720;
 const RAIL_MIN_READING_HEIGHT = 200;
 const RAIL_MAX_HEIGHT = 420;
 const RAIL_BAND_MARGIN = 64;
-const BACK_TO_BOTTOM_INSET = 12;
+const BACK_TO_BOTTOM_INSET = 16;
 
 // The inspector is narrower than the workspace: it holds one step's detail,
 // not a terminal. It still has to leave the trajectory list enough room to scan.
@@ -614,11 +614,7 @@ function HistoryTurn({
           />
         ))}
       </div>
-      <div className="my-5 flex items-center gap-3 text-[11px] text-gray-400 dark:text-gray-500">
-        <span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />
-        <span>
-          Turn {turn.displayNo} · {turn.toolCalls} tool call{turn.toolCalls === 1 ? '' : 's'}
-        </span>
+      <div className="mb-6 mt-3 flex justify-end text-[11px] text-gray-400 dark:text-gray-500">
         {onOpenRun ? (
           <button
             type="button"
@@ -628,7 +624,6 @@ function HistoryTurn({
             View execution
           </button>
         ) : null}
-        <span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />
       </div>
     </section>
   );
@@ -1638,13 +1633,6 @@ export function JobDetail({
               </button>
             ))}
           </nav>
-          {tab === 'chat' ? (
-            <TurnDirectory
-              entries={navigationEntries}
-              activeKey={scroll.activeKey}
-              onNavigate={jumpToTurn}
-            />
-          ) : null}
           {!isSuccessful ? (
             <span
               className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
@@ -1933,7 +1921,7 @@ export function JobDetail({
                         onClick={() => openRun(job.id, job.turnNo ?? 1)}
                         className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
                       >
-                        View execution · Turn {job.turnNo ?? 1}
+                        View execution
                       </button>
                     </div>
 
@@ -2099,7 +2087,7 @@ export function JobDetail({
               the design's order is body, rail preview, composer, header. */}
           {showRail ? (
             <div
-              className="pointer-events-none absolute right-1 top-0 z-0 flex flex-col justify-center"
+              className="pointer-events-none absolute right-3 top-0 z-0 flex flex-col justify-center"
               style={{ bottom: composerHeight }}
             >
               <TurnRail
@@ -2116,30 +2104,39 @@ export function JobDetail({
 
           {tab === 'chat' ? (
             <div
-              className="pointer-events-none absolute inset-x-0 z-0 flex flex-col items-center gap-2 px-4"
-              style={{ bottom: composerHeight + BACK_TO_BOTTOM_INSET }}
+              className="pointer-events-none absolute left-0 z-0 w-full max-w-full"
+              style={{
+                bottom: composerHeight + BACK_TO_BOTTOM_INSET,
+                // Match the scroller's usable width, including when a native
+                // scrollbar occupies space beside the conversation.
+                width: scroll.viewport.width || undefined,
+              }}
             >
-              {/* One live region for both answers: where a jump landed, and
+              <div
+                className={`mx-auto flex w-full max-w-4xl flex-col items-end gap-2 ${showRail ? 'pl-6 pr-12' : 'px-6'}`}
+              >
+                {/* One live region for both answers: where a jump landed, and
                   when it could not land at all. It is always in the DOM, since
                   a region added at the same moment as its text announces
                   nothing. */}
-              <p
-                role="status"
-                aria-live="polite"
-                className={
-                  navigationNotice === ''
-                    ? 'sr-only'
-                    : 'rounded-full bg-white/95 px-3 py-1 text-xs text-gray-600 shadow-card dark:bg-gray-900/95 dark:text-gray-300'
-                }
-              >
-                {navigationNotice}
-              </p>
-              {scroll.awayFromBottom ? (
-                <BackToBottom
-                  hasNewContent={scroll.hasNewContent}
-                  onReturn={scroll.returnToBottom}
-                />
-              ) : null}
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className={
+                    scroll.unavailableKey === null
+                      ? 'sr-only'
+                      : 'rounded-full bg-white/95 px-3 py-1 text-xs text-gray-600 shadow-card dark:bg-gray-900/95 dark:text-gray-300'
+                  }
+                >
+                  {navigationNotice}
+                </p>
+                {scroll.awayFromBottom ? (
+                  <BackToBottom
+                    hasNewContent={scroll.hasNewContent}
+                    onReturn={scroll.returnToBottom}
+                  />
+                ) : null}
+              </div>
             </div>
           ) : null}
         </div>

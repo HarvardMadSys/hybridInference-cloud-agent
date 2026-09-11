@@ -130,8 +130,7 @@ export const en = {
 
   // ── Conversation turn navigation ────────────────────────────────────────
   'turnNavigation.rail': 'Conversation turns',
-  'turnNavigation.directory': 'Turns',
-  'turnNavigation.directoryLabel': 'Turns in this chat',
+  'turnNavigation.emptyPreview': 'No message text',
   'turnNavigation.turn': 'Turn {turn}',
   'turnNavigation.attempt': 'Attempt {attempt}',
   'turnNavigation.jump': 'Go to turn {turn}',

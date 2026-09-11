@@ -129,8 +129,7 @@ export const zhCN: Record<TranslationKey, string> = {
 
   // ── Conversation turn navigation ────────────────────────────────────────
   'turnNavigation.rail': '对话轮次',
-  'turnNavigation.directory': '轮次',
-  'turnNavigation.directoryLabel': '本对话的轮次',
+  'turnNavigation.emptyPreview': '暂无消息文本',
   'turnNavigation.turn': '第 {turn} 轮',
   'turnNavigation.attempt': '第 {attempt} 次运行',
   'turnNavigation.jump': '跳转到第 {turn} 轮',

@@ -472,7 +472,7 @@ describe('JobDetail', () => {
     expect(activity).toHaveTextContent('router source');
     expect(within(turn).getByText('Earlier answer')).toBeInTheDocument();
     expect(screen.getAllByText('Earlier answer')).toHaveLength(1);
-    expect(within(turn).getByText('Turn 1 · 1 tool call')).toBeInTheDocument();
+    expect(within(turn).getByRole('button', { name: 'View execution' })).toBeInTheDocument();
     expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
   });
 
@@ -2117,7 +2117,9 @@ describe('the trajectory tab', () => {
     });
     render(<JobDetail job={job} events={STORED_CALL} threadJobs={[]} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'View execution' }));
+    fireEvent.click(
+      within(screen.getByLabelText('Turn 1')).getByRole('button', { name: 'View execution' }),
+    );
 
     const panel = screen.getByRole('region', { name: 'Run details' });
     expect(within(panel).getByRole('heading', { name: 'Run details' })).toBeInTheDocument();
@@ -2201,29 +2203,29 @@ describe('conversation turn navigation', () => {
     });
   }
 
-  it('offers a directory only once there is more than one turn to navigate', () => {
-    const { rerender } = render(<JobDetail job={makeJob()} />);
-    expect(screen.queryByRole('button', { name: 'Turns' })).not.toBeInTheDocument();
-
-    rerender(<JobDetail job={multiTurnJob()} />);
-    expect(screen.getByRole('button', { name: 'Turns' })).toBeInTheDocument();
-  });
+  function renderNavigableChat() {
+    const view = render(<JobDetail job={multiTurnJob()} />);
+    // jsdom supplies no layout. Give the Chat a wide reading area so its
+    // actual rail, rather than a separate directory, can be exercised.
+    const region = screen.getByRole('region', { name: 'Task progress' });
+    Object.defineProperty(region, 'clientWidth', { configurable: true, value: 1024 });
+    Object.defineProperty(region, 'clientHeight', { configurable: true, value: 800 });
+    return view;
+  }
 
   it('lists exactly the turns the transcript renders, in order', async () => {
-    render(<JobDetail job={multiTurnJob()} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
-
-    const panel = screen.getByRole('dialog', { name: 'Turns in this chat' });
-    const rows = within(panel).getAllByRole('button');
-    expect(rows).toHaveLength(2);
-    expect(rows[0]).toHaveTextContent('Earlier question');
-    expect(rows[0]).toHaveTextContent('Earlier answer');
-    expect(rows[1]).toHaveTextContent('Current task');
+    renderNavigableChat();
+    const rail = await screen.findByRole('navigation', { name: 'Conversation turns' });
+    const marks = within(rail).getAllByRole('button');
+    expect(marks).toHaveLength(2);
+    expect(marks[0]).toHaveAccessibleName('Go to turn 1');
+    expect(marks[1]).toHaveAccessibleName('Go to turn 2');
+    fireEvent.focus(marks[0]);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Earlier question');
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Earlier answer');
     // Which turn the reader is on is measured a frame after layout rather than
-    // guessed from the click that opened this panel.
-    await waitFor(() =>
-      expect(within(panel).getAllByRole('button')[1]).toHaveAttribute('aria-current', 'true'),
-    );
+    // guessed from the focused preview.
+    await waitFor(() => expect(marks[1]).toHaveAttribute('aria-current', 'true'));
   });
 
   it('offers forking on a stored turn as soon as the API says it is ready', () => {
@@ -2287,9 +2289,9 @@ describe('conversation turn navigation', () => {
   });
 
   it('jumps inside the chat without navigating, forking or switching attempts', async () => {
-    render(<JobDetail job={multiTurnJob()} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
-    fireEvent.click(within(screen.getByRole('dialog')).getAllByRole('button')[0]);
+    renderNavigableChat();
+    const rail = await screen.findByRole('navigation', { name: 'Conversation turns' });
+    fireEvent.click(within(rail).getAllByRole('button')[0]);
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(navigation.push).not.toHaveBeenCalled();
@@ -2300,11 +2302,15 @@ describe('conversation turn navigation', () => {
     );
   });
 
-  it('takes the directory away with the Chat view', () => {
-    render(<JobDetail job={multiTurnJob()} />);
-    expect(screen.getByRole('button', { name: 'Turns' })).toBeInTheDocument();
+  it('takes the rail away with the Chat view', async () => {
+    renderNavigableChat();
+    expect(
+      await screen.findByRole('navigation', { name: 'Conversation turns' }),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
-    expect(screen.queryByRole('button', { name: 'Turns' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('navigation', { name: 'Conversation turns' }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ConversationTurnNavigationEntry } from './conversationTurnNavigation';
-import { BackToBottom, TurnDirectory, TurnRail } from './TurnNavigator';
+import { BackToBottom, TurnRail } from './TurnNavigator';
 
 function entry(
   key: string,
@@ -205,64 +205,7 @@ describe('TurnRail', () => {
       />,
     );
     fireEvent.focus(screen.getByRole('button', { name: 'Go to turn 2' }));
-    expect(screen.getByRole('tooltip')).toHaveTextContent('Turn 2');
-  });
-});
-
-describe('TurnDirectory', () => {
-  it('stays out of the way when there is only one turn', () => {
-    render(<TurnDirectory entries={[entry('t1', 1)]} activeKey="t1" onNavigate={vi.fn()} />);
-    expect(screen.queryByRole('button', { name: 'Turns' })).not.toBeInTheDocument();
-  });
-
-  it('lists the same turns, in the same order, and closes on a jump', () => {
-    const onNavigate = vi.fn();
-    render(<TurnDirectory entries={ENTRIES} activeKey="t2" onNavigate={onNavigate} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
-    const panel = screen.getByRole('dialog', { name: 'Turns in this chat' });
-    const rows = within(panel).getAllByRole('button');
-    expect(rows).toHaveLength(3);
-    expect(rows[0]).toHaveTextContent('Question 1');
-    expect(rows[2]).toHaveTextContent('Running');
-    fireEvent.click(rows[2]);
-    expect(onNavigate).toHaveBeenCalledWith('t3');
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  });
-
-  it('hands focus back to its trigger after a keyboard jump', () => {
-    const onNavigate = vi.fn();
-    render(<TurnDirectory entries={ENTRIES} activeKey="t1" onNavigate={onNavigate} />);
-    const trigger = screen.getByRole('button', { name: 'Turns' });
-    fireEvent.click(trigger);
-    const rows = within(screen.getByRole('dialog')).getAllByRole('button');
-    fireEvent.click(rows[1]);
-
-    expect(onNavigate).toHaveBeenCalledWith('t2');
-    // The row is gone; focus must not fall to the top of the page.
-    expect(trigger).toHaveFocus();
-  });
-
-  it('returns focus to its trigger when dismissed with Escape', () => {
-    render(<TurnDirectory entries={ENTRIES} activeKey="t1" onNavigate={vi.fn()} />);
-    const trigger = screen.getByRole('button', { name: 'Turns' });
-    fireEvent.click(trigger);
-    expect(trigger).toHaveAttribute('aria-expanded', 'true');
-    fireEvent.keyDown(document, { key: 'Escape' });
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
-    expect(trigger).toHaveAttribute('aria-expanded', 'false');
-  });
-
-  it('closes when the reader clicks away', () => {
-    render(
-      <div>
-        <TurnDirectory entries={ENTRIES} activeKey="t1" onNavigate={vi.fn()} />
-        <button type="button">Elsewhere</button>
-      </div>,
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Turns' }));
-    fireEvent.pointerDown(screen.getByRole('button', { name: 'Elsewhere' }));
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('tooltip')).toHaveTextContent('No message text');
   });
 });
 

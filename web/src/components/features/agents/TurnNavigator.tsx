@@ -1,6 +1,6 @@
 'use client';
 
-// The conversation's turn rail, its directory panel, and the way back to the
+// The conversation's turn rail and the way back to the
 // newest reply.
 //
 // Presentation only: every component here receives the entries and asks for a
@@ -35,7 +35,7 @@ const PREVIEW_GAP_PX = 8;
  */
 const PREVIEW_CLOSE_DELAY_MS = 150;
 const MARK_HIT_WIDTH_PX = 32;
-const PREVIEW_WIDTH_PX = 300;
+const PREVIEW_WIDTH_PX = 280;
 
 interface TurnNavigationProps {
   entries: readonly ConversationTurnNavigationEntry[];
@@ -91,19 +91,18 @@ function TurnPreview({ entry }: { entry: ConversationTurnNavigationEntry }) {
   const t = useT();
   return (
     <>
-      <div className="line-clamp-1 text-[13px] font-medium text-gray-900 dark:text-gray-100">
-        {entry.promptPreview || t('turnNavigation.turn', { turn: entry.displayNo })}
+      <div className="line-clamp-1 break-words text-[13px] font-medium leading-[18px] text-gray-800 dark:text-gray-100">
+        {entry.promptPreview || t('turnNavigation.emptyPreview')}
       </div>
       {entry.responsePreview ? (
-        <div className="mt-1 line-clamp-3 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+        <div className="mt-1 line-clamp-3 break-words text-xs leading-[18px] text-gray-500 dark:text-gray-400">
           {entry.responsePreview}
         </div>
       ) : null}
-      <div className="mt-1.5 flex items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
-        <span>{t('turnNavigation.turn', { turn: entry.displayNo })}</span>
+      <div className="sr-only">
         {entry.previewAttemptNo === undefined ? null : (
           <span>{t('turnNavigation.attempt', { attempt: entry.previewAttemptNo })}</span>
-        )}
+        )}{' '}
         {entry.state === undefined ? null : <span>{t(STATE_KEYS[entry.state])}</span>}
       </div>
     </>
@@ -387,7 +386,7 @@ function TurnRailRail({
           }}
         >
           <div
-            className="rounded-[10px] border border-gray-200 bg-white px-3 py-2 text-left shadow-card dark:border-white/10 dark:bg-gray-900"
+            className="rounded-xl bg-white/95 px-3.5 py-2.5 text-left shadow-[0_4px_20px_rgba(15,23,42,0.08)] ring-1 ring-black/[0.06] backdrop-blur-sm dark:bg-zinc-900/95 dark:shadow-[0_4px_20px_rgba(0,0,0,0.2)] dark:ring-white/10"
             style={{ width: PREVIEW_WIDTH_PX, maxWidth: PREVIEW_WIDTH_PX }}
           >
             <TurnPreview entry={preview} />
@@ -406,112 +405,6 @@ function TurnRailRail({
 export const TurnRail = memo(TurnRailRail);
 
 /**
- * The same turns as a list, for narrow columns, touch input and anyone who
- * would rather click a row than a hairline. It never introduces a second
- * grouping: the rows are the rail's entries, in the rail's order.
- */
-export function TurnDirectory({ entries, activeKey, onNavigate }: TurnNavigationProps) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const buttonRef = useRef<HTMLButtonElement | null>(null);
-
-  useEffect(() => {
-    // The trigger and the panel both stand down below two turns; a listener
-    // that outlived them would keep swallowing Escape, and Escape is also how
-    // the running task is stopped.
-    if (!open || entries.length < 2) return undefined;
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target instanceof Node ? event.target : null;
-      if (target !== null && containerRef.current?.contains(target)) return;
-      setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      setOpen(false);
-      // Escape puts the reader back on the control they opened, not at the top
-      // of the page.
-      buttonRef.current?.focus();
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [entries.length, open]);
-
-  if (entries.length < 2) return null;
-
-  return (
-    <div ref={containerRef} className="relative">
-      <button
-        ref={buttonRef}
-        type="button"
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-        className={`rounded-lg px-2.5 py-1 transition-colors ${
-          open
-            ? 'bg-gray-100 font-medium text-gray-900 dark:bg-white/5 dark:text-gray-50'
-            : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'
-        }`}
-      >
-        {t('turnNavigation.directory')}
-      </button>
-      {open ? (
-        <div
-          role="dialog"
-          aria-label={t('turnNavigation.directoryLabel')}
-          className="absolute right-0 top-full z-30 mt-2 max-h-[min(70vh,420px)] w-72 overflow-y-auto overscroll-contain rounded-xl border border-gray-200 bg-white py-1 shadow-card dark:border-white/10 dark:bg-gray-900"
-        >
-          {entries.map((entry) => {
-            const active = entry.key === activeKey;
-            return (
-              <button
-                key={entry.key}
-                type="button"
-                aria-current={active ? 'true' : undefined}
-                onClick={() => {
-                  setOpen(false);
-                  onNavigate(entry.key);
-                  // The row is unmounted by the line above; without this the
-                  // keyboard reader falls back to the top of the page.
-                  buttonRef.current?.focus();
-                }}
-                className={`flex min-h-[44px] w-full flex-col items-start justify-center gap-0.5 px-3 py-2 text-left transition-colors hover:bg-gray-50 dark:hover:bg-white/5 ${
-                  active ? 'bg-gray-50 dark:bg-white/5' : ''
-                }`}
-              >
-                <span className="flex w-full items-baseline gap-2">
-                  <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
-                    {t('turnNavigation.turn', { turn: entry.displayNo })}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-gray-900 dark:text-gray-100">
-                    {entry.promptPreview || t('turnNavigation.turn', { turn: entry.displayNo })}
-                  </span>
-                  {entry.state === undefined ? null : (
-                    <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
-                      {t(STATE_KEYS[entry.state])}
-                    </span>
-                  )}
-                </span>
-                {entry.responsePreview ? (
-                  <span className="line-clamp-1 text-xs text-gray-500 dark:text-gray-400">
-                    {entry.responsePreview}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
  * The way back to the newest reply, and the news that there is one.
  *
  * Deliberately two controls' worth of meaning in one: returning to the end is
@@ -526,25 +419,32 @@ export function BackToBottom({
   onReturn: () => void;
 }) {
   const t = useT();
+  const label = hasNewContent
+    ? `${t('turnNavigation.backToBottom')} · ${t('turnNavigation.newContent')}`
+    : t('turnNavigation.backToBottom');
   return (
     <button
       type="button"
       onClick={onReturn}
-      className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-card transition-colors hover:bg-gray-50 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-white/5"
+      aria-label={label}
+      title={label}
+      className="pointer-events-auto relative inline-flex h-9 w-9 items-center justify-center rounded-full border border-zinc-200/80 bg-white/95 text-zinc-700 shadow-sm transition-colors hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/50 focus-visible:ring-offset-2 dark:border-white/10 dark:bg-zinc-800/95 dark:text-zinc-100 dark:hover:bg-zinc-700"
     >
       {hasNewContent ? (
-        <span className="h-1.5 w-1.5 rounded-full bg-crimson dark:bg-crimson-light" />
+        <span
+          aria-hidden="true"
+          className="absolute right-0 top-0 h-1.5 w-1.5 rounded-full bg-crimson ring-2 ring-white dark:bg-crimson-light dark:ring-zinc-800"
+        />
       ) : null}
-      {t(hasNewContent ? 'turnNavigation.newContent' : 'turnNavigation.backToBottom')}
       <svg
         aria-hidden="true"
-        className="h-3.5 w-3.5"
+        className="h-5 w-5"
         fill="none"
         viewBox="0 0 24 24"
         stroke="currentColor"
         strokeWidth={2}
       >
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14m0 0 6-6m-6 6-6-6" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="m7 10 5 5 5-5" />
       </svg>
     </button>
   );
