@@ -76,6 +76,21 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 # would make this Dockerfile unbuildable from the first `docker build`. Add it
 # back the day something is put there.
 
+# What this image is, in the two places a deployment looks: OCI's own labels,
+# and one of ours naming the artifact's role. A resolver reads both out of the
+# platform image it is about to run and compares them with the release
+# manifest — the revision against the manifest's source commit, the role
+# against the artifact it stands in for — so a build matrix that swaps two
+# digests is caught where the release is consumed rather than where it is
+# deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
+# built by hand says `unknown`, and a resolver refuses it.
+ARG SOURCE_COMMIT=unknown
+ARG NEXT_PUBLIC_BASE_PATH=
+LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      io.hybridinference.artifact.role="web" \
+      io.hybridinference.artifact.base_path="${NEXT_PUBLIC_BASE_PATH}"
+
 USER nextjs
 EXPOSE 3000
 CMD ["node", "server.js"]
