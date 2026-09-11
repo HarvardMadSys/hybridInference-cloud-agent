@@ -9,10 +9,12 @@ without a daemon.
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    from pathlib import Path
 
 from deploy.release import accept_artifacts as aa
 
