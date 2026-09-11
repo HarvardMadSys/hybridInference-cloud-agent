@@ -25,9 +25,12 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from cloud_agent.api.deps import (
-    get_agent_job_store,
+    get_audit_repository,
     get_client_ip,
+    get_host_pool,
     log_admin_action,
+    require_audit,
+    require_host_pool,
     verify_admin_access,
 )
 from cloud_agent.execution_profiles import default_execution_profile
@@ -47,19 +50,10 @@ from cloud_agent.schemas import (
 )
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.ports.audit import AuditRepository
+    from cloud_agent.ports.host_pool import HostPoolRepository
 
 router = APIRouter(prefix="/admin")
-
-
-def _require_store(store: AgentJobStore | None) -> AgentJobStore:
-    """Return the store or 503 — agent jobs are an optional deployment part."""
-    if store is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Agent jobs are not configured for this deployment.",
-        )
-    return store
 
 
 def _to_item(row: dict) -> AgentRunnerHost:
@@ -96,7 +90,7 @@ def _to_item(row: dict) -> AgentRunnerHost:
     )
 
 
-async def _snapshot(store: AgentJobStore) -> ListAgentRunnerHostsResponse:
+async def _snapshot(hosts: HostPoolRepository) -> ListAgentRunnerHostsResponse:
     """The pool as it stands — the response every endpoint here returns.
 
     Every part comes from one read. ``active_host`` is the policy's own value
@@ -106,7 +100,7 @@ async def _snapshot(store: AgentJobStore) -> ListAgentRunnerHostsResponse:
     sits still. ``runtime_versions`` is the same fact about versions, and is
     read in the same transaction as the menus it must be displayed against.
     """
-    rows, active, selected_versions = await store.runner_pool()
+    rows, active, selected_versions = await hosts.runner_pool()
     return ListAgentRunnerHostsResponse(
         execution_profile=default_execution_profile().value,
         hosts=[_to_item(row) for row in rows],
@@ -118,10 +112,11 @@ async def _snapshot(store: AgentJobStore) -> ListAgentRunnerHostsResponse:
 @router.get("/agent/runner-hosts", response_model=ListAgentRunnerHostsResponse)
 async def list_agent_runner_hosts(
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> ListAgentRunnerHostsResponse:
     """List every machine that has polled for agent work, and the pinned one."""
-    return await _snapshot(_require_store(store))
+    return await _snapshot(require_host_pool(hosts))
 
 
 @router.put("/agent/runner-hosts/active", response_model=ListAgentRunnerHostsResponse)
@@ -129,7 +124,8 @@ async def set_active_agent_runner_host(
     request: Request,
     payload: SetActiveAgentRunnerHostRequest,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> ListAgentRunnerHostsResponse:
     """Pin new chat placement to one host, or let any host materialize it.
 
@@ -141,7 +137,7 @@ async def set_active_agent_runner_host(
     drain, which would mean waiting for the old host to empty before the new one
     starts.
     """
-    job_store = _require_store(store)
+    job_store = require_host_pool(hosts)
     previous = await job_store.active_runner_host()
 
     if not await job_store.set_active_runner_host(host=payload.host):
@@ -157,14 +153,14 @@ async def set_active_agent_runner_host(
         )
 
     await log_admin_action(
-        job_store,
+        require_audit(audit),
         get_client_ip(request),
         "agent.runner_host.set_active",
         None,
         {"old_host": previous, "new_host": payload.host},
         actor_id=_admin_id,
     )
-    return await _snapshot(job_store)
+    return await _snapshot(require_host_pool(hosts))
 
 
 @router.put("/agent/runtime-versions", response_model=ListAgentRunnerHostsResponse)
@@ -172,7 +168,8 @@ async def set_agent_runtime_version(
     request: Request,
     payload: SetRuntimeVersionRequest,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> ListAgentRunnerHostsResponse:
     """Choose the agent CLI version this deployment runs for one runtime.
 
@@ -185,7 +182,7 @@ async def set_agent_runtime_version(
     the exact runtime version in its retained container. This applies to new
     groups; existing conversations keep the version they began on.
     """
-    job_store = _require_store(store)
+    job_store = require_host_pool(hosts)
     _, _, previous = await job_store.runner_pool()
 
     if not await job_store.set_runtime_version(runtime=payload.runtime, version=payload.version):
@@ -199,7 +196,7 @@ async def set_agent_runtime_version(
         )
 
     await log_admin_action(
-        job_store,
+        require_audit(audit),
         get_client_ip(request),
         "agent.runtime_version.set",
         None,
@@ -210,7 +207,7 @@ async def set_agent_runtime_version(
         },
         actor_id=_admin_id,
     )
-    return await _snapshot(job_store)
+    return await _snapshot(require_host_pool(hosts))
 
 
 @router.delete("/agent/runner-hosts/{host}", response_model=ListAgentRunnerHostsResponse)
@@ -218,7 +215,8 @@ async def forget_agent_runner_host(
     request: Request,
     host: str,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> ListAgentRunnerHostsResponse:
     """Drop a decommissioned host from the list.
 
@@ -231,7 +229,7 @@ async def forget_agent_runner_host(
     decided inside the store's transaction, not by a check here: a check here
     is a read a concurrent switch can outrun.
     """
-    job_store = _require_store(store)
+    job_store = require_host_pool(hosts)
     outcome = await job_store.forget_runner_host(host=host)
     if outcome == "active":
         raise HTTPException(
@@ -245,14 +243,14 @@ async def forget_agent_runner_host(
         raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
 
     await log_admin_action(
-        job_store,
+        require_audit(audit),
         get_client_ip(request),
         "agent.runner_host.forget",
         None,
         {"host": host},
         actor_id=_admin_id,
     )
-    return await _snapshot(job_store)
+    return await _snapshot(require_host_pool(hosts))
 
 
 # ── Pool lifecycle (phase G) ───────────────────────────────────────────
@@ -263,7 +261,8 @@ async def issue_host_enroll_token(
     request: Request,
     payload: IssueHostEnrollTokenRequest,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> IssueHostEnrollTokenResponse:
     """Mint a one-time token that lets one named machine join the pool.
 
@@ -286,7 +285,7 @@ async def issue_host_enroll_token(
     The TTL stays short for the reason it always was: the window is one
     machine, once, for as long as it takes to finish a setup already under way.
     """
-    job_store = _require_store(store)
+    job_store = require_host_pool(hosts)
     body = payload
     # A body is now required: it carries the host name, and there is no
     # sensible default for "which machine may this enrol".
@@ -298,7 +297,7 @@ async def issue_host_enroll_token(
         issued_by=_admin_id,
     )
     await log_admin_action(
-        job_store,
+        require_audit(audit),
         get_client_ip(request),
         "agent.runner_host.enroll_token_issued",
         None,
@@ -324,18 +323,19 @@ async def _set_status(
     host: str,
     status: str,
     action: str,
-    job_store: AgentJobStore,
+    hosts: HostPoolRepository,
+    audit: AuditRepository,
     actor_id: str,
 ) -> ListAgentRunnerHostsResponse:
     """Apply one table-driven status change, or say why it was refused."""
-    outcome = await job_store.set_host_status(host=host, status=status)
+    outcome = await hosts.set_host_status(host=host, status=status)
     if outcome == "unknown":
         raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
     if outcome == "invalid":
         # 409, not 400: the request is well-formed and would have been legal
         # from another state. Naming the current state is what tells an
         # operator whether to wait or to do something else.
-        current = await job_store.get_host(host=host)
+        current = await hosts.get_host(host=host)
         raise HTTPException(
             status_code=409,
             detail=(
@@ -344,9 +344,14 @@ async def _set_status(
             ),
         )
     await log_admin_action(
-        job_store, get_client_ip(request), action, None, {"host": host}, actor_id=actor_id
+        require_audit(audit),
+        get_client_ip(request),
+        action,
+        None,
+        {"host": host},
+        actor_id=actor_id,
     )
-    return await _snapshot(job_store)
+    return await _snapshot(hosts)
 
 
 @router.post("/agent/runner-hosts/{host}/drain", response_model=ListAgentRunnerHostsResponse)
@@ -354,7 +359,8 @@ async def drain_agent_runner_host(
     request: Request,
     host: str,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> ListAgentRunnerHostsResponse:
     """Stop this host taking new work; let what it has finish.
 
@@ -369,7 +375,8 @@ async def drain_agent_runner_host(
         host=host,
         status=HOST_DRAINING,
         action="agent.runner_host.drain",
-        job_store=_require_store(store),
+        hosts=require_host_pool(hosts),
+        audit=require_audit(audit),
         actor_id=_admin_id,
     )
 
@@ -379,7 +386,8 @@ async def undrain_agent_runner_host(
     request: Request,
     host: str,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> ListAgentRunnerHostsResponse:
     """Put a drained host back to work.
 
@@ -392,7 +400,8 @@ async def undrain_agent_runner_host(
         host=host,
         status=HOST_ONLINE,
         action="agent.runner_host.undrain",
-        job_store=_require_store(store),
+        hosts=require_host_pool(hosts),
+        audit=require_audit(audit),
         actor_id=_admin_id,
     )
 
@@ -411,7 +420,8 @@ async def remove_agent_runner_host(
         ),
     ),
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
+    audit: AuditRepository | None = Depends(get_audit_repository),
 ) -> ListAgentRunnerHostsResponse:
     """Revoke this host's credential and take it out of the pool.
 
@@ -431,7 +441,7 @@ async def remove_agent_runner_host(
     was retired. ``DELETE`` forgets that administrative row; neither action is
     evidence that the retained container or Docker data-root was deleted.
     """
-    job_store = _require_store(store)
+    job_store = require_host_pool(hosts)
     outcome = await job_store.remove_host(host=host, force=force)
     if outcome == "unknown":
         raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
@@ -445,11 +455,11 @@ async def remove_agent_runner_host(
             ),
         )
     await log_admin_action(
-        job_store,
+        require_audit(audit),
         get_client_ip(request),
         "agent.runner_host.remove",
         None,
         {"host": host, "force": force},
         actor_id=_admin_id,
     )
-    return await _snapshot(job_store)
+    return await _snapshot(require_host_pool(hosts))

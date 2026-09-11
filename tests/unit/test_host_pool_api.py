@@ -311,6 +311,8 @@ def _build_app(store: FakeHostPoolStore) -> FastAPI:
         "credentials",
         "hosts",
         "sandboxes",
+        "residencies",
+        "audit",
         "store",
     )
     # Supplied rather than left real because the subject here is the pool, not
@@ -889,6 +891,8 @@ async def claim_client(monkeypatch):
         "credentials",
         "hosts",
         "sandboxes",
+        "residencies",
+        "audit",
         "store",
     )
     app.dependency_overrides[get_agent_app_credentials] = lambda: None

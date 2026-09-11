@@ -595,7 +595,7 @@ def get_client_ip(request: Request) -> str:
 
 
 async def log_admin_action(
-    store: Any,
+    audit: AuditRepository,
     admin_ip: str,
     action: str,
     target_user_id: str | None = None,
@@ -621,9 +621,7 @@ async def log_admin_action(
     the operator their drain failed when it did not.
 
     Args:
-        store: The agent job store, or ``None`` on a deployment with no
-            database. A store that predates ``record_admin_action`` is treated
-            the same way — the trail is skipped, not fabricated.
+        audit: The durable audit trail.
         admin_ip: Best-effort caller address, from :func:`get_client_ip`.
         action: Dotted action name, e.g. ``agent.runner_host.drain``.
         actor_id: The authenticated administrator, from ``verify_admin_access``
@@ -635,11 +633,8 @@ async def log_admin_action(
     """
     from cloud_agent.logging_utils import get_logger
 
-    recorder = getattr(store, "record_admin_action", None)
-    if recorder is None:
-        return
     try:
-        await recorder(
+        await audit.record_admin_action(
             action=action,
             actor_id=actor_id,
             admin_ip=admin_ip,
