@@ -350,12 +350,14 @@ interface TrajectoryStep {
 
 ### 8.6 Harness 报告事件
 
-runtime 在启动时对自己的配置所做的陈述，作为可选证据字段 `harness` 挂在对应的 `lifecycle` 事件 payload 上。带该报告的 step 在 **Summary / Raw** 之外增加两个页签：
+runtime 在启动时对自己的配置所做的陈述，作为可选证据字段 `harness` 挂在对应的 `lifecycle` 事件 payload 上。该 step **就是这份报告**，因此只提供读取它的两个页签：
 
 | 选中对象 | 详情页签，按顺序 |
 | --- | --- |
-| 带 `harness` 报告的 lifecycle 事件 | **Summary / System Prompt / Tools / Raw** |
+| 带 `harness` 报告的 lifecycle 事件 | **System Prompt / Tools** |
 | 其余事件 | **Summary / Raw**，不出现空页签 |
+
+对带报告的事件不再提供 Summary 与 Raw：这是与 DS Harness 入口对齐的结果（DSH 的 "Initial System Prompt" 同样只有这两个页签）。代价是这条事件的原始记录不再从该行进入 —— 若需要，应另加入口而不是把页签加回来。选中该类 step 时的默认页签是其第一个页签，不是固定名称，否则页签条与面板会对"当前打开哪个"说法不一致。
 
 数据边界：
 

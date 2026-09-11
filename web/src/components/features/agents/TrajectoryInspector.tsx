@@ -52,20 +52,28 @@ const EVENT_TABS: Array<{ key: EventTab; label: string }> = [
 /**
  * The tabs a step actually has.
  *
- * A step takes a tab only when it holds something to put in it: an event whose
- * runtime reported a harness gets the two tabs that read that report, and an
- * event that reported none keeps Summary and Raw rather than opening views
- * that would have to explain their own emptiness.
+ * A step takes a tab only when it holds something to put in it. An event whose
+ * runtime reported a harness is that report and nothing else — the two tabs
+ * that read it, with no Summary or Raw around them — and an event that
+ * reported none keeps Summary and Raw rather than opening views that would
+ * have to explain their own emptiness.
  */
 export function tabsForStep(step: TrajectoryStep): Array<{ key: StepTab; label: string }> {
   if (step.kind === 'assistant') return ASSISTANT_TABS;
   if (step.kind === 'tool') return TOOL_TABS;
-  return step.harness ? [EVENT_TABS[0], ...HARNESS_TABS, EVENT_TABS[1]] : EVENT_TABS;
+  return step.harness ? HARNESS_TABS : EVENT_TABS;
 }
 
-/** Whether a tab belongs to the newly selected step, or must fall back. */
+/**
+ * Whether a tab belongs to the newly selected step, or must fall back.
+ *
+ * The fallback is the step's own first tab rather than a fixed name: a step
+ * whose views do not include Summary must not silently land on one that is not
+ * offered, or the strip and the panel would disagree about what is open.
+ */
 export function normalizeStepTab(step: TrajectoryStep, tab: StepTab): StepTab {
-  return tabsForStep(step).some((item) => item.key === tab) ? tab : 'summary';
+  const tabs = tabsForStep(step);
+  return tabs.some((item) => item.key === tab) ? tab : tabs[0].key;
 }
 
 /**

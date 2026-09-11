@@ -513,13 +513,17 @@ describe('TrajectoryInspector', () => {
     const key = buildTrajectorySteps(events)[0].key;
     render(<Harness events={events} initial={{ kind: 'step', stepKey: key, tab: 'summary' }} />);
 
-    // The two views exist only because this event carries a report to read.
+    // The step is that report, so the strip is exactly the two views that read
+    // it: no Summary or Raw around them. Selecting the step lands on the first
+    // of the two rather than on a tab that is not offered.
     expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
-      'Summary',
       'System Prompt',
       'Tools',
-      'Raw',
     ]);
+    expect(screen.getByRole('tab', { name: 'System Prompt' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
 
     fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
     expect(screen.getByText('Bash')).toBeInTheDocument();
