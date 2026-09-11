@@ -494,6 +494,123 @@ async def test_finishing_a_call_is_fenced_by_its_dispatch_generation(
     assert stored["status"] == "outcome_unknown"
 
 
+async def test_routing_a_connection_through_a_connector_moves_its_versions(
+    store: AgentJobStore,
+) -> None:
+    """A connector decides *where* a local process runs, so it is a target edit.
+
+    The design lists it beside the command, the mount and the auth method for
+    that reason. A connection whose connector changed is not the one a session
+    was approved against, so both versions move -- and the connector's own
+    authorized set is written in the same statement, because the two halves
+    disagreeing is how a connector ends up serving something the connection no
+    longer routes to it.
+    """
+    connector = await store.create_mcp_connector(
+        user_id=_OWNER, name="My laptop", registration_hash="hash-1"
+    )
+    connection = await store.create_mcp_connection(
+        user_id=_OWNER,
+        label="Local files",
+        transport="stdio",
+        location="user-connector",
+        url=None,
+        launch_spec={"command": "npx", "args": ["server@1.0.0"], "env": {}, "mounts": []},
+        auth_kind="none",
+        auth_config={},
+    )
+    before = await store.get_mcp_connection(connection_id=connection["id"])
+    assert before is not None
+
+    bound = await store.bind_mcp_connection_connector(
+        connection_id=connection["id"], user_id=_OWNER, connector_id=connector["id"]
+    )
+    assert bound is not None
+    assert bound["connector_id"] == connector["id"]
+    assert bound["config_revision"] == before["config_revision"] + 1
+    assert bound["authorization_epoch"] == before["authorization_epoch"] + 1
+    assert await store.list_mcp_connector_connections(connector_id=connector["id"]) == [
+        connection["id"]
+    ]
+
+    unbound = await store.unbind_mcp_connection_connector(
+        connection_id=connection["id"], user_id=_OWNER
+    )
+    assert unbound is not None
+    assert unbound["connector_id"] is None
+    assert unbound["config_revision"] == bound["config_revision"] + 1
+    assert await store.list_mcp_connector_connections(connector_id=connector["id"]) == []
+
+
+async def test_revoking_a_connector_detaches_what_routed_through_it(
+    store: AgentJobStore,
+) -> None:
+    """One decision, one transaction: a revoked connector serves nothing.
+
+    Checked in the database rather than in the handler, because the failure that
+    matters is a half-applied revoke -- a connector marked revoked while a
+    connection still names it, which jobs would keep resolving to.
+    """
+    connector = await store.create_mcp_connector(
+        user_id=_OWNER, name="My laptop", registration_hash="hash-2"
+    )
+    connection = await store.create_mcp_connection(
+        user_id=_OWNER,
+        label="Local files",
+        transport="stdio",
+        location="user-connector",
+        url=None,
+        launch_spec={"command": "npx", "args": ["server@1.0.0"], "env": {}, "mounts": []},
+        auth_kind="none",
+        auth_config={},
+    )
+    await store.bind_mcp_connection_connector(
+        connection_id=connection["id"], user_id=_OWNER, connector_id=connector["id"]
+    )
+    routed = await store.get_mcp_connection(connection_id=connection["id"])
+    assert routed is not None
+
+    assert await store.revoke_mcp_connector(connector_id=connector["id"], user_id=_OWNER)
+
+    detached = await store.get_mcp_connection(connection_id=connection["id"])
+    assert detached is not None
+    assert detached["connector_id"] is None
+    assert detached["authorization_epoch"] == routed["authorization_epoch"] + 1
+    assert await store.list_mcp_connector_connections(connector_id=connector["id"]) == []
+    rows = {row["id"]: row for row in await store.list_mcp_connectors(user_id=_OWNER)}
+    assert rows[connector["id"]]["status"] == "revoked"
+    # And it cannot be routed to again.
+    assert (
+        await store.bind_mcp_connection_connector(
+            connection_id=connection["id"], user_id=_OWNER, connector_id=connector["id"]
+        )
+        is None
+    )
+
+
+async def test_a_connector_cannot_be_bound_across_owners(store: AgentJobStore) -> None:
+    """The binding is the authorization step, so it has to check whose it is."""
+    connector = await store.create_mcp_connector(
+        user_id=_OTHER, name="Theirs", registration_hash="hash-3"
+    )
+    connection = await store.create_mcp_connection(
+        user_id=_OWNER,
+        label="Local files",
+        transport="stdio",
+        location="user-connector",
+        url=None,
+        launch_spec={"command": "npx", "args": ["server@1.0.0"], "env": {}, "mounts": []},
+        auth_kind="none",
+        auth_config={},
+    )
+    assert (
+        await store.bind_mcp_connection_connector(
+            connection_id=connection["id"], user_id=_OWNER, connector_id=connector["id"]
+        )
+        is None
+    )
+
+
 async def test_a_decision_after_the_deadline_does_not_revive_a_call(
     store: AgentJobStore,
 ) -> None:

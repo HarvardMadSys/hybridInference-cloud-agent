@@ -267,6 +267,24 @@ which is run deliberately rather than as part of the default gate — the seams
 it crosses are exactly the ones no per-layer test does, so it is worth running
 after any change to the merged endpoint, the host or the bridge.
 
+**Connectors are configured, not served.** `/v1/agent/mcp/connectors` registers
+one of the user's machines, returns the registration secret exactly once (hashed
+at rest, like every other credential here), renames it, revokes it, and binds a
+`user-connector` connection to it or unbinds one. A remote connection cannot be
+bound: it is a server the platform reaches directly, and sending it the long way
+round a user's laptop would be a detour with no purpose. Binding is the
+authorization step and it moves both versions, because a connector decides
+*where* a local process runs and that is a change of target like any other.
+Revoking detaches everything that routed through it in the same transaction — a
+connector marked revoked while a connection still names it is a job resolving to
+a target its owner has withdrawn.
+
+No connector runtime ships with this service yet, so every connector view says
+`runtime: "unavailable"` and a connection bound to one is refused at use with
+that reason, in the same way a managed-worker connection is refused for having
+no worker. The configuration is real and inspectable; the execution is not, and
+nothing here claims otherwise.
+
 **An adapter may claim MCP only when it can do both halves**: point the CLI at
 the platform's relay, *and* stop it reading any other MCP source. A runtime that
 could be given servers but not stopped from picking up the repository's own

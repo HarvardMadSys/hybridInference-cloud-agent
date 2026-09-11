@@ -282,11 +282,19 @@ async def _resolve_binding(
             "agent_mcp_stdio_not_runnable",
             extra={"event": "agent_mcp_stdio_not_runnable", "job_id": job_id, "alias": alias},
         )
+        # Named precisely, because the two cases need different actions from the
+        # owner: one is a deployment that has no connector runtime, the other is
+        # a connection they have not routed anywhere yet.
         raise _refused(
             503,
             "server_error",
-            f"The {alias!r} MCP connection runs a local process, which this deployment "
-            "has no worker or connector for.",
+            (
+                f"The {alias!r} MCP connection runs through a connector, and this "
+                "deployment does not serve connectors yet."
+                if connection_row.get("connector_id")
+                else f"The {alias!r} MCP connection runs a local process, and no connector "
+                "is configured for it."
+            ),
         )
 
     try:

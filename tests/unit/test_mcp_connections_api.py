@@ -50,7 +50,10 @@ class FakeStore:
         self.invocations: dict[int, dict[str, Any]] = {}
         self.threads: dict[str, dict[str, Any]] = {}
         self.created: list[dict[str, Any]] = []
+        self.connectors: dict[int, dict[str, Any]] = {}
+        self.connector_connections: dict[int, set[int]] = {}
         self._next = 1
+        self._next_connector = 1
 
     def _row(self, connection_id: int) -> dict[str, Any]:
         """The stored row, with the shape the API reads."""
@@ -185,6 +188,93 @@ class FakeStore:
 
     async def get_mcp_capabilities(self, *, connection_id: int) -> dict[str, Any] | None:
         return self.capabilities.get(connection_id)
+
+    # -- Connectors --
+
+    async def create_mcp_connector(
+        self, *, user_id: str, name: str, registration_hash: str
+    ) -> dict[str, Any]:
+        connector_id = self._next_connector
+        self._next_connector += 1
+        row = {
+            "id": connector_id,
+            "user_id": user_id,
+            "name": name,
+            "status": "pending",
+            "mounts": [],
+            "registration_hash": registration_hash,
+            "created_at": datetime.now(timezone.utc),
+            "last_seen_at": None,
+            "revoked_at": None,
+        }
+        self.connectors[connector_id] = row
+        return dict(row)
+
+    async def list_mcp_connectors(self, *, user_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row) for _, row in sorted(self.connectors.items()) if row["user_id"] == user_id
+        ]
+
+    async def update_mcp_connector(
+        self, *, connector_id: int, user_id: str, name: str | None = None, mounts: Any = None
+    ) -> dict[str, Any] | None:
+        row = self.connectors.get(connector_id)
+        if row is None or row["user_id"] != user_id or row["status"] == "revoked":
+            return None
+        if name is not None:
+            row["name"] = name
+        if mounts is not None:
+            row["mounts"] = list(mounts)
+        return dict(row)
+
+    async def revoke_mcp_connector(self, *, connector_id: int, user_id: str) -> bool:
+        row = self.connectors.get(connector_id)
+        if row is None or row["user_id"] != user_id or row["status"] == "revoked":
+            return False
+        row["status"] = "revoked"
+        row["revoked_at"] = datetime.now(timezone.utc)
+        for connection in self.connections.values():
+            if connection.get("connector_id") == connector_id:
+                # The real store moves both versions here; the API never reads
+                # them, so this fake only records the detach.
+                connection["connector_id"] = None
+        self.connector_connections.pop(connector_id, None)
+        return True
+
+    async def bind_mcp_connection_connector(
+        self, *, connection_id: int, user_id: str, connector_id: int
+    ) -> dict[str, Any] | None:
+        row = self.connections.get(connection_id)
+        connector = self.connectors.get(connector_id)
+        if (
+            row is None
+            or row["user_id"] != user_id
+            or row["deleted_at"] is not None
+            or connector is None
+            or connector["user_id"] != user_id
+            or connector["status"] == "revoked"
+        ):
+            return None
+        row["connector_id"] = connector_id
+        row["config_revision"] += 1
+        row["authorization_epoch"] += 1
+        self.connector_connections.setdefault(connector_id, set()).add(connection_id)
+        return self._row(connection_id)
+
+    async def unbind_mcp_connection_connector(
+        self, *, connection_id: int, user_id: str
+    ) -> dict[str, Any] | None:
+        row = self.connections.get(connection_id)
+        if row is None or row["user_id"] != user_id or row["connector_id"] is None:
+            return None
+        self.connector_connections.get(row["connector_id"], set()).discard(connection_id)
+        row["connector_id"] = None
+        row["config_revision"] += 1
+        row["authorization_epoch"] += 1
+        return self._row(connection_id)
+
+    async def list_mcp_connector_connections(self, *, connector_id: int) -> list[int]:
+        return sorted(self.connector_connections.get(connector_id, set()))
 
     async def save_mcp_capabilities(self, **kwargs: Any) -> int:
         row = self.connections[kwargs["connection_id"]]
@@ -811,6 +901,142 @@ class TestInvocationDecisions:
         """An unscoped list would be a way to enumerate other people's calls."""
         with _client(FakeStore()) as client:
             assert client.get("/v1/agent/mcp/invocations").status_code == 400
+
+
+class TestConnectors:
+    """Registering the user's own machine, and what may be routed to it."""
+
+    def _stdio(self, store: FakeStore) -> int:
+        """One connection that runs on the user's machine."""
+        return _seed(
+            store,
+            transport="stdio",
+            location="user-connector",
+            url=None,
+            launch_spec={"command": "npx", "args": ["server@1.0.0"], "env": {}, "mounts": []},
+            template=None,
+        )
+
+    def test_registering_shows_the_secret_once_and_never_again(self) -> None:
+        """A registration secret that can be read back is a second copy of it."""
+        store = FakeStore()
+        with _client(store) as client:
+            created = client.post("/v1/agent/mcp/connectors", json={"name": "My laptop"})
+            assert created.status_code == 201
+            secret = created.json()["registration_secret"]
+            assert secret
+            listed = client.get("/v1/agent/mcp/connectors").text
+        assert secret not in listed
+        # Stored hashed: the row holds a digest, not the value.
+        assert store.connectors[1]["registration_hash"] != secret
+        assert "registration_hash" not in listed
+
+    def test_a_connector_carries_the_resources_its_owner_named(self) -> None:
+        """Advisory on the platform side; the connector enforces its own."""
+        store = FakeStore()
+        with _client(store) as client:
+            client.post(
+                "/v1/agent/mcp/connectors",
+                json={"name": "Laptop", "mounts": ["/Users/me/data"]},
+            )
+            body = client.get("/v1/agent/mcp/connectors").json()
+        assert body[0]["mounts"] == ["/Users/me/data"]
+        assert body[0]["status"] == "pending"
+        # And it says plainly that nothing serves it yet.
+        assert body[0]["runtime"] == "unavailable"
+
+    def test_only_a_local_connection_can_be_routed_to_a_connector(self) -> None:
+        """A server the platform can reach directly is not sent the long way."""
+        store = FakeStore()
+        remote = _seed(store)
+        with _client(store) as client:
+            client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"})
+            response = client.post(
+                "/v1/agent/mcp/connectors/1/connections", json={"connection_id": remote}
+            )
+        assert response.status_code == 400
+        assert "own machine" in response.json()["detail"]["error"]["message"]
+
+    def test_binding_records_the_route_from_both_directions(self) -> None:
+        """The connection names the connector, and the connector names it back.
+
+        Divergence between the two is the failure that matters: a connector told
+        it may serve something the connection does not route to (or the reverse)
+        is one of the two halves deciding on its own.
+        """
+        store = FakeStore()
+        connection = self._stdio(store)
+        with _client(store) as client:
+            client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"})
+            response = client.post(
+                "/v1/agent/mcp/connectors/1/connections", json={"connection_id": connection}
+            )
+        assert response.status_code == 200
+        assert response.json()["connection_ids"] == [connection]
+        assert store.connections[connection]["connector_id"] == 1
+        # Routing a local process somewhere is a change of target, so the
+        # versions a decision is fenced on move with it.
+        assert store.connections[connection]["config_revision"] == 2
+        assert store.connections[connection]["authorization_epoch"] == 2
+
+    def test_revoking_detaches_everything_that_routed_through_it(self) -> None:
+        """One decision, so one transaction: a revoked connector serves nothing."""
+        store = FakeStore()
+        connection = self._stdio(store)
+        with _client(store) as client:
+            client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"})
+            client.post(
+                "/v1/agent/mcp/connectors/1/connections", json={"connection_id": connection}
+            )
+            assert client.delete("/v1/agent/mcp/connectors/1").status_code == 204
+            body = client.get("/v1/agent/mcp/connectors").json()
+        assert body[0]["status"] == "revoked"
+        assert body[0]["connection_ids"] == []
+        assert store.connections[connection]["connector_id"] is None
+
+    def test_a_revoked_connector_cannot_be_bound_to_again(self) -> None:
+        """Revocation is not a status the caller can route around."""
+        store = FakeStore()
+        connection = self._stdio(store)
+        with _client(store) as client:
+            client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"})
+            client.delete("/v1/agent/mcp/connectors/1")
+            response = client.post(
+                "/v1/agent/mcp/connectors/1/connections", json={"connection_id": connection}
+            )
+        assert response.status_code == 409
+
+    def test_another_users_connector_is_not_found(self) -> None:
+        """Ownership is part of the read, not a check after it."""
+        store = FakeStore()
+        connection = self._stdio(store)
+        store.connectors[9] = {
+            "id": 9,
+            "user_id": _OTHER,
+            "name": "Theirs",
+            "status": "pending",
+            "mounts": [],
+            "created_at": None,
+            "last_seen_at": None,
+            "revoked_at": None,
+        }
+        with _client(store) as client:
+            assert client.delete("/v1/agent/mcp/connectors/9").status_code == 404
+            assert (
+                client.post(
+                    "/v1/agent/mcp/connectors/9/connections", json={"connection_id": connection}
+                ).status_code
+                == 404
+            )
+
+    def test_unbinding_a_connection_that_is_not_routed_here_is_not_found(self) -> None:
+        """Silence would let a caller believe it had stopped something."""
+        store = FakeStore()
+        connection = self._stdio(store)
+        with _client(store) as client:
+            client.post("/v1/agent/mcp/connectors", json={"name": "Laptop"})
+            response = client.delete(f"/v1/agent/mcp/connectors/1/connections/{connection}")
+        assert response.status_code == 404
 
 
 class TestCapabilitySelectionSemantics:
