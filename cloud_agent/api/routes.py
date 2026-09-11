@@ -1495,7 +1495,7 @@ async def _create_job_as(
     mcp_servers = await _resolve_mcp_servers(
         body.mcp_servers,
         runtime=body.runtime,
-        connections=mcp_connections,
+        connections=require_mcp(mcp_connections),
         user_id=user["user_id"],
     )
     try:
@@ -2106,7 +2106,7 @@ async def create_agent_follow_up(
             # The runtime this turn will actually run on: an explicit echo or
             # the parent's value when omitted.
             runtime=body.runtime or parent["runtime"],
-            connections=mcp_connections,
+            connections=require_mcp(mcp_connections),
             user_id=user["user_id"],
         )
     job = await require_conversation_commands(commands).create_follow_up(
@@ -3265,9 +3265,6 @@ async def stream_agent_job_events(
                         # connection without polluting the event sequence.
                         yield ": keepalive\n\n"
 
-                import sys
-
-                print("EXEC TYPE:", type(execution).__name__, file=sys.stderr)
                 job = await require_queries(conversations).get_job(job_id)
                 if job is None:
                     return
@@ -3760,7 +3757,7 @@ async def worker_claim(
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
-        await attempts.release_claim(
+        await require_attempts(attempts).release_claim(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
@@ -3801,7 +3798,7 @@ async def worker_claim(
             # across three claim cycles would fail every queued private-repo
             # job outright, without an agent ever having started — the very
             # outcome this branch exists to avoid, only slower.
-            await attempts.release_claim(
+            await require_attempts(attempts).release_claim(
                 job_id=claim["id"],
                 attempt_id=claim["attempt_id"],
                 lease_generation=claim["lease_generation"],
