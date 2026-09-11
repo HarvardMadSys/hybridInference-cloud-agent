@@ -31,7 +31,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
 )
-from cloud_agent_host.workspace_broker import create_app
+from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
 
 
 class _Manager:
@@ -777,7 +777,8 @@ def test_snapshot_start_failure_releases_the_admission_barrier():
     assert status.snapshotting is False
 
 
-def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():
+@pytest.mark.parametrize("reserved_child", [False, True])
+def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(reserved_child):
     manager = _Manager()
     factory = _TransportFactory()
     supervisor: SharedChatSessionSupervisor
@@ -816,6 +817,19 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():
         context_status="live",
     )
 
+    # The control plane reserves the child membership before asking the host
+    # to fork. It has a slot and a residency, but no native session yet.
+    pending_manifest = [
+        *_members(),
+        SharedMemberManifest(
+            thread_id="athr_child",
+            resident_slot_id=2,
+            residency_generation=3,
+        ),
+    ]
+    if reserved_child:
+        supervisor.register_manifest(_spec(), pending_manifest)
+
     result = supervisor.fork_native(
         "athr_source",
         operation_id="fork-one",
@@ -832,6 +846,15 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation():
     assert supervisor.status("athr_child").resident_state == "live"
     assert supervisor.status("athr_source").operation_count == 0
     assert supervisor.status("athr_source").idle_deadline_monotonic is not None
+
+    if reserved_child:
+        # A concurrent Files/Git request can still carry the pending database
+        # manifest until the fork receipt is finalized by the control plane.
+        supervisor.register_manifest(_spec(), pending_manifest)
+        child = supervisor.status("athr_child")
+        assert child.native_session_id == "native-child"
+        assert child.resident_state == "live"
+        assert child.residency_generation == 3
 
 
 @pytest.mark.asyncio
@@ -888,6 +911,14 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
             json=body,
         )
         assert first.status_code == 200, first.text
+        # Files/Git hydration can register the still-pending database manifest
+        # after the host has created the child but before receipt finalization.
+        registered = await client.post(
+            "/shared-sandboxes/athr_source/register",
+            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            json=SharedSandboxIdentityRequest.model_validate(body).model_dump(),
+        )
+        assert registered.status_code == 200, registered.text
         # The control plane can retry before storing the receipt, so the
         # durable target manifest still contains no native session identity.
         body["source_launch"]["residency_generation"] = 10

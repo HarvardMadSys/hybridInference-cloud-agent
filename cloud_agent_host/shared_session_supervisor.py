@@ -407,6 +407,14 @@ class SharedChatSessionSupervisor:
                 other_group = self._members.get(manifest.thread_id)
                 if other_group is not None and other_group is not group:
                     raise SandboxError("chat membership points at two sandbox groups")
+                if manifest.thread_id != spec.thread_id and manifest.native_session_id is None:
+                    # Fork reserves a database membership before creating its
+                    # native child. Only the origin can start without native
+                    # context; installing the reservation here would make
+                    # fork_native reject its own target as already occupied.
+                    # A stale pending manifest must also preserve a child the
+                    # host has materialized but the database has not finalized.
+                    continue
                 member = group.members.get(manifest.thread_id)
                 if member is None:
                     # A durable observation that the previous broker owned a
