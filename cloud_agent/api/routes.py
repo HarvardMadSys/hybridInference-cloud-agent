@@ -42,7 +42,6 @@ from cloud_agent.api.deps import (
     bearer_token,
     get_agent_app_credentials,
     get_agent_gitlab_oauth,
-    get_agent_job_store,
     get_attempt_commands,
     get_conversation_commands,
     get_conversation_queries,
@@ -54,7 +53,9 @@ from cloud_agent.api.deps import (
     get_host_pool,
     get_log_store,
     get_mcp_connections,
+    get_residency_repository,
     get_sandbox_repository,
+    get_session_fork_repository,
     get_source_control_repository,
     looks_like_agent_token,
     require_attempts,
@@ -63,7 +64,9 @@ from cloud_agent.api.deps import (
     require_grants,
     require_host_pool,
     require_queries,
+    require_residencies,
     require_sandboxes,
+    require_session_forks,
     require_source_control,
 )
 from cloud_agent.api.hosts import RESIDENCY_TTL_S, _mint_residency_grant
@@ -221,11 +224,12 @@ if TYPE_CHECKING:
     from cloud_agent.ports.grants import GrantRepository
     from cloud_agent.ports.host_pool import HostPoolRepository
     from cloud_agent.ports.mcp import McpConnectionRepository
+    from cloud_agent.ports.residencies import ResidencyRepository
     from cloud_agent.ports.sandboxes import SandboxRepository
+    from cloud_agent.ports.session_forks import SessionForkRepository
     from cloud_agent.ports.source_control import (
         SourceControlRepository as SourceControlGrants,
     )
-    from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
 #: The MCP relay's address **as a sandbox can reach it** — a host-local relay,
@@ -348,21 +352,6 @@ def _sse_frame(event: dict[str, Any]) -> str:
         event_type = "malformed"
     data = json.dumps(_event_response(event).model_dump(), separators=(",", ":"))
     return f"id: {event['id']}\nevent: {event_type}\ndata: {data}\n\n"
-
-
-def _require_store(store: AgentJobStore | None) -> AgentJobStore:
-    """Return the store or fail with a clear 503 when the DB is absent."""
-    if store is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "unavailable",
-                    "message": "Agent jobs require a configured database.",
-                }
-            },
-        )
-    return store
 
 
 def _iso(value: Any) -> str | None:
@@ -577,7 +566,7 @@ async def _owned_job(
 @router.get("/config", response_model=AgentConfigResponse)
 async def get_agent_config(
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
     mcp_connections: McpConnectionRepository | None = Depends(get_mcp_connections),
@@ -593,7 +582,9 @@ async def get_agent_config(
     # This user's repositories, not the deployment's: what the picker offers
     # has to be what the create endpoint will accept for *them*.
     repos = await repos_for_user(
-        user["user_id"], grants_repo=store, app_credentials=app_credentials
+        user["user_id"],
+        grants_repo=require_source_control(source_control),
+        app_credentials=app_credentials,
     )
     return AgentConfigResponse(
         repos=repos,
@@ -660,7 +651,7 @@ async def _connect_github_for_user(
     *,
     body: GitHubConnectRequest | OAuthConnectRequest,
     user_id: str,
-    source_control: AgentJobStore,
+    source_control: SourceControlGrants,
     app_credentials: Any,
 ) -> GitHubConnectionResponse:
     await consume_oauth_state(
@@ -701,7 +692,7 @@ async def _connect_github_for_user(
 async def _source_control_providers(
     *,
     user_id: str,
-    source_control: AgentJobStore,
+    source_control: SourceControlGrants,
     app_credentials: Any | None,
     gitlab_oauth: Any | None,
 ) -> list[SourceControlProviderResponse]:
@@ -1802,7 +1793,9 @@ async def get_agent_attempt_telemetry(
 async def cancel_agent_job(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one of the caller's agent jobs.
@@ -1810,9 +1803,9 @@ async def cancel_agent_job(
     Queued jobs cancel immediately; a running job is flagged and the worker
     performs the fenced terminal transition when it next heartbeats.
     """
-    job_store = _require_store(store)
+    job_store = require_queries(conversations)
     owned = await _owned_job(job_store, job_id, user)
-    state = await job_store.request_cancel(job_id=job_id, user_id=user["user_id"])
+    state = await require_attempts(attempts).request_cancel(job_id=job_id, user_id=user["user_id"])
     if state in TERMINAL_STATES:
         resumed = True
         if owned.get("thread_sandbox") is not None:
@@ -1823,7 +1816,7 @@ async def cancel_agent_job(
                 broker=settled_broker,
             )
         if resumed:
-            await job_store.mark_terminal_resume_complete(job_id=job_id)
+            await require_sandboxes(sandboxes).mark_terminal_resume_complete(job_id=job_id)
     job = await job_store.get_job(job_id)
     return AgentJobCancelResponse(
         id=job_id,
@@ -2155,12 +2148,18 @@ async def fork_agent_job(
     job_id: str,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    forks: SessionForkRepository | None = Depends(get_session_fork_repository),
+    residencies: ResidencyRepository | None = Depends(get_residency_repository),
+    grant_records: GrantRepository | None = Depends(get_grant_repository),
     grants: Any = Depends(get_grant_client),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentJobResponse:
     """Fork one settled native session into the same shared Docker workspace."""
-    job_store = _require_store(store)
+    job_store = require_queries(conversations)
+    forks = require_session_forks(forks)
+    residencies = require_residencies(residencies)
+    grant_records = require_grants(grant_records)
     job = await _owned_job(job_store, job_id, user)
     not_settled = HTTPException(
         status_code=409,
@@ -2209,7 +2208,7 @@ async def fork_agent_job(
             },
         )
 
-    operation = await job_store.prepare_session_fork(
+    operation = await forks.prepare_session_fork(
         source_job_id=job_id,
         user_id=user["user_id"],
         idempotency_key=idempotency_key or f"generated:{secrets.token_urlsafe(24)}",
@@ -2294,7 +2293,7 @@ async def fork_agent_job(
     async def release_failed_fork_residencies(rows: dict[str, Any]) -> None:
         for role in ("source", "target"):
             residency = rows[role]
-            grant_id = await job_store.release_residency(
+            grant_id = await residencies.release_residency(
                 thread_id=str(residency["thread_id"]),
                 generation=int(residency["generation"]),
                 host=str(operation["host"]),
@@ -2371,7 +2370,7 @@ async def fork_agent_job(
             "mcp_credential": "",
         }
         coordinator_token = secrets.token_urlsafe(32)
-        claimed = await job_store.claim_session_fork_materialization(
+        claimed = await forks.claim_session_fork_materialization(
             operation_id=operation_id,
             coordinator_token=coordinator_token,
             lease_seconds=SESSION_FORK_COORDINATOR_LEASE_S,
@@ -2387,13 +2386,13 @@ async def fork_agent_job(
                 },
                 headers={"Retry-After": "2"},
             )
-        residencies = await job_store.establish_session_fork_residencies(
+        residencies = await forks.establish_session_fork_residencies(
             operation_id=operation_id,
             coordinator_token=coordinator_token,
             ttl_seconds=RESIDENCY_TTL_S,
         )
         if residencies is None:
-            await job_store.release_session_fork_materialization(
+            await forks.release_session_fork_materialization(
                 operation_id=operation_id,
                 coordinator_token=coordinator_token,
             )
@@ -2423,7 +2422,7 @@ async def fork_agent_job(
         )
         if not source_credential or not target_credential:
             await release_failed_fork_residencies(residencies)
-            await job_store.release_session_fork_materialization(
+            await forks.release_session_fork_materialization(
                 operation_id=operation_id,
                 coordinator_token=coordinator_token,
             )
@@ -2479,7 +2478,7 @@ async def fork_agent_job(
             # recovers the in-container journal or safely resumes before the
             # native mutation was reached.
             raise _workspace_broker_http_error(exc) from exc
-        materialized = await job_store.record_session_fork_materialized(
+        materialized = await forks.record_session_fork_materialized(
             operation_id=operation_id,
             coordinator_token=coordinator_token,
             receipt=receipt,
@@ -2495,7 +2494,7 @@ async def fork_agent_job(
                 },
             )
 
-    forked = await job_store.finalize_session_fork(operation_id=operation_id)
+    forked = await forks.finalize_session_fork(operation_id=operation_id)
     if forked is None:
         raise HTTPException(
             status_code=409,
@@ -2752,7 +2751,9 @@ async def _terminal_owner_workspace(
     *,
     job_id: str,
     user: dict[str, Any],
-    store: AgentJobStore | None,
+    conversations: ConversationQueries,
+    sandboxes: SandboxRepository,
+    source_control: SourceControlGrants,
     app_credentials: Any | None,
     require_ready: bool = False,
     recheck_entitlement: bool = True,
@@ -2766,10 +2767,9 @@ async def _terminal_owner_workspace(
     the broker-side workspace/session binding. Delete skips entitlement as well
     so a revoked owner can always clean up a live process.
     """
-    job_store = _require_store(store)
-    job = await _owned_job(job_store, job_id, user)
+    job = await _owned_job(conversations, job_id, user)
     if require_ready:
-        ready = job.get("thread_sandbox") is not None and await job_store.thread_workspace_ready(
+        ready = job.get("thread_sandbox") is not None and await sandboxes.thread_workspace_ready(
             thread_id=str(job["thread_id"])
         )
         if not ready:
@@ -2778,7 +2778,7 @@ async def _terminal_owner_workspace(
         await _require_workspace_entitlement(
             job=job,
             user=user,
-            source_control=job_store,
+            source_control=source_control,
             app_credentials=app_credentials,
         )
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
@@ -2810,7 +2810,7 @@ async def _terminal_owner_workspace(
                     }
                 },
             )
-        await job_store.mark_terminal_resume_complete(job_id=job_id)
+        await sandboxes.mark_terminal_resume_complete(job_id=job_id)
         job["terminal_resume_pending"] = False
     return job, broker
 
@@ -2820,13 +2820,13 @@ async def get_agent_job_workspace_file(
     job_id: str,
     path: str = Query("", max_length=4096),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentWorkspaceResponse:
     """Browse the chat's retained workspace through its owning host broker."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store, job_id, user)
+    job = await _owned_job(require_queries(conversations), job_id, user)
     try:
         safe_path = normalize_workspace_path(path)
     except WorkspacePathError as exc:
@@ -2836,7 +2836,10 @@ async def get_agent_job_workspace_file(
         ) from exc
 
     await _require_workspace_entitlement(
-        job=job, user=user, source_control=job_store, app_credentials=app_credentials
+        job=job,
+        user=user,
+        source_control=require_source_control(source_control),
+        app_credentials=app_credentials,
     )
 
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
@@ -2862,13 +2865,14 @@ async def write_agent_job_workspace_file(
     body: AgentWorkspaceWriteRequest,
     path: str = Query(..., min_length=1, max_length=4096),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentWorkspaceResponse:
     """Save one text file directly into the retained chat workspace."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store, job_id, user)
+    job = await _owned_job(require_queries(conversations), job_id, user)
     try:
         safe_path = normalize_workspace_path(path)
     except WorkspacePathError as exc:
@@ -2879,9 +2883,12 @@ async def write_agent_job_workspace_file(
     if not safe_path:
         raise HTTPException(status_code=400, detail="A file path is required.")
     await _require_workspace_entitlement(
-        job=job, user=user, source_control=job_store, app_credentials=app_credentials
+        job=job,
+        user=user,
+        source_control=require_source_control(source_control),
+        app_credentials=app_credentials,
     )
-    await _require_mutable_workspace_ready(job=job, sandboxes=job_store)
+    await _require_mutable_workspace_ready(job=job, sandboxes=require_sandboxes(sandboxes))
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         raise HTTPException(
@@ -2916,17 +2923,21 @@ async def run_agent_job_terminal_command(
     job_id: str,
     body: AgentTerminalRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalResponse:
     """Run an owner-entered command inside the retained chat sandbox."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store, job_id, user)
+    job = await _owned_job(require_queries(conversations), job_id, user)
     await _require_workspace_entitlement(
-        job=job, user=user, source_control=job_store, app_credentials=app_credentials
+        job=job,
+        user=user,
+        source_control=require_source_control(source_control),
+        app_credentials=app_credentials,
     )
-    await _require_mutable_workspace_ready(job=job, sandboxes=job_store)
+    await _require_mutable_workspace_ready(job=job, sandboxes=require_sandboxes(sandboxes))
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
         raise HTTPException(status_code=409, detail="This deployment has no live workspace broker.")
@@ -2955,7 +2966,9 @@ async def create_agent_job_terminal(
     job_id: str,
     body: AgentTerminalSessionCreateRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionResponse:
@@ -2964,7 +2977,9 @@ async def create_agent_job_terminal(
         require_host_pool(hosts),
         job_id=job_id,
         user=user,
-        store=store,
+        conversations=require_queries(conversations),
+        sandboxes=require_sandboxes(sandboxes),
+        source_control=require_source_control(source_control),
         app_credentials=app_credentials,
         require_ready=True,
     )
@@ -2989,7 +3004,9 @@ async def create_agent_job_terminal(
 async def list_agent_job_terminals(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionListResponse:
@@ -2998,7 +3015,9 @@ async def list_agent_job_terminals(
         require_host_pool(hosts),
         job_id=job_id,
         user=user,
-        store=store,
+        conversations=require_queries(conversations),
+        sandboxes=require_sandboxes(sandboxes),
+        source_control=require_source_control(source_control),
         app_credentials=app_credentials,
         require_ready=True,
     )
@@ -3015,7 +3034,9 @@ async def stream_agent_job_terminal(
     terminal_id: str = Path(..., pattern=_TERMINAL_ID_PATTERN),
     after: int = Query(0, ge=0, le=2**63 - 1),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> StreamingResponse:
@@ -3024,7 +3045,9 @@ async def stream_agent_job_terminal(
         require_host_pool(hosts),
         job_id=job_id,
         user=user,
-        store=store,
+        conversations=require_queries(conversations),
+        sandboxes=require_sandboxes(sandboxes),
+        source_control=require_source_control(source_control),
         app_credentials=app_credentials,
     )
     try:
@@ -3057,7 +3080,9 @@ async def write_agent_job_terminal_input(
     body: AgentTerminalSessionInputRequest,
     terminal_id: str = Path(..., pattern=_TERMINAL_ID_PATTERN),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionResponse:
@@ -3066,7 +3091,9 @@ async def write_agent_job_terminal_input(
         require_host_pool(hosts),
         job_id=job_id,
         user=user,
-        store=store,
+        conversations=require_queries(conversations),
+        sandboxes=require_sandboxes(sandboxes),
+        source_control=require_source_control(source_control),
         app_credentials=app_credentials,
         require_ready=True,
         recheck_entitlement=False,
@@ -3088,7 +3115,9 @@ async def resize_agent_job_terminal(
     body: AgentTerminalSessionResizeRequest,
     terminal_id: str = Path(..., pattern=_TERMINAL_ID_PATTERN),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionResponse:
@@ -3097,7 +3126,9 @@ async def resize_agent_job_terminal(
         require_host_pool(hosts),
         job_id=job_id,
         user=user,
-        store=store,
+        conversations=require_queries(conversations),
+        sandboxes=require_sandboxes(sandboxes),
+        source_control=require_source_control(source_control),
         app_credentials=app_credentials,
         require_ready=True,
         recheck_entitlement=False,
@@ -3122,7 +3153,9 @@ async def delete_agent_job_terminal(
     job_id: str,
     terminal_id: str = Path(..., pattern=_TERMINAL_ID_PATTERN),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentTerminalSessionResponse:
@@ -3131,7 +3164,9 @@ async def delete_agent_job_terminal(
         require_host_pool(hosts),
         job_id=job_id,
         user=user,
-        store=store,
+        conversations=require_queries(conversations),
+        sandboxes=require_sandboxes(sandboxes),
+        source_control=require_source_control(source_control),
         app_credentials=app_credentials,
         recheck_entitlement=False,
     )
@@ -3147,15 +3182,18 @@ async def delete_agent_job_terminal(
 async def get_agent_job_git_workspace(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
 ) -> AgentGitWorkspaceResponse:
     """Read live retained-workspace status, diff and recent commits."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store, job_id, user)
+    job = await _owned_job(require_queries(conversations), job_id, user)
     await _require_workspace_entitlement(
-        job=job, user=user, source_control=job_store, app_credentials=app_credentials
+        job=job,
+        user=user,
+        source_control=require_source_control(source_control),
+        app_credentials=app_credentials,
     )
     broker = await _workspace_broker_for_job(require_host_pool(hosts), job)
     if broker is None:
@@ -3973,18 +4011,20 @@ async def worker_establish_shared_sandbox_residency(
     job_id: str,
     body: WorkerSandboxResidencyRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    residencies: ResidencyRepository | None = Depends(get_residency_repository),
+    hosts: HostPoolRepository | None = Depends(get_host_pool),
     grants: Any = Depends(get_grant_client),
 ) -> HostResidencyEstablishResponse:
     """Mint the renewable member grant before the supervisor opens a CLI."""
-    job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store, job_id)
-    host = await job_store.host_for_job(job_id=job_id)
+    thread_id = await _worker_thread_id(require_queries(conversations), job_id)
+    host = await require_host_pool(hosts).host_for_job(job_id=job_id)
     if host is None or not host.get("host"):
         raise _lease_lost()
-    row = await job_store.establish_residency(
+    row = await require_residencies(residencies).establish_residency(
         thread_id=thread_id,
         host=str(host["host"]),
         runtime_id=body.runtime_id,
@@ -3994,11 +4034,11 @@ async def worker_establish_shared_sandbox_residency(
     )
     if row is None:
         raise _lease_lost()
-    credential = await _mint_residency_grant(job_store, grants, row=row)
+    credential = await _mint_residency_grant(require_residencies(residencies), grants, row=row)
     if not credential:
         # Resident processes cannot safely outlive an attempt-scoped token, so
         # renewable residency is all-or-nothing at admission.
-        await job_store.release_residency(
+        await require_residencies(residencies).release_residency(
             thread_id=thread_id,
             generation=int(row["generation"]),
             host=str(host["host"]),
@@ -4007,7 +4047,7 @@ async def worker_establish_shared_sandbox_residency(
             status_code=503,
             detail="a renewable shared-session credential could not be minted",
         )
-    recorded = await job_store.record_shared_thread_residency(
+    recorded = await require_sandboxes(sandboxes).record_shared_thread_residency(
         thread_id=thread_id,
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
@@ -4015,7 +4055,7 @@ async def worker_establish_shared_sandbox_residency(
         residency_generation=int(row["generation"]),
     )
     if not recorded:
-        released = await job_store.release_residency(
+        released = await require_residencies(residencies).release_residency(
             thread_id=thread_id,
             generation=int(row["generation"]),
             host=str(host["host"]),
@@ -4131,15 +4171,16 @@ async def worker_abandon_thread_sandbox(
     job_id: str,
     body: WorkerSandboxAbandonRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
+    sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
+    residencies: ResidencyRepository | None = Depends(get_residency_repository),
     grants: Any = Depends(get_grant_client),
 ) -> WorkerThreadSandbox:
     """Release a failed activation; ambiguous admission becomes LOST."""
-    job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    thread_id = await _worker_thread_id(job_store, job_id)
-    row = await job_store.abandon_thread_sandbox(
+    thread_id = await _worker_thread_id(require_queries(conversations), job_id)
+    row = await require_sandboxes(sandboxes).abandon_thread_sandbox(
         thread_id=thread_id,
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
@@ -4156,7 +4197,7 @@ async def worker_abandon_thread_sandbox(
         # its matching renewable capability now instead of leaving a dead
         # process's grant live until the residency TTL. The generation fence
         # makes a concurrent successor immune to this cleanup.
-        released = await job_store.release_residency(
+        released = await require_residencies(residencies).release_residency(
             thread_id=thread_id,
             generation=int(row["residency_generation"]),
             host=str(row["host"]),
