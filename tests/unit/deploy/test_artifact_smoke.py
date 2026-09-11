@@ -15,8 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from deploy.release import release_manifest as rm
-from deploy.release import smoke
+from deploy.release import release_manifest as rm, smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SANDBOX_DOCKERFILE = REPO_ROOT / "deploy/sandbox/Dockerfile.agent-sandbox"

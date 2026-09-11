@@ -18,8 +18,7 @@ from typing import Any
 
 import yaml
 
-from deploy.release import release_manifest as rm
-from deploy.release import smoke
+from deploy.release import release_manifest as rm, smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CI = REPO_ROOT / ".github/workflows/ci.yml"
@@ -116,6 +115,22 @@ def test_the_build_loads_the_image_it_is_about_to_start() -> None:
             "from there, and a self-hosted runner shares no filesystem with the job that built it"
         )
         assert build["with"]["push"] is False
+
+
+def test_the_build_tags_the_image_the_smoke_starts() -> None:
+    """`load: true` without a tag loads an image the next step cannot find.
+
+    Found by this job's first real run: the build reported success, the smoke
+    inspected the tag it had been told to start, and Docker answered `no such
+    object`. The docker exporter needs a name to load under, so the tag is
+    asserted here rather than rediscovered.
+    """
+    for fragment in (
+        "Build ${{ matrix.artifact.name }}",
+        "Build ${{ matrix.artifact.name }} (retry)",
+    ):
+        assert step(fragment)["with"]["tags"] == "${{ env.IMAGE_TAG }}"
+    assert "IMAGE_TAG=" in str(step("Name this run")["run"])
 
 
 def test_the_build_passes_the_commit_every_image_must_name() -> None:

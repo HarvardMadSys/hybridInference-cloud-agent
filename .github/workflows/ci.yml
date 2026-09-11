@@ -769,6 +769,11 @@ jobs:
           file: ${{ matrix.artifact.dockerfile }}
           push: false
           load: true
+          # The docker exporter needs a name to load the image under. Without
+          # this the build succeeds and the smoke then finds nothing to start:
+          # `docker inspect <tag>` is the first thing it does, and a build that
+          # produced an anonymous image reads as a missing one.
+          tags: ${{ env.IMAGE_TAG }}
           build-args: |
             SOURCE_COMMIT=${{ github.sha }}
             ${{ matrix.artifact.build_args }}
@@ -787,6 +792,11 @@ jobs:
           file: ${{ matrix.artifact.dockerfile }}
           push: false
           load: true
+          # The docker exporter needs a name to load the image under. Without
+          # this the build succeeds and the smoke then finds nothing to start:
+          # `docker inspect <tag>` is the first thing it does, and a build that
+          # produced an anonymous image reads as a missing one.
+          tags: ${{ env.IMAGE_TAG }}
           build-args: |
             SOURCE_COMMIT=${{ github.sha }}
             ${{ matrix.artifact.build_args }}
