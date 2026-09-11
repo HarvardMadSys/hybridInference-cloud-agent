@@ -449,7 +449,14 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
             else:
                 raise SmokeFailure(f"postgres never became ready\n{postgres.logs()}")
 
-            dsn = f"postgresql+asyncpg://cloudagent:smoke@{postgres.name}:5432/cloudagent"
+            # One setting, two readers: the service talks asyncpg and wants a
+            # bare `postgresql://`, while Alembic rewrites the same value for
+            # its synchronous engine (`cloud_agent.storage.dsn`). Spelling it
+            # `postgresql+asyncpg://` — the shape a SQLAlchemy-shaped guess
+            # produces — stops the API with `invalid DSN: scheme is expected to
+            # be either "postgresql" or "postgres"`. This check exists to be
+            # configured the way a deployment is, and this is that way.
+            dsn = f"postgresql://cloudagent:smoke@{postgres.name}:5432/cloudagent"
             environment = _control_environment(dsn)
 
             migrate.start(
