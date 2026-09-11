@@ -55,7 +55,13 @@ from cloud_agent.domain.execution import (
     SUCCEEDED,
     TERMINAL_STATES,
 )
+from cloud_agent.domain.ids import (
+    new_job_id,
+    new_session_fork_id,
+    new_thread_id,
+)
 from cloud_agent.domain.requests import check_client_request
+from cloud_agent.domain.runtimes import resolve_runtime_version
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
     ExecutionProfile,
@@ -92,72 +98,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 logger = get_logger(__name__)
-
-
-def _new_job_id() -> str:
-    """Generate a new agent job id."""
-    return f"ajob_{secrets.token_hex(8)}"
-
-
-def _new_thread_id() -> str:
-    """Generate a stable conversation id shared by a thread's runs."""
-    return f"athr_{secrets.token_hex(8)}"
-
-
-def _new_sandbox_id() -> str:
-    """Generate the platform identity of one retained Docker sandbox."""
-    return f"asbx_{secrets.token_hex(16)}"
-
-
-def _new_session_fork_id() -> str:
-    """Generate one shared native-session fork operation id."""
-    return f"asfork_{secrets.token_hex(16)}"
-
-
-def resolve_runtime_version(
-    *,
-    runtime: str,
-    thread_version: str | None,
-    selected: dict[str, Any],
-    available: dict[str, Any],
-    host_default: dict[str, Any],
-) -> str | None:
-    """Which CLI version this attempt runs, in priority order.
-
-    1. **The version its thread already runs.** A thread is a native CLI
-       session stored in its retained container. An admin changing the
-       selection must not reach into conversations already in flight: it
-       applies to new groups, and existing ones keep the version they started
-       on so the same native session remains readable.
-    2. **The deployment's selection**, but only if this host's image actually
-       holds it. A selection the host cannot serve falls through rather than
-       failing the claim — an image rebuilt with a shorter menu drops versions
-       out from under a stored choice, and a queue that parks on that is a
-       worse outcome than a job running the default.
-    3. **The host's default**, which is what every claim did before selection
-       existed.
-
-    ``None`` means the host has never reported a version for this runtime, and
-    is stamped as-is: "unknown" is a truthful record, and inventing one would
-    make the attempt row lie about what ran.
-    """
-    if thread_version:
-        return thread_version
-    choice = selected.get(runtime)
-    if isinstance(choice, str) and choice:
-        offered = available.get(runtime)
-        if isinstance(offered, list) and choice in offered:
-            return choice
-        logger.warning(
-            "Runtime version selection not offered by the claiming host",
-            extra={
-                "event": "agent_runtime_version_unavailable",
-                "runtime": runtime,
-                "selected": choice,
-            },
-        )
-    default = host_default.get(runtime)
-    return default if isinstance(default, str) and default else None
 
 
 class AgentJobStore:
@@ -461,8 +401,8 @@ class AgentJobStore:
             )
             if replayed is not None:
                 return replayed
-        job_id = _new_job_id()
-        thread_id = _new_thread_id()
+        job_id = new_job_id()
+        thread_id = new_thread_id()
         try:
             async with self._pool.acquire() as conn, conn.transaction():
                 # What every turn of this conversation shares is written once,
@@ -636,7 +576,7 @@ class AgentJobStore:
         client_request_fingerprint: str | None,
     ) -> dict[str, Any] | None:
         """The one-transaction body of :meth:`create_follow_up`."""
-        job_id = _new_job_id()
+        job_id = new_job_id()
         async with self._pool.acquire() as conn, conn.transaction():
             requested = await conn.fetchrow(
                 "SELECT thread_id FROM agent_jobs WHERE id = $1 AND user_id = $2",
@@ -794,8 +734,8 @@ class AgentJobStore:
         """Fence a settled native boundary and reserve an invisible child."""
         if not idempotency_key or len(idempotency_key) > 256 or "\x00" in idempotency_key:
             raise ValueError("session fork idempotency key is invalid")
-        operation_id = _new_session_fork_id()
-        target_thread_id = _new_thread_id()
+        operation_id = new_session_fork_id()
+        target_thread_id = new_thread_id()
         async with self._pool.acquire() as conn, conn.transaction():
             # A request may race itself across two HTTP workers. Serialize the
             # unique-key lookup before either can observe a missing row.
@@ -1405,7 +1345,7 @@ class AgentJobStore:
                 copied: dict[str, str] = {}
                 previous_copy: str | None = None
                 for turn in turns:
-                    copy_id = _new_job_id()
+                    copy_id = new_job_id()
                     copied[str(turn["id"])] = copy_id
                     await conn.execute(
                         """
