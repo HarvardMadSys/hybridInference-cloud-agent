@@ -776,8 +776,7 @@ export function TrajectoryView({
             Execution overview
           </h2>
           <span className="rounded-md bg-gray-50 px-2 py-0.5 text-[10px] tabular-nums text-gray-500 dark:bg-white/5 dark:text-gray-400">
-            {steps.length} {steps.length === 1 ? 'step' : 'steps'} · {events.length}{' '}
-            {events.length === 1 ? 'event' : 'events'}
+            {steps.length} {steps.length === 1 ? 'step' : 'steps'}
           </span>
         </div>
         <div className="px-4 pb-3 pt-3.5">
@@ -827,6 +826,7 @@ export function TrajectoryView({
         <button
           type="button"
           onClick={download}
+          title="Download session log"
           className="shrink-0 rounded-lg border border-gray-200 dark:border-white/10 px-2.5 py-1.5 text-[12px] text-gray-600 dark:text-gray-400 transition-colors hover:border-gray-300 dark:hover:border-white/20 hover:text-gray-900 dark:hover:text-gray-100"
         >
           Session log

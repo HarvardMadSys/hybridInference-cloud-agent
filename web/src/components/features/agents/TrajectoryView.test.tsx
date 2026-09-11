@@ -90,7 +90,13 @@ describe('TrajectoryView', () => {
   it('lists every stored event as a step, including the one chat folds away', () => {
     render(<Harness events={EVENTS} />);
 
-    expect(screen.getByText('2 steps · 3 events')).toBeInTheDocument();
+    expect(screen.getByText('2 steps')).toBeInTheDocument();
+    // The card counts what it shows; the stored stream is the download button's
+    // business, and its hover text says only that.
+    expect(screen.getByRole('button', { name: 'Session log' })).toHaveAttribute(
+      'title',
+      'Download session log',
+    );
     expect(screen.getByText('Bash')).toBeInTheDocument();
     expect(screen.getByText('the build passes')).toBeInTheDocument();
   });
