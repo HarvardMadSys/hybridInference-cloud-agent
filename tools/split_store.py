@@ -680,7 +680,7 @@ def read_after_commit_helper(method: str) -> str:
         '''    async def _read_after_commit(
             self,
             job_id: str,
-            read: Callable[..., Awaitable[dict[str, Any] | None]],
+            read: Callable[[asyncpg.Connection], Awaitable[dict[str, Any] | None]],
         ) -> dict[str, Any] | None:
             """Run one shared read on a fresh connection, after this commit.
 
@@ -691,7 +691,7 @@ def read_after_commit_helper(method: str) -> str:
             composition root.
             """
             async with self._pool.acquire() as conn:
-                return await read(conn, job_id)'''
+                return await read(conn)'''
     )
 
 
@@ -815,6 +815,7 @@ IMPORT_SPEC: dict[str, tuple[str, str] | None] = {
     # as a symbol. A later entry would simply win here, which is why the
     # duplicate that used to sit beside this one was a real bug.
     "ExecutionProfile": ("cloud_agent.execution_profiles", "__module__"),
+    "asyncpg": ("asyncpg", "__typeonly__"),
     "Callable": ("collections.abc", "__typeonly__"),
     "Awaitable": ("collections.abc", "__typeonly__"),
     "compatible_shared_sandbox_followup_attested": (
@@ -919,7 +920,10 @@ def render_imports(imports: dict[str, tuple[str, str]]) -> str:
         if _attr == "__typeonly__":
             # An annotation-only name: with ``from __future__ import
             # annotations`` it never runs, so it belongs under the guard.
-            typeonly.append(f"from {module} import {name}")
+            if name == module:
+                typeonly.append(f"import {module}")
+            else:
+                typeonly.append(f"from {module} import {name}")
             continue
         root = module.split(".")[0]
         if root in _STDLIB_ROOTS:
@@ -1403,11 +1407,6 @@ from __future__ import annotations
 
 '''
         typing_names = sorted(name for name, spec in direct.items() if spec[0] == "typing")
-        if "asyncpg" in indented:
-            if "TYPE_CHECKING" not in typing_names:
-                typing_names.append("TYPE_CHECKING")
-                typing_names.sort()
-            header += "if TYPE_CHECKING:\n    import asyncpg\n\n"
         if typing_names:
             import_parts.append(f"from typing import {', '.join(typing_names)}")
         rendered = render_imports({n: s_ for n, s_ in direct.items() if s_[0] != "typing"})

@@ -351,7 +351,7 @@ async def _set_status(
         {"host": host},
         actor_id=actor_id,
     )
-    return await _snapshot(hosts)
+    return await _snapshot(require_host_pool(hosts))
 
 
 @router.post("/agent/runner-hosts/{host}/drain", response_model=ListAgentRunnerHostsResponse)

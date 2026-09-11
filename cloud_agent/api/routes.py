@@ -63,6 +63,7 @@ from cloud_agent.api.deps import (
     require_execution_queries,
     require_grants,
     require_host_pool,
+    require_mcp,
     require_queries,
     require_residencies,
     require_sandboxes,
@@ -860,6 +861,7 @@ async def list_source_control_integrations(
     source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    mcp: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> SourceControlIntegrationsResponse:
     """Return configured/connected state for source control and MCP servers."""
     source_control = require_source_control(source_control)
@@ -870,7 +872,7 @@ async def list_source_control_integrations(
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
         ),
-        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=source_control),
+        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=require_mcp(mcp)),
     )
 
 
@@ -881,6 +883,7 @@ async def disconnect_mcp_integration(
     source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    mcp: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> SourceControlIntegrationsResponse:
     """Remove this user's credential for one server.
 
@@ -895,7 +898,7 @@ async def disconnect_mcp_integration(
     takes effect immediately without anything having to hunt down live jobs.
     """
     job_store = require_source_control(source_control)
-    removed = await job_store.delete_mcp_connection(user_id=user["user_id"], server=server)
+    removed = await require_mcp(mcp).delete_mcp_connection(user_id=user["user_id"], server=server)
     if not removed:
         raise HTTPException(
             status_code=404,
@@ -917,7 +920,7 @@ async def disconnect_mcp_integration(
             app_credentials=app_credentials,
             gitlab_oauth=gitlab_oauth,
         ),
-        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=job_store),
+        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=require_mcp(mcp)),
     )
 
 
@@ -1016,6 +1019,7 @@ async def disconnect_gitlab_integration(
     source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+    mcp: McpConnectionRepository | None = Depends(get_mcp_connections),
 ) -> SourceControlIntegrationsResponse:
     """Revoke GitLab best-effort, then always remove the local credential."""
     source_control = require_source_control(source_control)
@@ -1043,7 +1047,7 @@ async def disconnect_gitlab_integration(
         # This response replaces the page's whole state, so it has to carry the
         # part this endpoint did not touch. Omitted, it would default to an
         # empty list and read as "you have no MCP connections".
-        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=source_control),
+        mcp=await _mcp_integrations(user_id=user["user_id"], mcp=require_mcp(mcp)),
     )
 
 
@@ -1412,7 +1416,7 @@ async def _create_job_as(
         else None
     )
     if client_request_id is not None:
-        replayed = await job_store.replayed_submission(
+        replayed = await require_conversation_commands(commands).replayed_submission(
             user_id=user["user_id"],
             client_request_id=client_request_id,
             fingerprint=fingerprint,
@@ -1989,7 +1993,9 @@ async def create_agent_follow_up(
     body: AgentFollowUpRequest,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
+    conversations: ConversationQueries | None = Depends(get_conversation_queries),
     commands: ConversationCommands | None = Depends(get_conversation_commands),
+    source_control: SourceControlGrants | None = Depends(get_source_control_repository),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
     mcp_connections: McpConnectionRepository | None = Depends(get_mcp_connections),
@@ -2000,8 +2006,7 @@ async def create_agent_follow_up(
     resend returns the turn the first send made, different content under the
     same key is a 409 ``idempotency_conflict``.
     """
-    job_store = require_conversation_commands(commands)
-    parent = await _owned_job(job_store, job_id, user)
+    parent = await _owned_job(require_queries(conversations), job_id, user)
     # Ownership is proved above; the resend is answered next, before the checks
     # that can change between two sends of one submission. A first send whose
     # response was lost, followed by the session being archived or its sandbox
@@ -2013,7 +2018,7 @@ async def create_agent_follow_up(
         else None
     )
     if idempotency_key is not None:
-        replayed = await job_store.replayed_submission(
+        replayed = await require_conversation_commands(commands).replayed_submission(
             user_id=user["user_id"],
             client_request_id=idempotency_key,
             fingerprint=fingerprint,
@@ -2076,7 +2081,7 @@ async def create_agent_follow_up(
         await require_entitled_repo(
             parent["repo"],
             user["user_id"],
-            grants_repo=job_store,
+            grants_repo=require_source_control(source_control),
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
@@ -2104,7 +2109,7 @@ async def create_agent_follow_up(
             connections=mcp_connections,
             user_id=user["user_id"],
         )
-    job = await job_store.create_follow_up(
+    job = await require_conversation_commands(commands).create_follow_up(
         parent_job_id=job_id,
         user_id=user["user_id"],
         prompt=body.prompt,
@@ -2152,7 +2157,7 @@ async def fork_agent_job(
     user: dict[str, Any] = Depends(require_agent_owner),
     conversations: ConversationQueries | None = Depends(get_conversation_queries),
     forks: SessionForkRepository | None = Depends(get_session_fork_repository),
-    residencies: ResidencyRepository | None = Depends(get_residency_repository),
+    residency_repo: ResidencyRepository | None = Depends(get_residency_repository),
     grant_records: GrantRepository | None = Depends(get_grant_repository),
     grants: Any = Depends(get_grant_client),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
@@ -2160,7 +2165,7 @@ async def fork_agent_job(
     """Fork one settled native session into the same shared Docker workspace."""
     job_store = require_queries(conversations)
     forks = require_session_forks(forks)
-    residencies = require_residencies(residencies)
+    residency_repo = require_residencies(residency_repo)
     grant_records = require_grants(grant_records)
     job = await _owned_job(job_store, job_id, user)
     not_settled = HTTPException(
@@ -2295,7 +2300,7 @@ async def fork_agent_job(
     async def release_failed_fork_residencies(rows: dict[str, Any]) -> None:
         for role in ("source", "target"):
             residency = rows[role]
-            grant_id = await residencies.release_residency(
+            grant_id = await residency_repo.release_residency(
                 thread_id=str(residency["thread_id"]),
                 generation=int(residency["generation"]),
                 host=str(operation["host"]),
@@ -2413,12 +2418,12 @@ async def fork_agent_job(
                 with contextlib.suppress(Exception):
                     await grants.revoke(previous_grant)
         source_credential = await _mint_residency_grant(
-            job_store,
+            grant_records,
             grants,
             row=residencies["source"],
         )
         target_credential = await _mint_residency_grant(
-            job_store,
+            grant_records,
             grants,
             row=residencies["target"],
         )
@@ -3748,7 +3753,7 @@ async def worker_claim(
         await require_entitled_repo(
             claim["repo"],
             claim["user_id"],
-            grants_repo=job_store,
+            grants_repo=require_source_control(source_control),
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
@@ -4020,6 +4025,7 @@ async def worker_establish_shared_sandbox_residency(
     conversations: ConversationQueries | None = Depends(get_conversation_queries),
     sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
     residencies: ResidencyRepository | None = Depends(get_residency_repository),
+    grant_records: GrantRepository | None = Depends(get_grant_repository),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
     grants: Any = Depends(get_grant_client),
 ) -> HostResidencyEstablishResponse:
@@ -4040,7 +4046,7 @@ async def worker_establish_shared_sandbox_residency(
     )
     if row is None:
         raise _lease_lost()
-    credential = await _mint_residency_grant(require_residencies(residencies), grants, row=row)
+    credential = await _mint_residency_grant(require_grants(grant_records), grants, row=row)
     if not credential:
         # Resident processes cannot safely outlive an attempt-scoped token, so
         # renewable residency is all-or-nothing at admission.
@@ -4294,6 +4300,7 @@ async def worker_resume_terminals(
     conversations: ConversationQueries | None = Depends(get_conversation_queries),
     sandboxes: SandboxRepository | None = Depends(get_sandbox_repository),
     hosts: HostPoolRepository | None = Depends(get_host_pool),
+    attempts: AttemptCommands | None = Depends(get_attempt_commands),
 ) -> WorkerAckResponse:
     """Resume retained PTYs, then atomically publish workspace readiness."""
     job_store = require_queries(conversations)
@@ -4335,7 +4342,7 @@ async def worker_resume_terminals(
             },
         ) from exc
     try:
-        event_id = await job_store.append_event(
+        event_id = await require_attempts(attempts).append_event(
             attempt_id=claims["attempt_id"],
             lease_generation=claims["lease_generation"],
             event_type="lifecycle",

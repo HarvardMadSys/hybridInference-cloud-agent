@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    import asyncpg
+
 import cloud_agent.domain.execution as _execution
 import cloud_agent.domain.ids as _ids
 import cloud_agent.storage._sql.getters as _getters
@@ -895,7 +897,7 @@ class PostgresSessionForkRepository(PostgresRepository):
     async def _read_after_commit(
         self,
         job_id: str,
-        read: Callable[..., Awaitable[dict[str, Any] | None]],
+        read: Callable[[asyncpg.Connection], Awaitable[dict[str, Any] | None]],
     ) -> dict[str, Any] | None:
         """Run one shared read on a fresh connection, after this commit.
 
@@ -906,4 +908,4 @@ class PostgresSessionForkRepository(PostgresRepository):
         composition root.
         """
         async with self._pool.acquire() as conn:
-            return await read(conn, job_id)
+            return await read(conn)

@@ -32,6 +32,8 @@ from cloud_agent.api.deps import (
     get_residency_repository,
     get_sandbox_repository,
     require_host_pool,
+    require_residencies,
+    require_sandboxes,
 )
 from cloud_agent.broker_routing import BrokerUrlRefused, probe_broker, validate_broker_url
 from cloud_agent.host_pool import (
@@ -217,6 +219,12 @@ async def heartbeat_host(
     am here", not "I should be taking work" — and a ``disabled`` host cannot
     get this far, because its credential no longer authenticates.
     """
+    # Settled once, here: every later block uses at least one of
+    # these, and an unresolved port is a 503 the SQL layer would
+    # otherwise discover as a NoneType.
+    hosts = require_host_pool(hosts)
+    sandboxes = require_sandboxes(sandboxes)
+    residencies = require_residencies(residencies)
     updated = await hosts.record_host_heartbeat(
         host=host["host"],
         physical_host=body.physical_host,

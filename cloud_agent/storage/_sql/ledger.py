@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import asyncpg
 
+if TYPE_CHECKING:
+    import asyncpg
+
 
 _LEDGER_WINDOW_UNTIL_SQL = """
 LEAST(

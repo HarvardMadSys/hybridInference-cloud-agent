@@ -136,7 +136,12 @@ match-dir = "(?!tests|\\.venv|node_modules|web|migrations|docs).*"
 # checker turned on over a codebase that never had one reports thousands of
 # findings, and the ignore list that silences them is worse than no checker.
 [tool.mypy]
-python_version = "3.10"
+# Matches requires-python (>=3.12) and the interpreter CI runs. The linter pins
+# 3.10 deliberately -- see the ruff comment above -- but a type checker must use
+# the version the code actually runs on, or it reports working 3.12 syntax
+# (`datetime.UTC`, PEP 695) as an error. This was 3.10 when the config landed and
+# produced twelve false errors across the files this gate was turned on for.
+python_version = "3.12"
 files = [
   "cloud_agent/domain",
   "cloud_agent/ports",
