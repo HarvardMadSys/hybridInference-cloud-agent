@@ -20,8 +20,8 @@ from cloud_agent.api import admin_runs
 from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.api.routes import _attempt_resources
 from cloud_agent.ledger import summarize_job_usage
+from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.admin_queries import AdminRunQueries
-from cloud_agent.storage.store import _load_json
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, store as store
@@ -477,7 +477,7 @@ async def test_legacy_large_content_is_bounded_in_sql_and_real_http_reveal_is_au
         )
     assert record["target_user_id"] == job["user_id"]
     assert record["success"] is True
-    assert _load_json(record["details"]) == {
+    assert load_json(record["details"]) == {
         "actor": "admin-token",
         "job_id": job["id"],
         "event_id": event,

@@ -30,13 +30,13 @@ from cloud_agent.admin_usage import (
 )
 from cloud_agent.api.deps import get_agent_job_store, verify_admin_access
 from cloud_agent.api.routes import _require_store
+from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage.admin_usage_queries import (
     AdminUsageQueries,
     UsageQueryTooLarge,
     UsageQueryUnavailable,
 )
-from cloud_agent.storage.store import TERMINAL_STATES
 
 if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore

@@ -42,7 +42,25 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from cloud_agent.capacity_protocol import CapacityHistoryPointWrite, history_window
+from cloud_agent.capacity_protocol import (
+    CAPACITY_HISTORY_MAX_AGE_S,
+    CAPACITY_HISTORY_RETENTION_S,
+    CapacityHistoryPointWrite,
+    history_window,
+)
+from cloud_agent.domain.execution import (
+    ATTEMPT_ABORTED,
+    ATTEMPT_RUNNING,
+    CANCELLED,
+    EVENT_ATTEMPT_ABORTED,
+    EVENT_ATTEMPT_SUPERSEDED,
+    FAILED,
+    QUEUED,
+    RUNNING,
+    SUCCEEDED,
+    TERMINAL_STATES,
+)
+from cloud_agent.domain.requests import check_client_request
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
     ExecutionProfile,
@@ -60,6 +78,8 @@ from cloud_agent.host_pool import (
     transition_allowed,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
+from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.task_titles import fallback_title
 from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
 
@@ -67,51 +87,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 logger = get_logger(__name__)
-
-# Job lifecycle. ``cancel_requested`` is a flag orthogonal to ``state``: it is
-# delivered to the running worker via the heartbeat response, and the worker
-# performs the fenced transition to ``cancelled``.
-QUEUED = "queued"
-RUNNING = "running"
-SUCCEEDED = "succeeded"
-FAILED = "failed"
-CANCELLED = "cancelled"
-TERMINAL_STATES = (SUCCEEDED, FAILED, CANCELLED)
-
-# Attempt lifecycle.
-ATTEMPT_RUNNING = "running"
-ATTEMPT_SUPERSEDED = "superseded"
-ATTEMPT_FINISHED = "finished"
-
-# Control event appended by the reaper when it supersedes an attempt.
-EVENT_ATTEMPT_SUPERSEDED = "attempt_superseded"
-EVENT_ATTEMPT_ABORTED = "attempt_aborted"
-
-# An attempt the platform gave up on before the agent ever started — the job
-# never got its turn, so it must not count toward the retry budget.
-ATTEMPT_ABORTED = "aborted"
-
-
-def request_fingerprint(kind: str, payload: dict[str, Any]) -> str:
-    """Hash what a submission asked for, so a replayed key must ask the same thing.
-
-    A client resending a create or follow-up after a lost response carries the
-    same ``Idempotency-Key``; the fingerprint is how the store tells that
-    resend apart from the same key reused for different content. ``kind``
-    keeps a create and a follow-up from ever fingerprinting alike.
-    """
-    canonical = json.dumps(
-        {"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), default=str
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _check_client_request(client_request_id: str | None, fingerprint: str | None) -> None:
-    """A submission key travels with its fingerprint, or not at all."""
-    if (client_request_id is None) != (fingerprint is None):
-        raise ValueError("client_request_id and client_request_fingerprint come together")
-    if client_request_id is not None and not 1 <= len(client_request_id) <= 256:
-        raise ValueError("client_request_id must be 1-256 characters")
 
 
 def _new_job_id() -> str:
@@ -138,34 +113,6 @@ def _new_session_fork_id() -> str:
 # ``agent_sandboxes`` row per container, one membership row per chat. This is
 # the read shape the worker and owner routes see for a thread's sandbox.
 _NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
-
-# Bound a shared grant to one attempt's execution interval. A subsequent
-# attempt may start before a delayed predecessor is marked finished; clamp
-# that predecessor rather than counting the same requests twice. PostgreSQL
-# LEAST ignores the NULL produced when there is no following attempt.
-#
-# The successor lookup is named separately because a second reader asks a
-# different question of the same definition: whether an attempt's window is
-# still open (no end of its own and no successor) or already bounded.
-# Duplicating the subquery to answer that would be a second algorithm free to
-# drift from this one. ``a`` and ``j`` are the attempt and job aliases.
-NEXT_ATTEMPT_START_SQL = """
-(
-    SELECT MIN(next_attempt.started_at)
-    FROM agent_attempts next_attempt
-    JOIN agent_jobs next_job ON next_job.id = next_attempt.job_id
-    WHERE next_job.thread_id = j.thread_id
-      AND (next_attempt.started_at, next_attempt.id) > (a.started_at, a.id)
-)
-"""
-
-LEDGER_WINDOW_UNTIL_SQL = f"""
-LEAST(
-    COALESCE(a.finished_at, NOW()),
-    {NEXT_ATTEMPT_START_SQL}
-)
-"""
-
 
 _THREAD_SANDBOX_SOURCE = f"""
 (
@@ -231,21 +178,10 @@ _THREAD_SANDBOX_SOURCE = f"""
 """
 
 
-def _load_json(value: Any) -> Any:
-    """Decode a JSONB column that asyncpg may hand back as str or object."""
-    if isinstance(value, (str, bytes)):
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("Failed to decode agent job JSON column", exc_info=True)
-            return None
-    return value
-
-
 def _sandbox_row_to_dict(row: Any) -> dict[str, Any]:
     """Decode the JSON members embedded in the shared sandbox read shape."""
     result = dict(row)
-    result["group_members"] = _load_json(result.get("group_members")) or []
+    result["group_members"] = load_json(result.get("group_members")) or []
     return result
 
 
@@ -322,7 +258,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "published_pr_url": row["published_pr_url"],
         "published_commit_sha": row["published_commit_sha"],
         "detail": row["detail"],
-        "metadata": _load_json(row["metadata"]),
+        "metadata": load_json(row["metadata"]),
         "fork_source_job_id": row["fork_source_job_id"],
         # Resolved once, at creation, against the deployment registry — not
         # re-read per attempt. A job runs with the tool surface it was created
@@ -334,7 +270,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "pinned_at": row.get("pinned_at"),
         "archived_at": row.get("archived_at"),
         "deleted_at": row.get("deleted_at"),
-        "thread_sandbox": _load_json(row.get("thread_sandbox")),
+        "thread_sandbox": load_json(row.get("thread_sandbox")),
     }
 
 
@@ -565,15 +501,6 @@ _CAPACITY_COLUMN_NAMES = (
     "capacity_epoch",
 )
 _HOST_CAPACITY_COLUMNS = ", ".join(_CAPACITY_COLUMN_NAMES)
-
-#: How old a stored observation may be and still be written into history. Three
-#: heartbeat intervals: a host that has stopped reporting must stop adding
-#: points rather than have its last reading copied forward minute after minute.
-CAPACITY_HISTORY_MAX_AGE_S = 90.0
-
-#: History retention. The page serves at most 24 hours, so anything older is
-#: deleted rather than merely hidden.
-CAPACITY_HISTORY_RETENTION_S = 24 * 60 * 60.0
 
 
 class AgentJobStore:
@@ -975,7 +902,7 @@ class AgentJobStore:
         returns ``{"error": "client_request_conflict"}`` instead of someone
         else's task. Both or neither.
         """
-        _check_client_request(client_request_id, client_request_fingerprint)
+        check_client_request(client_request_id, client_request_fingerprint)
         if execution_profile is None:
             execution_profile = default_execution_profile().value
         if client_request_id is not None:
@@ -1084,7 +1011,7 @@ class AgentJobStore:
         the same key under different content returns
         ``{"error": "client_request_conflict"}``.
         """
-        _check_client_request(client_request_id, client_request_fingerprint)
+        check_client_request(client_request_id, client_request_fingerprint)
         if client_request_id is not None:
             replayed = await self.replayed_submission(
                 user_id=user_id,
@@ -1248,7 +1175,7 @@ class AgentJobStore:
                 if reset_reasoning_effort
                 else (reasoning_effort or parent["reasoning_effort"]),
                 QUEUED,
-                json.dumps(_load_json(parent["metadata"]))
+                json.dumps(load_json(parent["metadata"]))
                 if parent["metadata"] is not None
                 else None,
                 client_request_id,
@@ -1290,7 +1217,7 @@ class AgentJobStore:
             operation["source_job_id"],
         )
         result = dict(operation)
-        result["host_receipt"] = _load_json(result.get("host_receipt"))
+        result["host_receipt"] = load_json(result.get("host_receipt"))
         if sandbox is not None:
             sandbox_dict = _sandbox_row_to_dict(sandbox)
             result["thread_sandbox"] = sandbox_dict
@@ -1806,7 +1733,7 @@ class AgentJobStore:
             ):
                 return None
             if operation["state"] == "materialized":
-                prior = _load_json(operation["host_receipt"])
+                prior = load_json(operation["host_receipt"])
                 return (
                     await self._session_fork_details(conn, operation_id)
                     if prior == receipt
@@ -1956,7 +1883,7 @@ class AgentJobStore:
                         turn["published_pr_url"],
                         turn["published_commit_sha"],
                         turn["detail"],
-                        json.dumps(_load_json(turn["metadata"]))
+                        json.dumps(load_json(turn["metadata"]))
                         if turn["metadata"] is not None
                         else None,
                         turn["id"],
@@ -2324,7 +2251,7 @@ class AgentJobStore:
                 after_id,
                 limit,
             )
-        return [{**dict(row), "payload": _load_json(row["payload"])} for row in rows]
+        return [{**dict(row), "payload": load_json(row["payload"])} for row in rows]
 
     async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         """Return everything needed to summarize the thread containing a job.
@@ -2391,7 +2318,7 @@ class AgentJobStore:
                     "seq": row["seq"],
                     "event_type": row["event_type"],
                     "created_at": row["created_at"],
-                    "payload": _load_json(row["payload"]),
+                    "payload": load_json(row["payload"]),
                 }
                 for row in events
             ],
@@ -2428,7 +2355,7 @@ class AgentJobStore:
         return {
             "job_ids": [job_id],
             "attempts": [dict(row) for row in attempts],
-            "events": [{**dict(row), "payload": _load_json(row["payload"])} for row in events],
+            "events": [{**dict(row), "payload": load_json(row["payload"])} for row in events],
         }
 
     async def ledger_rows_for_job(self, *, job_id: str) -> list[dict[str, Any]]:
@@ -2457,7 +2384,7 @@ class AgentJobStore:
                 """,
                 job_id,
             )
-        return [{**dict(row), "snapshot": _load_json(row["snapshot"])} for row in rows]
+        return [{**dict(row), "snapshot": load_json(row["snapshot"])} for row in rows]
 
     async def ledger_rows_for_conversation(
         self, *, job_id: str, user_id: str
@@ -2491,7 +2418,7 @@ class AgentJobStore:
                 job_id,
                 user_id,
             )
-        return [{**dict(row), "snapshot": _load_json(row["snapshot"])} for row in rows]
+        return [{**dict(row), "snapshot": load_json(row["snapshot"])} for row in rows]
 
     async def queue_job_ledger_refresh(self, *, job_id: str) -> int:
         """Queue known references, sharing in-flight work and throttling retries."""
@@ -3232,7 +3159,7 @@ class AgentJobStore:
                 """
             )
         active = None if policy is None else policy["active_host"]
-        selected = {} if policy is None else _load_json(policy["runtime_versions"]) or {}
+        selected = {} if policy is None else load_json(policy["runtime_versions"]) or {}
         return (
             [{**self._host_row_to_dict(row), "is_active": row["host"] == active} for row in rows],
             active,
@@ -3272,7 +3199,7 @@ class AgentJobStore:
                 """
             )
         active = None if policy is None else policy["active_host"]
-        selected = {} if policy is None else _load_json(policy["runtime_versions"]) or {}
+        selected = {} if policy is None else load_json(policy["runtime_versions"]) or {}
         return (
             [{**self._host_row_to_dict(row), "is_active": row["host"] == active} for row in rows],
             active,
@@ -3309,10 +3236,10 @@ class AgentJobStore:
                     "SELECT runtime_versions_available FROM agent_runner_hosts "
                     "WHERE runtime_versions_available IS NOT NULL FOR SHARE"
                 )
-                menus = (_load_json(row[0]) or {} for row in offered)
+                menus = (load_json(row[0]) or {} for row in offered)
                 if not any(version in (menu.get(runtime) or []) for menu in menus):
                     return False
-            selection = dict(_load_json(current) or {})
+            selection = dict(load_json(current) or {})
             if version is None:
                 selection.pop(runtime, None)
             else:
@@ -3411,16 +3338,16 @@ class AgentJobStore:
     def _host_row_to_dict(row: Any) -> dict[str, Any]:
         """Decode a host row's JSON columns; ``credential_hash`` never leaves."""
         host = dict(row)
-        host["labels"] = _load_json(host.get("labels")) or {}
-        host["capabilities"] = _load_json(host.get("capabilities")) or []
+        host["labels"] = load_json(host.get("labels")) or {}
+        host["capabilities"] = load_json(host.get("capabilities")) or []
         # None (never reported) and {} (reported: no labels) stay distinct.
-        host["runtime_versions"] = _load_json(host.get("runtime_versions"))
-        host["runtime_versions_available"] = _load_json(host.get("runtime_versions_available"))
+        host["runtime_versions"] = load_json(host.get("runtime_versions"))
+        host["runtime_versions_available"] = load_json(host.get("runtime_versions_available"))
         # Absent from most projections, so read with ``.get``: a row that never
         # selected the capacity columns must decode to "no observation", not
         # raise a KeyError on a path that has nothing to do with capacity.
         if "capacity_snapshot" in host:
-            host["capacity_snapshot"] = _load_json(host["capacity_snapshot"])
+            host["capacity_snapshot"] = load_json(host["capacity_snapshot"])
         return host
 
     async def issue_enroll_token(
@@ -4247,7 +4174,7 @@ class AgentJobStore:
             )
             active_host = None if policy is None else policy["active_host"]
             selected_versions = (
-                {} if policy is None else _load_json(policy["runtime_versions"]) or {}
+                {} if policy is None else load_json(policy["runtime_versions"]) or {}
             )
             pin_allows_new_sandbox = active_host is None or host == active_host
             host_row = await conn.fetchrow(
@@ -4358,7 +4285,7 @@ class AgentJobStore:
                 "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM agent_attempts WHERE job_id = $1",
                 job_id,
             )
-            thread_sandbox = _load_json(job_row["thread_sandbox"])
+            thread_sandbox = load_json(job_row["thread_sandbox"])
             # A thread keeps the version it started on; see
             # ``resolve_runtime_version``. Read here, inside the claim, because
             # the answer must be the one the attempt is stamped with — the
@@ -5321,7 +5248,7 @@ class AgentJobStore:
                 "attempt_id": row["attempt_id"],
                 "seq": row["seq"],
                 "event_type": row["event_type"],
-                "payload": _load_json(row["payload"]),
+                "payload": load_json(row["payload"]),
                 "created_at": row["created_at"],
             }
             for row in rows
@@ -6483,7 +6410,7 @@ class AgentJobStore:
         if row is None:
             return None
         result = dict(row)
-        result["group_members"] = _load_json(result.get("group_members")) or []
+        result["group_members"] = load_json(result.get("group_members")) or []
         return result
 
     # ── Thread residency (design §7, issue #57) ────────────────────────
@@ -6885,7 +6812,7 @@ class AgentJobStore:
                 row["sandbox_id"],
             )
         result = dict(row)
-        result["members"] = _load_json(result.get("members")) or []
+        result["members"] = load_json(result.get("members")) or []
         return result
 
     async def record_sandbox_snapshot_capture(
@@ -7229,7 +7156,7 @@ class AgentJobStore:
                     "snapshot_id": int(snapshot["snapshot_id"]),
                     "sandbox_id": snapshot["sandbox_id"],
                     "workspace_epoch": int(snapshot["workspace_epoch"]),
-                    "included_job_ids": _load_json(snapshot["included_job_ids"]) or [],
+                    "included_job_ids": load_json(snapshot["included_job_ids"]) or [],
                     "job_id": snapshot["id"],
                     "anchor_job_id": snapshot["id"],
                     "thread_id": snapshot["thread_id"],
@@ -7244,14 +7171,14 @@ class AgentJobStore:
                     "cpu_limit": snapshot["cpu_limit"],
                     "stop_timeout_seconds": int(snapshot["stop_timeout_seconds"]),
                     "resident_slot_capacity": int(snapshot["resident_slot_capacity"]),
-                    "members": _load_json(snapshot["members"]) or [],
+                    "members": load_json(snapshot["members"]) or [],
                     "parent_job_id": snapshot["parent_job_id"],
                     "parent_pr_url": snapshot["parent_pr_url"],
                     "user_id": snapshot["user_id"],
                     "repo": snapshot["repo"],
                     "base_sha": snapshot["base_sha"],
                     "task_prompt": snapshot["task_prompt"],
-                    "metadata": _load_json(snapshot["metadata"]),
+                    "metadata": load_json(snapshot["metadata"]),
                     "patch": snapshot["patch"],
                 }
             return None
@@ -7436,7 +7363,7 @@ class AgentJobStore:
         if row is None:
             return None
         result = dict(row)
-        result["members"] = _load_json(result.get("members")) or []
+        result["members"] = load_json(result.get("members")) or []
         return result
 
     async def complete_snapshot_base_import(self, *, snapshot_id: int, commit_sha: str) -> bool:

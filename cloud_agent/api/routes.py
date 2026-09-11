@@ -56,6 +56,8 @@ from cloud_agent.broker_routing import (
     broker_for_job,
     hydrate_shared_broker,
 )
+from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
+from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.entitlement import (
     REPO_PATTERN,
     RepoNotAllowed,
@@ -159,7 +161,6 @@ from cloud_agent.source_control import (
     github_authorization_url,
     issue_oauth_state,
 )
-from cloud_agent.storage.store import RUNNING, SUCCEEDED, TERMINAL_STATES, request_fingerprint
 from cloud_agent.task_titles import generate_thread_title
 from cloud_agent.terminal_coordination import resume_settled_terminal
 from cloud_agent.thread_stats import summarize_thread

@@ -15,7 +15,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.storage.store import _load_json
+from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -231,7 +231,7 @@ class AdminUsageQueries:
             [
                 {
                     **dict(row),
-                    "snapshot": _load_json(row["snapshot"]) if row["id"] is not None else None,
+                    "snapshot": load_json(row["snapshot"]) if row["id"] is not None else None,
                 }
                 for row in rows
             ],

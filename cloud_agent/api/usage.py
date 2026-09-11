@@ -8,12 +8,12 @@ from fastapi import APIRouter, Depends
 
 from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.api.routes import _owned_job, _require_store, require_agent_owner
+from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.ledger import (
     JobUsageResponse,
     summarize_conversation,
     summarize_job_usage,
 )
-from cloud_agent.storage.store import TERMINAL_STATES
 
 if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore

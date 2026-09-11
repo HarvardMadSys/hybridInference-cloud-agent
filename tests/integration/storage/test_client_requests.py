@@ -15,7 +15,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-from cloud_agent.storage.store import request_fingerprint
+from cloud_agent.domain.requests import request_fingerprint
 from tests.integration.storage.test_agent_job_store import (
     _create_job,
     store as _shared_store,  # noqa: F401

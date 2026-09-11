@@ -35,9 +35,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.capacity_protocol import history_point_write_from_row
+from cloud_agent.capacity_protocol import CAPACITY_HISTORY_RETENTION_S, history_point_write_from_row
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.storage.store import CAPACITY_HISTORY_RETENTION_S
 
 if TYPE_CHECKING:
     from collections.abc import Callable

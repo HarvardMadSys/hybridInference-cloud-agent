@@ -24,11 +24,9 @@ from cloud_agent.admin_observability import (
     encode_cursor,
 )
 from cloud_agent.schemas import AttemptResources, ProcessObservation, ToolCallResources
-from cloud_agent.storage.store import (
-    LEDGER_WINDOW_UNTIL_SQL,
-    NEXT_ATTEMPT_START_SQL,
-    _load_json,
-)
+from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
+from cloud_agent.storage._sql.ledger import LEDGER_WINDOW_UNTIL_SQL
+from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.thread_stats import _TOKEN_KEY_GROUPS
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES, bound_event_payload
 
@@ -338,7 +336,7 @@ class AdminRunQueries:
         return {
             "job_ids": [job_id],
             "attempts": [dict(row) for row in attempts],
-            "events": [{**dict(row), "payload": _load_json(row["payload"])} for row in rows],
+            "events": [{**dict(row), "payload": load_json(row["payload"])} for row in rows],
         }
 
     async def activity(
@@ -469,6 +467,6 @@ class AdminRunQueries:
         if row is None:
             return None
         result = dict(row)
-        result["payload"] = bound_event_payload(_load_json(row["payload"]) or {})
+        result["payload"] = bound_event_payload(load_json(row["payload"]) or {})
         result["truncated"] = result["payload"].get("truncated") is True
         return result

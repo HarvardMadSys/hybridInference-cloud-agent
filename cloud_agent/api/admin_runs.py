@@ -24,12 +24,12 @@ from cloud_agent.admin_observability import (
 )
 from cloud_agent.api.deps import get_agent_job_store, get_client_ip, verify_admin_access
 from cloud_agent.api.routes import _attempt_duration_ms, _attempt_resources, _require_store
+from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry
 from cloud_agent.session_statistics import summarize_session_statistics
 from cloud_agent.storage.admin_queries import AdminRunQueries
-from cloud_agent.storage.store import TERMINAL_STATES
 
 if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore

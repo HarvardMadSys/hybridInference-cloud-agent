@@ -63,6 +63,15 @@ MAX_CAPACITY_BYTES = 8 * 1024
 #: last reading should keep being drawn in green.
 FRESH_AFTER_SECONDS = 90.0
 
+#: How old a stored observation may be and still be written into history. Three
+#: heartbeat intervals: a host that has stopped reporting must stop adding
+#: points rather than have its last reading copied forward minute after minute.
+CAPACITY_HISTORY_MAX_AGE_S = 90.0
+
+#: History retention. The page serves at most 24 hours, so anything older is
+#: deleted rather than merely hidden.
+CAPACITY_HISTORY_RETENTION_S = 24 * 60 * 60.0
+
 #: One historical point per observation minute, and the windows the API serves.
 HISTORY_RESOLUTION_SECONDS = 60
 HISTORY_RANGES: dict[str, int] = {"1h": 3600, "6h": 21600, "24h": 86400}
