@@ -9,6 +9,7 @@ transaction ownership it has here.
 from __future__ import annotations
 
 from cloud_agent.storage.repositories.audit import PostgresAuditRepository
+from cloud_agent.storage.repositories.conversation_commands import PostgresConversationCommands
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
@@ -21,6 +22,7 @@ from cloud_agent.storage.repositories.source_control import PostgresSourceContro
 
 __all__ = [
     "PostgresAuditRepository",
+    "PostgresConversationCommands",
     "PostgresConversationQueries",
     "PostgresCredentialQueries",
     "PostgresExecutionQueries",
