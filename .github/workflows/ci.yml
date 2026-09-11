@@ -220,6 +220,15 @@ jobs:
         continue-on-error: true
         run: uv run pydocstyle cloud_agent cloud_agent_host
 
+      # Blocking, and the store is inside it on purpose: a checker that cannot
+      # see the class it validates callers against proves nothing about the
+      # wiring, which is the point of cloud_agent/ports. Scope and strictness
+      # live in [tool.mypy]; this only runs it.
+      - name: Mypy
+        id: mypy
+        continue-on-error: true
+        run: uv run mypy
+
       # `continue-on-error` keeps a failed check from failing the job, so
       # without this the job would be green with a red step inside it. Same
       # shape as `CI Gate` below, for the same reason.
@@ -229,6 +238,7 @@ jobs:
             ruff-format=${{ steps.ruff_format.outcome }}
             ruff-lint=${{ steps.ruff_lint.outcome }}
             pydocstyle=${{ steps.pydocstyle.outcome }}
+            mypy=${{ steps.mypy.outcome }}
         run: |
           set -euo pipefail
           failed=0

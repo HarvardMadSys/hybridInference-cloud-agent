@@ -35,6 +35,11 @@ lint:  ## Run linters (ruff format check, ruff lint, pydocstyle)
 	$(UV_RUN) pydocstyle cloud_agent cloud_agent_host
 	@echo "$(GREEN)OK Linting passed$(RESET)"
 
+typecheck:  ## Type-check the control plane (mypy; config in pyproject.toml)
+	@echo "$(YELLOW)Running mypy...$(RESET)"
+	$(UV_RUN) mypy
+	@echo "$(GREEN)OK Type check passed$(RESET)"
+
 test:  ## Run tests (exclude external and db-dependent)
 	@echo "$(YELLOW)Running tests (not external, not dbtest)...$(RESET)"
 	$(UV_RUN) pytest -q -m "not external and not dbtest"
@@ -46,7 +51,7 @@ test-db:  ## Run the dbtest tier (needs Postgres; see TEST_DB_* in ENVIRONMENT.m
 test-all:  ## Run all tests except external (includes db-dependent)
 	$(UV_RUN) pytest -q -m "not external"
 
-check: format lint test  ## Format, lint, and test — the gate every task must pass
+check: format lint typecheck test  ## Format, lint, type-check, and test — the gate every task must pass
 
 clean:  ## Remove caches and build artifacts
 	rm -rf .pytest_cache .ruff_cache .coverage htmlcov build dist *.egg-info
