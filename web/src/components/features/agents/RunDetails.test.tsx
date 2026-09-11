@@ -326,6 +326,43 @@ describe('RunDetails', () => {
     expect(getAgentJobUsage).toHaveBeenCalledTimes(3);
   });
 
+  it('waits out a scheduled refresh instead of spending its reads before it', async () => {
+    vi.useFakeTimers();
+    // A terminal turn: its 30-second refresh has just completed and the server
+    // scheduled the last one five minutes after the turn finished.
+    const openedAt = Date.parse('2026-09-11T10:00:30.000Z');
+    const refreshAt = '2026-09-11T10:05:00.000Z';
+    const due = Date.parse(refreshAt);
+    vi.setSystemTime(new Date(openedAt));
+    const reads: number[] = [];
+    vi.mocked(getAgentJobUsage).mockImplementation(async () => {
+      reads.push(Date.now());
+      return Date.now() >= due ? usage() : usage({ next_refresh_at: refreshAt });
+    });
+    await act(async () => {
+      render(
+        <RunDetails
+          jobId="ledger-far-schedule"
+          turnNo={2}
+          tab="usage"
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />,
+      );
+    });
+    expect(reads).toHaveLength(1);
+
+    // Polling towards the schedule would spend the panel's reads long before
+    // the answer exists. The read belongs at the time the server named.
+    for (let elapsed = 0; elapsed < 285_000; elapsed += 15_000) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+    }
+    expect(reads).toHaveLength(2);
+    expect(reads[1]).toBeGreaterThanOrEqual(due);
+  });
+
   it('revalidates an unfinished cached ledger when the panel is reopened', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(pendingUsage());
     const element = (

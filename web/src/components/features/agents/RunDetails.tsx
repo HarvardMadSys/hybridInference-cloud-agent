@@ -69,30 +69,57 @@ const LEDGER_LABEL: Record<AgentJobUsageApi['ledger']['status'], string> = {
  */
 const usageCache = new Map<string, AgentJobUsageApi | null>();
 
-/** How long to wait before reading a ledger that has not settled yet. */
+/** How long to wait before reading a ledger whose work has not finished. */
 const LEDGER_POLL_MS = 15_000;
-/** Floor for a scheduled read, so an overdue timestamp cannot spin. */
+/** Floor for an overdue read, so a timestamp in the past cannot spin. */
 const LEDGER_POLL_FLOOR_MS = 1_000;
-/** Reads to spend on a queued refresh before leaving its state as it is. */
-const MAX_LEDGER_POLLS = 8;
+/**
+ * Reads to spend retrying work that should already have finished, and separate
+ * scheduled reads to honor.
+ *
+ * The two are not the same kind of wait. A retry is a guess that the worker is
+ * late; a schedule is the server naming the time it will have an answer, and a
+ * terminal turn's schedule runs half a minute and then five minutes after it
+ * finished. Spending one budget on both means polling towards a five-minute
+ * refresh until the budget runs out before the answer exists.
+ */
+const MAX_LEDGER_RETRIES = 8;
+const MAX_LEDGER_WAITS = 8;
+
+/** A read the panel still owes this ledger, and what it is waiting for. */
+interface LedgerRead {
+  delayMs: number;
+  /** True for a retry of overdue work, false for a schedule to wait out. */
+  retry: boolean;
+}
 
 /**
- * How long until this ledger is worth reading again, or null when it is not.
+ * When this ledger should be read again, or null when it has settled.
  *
  * A refresh request only queues the work, and the answer to that request is the
  * snapshot from before the worker ran, so a read after it is what turns the
  * queued answer into the finished one. The server also schedules its own
  * refreshes: an `available` snapshot whose `next_refresh_at` is still ahead is
- * going to change, and stopping here is what left a stale total in the cache
+ * going to change, and stopping at it is what left a stale total in the cache
  * for the next open.
  */
-function ledgerReadDelay(usage: AgentJobUsageApi | null | undefined, now: number): number | null {
+function ledgerNextRead(
+  usage: AgentJobUsageApi | null | undefined,
+  now: number,
+): LedgerRead | null {
   if (!usage) return null;
-  if (usage.ledger.refreshing || usage.ledger.status === 'pending') return LEDGER_POLL_MS;
+  if (usage.ledger.refreshing || usage.ledger.status === 'pending') {
+    return { delayMs: LEDGER_POLL_MS, retry: true };
+  }
   if (!usage.ledger.next_refresh_at) return null;
   const due = Date.parse(usage.ledger.next_refresh_at);
   if (!Number.isFinite(due)) return null;
-  return Math.min(Math.max(due - now, LEDGER_POLL_FLOOR_MS), LEDGER_POLL_MS);
+  // A schedule ahead is worth waiting out exactly: the answer does not exist
+  // before it, so reading earlier only spends budget on the same snapshot.
+  if (due > now) return { delayMs: due - now, retry: false };
+  // Overdue, so the worker is late: read now, counted as a retry so a server
+  // that keeps reporting an overdue schedule cannot spin.
+  return { delayMs: LEDGER_POLL_FLOOR_MS, retry: true };
 }
 
 function useJobUsage(jobId: string): {
@@ -109,18 +136,20 @@ function useJobUsage(jobId: string): {
   const [error, setError] = useState<string | null>(null);
   const [read, setRead] = useState(0);
   const requested = useRef(false);
-  const polls = useRef(0);
+  const retries = useRef(0);
+  const waits = useRef(0);
   const currentJob = useRef(jobId);
 
   useEffect(() => {
     if (currentJob.current !== jobId) {
       currentJob.current = jobId;
       requested.current = false;
-      polls.current = 0;
+      retries.current = 0;
+      waits.current = 0;
     }
     const known = usageCache.get(jobId);
-    const knownDelay = ledgerReadDelay(known, Date.now());
-    const mustRead = requested.current || known === undefined || knownDelay !== null;
+    const mustRead =
+      requested.current || known === undefined || ledgerNextRead(known, Date.now()) !== null;
     requested.current = false;
     setUsage(known ?? null);
     setLoaded(known !== undefined);
@@ -133,10 +162,14 @@ function useJobUsage(jobId: string): {
         usageCache.set(jobId, result);
         setUsage(result);
         setError(null);
-        const delay = ledgerReadDelay(result, Date.now());
-        if (delay !== null && polls.current < MAX_LEDGER_POLLS) {
-          polls.current += 1;
-          timer = setTimeout(() => setRead((value) => value + 1), delay);
+        const next = ledgerNextRead(result, Date.now());
+        const budget = next?.retry
+          ? retries.current < MAX_LEDGER_RETRIES
+          : waits.current < MAX_LEDGER_WAITS;
+        if (next && budget) {
+          if (next.retry) retries.current += 1;
+          else waits.current += 1;
+          timer = setTimeout(() => setRead((value) => value + 1), next.delayMs);
         }
       })
       .catch((cause: unknown) => {
@@ -155,7 +188,9 @@ function useJobUsage(jobId: string): {
 
   const refresh = useCallback(() => {
     setRefreshing(true);
-    polls.current = 0;
+    // A reader who asks for fresh accounting restarts the panel's own budget.
+    retries.current = 0;
+    waits.current = 0;
     refreshAgentJobUsage(jobId)
       .then((result) => {
         usageCache.set(jobId, result);
