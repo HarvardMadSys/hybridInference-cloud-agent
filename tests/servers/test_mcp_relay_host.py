@@ -24,8 +24,10 @@ worse than the per-connection one:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -566,3 +568,142 @@ class TestTheBarePrefix:
 def agent_mcp_relay_app_router() -> Any:
     """The relay router, for a case that needs its own store overrides."""
     return agent_mcp_router.router
+
+
+class FakeUpstream:
+    """A stand-in MCP server, at the JSON-RPC level.
+
+    The merged endpoint is a *client* of the servers behind it, so the only way
+    to know the host path works is to let it run against something that speaks
+    the protocol back. The transport is mocked rather than the host, which is
+    what keeps the protocol, the era detection and the result rendering inside
+    the test's blast radius.
+    """
+
+    def __init__(self, tools: dict[str, str] | None = None) -> None:
+        """Serve ``tools`` (name to reply text) from one server."""
+        self.tools = tools or {"get_issue": "issue 7: a bug"}
+        self.calls: list[dict[str, Any]] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        """Answer one JSON-RPC POST the way a Streamable HTTP server would."""
+        body = json.loads(request.content or b"{}")
+        self.calls.append({"method": body.get("method"), "params": body.get("params")})
+        method = body.get("method")
+        if method == "initialize":
+            result: Any = {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "fake", "version": "1"},
+            }
+        elif method == "tools/list":
+            result = {
+                "tools": [
+                    {
+                        "name": name,
+                        "description": f"{name} from the fake",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                    for name in self.tools
+                ]
+            }
+        elif method == "tools/call":
+            name = str((body.get("params") or {}).get("name") or "")
+            result = {"content": [{"type": "text", "text": self.tools.get(name, "?")}]}
+        else:
+            # A server that predates the stateless revision says "no such
+            # method" with the ordinary JSON-RPC code, and that is what tells
+            # the era detection to fall back to the handshake rather than
+            # conclude it is talking to a modern server that refuses this.
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body.get("id"),
+                    "error": {"code": -32601, "message": "method not found"},
+                },
+                headers={"content-type": "application/json"},
+            )
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body.get("id"), "result": result},
+            headers={"content-type": "application/json"},
+        )
+
+
+@pytest.fixture()
+def real_host(monkeypatch: pytest.MonkeyPatch) -> FakeUpstream:
+    """Drive the merged endpoint through the real host against a fake server.
+
+    Two things are arranged rather than mocked away. The connection's URL is an
+    https loopback literal, so the egress check keeps its default scheme rule
+    and needs no resolver; only the private-address rule is widened, the way a
+    deployment with a private connector bridge widens it. The transport is then
+    mocked, so everything above it -- version negotiation, ``tools/list``, the
+    call itself, the result rendering -- is the code that runs in production.
+    """
+    upstream = FakeUpstream()
+    monkeypatch.setenv("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "1")
+    monkeypatch.setattr(
+        "cloud_agent.mcp.transports.build_client",
+        lambda config: httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler)),
+    )
+    # ``_host()`` caches its instance; None makes it build one under the patched
+    # policy, and monkeypatch restores the global afterwards.
+    monkeypatch.setattr(agent_mcp_router, "_HOST_INSTANCE", None)
+    return upstream
+
+
+class TestAgainstARealProtocolHost:
+    """The merged endpoint driving the host for real, not a stub of it."""
+
+    def _store_with_loopback(self) -> FakeStore:
+        """One connection whose address the widened policy allows."""
+        return FakeStore(
+            connections={7: _connection(7, "GitHub", url="https://127.0.0.1:9/mcp")},
+            bindings=[
+                _binding(
+                    7,
+                    "github",
+                    rules={"get_issue": {"policy": "allow", "fingerprint": ""}},
+                )
+            ],
+            snapshots={7: _snapshot(7, "get_issue")},
+        )
+
+    async def test_a_call_travels_through_the_host_to_the_upstream(
+        self, real_host: FakeUpstream
+    ) -> None:
+        """The namespaced name reaches the upstream as its own, and back."""
+        store = self._store_with_loopback()
+        app = FastAPI()
+        app.include_router(agent_mcp_router.router)
+        app.dependency_overrides[get_agent_job_store] = lambda: store
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+            response = await api.post(
+                _HOST_URL,
+                json=_rpc("tools/call", name="github__get_issue", arguments={"number": 7}),
+                headers=_auth(),
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "result" in body, body
+        assert body["result"]["content"][0]["text"] == "issue 7: a bug"
+        # The upstream was spoken to by the host, in its own vocabulary.
+        methods = [call["method"] for call in real_host.calls]
+        assert "initialize" in methods
+        called = next(call for call in real_host.calls if call["method"] == "tools/call")
+        assert called["params"]["name"] == "get_issue"
+        assert called["params"]["arguments"] == {"number": 7}
+
+    async def test_the_catalogue_the_host_reports_is_namespaced(
+        self, real_host: FakeUpstream
+    ) -> None:
+        """Discovery goes through the host too, and the alias is the prefix."""
+        store = self._store_with_loopback()
+        app = FastAPI()
+        app.include_router(agent_mcp_router.router)
+        app.dependency_overrides[get_agent_job_store] = lambda: store
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+            response = await api.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
+        assert [tool["name"] for tool in _result(response)["tools"]] == ["github__get_issue"]

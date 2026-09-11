@@ -736,10 +736,14 @@ async def connect_streamable(
 
     - a discovery result, or any MCP-reserved error code, means a modern server;
       an unsupported-version error is retried once with a version it advertises;
-    - a rejected request with no readable MCP error in its body means a server
-      that predates the per-request shape, so the handshake is used instead.
+    - a rejected request whose body carries no readable MCP error means a server
+      that predates the per-request shape, so the handshake is used instead;
+    - a plain ``method not found`` means the same thing, whatever status carried
+      it. A server that has never heard of ``server/discover`` says so with the
+      ordinary JSON-RPC code, and treating that as a modern refusal would fail
+      the connection against every server the handshake era actually covers.
 
-    A server that answers neither way is reported with the error from the
+    A server that answers none of these ways is reported with the error from the
     attempt that got furthest, rather than with a guess about which era it is.
     """
     owned = client is None
@@ -766,6 +770,16 @@ async def connect_streamable(
                 await http.aclose()
             raise
         modern_error = exc
+    except JsonRpcError as exc:
+        if exc.code in MCP_RESERVED_CODES:
+            # An MCP-reserved code over a success status is still a modern
+            # server describing this request, not a legacy one failing to
+            # understand it.
+            if owned:
+                await http.aclose()
+            raise
+        # Anything else is the pre-stateless way of saying "no such method".
+        modern_error = TransportError(str(exc), kind="protocol_incompatible")
     except BaseException:
         if owned:
             await http.aclose()
