@@ -11,12 +11,9 @@ This module is the deciding part, kept free of HTTP so it can be tested by
 calling it. It answers two questions:
 
 - **May this request proceed?** A ``tools/call`` naming a tool outside the
-  session binding's allowed set is refused here, before anything leaves the
-  relay. That is the enforcement point that matters: the agent is driving on
-  untrusted repository content, so "the model was told not to" is not a
-  control. An empty set is not a wildcard -- it means the session enabled
-  nothing on that connection, which is the shape the picker produces when a
-  user turns a server off.
+  server's allowlist is refused here, before anything leaves the relay. That
+  is the enforcement point that matters: the agent is driving on untrusted
+  repository content, so "the model was told not to" is not a control.
 - **What does the agent get to see?** A ``tools/list`` result is filtered on
   the way back, so a tool that is not allowed is not merely refused when called
   — it is never advertised. A model cannot be talked into using a tool it was
@@ -43,7 +40,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from cloud_agent.mcp.models import McpServer
+    from cloud_agent.mcp_registry import McpServer
 
 # JSON-RPC's "method not found". A blocked tool is reported as an ordinary
 # protocol error rather than a transport failure, so the agent CLI surfaces it
@@ -99,11 +96,8 @@ def plan_request(body: bytes, server: McpServer) -> RequestPlan:
     ``tools/call`` it failed to notice, since noticing one is the same parse,
     and the response filter is independent of this decision.
     """
-    # No early return for an "unfiltered" server: there is no such server. An
-    # empty reachable set means nothing is callable, and a body that cannot be
-    # parsed is still forwarded untouched -- the response filter is independent
-    # of this decision, so nothing is weakened by letting the upstream answer a
-    # malformed request itself.
+    if server.unfiltered:
+        return RequestPlan()
     try:
         document = json.loads(body or b"{}")
     except (json.JSONDecodeError, ValueError):
@@ -141,42 +135,29 @@ def plan_request(body: bytes, server: McpServer) -> RequestPlan:
 
 
 def filter_message(payload: Any, server: McpServer) -> Any:
-    """Drop what this session cannot reach from anything shaped like a listing.
-
-    All three surfaces, not only tools. The design gives resources and prompts
-    their own scopes, and a listing that shows a resource the session turned off
-    is the same defect as one that shows a turned-off tool: the model is told it
-    can do something it cannot, and the next call fails for no visible reason.
-    """
+    """Drop disallowed tools from anything shaped like a ``tools/list`` result."""
     if not isinstance(payload, dict):
         return payload
     result = payload.get("result")
     if not isinstance(result, dict):
         return payload
-    filtered = result
-    for key, field, allowed in (
-        ("tools", "name", server.allows),
-        ("resources", "uri", server.allows_resource),
-        ("resourceTemplates", "uriTemplate", server.allows_resource),
-        ("prompts", "name", server.allows_prompt),
-    ):
-        entries = filtered.get(key)
-        if not isinstance(entries, list):
-            continue
-        kept = [
-            entry
-            for entry in entries
-            if not isinstance(entry, dict) or allowed(str(entry.get(field) or ""))
-        ]
-        if len(kept) != len(entries):
-            filtered = {**filtered, key: kept}
-    if filtered is result:
+    tools = result.get("tools")
+    if not isinstance(tools, list):
         return payload
-    return {**payload, "result": filtered}
+    kept = [
+        tool
+        for tool in tools
+        if not isinstance(tool, dict) or server.allows(str(tool.get("name") or ""))
+    ]
+    if len(kept) == len(tools):
+        return payload
+    return {**payload, "result": {**result, "tools": kept}}
 
 
 def filter_json_body(body: bytes, server: McpServer) -> bytes:
     """Filter a buffered ``application/json`` reply, if it needs it."""
+    if server.unfiltered:
+        return body
     try:
         document = json.loads(body or b"null")
     except (json.JSONDecodeError, ValueError):
@@ -196,6 +177,8 @@ def filter_sse_frame(frame: bytes, server: McpServer) -> bytes:
     upstream wrote them: the transport is its business, and only the tool list
     is ours.
     """
+    if server.unfiltered:
+        return frame
     lines = frame.split(b"\n")
     data = b"\n".join(line[5:].lstrip() for line in lines if line.startswith(b"data:"))
     if not data:

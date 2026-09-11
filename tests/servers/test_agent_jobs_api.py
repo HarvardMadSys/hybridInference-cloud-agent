@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar
@@ -37,10 +38,11 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent import broker_routing
+from cloud_agent import broker_routing, mcp_catalogue
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api.deps import get_agent_job_store
-from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.mcp_catalogue import McpProvider
+from cloud_agent.mcp_registry import mcp_cipher
 from cloud_agent.tokens import mint_worker_token
 
 pytestmark = pytest.mark.asyncio
@@ -49,8 +51,6 @@ _OWNER = "user-owner"
 _OTHER = "user-other"
 _MCP_ENCRYPTION_KEY = "api-test-mcp-encryption-key"
 _MCP_CIPHER = mcp_cipher(_MCP_ENCRYPTION_KEY)
-_UPSTREAM_URL = "https://mcp.example.com/mcp/readonly"
-_UPSTREAM_TOKEN = "ghu_owner_secret"
 
 
 class FakeAgentJobStore:
@@ -73,208 +73,48 @@ class FakeAgentJobStore:
         self.released: list[tuple[str, int]] = []
         self.runner_hosts: dict[str, dict[str, Any]] = {}
         self.active_host: str | None = None
-        self.mcp_connections: dict[int, dict[str, Any]] = {}
-        self.mcp_capabilities: dict[int, dict[str, Any]] = {}
-        self.mcp_bindings: dict[str, list[dict[str, Any]]] = {}
+        self.mcp_connections: dict[str, list[dict[str, Any]]] = {}
         self.session_forks: dict[str, dict[str, Any]] = {}
-        self._next_connection = 1
         self._next_event_id = 1
         self._next_job = 1
 
     # -- MCP connections --
     #
-    # Keyed by immutable connection id, which is what a binding names. Labels
-    # are display only: two connections to the same service are told apart by
-    # id, and nothing here resolves by name.
+    # Keyed by user, because that is the only way the real store can be asked.
 
-    async def list_mcp_connections(
-        self, *, user_id: str, include_deleted: bool = False
-    ) -> list[dict[str, Any]]:
-        rows = [row for row in self.mcp_connections.values() if row["user_id"] == user_id]
-        if not include_deleted:
-            rows = [row for row in rows if row["deleted_at"] is None]
-        return sorted(rows, key=lambda row: (row["label"], row["id"]))
+    async def list_mcp_connections(self, *, user_id: str) -> list[dict[str, Any]]:
+        return sorted(self.mcp_connections.get(user_id, []), key=lambda row: row["server"])
 
-    async def get_mcp_connection(
-        self, *, connection_id: int, user_id: str | None = None
-    ) -> dict[str, Any] | None:
-        row = self.mcp_connections.get(int(connection_id))
-        if row is None or (user_id is not None and row["user_id"] != user_id):
-            return None
-        return row
-
-    async def get_mcp_capabilities(self, *, connection_id: int) -> dict[str, Any] | None:
-        return self.mcp_capabilities.get(int(connection_id))
-
-    async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
-        return list(self.mcp_bindings.get(thread_id, []))
-
-    async def replace_mcp_bindings(self, *, thread_id: str, bindings: list[dict[str, Any]]) -> None:
-        self.mcp_bindings[thread_id] = [
-            self._thread_binding(thread_id, binding) for binding in bindings
-        ]
-
-    async def disconnect_mcp_connection(self, *, connection_id: int, user_id: str) -> bool:
-        """Tombstone one connection and clear its secret, as the store does."""
-        row = await self.get_mcp_connection(connection_id=connection_id, user_id=user_id)
-        if row is None or row["deleted_at"] is not None:
-            return False
-        row.update(
-            deleted_at=datetime.now(timezone.utc),
-            status="disabled",
-            access_token_ciphertext=None,
-            refresh_token_ciphertext=None,
-            client_secret_ciphertext=None,
-            expires_at=None,
-            authorization_epoch=row["authorization_epoch"] + 1,
-            credential_version=row["credential_version"] + 1,
-            oauth_generation=row["oauth_generation"] + 1,
-        )
-        return True
+    async def delete_mcp_connection(self, *, user_id: str, server: str) -> bool:
+        rows = self.mcp_connections.get(user_id, [])
+        remaining = [row for row in rows if row["server"] != server]
+        self.mcp_connections[user_id] = remaining
+        return len(remaining) != len(rows)
 
     def connect_mcp(
         self,
         *,
         user_id: str,
-        label: str = "GitHub",
-        template: str | None = "github",
-        url: str | None = _UPSTREAM_URL,
-        auth_kind: str = "static",
-        token: str | None = _UPSTREAM_TOKEN,
+        server: str,
+        token: str = "ghu_owner_secret",
         expires_at: datetime | None = None,
-        tools: tuple[str, ...] = ("get_issue",),
-        status: str = "active",
-        error_kind: str = "none",
-        error_detail: str | None = None,
-        deleted_at: datetime | None = None,
-    ) -> dict[str, Any]:
-        """Seed one connection and its discovery result, as the flows will.
-
-        A discovery result is seeded with the row because resolution reads the
-        two together: a connection with no snapshot offers nothing, and a case
-        about *which* tools a job may use would otherwise pass for the wrong
-        reason.
-        """
-        connection_id = self._next_connection
-        self._next_connection += 1
-        row: dict[str, Any] = {
-            "id": connection_id,
-            "user_id": user_id,
-            "label": label,
-            "template": template,
-            "transport": "streamable-http",
-            "location": "remote",
-            "url": url,
-            "launch_spec": None,
-            "auth_kind": auth_kind,
-            "auth_config": {"header_name": "Authorization", "scheme": "Bearer"},
-            "connector_id": None,
-            "status": status,
-            "error_kind": error_kind,
-            "error_detail": error_detail,
-            "access_token_ciphertext": _MCP_CIPHER.encrypt(token) if token else None,
-            "refresh_token_ciphertext": None,
-            "client_secret_ciphertext": None,
-            "expires_at": expires_at,
-            "scopes": [],
-            "issuer": None,
-            "resource": None,
-            "refresh_rotates": False,
-            "client_auth_method": None,
-            "registration": None,
-            "credential_version": 1,
-            "config_revision": 1,
-            "authorization_epoch": 1,
-            "oauth_generation": 0,
-            "capability_revision": 1,
-            "account_label": "octocat",
-            "last_login_at": None,
-            "created_at": None,
-            "updated_at": None,
-            "deleted_at": deleted_at,
-        }
-        self.mcp_connections[connection_id] = row
-        if tools:
-            self.mcp_capabilities[connection_id] = {
-                "connection_id": connection_id,
-                "capability_revision": 1,
-                "config_revision": 1,
-                "protocol_version": "2026-07-28",
-                "server_name": template or label,
-                "server_version": "1.0",
-                "tools": [
-                    {
-                        "name": name,
-                        "description": name,
-                        "input_schema": {"type": "object"},
-                        "annotations": {},
-                    }
-                    for name in tools
-                ],
-                "resources": [],
-                "resource_templates": [],
-                "prompts": [],
-                "support": {},
-                "discovered_at": None,
+    ) -> None:
+        """Seed a connection the way the OAuth flow will once it lands."""
+        self.mcp_connections.setdefault(user_id, []).append(
+            {
+                "server": server,
+                "account_label": "octocat",
+                "access_token_ciphertext": _MCP_CIPHER.encrypt(token),
+                "refresh_token_ciphertext": None,
+                "expires_at": expires_at,
             }
-        return row
-
-    def _thread_binding(self, thread_id: str, binding: dict[str, Any]) -> dict[str, Any]:
-        """One binding row as ``list_mcp_bindings`` returns it."""
-        row = self.mcp_connections[int(binding["connection_id"])]
-        return {
-            "thread_id": thread_id,
-            "connection_id": int(binding["connection_id"]),
-            "alias": str(binding["alias"]),
-            "enabled": bool(binding.get("enabled", True)),
-            "selection_pending": bool(binding.get("selection_pending", False)),
-            "config_revision": int(binding["config_revision"]),
-            "authorization_epoch": int(binding["authorization_epoch"]),
-            "capability_revision": int(binding["capability_revision"]),
-            "policy_revision": int(binding.get("policy_revision", 1)),
-            "rules": dict(binding.get("rules") or {}),
-            "resource_rules": dict(binding.get("resource_rules") or {}),
-            "prompt_rules": dict(binding.get("prompt_rules") or {}),
-            "label": row["label"],
-            "transport": row["transport"],
-            "location": row["location"],
-            "connection_status": row["status"],
-            "error_kind": row["error_kind"],
-            "error_detail": row["error_detail"],
-            "deleted_at": row["deleted_at"],
-        }
-
-    def _binding_summary(self, binding: dict[str, Any]) -> dict[str, Any]:
-        """One binding as a job response reports it: who, by alias and label."""
-        row = self.mcp_connections[int(binding["connection_id"])]
-        return {
-            "connection_id": int(binding["connection_id"]),
-            "alias": str(binding["alias"]),
-            "label": row["label"],
-        }
-
-    async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
-        """No GitLab account connected, for the same reason as the grants above."""
-        del user_id
-        return None
-
-    async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
-        """No GitHub App installations in these tests, which is the usual state.
-
-        The aggregate integrations endpoint reads them, so the fake has to
-        answer: the cases here are about MCP connections, and an absent method
-        would fail them for a reason that has nothing to do with what they
-        check.
-        """
-        del user_id
-        return []
+        )
 
     # -- owner surface --
     async def create_job(self, **kwargs: Any) -> dict[str, Any]:
         job_id = f"ajob_{self._next_job:04d}"
         self._next_job += 1
         thread_id = f"athr_{job_id}"
-        bindings = kwargs.pop("mcp_bindings", None) or []
         job = {
             "id": job_id,
             "thread_id": thread_id,
@@ -287,21 +127,10 @@ class FakeAgentJobStore:
             "published_pr_url": None,
             "published_commit_sha": None,
             "detail": None,
-            "mcp_bindings": sorted(
-                (self._binding_summary(binding) for binding in bindings),
-                key=lambda summary: (summary["alias"], summary["connection_id"]),
-            ),
             "created_at": None,
             "updated_at": None,
             **kwargs,
         }
-        # The selection is written once, on the thread, and read per request --
-        # the same shape ``agent_mcp_thread_bindings`` has, so a case about a
-        # later turn exercises the same lookup the route uses.
-        self.mcp_bindings[thread_id] = sorted(
-            (self._thread_binding(thread_id, binding) for binding in bindings),
-            key=lambda binding: (binding["alias"], binding["connection_id"]),
-        )
         job.setdefault("base_sha", None)
         job.setdefault("title", job["task_prompt"].splitlines()[0][:160])
         job.setdefault("metadata", None)
@@ -4689,294 +4518,332 @@ async def test_branches_are_only_listed_for_an_entitled_repo(store: FakeAgentJob
     assert theirs.status_code == 403
 
 
-# ── MCP connections ───────────────────────────────────────────────────
+# ── MCP server selection ──────────────────────────────────────────────
 
 
-def _binding(
-    connection_id: int,
-    *,
-    alias: str = "github",
-    tools: dict[str, str] | None = None,
-    **overrides: Any,
-) -> dict[str, Any]:
-    """One ``McpBindingInput`` body, as the composer sends it.
+_UPSTREAM_URL = "https://mcp.example.com/mcp/readonly"
+_UPSTREAM_TOKEN = "ghu_owner_secret"
 
-    ``tools`` is the selection itself, name to deny/confirm/allow. A name that
-    is absent is denied, which is why every case here names the tools it means.
-    """
-    binding: dict[str, Any] = {
-        "connection_id": connection_id,
-        "alias": alias,
-        "tools": {"get_issue": "allow"} if tools is None else tools,
-        "resources": {},
-        "prompts": {},
-        "enabled": True,
-    }
-    binding.update(overrides)
-    return binding
-
-
-def _job_body(**overrides: Any) -> dict[str, Any]:
-    """A valid submission, with the fields under test overridable."""
-    body: dict[str, Any] = {"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}
-    body.update(overrides)
-    return body
-
-
-async def test_the_composer_is_told_which_connections_and_which_runtimes(
-    client: AsyncClient, store: FakeAgentJobStore
-):
-    """A picker built from anything but the create endpoint's rules is decoration.
-
-    The composer learns which connections exist, what they offer and whether
-    they currently work. It never learns the address or the credential:
-    ``McpConnectionSummary`` has no field either could land in.
-    """
-    store.connect_mcp(
-        user_id=_OWNER,
+#: Two providers for the mechanism's sake, not the real catalogue's. Pinning
+#: these cases to the shipped entries would make them fail whenever a provider
+#: is added or withdrawn — a fact about somebody else's service, tested where it
+#: belongs in ``test_mcp_catalogue.py``.
+_TEST_PROVIDERS = (
+    McpProvider(
+        name="deepwiki",
         label="DeepWiki",
-        template="deepwiki",
+        description="",
         url="https://wiki.example.com/mcp",
-        tools=("read_wiki",),
-    )
-    store.connect_mcp(user_id=_OWNER, label="GitHub", tools=("get_issue",))
+        read_scope="allowlist",
+        scope_note="test double",
+        tools=frozenset({"read_wiki"}),
+    ),
+    McpProvider(
+        name="github",
+        label="GitHub",
+        description="",
+        url=_UPSTREAM_URL,
+        read_scope="endpoint",
+        scope_note="test double",
+    ),
+)
+
+
+def _catalogue(monkeypatch, *names: str) -> None:
+    """Install a catalogue for one test.
+
+    Patched on the module rather than at each import site because both
+    ``catalogue()`` and ``get_provider()`` read these globals when called, so
+    every consumer sees the same list — which is the point: a provider that is
+    on offer to the composer must be the one job creation resolves against.
+    """
+    providers = tuple(entry for entry in _TEST_PROVIDERS if not names or entry.name in names)
+    monkeypatch.setattr(mcp_catalogue, "CATALOGUE", providers)
+    monkeypatch.setattr(mcp_catalogue, "_BY_NAME", {entry.name: entry for entry in providers})
+
+
+async def test_the_composer_is_told_which_servers_and_which_runtimes(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """A picker built from anything but the create endpoint's rules is decoration."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github", token=_UPSTREAM_TOKEN)
+    store.connect_mcp(user_id=_OWNER, server="deepwiki", token=_UPSTREAM_TOKEN)
     config = (await client.get("/v1/agent/config")).json()
 
-    assert [entry["label"] for entry in config["mcp_connections"]] == ["DeepWiki", "GitHub"]
-    # The composer is told the same list the create path enforces, so a picker
-    # cannot offer a runtime that would then be refused.
-    assert config["mcp_runtimes"] == ["claude-code", "opencode", "pi"]
-    assert [entry["tool_count"] for entry in config["mcp_connections"]] == [1, 1]
-    assert all(entry["available"] for entry in config["mcp_connections"])
+    assert [entry["name"] for entry in config["mcp_servers"]] == ["deepwiki", "github"]
+    assert config["mcp_runtimes"] == ["claude-code"]
+    # The composer learns what a server exposes, never how to reach it or what
+    # to present when it gets there.
     assert _UPSTREAM_TOKEN not in json.dumps(config)
     assert "mcp.example.com" not in json.dumps(config)
 
 
 async def test_the_composer_offers_only_what_this_user_connected(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
-    """The property the deployment catalogue could not have.
+    """The whole point of #49: another person's connection is not on offer.
 
-    Both users exist and both could connect the same service; only the
-    connection differs, and it is the only thing that may decide what the owner
-    sees.
+    Both users exist and both servers are in the catalogue; only the connection
+    differs, and it is the only thing that may decide what the owner sees.
     """
-    store.connect_mcp(user_id=_OTHER, token="ghu_someone_elses_secret")
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OTHER, server="github", token="ghu_someone_elses_secret")
 
     config = (await client.get("/v1/agent/config")).json()
-    assert config["mcp_connections"] == []
+    assert config["mcp_servers"] == []
     assert "ghu_someone_elses_secret" not in json.dumps(config)
 
 
-async def test_omitting_bindings_means_no_connections(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_omitting_servers_takes_everything_the_owner_connected(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
-    """Connecting is availability, not consent.
-
-    A task that says nothing about tools gets none: a job that silently received
-    every connection its owner has would be spending credentials the prompt was
-    never written around.
-    """
-    store.connect_mcp(user_id=_OWNER)
-    created = await client.post("/v1/agent/jobs", json=_job_body())
-
-    assert created.status_code == 201, created.text
-    assert created.json()["mcp_bindings"] == []
+    """Connecting is the opt-in, so a job that chose nothing still gets them."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+    )
+    assert created.status_code == 201
+    assert created.json()["mcp_servers"] == ["github"]
 
 
-async def test_an_explicit_empty_list_means_no_connections(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_a_user_who_connected_nothing_gets_a_job_that_runs_without_mcp(
+    client: AsyncClient, monkeypatch
+):
+    """No MCP is a supported shape, not an error."""
+    _catalogue(monkeypatch)
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+    )
+    assert created.status_code == 201
+    assert created.json()["mcp_servers"] == []
+
+
+async def test_an_explicit_empty_list_means_no_servers(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
     """Choosing none is a real choice and must not be read as "unset"."""
-    store.connect_mcp(user_id=_OWNER)
-    created = await client.post("/v1/agent/jobs", json=_job_body(mcp_bindings=[]))
-
-    assert created.status_code == 201, created.text
-    assert created.json()["mcp_bindings"] == []
-
-
-async def test_a_job_records_the_bindings_it_was_created_with(
-    client: AsyncClient, store: FakeAgentJobStore
-):
-    """The response names the connection by alias and label, never by address."""
-    row = store.connect_mcp(user_id=_OWNER, label="GitHub", tools=("get_issue",))
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": [],
+        },
     )
-
-    assert created.status_code == 201, created.text
-    assert created.json()["mcp_bindings"] == [
-        {"connection_id": row["id"], "alias": "github", "label": "GitHub"}
-    ]
-    assert "mcp.example.com" not in created.text
+    assert created.status_code == 201
+    assert created.json()["mcp_servers"] == []
 
 
-async def test_a_selection_is_stamped_against_the_snapshot_it_was_chosen_from(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_an_unknown_server_is_refused_at_creation(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
-    """An approval is an approval *of something*.
-
-    The fingerprint records the tool's description and schema at the moment the
-    owner allowed it. Without it, a server that later redefines the tool would
-    inherit the old approval for a different thing wearing the same name.
-    """
-    row = store.connect_mcp(user_id=_OWNER, tools=("get_issue",))
+    """Better than discovering mid-run that the task's one tool is missing."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["sentry"],
+        },
     )
-    assert created.status_code == 201, created.text
-
-    (binding,) = store.mcp_bindings[created.json()["thread_id"]]
-    rule = binding["rules"]["get_issue"]
-    assert rule["policy"] == "allow"
-    assert len(rule["fingerprint"]) == 64
+    assert created.status_code == 400
+    assert "sentry" in created.text
 
 
-async def test_naming_a_connection_the_caller_does_not_own_is_refused_at_creation(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_naming_a_server_someone_else_connected_is_refused_at_creation(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
     """Refused in the same words as one that does not exist.
 
-    A caller must not be able to tell "nobody has this" from "somebody else has
-    this" -- the difference is another user's account state, and the reply to a
-    request that may not have it is the same either way.
+    A caller must not be able to tell "nobody has this" from "somebody else
+    has this" — the difference is another user's account state, and the reply
+    to a request that may not have it is the same either way.
     """
-    theirs = store.connect_mcp(user_id=_OTHER, token="ghu_someone_elses_secret")
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OTHER, server="github", token="ghu_someone_elses_secret")
+    body = {
+        "repo": "owner/name",
+        "task_prompt": "fix it",
+        "model": "glm-5.1",
+    }
 
-    owned = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(theirs["id"])])
-    )
-    missing = await client.post("/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(9999)]))
+    theirs = await client.post("/v1/agent/jobs", json={**body, "mcp_servers": ["github"]})
+    nobodys = await client.post("/v1/agent/jobs", json={**body, "mcp_servers": ["sentry"]})
 
-    assert owned.status_code == 400
+    assert theirs.status_code == 400
     assert (
-        owned.json()["detail"]["error"]["message"].replace(str(theirs["id"]), "9999")
-        == missing.json()["detail"]["error"]["message"]
+        theirs.json()["detail"]["error"]["message"].replace("github", "sentry")
+        == nobodys.json()["detail"]["error"]["message"]
     )
-    assert "ghu_someone_elses_secret" not in owned.text
+    assert "ghu_someone_elses_secret" not in theirs.text
 
 
 async def test_a_runtime_that_cannot_load_mcp_refuses_the_job(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
     """Silently dropping the tools would produce confidently wrong work."""
-    row = store.connect_mcp(user_id=_OWNER)
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
         "/v1/agent/jobs",
-        json=_job_body(runtime="codex", mcp_bindings=[_binding(row["id"])]),
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "runtime": "codex",
+            "mcp_servers": ["github"],
+        },
     )
-
     assert created.status_code == 400
     assert "codex" in created.text
 
 
-async def test_an_unknown_tool_selection_is_refused_at_creation(
-    client: AsyncClient, store: FakeAgentJobStore
-):
-    """A selection naming a tool the server does not offer is a refusal.
+@contextlib.asynccontextmanager
+async def _integrations_client(store: FakeAgentJobStore):
+    """A client for the Integrations page, which reads more of the store.
 
-    Accepting it would create a job around a tool the agent turns out not to
-    have, which does not fail -- it quietly produces the wrong work.
+    The page answers for source control as well as MCP, so the fake needs the
+    grant surface and a GitLab lookup before it can be asked at all — neither
+    of which any assertion here is about.
     """
-    row = store.connect_mcp(user_id=_OWNER, tools=("get_issue",))
-    created = await client.post(
-        "/v1/agent/jobs",
-        json=_job_body(mcp_bindings=[_binding(row["id"], tools={"delete_repo": "allow"})]),
-    )
+    equipped = _store_with_grants(store)
 
-    assert created.status_code == 400
-    assert "delete_repo" in created.text
-    assert "does not offer" in created.text
+    async def get_gitlab_connection(*, user_id: str):
+        return None
+
+    equipped.get_gitlab_connection = get_gitlab_connection
+    app = _build_app(equipped)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+        yield api
 
 
-async def test_a_connection_that_cannot_be_used_says_why_instead_of_vanishing(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_the_integrations_page_lists_the_catalogue_with_connection_state(
+    store: FakeAgentJobStore, monkeypatch
 ):
-    """Connected and unusable is a real state, and both surfaces must name it.
+    """The whole catalogue, marked — not just the part already connected.
 
-    Omitting it from the composer leaves its owner with a picker that silently
-    drops the server they are looking for; letting a job name it puts a dead
-    credential behind tools the prompt was written around.
+    Someone with no connections is asking "what can I connect?", and a list of
+    their connections is empty exactly when that question matters most.
     """
-    row = store.connect_mcp(
-        user_id=_OWNER,
-        label="GitHub",
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
-    )
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github", token=_UPSTREAM_TOKEN)
 
-    config = (await client.get("/v1/agent/config")).json()
-    (entry,) = config["mcp_connections"]
-    assert entry["connection_id"] == row["id"]
-    assert entry["available"] is False
-    assert "expired" in entry["error"]
+    async with _integrations_client(store) as api:
+        body = (await api.get("/v1/agent/integrations")).json()
+    rows = {entry["name"]: entry for entry in body["mcp"]}
 
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-    assert created.status_code == 400
-    assert "expired" in created.text
+    assert set(rows) == {"github", "deepwiki"}
+    assert rows["github"]["connected"] is True
+    assert rows["github"]["account_label"] == "octocat"
+    assert rows["deepwiki"]["connected"] is False
+    # Connecting is not possible until the OAuth flow lands, and the row says
+    # so rather than offering a button that cannot work.
+    assert rows["github"]["configured"] is False
+    assert rows["github"]["connect_url"] is None
+    assert _UPSTREAM_TOKEN not in json.dumps(body)
 
 
-async def test_disconnecting_clears_the_secret_and_bumps_the_epoch(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_the_integrations_page_never_shows_another_users_connection(
+    store: FakeAgentJobStore, monkeypatch
 ):
-    """A tombstone that still holds a token is not a disconnect.
+    """Connected is a fact about the caller, and only the caller."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OTHER, server="github", token="ghu_someone_elses_secret")
 
-    The row is kept so a binding can say *this was disconnected* rather than
-    *this never existed*, and its versions move so any approval made against the
-    old credential stops resolving instead of quietly continuing.
-    """
-    row = store.connect_mcp(user_id=_OWNER)
-    other = store.connect_mcp(user_id=_OTHER, token="ghu_someone_elses_secret")
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-    assert created.status_code == 201, created.text
+    async with _integrations_client(store) as api:
+        body = (await api.get("/v1/agent/integrations")).json()
+    rows = {entry["name"]: entry for entry in body["mcp"]}
 
-    assert await store.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
-
-    assert row["access_token_ciphertext"] is None
-    assert row["refresh_token_ciphertext"] is None
-    assert row["deleted_at"] is not None
-    assert row["status"] == "disabled"
-    assert row["authorization_epoch"] == 2
-    # Only the caller's row: a disconnect without its owner scope would take
-    # everyone else's connection with it.
-    assert other["access_token_ciphertext"] is not None
-    assert await store.disconnect_mcp_connection(connection_id=other["id"], user_id=_OWNER) is False
-    assert await store.list_mcp_connections(user_id=_OWNER) == []
-    assert len(await store.list_mcp_connections(user_id=_OWNER, include_deleted=True)) == 1
+    assert rows["github"]["connected"] is False
+    assert rows["github"]["account_label"] is None
+    assert "ghu_someone_elses_secret" not in json.dumps(body)
 
 
-async def test_a_follow_up_is_refused_when_its_thread_s_connection_was_disconnected(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_disconnecting_removes_only_the_callers_credential(
+    store: FakeAgentJobStore, monkeypatch
 ):
-    """Fail fast, on **every** turn -- not only when the caller switches runtime.
+    """Two users connected the same server; one disconnects."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    store.connect_mcp(user_id=_OTHER, server="github", token="ghu_someone_elses_secret")
 
-    Whether a thread's connection is still usable changes on its own, between
-    turns. A plain "keep going" follow-up that returned 201 would discover at
+    async with _integrations_client(store) as api:
+        response = await api.delete("/v1/agent/integrations/mcp/github")
+
+    assert response.status_code == 200
+    rows = {entry["name"]: entry for entry in response.json()["mcp"]}
+    assert rows["github"]["connected"] is False
+    assert [row["server"] for row in store.mcp_connections[_OTHER]] == ["github"]
+
+
+async def test_disconnecting_a_server_that_was_never_connected_is_a_404(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Not an error worth hiding, and not a silent success either."""
+    _catalogue(monkeypatch)
+    async with _integrations_client(store) as api:
+        response = await api.delete("/v1/agent/integrations/mcp/github")
+    assert response.status_code == 404
+
+
+async def test_a_follow_up_is_refused_when_its_thread_s_server_was_disconnected(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """Fail fast at creation, on **every** turn — not only a runtime switch.
+
+    A thread's servers are inherited by each turn, and whether they are still
+    connected changes on its own, from the Integrations page, between turns.
+    Validating only when the caller also switched runtime left the ordinary
+    follow-up — same harness, next prompt — returning 201 and discovering at
     its first tool call that the tools the prompt was written around are gone.
     """
-    row = store.connect_mcp(user_id=_OWNER, label="GitHub")
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github"],
+        },
     )
     job_id = created.json()["id"]
-    assert await store.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
 
+    async with _integrations_client(store) as api:
+        assert (await api.delete("/v1/agent/integrations/mcp/github")).status_code == 200
+
+    # No runtime in the body: the plain "keep going" follow-up.
     follow_up = await client.post(f"/v1/agent/jobs/{job_id}/follow-ups", json={"prompt": "again"})
 
     assert follow_up.status_code == 400
-    assert "GitHub" in follow_up.text
+    assert "github" in follow_up.text
 
 
-async def test_a_follow_up_still_runs_while_its_thread_s_connection_is_connected(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_a_follow_up_still_runs_while_its_thread_s_server_is_connected(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
-    """The check must not refuse the ordinary case it runs on."""
-    row = store.connect_mcp(user_id=_OWNER)
+    """The check must not refuse the ordinary case it now runs on."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
     created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github"],
+        },
     )
 
     follow_up = await client.post(
@@ -4986,79 +4853,117 @@ async def test_a_follow_up_still_runs_while_its_thread_s_connection_is_connected
     assert follow_up.status_code == 201
 
 
-async def test_disconnecting_leaves_a_running_jobs_binding_list_alone(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_an_expired_connection_is_neither_offered_nor_usable(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
-    """A job keeps the connection it was created with and loses the credential.
+    """A stored expiry in the past is a token we already know will be refused.
 
-    Nothing hunts down live jobs on disconnect: bindings are read per call, so
-    the job's own list stays as it was and each call fails the usability check
-    -- which is what the follow-up case above pins at the HTTP surface.
+    Offering it would put the server in the composer, let a job be created
+    around it, and send a dead bearer token upstream — with the answer sitting
+    in the row all three read.
     """
-    row = store.connect_mcp(user_id=_OWNER)
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-    job_id = created.json()["id"]
-    assert created.json()["mcp_bindings"][0]["connection_id"] == row["id"]
-
-    assert await store.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-    assert job["mcp_bindings"] == [
-        {"connection_id": row["id"], "alias": "github", "label": "GitHub"}
-    ]
-    assert row["access_token_ciphertext"] is None
-
-
-async def test_the_integrations_page_sees_every_connection_and_its_reason(
-    client: AsyncClient, store: FakeAgentJobStore
-):
-    """One request for one page, and an unusable connection is reported not hidden.
-
-    The aggregate endpoint is where the settings screen learns both halves at
-    once. A connection that has stopped working must appear with its reason:
-    a page that silently omits it leaves its owner looking for a server that is
-    right there, and the separate per-connection API is where they act on it.
-    """
-    working = store.connect_mcp(user_id=_OWNER, label="GitHub")
-    store.connect_mcp(user_id=_OTHER, label="Someone else's", template="sentry")
-    broken = store.connect_mcp(user_id=_OWNER, label="Broken", template="wiki")
-
-    response = await client.get("/v1/agent/integrations")
-
-    assert response.status_code == 200
-    rows = {entry["name"]: entry for entry in response.json()["mcp"]}
-    assert set(rows) == {"GitHub", "Broken"}
-    assert rows["GitHub"]["connected"] is True
-    assert rows["GitHub"]["configured"] is True
-    assert rows["GitHub"]["error"] is None
-    assert rows["Broken"]["connected"] is True
-    del working, broken
-
-
-async def test_the_claim_hands_the_runner_the_job_s_bindings(
-    client: AsyncClient, store: FakeAgentJobStore
-):
-    """The runner passes aliases to the adapter; it never learns the addresses."""
-    github = store.connect_mcp(user_id=_OWNER, label="GitHub", tools=("get_issue",))
-    wiki = store.connect_mcp(
+    _catalogue(monkeypatch)
+    store.connect_mcp(
         user_id=_OWNER,
-        label="DeepWiki",
-        template="deepwiki",
-        url="https://wiki.example.com/mcp",
-        tools=("read_wiki",),
+        server="github",
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
     )
+
+    config = (await client.get("/v1/agent/config")).json()
+    assert config["mcp_servers"] == []
+
     created = await client.post(
         "/v1/agent/jobs",
-        json=_job_body(
-            mcp_bindings=[
-                _binding(github["id"]),
-                _binding(wiki["id"], alias="deepwiki", tools={"read_wiki": "allow"}),
-            ]
-        ),
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github"],
+        },
     )
-    assert created.status_code == 201, created.text
+    assert created.status_code == 400
+
+    # And a job that named nothing does not silently pick it up either.
+    default = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
+    )
+    assert default.json()["mcp_servers"] == []
+
+
+async def test_the_integrations_page_says_why_a_connection_buys_nothing(
+    store: FakeAgentJobStore, monkeypatch
+):
+    """Connected and unusable is a real state, and the page must name it.
+
+    Reporting it as simply connected puts *Connected (octocat)* beside a
+    composer offering nothing, with no way for the owner to tell which of the
+    two is wrong or what to do about it.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(
+        user_id=_OWNER,
+        server="github",
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    async with _integrations_client(store) as api:
+        body = (await api.get("/v1/agent/integrations")).json()
+    row = {entry["name"]: entry for entry in body["mcp"]}["github"]
+
+    assert row["connected"] is True
+    assert "expired" in row["error"]
+
+
+async def test_disconnecting_leaves_a_running_jobs_server_list_alone(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """A job keeps the name it was created with and loses the credential.
+
+    Nothing hunts down live jobs on disconnect: the relay resolves the owner's
+    connections per call, so the job's own ``mcp_servers`` list stays as it was
+    and the server simply stops resolving — which is what
+    ``test_a_server_the_owner_no_longer_has_reports_it_as_unavailable`` pins at
+    the relay.
+    """
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github"],
+        },
+    )
+    assert created.json()["mcp_servers"] == ["github"]
+
+    async with _integrations_client(store) as api:
+        assert (await api.delete("/v1/agent/integrations/mcp/github")).status_code == 200
+
+    job = (await client.get(f"/v1/agent/jobs/{created.json()['id']}")).json()
+    assert job["mcp_servers"] == ["github"]
+    assert await store.list_mcp_connections(user_id=_OWNER) == []
+
+
+async def test_the_claim_hands_the_runner_the_job_s_servers(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
+):
+    """The runner passes names to the adapter; it never learns the addresses."""
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github", token=_UPSTREAM_TOKEN)
+    store.connect_mcp(user_id=_OWNER, server="deepwiki", token=_UPSTREAM_TOKEN)
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "glm-5.1",
+            "mcp_servers": ["github", "deepwiki"],
+        },
+    )
+    assert created.status_code == 201
 
     app = _build_app(store, claim_auth=True)
     transport = ASGITransport(app=app)
@@ -5068,12 +4973,8 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
         )
     assert claimed.status_code == 200
     body = claimed.json()
-    # Aliases, not summaries: the runtime builds the relay URL's path segment
-    # from each name, so a dict here would either fail the schema or address a
-    # server that does not exist.
-    assert body["mcp_bindings"] == ["deepwiki", "github"]
+    assert body["mcp_servers"] == ["deepwiki", "github"]
     assert "mcp.example.com" not in json.dumps(body)
-    assert "wiki.example.com" not in json.dumps(body)
 
 
 async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient, monkeypatch):
@@ -6251,18 +6152,24 @@ async def test_a_follow_up_resend_after_the_sandbox_is_lost_returns_the_first_tu
     assert again.json()["id"] == first.json()["id"]
 
 
-async def test_a_create_resend_after_a_connection_disconnects_returns_the_first_job(
-    client: AsyncClient, store: FakeAgentJobStore
+async def test_a_create_resend_after_a_tool_server_disconnects_returns_the_first_job(
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
     """A tool the first send was allowed to use is not re-authorised on a resend."""
-    row = store.connect_mcp(user_id=_OWNER)
-    body = _job_body(mcp_bindings=[_binding(row["id"])])
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    body = {
+        "repo": "owner/name",
+        "task_prompt": "fix it",
+        "model": "glm-5.1",
+        "mcp_servers": ["github"],
+    }
     headers = {"Idempotency-Key": "submit-1"}
 
     first = await client.post("/v1/agent/jobs", json=body, headers=headers)
     assert first.status_code == 201, first.text
 
-    assert await store.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
+    await store.delete_mcp_connection(user_id=_OWNER, server="github")
 
     again = await client.post("/v1/agent/jobs", json=body, headers=headers)
     assert again.status_code == 201, again.text
@@ -6271,20 +6178,26 @@ async def test_a_create_resend_after_a_connection_disconnects_returns_the_first_
 
 
 async def test_a_new_key_still_runs_the_checks_that_can_refuse_it(
-    client: AsyncClient, store: FakeAgentJobStore
+    client: AsyncClient, store: FakeAgentJobStore, monkeypatch
 ):
     """Answering the resend first must not turn the mutable checks off.
 
-    A different key is a different submission: the disconnected connection
+    A different key is a different submission: the disconnected tool server
     that a replay may ignore still refuses a job that has not been created.
     """
-    row = store.connect_mcp(user_id=_OWNER)
-    body = _job_body(mcp_bindings=[_binding(row["id"])])
+    _catalogue(monkeypatch)
+    store.connect_mcp(user_id=_OWNER, server="github")
+    body = {
+        "repo": "owner/name",
+        "task_prompt": "fix it",
+        "model": "glm-5.1",
+        "mcp_servers": ["github"],
+    }
 
     first = await client.post("/v1/agent/jobs", json=body, headers={"Idempotency-Key": "submit-1"})
     assert first.status_code == 201, first.text
 
-    assert await store.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
+    await store.delete_mcp_connection(user_id=_OWNER, server="github")
 
     fresh = await client.post("/v1/agent/jobs", json=body, headers={"Idempotency-Key": "submit-2"})
     assert fresh.status_code == 400, fresh.text

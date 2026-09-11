@@ -231,11 +231,6 @@ LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridIn
 COPY deploy/sandbox/pi-freeinference /usr/local/bin/pi-freeinference
 COPY deploy/sandbox/opencode-freeinference /usr/local/bin/opencode-freeinference
 COPY deploy/sandbox/kilo-freeinference /usr/local/bin/kilo-freeinference
-# pi has no MCP client of its own, so the platform's relay reaches it through
-# this bridge. It is a reviewed part of the image rather than a workspace file,
-# and the adapter loads it with an explicit `-e` while `--no-extensions` shuts
-# out every other extension source — including a repository's `.pi/extensions/`.
-COPY deploy/sandbox/pi-mcp-bridge.ts /usr/local/libexec/pi-mcp-bridge.ts
 COPY deploy/sandbox/http-agent-live-bridge /usr/local/bin/http-agent-live-bridge
 COPY deploy/sandbox/claude-session-fork /usr/local/bin/claude-session-fork
 COPY deploy/sandbox/member-process-reaper /usr/local/bin/member-process-reaper
@@ -251,8 +246,7 @@ RUN chmod 0755 /usr/local/bin/pi-freeinference /usr/local/bin/opencode-freeinfer
         /usr/local/libexec/freeinference-guest-observer \
         /usr/local/libexec/freeinference-tool-mark \
     && chmod 0555 /usr/local/bin/member-process-reaper \
-    && chmod 0644 /usr/local/libexec/freeinference-guest-observer.bpf.o \
-    && chmod 0444 /usr/local/libexec/pi-mcp-bridge.ts
+    && chmod 0644 /usr/local/libexec/freeinference-guest-observer.bpf.o
 
 # `--ignore-user-config` does not suppress a trusted repository's
 # .codex/config.toml. Codex 0.145 applies this requirements allowlist after all

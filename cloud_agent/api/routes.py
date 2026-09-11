@@ -71,8 +71,8 @@ from cloud_agent.github_app import AppNotInstalled, GitHubAppError
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp.models import ALIAS_PATTERN, ToolPolicy
-from cloud_agent.mcp.registry import resolve_connection, resolve_for_thread
+from cloud_agent.mcp_catalogue import catalogue as mcp_catalogue
+from cloud_agent.mcp_registry import connection_states, registry_for_user
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     EVENT_TYPE_PATTERN,
@@ -122,9 +122,8 @@ from cloud_agent.schemas import (
     GitHubConnectionResponse,
     GitHubConnectRequest,
     HostResidencyEstablishResponse,
-    McpBindingSummary,
-    McpConnectionSummary,
     McpIntegrationResponse,
+    McpServerSummary,
     OAuthConnectRequest,
     ProcessObservation,
     RepoBranchesResponse,
@@ -482,7 +481,7 @@ def _job_response(
         detail=job["detail"],
         forked_from_job_id=job.get("fork_source_job_id"),
         metadata=metadata or None,
-        mcp_bindings=[McpBindingSummary(**entry) for entry in (job.get("mcp_bindings") or [])],
+        mcp_servers=list(job.get("mcp_servers") or []),
         created_at=_iso(job["created_at"]),
         updated_at=_iso(job["updated_at"]),
         pinned_at=_iso(job.get("pinned_at")),
@@ -585,10 +584,10 @@ async def get_agent_config(
         # repository list above is theirs. Public fields only — McpServerSummary
         # has nowhere to put a URL or a credential, which is how it stays that
         # way.
-        mcp_connections=[
-            McpConnectionSummary(**entry)
+        mcp_servers=[
+            McpServerSummary(**entry)
             for entry in (
-                await _mcp_connections_for_user(store, user["user_id"]) if store is not None else []
+                await _mcp_servers_for_user(store, user["user_id"]) if store is not None else []
             )
         ],
         mcp_runtimes=runtimes_supporting_mcp(),
@@ -782,35 +781,41 @@ async def _source_control_providers(
 
 
 async def _mcp_integrations(*, user_id: str, store: AgentJobStore) -> list[McpIntegrationResponse]:
-    """This user's MCP connections, in the aggregate integrations response.
+    """The catalogue, marked with what this user has connected.
 
-    Read from the connections themselves rather than from a provider list, so
-    a server with no template appears here exactly like one with a template.
-    The management endpoints under ``/v1/agent/mcp`` are where a connection is
-    added, tested or removed; this is the summary the settings page folds in
-    beside source control.
+    The whole catalogue, not just the connected part: a page that listed only
+    connections would have nowhere to show what is on offer, which is the
+    question someone with no connections is asking.
+
+    ``configured`` is false for every provider until the connect flow lands
+    (#49's next change) — connecting takes an OAuth round trip this service
+    cannot make yet, and a Connect button that cannot connect is worse than the
+    "Coming soon" the UI already renders for a provider in this state. What is
+    live here is everything *after* connecting: a row that exists resolves,
+    scopes a job and authorizes tool calls, and can be removed.
+
+    Read through ``connection_states`` rather than straight from the store, so
+    a connection that exists but buys nothing says why. Reporting ``connected``
+    from the row alone would put *Connected (octocat)* on this page beside a
+    composer offering nothing — same data, two answers, and no way for the
+    owner to tell which one is wrong.
     """
-    rows = await store.list_mcp_connections(user_id=user_id)
-    rendered: list[McpIntegrationResponse] = []
-    for row in rows:
-        resolved = await resolve_connection(store, row=row)
-        snapshot = resolved.snapshot
-        rendered.append(
-            McpIntegrationResponse(
-                name=str(row["label"]),
-                label=str(row["label"]),
-                description=str(row.get("template") or row.get("url") or ""),
-                capabilities=sorted(
-                    capability.name for capability in (snapshot.tools if snapshot else ())
-                )[:32],
-                configured=True,
-                connected=True,
-                account_label=row.get("account_label"),
-                connect_url=None,
-                error=resolved.error,
-            )
+    states = {state.server: state for state in await connection_states(store, user_id=user_id)}
+    return [
+        McpIntegrationResponse(
+            name=provider.name,
+            label=provider.label,
+            description=provider.description,
+            capabilities=list(provider.capabilities),
+            configured=False,
+            connected=provider.name in states,
+            account_label=(
+                states[provider.name].account_label if provider.name in states else None
+            ),
+            error=states[provider.name].error if provider.name in states else None,
         )
-    return rendered
+        for provider in mcp_catalogue()
+    ]
 
 
 @router.get("/integrations", response_model=SourceControlIntegrationsResponse)
@@ -820,14 +825,55 @@ async def list_source_control_integrations(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlIntegrationsResponse:
-    """Return configured and connected state for source control and MCP.
+    """Return configured/connected state for source control and MCP servers."""
+    job_store = _require_store(store)
+    return SourceControlIntegrationsResponse(
+        providers=await _source_control_providers(
+            user_id=user["user_id"],
+            store=job_store,
+            app_credentials=app_credentials,
+            gitlab_oauth=gitlab_oauth,
+        ),
+        mcp=await _mcp_integrations(user_id=user["user_id"], store=job_store),
+    )
 
-    One response for one page, deliberately: the settings screen shows both
-    kinds of connection together, and two requests would let it render a
-    half-refreshed state after a disconnect. The MCP half is a summary — adding,
-    testing and selecting a connection live under ``/v1/agent/mcp``.
+
+@router.delete("/integrations/mcp/{server}", response_model=SourceControlIntegrationsResponse)
+async def disconnect_mcp_integration(
+    server: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+    gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
+) -> SourceControlIntegrationsResponse:
+    """Remove this user's credential for one server.
+
+    Scoped to the caller in the delete itself rather than by looking the row up
+    first: there is no ordering of two statements that makes "check it is mine,
+    then delete it" as hard to get wrong as a ``WHERE user_id`` that cannot be
+    forgotten.
+
+    Running jobs are not cancelled. Their next tool call to this server fails
+    with the server reported as unavailable, because the relay resolves the
+    owner's connections per call rather than at job start — so disconnecting
+    takes effect immediately without anything having to hunt down live jobs.
     """
     job_store = _require_store(store)
+    removed = await job_store.delete_mcp_connection(user_id=user["user_id"], server=server)
+    if not removed:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "type": "not_found",
+                    "message": f"You have no {server!r} MCP connection.",
+                }
+            },
+        )
+    logger.info(
+        "agent_mcp_disconnected",
+        extra={"event": "agent_mcp_disconnected", "server": server},
+    )
     return SourceControlIntegrationsResponse(
         providers=await _source_control_providers(
             user_id=user["user_id"],
@@ -1110,64 +1156,82 @@ async def _require_resolvable_model(
     )
 
 
-async def _mcp_connections_for_user(store: AgentJobStore, user_id: str) -> list[dict[str, Any]]:
-    """The MCP connections *this user* has added, for the composer.
+async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict[str, Any]]:
+    """The MCP servers *this user* has connected, for the composer.
 
-    Display metadata only. A connection's address and its credential never
-    leave this process: the sandbox reaches a server through the relay, which
-    is the entire reason resolution lives beside the relay rather than beside
-    the picker. :class:`McpConnectionSummary` has no field either could land
+    Names and display metadata only. A server's URL and its credential never
+    leave this process: the sandbox reaches an upstream through the relay,
+    which is the entire reason resolution lives beside the relay rather than
+    beside the picker. :class:`McpServerSummary` has no field either could land
     in, so that stays true without a filter at this call site.
 
-    Unusable connections are listed with their reason rather than omitted. A
-    picker that silently drops a server its owner is looking for is a bug
-    report waiting to happen; one that says *this credential expired* is an
-    instruction.
+    Only connections that currently work: an expired credential, an unreadable
+    one, or a deployment with no encryption key all leave the picker empty
+    rather than offering a server whose first tool call is already known to
+    fail. ``connection_states`` decides that, and the Integrations page reports
+    the reason from the same source.
     """
-    rows = await store.list_mcp_connections(user_id=user_id)
-    summaries: list[dict[str, Any]] = []
-    for row in rows:
-        resolved = await resolve_connection(store, row=row)
-        snapshot = resolved.snapshot
-        summaries.append(
+    registry = await registry_for_user(store, user_id=user_id)
+    servers: list[dict[str, Any]] = []
+    for name in registry.names:
+        server = registry.get(name)
+        if server is None:  # pragma: no cover - names() is derived from servers
+            continue
+        servers.append(
             {
-                "connection_id": int(row["id"]),
-                "label": resolved.connection.label,
-                "transport": resolved.connection.config.transport.value,
-                "location": resolved.connection.config.location.value,
-                "status": resolved.connection.status.value,
-                "available": resolved.usable,
-                "error": resolved.error,
-                "account_label": row.get("account_label"),
-                "tool_count": len(snapshot.tools) if snapshot else 0,
+                "name": server.name,
+                "description": server.description,
+                "default": server.default,
+                "tools": sorted(server.tools),
             }
         )
-    return summaries
+    return servers
 
 
-async def _resolve_mcp_bindings(
-    requested: list[Any] | None, *, runtime: str, store: AgentJobStore, user_id: str
-) -> list[dict[str, Any]]:
-    """Settle which MCP connections a new session may use, or refuse to create it.
+async def _resolve_mcp_servers(
+    requested: list[str] | None, *, runtime: str, store: AgentJobStore, user_id: str
+) -> list[str]:
+    """Settle which MCP servers a new job runs with, or refuse to create it.
 
     Resolved against the *creating user's* connections. That is the signature
-    this whole feature turns on: a connection somebody else added is unknown
-    here, and there is no deployment-wide list to fall back from.
+    this whole feature turns on: a server someone else connected is unknown
+    here, and there is no deployment-wide list to fall back to.
 
-    ``None`` means none, which is deliberately different from the old
-    name-based resolution: connecting a server is a decision about what is
-    *available*, and letting a task call it is a separate decision the caller
-    has to make. A job that silently received every connected tool because it
-    did not say otherwise is the shape this model removes.
-
-    Every failure is a refusal rather than a silent drop: a job is submitted
-    because someone wants a task done, and a task written around a tool the
-    agent turns out not to have does not fail -- it quietly produces the wrong
-    work, having spent the budget.
+    Both failures are refusals rather than silent drops, and for the same
+    reason: a job is submitted because someone wants a task done, and a task
+    written around a tool the agent turns out not to have does not fail — it
+    quietly produces the wrong work, having spent the budget.
     """
-    if not requested:
-        return []
-    if runtime not in runtimes_supporting_mcp():
+    connected = await _mcp_servers_for_user(store, user_id)
+    names = sorted(str(entry.get("name") or "") for entry in connected)
+    if requested is None:
+        # ``None`` means the job did not choose, and takes everything its owner
+        # connected — connecting a server is the opt-in. An explicit ``[]``
+        # means it wants none.
+        servers = sorted(
+            str(entry.get("name") or "") for entry in connected if entry.get("default")
+        )
+    else:
+        # Unknown names fail at creation rather than let the job discover
+        # mid-run that the agent is missing the one capability it needed.
+        unknown = sorted(set(requested) - set(names))
+        if unknown:
+            known = ", ".join(names) or "none yet"
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "type": "invalid_request",
+                        "message": (
+                            f"you have not connected these MCP server(s): "
+                            f"{', '.join(unknown)}. Connected: {known}. "
+                            "Connect a server on the Integrations page."
+                        ),
+                    }
+                },
+            )
+        servers = sorted(set(requested))
+    if servers and runtime not in runtimes_supporting_mcp():
         supported = ", ".join(runtimes_supporting_mcp()) or "none"
         raise HTTPException(
             status_code=400,
@@ -1175,141 +1239,13 @@ async def _resolve_mcp_bindings(
                 "error": {
                     "type": "invalid_request",
                     "message": (
-                        f"the {runtime!r} runtime cannot be given MCP connections on this "
+                        f"the {runtime!r} runtime cannot be given MCP servers on this "
                         f"deployment. Runtimes that can: {supported}."
                     ),
                 }
             },
         )
-    prepared: list[dict[str, Any]] = []
-    for entry in requested:
-        connection_id = int(getattr(entry, "connection_id", 0) or 0)
-        row = await store.get_mcp_connection(connection_id=connection_id, user_id=user_id)
-        if row is None:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": f"you have no MCP connection with id {connection_id}.",
-                    }
-                },
-            )
-        resolved = await resolve_connection(store, row=row)
-        if not resolved.usable:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"the {resolved.connection.label!r} MCP connection cannot be "
-                            f"used: {resolved.error}"
-                        ),
-                    }
-                },
-            )
-        snapshot = resolved.snapshot
-        available = {capability.name for capability in (snapshot.tools if snapshot else ())}
-        selected = {
-            str(name): str(policy) for name, policy in (getattr(entry, "tools", None) or {}).items()
-        }
-        unknown = sorted(set(selected) - available)
-        if unknown:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"{resolved.connection.label!r} does not offer: "
-                            f"{', '.join(unknown)}. Run a connection test to refresh what "
-                            "it advertises."
-                        ),
-                    }
-                },
-            )
-        rules: dict[str, Any] = {}
-        for name, policy in selected.items():
-            try:
-                parsed = ToolPolicy(policy)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": {
-                            "type": "invalid_request",
-                            "message": (
-                                f"unknown tool policy {policy!r}; use deny, confirm or allow."
-                            ),
-                        }
-                    },
-                ) from exc
-            capability = next(
-                (item for item in (snapshot.tools if snapshot else ()) if item.name == name),
-                None,
-            )
-            rules[name] = {
-                "policy": parsed.value,
-                "fingerprint": capability.fingerprint() if capability else "",
-            }
-        prepared.append(
-            {
-                "connection_id": connection_id,
-                "alias": _checked_alias(
-                    getattr(entry, "alias", None), fallback=_binding_alias(row)
-                ),
-                "enabled": bool(getattr(entry, "enabled", True)) and bool(rules),
-                "config_revision": resolved.connection.config_revision,
-                "authorization_epoch": resolved.connection.authorization_epoch,
-                "capability_revision": resolved.connection.capability_revision,
-                "policy_revision": 1,
-                "rules": rules,
-                "resource_rules": {
-                    str(name): str(policy)
-                    for name, policy in (getattr(entry, "resources", None) or {}).items()
-                },
-                "prompt_rules": {
-                    str(name): str(policy)
-                    for name, policy in (getattr(entry, "prompts", None) or {}).items()
-                },
-            }
-        )
-    return prepared
-
-
-def _binding_alias(row: dict[str, Any]) -> str:
-    """A stable, displayable prefix for one connection's tool names.
-
-    Derived from the template when there is one, and from the connection id
-    otherwise. Never from the label: a label is free text the owner can edit,
-    and an alias that changed under a rename would look to a running session
-    like its tools had disappeared.
-    """
-    template = str(row.get("template") or "").strip()
-    if template and re.fullmatch(ALIAS_PATTERN, template):
-        return template
-    return f"mcp{row['id']}"
-
-
-def _checked_alias(alias: str | None, *, fallback: str) -> str:
-    """Validate an explicit alias, or use one that is valid by construction."""
-    candidate = (alias or fallback).strip()
-    if not re.fullmatch(ALIAS_PATTERN, candidate):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": (
-                        f"{candidate!r} is not a usable MCP alias: use letters, digits, "
-                        "underscore and hyphen, starting with a letter or digit, up to "
-                        "40 characters."
-                    ),
-                }
-            },
-        )
-    return candidate
+    return servers
 
 
 def _require_registered_runtime(runtime: str) -> None:
@@ -1504,8 +1440,8 @@ async def _create_job_as(
     # Shared-live is enforced globally at claim time, not represented as an
     # optional per-job requirement. Job metadata therefore remains caller data
     # plus server-owned execution facts, without a hidden rollout switch.
-    mcp_bindings = await _resolve_mcp_bindings(
-        body.mcp_bindings, runtime=body.runtime, store=job_store, user_id=user["user_id"]
+    mcp_servers = await _resolve_mcp_servers(
+        body.mcp_servers, runtime=body.runtime, store=job_store, user_id=user["user_id"]
     )
     try:
         execution_profile = default_execution_profile().value
@@ -1525,7 +1461,7 @@ async def _create_job_as(
         base_sha=base_sha,
         setup_script=body.setup_script,
         metadata=metadata or None,
-        mcp_bindings=mcp_bindings,
+        mcp_servers=mcp_servers,
         client_request_id=client_request_id,
         # Over the request as sent, not as resolved: a branch that moved
         # between two sends of one submission is still one submission. The
@@ -2095,25 +2031,15 @@ async def create_agent_follow_up(
     # Integrations page, between turns — leaving a plain follow-up to return 201
     # and fail at its first tool call, which is exactly the fail-fast this
     # function exists to provide.
-    # Bindings are read fresh rather than carried on the job, so a turn always
-    # runs against what its session currently allows: a connection removed
-    # between turns stops being offered instead of failing at its first call.
-    for resolved, binding in await resolve_for_thread(
-        job_store, thread_id=str(parent["thread_id"])
-    ):
-        if binding.enabled and not resolved.usable:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"this conversation uses the {resolved.connection.label!r} MCP "
-                            f"connection, which is not usable: {resolved.error}"
-                        ),
-                    }
-                },
-            )
+    if parent.get("mcp_servers"):
+        await _resolve_mcp_servers(
+            list(parent["mcp_servers"]),
+            # The runtime this turn will actually run on: an explicit echo or
+            # the parent's value when omitted.
+            runtime=body.runtime or parent["runtime"],
+            store=job_store,
+            user_id=user["user_id"],
+        )
     job = await job_store.create_follow_up(
         parent_job_id=job_id,
         user_id=user["user_id"],
@@ -3772,10 +3698,7 @@ async def worker_claim(
         # is nothing this process can work out for itself.
         mcp_base_url=os.environ.get(ENV_SANDBOX_MCP_URL, ""),
         clone_token=clone_token,
-        # Aliases, because that is what the runtime config addresses: the relay
-        # path segment is the binding alias, and the runner learns nothing about
-        # where the connection points.
-        mcp_bindings=[str(entry["alias"]) for entry in claim.get("mcp_bindings") or []],
+        mcp_servers=list(claim.get("mcp_servers") or []),
         metadata=claim["metadata"],
     )
     if claim.get("title_generation_pending") is True:

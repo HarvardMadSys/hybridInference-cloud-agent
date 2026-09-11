@@ -48,7 +48,6 @@ import { BackToBottom, TurnRail } from './TurnNavigator';
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { ThreadActions } from './ThreadActions';
-import { McpSessionPanel } from './mcp/McpSessionPanel';
 import type { AgentEvent, AgentJob, AgentThreadMessage } from './types';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
@@ -65,7 +64,7 @@ import { shouldHoldReading, useConversationScroll } from './useConversationScrol
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
-type WorkspaceTab = 'git' | 'terminal' | 'files' | 'tools';
+type WorkspaceTab = 'git' | 'terminal' | 'files';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -95,10 +94,6 @@ const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'git', label: 'Git' },
   { key: 'terminal', label: 'Terminal' },
   { key: 'files', label: 'Files' },
-  // MCP selection and approvals are per conversation, so they belong beside
-  // the workspace rather than on the account-wide Integrations page: a held
-  // call is decided against this session's rules, not the user's.
-  { key: 'tools', label: 'Tools' },
 ];
 
 const DIFF_LINE_CLASS = {
@@ -2200,19 +2195,6 @@ export function JobDetail({
             className="min-h-0 flex-1 overflow-y-auto p-5"
           >
             <WorkspaceFiles job={job} active={workspaceOpen && workspaceTab === 'files'} />
-          </div>
-          <div
-            id="workspace-panel-tools"
-            role="tabpanel"
-            aria-labelledby="workspace-tab-tools"
-            hidden={workspaceTab !== 'tools'}
-            className="min-h-0 flex-1 overflow-y-auto p-5"
-          >
-            <McpSessionPanel
-              jobId={job.id}
-              threadId={job.threadId ?? job.id}
-              active={workspaceOpen && workspaceTab === 'tools'}
-            />
           </div>
         </aside>
 

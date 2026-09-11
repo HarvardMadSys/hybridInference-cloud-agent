@@ -125,13 +125,13 @@ class AgentJobCreate(BaseModel):
         pattern=r"^[0-9a-fA-F]{7,64}$",
         description="Commit SHA to work from.",
     )
-    mcp_bindings: list[McpBindingInput] | None = Field(
+    mcp_servers: list[str] | None = Field(
         None,
         max_length=16,
         description=(
-            "MCP connections this session may use, with the capabilities it may use on "
-            "each. Omitted means none: there is no implicit default, because connecting "
-            "a server is not the same decision as letting a task call it."
+            "MCP servers from this deployment's registry to expose to the agent. "
+            "Omitted takes the registry's defaults; an explicit [] means none. Each "
+            "name must be configured, and the runtime must support MCP."
         ),
     )
     metadata: dict[str, Any] | None = Field(None, description="Opaque caller metadata.")
@@ -317,10 +317,9 @@ class AgentJobResponse(BaseModel):
     # Set on turns created by a fork: the original turn this row copies.
     forked_from_job_id: str | None = None
     metadata: dict[str, Any] | None = None
-    # Labels and revisions only. The owner never sees a connection's address or
-    # credential — those are the two things this service's MCP relay keeps off
-    # the sandbox-facing wire.
-    mcp_bindings: list[McpBindingSummary] = Field(default_factory=list)
+    # Names only. The owner never sees a server's URL or credential — those are
+    # the two things this service's MCP relay keeps off the sandbox-facing wire.
+    mcp_servers: list[str] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
     pinned_at: str | None = None
@@ -984,12 +983,11 @@ class WorkerClaimResponse(BaseModel):
             "no GitHub App is configured, which is enough for a public repository."
         ),
     )
-    mcp_bindings: list[str] = Field(
+    mcp_servers: list[str] = Field(
         default_factory=list,
         description=(
-            "Aliases of the MCP connections this job may reach through the control-plane "
-            "relay. The runner passes them to the runtime adapter; it never learns their "
-            "addresses or their credentials."
+            "MCP server names this job may reach through the control-plane relay. The runner "
+            "passes them to the runtime adapter; it never learns their addresses."
         ),
     )
     metadata: dict[str, Any] | None = None
@@ -1403,56 +1401,20 @@ class WorkerAckResponse(BaseModel):
     state: str | None = None
 
 
-class McpConnectionSummary(BaseModel):
-    """One MCP connection the composer may offer, and whether it currently works.
+class McpServerSummary(BaseModel):
+    """One MCP server the composer may offer.
 
-    Public fields only: a connection's address and its credential stay on this
-    service, so neither has a field here to leak into.
-
-    ``available`` and ``error`` are separate from ``status`` on purpose. A
-    connection whose credential expired is still connected, and hiding it from
-    the composer would leave its owner with a picker that silently omits the
-    server they are looking for; showing it with the reason is what makes the
-    Integrations page an answer rather than a mystery.
+    Public fields only: a server's URL and its credential stay on the gateway,
+    so neither has a field here to leak into.
     """
 
-    connection_id: int
-    label: str
-    transport: str = ""
-    location: str = ""
-    status: str = "draft"
-    available: bool = False
-    error: str | None = None
-    account_label: str | None = None
-    tool_count: int = 0
-
-
-class McpBindingInput(BaseModel):
-    """One connection's use by a session, as the caller asks for it.
-
-    The policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that
-    is absent is denied: a session means what it says, and a capability the
-    server adds later is not covered by what its owner chose earlier.
-    """
-
-    connection_id: int
-    alias: str | None = Field(
-        default=None,
-        max_length=40,
-        description="Stable prefix for the tool names this connection contributes.",
+    name: str
+    description: str = ""
+    tools: list[str] = Field(
+        default_factory=list,
+        description="Tools exposed. Empty means every tool the server offers.",
     )
-    tools: dict[str, str] = Field(default_factory=dict)
-    resources: dict[str, str] = Field(default_factory=dict)
-    prompts: dict[str, str] = Field(default_factory=dict)
-    enabled: bool = True
-
-
-class McpBindingSummary(BaseModel):
-    """Which connection a job used, by label rather than by address."""
-
-    connection_id: int
-    alias: str
-    label: str = ""
+    default: bool = False
 
 
 class AgentConfigResponse(BaseModel):
@@ -1491,7 +1453,7 @@ class AgentConfigResponse(BaseModel):
             "against a gateway too old to answer this."
         ),
     )
-    mcp_connections: list[McpConnectionSummary] = Field(
+    mcp_servers: list[McpServerSummary] = Field(
         default_factory=list,
         description="MCP servers this deployment offers. Empty means none are configured.",
     )

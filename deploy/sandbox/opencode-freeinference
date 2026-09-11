@@ -23,82 +23,6 @@ import os
 import sys
 
 
-#: The environment variable the control plane publishes the relay entry in, as
-#: ``{name: url}`` -- one entry, at the relay's merged endpoint, which answers
-#: for every connection the job bound rather than for one alias each. Kept in
-#: step with ``MCP_SERVERS_ENV`` in ``cloud_agent_host/runtimes.py``.
-MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
-
-#: The per-attempt token, referenced from the config rather than written into
-#: it. Kept in step with ``MCP_TOKEN_ENV`` in ``cloud_agent_host/runtimes.py``.
-MCP_TOKEN_ENV = "AGENT_MCP_TOKEN"
-
-#: How this CLI interpolates an environment variable in a config file. Checked
-#: against the pinned binary: it is a text substitution over the raw file, run
-#: before parsing, so the reference has to survive JSON encoding as plain text
-#: -- which it does, and which is why the wrong syntax here fails silently as a
-#: literal ``{env:...}`` bearer token rather than as a config error.
-_ENV_REFERENCE = "{env:" + MCP_TOKEN_ENV + "}"
-
-#: Characters that cannot survive the substitution above: the token is written
-#: into the config *text* before it is parsed, so an unescaped quote or
-#: backslash would corrupt the document. Tokens this platform mints are
-#: base64url and contain neither; this guards a future format.
-_UNSAFE_IN_TOKEN = ('"', "\\")
-
-
-def mcp_servers() -> dict[str, object]:
-    """Build the platform's MCP entries from the environment.
-
-    Normally one entry, at the relay's merged endpoint, rather than one key per
-    connection: that endpoint lists every connection's tools from the single
-    URL, already namespaced by alias, so a key per connection would register the
-    same catalogue once per connection.
-
-    An empty mapping is written when the run has no connections, and the key is
-    written either way: a config that declared MCP only sometimes would leave
-    the CLI free to find its own sources on the turns where it does not, which
-    is the shape the project-config kill switch exists to prevent.
-    """
-    raw = os.environ.get(MCP_SERVERS_ENV) or "{}"
-    try:
-        endpoints = json.loads(raw)
-    except ValueError:
-        sys.stderr.write(
-            f"opencode-freeinference: {MCP_SERVERS_ENV} is not valid JSON; refusing to start rather "
-            "than running with no tools or with somebody else's.\n"
-        )
-        raise SystemExit(64) from None
-    if not isinstance(endpoints, dict):
-        sys.stderr.write(f"opencode-freeinference: {MCP_SERVERS_ENV} must be an object.\n")
-        raise SystemExit(64)
-    token = os.environ.get(MCP_TOKEN_ENV, "")
-    if endpoints and not token:
-        sys.stderr.write(
-            f"opencode-freeinference: {MCP_SERVERS_ENV} names connections but {MCP_TOKEN_ENV} is "
-            "empty; every call would be refused.\n"
-        )
-        raise SystemExit(64)
-    if any(character in token for character in _UNSAFE_IN_TOKEN):
-        sys.stderr.write(
-            f"opencode-freeinference: {MCP_TOKEN_ENV} contains a character that cannot survive config "
-            "interpolation.\n"
-        )
-        raise SystemExit(64)
-    return {
-        str(alias): {
-            "type": "remote",
-            "url": str(url),
-            "enabled": True,
-            "headers": {"Authorization": "Bearer " + _ENV_REFERENCE},
-            # The relay speaks MCP with a job token, not OAuth. Left on, the CLI
-            # would probe this platform for authorization-server metadata and
-            # fail the server as unauthenticated before the first call.
-            "oauth": False,
-        }
-        for alias, url in endpoints.items()
-    }
-
 def main() -> None:
     """Write OpenCode's provider config from the environment and exec it."""
     try:
@@ -132,10 +56,6 @@ def main() -> None:
     if effort:
         model_entry["options"] = {"reasoningEffort": effort}
     config = {
-        # One reviewed source, written every run -- including when it is empty.
-        # The project config is disabled below, so this is the only MCP source
-        # the CLI will see.
-        "mcp": mcp_servers(),
         "provider": {
             "freeinference": {
                 # Bundled in the opencode binary; with the catalog fetch

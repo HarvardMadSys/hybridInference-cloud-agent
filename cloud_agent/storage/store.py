@@ -324,10 +324,11 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "detail": row["detail"],
         "metadata": _load_json(row["metadata"]),
         "fork_source_job_id": row["fork_source_job_id"],
-        # Which connections this turn's conversation is bound to. Labels and
-        # aliases only: an address or a credential reaching this dict would be
-        # one serialization away from the owner-facing response.
-        "mcp_bindings": _load_json(row.get("mcp_bindings")) or [],
+        # Resolved once, at creation, against the deployment registry — not
+        # re-read per attempt. A job runs with the tool surface it was created
+        # with, so removing a server from the registry stops new jobs from
+        # asking for it without changing what a running one was promised.
+        "mcp_servers": list(row["mcp_servers"] or []),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "pinned_at": row.get("pinned_at"),
@@ -338,12 +339,9 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
 
 
 # A job's own columns. What a job shares with every other turn of its
-# conversation — repo, setup script, execution profile — lives on the thread,
-# so every read of a job joins ``agent_threads t`` and reports the thread's
-# values under the job's keys. MCP connections are deliberately *not* here:
-# they live in ``agent_mcp_thread_bindings``, which is read per request rather
-# than copied into a job, because a narrowing of what a session may use has to
-# take effect on the turn after it, not on the next job.
+# conversation — repo, setup script, execution profile, tool servers — lives on
+# the thread, so every read of a job joins ``agent_threads t`` and reports the
+# thread's values under the job's keys.
 _JOB_OWN_COLUMNS = (
     "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, base_sha, task_prompt, "
     "runtime, model, reasoning_effort, state, "
@@ -352,10 +350,7 @@ _JOB_OWN_COLUMNS = (
     "metadata, fork_source_job_id, "
     "created_at, updated_at"
 )
-#: ``mcp_servers`` is deliberately absent: this branch migrates the legacy
-#: provider-name list into per-thread bindings and drops the column, so a read
-#: that still named it would fail against the schema this branch deploys.
-_THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile"
+_THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile, t.mcp_servers"
 # Probe the unfinished-turn index before the latest-turn index: a cancelled
 # queued follow-up must not hide work that is still running earlier in the chat.
 _CONVERSATION_STATE_SQL = """
@@ -376,23 +371,8 @@ _QUALIFIED_JOB_COLUMNS = (
     + _THREAD_CONFIG_COLUMNS
     + f", {_CONVERSATION_STATE_SQL} AS conversation_state"
 )
-#: One conversation's MCP bindings, as a JSON array, joined onto every job read.
-#: Read per query rather than copied onto a job, because narrowing a session has
-#: to take effect on the turn after it rather than on the next job.
-_MCP_BINDING_COLUMNS = "COALESCE(b.mcp_bindings, '[]'::jsonb) AS mcp_bindings"
-_MCP_BINDING_JOIN = (
-    "LEFT JOIN LATERAL ("
-    "SELECT jsonb_agg(jsonb_build_object("
-    "'connection_id', tb.connection_id, 'alias', tb.alias, 'label', c.label"
-    ") ORDER BY tb.alias) AS mcp_bindings "
-    "FROM agent_mcp_thread_bindings tb "
-    "JOIN agent_mcp_connections c ON c.id = tb.connection_id "
-    "WHERE tb.thread_id = t.id"
-    ") b ON TRUE"
-)
 _JOB_SELECT = (
-    f"SELECT {_QUALIFIED_JOB_COLUMNS}, {_MCP_BINDING_COLUMNS} "
-    f"FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id {_MCP_BINDING_JOIN}"
+    f"SELECT {_QUALIFIED_JOB_COLUMNS} FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id"
 )
 
 
@@ -401,8 +381,7 @@ def _session_query(*, filter_repo: bool = False) -> str:
     repo_filter = "AND ($5::text IS NULL OR t.repo = $5)" if filter_repo else ""
     return f"""
 WITH latest AS (
-    SELECT {_QUALIFIED_JOB_COLUMNS}, {_MCP_BINDING_COLUMNS},
-           t.id AS session_id, t.title AS session_title, t.title_source,
+    SELECT {_QUALIFIED_JOB_COLUMNS}, t.id AS session_id, t.title AS session_title, t.title_source,
            t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
            CASE
                WHEN j.state = 'queued' THEN 'queued'
@@ -418,7 +397,6 @@ WITH latest AS (
         ORDER BY latest_job.turn_no DESC, latest_job.id DESC
         LIMIT 1
     ) j
-    {_MCP_BINDING_JOIN}
     WHERE t.user_id = $1 AND t.deleted_at IS NULL
       AND (($2 AND t.archived_at IS NOT NULL) OR (NOT $2 AND t.archived_at IS NULL))
       AND ($3::text IS NULL OR STRPOS(LOWER(t.title), LOWER($3)) > 0)
@@ -596,69 +574,6 @@ CAPACITY_HISTORY_MAX_AGE_S = 90.0
 #: History retention. The page serves at most 24 hours, so anything older is
 #: deleted rather than merely hidden.
 CAPACITY_HISTORY_RETENTION_S = 24 * 60 * 60.0
-
-
-def fence_params(
-    *,
-    config_revision: int | None = None,
-    authorization_epoch: int | None = None,
-    capability_revision: int | None = None,
-    policy_revision: int | None = None,
-    attempt_id: int | None = None,
-    lease_generation: int | None = None,
-) -> list[Any]:
-    """The values :func:`_invocation_fence_sql` numbered, in its order.
-
-    Kept as one pair so the clauses and their arguments cannot drift apart: a
-    fence whose ``$n`` refers to the wrong value silently matches the wrong
-    rows, which is worse than not checking at all because it looks like it does.
-    """
-    values: list[Any] = []
-    for value in (config_revision, authorization_epoch, capability_revision, policy_revision):
-        if value is not None:
-            values.append(int(value))
-    if attempt_id is not None:
-        values.append(attempt_id)
-    if lease_generation is not None:
-        values.append(lease_generation)
-    return values
-
-
-def _invocation_fence_sql(
-    *,
-    first_index: int,
-    config_revision: int | None = None,
-    authorization_epoch: int | None = None,
-    capability_revision: int | None = None,
-    policy_revision: int | None = None,
-    attempt_id: int | None = None,
-    lease_generation: int | None = None,
-) -> str:
-    """The ``AND`` clauses binding an approval to the state it was given for.
-
-    Every clause is optional so a caller that has nothing to compare against --
-    a migration, a repair script -- can still address the row. The API never
-    omits them.
-    """
-    clauses: list[str] = []
-    index = first_index
-    for column, value in (
-        ("config_revision", config_revision),
-        ("authorization_epoch", authorization_epoch),
-        ("capability_revision", capability_revision),
-        ("policy_revision", policy_revision),
-    ):
-        if value is not None:
-            clauses.append(f" AND {column} = ${index}")
-            index += 1
-    if attempt_id is not None:
-        # A job may have no attempt recorded, and ``= NULL`` is never true.
-        clauses.append(f" AND attempt_id IS NOT DISTINCT FROM ${index}")
-        index += 1
-    if lease_generation is not None:
-        clauses.append(f" AND lease_generation = ${index}")
-        index += 1
-    return "".join(clauses)
 
 
 class AgentJobStore:
@@ -954,1404 +869,78 @@ class AgentJobStore:
 
     # ── MCP connections ────────────────────────────────────────────────
     #
-    # A connection is one user's configuration for one MCP server: where it is,
-    # how to authenticate and where it runs. Everything here is scoped by
-    # ``user_id`` and none of it takes a connection id alone, so there is no
-    # shape in which one person's row can be read or changed through another's
-    # request.
-    #
-    # Three properties are enforced in SQL rather than in Python, because each
-    # is a race that a check-then-write would lose:
-    #
-    # * a configuration edit is conditional on the revision the caller read, so
-    #   two concurrent edits cannot silently merge into neither;
-    # * a credential write is conditional on the authorization epoch, so a
-    #   refresh that started before a disconnect cannot resurrect the secret;
-    # * an approval is claimed with a single ``UPDATE ... WHERE status`` so that
-    #   exactly one dispatcher sends a call with a side effect.
+    # One row per user per server: what *this person* connected, holding their
+    # credential. Every query here is scoped by ``user_id`` and none takes a
+    # connection id alone, so there is no shape in which one user's row can be
+    # read or removed through another's request — the property the deployment
+    # registry could not have, because it had no user to scope by.
 
-    _MCP_CONNECTION_COLUMNS = (
-        "id, user_id, label, template, transport, location, url, launch_spec, "
-        "auth_kind, auth_config, connector_id, status, error_kind, error_detail, "
-        "access_token_ciphertext, refresh_token_ciphertext, client_secret_ciphertext, "
-        "expires_at, scopes, issuer, resource, refresh_rotates, token_endpoint, "
-        "revocation_endpoint, registration_endpoint, client_auth_method, "
-        "registration, credential_version, config_revision, authorization_epoch, "
-        "oauth_generation, capability_revision, account_label, last_checked_at, "
-        "request_timeout_s, refresh_generation, refresh_lease_expires_at, "
-        "created_at, updated_at, deleted_at"
-    )
+    async def list_mcp_connections(self, *, user_id: str) -> list[dict[str, Any]]:
+        """Return this user's MCP connections, including encrypted tokens.
 
-    @staticmethod
-    def _mcp_connection(row: Any) -> dict[str, Any]:
-        """Decode one connection row into plain Python values."""
-        record = dict(row)
-        for key in ("launch_spec", "auth_config"):
-            record[key] = _load_json(record.get(key)) or {}
-        record["scopes"] = list(record.get("scopes") or [])
-        return record
-
-    async def list_mcp_connections(
-        self, *, user_id: str, include_deleted: bool = False
-    ) -> list[dict[str, Any]]:
-        """Every connection this user owns, newest label order stable."""
-        clause = "" if include_deleted else " AND deleted_at IS NULL"
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT {self._MCP_CONNECTION_COLUMNS}
-                FROM agent_mcp_connections
-                WHERE user_id = $1{clause}
-                ORDER BY label, id
-                """,
-                user_id,
-            )
-        return [self._mcp_connection(row) for row in rows]
-
-    async def get_mcp_connection(
-        self, *, connection_id: int, user_id: str | None = None
-    ) -> dict[str, Any] | None:
-        """One connection by immutable id, optionally checked against its owner."""
-        async with self._pool.acquire() as conn:
-            if user_id is None:
-                row = await conn.fetchrow(
-                    f"SELECT {self._MCP_CONNECTION_COLUMNS} FROM agent_mcp_connections WHERE id = $1",
-                    connection_id,
-                )
-            else:
-                row = await conn.fetchrow(
-                    f"SELECT {self._MCP_CONNECTION_COLUMNS} FROM agent_mcp_connections "
-                    "WHERE id = $1 AND user_id = $2",
-                    connection_id,
-                    user_id,
-                )
-        return self._mcp_connection(row) if row is not None else None
-
-    async def create_mcp_connection(
-        self,
-        *,
-        user_id: str,
-        label: str,
-        transport: str,
-        location: str,
-        url: str | None,
-        launch_spec: dict[str, Any] | None,
-        auth_kind: str,
-        auth_config: dict[str, Any],
-        template: str | None = None,
-        connector_id: int | None = None,
-        account_label: str | None = None,
-        request_timeout_s: float | None = None,
-    ) -> dict[str, Any]:
-        """Insert a connection and return it, at revision one.
-
-        New rows start ``draft`` rather than ``active``: nothing has been tested
-        and no capability has been discovered, and a connection that reads as
-        active before either has happened is a lie the Integrations page would
-        repeat.
+        Ordered by server name so the composer and the Integrations page agree
+        on order without either sorting again.
         """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                INSERT INTO agent_mcp_connections
-                    (user_id, label, template, transport, location, url, launch_spec,
-                     auth_kind, auth_config, connector_id, account_label, status,
-                     request_timeout_s)
-                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, 'draft',
-                        $12)
-                RETURNING {self._MCP_CONNECTION_COLUMNS}
-                """,
-                user_id,
-                label,
-                template,
-                transport,
-                location,
-                url,
-                json.dumps(launch_spec) if launch_spec is not None else None,
-                auth_kind,
-                json.dumps(auth_config),
-                connector_id,
-                account_label,
-                request_timeout_s,
-            )
-        return self._mcp_connection(row)
-
-    async def update_mcp_connection(
-        self,
-        *,
-        connection_id: int,
-        user_id: str,
-        expected_config_revision: int,
-        label: str | None = None,
-        transport: str | None = None,
-        location: str | None = None,
-        url: str | None = None,
-        launch_spec: dict[str, Any] | None = None,
-        auth_kind: str | None = None,
-        auth_config: dict[str, Any] | None = None,
-        account_label: str | None = None,
-        request_timeout_s: float | None = None,
-        reset_status: bool = False,
-    ) -> dict[str, Any] | None:
-        """Apply a configuration edit, refusing a stale revision.
-
-        Every field that decides *what is reached* -- transport, location,
-        endpoint, launch spec, authentication -- moves both the config revision
-        and the authorization epoch, which invalidates the thread bindings that
-        were approved against the previous target. A label edit moves neither:
-        renaming a connection is not a reason to make every session re-approve
-        the tools it already has.
-        """
-        security_relevant = any(
-            value is not None
-            for value in (transport, location, url, launch_spec, auth_kind, auth_config)
-        )
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_mcp_connections SET
-                    label = COALESCE($3, label),
-                    transport = COALESCE($4, transport),
-                    location = COALESCE($5, location),
-                    url = CASE WHEN $6::boolean THEN $7 ELSE url END,
-                    launch_spec = CASE WHEN $8::boolean THEN $9::jsonb ELSE launch_spec END,
-                    auth_kind = COALESCE($10, auth_kind),
-                    auth_config = CASE WHEN $11::boolean THEN $12::jsonb ELSE auth_config END,
-                    account_label = COALESCE($13, account_label),
-                    request_timeout_s = COALESCE($17, request_timeout_s),
-                    status = CASE WHEN $14::boolean THEN 'draft' ELSE status END,
-                    error_kind = CASE WHEN $14::boolean THEN 'none' ELSE error_kind END,
-                    error_detail = CASE WHEN $14::boolean THEN NULL ELSE error_detail END,
-                    config_revision = config_revision + CASE WHEN $15::boolean THEN 1 ELSE 0 END,
-                    authorization_epoch = authorization_epoch + CASE WHEN $15::boolean THEN 1 ELSE 0 END,
-                    updated_at = NOW()
-                WHERE id = $1 AND user_id = $2 AND config_revision = $16 AND deleted_at IS NULL
-                RETURNING {self._MCP_CONNECTION_COLUMNS}
-                """,
-                connection_id,
-                user_id,
-                label,
-                transport,
-                location,
-                url is not None,
-                url,
-                launch_spec is not None,
-                json.dumps(launch_spec) if launch_spec is not None else None,
-                auth_kind,
-                auth_config is not None,
-                json.dumps(auth_config) if auth_config is not None else None,
-                account_label,
-                reset_status,
-                security_relevant,
-                expected_config_revision,
-                request_timeout_s,
-            )
-        return self._mcp_connection(row) if row is not None else None
-
-    async def disconnect_mcp_connection(self, *, connection_id: int, user_id: str) -> bool:
-        """Soft-disconnect one connection: tombstone it and bump the epoch.
-
-        The row is kept so that the bindings pointing at it can say *this was
-        disconnected* rather than *this never existed*, and so a session that
-        was authorized against it fails the epoch check instead of quietly
-        resolving to nothing. The stored secret is cleared in the same
-        statement, because a tombstone that still holds a token is not a
-        disconnect.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE agent_mcp_connections SET
-                    deleted_at = NOW(),
-                    status = 'disabled',
-                    access_token_ciphertext = NULL,
-                    refresh_token_ciphertext = NULL,
-                    client_secret_ciphertext = NULL,
-                    expires_at = NULL,
-                    authorization_epoch = authorization_epoch + 1,
-                    credential_version = credential_version + 1,
-                    oauth_generation = oauth_generation + 1,
-                    updated_at = NOW()
-                WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-                RETURNING id
-                """,
-                connection_id,
-                user_id,
-            )
-            if row is not None:
-                await conn.execute(
-                    "DELETE FROM agent_mcp_oauth_flows WHERE connection_id = $1 AND consumed_at IS NULL",
-                    connection_id,
-                )
-        return row is not None
-
-    async def set_mcp_connection_status(
-        self,
-        *,
-        connection_id: int,
-        status: str,
-        error_kind: str = "none",
-        error_detail: str | None = None,
-    ) -> bool:
-        """Record what the last test or discovery found."""
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connections SET
-                    status = $2, error_kind = $3, error_detail = $4,
-                    last_checked_at = NOW(), updated_at = NOW()
-                WHERE id = $1 AND deleted_at IS NULL
-                RETURNING id
-                """,
-                connection_id,
-                status,
-                error_kind,
-                error_detail,
-            )
-        return updated is not None
-
-    async def set_mcp_credential(
-        self,
-        *,
-        connection_id: int,
-        expected_authorization_epoch: int,
-        access_token_ciphertext: str | None,
-        refresh_token_ciphertext: str | None = None,
-        client_secret_ciphertext: str | None = None,
-        expires_at: Any = None,
-        scopes: list[str] | None = None,
-        issuer: str | None = None,
-        resource: str | None = None,
-        refresh_rotates: bool = False,
-        client_auth_method: str | None = None,
-        registration: str | None = None,
-        token_endpoint: str | None = None,
-        revocation_endpoint: str | None = None,
-        registration_endpoint: str | None = None,
-        auth_config_patch: Mapping[str, Any] | None = None,
-        bump_epoch: bool = False,
-        clear_refresh: bool = False,
-        expected_oauth_generation: int | None = None,
-        expected_config_revision: int | None = None,
-        expected_refresh_generation: int | None = None,
-    ) -> bool:
-        """Write a credential, conditional on the state the flow started in.
-
-        The epoch condition is what makes a late OAuth callback harmless: a
-        flow that started before a disconnect carries the epoch it started
-        under, and by the time it returns the row has moved past it, so the
-        write matches no row instead of restoring a credential the owner
-        removed.
-
-        ``expected_oauth_generation`` and ``expected_config_revision`` close the
-        window the epoch alone leaves open. A callback spends real time on the
-        network between "this flow is still the current one" and "write what it
-        returned", and in that window a *newer* flow can finish: the epoch is
-        unchanged, because a re-authorization is not a change of target, so the
-        late write would land on top of the newer token while the row still
-        records the newer generation. Checking both here makes the two writes
-        race for one row in a single statement, which is the only place a race
-        can be settled.
-
-        ``expected_refresh_generation`` is the same fence for the automatic
-        refresh, which is the one caller that cannot see a newer flow finish:
-        it holds a lease, spends the same time on the network, and its token
-        response is worthless the moment that lease is superseded. Requiring the
-        generation *and* a lease that has not expired means a slow refresher
-        writes nothing rather than reviving the credential its successor is
-        replacing -- and the successful write clears the lease, because the
-        refresher that lands is done holding it.
-
-        ``clear_refresh`` means the *previous* refresh token is gone -- an
-        issuer that rotates invalidates it. It is not a request to discard the
-        one being written: a rotating issuer returns a new refresh token in the
-        same response, and writing NULL over it, which is what this column did,
-        leaves every connection unable to renew once its access token expires.
-
-        ``bump_epoch`` is for a *manual* replacement, where the identity behind
-        the credential may be a different account and every approval made
-        against the old one has to be re-made. A normal refresh keeps the epoch
-        and only moves the credential version.
-        """
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connections SET
-                    access_token_ciphertext = $3,
-                    refresh_token_ciphertext = CASE
-                        WHEN $5::text IS NOT NULL THEN $5::text
-                        WHEN $4::boolean THEN NULL
-                        ELSE refresh_token_ciphertext END,
-                    client_secret_ciphertext = COALESCE($6, client_secret_ciphertext),
-                    expires_at = $7,
-                    scopes = COALESCE($8, scopes),
-                    issuer = COALESCE($9, issuer),
-                    resource = COALESCE($10, resource),
-                    refresh_rotates = $11,
-                    client_auth_method = COALESCE($12, client_auth_method),
-                    registration = COALESCE($13, registration),
-                    token_endpoint = COALESCE($14, token_endpoint),
-                    revocation_endpoint = COALESCE($15, revocation_endpoint),
-                    registration_endpoint = COALESCE($16, registration_endpoint),
-                    auth_config = auth_config || $17::jsonb,
-                    credential_version = credential_version + 1,
-                    authorization_epoch = authorization_epoch + CASE WHEN $18::boolean THEN 1 ELSE 0 END,
-                    refresh_lease_expires_at = CASE
-                        WHEN $21::bigint IS NULL THEN refresh_lease_expires_at
-                        ELSE NULL END,
-                    updated_at = NOW()
-                WHERE id = $1 AND authorization_epoch = $2 AND deleted_at IS NULL
-                  AND oauth_generation = COALESCE($19::bigint, oauth_generation)
-                  AND config_revision = COALESCE($20::bigint, config_revision)
-                  AND ($21::bigint IS NULL
-                       OR (refresh_generation = $21 AND refresh_lease_expires_at > NOW()))
-                RETURNING id
-                """,
-                connection_id,
-                expected_authorization_epoch,
-                access_token_ciphertext,
-                clear_refresh,
-                refresh_token_ciphertext,
-                client_secret_ciphertext,
-                expires_at,
-                list(scopes) if scopes is not None else None,
-                issuer,
-                resource,
-                refresh_rotates,
-                client_auth_method,
-                registration,
-                token_endpoint,
-                revocation_endpoint,
-                registration_endpoint,
-                json.dumps(dict(auth_config_patch or {})),
-                bump_epoch,
-                expected_oauth_generation,
-                expected_config_revision,
-                expected_refresh_generation,
-            )
-        return updated is not None
-
-    async def set_mcp_client_registration(
-        self,
-        *,
-        connection_id: int,
-        user_id: str,
-        client_id: str,
-        client_secret_ciphertext: str | None,
-    ) -> bool:
-        """Record the OAuth client a connection authorizes as.
-
-        The target is unchanged, so neither the config revision nor the
-        authorization epoch moves: a client id says *who is asking*, not *what
-        is being reached*. The OAuth generation does move, because an
-        authorization already in flight was started by the previous client and
-        its callback must not complete the flow that replaces it.
-        """
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connections SET
-                    auth_config = auth_config || jsonb_build_object('client_id', $3::text),
-                    client_secret_ciphertext = COALESCE($4, client_secret_ciphertext),
-                    oauth_generation = oauth_generation + 1,
-                    updated_at = NOW()
-                WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-                RETURNING id
-                """,
-                connection_id,
-                user_id,
-                client_id,
-                client_secret_ciphertext,
-            )
-        return updated is not None
-
-    async def claim_mcp_refresh(
-        self,
-        *,
-        connection_id: int,
-        expected_credential_version: int,
-        lease_seconds: float,
-    ) -> dict[str, Any] | None:
-        """Take exclusive ownership of refreshing one connection's credential.
-
-        Two conditions, and they answer different questions. The version says
-        *the row I read is still the row I read* -- a credential written since
-        then means this caller would be spending a token that has already been
-        replaced. The lease says *nobody else is on the network with it right
-        now*, which the version cannot: bumping a version is a write, not a
-        lock, and it is visible the instant it commits, so a second caller that
-        reads afterwards claims the row while the first is still waiting on the
-        token endpoint. A rotating authorization server invalidates the first
-        refresh token the moment the second call uses it, so that is the
-        connection destroyed rather than merely refreshed twice.
-
-        The lease is also what keeps the property the version bump was chosen
-        for: a refresher that dies mid-flight leaves a lease that expires, not a
-        lock somebody has to clear, and the row is claimable again at the *new*
-        generation. That retry is bounded by ``lease_seconds`` instead of
-        immediate, which is the whole difference between the two mechanisms.
-
-        The generation is bumped here and returned to the caller, which hands it
-        back to :meth:`set_mcp_credential`. A claim that was superseded while it
-        was on the network therefore cannot write its answer over its
-        successor's, and the lease that successor holds is untouched.
-        """
-        if lease_seconds <= 0:
-            raise ValueError("an MCP refresh lease must be positive")
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_mcp_connections
-                SET refresh_generation = refresh_generation + 1,
-                    refresh_lease_expires_at = NOW() + make_interval(secs => $3),
-                    updated_at = NOW()
-                WHERE id = $1 AND credential_version = $2 AND deleted_at IS NULL
-                  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= NOW())
-                RETURNING {self._MCP_CONNECTION_COLUMNS}
-                """,
-                connection_id,
-                expected_credential_version,
-                lease_seconds,
-            )
-        return self._mcp_connection(row) if row is not None else None
-
-    async def release_mcp_refresh_claim(
-        self, *, connection_id: int, refresh_generation: int
-    ) -> bool:
-        """Give up a refresh lease early, after an attempt that wrote nothing.
-
-        Called on the failure paths only. A refused or unreachable token
-        endpoint rotated nothing, so holding the lease would only make the owner
-        wait out a timer for a refresh that never happened.
-
-        Fenced on the generation it was issued under: a lease that has since
-        been superseded belongs to the worker now holding it, and a late
-        releaser must not hand the row to a third caller while that one is still
-        on the network.
-        """
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connections
-                SET refresh_lease_expires_at = NULL, updated_at = NOW()
-                WHERE id = $1 AND refresh_generation = $2 AND deleted_at IS NULL
-                  AND refresh_lease_expires_at IS NOT NULL
-                RETURNING id
-                """,
-                connection_id,
-                refresh_generation,
-            )
-        return updated is not None
-
-    async def get_mcp_capabilities(self, *, connection_id: int) -> dict[str, Any] | None:
-        """The stored capability snapshot for one connection."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM agent_mcp_capabilities WHERE connection_id = $1",
-                connection_id,
-            )
-        if row is None:
-            return None
-        record = dict(row)
-        for key in ("tools", "resources", "resource_templates", "prompts", "support"):
-            record[key] = _load_json(record.get(key)) or ({} if key == "support" else [])
-        return record
-
-    async def save_mcp_capabilities(
-        self,
-        *,
-        connection_id: int,
-        config_revision: int,
-        protocol_version: str,
-        server_name: str,
-        server_version: str,
-        tools: list[dict[str, Any]],
-        resources: list[dict[str, Any]],
-        resource_templates: list[dict[str, Any]],
-        prompts: list[dict[str, Any]],
-        support: dict[str, Any],
-        partial: bool = False,
-    ) -> int:
-        """Store a discovery result and return the new capability revision.
-
-        The revision is incremented in the same statement that writes the
-        snapshot, so a binding's fence can never be checked against a snapshot
-        written by a different discovery. ``partial`` records a discovery that
-        succeeded on some surfaces and failed on others: the connection is
-        usable, and the interface says which part is missing rather than
-        presenting a short catalogue as the whole truth.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            revision = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connections
-                SET capability_revision = capability_revision + 1, updated_at = NOW()
-                WHERE id = $1 AND deleted_at IS NULL
-                RETURNING capability_revision
-                """,
-                connection_id,
-            )
-            if revision is None:
-                return 0
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_capabilities
-                    (connection_id, capability_revision, config_revision, protocol_version,
-                     server_name, server_version, tools, resources, resource_templates,
-                     prompts, support, discovered_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb,
-                        $10::jsonb, $11::jsonb, NOW())
-                ON CONFLICT (connection_id) DO UPDATE SET
-                    capability_revision = EXCLUDED.capability_revision,
-                    config_revision = EXCLUDED.config_revision,
-                    protocol_version = EXCLUDED.protocol_version,
-                    server_name = EXCLUDED.server_name,
-                    server_version = EXCLUDED.server_version,
-                    tools = EXCLUDED.tools,
-                    resources = EXCLUDED.resources,
-                    resource_templates = EXCLUDED.resource_templates,
-                    prompts = EXCLUDED.prompts,
-                    support = EXCLUDED.support,
-                    discovered_at = NOW()
-                """,
-                connection_id,
-                revision,
-                config_revision,
-                protocol_version,
-                server_name,
-                server_version,
-                json.dumps(tools),
-                json.dumps(resources),
-                json.dumps(resource_templates),
-                json.dumps(prompts),
-                json.dumps({**support, "partial": partial}),
-            )
-        return int(revision)
-
-    async def delete_mcp_capabilities(self, *, connection_id: int) -> None:
-        """Drop a snapshot, used when discovery proves the target changed."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM agent_mcp_capabilities WHERE connection_id = $1", connection_id
-            )
-
-    # ── MCP OAuth flows ────────────────────────────────────────────────
-
-    async def create_mcp_oauth_flow(
-        self,
-        *,
-        state_hash: str,
-        user_id: str,
-        connection_id: int,
-        config_revision: int,
-        authorization_epoch: int,
-        oauth_generation: int,
-        code_verifier_ciphertext: str,
-        client_id: str,
-        client_secret_ciphertext: str | None,
-        client_auth_method: str,
-        registration: str,
-        issuer: str,
-        resource: str,
-        redirect_uri: str,
-        scopes: list[str],
-        authorization_endpoint: str,
-        token_endpoint: str,
-        revocation_endpoint: str | None,
-        registration_endpoint: str | None,
-        expires_at: Any,
-    ) -> None:
-        """Record one started authorization.
-
-        Starting a flow also moves the OAuth generation, in the same
-        transaction, so any callback still in flight for an earlier attempt is
-        refused rather than being allowed to win a race against the newer one.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute(
-                """
-                UPDATE agent_mcp_connections
-                SET oauth_generation = oauth_generation + 1, updated_at = NOW()
-                WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-                """,
-                connection_id,
-                user_id,
-            )
-            await conn.execute(
-                "DELETE FROM agent_mcp_oauth_flows WHERE connection_id = $1 AND consumed_at IS NULL",
-                connection_id,
-            )
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_oauth_flows
-                    (state_hash, user_id, connection_id, config_revision,
-                     authorization_epoch, oauth_generation, code_verifier_ciphertext,
-                     client_id, client_secret_ciphertext, client_auth_method, registration,
-                     issuer, resource, redirect_uri, scopes, authorization_endpoint,
-                     token_endpoint, revocation_endpoint, registration_endpoint, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                        $15, $16, $17, $18, $19, $20)
-                """,
-                state_hash,
-                user_id,
-                connection_id,
-                config_revision,
-                authorization_epoch,
-                oauth_generation,
-                code_verifier_ciphertext,
-                client_id,
-                client_secret_ciphertext,
-                client_auth_method,
-                registration,
-                issuer,
-                resource,
-                redirect_uri,
-                list(scopes),
-                authorization_endpoint,
-                token_endpoint,
-                revocation_endpoint,
-                registration_endpoint,
-                expires_at,
-            )
-
-    async def consume_mcp_oauth_flow(self, *, state_hash: str) -> dict[str, Any] | None:
-        """Claim a flow exactly once, returning it, or ``None``.
-
-        The ``consumed_at IS NULL`` predicate is inside the ``UPDATE``, so two
-        callbacks racing on the same state cannot both proceed: the second
-        matches no row. Marking it consumed before the token exchange is
-        deliberate -- a callback that fails after this point must be restarted
-        by the user, which is preferable to a state value that can be replayed.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE agent_mcp_oauth_flows
-                SET consumed_at = NOW()
-                WHERE state_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
-                RETURNING *
-                """,
-                state_hash,
-            )
-        if row is None:
-            return None
-        record = dict(row)
-        record["scopes"] = list(record.get("scopes") or [])
-        return record
-
-    async def delete_mcp_oauth_flows(self, *, connection_id: int) -> int:
-        """Drop every unconsumed flow for one connection."""
-        async with self._pool.acquire() as conn:
-            deleted = await conn.fetch(
-                "DELETE FROM agent_mcp_oauth_flows WHERE connection_id = $1 AND consumed_at IS NULL "
-                "RETURNING state_hash",
-                connection_id,
-            )
-        return len(deleted)
-
-    # ── MCP thread bindings ────────────────────────────────────────────
-
-    async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """Every connection this conversation may use, with its rules."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT b.thread_id, b.connection_id, b.alias, b.enabled, b.selection_pending,
-                       b.config_revision, b.authorization_epoch, b.capability_revision,
-                       b.policy_revision, b.rules, b.resource_rules, b.prompt_rules,
-                       c.label, c.transport, c.location, c.status AS connection_status,
-                       c.error_kind, c.error_detail, c.deleted_at
-                FROM agent_mcp_thread_bindings b
-                JOIN agent_mcp_connections c ON c.id = b.connection_id
-                WHERE b.thread_id = $1
-                ORDER BY b.alias, b.connection_id
+                SELECT id, user_id, server, account_label, access_token_ciphertext,
+                       refresh_token_ciphertext, expires_at, created_at, updated_at
+                FROM agent_mcp_connections WHERE user_id = $1 ORDER BY server
                 """,
-                thread_id,
-            )
-        bindings: list[dict[str, Any]] = []
-        for row in rows:
-            record = dict(row)
-            for key in ("rules", "resource_rules", "prompt_rules"):
-                record[key] = _load_json(record.get(key)) or {}
-            bindings.append(record)
-        return bindings
-
-    async def replace_mcp_bindings(self, *, thread_id: str, bindings: list[dict[str, Any]]) -> None:
-        """Replace a conversation's selection wholesale.
-
-        Wholesale rather than per-row, because a selection is a decision about
-        the *set*: leaving an unmentioned binding in place would mean removing a
-        connection from the dialog did not remove its tools from the session.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute(
-                "DELETE FROM agent_mcp_thread_bindings WHERE thread_id = $1", thread_id
-            )
-            for binding in bindings:
-                await conn.execute(
-                    """
-                    INSERT INTO agent_mcp_thread_bindings
-                        (thread_id, connection_id, alias, enabled, selection_pending,
-                         config_revision, authorization_epoch, capability_revision,
-                         policy_revision, rules, resource_rules, prompt_rules)
-                    VALUES ($1, $2, $3, $4, FALSE, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
-                    """,
-                    thread_id,
-                    int(binding["connection_id"]),
-                    str(binding["alias"]),
-                    bool(binding.get("enabled", True)),
-                    int(binding["config_revision"]),
-                    int(binding["authorization_epoch"]),
-                    int(binding["capability_revision"]),
-                    int(binding.get("policy_revision", 1)),
-                    json.dumps(binding.get("rules") or {}),
-                    json.dumps(binding.get("resource_rules") or {}),
-                    json.dumps(binding.get("prompt_rules") or {}),
-                )
-
-    async def bump_mcp_binding_policy_revision(self, *, thread_id: str, connection_id: int) -> int:
-        """Move a binding's policy revision, invalidating held approvals."""
-        async with self._pool.acquire() as conn:
-            revision = await conn.fetchval(
-                """
-                UPDATE agent_mcp_thread_bindings
-                SET policy_revision = policy_revision + 1, updated_at = NOW()
-                WHERE thread_id = $1 AND connection_id = $2
-                RETURNING policy_revision
-                """,
-                thread_id,
-                connection_id,
-            )
-        return int(revision or 0)
-
-    # ── MCP invocations ────────────────────────────────────────────────
-
-    async def create_mcp_invocation(
-        self,
-        *,
-        job_id: str,
-        attempt_id: int | None,
-        lease_generation: int,
-        thread_id: str,
-        connection_id: int,
-        capability_name: str,
-        arguments_digest: str,
-        arguments_ciphertext: str | None,
-        config_revision: int,
-        authorization_epoch: int,
-        capability_revision: int,
-        policy_revision: int,
-        expires_at: Any,
-        capability_kind: str = "tool",
-    ) -> dict[str, Any]:
-        """Record a call that is waiting for its owner."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO agent_mcp_invocations
-                    (job_id, attempt_id, lease_generation, thread_id, connection_id,
-                     capability_name, capability_kind, arguments_digest,
-                     arguments_ciphertext, config_revision, authorization_epoch,
-                     capability_revision, policy_revision, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                RETURNING *
-                """,
-                job_id,
-                attempt_id,
-                lease_generation,
-                thread_id,
-                connection_id,
-                capability_name,
-                capability_kind,
-                arguments_digest,
-                arguments_ciphertext,
-                config_revision,
-                authorization_epoch,
-                capability_revision,
-                policy_revision,
-                expires_at,
-            )
-        return dict(row)
-
-    async def get_mcp_invocation(self, *, invocation_id: int) -> dict[str, Any] | None:
-        """One invocation by id."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM agent_mcp_invocations WHERE id = $1", invocation_id
-            )
-        return dict(row) if row is not None else None
-
-    async def list_mcp_invocations(
-        self,
-        *,
-        job_id: str | None = None,
-        thread_id: str | None = None,
-        statuses: list[str] | None = None,
-        user_id: str | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Invocations filtered by job, thread, state or owner, newest first.
-
-        ``user_id`` scopes through the job rather than a column on the
-        invocation, because an invocation belongs to whoever owns the job that
-        made it. Filtering the *list* is not a convenience: the rows carry the
-        decrypted arguments, so a listing that does not scope by owner hands one
-        user another user's tool call bodies. Callers that serve a request must
-        pass it.
-        """
-        clauses: list[str] = []
-        params: list[Any] = []
-        if user_id is not None:
-            params.append(user_id)
-            clauses.append(f"job_id IN (SELECT id FROM agent_jobs WHERE user_id = ${len(params)})")
-        if job_id is not None:
-            params.append(job_id)
-            clauses.append(f"job_id = ${len(params)}")
-        if thread_id is not None:
-            params.append(thread_id)
-            clauses.append(f"thread_id = ${len(params)}")
-        if statuses:
-            params.append(list(statuses))
-            clauses.append(f"status = ANY(${len(params)})")
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(max(1, min(limit, 200)))
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT * FROM agent_mcp_invocations {where}
-                ORDER BY id DESC LIMIT ${len(params)}
-                """,
-                *params,
+                user_id,
             )
         return [dict(row) for row in rows]
 
-    async def decide_mcp_invocation(
-        self, *, invocation_id: int, approve: bool, decided_by: str
-    ) -> dict[str, Any] | None:
-        """Approve or deny one pending call.
-
-        Only a pending call may be decided, enforced in the predicate rather
-        than by reading first: an approval that arrives after the call expired
-        must not revive it, and a check-then-write would let exactly that race
-        through.
-        """
-        target = "approved" if approve else "denied"
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE agent_mcp_invocations
-                SET status = $2, decided_at = NOW(), decided_by = $3
-                WHERE id = $1 AND status = 'pending' AND expires_at > NOW()
-                RETURNING *
-                """,
-                invocation_id,
-                target,
-                decided_by,
-            )
-            if row is None:
-                # Distinguish "already decided" from "too late" for the caller,
-                # without changing either outcome.
-                await conn.execute(
-                    "UPDATE agent_mcp_invocations SET status = 'expired' "
-                    "WHERE id = $1 AND status = 'pending' AND expires_at <= NOW()",
-                    invocation_id,
-                )
-        return dict(row) if row is not None else None
-
-    async def claim_mcp_invocation(
+    async def upsert_mcp_connection(
         self,
         *,
-        invocation_id: int,
-        config_revision: int | None = None,
-        authorization_epoch: int | None = None,
-        capability_revision: int | None = None,
-        policy_revision: int | None = None,
-        attempt_id: int | None = None,
-        lease_generation: int | None = None,
-    ) -> dict[str, Any] | None:
-        """Take exclusive ownership of dispatching one approved call.
+        user_id: str,
+        server: str,
+        account_label: str | None,
+        access_token_ciphertext: str,
+        refresh_token_ciphertext: str | None,
+        expires_at: Any,
+    ) -> int:
+        """Store one credential per user per server, replacing any earlier one.
 
-        The single ``UPDATE ... WHERE status = 'approved'`` is the whole
-        mutual-exclusion mechanism. Two workers may both arrive; one matches the
-        row, the other matches nothing and must not send. ``dispatch_generation``
-        is bumped so that a worker whose lease was superseded can be refused by
-        the upstream side even if it still holds this record.
-
-        The fence is in the same predicate, for the same reason the status is:
-        the window between "this approval is still valid" and "I am dispatching
-        it" is exactly where a connection gets repointed, and a check performed
-        before the ``UPDATE`` is a check that races with it. Requiring the
-        versions here means an approval whose target moved is not merely
-        discouraged but unmatchable.
+        Reconnecting is an update rather than a second row: "connected" is a
+        yes/no per person per server, and two live credentials for one pair
+        would leave which one a job used down to row order.
         """
-        fence = _invocation_fence_sql(
-            config_revision=config_revision,
-            authorization_epoch=authorization_epoch,
-            capability_revision=capability_revision,
-            policy_revision=policy_revision,
-            attempt_id=attempt_id,
-            lease_generation=lease_generation,
-            first_index=2,
-        )
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_mcp_invocations
-                SET status = 'dispatching', dispatch_generation = dispatch_generation + 1
-                WHERE id = $1 AND status = 'approved' AND expires_at > NOW(){fence}
-                RETURNING *
-                """,
-                invocation_id,
-                *fence_params(
-                    config_revision=config_revision,
-                    authorization_epoch=authorization_epoch,
-                    capability_revision=capability_revision,
-                    policy_revision=policy_revision,
-                    attempt_id=attempt_id,
-                    lease_generation=lease_generation,
-                ),
-            )
-        return dict(row) if row is not None else None
-
-    async def finish_mcp_invocation(
-        self,
-        *,
-        invocation_id: int,
-        dispatch_generation: int,
-        status: str,
-        result_summary: str | None = None,
-    ) -> bool:
-        """Record the outcome of a dispatched call, fenced by generation."""
-        if status not in ("completed", "failed", "outcome_unknown"):
-            raise ValueError(f"invalid terminal invocation status: {status!r}")
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
+            connection_id = await conn.fetchval(
                 """
-                UPDATE agent_mcp_invocations
-                SET status = $3, result_summary = $4
-                WHERE id = $1 AND status = 'dispatching' AND dispatch_generation = $2
+                INSERT INTO agent_mcp_connections
+                    (user_id, server, account_label, access_token_ciphertext,
+                     refresh_token_ciphertext, expires_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (user_id, server) DO UPDATE SET
+                    account_label = EXCLUDED.account_label,
+                    access_token_ciphertext = EXCLUDED.access_token_ciphertext,
+                    refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = NOW()
                 RETURNING id
                 """,
-                invocation_id,
-                dispatch_generation,
-                status,
-                result_summary,
+                user_id,
+                server,
+                account_label,
+                access_token_ciphertext,
+                refresh_token_ciphertext,
+                expires_at,
             )
-        return updated is not None
+        return int(connection_id)
 
-    async def find_approved_mcp_invocation(
-        self,
-        *,
-        job_id: str,
-        connection_id: int,
-        capability_name: str,
-        arguments_digest: str,
-        capability_kind: str = "tool",
-        config_revision: int | None = None,
-        authorization_epoch: int | None = None,
-        capability_revision: int | None = None,
-        policy_revision: int | None = None,
-        attempt_id: int | None = None,
-        lease_generation: int | None = None,
-    ) -> dict[str, Any] | None:
-        """The oldest approval of one call that is still valid for it.
-
-        Matching on the argument digest as well as the name is what makes an
-        approval an approval *of something*: a session-wide "allow" is a rule,
-        while this is one decision about one call, and reusing it for different
-        arguments would turn a single confirmation into a standing grant.
-
-        The fence is part of the lookup, not a check after it. An approval was
-        given for a target, a catalogue and a session *as they were*, and the
-        owner agreed to that call and nothing else -- so once the connection is
-        repointed, the catalogue grows or the job changes hands, the approval
-        describes something that no longer exists and must not be found at all.
-        """
-        fence = _invocation_fence_sql(
-            config_revision=config_revision,
-            authorization_epoch=authorization_epoch,
-            capability_revision=capability_revision,
-            policy_revision=policy_revision,
-            attempt_id=attempt_id,
-            lease_generation=lease_generation,
-            first_index=6,
-        )
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT * FROM agent_mcp_invocations
-                WHERE job_id = $1 AND connection_id = $2 AND capability_name = $3
-                  AND arguments_digest = $4 AND capability_kind = $5
-                  AND status = 'approved' AND expires_at > NOW(){fence}
-                ORDER BY id
-                LIMIT 1
-                """,
-                job_id,
-                connection_id,
-                capability_name,
-                arguments_digest,
-                capability_kind,
-                *fence_params(
-                    config_revision=config_revision,
-                    authorization_epoch=authorization_epoch,
-                    capability_revision=capability_revision,
-                    policy_revision=policy_revision,
-                    attempt_id=attempt_id,
-                    lease_generation=lease_generation,
-                ),
-            )
-        return dict(row) if row is not None else None
-
-    async def expire_mcp_invocations(self) -> int:
-        """Expire every pending or approved call whose deadline has passed."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "UPDATE agent_mcp_invocations SET status = 'expired' "
-                "WHERE status IN ('pending', 'approved') AND expires_at <= NOW() RETURNING id"
-            )
-        return len(rows)
-
-    async def cancel_mcp_invocations_for_attempt(self, *, attempt_id: int) -> int:
-        """Expire a superseded attempt's undecided calls."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "UPDATE agent_mcp_invocations SET status = 'expired' "
-                "WHERE attempt_id = $1 AND status IN ('pending', 'approved') RETURNING id",
-                attempt_id,
-            )
-        return len(rows)
-
-    # ── MCP transport sessions ─────────────────────────────────────────
-    #
-    # A row here is a *record* of a live protocol session, not the session: the
-    # socket, the negotiated revision and the upstream's own session id live in
-    # the process that opened them, and no table can hand those back. What the
-    # record buys is the two things a process cannot know on its own -- who owns
-    # a session, and that a superseded owner's session is still out there.
-
-    async def open_mcp_transport_session(
-        self,
-        *,
-        handle: str,
-        connection_id: int,
-        member: str,
-        job_id: str | None,
-        attempt_id: int | None,
-        owner_lease_generation: int,
-        protocol_version: str,
-        upstream_session_id: str | None,
-        config_revision: int,
-        authorization_epoch: int,
-    ) -> None:
-        """Record one opened session under its opaque handle."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_transport_sessions
-                    (handle, connection_id, member, job_id, attempt_id,
-                     owner_lease_generation, protocol_version, upstream_session_id,
-                     config_revision, authorization_epoch)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                ON CONFLICT (handle) DO UPDATE SET
-                    owner_lease_generation = EXCLUDED.owner_lease_generation,
-                    protocol_version = EXCLUDED.protocol_version,
-                    upstream_session_id = EXCLUDED.upstream_session_id,
-                    config_revision = EXCLUDED.config_revision,
-                    authorization_epoch = EXCLUDED.authorization_epoch,
-                    last_used_at = NOW()
-                """,
-                handle,
-                connection_id,
-                member,
-                job_id,
-                attempt_id,
-                owner_lease_generation,
-                protocol_version,
-                upstream_session_id,
-                config_revision,
-                authorization_epoch,
-            )
-
-    async def close_mcp_transport_session(self, *, handle: str) -> bool:
-        """Forget one session. ``False`` when it was already gone."""
+    async def delete_mcp_connection(self, *, user_id: str, server: str) -> bool:
+        """Disconnect one server for this user; ``False`` if it was not connected."""
         async with self._pool.acquire() as conn:
             deleted = await conn.fetchval(
-                "DELETE FROM agent_mcp_transport_sessions WHERE handle = $1 RETURNING handle",
-                handle,
+                "DELETE FROM agent_mcp_connections WHERE user_id = $1 AND server = $2 RETURNING id",
+                user_id,
+                server,
             )
         return deleted is not None
-
-    async def reap_mcp_transport_sessions(
-        self, *, connection_id: int, member: str, keep_handle: str
-    ) -> list[dict[str, Any]]:
-        """Delete every other session this member holds on this connection.
-
-        The design's "explicitly rebuild the protocol session when the owner is
-        superseded" is this: a takeover produces a new key, and the old session
-        -- a socket the platform will never drive again -- is closed and its
-        record removed rather than left for the reaper to find. Returned rather
-        than counted so the caller can close the transports it still holds.
-        """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                DELETE FROM agent_mcp_transport_sessions
-                WHERE connection_id = $1 AND member = $2 AND handle <> $3
-                RETURNING handle, owner_lease_generation
-                """,
-                connection_id,
-                member,
-                keep_handle,
-            )
-        return [dict(row) for row in rows]
-
-    async def list_mcp_transport_sessions(self, *, connection_id: int) -> list[dict[str, Any]]:
-        """Every recorded session for one connection, newest first."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT handle, member, job_id, attempt_id, owner_lease_generation,
-                       protocol_version, config_revision, authorization_epoch,
-                       created_at, last_used_at
-                FROM agent_mcp_transport_sessions
-                WHERE connection_id = $1
-                ORDER BY last_used_at DESC, handle
-                """,
-                connection_id,
-            )
-        return [dict(row) for row in rows]
-
-    async def touch_mcp_transport_session(self, *, handle: str) -> bool:
-        """Move a session's last-used timestamp, so a diagnosis can see it live."""
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                "UPDATE agent_mcp_transport_sessions SET last_used_at = NOW() "
-                "WHERE handle = $1 RETURNING handle",
-                handle,
-            )
-        return updated is not None
-
-    # ── MCP connectors ─────────────────────────────────────────────────
-
-    async def create_mcp_connector(
-        self, *, user_id: str, name: str, registration_hash: str
-    ) -> dict[str, Any]:
-        """Register a user-run connector in the pending state."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO agent_mcp_connectors (user_id, name, registration_hash)
-                VALUES ($1, $2, $3)
-                RETURNING id, user_id, name, status, mounts, created_at, last_seen_at
-                """,
-                user_id,
-                name,
-                registration_hash,
-            )
-        return dict(row)
-
-    async def list_mcp_connectors(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Every connector this user registered."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, user_id, name, status, mounts, created_at, last_seen_at, revoked_at
-                FROM agent_mcp_connectors WHERE user_id = $1 ORDER BY id
-                """,
-                user_id,
-            )
-        return [dict(row) for row in rows]
-
-    async def set_mcp_connector_status(self, *, connector_id: int, status: str) -> bool:
-        """Record a heartbeat or a status change for one connector."""
-        if status not in ("pending", "online", "offline", "revoked"):
-            raise ValueError(f"invalid connector status: {status!r}")
-        async with self._pool.acquire() as conn:
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connectors
-                SET status = $2,
-                    last_seen_at = CASE WHEN $2 = 'online' THEN NOW() ELSE last_seen_at END,
-                    revoked_at = CASE WHEN $2 = 'revoked' THEN NOW() ELSE revoked_at END
-                WHERE id = $1
-                RETURNING id
-                """,
-                connector_id,
-                status,
-            )
-        return updated is not None
-
-    async def update_mcp_connector(
-        self,
-        *,
-        connector_id: int,
-        user_id: str,
-        name: str | None = None,
-        mounts: list[str] | None = None,
-    ) -> dict[str, Any] | None:
-        """Rename a connector or change the resources it may reach.
-
-        Neither edit moves the connections' versions on its own: ``mounts`` is
-        what the connector is allowed to see on the user's machine, and widening
-        it is a decision the connector makes locally, while the platform's
-        record of it is advisory. Binding a *connection* to the connector is the
-        security-relevant edit, and that is where the versions move.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE agent_mcp_connectors
-                SET name = COALESCE($3, name),
-                    mounts = COALESCE($4, mounts)
-                WHERE id = $1 AND user_id = $2 AND status <> 'revoked'
-                RETURNING id, user_id, name, status, mounts, created_at, last_seen_at, revoked_at
-                """,
-                connector_id,
-                user_id,
-                name,
-                list(mounts) if mounts is not None else None,
-            )
-        return dict(row) if row is not None else None
-
-    async def bind_mcp_connection_connector(
-        self,
-        *,
-        connection_id: int,
-        user_id: str,
-        connector_id: int,
-    ) -> dict[str, Any] | None:
-        """Route one connection through one connector, moving both versions.
-
-        ``connector`` is on the design's list of security-relevant configuration:
-        it decides *where* a local process runs, so choosing it is as much a
-        change of target as editing the command. Both revisions move, which
-        invalidates every session binding approved against the previous answer,
-        and the connector's authorized set is written in the same transaction so
-        the two cannot disagree about what it may serve.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_mcp_connections c
-                SET connector_id = $3,
-                    config_revision = c.config_revision + 1,
-                    authorization_epoch = c.authorization_epoch + 1,
-                    updated_at = NOW()
-                WHERE c.id = $1 AND c.user_id = $2 AND c.deleted_at IS NULL
-                  AND EXISTS (
-                      SELECT 1 FROM agent_mcp_connectors k
-                      WHERE k.id = $3 AND k.user_id = $2 AND k.status <> 'revoked'
-                  )
-                RETURNING {self._MCP_CONNECTION_COLUMNS}
-                """,
-                connection_id,
-                user_id,
-                connector_id,
-            )
-            if row is None:
-                return None
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_connector_connections (connector_id, connection_id)
-                VALUES ($1, $2) ON CONFLICT DO NOTHING
-                """,
-                connector_id,
-                connection_id,
-            )
-        return self._mcp_connection(row)
-
-    async def unbind_mcp_connection_connector(
-        self, *, connection_id: int, user_id: str
-    ) -> dict[str, Any] | None:
-        """Stop routing one connection through its connector.
-
-        The same version movement as binding, for the same reason: a connection
-        that has moved back to "nowhere to run" is not the one a session was
-        approved against.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                f"""
-                UPDATE agent_mcp_connections c
-                SET connector_id = NULL,
-                    config_revision = c.config_revision + 1,
-                    authorization_epoch = c.authorization_epoch + 1,
-                    updated_at = NOW()
-                WHERE c.id = $1 AND c.user_id = $2 AND c.connector_id IS NOT NULL
-                RETURNING {self._MCP_CONNECTION_COLUMNS}
-                """,
-                connection_id,
-                user_id,
-            )
-            if row is None:
-                return None
-            await conn.execute(
-                "DELETE FROM agent_mcp_connector_connections WHERE connection_id = $1",
-                connection_id,
-            )
-        return self._mcp_connection(row)
-
-    async def revoke_mcp_connector(self, *, connector_id: int, user_id: str) -> bool:
-        """Revoke a connector and detach everything that routed through it.
-
-        One transaction, because the two halves are the same decision: a
-        connector marked revoked while its connections still name it would leave
-        jobs resolving to a target the owner has withdrawn, and each detached
-        connection has its versions moved so the sessions approved against it
-        stop working rather than quietly pointing somewhere else.
-        """
-        async with self._pool.acquire() as conn, conn.transaction():
-            revoked = await conn.fetchval(
-                """
-                UPDATE agent_mcp_connectors
-                SET status = 'revoked', revoked_at = NOW()
-                WHERE id = $1 AND user_id = $2 AND status <> 'revoked'
-                RETURNING id
-                """,
-                connector_id,
-                user_id,
-            )
-            if revoked is None:
-                return False
-            await conn.execute(
-                """
-                UPDATE agent_mcp_connections
-                SET connector_id = NULL,
-                    config_revision = config_revision + 1,
-                    authorization_epoch = authorization_epoch + 1,
-                    updated_at = NOW()
-                WHERE connector_id = $1
-                """,
-                connector_id,
-            )
-            await conn.execute(
-                "DELETE FROM agent_mcp_connector_connections WHERE connector_id = $1",
-                connector_id,
-            )
-        return True
-
-    async def authorize_mcp_connector_connection(
-        self, *, connector_id: int, connection_id: int
-    ) -> None:
-        """Record that a connector is allowed to serve one connection."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_connector_connections (connector_id, connection_id)
-                VALUES ($1, $2) ON CONFLICT DO NOTHING
-                """,
-                connector_id,
-                connection_id,
-            )
-
-    async def list_mcp_connector_connections(self, *, connector_id: int) -> list[int]:
-        """The connection ids one connector may serve."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT connection_id FROM agent_mcp_connector_connections WHERE connector_id = $1",
-                connector_id,
-            )
-        return [int(row["connection_id"]) for row in rows]
 
     # ── Jobs ───────────────────────────────────────────────────────────
 
@@ -2368,7 +957,7 @@ class AgentJobStore:
         base_sha: str | None = None,
         setup_script: str | None = None,
         metadata: dict[str, Any] | None = None,
-        mcp_bindings: list[dict[str, Any]] | None = None,
+        mcp_servers: list[str] | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
@@ -2407,8 +996,8 @@ class AgentJobStore:
                     """
                     INSERT INTO agent_threads
                         (id, user_id, repo, title, title_source,
-                         setup_script, execution_profile)
-                    VALUES ($1, $2, $3, $4, 'fallback', $5, $6)
+                         setup_script, execution_profile, mcp_servers)
+                    VALUES ($1, $2, $3, $4, 'fallback', $5, $6, $7)
                     """,
                     thread_id,
                     user_id,
@@ -2416,8 +1005,8 @@ class AgentJobStore:
                     fallback_title(task_prompt),
                     setup_script,
                     execution_profile,
+                    list(mcp_servers or []),
                 )
-                await self._write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
                 await conn.execute(
                     """
                     INSERT INTO agent_jobs
@@ -2885,7 +1474,7 @@ class AgentJobStore:
             # history in, and a membership that already owns its resident
             # slot and can carry the residency the host is about to open.
             source_thread = await conn.fetchrow(
-                "SELECT repo, title, setup_script, execution_profile "
+                "SELECT repo, title, setup_script, execution_profile, mcp_servers "
                 "FROM agent_threads WHERE id = $1",
                 source["thread_id"],
             )
@@ -2893,8 +1482,8 @@ class AgentJobStore:
                 """
                 INSERT INTO agent_threads
                     (id, user_id, repo, title, title_source,
-                     setup_script, execution_profile)
-                VALUES ($1, $2, $3, $4, 'inherited', $5, $6)
+                     setup_script, execution_profile, mcp_servers)
+                VALUES ($1, $2, $3, $4, 'inherited', $5, $6, $7)
                 """,
                 target_thread_id,
                 user_id,
@@ -2902,24 +1491,7 @@ class AgentJobStore:
                 f"{source_thread['title']} (fork)"[:160],
                 source_thread["setup_script"],
                 source_thread["execution_profile"],
-            )
-            # The child inherits the parent's *selection*, not its approvals:
-            # the rules are copied with their fingerprints so that a capability
-            # which changed in the meantime is held for the new session's owner
-            # rather than silently allow-listed by inheritance.
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_thread_bindings
-                    (thread_id, connection_id, alias, enabled, selection_pending,
-                     config_revision, authorization_epoch, capability_revision,
-                     policy_revision, rules, resource_rules, prompt_rules)
-                SELECT $1, connection_id, alias, enabled, selection_pending,
-                       config_revision, authorization_epoch, capability_revision,
-                       policy_revision, rules, resource_rules, prompt_rules
-                FROM agent_mcp_thread_bindings WHERE thread_id = $2
-                """,
-                target_thread_id,
-                source["thread_id"],
+                list(source_thread["mcp_servers"] or []),
             )
             await conn.execute(
                 """
@@ -3309,7 +1881,7 @@ class AgentJobStore:
                 # follow-up held the thread row produced a real PostgreSQL
                 # deadlock cycle (each transaction then waited for the other).
                 thread = await conn.fetchrow(
-                    "SELECT repo, title, setup_script, execution_profile "
+                    "SELECT repo, title, setup_script, execution_profile, mcp_servers "
                     "FROM agent_threads WHERE id = $1 FOR UPDATE",
                     operation["source_thread_id"],
                 )
@@ -4068,31 +2640,23 @@ class AgentJobStore:
     ) -> dict[str, Any] | None:
         """Resolve Agent-owned job metadata for the MCP relay's live fence.
 
-        Return the job's owner, model and MCP binding scope only while its
+        Return the job's owner, model and MCP server scope only while its
         current attempt has a live lease and the job is running or publishing.
         The relay uses that owner to resolve stored MCP connections and checks
-        the admitted binding before forwarding a request.
+        the admitted server scope before forwarding a request.
 
         Only Agent job and attempt tables participate. Gateway account roles
         and status do not belong to this database. Inference authorization
         uses Gateway-issued grants separately from this MCP lookup.
-
-        The bindings are read fresh on every call rather than carried on the
-        job, so narrowing a session takes effect on its next tool call instead
-        of at its next turn.
-
-        Disabled bindings are filtered out here rather than refused later. A
-        binding turned off with no capabilities selected would otherwise be
-        handed to the runner as a server whose every call fails, and the model
-        would spend its budget discovering that one tool at a time instead of
-        being offered nothing at all.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT j.user_id, j.id AS job_id, j.model, j.state, j.thread_id
+                SELECT j.user_id, j.id AS job_id, j.model, j.state,
+                       t.mcp_servers
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
+                JOIN agent_threads t ON t.id = j.thread_id
                 WHERE a.id = $1
                   AND a.lease_generation = $2
                   AND a.status = 'running'
@@ -4107,63 +2671,13 @@ class AgentJobStore:
             )
             if row is None:
                 return None
-            bindings = await conn.fetch(
-                """
-                SELECT b.thread_id, b.connection_id, b.alias, b.enabled, b.selection_pending,
-                       b.config_revision, b.authorization_epoch, b.capability_revision,
-                       b.policy_revision, b.rules, b.resource_rules, b.prompt_rules,
-                       c.user_id AS owner_id, c.status AS connection_status,
-                       c.deleted_at, c.label, c.transport, c.location
-                FROM agent_mcp_thread_bindings b
-                JOIN agent_mcp_connections c ON c.id = b.connection_id
-                WHERE b.thread_id = $1 AND b.enabled
-                ORDER BY b.alias, b.connection_id
-                """,
-                row["thread_id"],
-            )
         return {
             "user_id": row["user_id"],
             "job_id": row["job_id"],
-            "thread_id": row["thread_id"],
-            # Read under the same fence as the owner metadata, and never
-            # returned to the sandbox: the relay is the only reader.
-            "mcp_bindings": [self._mcp_binding_row(binding) for binding in bindings],
+            # Read the MCP allowlist under the same fence as its owner metadata.
+            "mcp_servers": list(row["mcp_servers"] or []),
             "model": row["model"],
         }
-
-    @staticmethod
-    def _mcp_binding_row(row: Any) -> dict[str, Any]:
-        """Decode one binding row, rules included."""
-        record = dict(row)
-        for key in ("rules", "resource_rules", "prompt_rules"):
-            record[key] = _load_json(record.get(key)) or {}
-        return record
-
-    async def _write_mcp_bindings(
-        self, conn: Any, *, thread_id: str, bindings: list[dict[str, Any]] | None
-    ) -> None:
-        """Insert a conversation's initial MCP selection inside its transaction."""
-        for binding in bindings or []:
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_thread_bindings
-                    (thread_id, connection_id, alias, enabled, selection_pending,
-                     config_revision, authorization_epoch, capability_revision,
-                     policy_revision, rules, resource_rules, prompt_rules)
-                VALUES ($1, $2, $3, $4, FALSE, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
-                """,
-                thread_id,
-                int(binding["connection_id"]),
-                str(binding["alias"]),
-                bool(binding.get("enabled", True)),
-                int(binding["config_revision"]),
-                int(binding["authorization_epoch"]),
-                int(binding["capability_revision"]),
-                int(binding.get("policy_revision", 1)),
-                json.dumps(binding.get("rules") or {}),
-                json.dumps(binding.get("resource_rules") or {}),
-                json.dumps(binding.get("prompt_rules") or {}),
-            )
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Fetch one job by id."""

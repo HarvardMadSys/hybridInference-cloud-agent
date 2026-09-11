@@ -213,193 +213,56 @@ sandbox ──[attempt-fenced mcp token]──▶ MCP-only relay ──[owner cr
 
 The MCP listener is a separate FastAPI app on port 8001; it does not expose the
 job, host, session, admin, or inference APIs. The sandbox authenticates to
-`/v1/agent/mcp` over its second fixed relay, so **`platform_only` stays
+`/v1/agent/mcp/<name>` over its second fixed relay, so **`platform_only` stays
 closed**: inference and MCP are the only agent-phase destinations. The upstream
 address and the owner's credential stay in the control plane.
 
-There is no deployment registry and no in-code catalogue of servers. A person
-adds a connection through `/v1/agent/mcp` — a remote URL, an imported
-`mcpServers` snippet, or a stdio launch spec — and a row in
-`agent_mcp_connections` holds their configuration and their credential, wrapped
-with `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under an MCP-specific domain
-separator. What the server offers is discovered and stored as a capability
-snapshot; templates only prefill a form.
+There is no deployment YAML registry. Which providers may exist is a reviewed,
+in-code catalogue in `cloud_agent/mcp_catalogue.py`; a row in
+`agent_mcp_connections` supplies one user's credential. Both are needed, and a
+job records only opaque server ids. The credential is wrapped with
+`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under an MCP-specific domain separator.
 
-The relay, the connection API, the discovery path and the tool-call path are
-implemented and tested. The coding-agent adapters are not all done, and the
-list below is a statement about the adapters rather than about the feature.
+The current product does not yet expose an MCP connect flow: catalogue entries
+render as *Coming soon* and ordinary jobs therefore run with no MCP unless a
+valid per-user connection row was created by a migration or another trusted
+control-plane workflow. The relay and post-connection path are implemented and
+tested, but this distinction must not be reported as an end-user feature that
+is already connectable.
 
-Five things about this that look like details and are not:
+Four things about this that look like details and are not:
 
-- **Nothing is reachable by name.** A URL path segment is a *binding alias* —
-  a name one conversation gave one connection — and a token names a job, so the
-  relay resolves the alias against that job's own bindings. A connection
-  somebody else added cannot be named into existence.
-- **A session means exactly what it says.** Each capability carries a policy:
-  `deny`, `confirm` or `allow`. An omitted capability is denied, including one
-  the server adds after the session was configured, and a policy whose tool
-  description or schema changed goes back to the owner rather than being
-  treated as an aged approval.
-- **`confirm` holds the call rather than guessing.** The relay records a
-  pending invocation and answers with a protocol error the model can read; the
-  retry that matches an approval consumes it exactly once, through a single
-  conditional `UPDATE` that only one dispatcher can win.
+- **Only reviewed remote streamable-HTTP servers.** A stdio server would be
+  third-party code in either the untrusted sandbox or the trusted control
+  plane, so no catalogue entry can configure one. Hosting them needs its own
+  isolated tier.
+- **`tools:` is the control that matters, and it is enforced in both
+  directions.** A tool not listed is never advertised to the model *and* is
+  refused if called anyway. Omit it and every tool the server exposes is
+  reachable — including any write tool it gains in a later release, with no
+  config change here to notice. Every current catalogue entry must instead
+  declare either a provider-owned read-only endpoint or a reviewed tool-name
+  allowlist. An agent runs on untrusted repository content, so a README can try
+  to talk it into calling whatever the credential permits.
 - **Credentials are per user and fail closed.** A missing encryption key,
-  unreadable ciphertext, expired connection with no refresh, or disconnected
-  connection removes that server from the owner's reachable set and says why on
-  the Integrations page.
-- **A connection is not a job.** Bindings are read fresh on every tool call
-  rather than copied onto a job, so narrowing a session takes effect on its
-  next call instead of at its next turn.
-- **Two endpoints, one decision path.** `/v1/agent/mcp/<alias>` forwards to one
-  connection and leaves the protocol to the CLI. `/v1/agent/mcp` — the bare
-  prefix, which `/<alias>` cannot match — is the merged host: the platform
-  answers `initialize`, presents every connection of that job as one catalogue
-  with names namespaced `<alias>__<tool>`, and routes a call back to its own
-  server. It exists because a runtime whose MCP entries are gated by a
-  name-and-identity allowlist cannot be given a per-conversation alias at run
-  time, and one fixed name and URL is the shape that fits. **Every adapter is
-  given that endpoint and nothing else, as one entry named `session`**: an entry
-  per connection would present this same merged catalogue once per connection,
-  and the per-connection route is left for a client that wants exactly one
-  connection's protocol passed through untouched — which no runtime asks for,
-  because a legacy SSE server cannot initialize through a pipe at all. Both
-  routes call the
-  same `decide`, so an approval granted on the Integrations page is consumed by
-  whichever surface the retry arrives on, and neither is a way around the other.
-  Routing on the merged surface is a lookup in the catalogue built from the
-  bindings, never a split on the separator: an alias may itself contain `__`, so
-  `a__b` plus tool `c` and `a` plus tool `b__c` present the same string, and
-  only the map can tell them apart. The same endpoint serves resources and
-  prompts, resolved through that one catalogue and decided by the same function
-  as a tool call — the design gives them their own *scopes* so that they are not
-  a way round tool authorization, and a separate code path is exactly how they
-  would become one. A tool and a prompt are namespaced by alias because a bare
-  name is ambiguous the moment two connections offer one; a resource keeps its
-  own URI, because the design treats an external URI as that server's identifier
-  for it and a presented name would invent one the server never issued. A connection that cannot be resolved is
-  skipped with a log rather than failing the listing — losing every other tool
-  is a worse outcome than the failure that caused it — while the per-connection
-  route still refuses loudly for the server that is actually broken.
+  unreadable ciphertext, expired connection, disconnected provider, or retired
+  catalogue entry removes that server from the user's reachable registry.
+- **A job reaches the servers it was created with**, recorded on the job row.
+  Not the registry's whole list — a token names a server in the URL, and the
+  check is against the job's own grant. Omitting `mcp_servers` at creation
+  takes the registry's `default: true` entries; an explicit `[]` means none.
 
-**The whole chain has been run end to end**, against a real listener, a real
-database and a real CLI rather than a fake at each seam. What was exercised:
-the sandbox listener on its own port, `AGENT_DATABASE_URL` pointing at a
-migrated database, one seeded connection with a static credential and a
-discovery snapshot, one live job whose attempt holds the fence, and pi 0.73.1
-driving the bridge at `/v1/agent/mcp`. The model was advertised exactly
-`session__github__get_issue`; the upstream server saw `server/discover`,
-`initialize` and `tools/call`, every one carrying the *connection's* credential
-rather than the sandbox token; the call reached it as `get_issue` with the
-model's own arguments; and the tool result the model received was the upstream's
-text. Two details that only a live run shows: the era probe falls back to the
-handshake against a server that answers `-32601`, and the tool's *namespaced*
-name never leaves the platform — the upstream is addressed by its own.
+Only `claude-code` can be given servers, because it is the only adapter with a
+verified relay path that also shuts out repository-supplied MCP config. Every
+other adapter still fails closed, so a job naming servers on one of them is
+refused at creation rather than run with the tools silently missing. Codex is a
+matter of verifying two flags against the pinned `CODEX_VERSION`, not of
+design.
 
-It is `tests/external/test_agent_mcp_end_to_end.py`, and it runs in seconds:
-the two ends (the user's server and the model) are threaded HTTP stubs the test
-starts itself, the relay is the real application on a real socket, and the CLI
-is installed at the version the sandbox Dockerfile pins. It skips rather than
-fails without Postgres, npm or the network, and it is in the external tier,
-which is run deliberately rather than as part of the default gate — the seams
-it crosses are exactly the ones no per-layer test does, so it is worth running
-after any change to the merged endpoint, the host or the bridge.
-
-**Connectors are configured, not served.** `/v1/agent/mcp/connectors` registers
-one of the user's machines, returns the registration secret exactly once (hashed
-at rest, like every other credential here), renames it, revokes it, and binds a
-`user-connector` connection to it or unbinds one. A remote connection cannot be
-bound: it is a server the platform reaches directly, and sending it the long way
-round a user's laptop would be a detour with no purpose. Binding is the
-authorization step and it moves both versions, because a connector decides
-*where* a local process runs and that is a change of target like any other.
-Revoking detaches everything that routed through it in the same transaction — a
-connector marked revoked while a connection still names it is a job resolving to
-a target its owner has withdrawn.
-
-No connector runtime ships with this service yet, so every connector view says
-`runtime: "unavailable"` and a connection bound to one is refused at use with
-that reason, in the same way a managed-worker connection is refused for having
-no worker. The configuration is real and inspectable; the execution is not, and
-nothing here claims otherwise.
-
-**Deploying this, and backing it out.** Three things have to be true in order,
-and the middle one is the one people skip.
-
-*Order the schema first.* `0007_generic_mcp_connections` drops
-`UNIQUE(user_id, server)`, renames `server` to `template`, adds the connection's
-transport, location, endpoint / launch spec and auth profile, moves the legacy
-`agent_threads.mcp_servers` list onto explicit bindings, and drops that column.
-Deploy it, and drain the old instances, **before** anything writes the new
-shape: an old instance still resolves tools by provider name and ignores the
-status and revision columns, so a connection it cannot see the state of is a
-connection it authorizes anyway. A deployment that cannot drain should keep the
-old API unreachable rather than rely on the new rows being ignored.
-
-*Migrate, do not guess.* The revision maps a legacy name only where the thread's
-owner has exactly one connection for that provider, and writes everything else
-into `agent_mcp_legacy_bindings` with `no_connection` or `ambiguous_connection`.
-Those rows are the list of sessions whose tools a human has to look at; they are
-not cleaned up automatically, because silently dropping them and silently
-guessing which connection a name meant are the same mistake from two sides.
-
-*The switch withdraws use, not data.* `AGENT_MCP_ENABLED=0` refuses
-authorization, session binding, connector binding and every relay call, while
-listing, capabilities and disconnection keep working. It is read from the
-environment, so it is **not in force until every instance has restarted** —
-turning it off and stopping there is not a withdrawal. A deployment that cannot
-prove all instances restarted has to isolate the old listener as well.
-
-*Rolling back* means turning the switch off and returning to a version that
-reads the schema compatibly. It does not mean a downgrade: `0005`'s own
-`downgrade()` re-derives the legacy name list and drops the new tables, so it
-loses every binding made since and cannot represent two connections to one
-service. Leave the schema in place, keep the switch off, and fix forward. The
-switch never deletes a connection, and it never restores a secret somebody
-revoked — a disconnect clears the ciphertext in the same statement that
-tombstones the row.
-
-Two things this feature deliberately does not add: no new dependency for model
-inference (MCP and connectors sit beside the gateway path, not inside it), and
-no second encryption root — connection credentials are wrapped with the same
-`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under their own domain separator, so one
-key to rotate and two credential kinds that cannot be read as each other.
-
-**An adapter may claim MCP only when it can do both halves**: point the CLI at
-the platform's relay, *and* stop it reading any other MCP source. A runtime that
-could be given servers but not stopped from picking up the repository's own
-would be worse than one with no MCP at all, so the capability is declared per
-runtime and checked against the pinned binary rather than inferred from the
-family a CLI belongs to.
-
-| Runtime | Pin | How the relay reaches it | Why the repository cannot add servers |
-|---|---|---|---|
-| `claude-code` | 2.1.220 | `--mcp-config` with the platform's servers | `--strict-mcp-config`, verified against the CLI: without it a committed `.mcp.json` is loaded alongside ours with no approval step |
-| `opencode` | 1.18.9 | the reviewed `opencode-freeinference` wrapper merges the relay endpoints into the `OPENCODE_CONFIG` it writes | the wrapper exports `OPENCODE_DISABLE_PROJECT_CONFIG`, which covers both `opencode.json` and `.opencode/` |
-| `kilo` | 7.4.17 | not wired | `KILO_DISABLE_PROJECT_CONFIG` covers the project `kilo.json` and the project `.kilo`/`.kilocode` directories — **but not the fork's legacy migrator**, which reads `<project>/.kilo/mcp.json` and `<project>/.kilocode/mcp.json` unconditionally. A committed file would hand the agent tools the repository chose, so the runtime refuses the feature rather than promising a bound it does not have |
-| `codex` | 0.145.0 | not wired | `/etc/codex/requirements.toml` is the layer applied after every other one, and its MCP allowlist matches a server by name **and exact identity**: the pinned binary's only matchers are `RawMcpServerUrlIdentity { url }` and `RawMcpServerCommandIdentity { command }`, with no prefix or regex form. The file is baked into the image and would have to name the deployment's exact relay URL, which is a runtime value. Kept empty, which disables every MCP server regardless of layer — the fail-closed P0 policy. Declaring the server is *not* the problem: `-c 'mcp_servers.agent_mcp={url=..., bearer_token_env_var=...}'` works and `codex mcp list` shows it enabled with Bearer-token auth |
-| `pi` | 0.73.1 | the reviewed `pi-mcp-bridge.ts` shipped at `/usr/local/libexec/`, loaded with an explicit `-e` | `--no-extensions` disables every other extension source — the project's `.pi/extensions/`, the global directory, and anything a settings file names — so the explicit path is the only way in. Verified against the pinned binary: a repository's own extension does not load, the relay's tools are registered as `<alias>__<tool>`, and a call reaches the upstream |
-
-A job naming connections on a runtime that has not declared them is refused at
-creation rather than run with the tools silently missing.
-
-**What would unblock the two that remain.** Kilo needs a way to stop the
-legacy migrator — either a supported switch, or a deployment that mounts the
-workspace without `.kilo/mcp.json` reachable. Codex needs the image — or a
-config mounted over `/etc/codex/` — built per deployment with that deployment's
-relay address, because its allowlist matches an exact URL identity. The merged
-relay endpoint at `/v1/agent/mcp` supplies the other half: one fixed server
-name, which is what makes a single allowlist entry possible at all.
-
-**The credential is referenced, not embedded, and the syntax is not portable.**
-Claude Code expands `${AGENT_MCP_TOKEN}`; the OpenCode family substitutes
-`{env:AGENT_MCP_TOKEN}` as a text pass over the raw config file before parsing
-it. Both were checked against the pinned binaries, and the wrong one fails
-silently: the literal placeholder is sent as the bearer token and every call is
-refused with a 401 that reads as a broken server. The address is decided once in
-`cloud_agent_host/runtimes.py` and the reference is written next to the CLI that
-has to expand it, in `deploy/sandbox/`. Either way the token travels in the
-environment, never in argv and never in the config file.
+The credential is referenced, not embedded: the generated config carries
+`${AGENT_MCP_TOKEN}` and the adapter exports it, so the job token never becomes
+a process argument — where it would be readable from the process table and
+liable to be copied into an error tail or an event payload the owner reads.
 
 ### What `--strict-mcp-config` is holding shut
 
@@ -418,7 +281,7 @@ checkout). A directory containing
 
 produces these two `system/init` lines, differing only in the flag:
 
-| invocation | MCP servers reported by the CLI |
+| invocation | `mcp_servers` reported by the CLI |
 |---|---|
 | `--mcp-config <ours>` | `evil_repo_server`, `github` |
 | `--mcp-config <ours> --strict-mcp-config` | `github` |
@@ -1221,16 +1084,6 @@ the revisions stacked on this one; the window covers them as well.)
   unfinished ancestor, it refuses the downgrade until those queued follow-ups
   are drained or cancelled because the older scheduler cannot preserve their
   execution order.
-- `0007_generic_mcp_connections` drops `agent_threads.mcp_servers` and turns
-  `agent_mcp_connections` into a self-describing connection: transport,
-  execution location, endpoint or launch spec and auth profile, with the
-  provider name kept as an optional `template`. The legacy name list is mapped
-  onto `agent_mcp_thread_bindings` where the owner has exactly one connection
-  for that provider, and recorded in `agent_mcp_legacy_bindings` where they do
-  not — an ambiguous mapping would let a connection created later inherit a
-  session authorized against a different one. It sits on `0006_host_capacity`
-  rather than beside `0005`, so the chain stays linear; `0008_mcp_refresh_lease`
-  follows it with the lease that fences a credential refresh between workers.
 
 The runner holds no database connection — its heartbeats are HTTP calls to the
 control plane — so stopping the control plane, the MCP relay and the web tier
@@ -1730,10 +1583,8 @@ The MCP suites live here with the catalogue, per-user registry, relay, filters,
 API and runtime adapter. After changing that path, run at least:
 
 ```bash
-uv run pytest tests/unit/test_mcp_connection_config.py \
-  tests/unit/test_mcp_protocol_and_authorization.py tests/unit/test_mcp_proxy.py \
-  tests/servers/test_mcp_relay.py tests/servers/test_agent_jobs_api.py \
-  tests/unit/test_agent_runtimes.py
+uv run pytest tests/unit/test_mcp_registry_and_proxy.py \
+  tests/servers/test_mcp_relay.py tests/unit/test_agent_runtimes.py
 ```
 
 These tests do not invoke the installed agent binaries. An installed-CLI smoke

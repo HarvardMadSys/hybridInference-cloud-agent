@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationsApi } from '@/lib/api/agents';
 
@@ -10,21 +10,10 @@ vi.mock('@/lib/api/agents', () => ({
   disconnectAgentIntegration: vi.fn(),
 }));
 
-// The MCP section loads its own connections; mocked empty so this file stays
-// about the source-control rows.
-vi.mock('@/lib/api/mcp', () => ({
-  listMcpConnections: vi.fn(),
-  testMcpConnection: vi.fn(),
-  disconnectMcpConnection: vi.fn(),
-  authorizeMcpConnection: vi.fn(),
-}));
-
 import { disconnectAgentIntegration, getAgentIntegrations } from '@/lib/api/agents';
-import { listMcpConnections } from '@/lib/api/mcp';
 
 const mockedGetIntegrations = getAgentIntegrations as unknown as ReturnType<typeof vi.fn>;
 const mockedDisconnect = disconnectAgentIntegration as unknown as ReturnType<typeof vi.fn>;
-const mockedListMcpConnections = listMcpConnections as unknown as ReturnType<typeof vi.fn>;
 
 const integrations: AgentIntegrationsApi = {
   providers: [
@@ -52,10 +41,6 @@ const integrations: AgentIntegrationsApi = {
   ],
 };
 
-beforeEach(() => {
-  mockedListMcpConnections.mockResolvedValue({ connections: [], templates: [] });
-});
-
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
@@ -77,11 +62,9 @@ describe('IntegrationsView', () => {
     // GitLab is behind "Coming soon", so its connect_url is deliberately not
     // offered even though the API still returns one.
     expect(screen.queryByRole('link', { name: /Connect/ })).not.toBeInTheDocument();
-    // One: GitLab's. The MCP section is a real list now, not a "Coming soon"
-    // placeholder, so it contributes a button instead.
-    expect(screen.getAllByText('Coming soon')).toHaveLength(1);
+    // Two: GitLab's, and the MCP Servers section's own long-standing one.
+    expect(screen.getAllByText('Coming soon')).toHaveLength(2);
     expect(screen.getByText('Your own MCP servers')).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: 'Add connection' })).toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {
@@ -92,7 +75,7 @@ describe('IntegrationsView', () => {
     // GitHub only: a provider that is not offered yet does not tell a user to
     // go and ask an admin for it.
     expect(await screen.findAllByText('Admin setup required')).toHaveLength(1);
-    expect(screen.getAllByText('Coming soon')).toHaveLength(1);
+    expect(screen.getAllByText('Coming soon')).toHaveLength(2);
   });
 
   it('does not trust the callback query string as connection status', async () => {
@@ -194,8 +177,7 @@ describe('IntegrationsView', () => {
     render(<IntegrationsView />);
 
     expect(await screen.findByText('Manage')).toBeInTheDocument();
-    // None left: GitLab's is gone because it is connected, and the MCP section
-    // no longer carries a placeholder pill.
-    expect(screen.queryAllByText('Coming soon')).toHaveLength(0);
+    // One left: the MCP Servers pill. GitLab's is gone because it is connected.
+    expect(screen.getAllByText('Coming soon')).toHaveLength(1);
   });
 });

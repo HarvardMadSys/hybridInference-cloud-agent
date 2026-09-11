@@ -46,7 +46,7 @@ database stamped with the chain that predates it.
 | `cloud_agent/grants.py`, `ledger.py`, `grant_usage.py` | Gateway inference grants, and the usage snapshots read back from them |
 | `cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |
 | `cloud_agent/identity_namespace.py` | Which Gateway minted the `user_id`s this database is keyed by |
-| `cloud_agent/mcp/`, `api/mcp_relay.py`, `mcp_proxy.py` | Per-user MCP connections, the protocol host that drives one connection generically, and the relay that fronts them |
+| `cloud_agent/mcp_catalogue.py`, `mcp_registry.py`, `mcp_proxy.py` | The reviewed MCP catalogue, per-user connections, and the relay |
 | `cloud_agent/publisher.py`, `publish_worker.py`, `source_control.py` | Branch and draft-PR publication, and the GitHub/GitLab credentials behind it |
 | `cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
 | `cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |

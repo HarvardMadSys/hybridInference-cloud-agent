@@ -155,30 +155,6 @@ services:
       # container's own address, which is why it cannot be derived here.
       AGENT_SANDBOX_MCP_URL: ${AGENT_SANDBOX_MCP_URL:-}
 
-      # The deployment's MCP kill switch. Unset means enabled; set it to 0 to
-      # withdraw MCP *use* -- authorization, session binding and the relay all
-      # refuse -- while leaving every read and every disconnect working, so an
-      # owner can still see what is configured and take it away. It is read
-      # from the environment rather than stored, so turning it off is not in
-      # force until every instance has restarted; a deployment that cannot
-      # prove that must isolate the old listeners as well.
-      AGENT_MCP_ENABLED: ${AGENT_MCP_ENABLED:-}
-
-      # The browser-facing address this service builds OAuth callbacks from.
-      # Configured rather than derived from the request: a redirect URI is
-      # registered with the authorization server in advance, so a value taken
-      # from whatever host a request arrived on would differ per proxy and fail
-      # that registration. Unset means a connection can still use a static
-      # credential, and only the browser flow is refused.
-      AGENT_MCP_PUBLIC_BASE_URL: ${AGENT_MCP_PUBLIC_BASE_URL:-}
-
-      # Both widen what a user-added MCP connection may dial, and both are off
-      # by default. Private space is reachable only through a user connector;
-      # plain HTTP would put the credential on the wire in the clear. They are
-      # separate variables because they are separate risks.
-      AGENT_MCP_ALLOW_PRIVATE_TARGETS: ${AGENT_MCP_ALLOW_PRIVATE_TARGETS:-}
-      AGENT_MCP_ALLOW_PLAIN_HTTP: ${AGENT_MCP_ALLOW_PLAIN_HTTP:-}
-
       # --- Workspaces -------------------------------------------------------
       # Authorizes this service to the hosts' workspace brokers. Per-host
       # broker addresses come from each host's registration row, not from here.
