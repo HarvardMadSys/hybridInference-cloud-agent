@@ -160,6 +160,24 @@ def _auth_headers(config: RemoteTransportConfig) -> dict[str, str]:
     return {"Authorization": f"Bearer {config.secret}"}
 
 
+def merge_headers(base: dict[str, str], extra: Mapping[str, str]) -> dict[str, str]:
+    """Overlay ``extra`` on ``base``, treating one header name as one name.
+
+    HTTP header names are case-insensitive and ``dict`` keys are not, so a plain
+    ``update`` keeps *both* spellings when a connection writes ``authorization``
+    and the platform writes ``Authorization``. httpx then sends both, the server
+    picks one, and the credential meant to replace the sandbox's token may be
+    the one that loses. This is the same merge the relay's proxy performs, and
+    for the same reason.
+    """
+    merged = dict(base)
+    for name, value in extra.items():
+        for existing in [key for key in merged if key.lower() == name.lower()]:
+            del merged[existing]
+        merged[name] = value
+    return merged
+
+
 def build_headers(config: RemoteTransportConfig, *, body: bool) -> dict[str, str]:
     """Assemble the header set for one outbound request.
 
@@ -177,9 +195,8 @@ def build_headers(config: RemoteTransportConfig, *, body: bool) -> dict[str, str
         headers[PROTOCOL_VERSION_HEADER] = config.protocol_version
     if config.session_id:
         headers[SESSION_ID_HEADER] = config.session_id
-    headers.update(sanitize_headers(config.headers))
-    headers.update(_auth_headers(config))
-    return headers
+    headers = merge_headers(headers, sanitize_headers(config.headers))
+    return merge_headers(headers, _auth_headers(config))
 
 
 class _HttpCore:
@@ -751,7 +768,6 @@ async def connect_streamable(
     transport = StreamableHttpTransport(config, http)
     transport.set_era("modern")
     transport.set_protocol_version(config.protocol_version or PREFERRED_PROTOCOL_VERSION)
-    modern_error: TransportError | None = None
     try:
         try:
             handshake = await discover_server(transport)
@@ -759,6 +775,17 @@ async def connect_streamable(
             if not exc.supported:
                 raise
             transport.set_protocol_version(negotiate_version(exc.supported))
+            handshake = await discover_server(transport)
+        except TransportError as exc:
+            # Over HTTP an unsupported version arrives as a 400 whose *body*
+            # carries the code, so the status check has already turned it into a
+            # transport error by the time it could be recognised. Read the body
+            # back: the retry is the whole reason the server is told which
+            # revisions it does implement.
+            error = exc.modern_error()
+            if not isinstance(error, UnsupportedProtocolVersion) or not error.supported:
+                raise
+            transport.set_protocol_version(negotiate_version(error.supported))
             handshake = await discover_server(transport)
         transport.set_protocol_version(handshake.protocol_version)
         return transport, handshake
@@ -984,4 +1011,5 @@ __all__ = [
     "connect_legacy_sse",
     "connect_streamable",
     "iter_sse",
+    "merge_headers",
 ]
