@@ -254,6 +254,11 @@ class McpHost:
         self._limits = limits or HostLimits()
         self._store = store
         self._sessions: dict[str, Session] = {}
+        #: What each live session was opened with, so a caller that arrives with
+        #: a rotated token or a changed timeout is not silently handed the old
+        #: transport. Kept beside the sessions rather than on them because it is
+        #: the *caller's* state, not the protocol's.
+        self._opened_with: dict[str, tuple[str | None, float | None, int]] = {}
 
     def session(self, key: SessionKey) -> Session | None:
         """The live session for one member, if any."""
@@ -278,16 +283,50 @@ class McpHost:
         expired keep driving a connection the platform has already reassigned.
         """
         existing = self._sessions.get(key.handle())
-        if existing is not None:
+        if existing is not None and self._still_describes(existing, connection, secret):
             return existing
+        if existing is not None:
+            # The key is unchanged -- same connection, same member, same owner --
+            # but something the session was *opened with* is not. A refreshed
+            # token and a widened timeout both arrive under the same key, and a
+            # cache that answers with the old transport sends the old credential
+            # to the upstream and keeps the old bound, neither of which the
+            # caller asked for.
+            del self._sessions[key.handle()]
+            await existing.aclose()
         await self.reap_superseded(key)
         transport, handshake, stream_task = await self._connect(connection, secret=secret)
         session = Session(
             key=key, transport=transport, handshake=handshake, stream_task=stream_task
         )
         self._sessions[key.handle()] = session
+        self._opened_with[key.handle()] = (
+            secret,
+            connection.request_timeout_s,
+            connection.credential_version,
+        )
         await self._record(connection, session)
         return session
+
+    def _still_describes(
+        self, session: Session, connection: McpConnection, secret: str | None
+    ) -> bool:
+        """Whether a cached session was opened with what the caller just passed.
+
+        Compared rather than assumed because the key cannot carry either: the
+        credential is a secret the caller holds for this call and the timeout is
+        a property of the connection row, while the key is a digest of the
+        connection, the member and the owner.
+        """
+        opened = self._opened_with.get(session.key.handle())
+        if opened is None:
+            return False
+        recorded_secret, recorded_timeout, recorded_credential = opened
+        return (
+            recorded_secret == secret
+            and recorded_timeout == connection.request_timeout_s
+            and recorded_credential == connection.credential_version
+        )
 
     async def reap_superseded(self, key: SessionKey) -> int:
         """Close what this member held under an older owner, and forget it.
@@ -309,6 +348,7 @@ class McpHost:
                 and session.key.owner_lease_generation < key.owner_lease_generation
             ):
                 del self._sessions[handle]
+                self._opened_with.pop(handle, None)
                 await session.aclose()
                 closed += 1
                 if self._store is not None:
@@ -324,6 +364,7 @@ class McpHost:
     async def close(self, key: SessionKey) -> bool:
         """Close one session and remove its record."""
         session = self._sessions.pop(key.handle(), None)
+        self._opened_with.pop(key.handle(), None)
         if session is not None:
             await session.aclose()
         if self._store is not None:

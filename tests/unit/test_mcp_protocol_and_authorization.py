@@ -894,6 +894,40 @@ class TestSessionRecords:
         assert session is not None
 
     @pytest.mark.asyncio
+    async def test_a_rotated_credential_rebuilds_the_session(self) -> None:
+        """The key cannot carry the token, so a cache keyed on it must compare.
+
+        A refreshed access token arrives under the same connection, member and
+        owner, so the handle is unchanged -- and answering from the cache would
+        keep sending the token the refresh just replaced. The same goes for a
+        timeout widened on the connection row.
+        """
+        store = self._Store()
+        built = self._host(store)
+        opened: list[tuple[object, object]] = []
+
+        async def connect(connection: object, *, secret: object) -> tuple:
+            opened.append((connection, secret))
+            return object(), protocol.Handshake(protocol_version="2025-11-25"), None
+
+        built._connect = connect  # type: ignore[method-assign]
+        key = host.SessionKey(connection_id="7", member="ajob:5")
+        first = await built.open(self._connection(), secret="token-v1", key=key)
+        assert await built.open(self._connection(), secret="token-v1", key=key) is first
+        assert len(opened) == 1, "an unchanged session should be reused"
+
+        second = await built.open(self._connection(), secret="token-v2", key=key)
+        assert second is not first
+        assert [secret for _, secret in opened] == ["token-v1", "token-v2"]
+
+        # And the timeout, which lives on the connection rather than the token.
+        third = await built.open(
+            self._connection(request_timeout_s=45.0), secret="token-v2", key=key
+        )
+        assert third is not second
+        assert len(opened) == 3
+
+    @pytest.mark.asyncio
     async def test_closing_a_session_removes_its_record(self) -> None:
         """A record nobody can serve is not a session."""
         store = self._Store()
