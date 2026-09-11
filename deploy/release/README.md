@@ -83,6 +83,33 @@ python -m deploy.release.release_manifest \
 The manifest is written only after every check passes, in one piece: a
 half-written document with a correct-looking hash is worse than no document.
 
+## Starting, not just building
+
+An image that builds is an image whose Dockerfile parses. `deploy/release/smoke.py`
+starts each artifact the way its deployment does and asserts what only starting
+shows; every entry says what it proves *and* what it does not, because a check
+that quietly proves less than its name is worse than no check.
+
+| Artifact | Starting it proves |
+|---|---|
+| control | migrates a real database with `alembic upgrade head`, then answers `/healthz` |
+| web (both variants) | serves its sign-in page under its own mount prefix, with the identity read at runtime |
+| runner | its modules import and the Docker CLI it shells out to is present |
+| sandbox | every Agent CLI reports the version its own image label claims |
+| tunnel | the entrypoint runs and refuses an unreachable peer loudly |
+| egress | comes up under a rendered config and accepts connections |
+
+The same script is what CI runs on a pull request and what the publication
+workflow runs over the images it is about to push. One implementation, because
+the check that matters is the one applied to the bytes that get published, and
+two copies of "it starts" would drift apart.
+
+Each run also asserts the image's own identity labels —
+`org.opencontainers.image.revision`, `io.hybridinference.artifact.role`, and
+`base_path` for the web variants. The Dockerfiles default the revision to
+`unknown`, so a build argument that fails to arrive produces an image every
+resolver refuses; this is the last place that can be seen before it is pushed.
+
 ## Registry layout is not part of this contract
 
 Artifacts are addressed by digest, so which package or tag an image lives in is

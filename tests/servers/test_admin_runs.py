@@ -169,7 +169,7 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     assert body["usage"]["runtime"]["input_tokens"] == 200  # two attempts, not six blocks
     assert body["usage"]["runtime"]["normalized_input_tokens"] == 400
     assert body["usage"]["conversation"] is None
-    assert body["capabilities"] == {"llm_requests": False}
+    assert body["capabilities"] == {"llm_requests": True}
     assert body["usage"]["ledger"]["finalized"] is False
     assert body["usage"]["ledger"]["unknown_rows"]["reasoning"] == 1
     assert "private" not in admin.text
@@ -352,5 +352,5 @@ def test_admin_observation_routes_are_registered_only_on_the_control_plane():
     control = create_app().openapi()["paths"]
     relay = create_mcp_app().openapi()["paths"]
     paths = {path for path in control if path.startswith(PREFIX)}
-    assert len(paths) == 5
+    assert len(paths) == 7
     assert not paths.intersection(relay)

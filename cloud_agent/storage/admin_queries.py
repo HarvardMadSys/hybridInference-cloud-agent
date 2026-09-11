@@ -11,18 +11,24 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.admin_observability import (
+    SOURCE_LEDGER_SENTINEL,
     ActivityCursor,
     AdminActivity,
     AdminActivityPage,
     AdminRun,
     AdminRunList,
+    LlmRequestSourceCursor,
     RunCursor,
     RunFilters,
     cursor_scope,
     encode_cursor,
 )
 from cloud_agent.schemas import AttemptResources, ProcessObservation, ToolCallResources
-from cloud_agent.storage.store import _load_json
+from cloud_agent.storage.store import (
+    LEDGER_WINDOW_UNTIL_SQL,
+    NEXT_ATTEMPT_START_SQL,
+    _load_json,
+)
 from cloud_agent.thread_stats import _TOKEN_KEY_GROUPS
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES, bound_event_payload
 
@@ -103,6 +109,18 @@ _PROCESS_COLUMNS = ", ".join(
 )
 _MAX_CALLS = 512
 _MAX_PROCESSES = 2048
+
+# One stored attribution reference, in the shape the admin read models expect.
+# The effective window end is the ledger accounting definition, shared with the
+# summary query rather than re-derived here; ``window_open`` asks the same
+# definition a second question instead of duplicating its successor lookup.
+_SOURCE_COLUMNS = f"""
+    a.id AS attempt_id, a.attempt_no, a.status AS attempt_status,
+    a.started_at, a.finished_at, j.thread_id,
+    l.id AS ledger_id, l.grant_id, l.binding_id, l.residency_generation,
+    l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
+    (a.finished_at IS NULL AND {NEXT_ATTEMPT_START_SQL} IS NULL) AS window_open
+"""
 
 
 class AdminRunQueries:
@@ -199,6 +217,70 @@ class AdminRunQueries:
                 job_id,
             )
         return [dict(row) for row in rows]
+
+    async def llm_request_sources(
+        self,
+        job_id: str,
+        *,
+        attempt_id: int | None,
+        cursor: LlmRequestSourceCursor | None,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read one page of stored attribution references, in execution order.
+
+        An attempt without a reference is returned as well, ordered after every
+        attempt that has one by a sentinel ledger id. Omitting it would answer
+        "this execution made no requests" where the truth is "this execution
+        was never attributed", and the two must stay distinguishable.
+
+        Returns:
+            The page, and whether another page exists.
+        """
+        async with self._read() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_SOURCE_COLUMNS}, COALESCE(l.id, $6::bigint) AS ledger_key
+                FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
+                WHERE a.job_id = $1
+                  AND ($2::bigint IS NULL OR a.id = $2)
+                  AND ($3::integer IS NULL
+                       OR (a.attempt_no, a.id, COALESCE(l.id, $6::bigint))
+                          > ($3, $4::bigint, $5::bigint))
+                ORDER BY a.attempt_no, a.id, COALESCE(l.id, $6::bigint)
+                LIMIT $7
+                """,
+                job_id,
+                attempt_id,
+                cursor.attempt_no if cursor else None,
+                cursor.attempt_id if cursor else None,
+                cursor.ledger_key if cursor else None,
+                SOURCE_LEDGER_SENTINEL,
+                limit + 1,
+            )
+        return [dict(row) for row in rows[:limit]], len(rows) > limit
+
+    async def llm_request_source(self, job_id: str, source_id: int) -> dict[str, Any] | None:
+        """Read one stored reference, scoped to the job in the path.
+
+        The job is part of the predicate rather than checked afterwards, so a
+        reference belonging to another run is indistinguishable from one that
+        does not exist.
+        """
+        async with self._read() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_SOURCE_COLUMNS}
+                FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                JOIN agent_attempt_ledger l ON l.attempt_id = a.id
+                WHERE a.job_id = $1 AND l.id = $2
+                """,
+                job_id,
+                source_id,
+            )
+        return dict(row) if row is not None else None
 
     async def usage_inputs(self, job_id: str) -> dict[str, Any]:
         """Project only numeric usage and response identity for existing accounting.

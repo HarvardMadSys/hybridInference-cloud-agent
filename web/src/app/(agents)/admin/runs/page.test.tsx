@@ -53,6 +53,8 @@ vi.mock('@/lib/api/adminRuns', () => ({
   getAdminRun: vi.fn(),
   getAdminRunActivity: vi.fn(),
   getAdminAttemptResources: vi.fn(),
+  getAdminLlmRequestSources: vi.fn(),
+  getAdminLlmRequests: vi.fn(),
   revealAdminEventContent: vi.fn(),
 }));
 
@@ -61,6 +63,8 @@ import {
   getAdminRun,
   getAdminRunActivity,
   getAdminAttemptResources,
+  getAdminLlmRequestSources,
+  getAdminLlmRequests,
   revealAdminEventContent,
 } from '@/lib/api/adminRuns';
 import AdminRunsPageComponent from './page';
@@ -164,7 +168,7 @@ function detail(overrides: Partial<AdminRunDetail> = {}): AdminRunDetail {
       },
     ],
     usage: usage(),
-    capabilities: { llm_requests: false },
+    capabilities: { llm_requests: true },
     ...overrides,
   };
 }
@@ -658,6 +662,8 @@ describe('admin run observation', () => {
       getAdminRun,
       getAdminRunActivity,
       getAdminAttemptResources,
+      getAdminLlmRequestSources,
+      getAdminLlmRequests,
       revealAdminEventContent,
     ])
       expect(fn).not.toHaveBeenCalled();
@@ -678,7 +684,10 @@ describe('admin run observation', () => {
     expect(screen.getByText('$0.0097')).toBeInTheDocument();
     expect(screen.getByText('Not finalized')).toBeInTheDocument();
     expect(screen.getByText(/Rows missing metrics: reasoning: 2/)).toBeInTheDocument();
-    expect(screen.getByText(/Per-request LLM records are not stored here/)).toBeInTheDocument();
+    expect(screen.getByText('LLM requests')).toBeInTheDocument();
+    // Collapsed by default: naming the surface must not read the gateway.
+    expect(getAdminLlmRequestSources).not.toHaveBeenCalled();
+    expect(getAdminLlmRequests).not.toHaveBeenCalled();
     expect(screen.queryByText('Failure classification')).not.toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: /Publish|View changes|Raw events/i }),

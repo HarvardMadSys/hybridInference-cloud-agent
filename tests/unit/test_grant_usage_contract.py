@@ -10,10 +10,54 @@ import httpx
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
-from cloud_agent.grant_usage import GrantUsageReport
+from cloud_agent.grant_usage import GrantUsageReport, GrantUsageRequestPage
 from cloud_agent.grants import GrantClient
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "inference-grants.openapi.yaml"
+
+
+def _request_page() -> dict[str, Any]:
+    """One windowed report with a request row, in the declared shape."""
+    return {
+        **_empty_report(),
+        "totals": {
+            "calls": 1,
+            "tokens_in": 40086,
+            "tokens_out": 413,
+            "cache_read": 19712,
+            "cache_write": None,
+            "reasoning": None,
+            "spent_usd": "0.00978569",
+        },
+        "unknown_rows": {
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "cache_read": 0,
+            "cache_write": 1,
+            "reasoning": 1,
+            "spent_usd": 0,
+        },
+        "requests": [
+            {
+                "request_id": "req_contract",
+                "request_started_at": "2026-09-09T09:00:04+00:00",
+                "logged_at": "2026-09-09T09:00:05+00:00",
+                "model": "model-alias",
+                "served_model_id": None,
+                "tokens_in": 40086,
+                "tokens_out": 413,
+                "cache_read": 19712,
+                "cache_write": None,
+                "reasoning": None,
+                "spent_usd": "0.00978569",
+                "ttft_ms": 240,
+                "latency_ms": 850,
+                "status_code": 429,
+                "usage_estimated": True,
+            }
+        ],
+        "next_cursor": "opaque-next-cursor",
+    }
 
 
 def _empty_report() -> dict[str, Any]:
@@ -104,3 +148,55 @@ def test_snapshot_model_requires_the_contracts_coverage_and_window_fields() -> N
         )
     window_schema = document["components"]["schemas"]["WindowedUsage"]["properties"]["window"]
     assert set(type(report.window).model_fields) == set(window_schema["required"])
+
+
+async def test_request_pages_are_declared_and_consumed_within_the_contract() -> None:
+    """The detail shape is consumed here, not only declared by the gateway."""
+    document = yaml.safe_load(CONTRACT.read_text())
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_request_page())
+
+    client = GrantClient(
+        "https://gateway.example",
+        "service-secret",
+        base_path="/internal/agent-grants",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    since = datetime(2026, 9, 9, 9, 0, tzinfo=UTC)
+    page = await client.usage_requests(
+        "agr_contract",
+        since=since,
+        until=since + timedelta(minutes=1),
+        limit=50,
+        external_job_id="thread:athr_contract",
+        cursor="opaque-gateway-cursor",
+    )
+
+    operation = document["paths"]["/internal/agent-grants/{grant_id}/usage"]["get"]
+    query_schemas = {
+        parameter["name"]: parameter["schema"]
+        for parameter in operation["parameters"]
+        if parameter.get("in") == "query"
+    }
+    sent = dict(seen[-1].url.params)
+    assert set(sent) <= set(query_schemas)
+    assert set(sent) == {"since", "until", "detail", "limit", "cursor"}
+    for name, value in sent.items():
+        typed: Any = int(value) if name == "limit" else value
+        Draft202012Validator(query_schemas[name], format_checker=FormatChecker()).validate(typed)
+    response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    Draft202012Validator({**response_schema, "components": document["components"]}).validate(
+        page.model_dump(mode="json")
+    )
+
+
+def test_request_models_require_every_declared_row_field() -> None:
+    document = yaml.safe_load(CONTRACT.read_text())
+    page = GrantUsageRequestPage.model_validate(_request_page())
+    schemas = document["components"]["schemas"]
+    assert set(type(page.requests[0]).model_fields) == set(schemas["UsageRequest"]["required"])
+    assert set(schemas["WindowedUsage"]["required"]) <= set(type(page).model_fields)
+    assert page.next_cursor == "opaque-next-cursor"

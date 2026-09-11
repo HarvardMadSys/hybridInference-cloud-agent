@@ -11,6 +11,7 @@ import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../../AdminNavigation';
 import { Activity } from '../Activity';
+import { LLMRequests } from '../LLMRequests';
 import { Resources } from '../Resources';
 import {
   accessDenied,
@@ -178,10 +179,17 @@ function RunDetails({ jobId }: { jobId: string }) {
               />
             )}
             <UsageSnapshot usage={detail.usage} />
-            {!detail.capabilities.llm_requests && (
+            {detail.capabilities.llm_requests ? (
+              <LLMRequests
+                jobId={jobId}
+                attemptId={attemptId ?? undefined}
+                running={attempt?.finished_at == null}
+                onAccessDenied={onAccessDenied}
+              />
+            ) : (
               <p className="mt-4 text-xs text-gray-500 dark:text-gray-400">
-                Per-request LLM records are not stored here. Gateway usage above is an aggregate
-                snapshot.
+                Per-request LLM records are not served by this build. Gateway usage above is an
+                aggregate snapshot.
               </p>
             )}
           </>

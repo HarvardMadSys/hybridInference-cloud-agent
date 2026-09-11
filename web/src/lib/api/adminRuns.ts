@@ -59,7 +59,61 @@ export interface AdminRunDetail {
   run: AdminRun;
   attempts: AdminAttempt[];
   usage: AgentJobUsageApi;
-  capabilities: { llm_requests: false };
+  capabilities: { llm_requests: boolean };
+}
+
+/** One stored gateway attribution reference for a run's execution. */
+export interface AdminLlmRequestSource {
+  source_id: string | null;
+  attempt_id: number;
+  attempt_no: number;
+  window_since: string | null;
+  window_until: string | null;
+  window_state: 'open' | 'closed' | 'unknown';
+  availability: 'queryable' | 'pending' | 'unavailable';
+  reason: string | null;
+}
+
+export interface AdminLlmRequestSourcesPage {
+  job_id: string;
+  observed_at: string;
+  sources: AdminLlmRequestSource[];
+  next_cursor: string | null;
+  reason: string | null;
+}
+
+/** One logged gateway request. Safe metadata only: never a prompt or response. */
+export interface AdminLlmRequest {
+  request_id: string;
+  request_started_at: string;
+  logged_at: string;
+  model: string | null;
+  served_model_id: string | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+  reasoning: number | null;
+  spent_usd: string | null;
+  ttft_ms: number | null;
+  latency_ms: number | null;
+  status_code: number | null;
+  usage_estimated: boolean;
+}
+
+export interface AdminLlmRequestPage {
+  job_id: string;
+  source_id: string;
+  attempt_id: number;
+  attempt_no: number;
+  window: { since: string; until: string; basis: 'request_started_at' };
+  source: 'gateway_api_logs';
+  fetched_at: string;
+  gateway_as_of: string;
+  pagination_consistency: 'live_keyset';
+  finalized: false;
+  requests: AdminLlmRequest[];
+  next_cursor: string | null;
 }
 
 export interface AdminActivityEvent {
@@ -131,6 +185,24 @@ export function getAdminAttemptResources(
   signal?: AbortSignal,
 ): Promise<AgentAttemptTelemetryApi> {
   return read(`${runPath(jobId)}/attempts/${attemptId}/resources`, signal);
+}
+
+/** Which stored references this execution can be read through; no gateway call. */
+export function getAdminLlmRequestSources(
+  jobId: string,
+  filters: { attempt_id?: number; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AdminLlmRequestSourcesPage> {
+  return read(`${runPath(jobId)}/llm-request-sources${query(filters)}`, signal);
+}
+
+/** One page of gateway request rows for one stored reference. */
+export function getAdminLlmRequests(
+  jobId: string,
+  filters: { source_id: string | number; cursor?: string; limit?: number },
+  signal?: AbortSignal,
+): Promise<AdminLlmRequestPage> {
+  return read(`${runPath(jobId)}/llm-requests${query(filters)}`, signal);
 }
 
 /** Explicit content access. The server records the actor and event before returning it. */

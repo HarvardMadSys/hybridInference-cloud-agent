@@ -280,9 +280,12 @@ paths:
         With no query parameters, this retains the legacy flat response:
         lifetime totals keyed by the grant's `external_job_id`. With any new
         parameter, `since` and `detail` are required and select the versioned
-        response. This consumer uses `detail=totals` and always sends both
-        window bounds. It rejects legacy responses from older deployments
-        that ignore unknown query parameters.
+        response. This consumer uses `detail=totals` for the per-turn snapshot
+        it stores, and `detail=requests` one page at a time for the admin
+        per-request view; both always send explicit window bounds, and a
+        totals-only answer is never read as an empty request page. It rejects
+        legacy responses from older deployments that ignore unknown query
+        parameters.
 
         Windowed results match the exact authenticated grant ID and use
         `[since, until)` over `request_started_at`. Logging-time boundaries
