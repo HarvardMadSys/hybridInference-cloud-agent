@@ -1,5 +1,14 @@
 # Removing the cloud agent from the gateway
 
+> **Status, 2026-08-09: this deletion has been executed.** H4 shipped as
+> hybridInference#1235 and was deployed to staging **and** production the same
+> day; `docs/cutover.md`'s log and MIGRATION.md's H4 row are the record. The
+> gateway's agent routes answer 404 on both, `apps/backend/serving/agent_jobs/`
+> is gone, and the gateway boots with zero `AGENT_*` variables. Read everything
+> below as the checklist that was followed and the reasoning behind each
+> deletion — not as pending work. Two notes are struck in place below, where the
+> precondition they describe was resolved before the deletion ran.
+
 The checklist for the **source repository**, `HarvardMadSys/hybridInference`,
 after production cutover (task H4). Nothing here happens in this repository —
 it is written here because this is where the migration's registers live, and a
@@ -8,7 +17,8 @@ deletion list that is not derived from them deletes the wrong things.
 **Do not start until H3 is complete and soaked.** The gateway's copy is the
 rollback path right up to that point (see
 [docs/cutover.md](cutover.md) § Rollback), and rollback stops existing the
-moment this list is executed.
+moment this list is executed. H3 was executed 2026-08-07 and H4 followed on
+2026-08-09.
 
 Every path below was read at the freeze commit `764a6f97`, and line numbers are
 that commit's — **with one marked exception**. §1.4's identity paths are C-phase
@@ -52,14 +62,19 @@ acceptance" is the same edit seen from the other side.
 `serving.agent_jobs.tokens.mint_worker_token` — re-point it at whatever mints
 grants, or the retained test does not import.
 
-> ⚠️ **`agent_grants` does not exist yet.**
-> `git grep agent_grants origin/dev -- apps/ tests/` returns nothing: phase
-> C5–C8 has not started. (A bare `git grep agent_grants origin/dev` *does* hit —
-> `docs/agents/plans/2026-08-03-cloud-agent-repo-split.md`, which specifies the
-> table rather than implementing it. Scope the grep to the code, or it looks
-> like the work is done.) Until it lands, `model_auth.py` has nothing to
-> relocate *onto*, and this whole section is a plan rather than a checklist.
-> Confirm before scheduling H4.
+> ⚠️ ~~**`agent_grants` does not exist yet.**~~
+> **Resolved before H4 ran.** This note guarded on
+> `git grep agent_grants origin/dev -- apps/ tests/` returning nothing, which was
+> true when it was written and false by the time H4 executed: the table and its
+> router landed as C5–C8 (hybridInference#1180–#1183, #1191, #1195), and the
+> grep now hits `apps/backend/serving/grants.py` and
+> `apps/backend/serving/servers/routers/agent_grants.py`. `model_auth.py` had
+> something to relocate onto, and the section above stopped being a plan. The
+> scoping lesson is kept because it is still the right way to read the grep: a
+> bare `git grep agent_grants origin/dev` also hits
+> `docs/agents/plans/2026-08-03-cloud-agent-repo-split.md`, which *specifies* the
+> table rather than implementing it — scope the grep to the code, or a plan looks
+> like the work is done.
 
 ### 1.2 The MCP proxy
 
@@ -335,19 +350,32 @@ pointing at its path breaks **at this commit**, not before:
 | `ops/release/public_export.py` | 36 | `_PATCH_GATE = REPO / "apps" / "backend" / "serving" / "agent_jobs" / "patch_gate.py"` — loaded by path to reuse the sandbox's credential-shape regexes in the open-source export audit. |
 | `tests/unit/release/test_public_export_audit.py` | 161 | The same path again, asserting the reuse is real and that the gate grew no import the release tool cannot satisfy. |
 
-The manifest's coordination note names only the first. Both must be dropped or
-re-pointed **before** this pull request lands, and that is the neutral-upstream
+The manifest's coordination note names only the first. Both had to be dropped or
+re-pointed **before** this pull request landed, and that was the neutral-upstream
 split's owner to do — it is the concrete instance of the "no repo-wide sweeps
-over agent paths" coordination rule.
+over agent paths" coordination rule. Two options were listed: inline the
+credential shapes into the export tool (accepting that two lists now drift,
+which is what the reuse existed to prevent), or vendor a copy of the shapes into
+`ops/release/`.
 
-Two options: inline the credential shapes into the export tool (accepting that
-two lists now drift, which is what the reuse existed to prevent), or vendor a
-copy of the shapes into `ops/release/`. Whoever owns the export tool decides;
-this list only says it cannot be discovered at merge time.
+**Neither option was taken, because the question was dissolved.** The
+public-export mechanism itself was retired on 2026-08-26 (hybridInference#1316):
+the repository is being published whole, so nothing is exported from a filtered
+tree any more. `ops/release/public_export.py` exists on neither the gateway's
+`dev` nor its `main`, and neither does its test. The §4 acceptance item resting
+on it went with it, as did the manifest's "hard-referenced by
+`public_export.py:36`" note.
 
 ---
 
 ## 4. Acceptance
+
+Every item below was checked when H4 executed on 2026-08-09; hybridInference#1235
+states the result ("Acceptance — all four, on this tree") — zero `AGENT_*`
+variables, 147 routes, `rg 'agent_jobs' apps/` with no hits, 4,174 tests. The
+list is kept unticked as the checklist that was run rather than as open work;
+the database item is additionally pinned by
+`tests/unit/storage/test_no_agent_tables.py`.
 
 - [ ] `rg 'agent_jobs' apps/` returns nothing outside the relocated grants and
       MCP modules.
@@ -356,7 +384,8 @@ this list only says it cannot be discovered at merge time.
       code storage excepted.
 - [ ] `make test` is green, including the retained MCP and `model_auth` tests
       with their imports re-pointed (§1.1, §1.2).
-- [ ] `ops/release/public_export.py` runs (§3).
+- [ ] ~~`ops/release/public_export.py` runs (§3).~~ **Withdrawn** — the tool was
+      retired on 2026-08-26 (hybridInference#1316) and does not exist.
 - [ ] `/agents` redirects to the new domain.
 - [ ] Backups of the eleven dropped tables are retained somewhere with a stated
       expiry, and H1's import has been confirmed against production data — not

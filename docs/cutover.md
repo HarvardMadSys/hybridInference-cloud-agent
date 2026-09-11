@@ -17,7 +17,8 @@ deliberate choice, and two facts make it the honest one:
   step.
 - **Terminal sessions are process memory.** `WorkspaceBroker` keeps live
   sessions in a dict on the broker process
-  (`cloud_agent_host/workspace_broker.py:430`). They are not in any
+  (`cloud_agent_host/workspace_broker.py:658`,
+  `self._sessions`). They are not in any
   database, so there is nothing to migrate and no honest way to preserve them.
   They are closed deliberately, and the announcement says so.
 
@@ -58,8 +59,9 @@ Do not start until every one of these is true.
       stack with a *fresh* connection — i.e. before any migrated row is
       involved.
 - [ ] The gateway's key material is available as a **file** on whatever machine
-      runs step 5, and the machine has been decided (see
-      `deploy/migrate/README.md` § Where it runs).
+      runs step 5, and the machine has been decided (the decision was recorded
+      in `deploy/migrate/README.md` § Where it runs, which was deleted with the
+      tooling on 2026-08-31; see MIGRATION.md's H1 row).
 - [ ] Backups of both databases are taken, and a restore has been rehearsed at
       least once. `pg_dump` of the gateway database and of the new one.
 - [ ] Step 5 has been rehearsed end to end on a copy, with `--apply` and a
@@ -109,7 +111,8 @@ blocker that vanishes without a record reads as one that was never real.
 - [ ] Say that open terminal sessions will be closed and any unfinished job
       will not be resumed on the other side.
 - [ ] Ask that no long job be started inside the six hours before the window —
-      the default agent timeout is 3600 s (`cloud_agent_host/runner.py:59`), and step 3 waits for
+      the default agent timeout is 3600 s
+      (`cloud_agent_host/runner.py:100`, `DEFAULT_AGENT_TIMEOUT_S`), and step 3 waits for
       whatever is running.
 
 ## 2. Freeze new-job creation on the old stack — T+0
@@ -172,11 +175,18 @@ curl -s https://<gateway>/openapi.json \
 
 ## 3. Drain the old runner
 
-The runner has **no drain mode**. `run_forever` claims in a loop and exits only
-on `KeyboardInterrupt` (`cloud_agent_host/runner.py:1230`), and stopping it mid-job does not
+The runner's only drain is the signal `docker stop` already sends.
+`run_forever` (`cloud_agent_host/runner.py:2136`) loops on claims and exits in
+three ways: a SIGTERM sets a stop flag, so it finishes the job in hand and then
+returns; SIGINT (`KeyboardInterrupt`) still stops immediately; and a rejected
+host credential stops it before the next claim. The SIGTERM half is what a
+`docker compose up -d` replacement relies on — before it existed only
+`KeyboardInterrupt` was caught and every replacement killed the job in flight.
+
+What has not changed is that killing the process mid-job does not
 finish the job: the lease expires after `AGENT_LEASE_TTL` (default 120 s), the
 reaper supersedes the attempt within 30 s of that, and the job is requeued into
-a queue nothing will ever serve again. Draining means *waiting*.
+a queue nothing will ever serve again. Draining still means *waiting*.
 
 - [ ] Watch the queue until it is empty and no attempt is running:
 

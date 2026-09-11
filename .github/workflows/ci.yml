@@ -124,7 +124,11 @@ jobs:
           # Docker: the deploy files and what they COPY. README.md is here
           # because Dockerfile.agent-runner COPYs it alongside pyproject/uv.lock,
           # so deleting or renaming it breaks the build and nothing else notices.
-          if matches '^(deploy/|cloud_agent_host/)' || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
+          # web/ is here because the console image is built from web/ plus
+          # deploy/control-plane/Dockerfile.web: a change to the app alone used
+          # to skip every docker job, which is how that image went unverified.
+          if matches '^(deploy/|cloud_agent_host/|web/)' \
+             || matches '^(pyproject\.toml|uv\.lock|README\.md)$'; then
             docker=true
           else
             docker=false
@@ -655,49 +659,112 @@ jobs:
       # published by the commit that introduced it.
       - name: Scan history
         run: gitleaks detect --source . --redact --verbose --no-banner
-  # ------------------------------------------------------------------ docker
-  build:
-    name: Build ${{ matrix.image.name }}
+  # --------------------------------------------------------------- artifacts
+  # One cell per artifact, on the architecture that artifact is deployed to:
+  # build it, then start it. Both halves in one job deliberately — a self-hosted
+  # runner is a machine, not a shared filesystem, so an image built in one job
+  # is not there for the next one, and passing it between jobs would mean a
+  # registry, which would put a publishing credential in the pull-request path.
+  #
+  # Starting it is the half that catches what building cannot. The egress proxy
+  # is the standing example: it built, its config parsed, and it exited on every
+  # start for two days because squid opens its logs after dropping to an
+  # unprivileged user — and the runner's isolation preflight, correctly refusing
+  # to run without a proxy, took three runners down behind it.
+  #
+  # The checks live in `deploy/release/smoke.py` rather than here, because the
+  # publication workflow runs the same script against the images it is about to
+  # push. Two copies of "it starts" would drift, and the copy that matters is
+  # the one applied to the bytes that get published.
+  artifacts:
+    name: ${{ matrix.artifact.name }} (${{ matrix.artifact.arch }})
     needs: changes
     if: needs.changes.outputs.docker == 'true'
-    # **Each image builds on the architecture it is deployed to.** The control
-    # plane targets ARM64; the host images target x86_64. Each image uses the
-    # matching self-hosted image verification pool.
-    # A build resolving on ARM64 says nothing about a base image without an
-    # amd64 layer, or the reverse.
-    #
-    # `push: false` still: nothing here publishes. The point is that the build
-    # resolves *where it matters*.
-    runs-on: ${{ fromJSON(matrix.image.runner) }}
+    runs-on: ${{ fromJSON(matrix.artifact.runner) }}
     strategy:
       fail-fast: false
       matrix:
-        image:
-          - name: runner
-            dockerfile: deploy/host/Dockerfile.agent-runner
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-          - name: sandbox
-            dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-          - name: egress-proxy
-            dockerfile: deploy/host/Dockerfile.agent-egress-proxy
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-          - name: gateway-tunnel
-            dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-          - name: control-plane
+        artifact:
+          # The web image is built twice, and only here is either variant built
+          # in CI: a mount prefix is resolved while the bundle is compiled, so
+          # the two are different images and neither was verified before this.
+          - name: control
+            arch: arm64
+            smoke_args: --role control
             dockerfile: deploy/control-plane/Dockerfile
             runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
+            build_args: ""
+          - name: web-root
+            arch: arm64
+            smoke_args: --role web --variant root
+            dockerfile: deploy/control-plane/Dockerfile.web
+            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
+            build_args: |
+              NEXT_PUBLIC_BASE_PATH=
+              NEXT_PUBLIC_AGENT_API_URL=/api
+          - name: web-agents
+            arch: arm64
+            smoke_args: --role web --variant agents
+            dockerfile: deploy/control-plane/Dockerfile.web
+            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
+            build_args: |
+              NEXT_PUBLIC_BASE_PATH=/agents
+              NEXT_PUBLIC_AGENT_API_URL=/agents/api
+          - name: runner
+            arch: amd64
+            smoke_args: --role runner
+            dockerfile: deploy/host/Dockerfile.agent-runner
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            build_args: ""
+          - name: sandbox
+            arch: amd64
+            smoke_args: --role sandbox
+            dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            build_args: ""
+          - name: tunnel
+            arch: amd64
+            smoke_args: --role tunnel
+            dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            build_args: ""
+          - name: egress
+            arch: amd64
+            smoke_args: --role egress
+            dockerfile: deploy/host/Dockerfile.agent-egress-proxy
+            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
+            build_args: ""
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      # Named per run, so a retry and a concurrent attempt stay independently
+      # diagnosable and a run that dies before cleanup leaves something
+      # identifiable behind rather than a bare image id.
+      - name: Name this cell's artifacts
+        run: |
+          # Run, attempt *and artifact*: the seven cells of one run share the
+          # first two, several of them land on the same Docker host, and the
+          # cleanup below removes containers by this label. Without the artifact
+          # name, the first cell to finish deletes the others' containers while
+          # they are still being tested — which is exactly what the control and
+          # egress cells did, twice, before this.
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
+          echo "IMAGE_TAG=${{ matrix.artifact.name }}:ci-${suffix}" >> "${GITHUB_ENV}"
+          echo "SUFFIX=${suffix}" >> "${GITHUB_ENV}"
+
       - uses: docker/setup-buildx-action@v3
 
-      # Build only — never push. These images carry no credentials and this
-      # repository publishes none; the point is that the build resolves.
-      - name: Build ${{ matrix.image.name }}
+      # `push: false` still: nothing here publishes, and these images carry no
+      # credentials. `load: true` is what puts the image on this runner's
+      # daemon, which is where the smoke below starts it.
+      #
+      # `SOURCE_COMMIT` is passed to every artifact because each Dockerfile
+      # writes it into `org.opencontainers.image.revision`, and a release whose
+      # images cannot name their commit is refused by every resolver. The smoke
+      # asserts it arrived.
+      - name: Build ${{ matrix.artifact.name }}
         id: build
         # A transient buildkit/runner recycle surfaces as graceful_stop on this
         # pool. Recreate the builder and retry once before failing the cell.
@@ -705,126 +772,82 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.image.dockerfile }}
+          file: ${{ matrix.artifact.dockerfile }}
           push: false
-          load: false
-          cache-from: type=gha,scope=${{ matrix.image.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+          load: true
+          # The docker exporter needs a name to load the image under. Without
+          # this the build succeeds and the smoke then finds nothing to start:
+          # `docker inspect <tag>` is the first thing it does, and a build that
+          # produced an anonymous image reads as a missing one.
+          tags: ${{ env.IMAGE_TAG }}
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
+            ${{ matrix.artifact.build_args }}
+          cache-from: type=gha,scope=${{ matrix.artifact.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.artifact.name }}
 
       - name: Set up Docker Buildx (retry)
         if: steps.build.outcome == 'failure'
         uses: docker/setup-buildx-action@v3
 
-      - name: Build ${{ matrix.image.name }} (retry)
+      - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.image.dockerfile }}
+          file: ${{ matrix.artifact.dockerfile }}
           push: false
-          load: false
-          cache-from: type=gha,scope=${{ matrix.image.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
-
-  egress-proxy-starts:
-    name: The egress proxy stays up
-    needs: changes
-    if: needs.changes.outputs.docker == 'true'
-    # x86_64, because this job's whole point is that starting the thing proves
-    # what building it cannot — and the thing starts on the runner host. Squid
-    # opening its logs is exactly the kind of failure that could differ by base
-    # image layer, so proving it on the other architecture would prove the
-    # wrong one.
-    runs-on: [self-hosted, Linux, X64, image-verify-x64]
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      # **Building it proves nothing about whether it runs**, and this is the
-      # job that exists because of what that cost.
-      #
-      # Squid opens its logs *after* dropping to `cache_effective_user`, and in
-      # a container `/dev/stdout` is a root-owned `prw-------` pipe — so the
-      # open failed and squid treated it as fatal. The image built fine. The
-      # config passed `squid -k parse` fine. It exited on every start, 2814
-      # times on staging from 2026-08-03, and because the runner's isolation
-      # preflight correctly refuses to start without a reachable proxy, three
-      # runners and the workspace broker crash-looped behind it. No agent job
-      # ran for two days.
-      #
-      # Nothing textual would have caught it: the broken config parsed, and so
-      # did a first attempted fix (`cache_effective_user root`, which squid
-      # rejects outright). Only starting the thing does.
-      #
-      # Keep the tag, container and rendered config per-run so retries and
-      # concurrent workflow attempts remain independently diagnosable.
-      - name: Name this run's artifacts
-        run: |
-          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          echo "IMAGE_TAG=egress-proxy:ci-${suffix}" >> "${GITHUB_ENV}"
-          echo "CONTAINER_NAME=egress-proxy-ci-${suffix}" >> "${GITHUB_ENV}"
-          echo "SQUID_CONF=${RUNNER_TEMP}/squid.conf" >> "${GITHUB_ENV}"
-
-      - name: Build the image
-        run: docker build -f deploy/host/Dockerfile.agent-egress-proxy -t "${IMAGE_TAG}" .
+          load: true
+          # The docker exporter needs a name to load the image under. Without
+          # this the build succeeds and the smoke then finds nothing to start:
+          # `docker inspect <tag>` is the first thing it does, and a build that
+          # produced an anonymous image reads as a missing one.
+          tags: ${{ env.IMAGE_TAG }}
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
+            ${{ matrix.artifact.build_args }}
+          cache-from: type=gha,scope=${{ matrix.artifact.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.artifact.name }}
 
       - name: Isolate uv cache dir
         run: |
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
-      # setup-uv rather than mutating the runner image's system Python; the
-      # action also gives this job the same pinned setup path as backend CI.
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
           prune-cache: false
 
-      - name: Render a config the way the runner does
+      - name: Start it, and assert what only starting shows
         run: |
           set -euo pipefail
-          uv run --with-editable . python -c "
-          from cloud_agent_host.egress_proxy import build_config_from_env
-          import os, pathlib
-          pathlib.Path(os.environ['SQUID_CONF']).write_text(
-              build_config_from_env({'AGENT_EGRESS_ALLOWLIST': 'registry.npmjs.org'})
-          )"
+          uv run --with-editable . python deploy/release/smoke.py \
+            ${{ matrix.artifact.smoke_args }} \
+            --image "${IMAGE_TAG}" \
+            --suffix "${SUFFIX}" \
+            --revision "${GITHUB_SHA}"
 
-      - name: It must still be running, and serving
-        run: |
-          set -euo pipefail
-          # Named, not just captured in `cid`: every branch below exits
-          # non-zero under `set -e` before any inline removal could run, so the
-          # container has to be reachable by the always() cleanup step instead.
-          cid=$(docker run -d --name "${CONTAINER_NAME}" -v "${SQUID_CONF}":/etc/squid/generated/squid.conf:ro "${IMAGE_TAG}")
-          sleep 10
-          state=$(docker inspect "$cid" --format '{{.State.Status}}')
-          docker logs "$cid" 2>&1 | tail -30
-          if [ "$state" != "running" ]; then
-            echo "::error::the egress proxy exited (state=$state) — the sandbox has no door, and every agent job will fail its isolation preflight"
-            exit 1
-          fi
-          # Up is not the same as listening: a squid that started and then
-          # failed to bind would still read as `running` for a moment.
-          docker logs "$cid" 2>&1 | grep -F "Accepting HTTP Socket connections" >/dev/null || {
-            echo "::error::the proxy is up but never accepted connections"
-            exit 1
-          }
-
-      # A hosted runner is discarded; this one is not. Without this the machine
-      # accumulates a squid container and image per run until the disk fills,
-      # and the symptom lands on whatever job happens to be running then.
-      #
-      # Container first: an image with a container still referencing it will
-      # not be removed, not even with `-f`, so cleaning up in the other order
-      # silently leaves both behind. Both failure branches above exit before
-      # any inline cleanup, which is exactly when this matters.
-      - name: Drop this run's container and image
+      # The harness removes what it started; this is the backstop for the paths
+      # where it never got that far. Hosted runners are discarded, these are
+      # not: without it the machine accumulates a container and an image per
+      # attempt until the disk fills, and the symptom lands on whatever job
+      # happens to be running then. Containers first — an image with a
+      # container still referencing it is not removed even with `-f`.
+      - name: Drop this run's containers and image
         if: always()
         run: |
-          docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-          docker image rm -f "${IMAGE_TAG}" >/dev/null 2>&1 || true
+          # Scoped by this cell's label, not by the name prefix: a shared
+          # runner hosts several cells at once, so `--filter name=smoke-`
+          # reaches into the others and kills their containers mid-check.
+          docker ps -aq --filter "label=io.hybridinference.smoke.run=${SUFFIX}" \
+            | xargs -r docker rm -f || true
+          # Not `-f`. Forced removal untags an image another cell or run may
+          # still be starting containers from; a plain `rm` refuses while any
+          # container references it, so the worst case is a leftover image
+          # rather than a tag pulled out from under somebody else. (It does not
+          # delete containers — the removals above are what did that.)
+          docker image rm "${IMAGE_TAG}" >/dev/null 2>&1 || true
 
   compose:
     name: Compose resolves
@@ -1013,8 +1036,7 @@ jobs:
       - test-db
       - check
       - gitleaks
-      - build
-      - egress-proxy-starts
+      - artifacts
       - compose
     steps:
       - name: Every job succeeded or was deliberately skipped
@@ -1026,8 +1048,7 @@ jobs:
             test-db=${{ needs.test-db.result }}
             web=${{ needs.check.result }}
             gitleaks=${{ needs.gitleaks.result }}
-            build=${{ needs.build.result }}
-            egress=${{ needs.egress-proxy-starts.result }}
+            artifacts=${{ needs.artifacts.result }}
             compose=${{ needs.compose.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
         run: |

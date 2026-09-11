@@ -48,8 +48,8 @@ def test_private_repository_ci_uses_existing_self_hosted_pools() -> None:
     assert workflow["permissions"] == {"contents": "read"}
     jobs = workflow["jobs"]
     special_runners = {
-        "build": "${{ fromJSON(matrix.image.runner) }}",
-        "egress-proxy-starts": ["self-hosted", "Linux", "X64", "image-verify-x64"],
+        # One cell per artifact, each naming the pool it builds and starts on.
+        "artifacts": "${{ fromJSON(matrix.artifact.runner) }}",
         "compose": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
     }
     assert special_runners.keys() <= jobs.keys()
@@ -59,24 +59,32 @@ def test_private_repository_ci_uses_existing_self_hosted_pools() -> None:
 
 
 def test_ci_images_build_on_their_deployment_architecture() -> None:
-    """Matrix indirection must preserve both self-hosting and native builds."""
+    """Matrix indirection must preserve both self-hosting and native builds.
+
+    One cell per artifact, and the console appears twice because a mount prefix
+    is resolved while its bundle is compiled — both variants are images, and
+    until this matrix covered them neither was built in CI at all.
+    """
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
-    matrix = workflow["jobs"]["build"]["strategy"]["matrix"]
-    assert set(matrix) == {"image"}
-    images = matrix["image"]
+    matrix = workflow["jobs"]["artifacts"]["strategy"]["matrix"]
+    assert set(matrix) == {"artifact"}
+    cells = matrix["artifact"]
     x64 = ["self-hosted", "Linux", "X64", "image-verify-x64"]
     arm64 = ["self-hosted", "Linux", "ARM64", "image-verify-arm64"]
     expected = {
-        "deploy/host/Dockerfile.agent-runner": x64,
-        "deploy/sandbox/Dockerfile.agent-sandbox": x64,
-        "deploy/host/Dockerfile.agent-egress-proxy": x64,
-        "deploy/host/Dockerfile.agent-gateway-tunnel": x64,
-        "deploy/control-plane/Dockerfile": arm64,
+        "control": ("deploy/control-plane/Dockerfile", arm64),
+        "web-root": ("deploy/control-plane/Dockerfile.web", arm64),
+        "web-agents": ("deploy/control-plane/Dockerfile.web", arm64),
+        "runner": ("deploy/host/Dockerfile.agent-runner", x64),
+        "sandbox": ("deploy/sandbox/Dockerfile.agent-sandbox", x64),
+        "tunnel": ("deploy/host/Dockerfile.agent-gateway-tunnel", x64),
+        "egress": ("deploy/host/Dockerfile.agent-egress-proxy", x64),
     }
-    assert len(images) == len(expected)
-    assert {image["dockerfile"] for image in images} == expected.keys()
-    for image in images:
-        assert json.loads(image["runner"]) == expected[image["dockerfile"]], image["name"]
+    assert {cell["name"] for cell in cells} == set(expected)
+    for cell in cells:
+        dockerfile, pool = expected[cell["name"]]
+        assert cell["dockerfile"] == dockerfile, cell["name"]
+        assert json.loads(cell["runner"]) == pool, cell["name"]
 
 
 # ---------------------------------------------------------------------------

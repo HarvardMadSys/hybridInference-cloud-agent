@@ -57,8 +57,10 @@ actual 403 response against the schema and consumer. It creates no accounts and
 does not access either database directly. This external test requires explicit
 Gateway credentials and is not part of default CI; ordinary CI runs the local
 schema/consumer agreement tests. It was exercised against the production Gateway
-router and error handler at `bd93e98fe`, using an isolated empty account-store
-fixture over loopback HTTP.
+router and error handler as merged by `c7987680` ("feat(agent): expose
+deployment-owned access permissions", hybridInference#1408), using an isolated
+empty account-store fixture over loopback HTTP. The commit this line used to
+cite, `bd93e98fe`, is a documentation-only one and named no router revision.
 
 The local `ADMIN_TOKEN` remains an infrastructure credential independent of
 Gateway availability. The dedicated on-call token must additionally pass the

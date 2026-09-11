@@ -1,6 +1,6 @@
 import Link from 'next/link';
 
-export function AdminNavigation({ current }: { current: 'servers' | 'runs' }) {
+export function AdminNavigation({ current }: { current: 'servers' | 'runs' | 'usage' }) {
   return (
     <nav
       aria-label="Admin sections"
@@ -9,6 +9,7 @@ export function AdminNavigation({ current }: { current: 'servers' | 'runs' }) {
       {[
         { key: 'servers', label: 'Servers', href: '/admin/hosts' },
         { key: 'runs', label: 'Runs', href: '/admin/runs' },
+        { key: 'usage', label: 'Usage', href: '/admin/usage' },
       ].map((item) => (
         <Link
           key={item.key}

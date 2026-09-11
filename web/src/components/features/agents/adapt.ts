@@ -32,19 +32,16 @@ import type {
 } from './types';
 
 /**
- * Map a server state onto a display state.
+ * Preserve a server result as a per-turn display state.
  *
- * `succeeded` splits in two, because those are different things to a user: a
- * job whose patch is already a draft PR is done, while one that finished
- * without a PR is waiting on the publish step (or produced no changes) and
- * still wants a human.
+ * Historical turns and their actions keep the distinction between success,
+ * failure and cancellation. Conversation badges use `toConversationState`
+ * to present successful and stopped turns as idle regardless of publication.
  */
 export function toDisplayState(job: AgentJobApi): AgentJobState {
-  if (job.state === 'waiting' || job.state === 'queued') return 'queued';
+  if (job.state === 'queued') return 'queued';
   if (job.state === 'running' || job.state === 'publishing') return 'running';
-  // `succeeded` splits in two because those are different things to a user: a
-  // job whose patch is already a draft PR is done, while one that finished
-  // without a PR is waiting on the publish step (or produced no changes).
+  // Retain the legacy result values for historical turn consumers.
   if (job.state === 'succeeded') return job.published_pr_url ? 'done' : 'needs_review';
   if (job.state === 'failed') return 'failed';
   if (job.state === 'cancelled') return 'cancelled';
@@ -113,12 +110,16 @@ export function durationBetween(
 export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   const payload = event.payload ?? {};
   const type = event.event_type;
+  // Every mapped row carries the stored id, including the ones that borrow
+  // their text from a payload: it is the only identity that survives folding,
+  // and the Chat reading anchor is restored by row.
+  const sourceEventId = event.id;
 
   // Never carry chain-of-thought into the display model. The UI represents
   // this as a compact reasoning status, not as model-authored hidden text.
-  if (type === 'thinking') return { kind: 'thinking', text: '' };
-  if (type === 'message') return { kind: 'message', text: asText(payload, 'text') };
-  if (type === 'usage') return { kind: 'usage', text: asText(payload, 'text') };
+  if (type === 'thinking') return { kind: 'thinking', text: '', sourceEventId };
+  if (type === 'message') return { kind: 'message', text: asText(payload, 'text'), sourceEventId };
+  if (type === 'usage') return { kind: 'usage', text: asText(payload, 'text'), sourceEventId };
 
   if (type === 'tool_use') {
     const name = asText(payload, 'name', 'tool') || 'Bash';
@@ -134,6 +135,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       detail: asText(payload, 'detail', 'text') || commandText(payload.input) || 'Running tool',
       ...(output ? { output } : {}),
       ...(outputIsError ? { outputIsError: true } : {}),
+      sourceEventId,
     };
   }
 
@@ -148,6 +150,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       toolUseId: asText(payload, 'tool_use_id') || undefined,
       isError: payload.is_error === true,
       ...(event.created_at ? { at: event.created_at } : {}),
+      sourceEventId,
     };
   }
 
@@ -162,40 +165,43 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
         payload.attempts > 0
           ? payload.attempts
           : 1;
-      return { kind: 'egress_denied', host, attempts };
+      return { kind: 'egress_denied', host, attempts, sourceEventId };
     }
     return {
       kind: 'lifecycle',
       text: ownerFailureMessage(asText(payload, 'detail', 'text') || 'An error occurred'),
+      sourceEventId,
     };
   }
 
   if (type === 'attempt_superseded') {
-    return { kind: 'lifecycle', text: 'attempt_superseded' };
+    return { kind: 'lifecycle', text: 'attempt_superseded', sourceEventId };
   }
   if (type === 'lifecycle') {
     const phase = asText(payload, 'phase', 'text') || 'lifecycle';
     // The runner reports whether it reused the tree; the milestone reads
     // differently depending on the answer, and only the runner can know it.
     if (phase === 'checked_out' && payload.reused === true) {
-      return { kind: 'lifecycle', text: 'workspace_reused' };
+      return { kind: 'lifecycle', text: 'workspace_reused', sourceEventId };
     }
     if (phase === 'rate_limit') {
       const info = payload.info;
       const status =
         info && typeof info === 'object' ? (info as Record<string, unknown>).status : null;
       if (status === 'rejected') {
-        return { kind: 'lifecycle', text: 'Model usage limit reached' };
+        return { kind: 'lifecycle', text: 'Model usage limit reached', sourceEventId };
       }
       if (status === 'allowed_warning') {
-        return { kind: 'lifecycle', text: 'Approaching model usage limit' };
+        return { kind: 'lifecycle', text: 'Approaching model usage limit', sourceEventId };
       }
       return null;
     }
     if (phase === 'shared_tool_errors_observed') {
-      return { kind: 'lifecycle', text: 'Some tools encountered errors' };
+      return { kind: 'lifecycle', text: 'Some tools encountered errors', sourceEventId };
     }
-    return Object.hasOwn(LIFECYCLE_LABELS, phase) ? { kind: 'lifecycle', text: phase } : null;
+    return Object.hasOwn(LIFECYCLE_LABELS, phase)
+      ? { kind: 'lifecycle', text: phase, sourceEventId }
+      : null;
   }
   if (type === 'raw') {
     // Raw records are unclassified runtime protocol data. They remain available
@@ -693,6 +699,9 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     historyTurns = historicalJobs.map((threadJob) => ({
       jobId: threadJob.id,
       turnNo: threadJob.turn_no ?? 1,
+      // The stored turn's own outcome, so the rail can say a turn failed
+      // without re-deriving it from the events it happens to carry.
+      state: toDisplayState(threadJob),
       // This is stronger than platform success: the API has also proved a
       // settled native ordinal, compatible online host/image, and idle source
       // membership. Showing a button from state alone creates a predictable
@@ -731,11 +740,8 @@ export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): Agen
     title: job.title ?? options.thread?.title ?? job.task_prompt.split('\n')[0].slice(0, 80),
     prompt: job.task_prompt,
     state: toDisplayState(job),
-    stateNote: job.detail
-      ? ownerFailureMessage(job.detail)
-      : job.state === 'waiting'
-        ? 'Queued after the current run'
-        : undefined,
+    conversationState: job.conversation_state ?? undefined,
+    stateNote: job.detail ? ownerFailureMessage(job.detail) : undefined,
     repo: job.repo,
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),

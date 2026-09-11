@@ -1,12 +1,13 @@
 // Tests for the API → UI adapter.
 //
 // The cases that matter are the ones where a wrong mapping would mislead a
-// user about their own job: a finished-but-unpublished job looking done, a
+// user about their own job: a completed chat looking active while it publishes, a
 // superseded attempt looking live, or an event kind silently vanishing.
 
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
+import { getConversationState, toConversationState } from './conversationState';
 
 import {
   lifecyclePhaseLabel,
@@ -36,6 +37,7 @@ describe('owner failure wording', () => {
     expect(toDisplayEvent(event(1, 'error', { text: detail }))).toEqual({
       kind: 'lifecycle',
       text: expected,
+      sourceEventId: 1,
     });
     expect(toDisplayJob({ ...JOB, state: 'failed', detail }, {}).stateNote).toBe(expected);
   });
@@ -45,7 +47,7 @@ describe('owner failure wording', () => {
     expect(ownerFailureMessage(detail)).toBe(detail);
     expect(
       toDisplayEvent(event(1, 'message', { text: 'Investigate why the lease expired.' })),
-    ).toEqual({ kind: 'message', text: 'Investigate why the lease expired.' });
+    ).toEqual({ kind: 'message', text: 'Investigate why the lease expired.', sourceEventId: 1 });
   });
 
   it('treats a settled boundary as finished, not interrupted', () => {
@@ -101,7 +103,7 @@ function event(
 
 describe('toDisplayState', () => {
   it('separates published from merely finished', () => {
-    // Both are `succeeded` on the wire, but only one is done to a user.
+    // Both are idle conversations; per-turn results retain their legacy values.
     expect(toDisplayState({ ...JOB, state: 'succeeded', published_pr_url: 'u' })).toBe('done');
     expect(toDisplayState({ ...JOB, state: 'succeeded', published_pr_url: null })).toBe(
       'needs_review',
@@ -113,13 +115,35 @@ describe('toDisplayState', () => {
   });
 
   it.each([
-    ['waiting', 'queued'],
     ['queued', 'queued'],
     ['running', 'running'],
     ['failed', 'failed'],
     ['cancelled', 'cancelled'],
   ] as const)('maps %s', (wire, display) => {
     expect(toDisplayState({ ...JOB, state: wire })).toBe(display);
+  });
+});
+
+describe('conversation display state', () => {
+  it('preserves a cancelled turn while carrying the whole conversation activity', () => {
+    const job = toDisplayJob({ ...JOB, state: 'cancelled', conversation_state: 'running' });
+    expect(job.state).toBe('cancelled');
+    expect(job.conversationState).toBe('running');
+    expect(getConversationState(job)).toBe('running');
+  });
+  it.each([
+    ['queued', null, 'queued'],
+    ['running', null, 'running'],
+    ['publishing', null, 'running'],
+    ['succeeded', null, 'idle'],
+    ['succeeded', 'https://github.com/o/n/pull/1', 'idle'],
+    ['failed', null, 'failed'],
+    ['cancelled', null, 'idle'],
+  ] as const)('displays %s with PR %s as %s', (state, published_pr_url, expected) => {
+    const job = toDisplayJob({ ...JOB, state, published_pr_url });
+    expect(toConversationState(job.state)).toBe(expected);
+    // Presentation never rewrites the individual turn's result or PR metadata.
+    expect(job.state).toBe(toDisplayState({ ...JOB, state, published_pr_url }));
   });
 });
 
@@ -140,6 +164,7 @@ describe('toDisplayEvent', () => {
       kind: 'egress_denied',
       host: 'evil.example',
       attempts: 3,
+      sourceEventId: 1,
     });
   });
 
@@ -147,12 +172,13 @@ describe('toDisplayEvent', () => {
     expect(toDisplayEvent(event(1, 'error', { detail: 'boom' }))).toEqual({
       kind: 'lifecycle',
       text: 'boom',
+      sourceEventId: 1,
     });
   });
 
   it('renders an interruption without its internal reason', () => {
     const row = toDisplayEvent(event(1, 'attempt_superseded', { reason: 'lease_expired' }));
-    expect(row).toEqual({ kind: 'lifecycle', text: 'attempt_superseded' });
+    expect(row).toEqual({ kind: 'lifecycle', text: 'attempt_superseded', sourceEventId: 1 });
   });
 
   it('keeps rate-limit warnings while hiding normal allowance events', () => {
@@ -161,12 +187,12 @@ describe('toDisplayEvent', () => {
     ).toBeNull();
     expect(
       toDisplayEvent(event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'rejected' } })),
-    ).toEqual({ kind: 'lifecycle', text: 'Model usage limit reached' });
+    ).toEqual({ kind: 'lifecycle', text: 'Model usage limit reached', sourceEventId: 1 });
     expect(
       toDisplayEvent(
         event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'allowed_warning' } }),
       ),
-    ).toEqual({ kind: 'lifecycle', text: 'Approaching model usage limit' });
+    ).toEqual({ kind: 'lifecycle', text: 'Approaching model usage limit', sourceEventId: 1 });
   });
 
   it('keeps an unfamiliar tool visible by its actual name', () => {
@@ -175,6 +201,7 @@ describe('toDisplayEvent', () => {
       tool: 'WebFetch',
       detail: 'x',
       id: undefined,
+      sourceEventId: 1,
     });
   });
 
@@ -192,6 +219,7 @@ describe('toDisplayEvent', () => {
       text: 'all green',
       toolUseId: 'tool_1',
       isError: false,
+      sourceEventId: 1,
     });
     expect(toDisplayEvent(event(1, 'diff'))).toBeNull();
   });
@@ -212,6 +240,7 @@ describe('toDisplayEvent', () => {
       id: undefined,
       detail: 'pytest -q',
       output: ['1 passed'],
+      sourceEventId: 1,
     });
   });
 
@@ -227,6 +256,7 @@ describe('toDisplayEvent', () => {
       {
         kind: 'lifecycle',
         text: 'Some tools encountered errors',
+        sourceEventId: 1,
       },
     );
     expect(
@@ -236,7 +266,7 @@ describe('toDisplayEvent', () => {
           detail: 'Could not open pull request',
         }),
       ),
-    ).toEqual({ kind: 'lifecycle', text: 'Could not open pull request' });
+    ).toEqual({ kind: 'lifecycle', text: 'Could not open pull request', sourceEventId: 1 });
     for (const phase of [
       'result',
       'shared_snapshot_publishing',
@@ -246,6 +276,7 @@ describe('toDisplayEvent', () => {
       expect(toDisplayEvent(event(1, 'lifecycle', { phase }))).toEqual({
         kind: 'lifecycle',
         text: phase,
+        sourceEventId: 1,
       });
       expect(lifecyclePhaseLabel(phase).milestone).toBe(true);
     }
@@ -253,6 +284,15 @@ describe('toDisplayEvent', () => {
 });
 
 describe('toDisplayJob', () => {
+  it.each([null, 'ajob_previous'])(
+    'does not infer a queue reason from the parent ID %s',
+    (parent_job_id) => {
+      const job = toDisplayJob({ ...JOB, state: 'queued', parent_job_id, detail: null });
+      expect(job.state).toBe('queued');
+      expect(job.stateNote).toBeUndefined();
+    },
+  );
+
   it('states the branch the publisher will use', () => {
     expect(toDisplayJob(JOB).branch).toBe('agent/ajob_1');
   });
@@ -576,6 +616,34 @@ describe('toDisplayJob', () => {
       expect.objectContaining({ kind: 'tool_use', detail: 'pwd', output: ['/workspace'] }),
       expect.objectContaining({ kind: 'message', text: 'first answer' }),
     ]);
+  });
+
+  it.each([
+    ['failed', 'failed'],
+    ['cancelled', 'cancelled'],
+    ['succeeded', 'needs_review'],
+  ] as const)("carries a stored turn's %s outcome onto its rail entry", (state, expected) => {
+    // A turn that failed is not the same as a turn that was never classified:
+    // the rail says so from the thread's job row rather than from whichever
+    // events that turn happens to carry.
+    const current = {
+      ...JOB,
+      id: 'ajob_2',
+      thread_id: 'thread_1',
+      turn_no: 2,
+      state: 'succeeded' as const,
+    };
+    const job = toDisplayJob(current, {
+      thread: {
+        thread_id: 'thread_1',
+        jobs: [{ ...JOB, id: 'ajob_1', thread_id: 'thread_1', turn_no: 1, state }, current],
+        messages: [],
+      },
+      threadEvents: [],
+    });
+
+    expect(toConversationState(job.state)).toBe('idle');
+    expect(job.historyTurns?.[0].state).toBe(expected);
   });
 
   it('renders a settled turn from durable messages when it has no events', () => {

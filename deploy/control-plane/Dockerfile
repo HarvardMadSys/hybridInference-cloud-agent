@@ -53,6 +53,19 @@ RUN pip install --no-cache-dir . \
 
 # Never root. This process holds a git credential and a database; a container
 # escape that starts as root is a materially worse day than one that does not.
+# What this image is, in the two places a deployment looks: OCI's own labels,
+# and one of ours naming the artifact's role. A resolver reads both out of the
+# platform image it is about to run and compares them with the release
+# manifest — the revision against the manifest's source commit, the role
+# against the artifact it stands in for — so a build matrix that swaps two
+# digests is caught where the release is consumed rather than where it is
+# deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
+# built by hand says `unknown`, and a resolver refuses it.
+ARG SOURCE_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      io.hybridinference.artifact.role="control"
+
 USER cloudagent
 
 EXPOSE 8000

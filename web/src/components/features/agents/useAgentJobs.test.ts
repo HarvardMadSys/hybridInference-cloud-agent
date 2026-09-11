@@ -11,6 +11,7 @@ import {
 
 const JOB = {
   state: 'queued',
+  conversation_state: 'queued',
   current_attempt_id: 10,
 } as AgentJobApi;
 
@@ -58,6 +59,7 @@ describe('applyAgentLifecycleEvent', () => {
     const started = applyAgentLifecycleEvent(JOB, lifecycle(11, 'started'));
 
     expect(started.state).toBe('running');
+    expect(started.conversation_state).toBe('running');
     expect(started.current_attempt_id).toBe(11);
 
     const ready = applyAgentLifecycleEvent(started, lifecycle(11, 'workspace_ready'));
@@ -73,6 +75,7 @@ describe('applyAgentLifecycleEvent', () => {
     const requeued = applyAgentLifecycleEvent(ready, superseded(10));
 
     expect(requeued.state).toBe('queued');
+    expect(requeued.conversation_state).toBe('queued');
     expect(requeued.current_attempt_id).toBeNull();
 
     const replacement = applyAgentLifecycleEvent(ready, lifecycle(11, 'workspace_ready'));

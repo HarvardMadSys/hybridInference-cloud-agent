@@ -291,6 +291,7 @@ def heartbeat(
     runtime_versions_available: dict[str, list[str]] | None = None,
     residencies: list[dict[str, Any]] | None = None,
     retained_sandboxes: list[dict[str, Any]] | None = None,
+    capacity: dict[str, Any] | None = None,
     on_residencies_lost: Callable[[list[str]], None] | None = None,
     on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
@@ -309,6 +310,12 @@ def heartbeat(
     ``runtime_versions_available`` the whole menu this image holds. The admin
     page offers the menu and the claim validates a stored selection against it,
     so a host that stops reporting a version stops being asked to run it.
+
+    ``capacity`` is this host's own CPU, memory and retained-container
+    observation, already stamped with the age it had when the beat was built.
+    It is optional in both directions: a host that does not collect it omits
+    it, and a control plane that cannot use it drops it without refusing the
+    beat. Liveness never depends on a monitoring field.
     """
     answer = _post(
         f"{base_url.rstrip('/')}/v1/agent/host/heartbeat",
@@ -323,6 +330,7 @@ def heartbeat(
             "runtime_versions_available": runtime_versions_available,
             "residencies": residencies,
             "retained_sandboxes": retained_sandboxes,
+            "capacity": capacity,
             "physical_host": os.environ.get("AGENT_PHYSICAL_HOST", "").strip() or None,
         },
         bearer=identity.credential,
@@ -463,6 +471,7 @@ class HostHeartbeat:
         runtime_versions_available: dict[str, list[str]] | None = None,
         residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
         retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
+        capacity_beats: Callable[[], dict[str, Any] | None] | None = None,
         on_residencies_lost: Callable[[list[str]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
@@ -480,6 +489,12 @@ class HostHeartbeat:
         # the pool has already torn down.
         self._residency_beats = residency_beats
         self._retained_sandbox_beats = retained_sandbox_beats
+        # Also asked per beat: the age is recomputed from the sampler's
+        # monotonic clock at send time, so a cached block cannot be made to
+        # look fresh by the act of sending it. ``None`` — before the first
+        # sample, or once the newest one is too old to be worth sending —
+        # simply omits the field.
+        self._capacity_beats = capacity_beats
         self._on_residencies_lost = on_residencies_lost
         self._on_retained_sandboxes_stop = on_retained_sandboxes_stop
         self._stop = threading.Event()
@@ -554,6 +569,7 @@ class HostHeartbeat:
                         if self._retained_sandbox_beats is not None
                         else None
                     ),
+                    capacity=(self._capacity_beats() if self._capacity_beats is not None else None),
                     on_residencies_lost=self._on_residencies_lost,
                     on_retained_sandboxes_stop=self._on_retained_sandboxes_stop,
                 )

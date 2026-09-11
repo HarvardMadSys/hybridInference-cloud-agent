@@ -256,12 +256,18 @@ def verify_session(token: str) -> dict[str, Any]:
     return claims
 
 
-#: Domain separation for the two things this service signs. Both are HS256
-#: under one configured secret, and a login-flow token that could be presented
-#: as a session (or the reverse) is a confused deputy waiting to happen. Two
-#: keys derived from the one secret make that structurally impossible instead
-#: of relying on a claim being checked everywhere.
+#: Domain separation for the things this service signs. All are HS256 under one
+#: configured secret, and a login-flow token that could be presented as a
+#: session (or the reverse) is a confused deputy waiting to happen. Keys
+#: derived from the one secret under their own purpose make that structurally
+#: impossible instead of relying on a claim being checked everywhere.
 _LOGIN_FLOW_KEY_INFO = b"cloud-agent/login-flow/v1"
+
+#: Purpose for admin pagination cursors over per-request gateway usage. A
+#: cursor is not a credential: it carries no authority of its own, and every
+#: page re-authenticates and re-checks attribution. Signing only stops a
+#: browser from steering a continuation at another query.
+_ADMIN_LLM_REQUEST_CURSOR_KEY_INFO = b"cloud-agent/admin-llm-requests-cursor/v1"
 
 
 def _login_flow_secret() -> str:
@@ -271,6 +277,24 @@ def _login_flow_secret() -> str:
         IdentityNotConfigured: If no session secret is set.
     """
     return hmac.new(_session_secret().encode(), _LOGIN_FLOW_KEY_INFO, hashlib.sha256).hexdigest()
+
+
+def admin_llm_request_cursor_secret() -> str:
+    """Return the key an admin request-page continuation cursor is signed with.
+
+    Named for its one purpose rather than exposed as a general "derive a key"
+    helper: a second caller with a second purpose adds its own constant, so no
+    two signed shapes can ever be confused.
+
+    Returns:
+        The derived signing key.
+
+    Raises:
+        IdentityNotConfigured: If no session secret is set.
+    """
+    return hmac.new(
+        _session_secret().encode(), _ADMIN_LLM_REQUEST_CURSOR_KEY_INFO, hashlib.sha256
+    ).hexdigest()
 
 
 def new_verifier() -> str:

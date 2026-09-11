@@ -42,9 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
+from cloud_agent.capacity_protocol import CapacityHistoryPointWrite, history_window
 from cloud_agent.execution_profiles import (
     KATA_RUNTIME,
     ExecutionProfile,
@@ -65,13 +63,15 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.task_titles import fallback_title
 from cloud_agent_host.shared_protocol import NATIVE_FORK_AT_ANCHOR_CAPABILITY
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 logger = get_logger(__name__)
 
 # Job lifecycle. ``cancel_requested`` is a flag orthogonal to ``state``: it is
 # delivered to the running worker via the heartbeat response, and the worker
 # performs the fenced transition to ``cancelled``.
 QUEUED = "queued"
-WAITING = "waiting"
 RUNNING = "running"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
@@ -143,16 +143,26 @@ _NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], se
 # attempt may start before a delayed predecessor is marked finished; clamp
 # that predecessor rather than counting the same requests twice. PostgreSQL
 # LEAST ignores the NULL produced when there is no following attempt.
-_LEDGER_WINDOW_UNTIL_SQL = """
+#
+# The successor lookup is named separately because a second reader asks a
+# different question of the same definition: whether an attempt's window is
+# still open (no end of its own and no successor) or already bounded.
+# Duplicating the subquery to answer that would be a second algorithm free to
+# drift from this one. ``a`` and ``j`` are the attempt and job aliases.
+NEXT_ATTEMPT_START_SQL = """
+(
+    SELECT MIN(next_attempt.started_at)
+    FROM agent_attempts next_attempt
+    JOIN agent_jobs next_job ON next_job.id = next_attempt.job_id
+    WHERE next_job.thread_id = j.thread_id
+      AND (next_attempt.started_at, next_attempt.id) > (a.started_at, a.id)
+)
+"""
+
+LEDGER_WINDOW_UNTIL_SQL = f"""
 LEAST(
     COALESCE(a.finished_at, NOW()),
-    (
-        SELECT MIN(next_attempt.started_at)
-        FROM agent_attempts next_attempt
-        JOIN agent_jobs next_job ON next_job.id = next_attempt.job_id
-        WHERE next_job.thread_id = j.thread_id
-          AND (next_attempt.started_at, next_attempt.id) > (a.started_at, a.id)
-    )
+    {NEXT_ATTEMPT_START_SQL}
 )
 """
 
@@ -305,6 +315,7 @@ def _job_row_to_dict(row: Any) -> dict[str, Any]:
         "execution_profile": row["execution_profile"],
         "reasoning_effort": row["reasoning_effort"],
         "state": row["state"],
+        "conversation_state": row.get("conversation_state"),
         "cancel_requested": row["cancel_requested"],
         "terminal_resume_pending": row["terminal_resume_pending"],
         "current_attempt_id": row["current_attempt_id"],
@@ -341,11 +352,29 @@ _JOB_OWN_COLUMNS = (
     "metadata, fork_source_job_id, "
     "created_at, updated_at"
 )
+#: ``mcp_servers`` is deliberately absent: this branch migrates the legacy
+#: provider-name list into per-thread bindings and drops the column, so a read
+#: that still named it would fail against the schema this branch deploys.
 _THREAD_CONFIG_COLUMNS = "t.repo, t.setup_script, t.execution_profile"
+# Probe the unfinished-turn index before the latest-turn index: a cancelled
+# queued follow-up must not hide work that is still running earlier in the chat.
+_CONVERSATION_STATE_SQL = """
+COALESCE(
+    (SELECT active.state FROM agent_jobs active
+     WHERE active.thread_id = j.thread_id AND active.user_id = j.user_id
+       AND active.state IN ('queued', 'running')
+     ORDER BY CASE WHEN active.state = 'running' THEN 0 ELSE 1 END, active.turn_no DESC
+     LIMIT 1),
+    (SELECT CASE WHEN latest.state = 'failed' THEN 'failed' ELSE 'idle' END
+     FROM agent_jobs latest
+     WHERE latest.thread_id = j.thread_id AND latest.user_id = j.user_id
+     ORDER BY latest.turn_no DESC LIMIT 1)
+)"""
 _QUALIFIED_JOB_COLUMNS = (
     ", ".join(f"j.{column.strip()}" for column in _JOB_OWN_COLUMNS.split(","))
     + ", "
     + _THREAD_CONFIG_COLUMNS
+    + f", {_CONVERSATION_STATE_SQL} AS conversation_state"
 )
 #: One conversation's MCP bindings, as a JSON array, joined onto every job read.
 #: Read per query rather than copied onto a job, because narrowing a session has
@@ -376,7 +405,7 @@ WITH latest AS (
            t.id AS session_id, t.title AS session_title, t.title_source,
            t.archived_at, t.pinned_at, COALESCE(t.archived_at, j.created_at) AS sort_at,
            CASE
-               WHEN j.state IN ('queued', 'waiting') THEN 'queued'
+               WHEN j.state = 'queued' THEN 'queued'
                WHEN j.state = 'running' THEN 'running'
                WHEN j.state = 'succeeded' AND NULLIF(j.published_pr_url, '') IS NOT NULL THEN 'done'
                WHEN j.state = 'succeeded' THEN 'needs_review'
@@ -395,7 +424,10 @@ WITH latest AS (
       AND ($3::text IS NULL OR STRPOS(LOWER(t.title), LOWER($3)) > 0)
       {repo_filter}
 ), matched AS (
-    SELECT * FROM latest WHERE $4::text IS NULL OR display_state = $4
+    SELECT * FROM latest
+    WHERE $4::text IS NULL
+       OR CASE WHEN $4 IN ('done', 'needs_review', 'cancelled')
+               THEN display_state ELSE conversation_state END = $4
 )
 """
 
@@ -541,6 +573,30 @@ _QUALIFIED_HOST_COLUMNS = (
     + ", (h.credential_hash IS NOT NULL) AS enrolled"
 )
 
+#: The latest host-capacity observation, projected only where it is read.
+#:
+#: Deliberately *not* part of ``_HOST_COLUMN_NAMES``. That list is also what
+#: every broker request resolves a host through — a file read, a terminal, a
+#: git operation — and an 8 KiB monitoring snapshot has no business riding
+#: along on any of them. The admin pool read and the capacity history task ask
+#: for these columns by name; nothing else does.
+_CAPACITY_COLUMN_NAMES = (
+    "capacity_snapshot",
+    "capacity_received_at",
+    "capacity_sampled_at",
+    "capacity_epoch",
+)
+_HOST_CAPACITY_COLUMNS = ", ".join(_CAPACITY_COLUMN_NAMES)
+
+#: How old a stored observation may be and still be written into history. Three
+#: heartbeat intervals: a host that has stopped reporting must stop adding
+#: points rather than have its last reading copied forward minute after minute.
+CAPACITY_HISTORY_MAX_AGE_S = 90.0
+
+#: History retention. The page serves at most 24 hours, so anything older is
+#: deleted rather than merely hidden.
+CAPACITY_HISTORY_RETENTION_S = 24 * 60 * 60.0
+
 
 def fence_params(
     *,
@@ -622,8 +678,8 @@ class AgentJobStore:
         """Give queued descendants a terminal answer when continuity is LOST.
 
         A retained chat cannot be claimed again after its context becomes
-        indeterminate. Leaving already-submitted turns in ``waiting`` or
-        ``queued`` would therefore create a permanent queue entry rather than
+        indeterminate. Leaving already-submitted turns in ``queued`` would
+        therefore create a permanent queue entry rather than
         a recoverable retry. Every LOST transition calls this helper in the
         same transaction that fences the sandbox row.
         """
@@ -631,32 +687,25 @@ class AgentJobStore:
             """
             UPDATE agent_jobs
             SET state = 'failed', detail = $2, updated_at = NOW()
-            WHERE thread_id = $1 AND state IN ('waiting', 'queued')
+            WHERE thread_id = $1 AND state = 'queued'
             """,
             thread_id,
             detail[:2000],
         )
 
     @staticmethod
-    async def _advance_waiting_follow_ups(
+    async def _fail_discontinuous_follow_ups(
         conn: Any,
         *,
         parent_job_id: str | None = None,
     ) -> None:
-        """Release only descendants whose retained continuity is provable.
+        """Fail queued descendants that cannot preserve native continuity.
 
-        A waiting child follows a parent that settled with a usable shared
-        membership, or a parent that failed or was cancelled before it ever
-        produced native context. A child whose parent succeeded but whose
-        membership is since lost cannot be continuous, so the whole pending
-        tail of that thread fails first and nothing is released into a fresh
-        sandbox presented as continuity.
-
-        Every terminal writer — ``transition``, ``release_claim``,
-        ``request_cancel`` and the reaper — calls this for the job it just
-        closed, so a chain advances one turn at a time inside the transaction
-        that closed the previous one. :meth:`sweep_waiting_follow_ups` runs
-        the unscoped form periodically as the safety net.
+        A successful parent requires a usable shared membership. The whole
+        pending tail fails if that membership is missing or lost. Terminal
+        writers scope this cleanup to the parent they just changed; the
+        periodic sweep handles legacy rows. Scheduling itself only checks
+        eligibility and never needs to promote a queued turn.
         """
         await conn.execute(
             """
@@ -664,44 +713,10 @@ class AgentJobStore:
                 SELECT DISTINCT child.thread_id
                 FROM agent_jobs child
                 JOIN agent_jobs parent ON parent.id = child.parent_job_id
-                WHERE child.state IN ('waiting', 'queued')
-                  AND parent.state = ANY($2::text[])
+                WHERE child.state = 'queued'
+                  AND parent.state = 'succeeded'
                   AND ($1::text IS NULL OR parent.id = $1)
-                  AND NOT (
-                        parent.state IN ('failed', 'cancelled')
-                        OR EXISTS (
-                            SELECT 1
-                            FROM agent_thread_sandbox_memberships m
-                            JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                            WHERE m.thread_id = child.thread_id
-                              AND m.context_status <> 'lost'
-                              AND m.native_state <> 'lost'
-                              AND g.state NOT IN ('stopped_dirty', 'lost')
-                        )
-                  )
-            )
-            UPDATE agent_jobs pending
-            SET state = 'failed',
-                detail = 'not run because its parent predates retained-session continuity',
-                updated_at = NOW()
-            WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
-              AND pending.state IN ('waiting', 'queued')
-            """,
-            parent_job_id,
-            list(TERMINAL_STATES),
-        )
-        await conn.execute(
-            """
-            UPDATE agent_jobs child
-            SET state = 'queued', updated_at = NOW()
-            FROM agent_jobs parent
-            WHERE child.state = 'waiting'
-              AND child.parent_job_id = parent.id
-              AND parent.state = ANY($2::text[])
-              AND ($1::text IS NULL OR parent.id = $1)
-              AND (
-                    parent.state IN ('failed', 'cancelled')
-                    OR EXISTS (
+                  AND NOT EXISTS (
                         SELECT 1
                         FROM agent_thread_sandbox_memberships m
                         JOIN agent_sandboxes g ON g.id = m.sandbox_id
@@ -709,25 +724,27 @@ class AgentJobStore:
                           AND m.context_status <> 'lost'
                           AND m.native_state <> 'lost'
                           AND g.state NOT IN ('stopped_dirty', 'lost')
-                    )
-              )
+                  )
+            )
+            UPDATE agent_jobs pending
+            SET state = 'failed',
+                detail = 'not run because its parent predates retained-session continuity',
+                updated_at = NOW()
+            WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
+              AND pending.state = 'queued'
             """,
             parent_job_id,
-            list(TERMINAL_STATES),
         )
 
-    async def sweep_waiting_follow_ups(self) -> None:
-        """Promote or fail every waiting follow-up whose parent already settled.
+    async def sweep_queued_follow_ups(self) -> None:
+        """Fail queued follow-ups whose earlier native context is unavailable.
 
-        The scoped calls in the terminal writers are what keep a chat moving;
-        this pass exists so a child stranded by a crash between a parent's
-        terminal write and its scoped promotion is picked up on the next
-        reaper tick rather than never. It touches only rows the partial
-        ``waiting``/``queued`` indexes point at, so its cost follows the
-        number of pending follow-ups, not the size of the history.
+        Claiming already excludes these rows. This periodic safety net gives
+        legacy pending turns a terminal answer using the partial queued
+        indexes, without a cleanup scan on every claim poll.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._advance_waiting_follow_ups(conn)
+            await self._fail_discontinuous_follow_ups(conn)
 
     async def initialize(self) -> None:
         """No-op: schema and backfills are Alembic's now, not startup's.
@@ -2467,8 +2484,8 @@ class AgentJobStore:
         clears it back to Auto — the one thing a null override cannot express,
         since null is what "inherit" already sends.
 
-        A follow-up submitted while the latest turn is active is stored as
-        ``waiting``. The thread row is locked before selecting that turn, so
+        Every follow-up is ``queued`` until all earlier turns have finished.
+        The thread row is locked before selecting the latest turn, so
         concurrent submissions form one linear chain instead of siblings that
         could later mutate the same branch at once. A request made from an old
         turn also appends to the current tip, matching chat semantics.
@@ -2617,10 +2634,6 @@ class AgentJobStore:
                 # source from which the new runtime can fabricate continuity.
                 return {"error": "sandbox_context_lost"}
             turn_no = parent["turn_no"] + 1
-            parent_ready = parent["state"] in (FAILED, CANCELLED) or (
-                parent["state"] == SUCCEEDED and sandbox is not None
-            )
-            state = QUEUED if parent_ready else WAITING
             # Repo, setup script, execution profile and tool servers are the
             # thread's, not copied per turn: the next turn of a conversation
             # runs with the surface the thread has been running with, and a
@@ -2645,7 +2658,7 @@ class AgentJobStore:
                 None
                 if reset_reasoning_effort
                 else (reasoning_effort or parent["reasoning_effort"]),
-                state,
+                QUEUED,
                 json.dumps(_load_json(parent["metadata"]))
                 if parent["metadata"] is not None
                 else None,
@@ -3854,7 +3867,7 @@ class AgentJobStore:
                 SELECT a.id AS attempt_id, a.job_id, a.attempt_no,
                        a.status AS attempt_status, a.started_at, a.finished_at,
                        l.id, l.grant_id, l.residency_generation, l.binding_id,
-                       l.window_since, {_LEDGER_WINDOW_UNTIL_SQL} AS window_until,
+                       l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
                        l.snapshot, l.queried_at, l.last_error_code, l.next_refresh_at,
                        l.last_refresh_attempt_at, l.refresh_generation,
                        l.refresh_lease_expires_at, l.terminal_refresh_count,
@@ -3943,7 +3956,7 @@ class AgentJobStore:
                 f"""
                 WITH due AS (
                     SELECT l.id, a.job_id, a.status <> 'running' AS terminal,
-                           {_LEDGER_WINDOW_UNTIL_SQL} AS window_until
+                           {LEDGER_WINDOW_UNTIL_SQL} AS window_until
                     FROM agent_attempt_ledger l
                     JOIN agent_attempts a ON a.id = l.attempt_id
                     JOIN agent_jobs j ON j.id = a.job_id
@@ -4336,7 +4349,7 @@ class AgentJobStore:
                 SELECT t.repo,
                        COUNT(DISTINCT j.thread_id) AS task_count,
                        COUNT(*) FILTER (
-                           WHERE j.state IN ('queued', 'waiting', 'running')
+                           WHERE j.state IN ('queued', 'running')
                        ) AS active_count,
                        MAX(GREATEST(t.updated_at, j.updated_at)) AS last_activity_at,
                        COUNT(DISTINCT j.thread_id) FILTER (
@@ -4665,7 +4678,9 @@ class AgentJobStore:
         async with self._pool.acquire() as conn:
             return await conn.fetchval("SELECT active_host FROM agent_runner_policy WHERE id")
 
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
+    async def runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], datetime]:
         """The pool, the pinned host and the version selection, read together.
 
         One transaction because all three are shown side by side: read
@@ -4674,14 +4689,30 @@ class AgentJobStore:
         the operator is using to fix a bug. The version selection joined that
         for the same reason — a page offering a menu that no longer contains
         the selection it displays is the same failure wearing a different hat.
+
+        **Repeatable read, and read-only.** The pool is the page an operator
+        reads while changing things, so a claim, a pin and a drain landing
+        between the policy read and the host read used to be able to produce a
+        list that never existed: slots already spent shown against a pin not
+        yet switched. One snapshot for all of it removes that class of answer,
+        and ``observed_at`` is the database's own instant for the same
+        snapshot, so the ages the page renders are measured from the moment the
+        data was taken rather than from whenever the client's clock says.
+
+        Returns:
+            ``(hosts, active_host, selected_versions, observed_at)``.
         """
-        async with self._pool.acquire() as conn, conn.transaction():
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            observed_at = await conn.fetchval("SELECT NOW()")
             policy = await conn.fetchrow(
                 "SELECT active_host, runtime_versions FROM agent_runner_policy WHERE id"
             )
             rows = await conn.fetch(
                 f"""
-                SELECT {_HOST_COLUMNS}
+                SELECT {_HOST_COLUMNS}, {_HOST_CAPACITY_COLUMNS}
                 FROM agent_runner_hosts
                 ORDER BY last_seen_at DESC
                 """
@@ -4692,6 +4723,7 @@ class AgentJobStore:
             [{**self._host_row_to_dict(row), "is_active": row["host"] == active} for row in rows],
             active,
             selected,
+            observed_at,
         )
 
     async def deployment_runner_pool(
@@ -4736,7 +4768,7 @@ class AgentJobStore:
 
     async def list_runner_hosts(self) -> list[dict[str, Any]]:
         """Return every host seen polling, most recent poll first."""
-        hosts, _, _ = await self.runner_pool()
+        hosts, _, _, _ = await self.runner_pool()
         return hosts
 
     async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
@@ -4870,6 +4902,11 @@ class AgentJobStore:
         # None (never reported) and {} (reported: no labels) stay distinct.
         host["runtime_versions"] = _load_json(host.get("runtime_versions"))
         host["runtime_versions_available"] = _load_json(host.get("runtime_versions_available"))
+        # Absent from most projections, so read with ``.get``: a row that never
+        # selected the capacity columns must decode to "no observation", not
+        # raise a KeyError on a path that has nothing to do with capacity.
+        if "capacity_snapshot" in host:
+            host["capacity_snapshot"] = _load_json(host["capacity_snapshot"])
         return host
 
     async def issue_enroll_token(
@@ -4969,6 +5006,12 @@ class AgentJobStore:
         name. :meth:`consume_enroll_token` will only spend a token under the
         name an admin bound to it, so reaching this method under a live host's
         name is an operator's decision rather than a machine's.
+
+        Re-enrollment also **rotates the capacity epoch and clears the stored
+        observation**. A rebuilt machine keeps its name, so nothing else
+        distinguishes the new box from the one it replaced; without the
+        rotation the admin chart would join the two machines' histories into
+        one line that no machine ever drew.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -4986,6 +5029,11 @@ class AgentJobStore:
                     labels = EXCLUDED.labels,
                     credential_hash = EXCLUDED.credential_hash,
                     last_heartbeat_at = NULL,
+                    capacity_snapshot = NULL,
+                    capacity_received_at = NULL,
+                    capacity_sampled_at = NULL,
+                    capacity_sample_id = NULL,
+                    capacity_epoch = gen_random_uuid(),
                     slots_used = (
                         SELECT count(*) FROM agent_attempts
                         WHERE host_id = EXCLUDED.host AND status = 'running'
@@ -5027,6 +5075,9 @@ class AgentJobStore:
         self,
         *,
         host: str,
+        credential_hash: str | None = None,
+        capacity: Mapping[str, Any] | None = None,
+        capacity_sample_age_ms: int | None = None,
         physical_host: str | None = None,
         slots_total: int | None = None,
         runner_version: str | None = None,
@@ -5049,8 +5100,40 @@ class AgentJobStore:
         Returns ``None`` for an unknown host. Every field is optional and only
         overwrites when supplied, so a heartbeat that carries nothing but
         liveness does not blank out what enrollment declared.
+
+        **The capacity block is written by a second statement, deliberately.**
+        Its acceptance conditions are not the heartbeat's: the credential must
+        still be the one this request authenticated with, the sample must not
+        be one already stored, and an older observation must not overwrite a
+        younger one. They are enforced in SQL rather than here because the
+        sequence they guard against is a race — credential A authenticates, an
+        operator re-enrolls the name under credential B, and A's delayed
+        request arrives afterwards. Checking "is this still the right
+        credential" outside the write would let exactly that request through.
+        That second statement runs in its own savepoint, so a block the
+        database refuses costs the host nothing but the block: the liveness
+        half of the same call still commits.
+
+        Args:
+            host: The authenticated host name.
+            credential_hash: Digest the request authenticated with. The
+                capacity write is refused unless the row still holds it.
+            capacity: The validated, normalized capacity block to store.
+            capacity_sample_age_ms: How old the observation was when sent.
+            physical_host: Admin grouping label; never an identity.
+            slots_total: Claim ceiling this host now reports.
+            runner_version: Runner build the host is running.
+            broker_url: Address the control plane reaches this host's broker.
+            capabilities: What this host can run.
+            sandbox_runtime: Attested container runtime.
+            sandbox_image_digest: Digest of the sandbox image it launches.
+            runtime_versions: Default CLI version per runtime.
+            runtime_versions_available: Every CLI version its image holds.
+
+        Returns:
+            The updated host row, or ``None`` when the host no longer exists.
         """
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_runner_hosts
@@ -5090,7 +5173,315 @@ class AgentJobStore:
                 ),
                 json.dumps({"physical_host": physical_host} if physical_host is not None else {}),
             )
-        return None if row is None else self._host_row_to_dict(row)
+            if row is None:
+                return None
+            if (
+                capacity is not None
+                and capacity_sample_age_ms is not None
+                and credential_hash is not None
+            ):
+                await self._record_host_capacity_isolated(
+                    conn,
+                    host=host,
+                    credential_hash=credential_hash,
+                    capacity=capacity,
+                    sample_age_ms=capacity_sample_age_ms,
+                )
+        return self._host_row_to_dict(row)
+
+    @staticmethod
+    async def _record_host_capacity_isolated(
+        conn: Any,
+        *,
+        host: str,
+        credential_hash: str,
+        capacity: Mapping[str, Any],
+        sample_age_ms: int,
+    ) -> None:
+        """Store a capacity observation without ever risking the heartbeat.
+
+        The two halves of this request share a transaction, and a transaction
+        that has raised is finished: catching the exception in Python would not
+        un-abort it, so the heartbeat's own write would be rolled back with the
+        monitoring field that failed. A nested transaction is a SAVEPOINT,
+        which is the only thing that lets the failure be contained here.
+
+        That matters because the failure modes are the database's, not this
+        code's: a namespace carrying U+0000 passes any string validation and is
+        then refused by JSONB, and a constraint added tomorrow could refuse
+        something else. A host that is alive must be recorded as alive whatever
+        the control plane thinks of its monitoring data.
+        """
+        try:
+            async with conn.transaction():
+                await AgentJobStore._record_host_capacity(
+                    conn,
+                    host=host,
+                    credential_hash=credential_hash,
+                    capacity=capacity,
+                    sample_age_ms=sample_age_ms,
+                )
+        except Exception:
+            logger.warning(
+                "agent_host_capacity_write_failed",
+                exc_info=True,
+                extra={"event": "agent_host_capacity_write_failed", "host": host},
+            )
+
+    @staticmethod
+    async def _record_host_capacity(
+        conn: Any,
+        *,
+        host: str,
+        credential_hash: str,
+        capacity: Mapping[str, Any],
+        sample_age_ms: int,
+    ) -> None:
+        """Store a capacity observation, iff it is new, newer, and still ours.
+
+        Three conditions, all in the predicate rather than in a prior read:
+
+        * ``credential_hash`` still matches — a re-enrollment between
+          authentication and this write has cleared the row, and the delayed
+          request must not repopulate it with the previous machine's numbers.
+        * ``sample_id`` differs — the same observation arriving again (a
+          retried heartbeat, a second replica replaying a cached block) does
+          not refresh its timestamps and so cannot be made to look fresh.
+        * ``sampled_at`` is newer than what is stored — replicas report
+          independently and out of order, and the older report must not
+          overwrite the younger one merely because it arrived later.
+
+        ``sampled_at`` is derived from the server's own ``NOW()`` minus the
+        reported age. The runner's wall clock is never trusted, and the two
+        timestamps therefore come from one clock that cannot jump.
+        """
+        await conn.execute(
+            """
+            UPDATE agent_runner_hosts
+            SET capacity_snapshot = $3::jsonb,
+                capacity_received_at = NOW(),
+                capacity_sampled_at = NOW() - make_interval(secs => $4::double precision),
+                capacity_sample_id = $5::uuid
+            WHERE host = $1
+              AND credential_hash = $2
+              AND capacity_sample_id IS DISTINCT FROM $5::uuid
+              AND (
+                  capacity_sampled_at IS NULL
+                  OR capacity_sampled_at < NOW() - make_interval(secs => $4::double precision)
+              )
+            """,
+            host,
+            credential_hash,
+            json.dumps(capacity),
+            sample_age_ms / 1000.0,
+            str(capacity["sample_id"]),
+        )
+
+    async def list_capacity_history_candidates(
+        self, *, after_host: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return one page of hosts whose stored observation is still fresh.
+
+        Keyset pagination on the host name, not ``OFFSET``: the history task
+        walks the pool every minute, and an offset it restarts from would
+        re-read the same prefix forever while the hosts behind it are never
+        sampled.
+
+        The snapshot's scalars are projected as text rather than cast in SQL.
+        A cast would make one corrupt document fail the whole batch, and a
+        batch that fails at the same row never gets past it; parsing happens
+        where a bad value costs a single point.
+
+        Args:
+            after_host: Last host of the previous page, or ``None`` to start.
+            limit: Page size ceiling.
+
+        Returns:
+            Rows ordered by host, each carrying its epoch, sample identity and
+            projected scalars.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT host,
+                       capacity_epoch,
+                       capacity_sample_id,
+                       capacity_sampled_at,
+                       capacity_snapshot #>> '{linux_boot_id}' AS linux_boot_id,
+                       capacity_snapshot #>> '{cpu_percent}' AS cpu_percent,
+                       capacity_snapshot #>> '{cpu_logical_count}' AS cpu_logical_count,
+                       capacity_snapshot #>> '{cpu_window_seconds}' AS cpu_window_seconds,
+                       capacity_snapshot #>> '{missing,cpu}' AS cpu_missing_reason,
+                       capacity_snapshot #>> '{memory_total_bytes}' AS memory_total_bytes,
+                       capacity_snapshot #>> '{memory_available_bytes}' AS memory_available_bytes,
+                       capacity_snapshot #>> '{missing,memory}' AS memory_missing_reason
+                FROM agent_runner_hosts
+                WHERE capacity_snapshot IS NOT NULL
+                  AND capacity_sample_id IS NOT NULL
+                  AND capacity_sampled_at IS NOT NULL
+                  AND capacity_sampled_at
+                      >= NOW() - make_interval(secs => $2::double precision)
+                  AND host > COALESCE($1, '')
+                ORDER BY host
+                LIMIT $3
+                """,
+                after_host,
+                CAPACITY_HISTORY_MAX_AGE_S,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def record_capacity_history_point(
+        self,
+        *,
+        host: str,
+        capacity_epoch: Any,
+        point: CapacityHistoryPointWrite,
+    ) -> bool:
+        """Keep one observation for a host, epoch and minute.
+
+        ``ON CONFLICT DO NOTHING`` against both the primary key and the sample
+        uniqueness constraint, and that is the whole correctness argument: the
+        first fresh observation selected for a minute is the one that is kept.
+        Later ones in the same minute are not averaged, not summed and not
+        allowed to replace it — three runner replicas report independently, and
+        a chart built from whichever of them wrote last would move for reasons
+        that have nothing to do with the machine.
+
+        Args:
+            host: The host the observation belongs to.
+            capacity_epoch: The generation it was observed under. Passed
+                through from the row that was read, never re-derived, so a
+                delayed write cannot stamp an old sample with a new epoch.
+            point: The scalar observation.
+
+        Returns:
+            ``True`` when this call inserted the minute's point.
+        """
+        async with self._pool.acquire() as conn:
+            inserted = await conn.fetchval(
+                """
+                INSERT INTO agent_host_capacity_history (
+                    host, capacity_epoch, bucket_at, sampled_at, sample_id, linux_boot_id,
+                    cpu_percent, cpu_logical_count, cpu_window_seconds, cpu_missing_reason,
+                    memory_total_bytes, memory_available_bytes, memory_missing_reason
+                )
+                VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7, $8, $9, $10, $11, $12, $13)
+                ON CONFLICT DO NOTHING
+                RETURNING bucket_at
+                """,
+                host,
+                capacity_epoch,
+                point.bucket_at,
+                point.sampled_at,
+                point.sample_id,
+                point.linux_boot_id,
+                point.cpu_percent,
+                point.cpu_logical_count,
+                point.cpu_window_seconds,
+                point.cpu_missing_reason,
+                point.memory_total_bytes,
+                point.memory_available_bytes,
+                point.memory_missing_reason,
+            )
+        return inserted is not None
+
+    async def prune_capacity_history(
+        self, *, older_than_seconds: float = CAPACITY_HISTORY_RETENTION_S, limit: int = 2000
+    ) -> int:
+        """Delete one bounded batch of history older than the retention window.
+
+        Bounded because this runs beside the reaper and the publisher on the
+        same database: an unbounded ``DELETE`` after a control-plane outage
+        would hold locks for as long as it took to remove the backlog, and the
+        work it delayed is recovering jobs.
+
+        Args:
+            older_than_seconds: Retention window.
+            limit: Rows this call may remove.
+
+        Returns:
+            How many rows were removed.
+        """
+        async with self._pool.acquire() as conn:
+            # The delete is a data-modifying CTE and the count comes from the
+            # outer SELECT. Returning the deleted rows and calling ``fetchval``
+            # would yield the first row — that is, ``1`` for every batch — and
+            # a retention pass that always reports one row looks like it is
+            # keeping up while the table grows without bound.
+            removed = await conn.fetchval(
+                """
+                WITH expired AS (
+                    SELECT ctid FROM agent_host_capacity_history
+                    WHERE bucket_at < NOW() - make_interval(secs => $1::double precision)
+                    LIMIT $2
+                ), removed AS (
+                    DELETE FROM agent_host_capacity_history h
+                    USING expired
+                    WHERE h.ctid = expired.ctid
+                    RETURNING 1
+                )
+                SELECT count(*) FROM removed
+                """,
+                older_than_seconds,
+                limit,
+            )
+        return 0 if removed is None else int(removed)
+
+    async def host_capacity_history(
+        self, *, host: str, range_seconds: int
+    ) -> dict[str, Any] | None:
+        """Read one host's stored capacity history for the current epoch.
+
+        The epoch and the points come from a single read-only repeatable-read
+        view, which is what stops a re-enrollment landing between them from
+        returning a window labelled with one generation and filled from
+        another.
+
+        Args:
+            host: Enrollment name.
+            range_seconds: Window length ending at the read's own minute.
+
+        Returns:
+            ``{"capacity_epoch", "since", "until", "observed_at", "rows"}``,
+            or ``None`` when no such host exists. A host that has never
+            reported capacity answers with an empty point list rather than
+            ``None``: it exists, and "not measured" is a different answer from
+            "not here".
+        """
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            observed_at = await conn.fetchval("SELECT NOW()")
+            epoch = await conn.fetchval(
+                "SELECT capacity_epoch FROM agent_runner_hosts WHERE host = $1", host
+            )
+            if epoch is None:
+                return None
+            since, until = history_window(now=observed_at, seconds=range_seconds)
+            rows = await conn.fetch(
+                """
+                SELECT bucket_at, sampled_at, linux_boot_id, cpu_percent,
+                       cpu_logical_count, cpu_window_seconds, cpu_missing_reason,
+                       memory_total_bytes, memory_available_bytes, memory_missing_reason
+                FROM agent_host_capacity_history
+                WHERE host = $1 AND capacity_epoch = $2
+                  AND bucket_at >= $3 AND bucket_at <= $4
+                ORDER BY bucket_at
+                """,
+                host,
+                epoch,
+                since,
+                until,
+            )
+        return {
+            "capacity_epoch": epoch,
+            "since": since,
+            "until": until,
+            "observed_at": observed_at,
+            "rows": [dict(row) for row in rows],
+        }
 
     async def set_host_status(self, *, host: str, status: str) -> str:
         """Move a host to ``status``, refusing transitions the table forbids.
@@ -5123,7 +5514,7 @@ class AgentJobStore:
         until their leases lapsed. ``force`` accepts exactly that — the lease
         expiry *is* the recovery path. A retained activation cannot be replayed
         safely after its host disappears, so its expiry marks that chat LOST
-        and fails already-waiting descendants instead.
+        and fails already-queued descendants instead.
 
         Disabling rather than deleting. The row is what
         ``agent_attempts.host_id`` points at, and what an operator reads when
@@ -5278,6 +5669,12 @@ class AgentJobStore:
         ``lease_generation``, or ``None`` when the queue is empty. Concurrent
         workers are safe via ``FOR UPDATE SKIP LOCKED``.
 
+        A queued follow-up becomes eligible only after every earlier turn in
+        its thread is terminal. Checking all unfinished earlier turns also
+        prevents a cancelled intermediate turn from letting its descendants
+        overtake an active ancestor. The indexed eligibility check precedes
+        the limit, so a blocked thread cannot hide runnable work behind it.
+
         The caller is always an enrolled host whose exact credential hash is
         re-checked while its capacity slot is taken. An operator pin chooses
         the host for chats that do not have a sandbox yet. A retained chat is
@@ -5376,6 +5773,12 @@ class AgentJobStore:
                 JOIN agent_threads t ON t.id = j.thread_id
                 LEFT JOIN {_THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
+                  AND NOT EXISTS (
+                        SELECT 1 FROM agent_jobs earlier
+                        WHERE earlier.thread_id = j.thread_id
+                          AND earlier.turn_no < j.turn_no
+                          AND earlier.state IN ('queued', 'running')
+                  )
                   AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
                   AND (
                         t.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
@@ -5385,11 +5788,20 @@ class AgentJobStore:
                         )
                   )
                   AND (
-                        (s.thread_id IS NULL AND $5::boolean AND $4::boolean)
+                        (
+                            s.thread_id IS NULL AND $5::boolean AND $4::boolean
+                            AND NOT EXISTS (
+                                SELECT 1 FROM agent_jobs parent
+                                WHERE parent.id = j.parent_job_id
+                                  AND parent.state = 'succeeded'
+                            )
+                        )
                         OR (
                             s.host = $2
                             AND $6::boolean
                             AND s.fork_operation_id IS NULL
+                            AND s.context_status <> 'lost'
+                            AND s.native_state <> 'lost'
                             AND s.state IN (
                                 'provisioning', 'starting', 'running', 'stopped'
                             )
@@ -5612,9 +6024,9 @@ class AgentJobStore:
             await self._release_host_slot(conn, released_row["host_id"])
             if released_state == CANCELLED:
                 # A cancelled parent is a turn boundary like any other
-                # terminal outcome: its waiting child must move in this same
-                # transaction, not wait for the periodic sweep to notice.
-                await self._advance_waiting_follow_ups(conn, parent_job_id=released)
+                # terminal outcome: fail any child that cannot preserve
+                # continuity in this transaction.
+                await self._fail_discontinuous_follow_ups(conn, parent_job_id=released)
         return True
 
     async def heartbeat(
@@ -5924,7 +6336,7 @@ class AgentJobStore:
                     sandbox_transition is not None
                     and sandbox_transition["context_status"] == "lost"
                 ):
-                    await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                    await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
         return True
 
     async def append_event(
@@ -7854,13 +8266,13 @@ class AgentJobStore:
             if row is None:
                 return None
             state = row["state"]
-            if state in (WAITING, QUEUED):
+            if state == QUEUED:
                 await conn.execute(
                     "UPDATE agent_jobs SET state = 'cancelled', cancel_requested = TRUE, "
                     "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
                     job_id,
                 )
-                await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 return CANCELLED
             if state == RUNNING:
                 await conn.execute(
@@ -8901,7 +9313,7 @@ class AgentJobStore:
                     # boundary as ``transition``. Keep the linear chat moving
                     # when the context is usable; the LOST branch above has
                     # already failed every unrunnable descendant instead.
-                    await self._advance_waiting_follow_ups(conn, parent_job_id=job_id)
+                    await self._fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
                 action_result: dict[str, Any] = {
                     "job_id": job_id,
                     "attempt_id": attempt_id,

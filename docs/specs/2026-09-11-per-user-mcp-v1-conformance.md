@@ -2,7 +2,10 @@
 
 - Date: 2026-09-11.
 - Baseline: `ba27315` on `realtmxi/codex/mcp-v1-design`, plus the review fixes
-  through `4c8fb37` and the two P2 items below (`0006_mcp_refresh_lease`).
+  through `4c8fb37`, the two P2 items below (`0008_mcp_refresh_lease`) and the
+  recheck fixes; merged with `dev` at `59bf2cc`, which the migrations now sit on
+  top of (`0006_host_capacity → 0007_generic_mcp_connections →
+  0008_mcp_refresh_lease`).
 - Design: [`2026-09-11-per-user-mcp-v1-design.zh.md`](2026-09-11-per-user-mcp-v1-design.zh.md).
 
 This is an audit, not a plan. It states, dimension by dimension, what the code
@@ -75,7 +78,7 @@ are outside this repository.
 | §8.3 attempt, follow-up and fork | Done: bindings read per call, fork copies the selection, the claim carries aliases |
 | §9 API and interface contract | Done, including the connector API; 19 routes in `create_app()` |
 | §10 migration and deployment | Done as a deployment switch plus the operating notes; no staging run |
-| §11 quality gate | `ruff check`, `ruff format --check`, `pydocstyle`, 2559 non-database and 304 database tests, and one external end-to-end test |
+| §11 quality gate | `ruff check`, `ruff format --check`, `pydocstyle`, 3034 non-database and 355 database tests, the web app's own gate (type-check, eslint, prettier, 1184 tests), and one external end-to-end test |
 
 ## Runtimes (design §8.2)
 
@@ -111,17 +114,12 @@ or namespace several connections.
    rather than accepting the notification silently.
 6. **Deployment acceptance**: a staging run, a real OAuth round trip, and
    interoperation with two real third-party servers and one real stdio server.
-7. **A rebase onto `dev`**: this branch's `0005_generic_mcp_connections` and
-   `0006_mcp_refresh_lease` both hang off `0004_residency_on_membership`, while
-   `dev` has taken `0005` and `0006` for other work. The chain is linear *within
-   this branch* and the tests pin that, so it has to be renumbered onto `dev`'s
-   head when the branch is rebased — otherwise the merge has two heads.
 
 ## How to check this document
 
 ```bash
-uv run pytest -q -m "not external and not dbtest"   # 2559
-uv run pytest -q -m dbtest                          # 304, needs Postgres
+uv run pytest -q -m "not external and not dbtest"   # 3034
+uv run pytest -q -m dbtest                          # 355, needs Postgres
 uv run pytest -q tests/external/test_agent_mcp_end_to_end.py  # 1, needs npm and Postgres
 ```
 

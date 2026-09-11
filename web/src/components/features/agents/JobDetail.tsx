@@ -29,18 +29,44 @@ import {
 
 import { lifecyclePhaseLabel, ownerFailureMessage, toDiffFileDetails } from './adapt';
 import { isComposerSubmit } from './composerKeys';
+import {
+  CONVERSATION_STATE_KEYS,
+  getConversationState,
+  type ConversationState,
+} from './conversationState';
+import {
+  conversationNavigationScope,
+  describeCurrentTurn,
+  describeHistoryTurns,
+  eventBlockKey,
+  messageBlockKey,
+  sameNavigationEntries,
+  toNavigationEntry,
+  type ConversationTurnDescription,
+  type ConversationTurnNavigationEntry,
+} from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { PaneResizer } from './PaneResizer';
 import { Picker } from './Picker';
+import { BackToBottom, TurnRail } from './TurnNavigator';
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { ThreadActions } from './ThreadActions';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
-import type { AgentEvent, AgentHistoryTurn, AgentJob, AgentThreadMessage } from './types';
-import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
+import type { AgentEvent, AgentJob, AgentThreadMessage } from './types';
+import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
 import { TrajectoryView } from './TrajectoryView';
+import {
+  TrajectoryInspector,
+  normalizeStepTab,
+  type InspectorSelection,
+  type RunTab,
+  type StepTab,
+} from './TrajectoryInspector';
+import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
+import { shouldHoldReading, useConversationScroll } from './useConversationScroll';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
@@ -53,6 +79,22 @@ const WORKSPACE_MAX_WIDTH = 1200;
 // The transcript is the reason the page exists; the workspace stops widening
 // before the conversation and its composer get squeezed into a column.
 const TRANSCRIPT_MIN_WIDTH = 400;
+// The rail needs room to sit beside the text rather than over it, and a band
+// tall enough that its marks mean something. Otherwise the transcript keeps
+// its normal scrolling, without adding a second navigation surface.
+const RAIL_MIN_COLUMN_WIDTH = 720;
+const RAIL_MIN_READING_HEIGHT = 200;
+const RAIL_MAX_HEIGHT = 420;
+const RAIL_BAND_MARGIN = 64;
+const BACK_TO_BOTTOM_INSET = 16;
+
+// The inspector is narrower than the workspace: it holds one step's detail,
+// not a terminal. It still has to leave the trajectory list enough room to scan.
+export const INSPECTOR_WIDTH_STORAGE_KEY = 'agents.inspector.width';
+const INSPECTOR_DEFAULT_WIDTH = 400;
+const INSPECTOR_MIN_WIDTH = 320;
+const INSPECTOR_MAX_WIDTH = 640;
+const TRAJECTORY_MIN_WIDTH = 420;
 
 const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'git', label: 'Git' },
@@ -64,40 +106,24 @@ const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'tools', label: 'Tools' },
 ];
 
-const STATE_PILL: Record<AgentJob['state'], { label: string; className: string; dot?: string }> = {
+const STATE_PILL: Record<ConversationState, { className: string; dot?: string }> = {
   running: {
-    label: 'Running',
     className:
       'bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 ring-1 ring-inset ring-blue-100 dark:ring-blue-500/25',
     dot: 'bg-blue-500',
   },
   queued: {
-    label: 'Queued',
     className:
       'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400 ring-1 ring-inset ring-gray-200/70 dark:ring-white/10',
     dot: 'bg-gray-400 dark:bg-gray-600',
   },
-  needs_review: {
-    // This display enum means API succeeded without a published PR. A run
-    // that produced no patch needs no review, so completion is the truth.
-    label: 'Completed',
-    className:
-      'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-100 dark:ring-emerald-500/25',
-  },
-  done: {
-    label: 'Done',
-    className:
-      'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-100 dark:ring-emerald-500/25',
-  },
-  failed: {
-    label: 'Failed',
-    className:
-      'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-inset ring-red-100 dark:ring-red-500/25',
-  },
-  cancelled: {
-    label: 'Cancelled',
+  idle: {
     className:
       'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400 ring-1 ring-inset ring-gray-200/70 dark:ring-white/10',
+  },
+  failed: {
+    className:
+      'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-inset ring-red-100 dark:ring-red-500/25',
   },
 };
 
@@ -150,14 +176,17 @@ function ToolIcon({ tool }: { tool: string }) {
   );
 }
 
-function LifecycleRow({ text }: { text: string }) {
+function LifecycleRow({ text, blockKey }: { text: string; blockKey?: string }) {
   const { text: label, milestone } = lifecyclePhaseLabel(text);
 
   // A phase this build does not recognise is a diagnostic, not an achievement:
   // no tick, muted, and clearly a passthrough of what the runtime said.
   if (!milestone) {
     return (
-      <div className="flex items-center gap-2.5 py-1 text-xs text-gray-400 dark:text-gray-500">
+      <div
+        data-block-key={blockKey}
+        className="flex items-center gap-2.5 py-1 text-xs text-gray-400 dark:text-gray-500"
+      >
         <span className="h-1 w-1 rounded-full bg-gray-300 dark:bg-gray-600" />
         <span className="font-mono">{label}</span>
       </div>
@@ -165,7 +194,10 @@ function LifecycleRow({ text }: { text: string }) {
   }
 
   return (
-    <div className="flex items-center gap-2.5 py-2 text-[13px] text-gray-500 dark:text-gray-400">
+    <div
+      data-block-key={blockKey}
+      className="flex items-center gap-2.5 py-2 text-[13px] text-gray-500 dark:text-gray-400"
+    >
       <span className="flex h-4 w-4 items-center justify-center rounded-full bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400">
         <svg
           aria-hidden="true"
@@ -183,9 +215,18 @@ function LifecycleRow({ text }: { text: string }) {
   );
 }
 
-function ToolActivity({ event }: { event: Extract<AgentEvent, { kind: 'tool_use' }> }) {
+function ToolActivity({
+  event,
+  blockKey,
+}: {
+  event: Extract<AgentEvent, { kind: 'tool_use' }>;
+  blockKey?: string;
+}) {
   return (
-    <details className="group my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900">
+    <details
+      data-block-key={blockKey}
+      className="group my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
+    >
       <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2 text-[13px] text-gray-700 dark:text-gray-300 marker:content-none">
         <Chevron className="shrink-0 text-gray-400 dark:text-gray-500 transition-transform group-open:rotate-90" />
         <ToolIcon tool={event.tool} />
@@ -326,10 +367,13 @@ function AssistantMessage({
   text,
   extraActions,
   footer,
+  blockKey,
 }: {
   text: string;
   extraActions?: ReactNode;
   footer?: ReactNode;
+  /** Stable row identity, so a layout change never moves a reader off it. */
+  blockKey?: string;
 }) {
   const actions = (
     <MessageActions>
@@ -341,7 +385,7 @@ function AssistantMessage({
     </MessageActions>
   );
   return (
-    <div className="group py-3 text-gray-800 dark:text-gray-200">
+    <div data-block-key={blockKey} className="group py-3 text-gray-800 dark:text-gray-200">
       <Markdown text={text} />
       {footer ? (
         <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
@@ -361,18 +405,21 @@ function ThreadTurn({
   onFork,
   onRewind,
   footer,
+  blockKey,
 }: {
   message: AgentThreadMessage;
   footer?: ReactNode;
   busy?: boolean;
   onFork?: () => void;
   onRewind?: () => void;
+  blockKey?: string;
 }) {
   if (message.role === 'assistant') {
     return (
       <AssistantMessage
         text={message.content}
         footer={footer}
+        blockKey={blockKey}
         extraActions={
           onFork ? (
             <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
@@ -385,7 +432,7 @@ function ThreadTurn({
     );
   }
   return (
-    <div className="group my-3 ml-auto w-fit max-w-[88%]">
+    <div data-block-key={blockKey} className="group my-3 ml-auto w-fit max-w-[88%]">
       <div className="rounded-2xl bg-gray-100 dark:bg-white/5 px-4 py-3 text-sm leading-relaxed text-gray-800 dark:text-gray-200">
         <Markdown text={message.content} />
       </div>
@@ -410,16 +457,20 @@ function EventRow({
   onFork,
   busy,
   footer,
+  blockKey,
 }: {
   event: AgentEvent;
   onFork?: () => void;
   busy?: boolean;
   footer?: ReactNode;
+  /** Stable row identity, so a layout change never moves a reader off it. */
+  blockKey?: string;
 }) {
-  if (event.kind === 'lifecycle') return <LifecycleRow text={event.text} />;
+  if (event.kind === 'lifecycle') return <LifecycleRow text={event.text} blockKey={blockKey} />;
   if (event.kind === 'thinking') {
     return (
       <div
+        data-block-key={blockKey}
         aria-label="Agent reasoning"
         className="flex items-center gap-2.5 py-2 text-[13px] text-gray-400 dark:text-gray-500"
       >
@@ -433,6 +484,7 @@ function EventRow({
       <AssistantMessage
         text={event.text}
         footer={footer}
+        blockKey={blockKey}
         extraActions={
           onFork ? (
             <MessageActionButton label="Fork from here" onClick={onFork} disabled={busy}>
@@ -444,10 +496,13 @@ function EventRow({
       />
     );
   }
-  if (event.kind === 'tool_use') return <ToolActivity event={event} />;
+  if (event.kind === 'tool_use') return <ToolActivity event={event} blockKey={blockKey} />;
   if (event.kind === 'tool_result') {
     return (
-      <details className="my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900">
+      <details
+        data-block-key={blockKey}
+        className="my-1 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-gray-900"
+      >
         <summary className="cursor-pointer px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
           Unmatched tool result
         </summary>
@@ -459,21 +514,31 @@ function EventRow({
   }
   if (event.kind === 'terminal') {
     return (
-      <pre className="my-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-950 px-3 py-2.5 font-mono text-xs text-gray-200">
+      <pre
+        data-block-key={blockKey}
+        className="my-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-950 px-3 py-2.5 font-mono text-xs text-gray-200"
+      >
         {event.text}
       </pre>
     );
   }
   if (event.kind === 'egress_denied') {
     return (
-      <div className="my-2 flex items-center gap-2 rounded-lg bg-red-50 dark:bg-red-500/10 px-3 py-2 text-[13px] text-red-700 dark:text-red-400">
+      <div
+        data-block-key={blockKey}
+        className="my-2 flex items-center gap-2 rounded-lg bg-red-50 dark:bg-red-500/10 px-3 py-2 text-[13px] text-red-700 dark:text-red-400"
+      >
         <span className="font-medium">Network request blocked</span>
         <span className="font-mono text-xs">{event.host}</span>
         <span className="text-red-500 dark:text-red-400">× {event.attempts}</span>
       </div>
     );
   }
-  return <p className="py-1 text-[11px] text-gray-400 dark:text-gray-500">{event.text}</p>;
+  return (
+    <p data-block-key={blockKey} className="py-1 text-[11px] text-gray-400 dark:text-gray-500">
+      {event.text}
+    </p>
+  );
 }
 
 function HistoryTurn({
@@ -482,32 +547,33 @@ function HistoryTurn({
   busy,
   onFork,
   onRewind,
+  onOpenRun,
 }: {
-  turn: AgentHistoryTurn;
+  turn: ConversationTurnDescription;
   rewindAnchorJobId?: string;
   busy: boolean;
   onFork?: (jobId: string) => void;
   onRewind?: (jobId: string, prompt: string) => void;
+  onOpenRun?: (jobId: string, turnNo: number) => void;
 }) {
-  const hasEventMessages = turn.events.some((event) => event.kind === 'message');
-  const toolCalls = turn.events.filter((event) => event.kind === 'tool_use').length;
-  const fallbackMessages = hasEventMessages
-    ? []
-    : turn.messages.filter((message) => message.role === 'assistant');
+  // What the transcript renders is decided once, by the turn description the
+  // navigation rail also reads.
+  const { jobId } = turn;
   const lastEventMessageIndex = turn.events.reduce(
     (last, event, index) => (event.kind === 'message' ? index : last),
     -1,
   );
-  const lastFallbackMessageId = fallbackMessages.at(-1)?.id;
+  const lastFallbackMessageId = turn.fallbackResponses.at(-1)?.id;
 
   return (
-    <section aria-label={`Turn ${turn.turnNo}`}>
+    <section aria-label={`Turn ${turn.displayNo}`} data-turn-key={turn.key}>
       {turn.messages
         .filter((message) => message.role === 'user')
         .map((message) => (
           <ThreadTurn
             key={message.id}
             message={message}
+            blockKey={messageBlockKey(jobId, message.id)}
             busy={busy}
             onRewind={
               rewindAnchorJobId && onRewind
@@ -516,11 +582,12 @@ function HistoryTurn({
             }
           />
         ))}
-      <div aria-label={`Turn ${turn.turnNo} agent activity`} className="mt-2">
+      <div aria-label={`Turn ${turn.displayNo} agent activity`} className="mt-2">
         {turn.events.map((event, index) => (
           <EventRow
-            key={`${turn.jobId}-${index}`}
+            key={eventBlockKey(jobId, event, index)}
             event={event}
+            blockKey={eventBlockKey(jobId, event, index)}
             busy={busy}
             onFork={
               event.kind === 'message' && index === lastEventMessageIndex && onFork
@@ -529,10 +596,11 @@ function HistoryTurn({
             }
           />
         ))}
-        {fallbackMessages.map((message) => (
+        {turn.fallbackResponses.map((message) => (
           <ThreadTurn
             key={message.id}
             message={message}
+            blockKey={messageBlockKey(jobId, message.id)}
             busy={busy}
             onFork={
               message.id === lastFallbackMessageId && onFork ? () => onFork(turn.jobId) : undefined
@@ -540,12 +608,16 @@ function HistoryTurn({
           />
         ))}
       </div>
-      <div className="my-5 flex items-center gap-3 text-[11px] text-gray-400 dark:text-gray-500">
-        <span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />
-        <span>
-          Turn {turn.turnNo} · {toolCalls} tool call{toolCalls === 1 ? '' : 's'}
-        </span>
-        <span className="h-px flex-1 bg-gray-200 dark:bg-white/10" />
+      <div className="mb-6 mt-3 flex justify-end text-[11px] text-gray-400 dark:text-gray-500">
+        {onOpenRun ? (
+          <button
+            type="button"
+            onClick={() => onOpenRun(turn.jobId, turn.displayNo)}
+            className="rounded px-1.5 py-0.5 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-white/10 dark:hover:text-gray-100"
+          >
+            View execution
+          </button>
+        ) : null}
       </div>
     </section>
   );
@@ -960,11 +1032,14 @@ function GitPanel({ job, active }: { job: AgentJob; active: boolean }) {
 export function JobDetail({
   job,
   events = [],
+  threadJobs = [],
   onReload,
 }: {
   job: AgentJob;
   /** The stored stream, for the trajectory tab. Absent in fixtures. */
   events?: (AgentJobEventApi | AgentThreadEventApi)[];
+  /** The conversation's turn rows, so Run details can describe a past turn. */
+  threadJobs?: AgentJobApi[];
   onReload?: () => void;
 }) {
   const router = useRouter();
@@ -990,6 +1065,16 @@ export function JobDetail({
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('git');
+  // The right region holds either the workspace or one selected step, never
+  // both: two panels would hide the trajectory that explains either of them.
+  const [inspector, setInspector] = useState<InspectorSelection | null>(null);
+  const [trajectoryQuery, setTrajectoryQuery] = useState('');
+  const [focusJobId, setFocusJobId] = useState<string | null>(null);
+  const inspectorTriggerRef = useRef<HTMLElement | null>(null);
+  const trajectorySteps = useMemo(
+    () => buildTrajectorySteps(events, turnContextFromJobs(threadJobs)),
+    [events, threadJobs],
+  );
   const [followUp, setFollowUp] = useState('');
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
@@ -1011,6 +1096,30 @@ export function JobDetail({
     maxViewportFraction: 0.75,
     siblingMinWidth: TRANSCRIPT_MIN_WIDTH,
   });
+  const inspectorPane = useResizablePane({
+    storageKey: INSPECTOR_WIDTH_STORAGE_KEY,
+    defaultWidth: INSPECTOR_DEFAULT_WIDTH,
+    minWidth: INSPECTOR_MIN_WIDTH,
+    maxWidth: INSPECTOR_MAX_WIDTH,
+    side: 'end',
+    maxViewportFraction: 0.6,
+    siblingMinWidth: TRAJECTORY_MIN_WIDTH,
+  });
+  // Both panes size themselves against the region that holds them: only that
+  // element knows how much is left once the sidebar has taken its share. The
+  // workspace and the inspector never open together, but they share the
+  // container, so both refs are attached to it. Without the inspector's, its
+  // floor for the list has nothing to measure against, and a drag can squeeze
+  // the list past the width it needs to stay readable.
+  const { containerRef: workspaceContainerRef } = workspacePane;
+  const { containerRef: inspectorContainerRef } = inspectorPane;
+  const layoutContainerRef = useCallback(
+    (node: HTMLElement | null) => {
+      workspaceContainerRef(node);
+      inspectorContainerRef(node);
+    },
+    [inspectorContainerRef, workspaceContainerRef],
+  );
 
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);
 
@@ -1079,10 +1188,8 @@ export function JobDetail({
 
   const selectedAttempt = job.attempts.find((attempt) => attempt.no === attemptNo);
   const runNote = ownerRunNote(job);
-  const visibleEvents = job.events.filter(
-    (event) => event.attemptNo === undefined || attemptNo === 0 || event.attemptNo === attemptNo,
-  );
-  const pill = STATE_PILL[job.state];
+  const conversationState = getConversationState(job);
+  const pill = STATE_PILL[conversationState];
   const isArchived = Boolean(job.archivedAt);
   const isActive = job.state === 'running' || job.state === 'queued';
   const isSuccessful = job.state === 'done' || job.state === 'needs_review';
@@ -1125,11 +1232,94 @@ export function JobDetail({
   function openWorkspace(tab: WorkspaceTab) {
     setWorkspaceTab(tab);
     setWorkspaceOpen(true);
+    setInspector(null);
   }
 
   const toggleWorkspace = useCallback(() => {
-    setWorkspaceOpen((current) => !current);
+    setWorkspaceOpen((current) => {
+      if (!current) setInspector(null);
+      return !current;
+    });
   }, []);
+
+  const closeInspector = useCallback(() => {
+    setInspector(null);
+    // Cleared so reopening the same turn scrolls back to it.
+    setFocusJobId(null);
+    const trigger = inspectorTriggerRef.current;
+    inspectorTriggerRef.current = null;
+    // Escape closes the panel, not the reader's place in it.
+    if (trigger && document.contains(trigger)) trigger.focus();
+  }, []);
+
+  // Remember what opened the panel so closing it can hand focus back.
+  const rememberInspectorTrigger = useCallback(() => {
+    const active = document.activeElement;
+    inspectorTriggerRef.current = active instanceof HTMLElement ? active : null;
+  }, []);
+
+  const selectStep = useCallback(
+    (stepKey: string) => {
+      const step = trajectorySteps.find((candidate) => candidate.key === stepKey);
+      rememberInspectorTrigger();
+      setWorkspaceOpen(false);
+      setInspector((current) => {
+        const keepTab = current?.kind === 'step' && current.stepKey === stepKey;
+        const tab: StepTab = keepTab ? current.tab : 'summary';
+        return { kind: 'step', stepKey, tab: step ? normalizeStepTab(step, tab) : 'summary' };
+      });
+    },
+    [rememberInspectorTrigger, trajectorySteps],
+  );
+
+  const openRun = useCallback(
+    (jobId: string, turnNo: number) => {
+      rememberInspectorTrigger();
+      setWorkspaceOpen(false);
+      setInspector({ kind: 'run', jobId, turnNo, tab: 'overview' });
+      setTab('trajectory');
+      setFocusJobId(jobId);
+    },
+    [rememberInspectorTrigger],
+  );
+
+  const selectInspectorTab = useCallback((next: StepTab | RunTab) => {
+    setInspector((current) => {
+      if (!current) return current;
+      return current.kind === 'step'
+        ? { ...current, tab: next as StepTab }
+        : { ...current, tab: next as RunTab };
+    });
+  }, []);
+
+  // Step and run details explain the trajectory; Chat has no place to keep them.
+  useEffect(() => {
+    if (tab !== 'chat') return;
+    setInspector(null);
+    setFocusJobId(null);
+  }, [tab]);
+
+  // Escape closes this layer only. Controls that consume Escape themselves —
+  // the composer, the terminal, any dialog — keep it.
+  useEffect(() => {
+    if (!inspector) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.repeat || event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (
+        target?.closest(
+          'input, textarea, select, [contenteditable="true"], [role="dialog"], #job-workspace-pane',
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      closeInspector();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [closeInspector, inspector]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1206,6 +1396,9 @@ export function JobDetail({
       // reader. Next scrolls on navigation by default, which jumps the task
       // region back to the top and makes every follow-up look like a reload.
       router.push(`/${child.id}`, { scroll: false });
+      // The reader asked for this turn, so following its output is what they
+      // asked for — the one place besides "back to bottom" that resumes it.
+      scroll.followLatest();
       // Also what the remount used to do. Without it the composer stayed
       // disabled with the sent text still in it, because nothing else ever
       // cleared either.
@@ -1269,14 +1462,6 @@ export function JobDetail({
     }
   }
 
-  const allThreadMessages = job.threadMessages ?? [];
-  const historyTurns = job.historyTurns;
-  // A real API-backed job has reconstructed historical turns. Keep only this
-  // job's durable-message fallback here; compact fixtures use flat history,
-  // and forked turns still need their copied display messages.
-  const threadMessages = historyTurns
-    ? allThreadMessages.filter((message) => message.jobId === job.id)
-    : allThreadMessages;
   const canForkWorkspace = Boolean(
     job.sandboxId && job.workspaceShared && !isActive && !isArchived,
   );
@@ -1285,6 +1470,88 @@ export function JobDetail({
   const usageFooter = selectedAttemptIsCurrent ? (
     <LedgerUsage job={job} usage={usage} />
   ) : undefined;
+
+  // Turns the transcript renders, described once. The Chat below and the rail
+  // beside it read the same description, so a mark cannot address a turn the
+  // body does not draw. The stored turns are memoized because they are
+  // immutable; the newest one is rebuilt every commit because its rows are what
+  // the transcript is drawing right now.
+  const currentAttemptNo = job.currentAttemptNo;
+  const historyTurns = describeHistoryTurns(job);
+  const currentTurn = describeCurrentTurn(job, { attemptNo, currentAttemptNo });
+  const threadMessages = currentTurn.messages;
+  const visibleEvents = currentTurn.events;
+  const currentRewindAnchor = job.historyTurns
+    ? [...job.historyTurns].reverse().find((turn) => turn.forkable)?.jobId
+    : undefined;
+
+  // The rail renders two host elements per turn while `toDisplayJob()` hands
+  // the page a rebuilt job per streamed event. Handing it the entries it was
+  // already showing keeps those marks from being rebuilt for a delta that only
+  // reaches the newest turn's body.
+  const previousEntriesRef = useRef<ConversationTurnNavigationEntry[]>([]);
+  const navigationEntries = useMemo(() => {
+    const fresh = [
+      ...historyTurns.map((turn) => toNavigationEntry(turn)),
+      toNavigationEntry(currentTurn, { attemptNo, currentAttemptNo }),
+    ];
+    const previous = previousEntriesRef.current;
+    if (sameNavigationEntries(previous, fresh)) return previous;
+    previousEntriesRef.current = fresh;
+    return fresh;
+  }, [attemptNo, currentAttemptNo, currentTurn, historyTurns]);
+  const turnKeys = useMemo(() => navigationEntries.map((entry) => entry.key), [navigationEntries]);
+  const conversationKey = conversationNavigationScope(job).conversationKey;
+  const scroll = useConversationScroll({
+    turnKeys,
+    conversationKey,
+    active: tab === 'chat',
+  });
+  // Announced only for a jump the reader asked for, never for a streamed
+  // event: a transcript that talks on every token is one nobody can listen to.
+  const [announcedTurn, setAnnouncedTurn] = useState<string | null>(null);
+  const jumpToTurn = useCallback(
+    (key: string) => {
+      const entry = navigationEntries.find((candidate) => candidate.key === key);
+      setAnnouncedTurn(
+        entry === undefined ? null : t('turnNavigation.turn', { turn: entry.displayNo }),
+      );
+      scroll.jumpToTurn(key);
+    },
+    [navigationEntries, scroll, t],
+  );
+  // What the live region says: where the reader's last jump landed, or that it
+  // could not land. Never a token, and never both at once.
+  const navigationNotice =
+    scroll.unavailableKey === null ? (announcedTurn ?? '') : t('turnNavigation.unavailable');
+  const showRail =
+    tab === 'chat' &&
+    navigationEntries.length > 1 &&
+    scroll.viewport.width >= RAIL_MIN_COLUMN_WIDTH &&
+    scroll.viewport.readingHeight >= RAIL_MIN_READING_HEIGHT &&
+    scroll.viewport.finePointer;
+  const composerHeight = scroll.viewport.composerHeight;
+
+  // Switching to an older run changes what the body shows, so it is a reading
+  // position, not a live one: the reader settled on a fixed snapshot. The
+  // selection also moves by itself — a queued turn starts, a retry arrives —
+  // and that must not stop the newest output from being followed.
+  const attemptSelection = useRef({ jobId: job.id, attemptNo });
+  const chosenAttemptRef = useRef<number | null>(null);
+  useEffect(() => {
+    const previous = attemptSelection.current;
+    attemptSelection.current = { jobId: job.id, attemptNo };
+    if (
+      !shouldHoldReading(previous, attemptSelection.current, chosenAttemptRef.current, liveAttempt)
+    )
+      return;
+    chosenAttemptRef.current = null;
+    scroll.holdReading();
+    // `scroll` changes identity on every measurement; the judgement above is
+    // what decides whether this is the reader's choice at all.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attemptNo, job.id, liveAttempt]);
+
   const currentReplyId = [...threadMessages]
     .reverse()
     .find((message) => message.role === 'assistant' && message.jobId === job.id)?.id;
@@ -1295,9 +1562,9 @@ export function JobDetail({
     (last, event, index) => (event.kind === 'message' ? index : last),
     -1,
   );
-  const currentRewindAnchor = historyTurns
-    ? [...historyTurns].reverse().find((turn) => turn.forkable)?.jobId
-    : undefined;
+  // The workspace and the inspector share one right-hand region, so either of
+  // them narrows the transcript in exactly the same way.
+  const panelOpen = workspaceOpen || inspector !== null;
   return (
     <section className="flex h-full min-h-0 flex-col bg-gray-50/40 dark:bg-gray-950">
       <header className="relative z-20 shrink-0 border-b border-gray-200/80 dark:border-white/10 bg-white/95 dark:bg-gray-900/95 px-6 shadow-[0_1px_0_rgba(17,24,39,0.02)] backdrop-blur">
@@ -1361,18 +1628,17 @@ export function JobDetail({
               </button>
             ))}
           </nav>
-          {!isSuccessful ? (
-            <span
-              className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
-            >
-              {pill.dot ? (
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${pill.dot} ${isActive ? 'animate-pulse' : ''}`}
-                />
-              ) : null}
-              {job.state === 'queued' && job.parentJobId ? 'Queued after current run' : pill.label}
-            </span>
-          ) : null}
+          <span
+            aria-label={t('conversation.status')}
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
+          >
+            {pill.dot ? (
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${pill.dot} ${isActive ? 'animate-pulse' : ''}`}
+              />
+            ) : null}
+            {t(CONVERSATION_STATE_KEYS[conversationState])}
+          </span>
           {job.diffFiles.length ? (
             <button
               type="button"
@@ -1436,316 +1702,456 @@ export function JobDetail({
       </header>
 
       <div
-        ref={workspacePane.containerRef}
-        className={`min-h-0 flex-1 overflow-hidden ${workspaceOpen ? 'block lg:flex' : 'flex'}`}
+        ref={layoutContainerRef}
+        className={`min-h-0 flex-1 overflow-hidden ${panelOpen ? 'block lg:flex' : 'flex'}`}
       >
-        <div
-          role="region"
-          aria-label="Task progress"
-          className={`min-w-0 flex-1 flex-col overflow-y-auto ${
-            workspaceOpen ? 'hidden lg:flex' : 'flex'
-          }`}
-        >
-          <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col px-6 pb-6 pt-7">
-            {tab === 'trajectory' ? (
-              <div className="flex-1">
-                <TrajectoryView events={events} />
-              </div>
-            ) : (
-              <div className="flex-1">
-                {historyTurns?.map((turn, index) => {
-                  const rewindAnchorJobId = [...historyTurns.slice(0, index)]
-                    .reverse()
-                    .find((candidate) => candidate.forkable)?.jobId;
-                  return (
-                    <HistoryTurn
-                      key={turn.jobId}
-                      turn={turn}
-                      rewindAnchorJobId={rewindAnchorJobId}
-                      busy={forking}
-                      onFork={
-                        turn.forkable && canForkWorkspace
-                          ? (anchorJobId) => void forkFrom(anchorJobId)
-                          : undefined
-                      }
-                      onRewind={
-                        rewindAnchorJobId && canForkWorkspace
-                          ? (anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)
-                          : undefined
-                      }
-                    />
-                  );
-                })}
-                {threadMessages.map((message) => {
-                  const rewindAnchor =
-                    message.role === 'user' && currentRewindAnchor !== message.jobId
-                      ? currentRewindAnchor
-                      : undefined;
-                  return (
-                    <ThreadTurn
-                      key={message.id}
-                      message={message}
-                      footer={
-                        lastVisibleMessageIndex < 0 && message.id === currentReplyId
-                          ? usageFooter
-                          : undefined
-                      }
-                      busy={forking}
-                      onFork={
-                        message.role === 'assistant' &&
-                        message.id === lastThreadAssistantMessageId &&
-                        isSuccessful &&
-                        canForkCurrent
-                          ? () => void forkFrom(message.jobId)
-                          : undefined
-                      }
-                      onRewind={
-                        rewindAnchor && canForkWorkspace
-                          ? () => void forkFrom(rewindAnchor, message.content)
-                          : undefined
-                      }
-                    />
-                  );
-                })}
-
-                {job.historyIncludesPrompt ? null : (
-                  <div className="group my-4 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-4 py-3 shadow-subtle">
-                    <Markdown text={job.prompt || job.title} />
-                    <MessageActions align="end">
-                      <MessageActionButton
-                        label="Copy message"
-                        onClick={() => void copyMessage(job.prompt || job.title)}
-                      >
-                        <CopyIcon />
-                        Copy
-                      </MessageActionButton>
-                      {currentRewindAnchor && canForkWorkspace ? (
-                        <MessageActionButton
-                          label="Edit & rewind"
-                          onClick={() =>
-                            void forkFrom(currentRewindAnchor, job.prompt || job.title)
-                          }
-                          disabled={forking}
-                        >
-                          <RewindIcon />
-                          Edit & rewind
-                        </MessageActionButton>
-                      ) : null}
-                    </MessageActions>
-                  </div>
-                )}
-
-                {runNote && job.state !== 'failed' ? (
-                  <p className="mb-2 text-xs text-gray-400 dark:text-gray-500">{runNote}</p>
-                ) : null}
-
-                {job.attempts.length > 1 ? (
-                  <div className="my-3 flex flex-wrap items-center gap-1.5 text-xs">
-                    <span className="mr-1 text-gray-400 dark:text-gray-500">Run attempts</span>
-                    {job.attempts.map((attempt) => (
-                      <button
-                        key={attempt.no}
-                        type="button"
-                        onClick={() => setAttemptNo(attempt.no)}
-                        className={`rounded-md px-2 py-1 ${
-                          attempt.no === attemptNo
-                            ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900'
-                            : 'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-white/15'
-                        }`}
-                      >
-                        {attempt.no} · {attempt.status}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-
-                {selectedAttempt?.status === 'superseded' && selectedAttempt.note ? (
-                  <div className="my-3 rounded-lg border border-amber-200 dark:border-amber-500/25 bg-amber-50 dark:bg-amber-500/10 px-3 py-2 text-[13px] text-amber-800 dark:text-amber-300">
-                    {selectedAttempt.note}
-                  </div>
-                ) : null}
-
-                <div aria-label="Agent activity" className="mt-2">
-                  {visibleEvents.map((event, index) => (
-                    <EventRow
-                      key={`${event.attemptNo ?? 0}-${index}`}
-                      event={event}
-                      busy={forking}
-                      footer={index === lastVisibleMessageIndex ? usageFooter : undefined}
-                      onFork={
-                        event.kind === 'message' &&
-                        index === lastVisibleMessageIndex &&
-                        isSuccessful &&
-                        canForkCurrent &&
-                        selectedAttemptIsCurrent
-                          ? () => void forkFrom(job.id)
-                          : undefined
-                      }
-                    />
-                  ))}
-                  {job.liveNote ? (
-                    <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
-                      <span className="h-2 w-2 animate-pulse rounded-full bg-blue-500" />
-                      {job.liveNote}
-                    </div>
-                  ) : null}
-                  {job.state === 'queued' && visibleEvents.length === 0 ? (
-                    <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
-                      <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
-                      {job.parentJobId ? 'Queued after the current run' : 'Waiting to start'}
-                    </div>
-                  ) : null}
-                </div>
-
-                <AttemptTurnFooter job={job} attemptNo={attemptNo} />
-
-                <OutcomeCard job={job} onOpenDiff={() => openWorkspace('git')} />
-                {selectedAttemptIsCurrent ? (
-                  <RunNotices
-                    job={job}
-                    showNetworkWarning={
-                      !visibleEvents.some((event) => event.kind === 'egress_denied')
-                    }
+        {/* The rail's positioning layer: a sibling of the scroller, so it never
+            adds to the transcript's scrollHeight, and inside the Chat column,
+            so it stays beside the conversation when the workspace opens. */}
+        <div className="relative flex min-w-0 flex-1">
+          <div
+            ref={scroll.containerRef}
+            role="region"
+            aria-label="Task progress"
+            // A scrollable region belongs in the tab order: without it the
+            // transcript can only be scrolled by focusing something inside it,
+            // and the one thing this feature must never do is move a reader
+            // who is looking somewhere else.
+            tabIndex={0}
+            className={`min-w-0 flex-1 flex-col overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40 ${
+              panelOpen ? 'hidden lg:flex' : 'flex'
+            }`}
+          >
+            {/* The rail is an overlay, so the text gives back the width it
+                occupies rather than running underneath the marks. The
+                trajectory is a wide table of steps, so it keeps the width the
+                inspector is not holding instead of a reading column. */}
+            <div
+              className={`flex w-full flex-1 flex-col pb-6 pt-7 ${
+                tab === 'trajectory'
+                  ? 'px-6'
+                  : `mx-auto max-w-4xl ${showRail ? 'pl-6 pr-12' : 'px-6'}`
+              }`}
+            >
+              {tab === 'trajectory' ? (
+                <div className="flex-1">
+                  <TrajectoryView
+                    events={events}
+                    steps={trajectorySteps}
+                    query={trajectoryQuery}
+                    onQueryChange={setTrajectoryQuery}
+                    selectedKey={inspector?.kind === 'step' ? inspector.stepKey : null}
+                    onSelectStep={selectStep}
+                    onOpenRun={openRun}
+                    focusJobId={focusJobId}
                   />
-                ) : null}
-                {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
-                  <div className="mt-4">{usageFooter}</div>
-                ) : null}
-              </div>
-            )}
-
-            <div className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95">
-              {isArchived ? (
-                <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-gray-900">
-                  <div className="min-w-0 flex-1 basis-64">
-                    <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                      {t('sessionArchive.title')}
-                    </p>
-                    <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
-                      {t(
-                        contextLost
-                          ? 'sessionArchive.contextLost'
-                          : isActive
-                            ? 'sessionArchive.running'
-                            : 'sessionArchive.body',
-                      )}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={restoring}
-                    onClick={() => void unarchive()}
-                    className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
-                  >
-                    {t(
-                      restoring
-                        ? 'sessionArchive.restoring'
-                        : contextLost
-                          ? 'sessionArchive.restore'
-                          : 'sessionArchive.continue',
-                    )}
-                  </button>
                 </div>
               ) : (
-                <form
-                  onSubmit={(event) => void submitFollowUp(event)}
-                  className="rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
-                >
-                  <textarea
-                    rows={2}
-                    value={followUp}
-                    onChange={(event) => setFollowUp(event.target.value)}
-                    disabled={contextLost}
-                    onKeyDown={(event) => {
-                      if (!isComposerSubmit(event)) return;
-                      event.preventDefault();
-                      // Through the form, so the keyboard and the button take the
-                      // same path and cannot drift apart.
-                      event.currentTarget.form?.requestSubmit();
-                    }}
-                    placeholder={contextLost ? 'Unable to reconnect this chat' : 'Add a follow-up'}
-                    aria-label="Add a follow-up"
-                    className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
-                  />
-                  <div className="flex items-center gap-1.5 px-3 pb-2.5">
-                    {modelOptions.length > 0 ? (
-                      <>
-                        {/* The harness stays the thread's; the model is offered
-                          again. A model change restarts this member's CLI and
-                          native-resumes it in the same retained workspace; it
-                          does not replace or clone the sandbox. */}
-                        <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
-                          {contextLost
-                            ? 'Start a new chat ·'
-                            : job.state === 'cancelled'
-                              ? `Restores any saved changes · ${job.runtime} ·`
-                              : `Inherits ${job.runtime} ·`}
-                        </span>
-                        <Picker
-                          label="Model for this turn"
-                          value={model}
-                          options={modelOptions}
-                          onChange={setModel}
+                <div className="flex-1">
+                  {historyTurns.map((turn, index) => {
+                    const rewindAnchorJobId = [...historyTurns.slice(0, index)]
+                      .reverse()
+                      .find((candidate) => candidate.forkable)?.jobId;
+                    return (
+                      <HistoryTurn
+                        key={turn.key}
+                        turn={turn}
+                        rewindAnchorJobId={rewindAnchorJobId}
+                        busy={forking}
+                        onFork={
+                          turn.forkable && canForkWorkspace
+                            ? (anchorJobId) => void forkFrom(anchorJobId)
+                            : undefined
+                        }
+                        onRewind={
+                          rewindAnchorJobId && canForkWorkspace
+                            ? (anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)
+                            : undefined
+                        }
+                        onOpenRun={openRun}
+                      />
+                    );
+                  })}
+                  <section
+                    aria-label={`Turn ${currentTurn.displayNo}`}
+                    data-turn-key={currentTurn.key}
+                  >
+                    {threadMessages.map((message) => {
+                      const rewindAnchor =
+                        message.role === 'user' && currentRewindAnchor !== message.jobId
+                          ? currentRewindAnchor
+                          : undefined;
+                      return (
+                        <ThreadTurn
+                          key={message.id}
+                          message={message}
+                          blockKey={messageBlockKey(message.jobId, message.id)}
+                          footer={
+                            lastVisibleMessageIndex < 0 && message.id === currentReplyId
+                              ? usageFooter
+                              : undefined
+                          }
+                          busy={forking}
+                          onFork={
+                            message.role === 'assistant' &&
+                            message.id === lastThreadAssistantMessageId &&
+                            isSuccessful &&
+                            canForkCurrent
+                              ? () => void forkFrom(message.jobId)
+                              : undefined
+                          }
+                          onRewind={
+                            rewindAnchor && canForkWorkspace
+                              ? () => void forkFrom(rewindAnchor, message.content)
+                              : undefined
+                          }
                         />
-                        <Picker
-                          label="Reasoning for this turn"
-                          value={effort}
-                          options={efforts}
-                          onChange={setEffort}
-                        />
-                        {isActive ? (
-                          <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                            · queued after this run
-                          </span>
-                        ) : null}
-                      </>
-                    ) : (
-                      <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400 dark:text-gray-500">
-                        {contextLost
-                          ? `Start a new chat · ${job.runtime} · ${job.model}`
-                          : job.state === 'cancelled'
-                            ? `Restores any saved changes · ${job.runtime} · ${job.model}`
-                            : `Inherits ${job.runtime} · ${job.model}`}
-                        {isActive ? ' · queued after this run' : ''}
-                      </span>
+                      );
+                    })}
+
+                    {job.historyIncludesPrompt ? null : (
+                      <div
+                        data-block-key={`${job.id}:prompt`}
+                        className="group my-4 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-4 py-3 shadow-subtle"
+                      >
+                        <Markdown text={job.prompt || job.title} />
+                        <MessageActions align="end">
+                          <MessageActionButton
+                            label="Copy message"
+                            onClick={() => void copyMessage(job.prompt || job.title)}
+                          >
+                            <CopyIcon />
+                            Copy
+                          </MessageActionButton>
+                          {currentRewindAnchor && canForkWorkspace ? (
+                            <MessageActionButton
+                              label="Edit & rewind"
+                              onClick={() =>
+                                void forkFrom(currentRewindAnchor, job.prompt || job.title)
+                              }
+                              disabled={forking}
+                            >
+                              <RewindIcon />
+                              Edit & rewind
+                            </MessageActionButton>
+                          ) : null}
+                        </MessageActions>
+                      </div>
                     )}
+
+                    {runNote && job.state !== 'failed' ? (
+                      <p className="mb-2 text-xs text-gray-400 dark:text-gray-500">{runNote}</p>
+                    ) : null}
+
+                    {job.attempts.length > 1 ? (
+                      <details
+                        className="my-3 text-xs"
+                        onToggle={(event) => {
+                          if (!event.currentTarget.open) {
+                            chosenAttemptRef.current = liveAttempt;
+                            setAttemptNo(liveAttempt);
+                          }
+                        }}
+                      >
+                        <summary className="cursor-pointer text-gray-500 dark:text-gray-400">
+                          {t('conversation.executionHistory', { count: job.attempts.length })}
+                          {attemptNo !== liveAttempt
+                            ? ` · ${t('conversation.viewingExecution', { number: attemptNo })}`
+                            : ''}
+                        </summary>
+                        <p className="mt-2 text-gray-400 dark:text-gray-500">
+                          {t('conversation.executionHistoryHint')}
+                        </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          {job.attempts.map((attempt) => (
+                            <button
+                              key={attempt.no}
+                              type="button"
+                              aria-pressed={attempt.no === attemptNo}
+                              onClick={() => {
+                                chosenAttemptRef.current = attempt.no;
+                                setAttemptNo(attempt.no);
+                              }}
+                              className={`rounded-md px-2 py-1 ${
+                                attempt.no === attemptNo
+                                  ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900'
+                                  : 'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-white/15'
+                              }`}
+                            >
+                              {attempt.no} · {attempt.status}
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    ) : null}
+
+                    {selectedAttempt?.status === 'superseded' && selectedAttempt.note ? (
+                      <div className="my-3 rounded-lg border border-amber-200 dark:border-amber-500/25 bg-amber-50 dark:bg-amber-500/10 px-3 py-2 text-[13px] text-amber-800 dark:text-amber-300">
+                        {selectedAttempt.note}
+                      </div>
+                    ) : null}
+
+                    <div aria-label="Agent activity" className="mt-2">
+                      {visibleEvents.map((event, index) => (
+                        <EventRow
+                          key={eventBlockKey(job.id, event, index)}
+                          event={event}
+                          blockKey={eventBlockKey(job.id, event, index)}
+                          busy={forking}
+                          footer={index === lastVisibleMessageIndex ? usageFooter : undefined}
+                          onFork={
+                            event.kind === 'message' &&
+                            index === lastVisibleMessageIndex &&
+                            isSuccessful &&
+                            canForkCurrent &&
+                            selectedAttemptIsCurrent
+                              ? () => void forkFrom(job.id)
+                              : undefined
+                          }
+                        />
+                      ))}
+                      {job.liveNote ? (
+                        <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
+                          <span className="h-2 w-2 animate-pulse rounded-full bg-blue-500" />
+                          {job.liveNote}
+                        </div>
+                      ) : null}
+                      {job.state === 'queued' && visibleEvents.length === 0 ? (
+                        <div className="flex items-center gap-2.5 py-3 text-[13px] text-gray-500 dark:text-gray-400">
+                          <span className="h-2 w-2 animate-pulse rounded-full bg-gray-400 dark:bg-gray-600" />
+                          Waiting to start
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <AttemptTurnFooter job={job} attemptNo={attemptNo} />
+
+                    {/* The inspector's Run details open on the turn the reader
+                        is looking at, which is this one. */}
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => openRun(job.id, job.turnNo ?? 1)}
+                        className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100"
+                      >
+                        View execution
+                      </button>
+                    </div>
+
+                    <OutcomeCard job={job} onOpenDiff={() => openWorkspace('git')} />
+                    {selectedAttemptIsCurrent ? (
+                      <RunNotices
+                        job={job}
+                        showNetworkWarning={
+                          !visibleEvents.some((event) => event.kind === 'egress_denied')
+                        }
+                      />
+                    ) : null}
+                    {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
+                      <div className="mt-4">{usageFooter}</div>
+                    ) : null}
+                  </section>
+                </div>
+              )}
+
+              <div
+                ref={scroll.composerRef}
+                className="sticky bottom-0 z-10 -mx-2 mt-10 bg-gradient-to-t from-gray-50 via-gray-50/95 px-2 pb-2 pt-8 dark:from-gray-950 dark:via-gray-950/95"
+              >
+                {isArchived ? (
+                  <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-gray-900">
+                    <div className="min-w-0 flex-1 basis-64">
+                      <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                        {t('sessionArchive.title')}
+                      </p>
+                      <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                        {t(
+                          contextLost
+                            ? 'sessionArchive.contextLost'
+                            : isActive
+                              ? 'sessionArchive.running'
+                              : 'sessionArchive.body',
+                        )}
+                      </p>
+                    </div>
                     <button
-                      type="submit"
-                      disabled={contextLost || !followUp.trim() || submitting}
-                      className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
-                      aria-label="Send follow-up"
-                      title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
+                      type="button"
+                      disabled={restoring}
+                      onClick={() => void unarchive()}
+                      className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
                     >
-                      {submitting ? (
-                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                      ) : (
-                        <svg
-                          aria-hidden="true"
-                          className="h-4 w-4"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                          strokeWidth={2}
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M12 19V5m0 0-6 6m6-6 6 6"
-                          />
-                        </svg>
+                      {t(
+                        restoring
+                          ? 'sessionArchive.restoring'
+                          : contextLost
+                            ? 'sessionArchive.restore'
+                            : 'sessionArchive.continue',
                       )}
                     </button>
                   </div>
-                </form>
-              )}
-              <ThreadStatsBar job={job} />
-              {actionError ? (
-                <p className="mt-2 text-center text-xs text-red-600 dark:text-red-400" role="alert">
-                  {ownerFailureMessage(actionError)}
-                </p>
-              ) : null}
+                ) : (
+                  <form
+                    onSubmit={(event) => void submitFollowUp(event)}
+                    className="rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 shadow-[0_16px_40px_-28px_rgba(17,24,39,0.55)] transition focus-within:border-crimson/30 focus-within:ring-4 focus-within:ring-crimson/[0.05]"
+                  >
+                    <textarea
+                      rows={2}
+                      value={followUp}
+                      onChange={(event) => setFollowUp(event.target.value)}
+                      disabled={contextLost}
+                      onKeyDown={(event) => {
+                        if (!isComposerSubmit(event)) return;
+                        event.preventDefault();
+                        // Through the form, so the keyboard and the button take the
+                        // same path and cannot drift apart.
+                        event.currentTarget.form?.requestSubmit();
+                      }}
+                      placeholder={
+                        contextLost ? 'Unable to reconnect this chat' : 'Add a follow-up'
+                      }
+                      aria-label="Add a follow-up"
+                      className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 dark:text-gray-50 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-0"
+                    />
+                    <div className="flex items-center gap-1.5 px-3 pb-2.5">
+                      {modelOptions.length > 0 ? (
+                        <>
+                          {/* The harness stays the thread's; the model is offered
+                          again. A model change restarts this member's CLI and
+                          native-resumes it in the same retained workspace; it
+                          does not replace or clone the sandbox. */}
+                          <span className="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">
+                            {contextLost
+                              ? 'Start a new chat ·'
+                              : job.state === 'cancelled'
+                                ? `Restores any saved changes · ${job.runtime} ·`
+                                : `Inherits ${job.runtime} ·`}
+                          </span>
+                          <Picker
+                            label="Model for this turn"
+                            value={model}
+                            options={modelOptions}
+                            onChange={setModel}
+                          />
+                          <Picker
+                            label="Reasoning for this turn"
+                            value={effort}
+                            options={efforts}
+                            onChange={setEffort}
+                          />
+                          {isActive ? (
+                            <span className="min-w-0 truncate text-[11px] text-gray-400 dark:text-gray-500">
+                              · queued after this run
+                            </span>
+                          ) : null}
+                        </>
+                      ) : (
+                        <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400 dark:text-gray-500">
+                          {contextLost
+                            ? `Start a new chat · ${job.runtime} · ${job.model}`
+                            : job.state === 'cancelled'
+                              ? `Restores any saved changes · ${job.runtime} · ${job.model}`
+                              : `Inherits ${job.runtime} · ${job.model}`}
+                          {isActive ? ' · queued after this run' : ''}
+                        </span>
+                      )}
+                      <button
+                        type="submit"
+                        disabled={contextLost || !followUp.trim() || submitting}
+                        className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-crimson text-white shadow-sm transition-colors hover:bg-crimson-dark disabled:cursor-not-allowed disabled:opacity-40"
+                        aria-label="Send follow-up"
+                        title="Send follow-up — ⏎ to send, ⇧⏎ for a new line"
+                      >
+                        {submitting ? (
+                          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                        ) : (
+                          <svg
+                            aria-hidden="true"
+                            className="h-4 w-4"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M12 19V5m0 0-6 6m6-6 6 6"
+                            />
+                          </svg>
+                        )}
+                      </button>
+                    </div>
+                  </form>
+                )}
+                <ThreadStatsBar job={job} />
+                {actionError ? (
+                  <p
+                    className="mt-2 text-center text-xs text-red-600 dark:text-red-400"
+                    role="alert"
+                  >
+                    {ownerFailureMessage(actionError)}
+                  </p>
+                ) : null}
+              </div>
             </div>
           </div>
+
+          {/* Above the transcript, below its composer and the page header:
+              the design's order is body, rail preview, composer, header. */}
+          {showRail ? (
+            <div
+              className="pointer-events-none absolute right-3 top-0 z-0 flex flex-col justify-center"
+              style={{ bottom: composerHeight }}
+            >
+              <TurnRail
+                entries={navigationEntries}
+                activeKey={scroll.activeKey}
+                onNavigate={jumpToTurn}
+                maxHeightPx={Math.min(
+                  RAIL_MAX_HEIGHT,
+                  scroll.viewport.readingHeight - RAIL_BAND_MARGIN,
+                )}
+              />
+            </div>
+          ) : null}
+
+          {tab === 'chat' ? (
+            <div
+              className="pointer-events-none absolute left-0 z-0 w-full max-w-full"
+              style={{
+                bottom: composerHeight + BACK_TO_BOTTOM_INSET,
+                // Match the scroller's usable width, including when a native
+                // scrollbar occupies space beside the conversation.
+                width: scroll.viewport.width || undefined,
+              }}
+            >
+              <div
+                className={`mx-auto flex w-full max-w-4xl flex-col items-end gap-2 ${showRail ? 'pl-6 pr-12' : 'px-6'}`}
+              >
+                {/* One live region for both answers: where a jump landed, and
+                  when it could not land at all. It is always in the DOM, since
+                  a region added at the same moment as its text announces
+                  nothing. */}
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className={
+                    scroll.unavailableKey === null
+                      ? 'sr-only'
+                      : 'rounded-full bg-white/95 px-3 py-1 text-xs text-gray-600 shadow-card dark:bg-gray-900/95 dark:text-gray-300'
+                  }
+                >
+                  {navigationNotice}
+                </p>
+                {scroll.awayFromBottom ? (
+                  <BackToBottom
+                    hasNewContent={scroll.hasNewContent}
+                    onReturn={scroll.returnToBottom}
+                  />
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         {workspaceOpen ? (
@@ -1765,7 +2171,7 @@ export function JobDetail({
           style={{ '--job-workspace-width': `${workspacePane.width}px` } as CSSProperties}
           className={`${
             workspaceOpen ? 'flex' : 'hidden'
-          } min-h-0 min-w-0 flex-col overflow-hidden bg-white dark:bg-gray-900 lg:w-[var(--job-workspace-width)] lg:shrink-0`}
+          } h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white dark:bg-gray-900 lg:w-[var(--job-workspace-width)] lg:shrink-0`}
         >
           <nav
             aria-label="Workspace views"
@@ -1847,6 +2253,42 @@ export function JobDetail({
               active={workspaceOpen && workspaceTab === 'tools'}
             />
           </div>
+        </aside>
+
+        {inspector ? (
+          <PaneResizer
+            pane={inspectorPane}
+            label="Resize step details"
+            controls="job-inspector-pane"
+            className="hidden lg:block"
+          />
+        ) : null}
+
+        <aside
+          id="job-inspector-pane"
+          role="region"
+          aria-label={inspector?.kind === 'run' ? 'Run details' : 'Step details'}
+          hidden={!inspector}
+          style={{ '--job-inspector-width': `${inspectorPane.width}px` } as CSSProperties}
+          className={`${
+            inspector ? 'flex' : 'hidden'
+          } h-full min-h-0 min-w-0 flex-col overflow-hidden border-l border-gray-200 bg-white dark:border-white/10 dark:bg-gray-900 lg:w-[var(--job-inspector-width)] lg:shrink-0`}
+        >
+          {inspector ? (
+            <TrajectoryInspector
+              selection={inspector}
+              steps={trajectorySteps}
+              events={events}
+              jobs={threadJobs}
+              currentJob={job}
+              query={trajectoryQuery}
+              onClearQuery={() => setTrajectoryQuery('')}
+              onSelectTab={selectInspectorTab}
+              onSelectStep={selectStep}
+              onClose={closeInspector}
+              onOpenGitDiff={() => openWorkspace('git')}
+            />
+          ) : null}
         </aside>
       </div>
     </section>

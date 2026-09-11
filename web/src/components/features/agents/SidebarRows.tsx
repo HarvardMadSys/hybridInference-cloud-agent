@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { useEffect, useState, type HTMLAttributes } from 'react';
 import { useT } from '@/components/providers';
 import { projectLabel } from './conversations';
+import { CONVERSATION_STATE_KEYS, getConversationState } from './conversationState';
 import { activityLabel } from './relativeTime';
 import { useConversationList, type SidebarConversation } from './useConversationList';
 export function Highlight({ text, query }: { text: string; query: string }) {
@@ -73,7 +74,9 @@ export function TaskRow({
   const t = useT();
   const { key, job, jobIds } = row;
   const isActive = key === activeKey;
-  const inProgress = job.state === 'running' || job.state === 'queued';
+  const conversationState = getConversationState(job);
+  const inProgress = conversationState === 'running' || conversationState === 'queued';
+  const stateLabel = t(CONVERSATION_STATE_KEYS[conversationState]);
   useEffect(() => {
     if (isActive && !inProgress) onRead(row);
   }, [isActive, inProgress, row, onRead]);
@@ -102,19 +105,19 @@ export function TaskRow({
         }`}
       >
         <span className="flex h-3 w-3 shrink-0 items-center justify-center">
-          {inProgress ? (
-            <span
-              aria-label={t('sidebar.inProgress')}
-              title={t('sidebar.inProgress')}
-              className="h-3 w-3 animate-spin rounded-full border-[1.5px] border-gray-400 border-t-transparent dark:border-gray-500 dark:border-t-transparent motion-reduce:animate-none"
-            />
-          ) : !isActive && isUnread(row) ? (
-            <span
-              aria-label={t('sidebar.unread')}
-              title={t('sidebar.unread')}
-              className="h-1.5 w-1.5 rounded-full bg-blue-500"
-            />
-          ) : null}
+          <span
+            aria-label={stateLabel}
+            title={stateLabel}
+            className={
+              conversationState === 'running'
+                ? 'h-3 w-3 animate-spin rounded-full border-[1.5px] border-gray-400 border-t-transparent dark:border-gray-500 dark:border-t-transparent motion-reduce:animate-none'
+                : conversationState === 'queued'
+                  ? 'h-1.5 w-1.5 rounded-full bg-gray-400 dark:bg-gray-500'
+                  : conversationState === 'failed'
+                    ? 'h-1.5 w-1.5 rounded-full bg-red-500'
+                    : 'h-1.5 w-1.5 rounded-full border border-gray-400 dark:border-gray-500'
+            }
+          />
         </span>
         <span className="min-w-0 flex-1 truncate">
           <Highlight text={job.title} query={query} />
@@ -125,6 +128,13 @@ export function TaskRow({
             </span>
           )}
         </span>
+        {!inProgress && !isActive && isUnread(row) ? (
+          <span
+            aria-label={t('sidebar.unread')}
+            title={t('sidebar.unread')}
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500"
+          />
+        ) : null}
       </Link>
       {activity && (
         <span

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getAgentJob,
   getAgentJobFiles,
@@ -24,6 +24,7 @@ import type {
 import { toDisplayJob } from './adapt';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import type { AgentJob } from './types';
+import { getConversationState } from './conversationState';
 
 const ACTIVE_ATTEMPT_PHASES = new Set([
   'started',
@@ -70,6 +71,7 @@ export function applyAgentLifecycleEvent(
       ...current,
       telemetry_attempt_id: telemetryAttemptId,
       state: 'queued',
+      conversation_state: 'queued',
       current_attempt_id: null,
     };
   }
@@ -81,6 +83,7 @@ export function applyAgentLifecycleEvent(
       ...current,
       telemetry_attempt_id: telemetryAttemptId,
       state: 'running',
+      conversation_state: 'running',
       current_attempt_id: event.attempt_id,
     };
   }
@@ -89,6 +92,7 @@ export function applyAgentLifecycleEvent(
       ...current,
       telemetry_attempt_id: telemetryAttemptId,
       state: 'publishing',
+      conversation_state: 'running',
       current_attempt_id: event.attempt_id,
     };
   }
@@ -162,8 +166,8 @@ export function useAgentJobList(
   // not need a request every ten seconds.
   const hasLive = jobs.some(
     (job) =>
-      job.state === 'running' ||
-      job.state === 'queued' ||
+      getConversationState(job) === 'running' ||
+      getConversationState(job) === 'queued' ||
       (job.workspaceShared === true &&
         isActiveWorkspacePublicationState(job.workspacePublicationState)),
   );
@@ -313,6 +317,14 @@ export function useAgentJob(jobId: string): {
   job: AgentJob | null;
   /** Every turn's stored stream, unfolded — what the trajectory view reads. */
   events: AgentThreadEventApi[];
+  /**
+   * The conversation's turn rows, as the API returned them.
+   *
+   * The display model keeps only what Chat renders, and the inspector needs the
+   * per-turn execution fields it drops — started/finished, attempts, the exact
+   * model. Returning them here avoids a second read of the same thread.
+   */
+  threadJobs: AgentJobApi[];
   loading: boolean;
   error: string | null;
   reload: () => void;
@@ -400,8 +412,7 @@ export function useAgentJob(jobId: string): {
 
   // Live events. Terminal jobs have nothing more to say, so no stream is
   // opened for them at all.
-  const isLive =
-    state === 'waiting' || state === 'running' || state === 'queued' || state === 'publishing';
+  const isLive = state === 'running' || state === 'queued' || state === 'publishing';
   const currentTurnNo =
     api?.turn_no ?? thread?.jobs.find((threadJob) => threadJob.id === jobId)?.turn_no ?? 1;
   useEffect(() => {
@@ -419,7 +430,7 @@ export function useAgentJob(jobId: string): {
           ...current,
           { ...event, job_id: jobId, turn_no: currentTurnNo },
         ]);
-        // The stream is also the fastest authority for a waiting/queued child
+        // The stream is also the fastest authority for a queued child
         // becoming active; keep the status pill in step without polling.
         setApi((current) => (current ? applyAgentLifecycleEvent(current, event) : current));
       },
@@ -471,40 +482,61 @@ export function useAgentJob(jobId: string): {
     };
   }, [awaitingTitle, jobId, tick]);
 
-  // A shared turn reaches its terminal job state before its quiescent
-  // workspace snapshot is captured and published. The SSE correctly closes
-  // at the turn boundary, so keep only that small, asynchronous tail live;
-  // otherwise the badge and draft-PR link remain stale until a full reload.
-  // Jobs without a retained group never enter this loop, and terminal
-  // publication states stop it immediately after the next response.
+  // A queued or terminal turn's stream cannot report another turn finishing.
+  // Refresh shared activity until this turn takes over or the conversation
+  // and its publication have both settled.
   const publicationActive = hasActiveWorkspacePublication(api);
+  const conversationActive =
+    api?.conversation_state === 'running' || api?.conversation_state === 'queued';
+  const metadataActive =
+    publicationActive || (state !== 'running' && state !== 'publishing' && conversationActive);
   useEffect(() => {
-    if (!jobId || !publicationActive) return undefined;
+    if (!jobId || !metadataActive) return undefined;
     let cancelled = false;
+    let pending = false;
+    const version = generation.current;
     const timer = setInterval(() => {
-      // Publication changes only fields on the job row. Fetching the complete
+      if (pending) return;
+      pending = true;
+      // These updates change only fields on the job row. Fetching the complete
       // conversation and event history every five seconds would add load and
       // briefly reset unrelated UI state for no benefit.
       void getAgentJob(jobId)
         .then((latest) => {
-          if (!cancelled) setApi(latest);
+          if (!cancelled && generation.current === version) setApi(latest);
         })
         .catch(() => {
           // This is a background freshness aid. Keep the last good terminal
           // view on a transient failure and try again on the next interval.
+        })
+        .finally(() => {
+          pending = false;
         });
     }, 5_000);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [jobId, publicationActive]);
+  }, [jobId, metadataActive, tick]);
 
   const job = api ? toDisplayJob(api, { events, patch, thread, threadEvents }) : null;
+  // The turn rows come from the thread read, which is a snapshot: a live
+  // attempt replacement updates `api` and would otherwise leave the inspector
+  // reading the attempt that is already gone. The current turn is therefore
+  // read from the live row, and only the other turns come from the snapshot.
+  const threadJobs = useMemo(() => {
+    const rows = thread?.jobs ?? [];
+    if (!api) return rows;
+    const index = rows.findIndex((row) => row.id === api.id);
+    if (index === -1) return rows;
+    const merged = [...rows];
+    merged[index] = api;
+    return merged;
+  }, [api, thread]);
   // Both shapes, deliberately: `job.events` is the chat view's *reading* of
   // the stream — folded, deduplicated, unknown kinds dropped — while the
   // trajectory needs the rows the platform actually stored.
-  return { job, events: threadEvents, loading, error, reload };
+  return { job, events: threadEvents, threadJobs, loading, error, reload };
 }
 
 /** One directory of the workspace tree, as far as it has been loaded. */

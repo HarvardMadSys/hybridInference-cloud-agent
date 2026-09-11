@@ -357,6 +357,12 @@ services:
       AGENT_EGRESS_ALLOWLIST: ${AGENT_EGRESS_ALLOWLIST:-}
       AGENT_EGRESS_CHAT_NETWORK_POOL: ${AGENT_EGRESS_CHAT_NETWORK_POOL:-10.240.0.0/16}
       AGENT_SANDBOX_NAMESPACE: ${COMPOSE_PROJECT:?the unique host Compose project}
+      # Host capacity sampling: the machine's own CPU, memory and retained
+      # container count, reported on the heartbeat the runner already sends.
+      # Enabled unless an operator turns it off; a deployment that has not
+      # mounted the proc files below reports the fields as missing rather than
+      # failing, so the default costs nothing where it cannot work.
+      AGENT_HOST_CAPACITY_ENABLED: ${AGENT_HOST_CAPACITY_ENABLED:-1}
 
       AGENT_LEASE_TTL: ${AGENT_LEASE_TTL:-120}
       AGENT_TIMEOUT_S: ${AGENT_TIMEOUT_S:-3600}
@@ -383,6 +389,41 @@ services:
       - type: bind
         source: ../../.shared-live-ready
         target: /run/cloud-agent/shared-live-ready
+        read_only: true
+        bind:
+          create_host_path: false
+      # The host machine's own load, as three named files and nothing more.
+      #
+      # **Not `/proc`, and not `pid: host`.** A container's `/proc/stat`
+      # describes the container, so mounting the directory would produce a
+      # number that looks like a machine and is not one; and a shared pid
+      # namespace would hand this process — which sits beside untrusted
+      # repository code — a view of every process on the host. Three read-only
+      # files answer the only question asked here: how busy is the box, and how
+      # much memory is left.
+      #
+      # `create_host_path: false` so a host without them fails loudly rather
+      # than getting an empty file Docker invented. The collector treats a
+      # missing file as a missing measurement and never falls back to reading
+      # an unscoped `/proc`.
+      - type: bind
+        source: /proc/stat
+        target: /run/host-metrics/stat
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /proc/meminfo
+        target: /run/host-metrics/meminfo
+        read_only: true
+        bind:
+          create_host_path: false
+      # The boot id is what makes a reading provably this machine's: a restart
+      # changes it, so a CPU delta spanning one is discarded instead of being
+      # averaged across two different uptimes.
+      - type: bind
+        source: /proc/sys/kernel/random/boot_id
+        target: /run/host-metrics/boot_id
         read_only: true
         bind:
           create_host_path: false

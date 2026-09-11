@@ -132,6 +132,12 @@ match-dir = "(?!tests|\\.venv|node_modules|web|migrations|docs).*"
 [dependency-groups]
 dev = [
   "httpx>=0.27.0",
+  # Validates release manifests against deploy/release/manifest.schema.json —
+  # the published contract, checked against the generator that writes it, so
+  # the two cannot drift apart. Named here rather than relied on transitively:
+  # it arrives today through openapi-spec-validator, and a test that leans on a
+  # dependency of a dependency breaks the day that one changes.
+  "jsonschema>=4.21",
   "mypy>=1.20.2",
   "pre-commit>=3.6.0",
   "pydocstyle>=6.3.0",

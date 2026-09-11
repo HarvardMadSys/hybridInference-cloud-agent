@@ -22,13 +22,21 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from cloud_agent.api.deps import (
     get_agent_job_store,
     get_client_ip,
     log_admin_action,
     verify_admin_access,
+)
+from cloud_agent.capacity_protocol import (
+    DEFAULT_HISTORY_RANGE,
+    HISTORY_RANGES,
+    AgentHostCapacityHistoryResponse,
+    admin_capacity_view,
+    history_point_grid,
+    resolve_history_range,
 )
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.host_pool import (
@@ -49,7 +57,17 @@ from cloud_agent.schemas import (
 if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore
 
-router = APIRouter(prefix="/admin")
+
+def _no_store(response: Response) -> None:
+    """Keep an operator's view of the pool out of every cache on the way.
+
+    These responses carry live placement and load for the whole fleet, and a
+    stale one is worse than a slow one: the numbers look current and are not.
+    """
+    response.headers["Cache-Control"] = "no-store"
+
+
+router = APIRouter(prefix="/admin", dependencies=[Depends(_no_store)])
 
 
 def _require_store(store: AgentJobStore | None) -> AgentJobStore:
@@ -62,20 +80,21 @@ def _require_store(store: AgentJobStore | None) -> AgentJobStore:
     return store
 
 
-def _to_item(row: dict) -> AgentRunnerHost:
+def _to_item(row: dict, *, now: datetime | None = None) -> AgentRunnerHost:
     last_seen: datetime = row["last_seen_at"]
-    now = datetime.now(UTC)
+    read_at = datetime.now(UTC) if now is None else now
     # The column is TIMESTAMPTZ, so asyncpg hands back an aware datetime; a
     # naive one would only come from a hand-built row in a test.
     if last_seen.tzinfo is None:
         last_seen = last_seen.replace(tzinfo=UTC)
+    epoch = row.get("capacity_epoch")
     return AgentRunnerHost(
         host=row["host"],
         active=bool(row["is_active"]),
         last_worker_id=row.get("last_worker_id"),
         first_seen_at=row["first_seen_at"],
         last_seen_at=last_seen,
-        seconds_since_seen=max(0.0, (now - last_seen).total_seconds()),
+        seconds_since_seen=max(0.0, (read_at - last_seen).total_seconds()),
         # Read with ``.get`` and defaulted, not indexed. A row predating the
         # pool columns — and any caller that builds one by hand — must render,
         # because the alternative is that the page an operator uses to fix a
@@ -93,6 +112,15 @@ def _to_item(row: dict) -> AgentRunnerHost:
         sandbox_image_digest=row.get("sandbox_image_digest"),
         runtime_versions=row.get("runtime_versions"),
         runtime_versions_available=row.get("runtime_versions_available"),
+        capacity_epoch=None if epoch is None else str(epoch),
+        # The stored block is re-validated rather than trusted: one corrupt
+        # document costs that host its capacity numbers, not the whole page.
+        capacity=admin_capacity_view(
+            snapshot=row.get("capacity_snapshot"),
+            received_at=row.get("capacity_received_at"),
+            sampled_at=row.get("capacity_sampled_at"),
+            now=read_at,
+        ),
     )
 
 
@@ -105,13 +133,19 @@ async def _snapshot(store: AgentJobStore) -> ListAgentRunnerHostsResponse:
     name the claim gate is actually enforcing, not "unpinned" while the queue
     sits still. ``runtime_versions`` is the same fact about versions, and is
     read in the same transaction as the menus it must be displayed against.
+
+    ``observed_at`` is that transaction's own instant. Every age on the page is
+    measured from it rather than from whenever the response happened to be
+    serialized, so a slow request cannot make the whole fleet look older than
+    it is.
     """
-    rows, active, selected_versions = await store.runner_pool()
+    rows, active, selected_versions, observed_at = await store.runner_pool()
     return ListAgentRunnerHostsResponse(
         execution_profile=default_execution_profile().value,
-        hosts=[_to_item(row) for row in rows],
+        hosts=[_to_item(row, now=observed_at) for row in rows],
         active_host=active,
         runtime_versions=selected_versions,
+        observed_at=observed_at,
     )
 
 
@@ -186,7 +220,7 @@ async def set_agent_runtime_version(
     groups; existing conversations keep the version they began on.
     """
     job_store = _require_store(store)
-    _, _, previous = await job_store.runner_pool()
+    _, _, previous, _ = await job_store.runner_pool()
 
     if not await job_store.set_runtime_version(runtime=payload.runtime, version=payload.version):
         raise HTTPException(
@@ -453,3 +487,61 @@ async def remove_agent_runner_host(
         actor_id=_admin_id,
     )
     return await _snapshot(job_store)
+
+
+# ── Capacity history ───────────────────────────────────────────────────
+
+
+@router.get(
+    "/agent/runner-hosts/{host}/capacity-history",
+    response_model=AgentHostCapacityHistoryResponse,
+)
+async def get_agent_runner_host_capacity_history(
+    host: str,
+    window: str = Query(
+        DEFAULT_HISTORY_RANGE,
+        alias="range",
+        description="How far back to read: 1h, 6h or 24h. Anything else is refused.",
+    ),
+    _admin_id: str = Depends(verify_admin_access),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> AgentHostCapacityHistoryResponse:
+    """Read one host's stored CPU and memory history.
+
+    Separate from the pool endpoint on purpose. The table is the page's main
+    information and it loads on every poll; a 24-hour curve is wanted only when
+    an operator opens one machine, and folding it into the poll would make
+    every thirty seconds cost a day of rows per host.
+
+    Only the current epoch is served. A rebuilt machine inherits its name, so
+    an older generation's points describe hardware that is no longer there —
+    the response carries the epoch so a client can tell that its curve is
+    stale rather than let it appear to continue into the new machine.
+
+    Every point is one observation of one minute, and a minute nobody measured
+    comes back as an explicit null rather than as an interpolated value: the
+    chart exists to show when a machine was in trouble, and a filled-in gap is
+    the one thing that would hide it.
+    """
+    seconds = resolve_history_range(window)
+    if seconds is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unsupported range {window!r}. Use one of: {', '.join(sorted(HISTORY_RANGES))}."
+            ),
+        )
+    history = await _require_store(store).host_capacity_history(host=host, range_seconds=seconds)
+    if history is None:
+        raise HTTPException(status_code=404, detail=f"Unknown runner host: {host}")
+    epoch = history["capacity_epoch"]
+    return AgentHostCapacityHistoryResponse(
+        host=host,
+        capacity_epoch=None if epoch is None else str(epoch),
+        since=history["since"],
+        until=history["until"],
+        observed_at=history["observed_at"],
+        points=history_point_grid(
+            rows=history["rows"], since=history["since"], until=history["until"]
+        ),
+    )

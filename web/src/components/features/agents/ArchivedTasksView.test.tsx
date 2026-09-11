@@ -75,7 +75,12 @@ function listing(options: AgentSessionListOptions = {}) {
     (item) =>
       Boolean(item.archived_at) === (options.archived ?? true) &&
       (!options.search || item.title.toLowerCase().includes(options.search.toLowerCase())) &&
-      (!options.state || item.job.state === options.state),
+      (!options.state ||
+        (item.job.conversation_state
+          ? item.job.conversation_state === options.state
+          : options.state === 'idle'
+            ? item.job.state === 'succeeded' || item.job.state === 'cancelled'
+            : item.job.state === options.state)),
   );
   const facets = new Map<string, number>();
   for (const item of matches) facets.set(item.job.repo, (facets.get(item.job.repo) ?? 0) + 1);
@@ -147,6 +152,40 @@ afterEach(() => {
 });
 
 describe('archived session management', () => {
+  it('offers four chat states and finds both successful and stopped conversations as idle', async () => {
+    sessions = [
+      session('published'),
+      session('unpublished', {}, { published_pr_url: null }),
+      session('stopped', {}, { state: 'cancelled' }),
+      session('failed', {}, { state: 'failed' }),
+      session('busy', { can_delete: false }, { state: 'cancelled', conversation_state: 'running' }),
+    ];
+    render(<ArchivedTasksView />);
+    await screen.findByRole('link', { name: /Session published/ });
+    expect(
+      within(await screen.findByRole('link', { name: /Session busy/ })).getByText('Running'),
+    ).toBeVisible();
+    const status = screen.getByRole('combobox', { name: 'Filter by status' });
+    expect(
+      within(status)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['All statuses', 'Queued', 'Running', 'Idle', 'Failed']);
+    fireEvent.change(status, { target: { value: 'idle' } });
+    await waitFor(() =>
+      expect(mocks.list).toHaveBeenCalledWith(
+        expect.objectContaining({ state: 'idle' }),
+        expect.any(AbortSignal),
+      ),
+    );
+    for (const id of ['published', 'unpublished', 'stopped']) {
+      const row = await screen.findByRole('link', { name: new RegExp(`Session ${id}`) });
+      expect(within(row).getByText('Idle')).toBeInTheDocument();
+    }
+    expect(screen.queryByRole('link', { name: /Session failed/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Session busy/ })).not.toBeInTheDocument();
+  });
+
   it('opens archived history without unarchiving and keeps running status visible', async () => {
     sessions = [session('running', { can_delete: false }, { state: 'running' })];
     render(<ArchivedTasksView />);

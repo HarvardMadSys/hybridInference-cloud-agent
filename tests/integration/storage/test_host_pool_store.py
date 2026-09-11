@@ -1569,7 +1569,7 @@ async def test_a_version_no_host_offers_is_refused(store):
 
     assert not await store.set_runtime_version(runtime="claude-code", version="2.1.235")
 
-    _, _, selected = await store.runner_pool()
+    _, _, selected, _ = await store.runner_pool()
     assert selected == {}
 
 
@@ -1623,7 +1623,7 @@ async def test_physical_server_grouping_preserves_deployment_identity_and_labels
     await store.set_host_status(host="gpu-box-kata", status=HOST_DRAINING)
     # Old replicas omitting the new field must not erase it.
     await store.record_host_heartbeat(host="gpu-box-kata")
-    rows, active, _ = await store.runner_pool()
+    rows, active, _, _ = await store.runner_pool()
     assert active == "gpu-box-kata"
     assert len(rows) == 2
     for row in rows:

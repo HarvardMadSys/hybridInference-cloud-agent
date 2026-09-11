@@ -33,16 +33,16 @@ there is not. A mapped binding is created with ``selection_pending`` set, so a
 session that predates this revision keeps working while every tool it calls is
 confirmed by its owner once.
 
-Revision ID: 0005_generic_mcp_connections
-Revises: 0004_residency_on_membership
+Revision ID: 0007_generic_mcp_connections
+Revises: 0006_host_capacity
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0005_generic_mcp_connections"
-down_revision = "0004_residency_on_membership"
+revision = "0007_generic_mcp_connections"
+down_revision = "0006_host_capacity"
 branch_labels = None
 depends_on = None
 

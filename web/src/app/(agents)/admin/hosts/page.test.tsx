@@ -4,7 +4,9 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { AgentRunnerHostPool } from '@/lib/api/admin';
 import type { AgentAccessApi } from '@/lib/api/session';
+import { APIError } from '@/lib/utils/errors';
 
 const auth = vi.hoisted(() => ({ role: 'admin', access: undefined as AgentAccessApi | undefined }));
 beforeEach(() => {
@@ -27,6 +29,7 @@ vi.mock('@/components/providers/AuthProvider', async () => {
 
 vi.mock('@/lib/api/admin', () => ({
   getAgentRunnerHosts: vi.fn(),
+  getAgentRunnerHostCapacityHistory: vi.fn(),
   setActiveAgentRunnerHost: vi.fn(),
   forgetAgentRunnerHost: vi.fn(),
   drainAgentRunnerHost: vi.fn(),
@@ -37,22 +40,66 @@ vi.mock('@/lib/api/admin', () => ({
 
 import {
   drainAgentRunnerHost,
+  getAgentRunnerHostCapacityHistory,
   getAgentRunnerHosts,
   removeAgentRunnerHost,
   setActiveAgentRunnerHost,
   setAgentRuntimeVersion,
 } from '@/lib/api/admin';
 
-import { formatAge, formatSlots, runtimeMenu } from './format';
+import { reasonLabel } from './capacity';
+import { formatAge, runtimeMenu } from './format';
 import AdminHostsPage from './page';
 
 const mocked = {
   list: getAgentRunnerHosts as unknown as ReturnType<typeof vi.fn>,
+  history: getAgentRunnerHostCapacityHistory as unknown as ReturnType<typeof vi.fn>,
   pin: setActiveAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   drain: drainAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   remove: removeAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   setVersion: setAgentRuntimeVersion as unknown as ReturnType<typeof vi.fn>,
 };
+
+const GIB = 1024 ** 3;
+const RUNNER_A_EPOCH = '11111111-1111-4111-8111-111111111111';
+
+function inventory(over: Record<string, unknown> = {}) {
+  return {
+    namespace: 'example-agent-kata',
+    status: 'available',
+    running: 3,
+    stopped: 7,
+    other_states: { created: 0, paused: 0, restarting: 0, removing: 0, dead: 0 },
+    reason: null,
+    unscoped_legacy_containers: 0,
+    duplicate_sandbox_id: false,
+    ...over,
+  };
+}
+
+function capacity(over: Record<string, unknown> = {}) {
+  return {
+    schema_version: 1,
+    source: 'linux_host_proc_and_docker_list',
+    sample_id: 'sample-1',
+    linux_boot_id: 'boot-a',
+    cpu_percent: 37.24,
+    cpu_logical_count: 32,
+    cpu_window_seconds: 30,
+    cpu_missing_reason: null,
+    memory_total_bytes: 128 * GIB,
+    memory_available_bytes: 86 * GIB,
+    memory_used_bytes: 42 * GIB,
+    memory_used_percent: 32.8,
+    memory_missing_reason: null,
+    inventory: inventory(),
+    received_at: '2026-09-11T12:34:31Z',
+    sampled_at: '2026-09-11T12:34:01Z',
+    sample_age_seconds: 12,
+    freshness: 'fresh',
+    ...over,
+  };
+}
 
 function host(over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -75,6 +122,8 @@ function host(over: Partial<Record<string, unknown>> = {}) {
     sandbox_image_digest: 'freeinference-cloud-agent-job@sha256:abcdef0123456789',
     runtime_versions: { 'claude-code': '2.1.220' },
     runtime_versions_available: { 'claude-code': ['2.1.220', '2.1.235'] },
+    capacity_epoch: RUNNER_A_EPOCH,
+    capacity: null,
     ...over,
   };
 }
@@ -83,13 +132,69 @@ function pool(
   hosts: unknown[],
   active: string | null = null,
   runtimeVersions: Record<string, string> = {},
-) {
+): AgentRunnerHostPool {
   return {
-    hosts,
+    hosts: hosts as AgentRunnerHostPool['hosts'],
     active_host: active,
     runtime_versions: runtimeVersions,
     execution_profile: 'untrusted-kata-v1',
+    observed_at: '2026-09-11T12:34:31Z',
   };
+}
+
+const at = (minute: number): string =>
+  new Date(Date.UTC(2026, 8, 11, 12, minute, 30)).toISOString();
+
+function historyPoint(minute: number, cpu: number | null, over: Record<string, unknown> = {}) {
+  return {
+    bucket_at: new Date(Date.UTC(2026, 8, 11, 12, minute, 0)).toISOString(),
+    sampled_at: cpu === null ? null : at(minute),
+    linux_boot_id: 'boot-a',
+    cpu_percent: cpu,
+    cpu_logical_count: 32,
+    cpu_window_seconds: 30,
+    cpu_missing_reason: null,
+    memory_total_bytes: 128 * GIB,
+    memory_available_bytes: 86 * GIB,
+    memory_used_bytes: 42 * GIB,
+    memory_used_percent: cpu === null ? null : 32.8,
+    memory_missing_reason: null,
+    ...over,
+  };
+}
+
+function history(over: Record<string, unknown> = {}) {
+  return {
+    host: 'runner-a',
+    capacity_epoch: RUNNER_A_EPOCH,
+    since: new Date(Date.UTC(2026, 8, 11, 12, 0, 0)).toISOString(),
+    until: new Date(Date.UTC(2026, 8, 11, 12, 5, 0)).toISOString(),
+    observed_at: new Date(Date.UTC(2026, 8, 11, 12, 5, 40)).toISOString(),
+    resolution_seconds: 60,
+    semantics: 'sampled_observation',
+    points: [0, 1, 2, 3, 4, 5].map((minute) => historyPoint(minute, 10 + minute * 10)),
+    ...over,
+  };
+}
+
+/** jsdom's `document.hidden` is read-only; the page reads it every poll. */
+function setDocumentHidden(hidden: boolean): void {
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+}
+
+/** The expanded panel for a server, by the id its toggle points at. */
+function panelFor(name = 'runner-a'): HTMLElement {
+  const panel = document.getElementById(`capacity-panel-${name}`);
+  if (panel === null) throw new Error(`no open capacity panel for ${name}`);
+  return panel;
+}
+
+/** Waits for the row, then opens it. `vi.waitFor` also works under fake timers. */
+async function openPanel(name = 'runner-a'): Promise<void> {
+  const target = (): HTMLElement =>
+    screen.getByRole('button', { name: `Show capacity for ${name}` });
+  await vi.waitFor(() => expect(target()).toBeInTheDocument());
+  fireEvent.click(target());
 }
 
 describe('AdminHostsPage', () => {
@@ -97,11 +202,15 @@ describe('AdminHostsPage', () => {
     auth.role = 'admin';
     Object.values(mocked).forEach((m) => m.mockReset());
     mocked.list.mockResolvedValue(pool([host()]));
+    mocked.history.mockResolvedValue(history());
   });
 
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    setDocumentHidden(false);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('refuses an admin with only agent.use without asking the control plane', async () => {
@@ -146,8 +255,9 @@ describe('AdminHostsPage', () => {
     render(<AdminHostsPage />);
 
     expect(await screen.findByText('legacy-box')).toBeInTheDocument();
-    // No ceiling declared: the slot cell is the count alone, not "0 / null".
-    expect(screen.getByText('0')).toBeInTheDocument();
+    // No ceiling declared: the quota says so instead of inventing a free count.
+    expect(screen.getByText('Limit not set')).toBeInTheDocument();
+    expect(screen.queryByText(/free/)).not.toBeInTheDocument();
   });
 
   it('shows one server and only its Kata capacity without placement controls', async () => {
@@ -173,7 +283,8 @@ describe('AdminHostsPage', () => {
     );
     render(<AdminHostsPage />);
     const row = (await screen.findByRole('rowheader', { name: 'gpu-box' })).closest('tr')!;
-    expect(within(row).getByText('0 / 3')).toBeInTheDocument();
+    expect(within(row).getByText('0 / 3 in use')).toBeInTheDocument();
+    expect(within(row).getByText('3 free')).toBeInTheDocument();
     expect(screen.queryByText('Execution environment')).not.toBeInTheDocument();
     expect(screen.queryByText('Standard (runc)')).not.toBeInTheDocument();
     expect(screen.queryByText('pinned')).not.toBeInTheDocument();
@@ -323,22 +434,598 @@ describe('AdminHostsPage', () => {
     expect(screen.queryByText(/enrol/i)).not.toBeInTheDocument();
   });
 
-  it('keeps the last good pool when a background refresh fails', async () => {
+  it('clears everything and refuses the page when access is revoked mid-session', async () => {
+    mocked.list.mockRejectedValueOnce(new APIError('FORBIDDEN', 'revoked', 403));
+    render(<AdminHostsPage />);
+
+    expect(await screen.findByText('Admin access required')).toBeInTheDocument();
+    expect(screen.queryByText('runner-a')).not.toBeInTheDocument();
+  });
+});
+
+describe('capacity columns', () => {
+  beforeEach(() => {
+    auth.role = 'admin';
+    Object.values(mocked).forEach((m) => m.mockReset());
+    mocked.history.mockResolvedValue(history());
+  });
+
+  afterEach(cleanup);
+
+  it('reports load, quota and retained sandboxes beside the status', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          slots_used: 2,
+          slots_total: 3,
+          capacity: capacity(),
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    expect(within(row).getByText('2 / 3 in use')).toBeInTheDocument();
+    expect(within(row).getByText('1 free')).toBeInTheDocument();
+    expect(within(row).getByText('37%')).toBeInTheDocument();
+    expect(within(row).getByText('32 logical CPUs')).toBeInTheDocument();
+    expect(within(row).getByText('33% · 42 / 128 GiB')).toBeInTheDocument();
+    expect(within(row).getByText('86 GiB available')).toBeInTheDocument();
+    expect(within(row).getByText('3 running · 7 stopped')).toBeInTheDocument();
+    expect(within(row).getByText('12s ago')).toBeInTheDocument();
+    // The poll-time column it replaced is gone.
+    expect(screen.queryByText('Last polled')).not.toBeInTheDocument();
+  });
+
+  it('names the reason a value is missing instead of printing zero', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          host: 'warm',
+          capacity: capacity({ cpu_percent: null, cpu_missing_reason: 'warming_up' }),
+        }),
+        host({ host: 'silent', capacity: null }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    const warm = (await screen.findByRole('rowheader', { name: 'warm' })).closest('tr')!;
+    expect(within(warm).getByText('Warming up')).toBeInTheDocument();
+    expect(within(warm).queryByText('0%')).not.toBeInTheDocument();
+    const silent = screen.getByRole('rowheader', { name: 'silent' }).closest('tr')!;
+    // Both load cells say so, and the sandbox cell does not claim zero.
+    expect(within(silent).getAllByText('Not measured').length).toBeGreaterThanOrEqual(2);
+    expect(within(silent).queryByText('0 running · 0 stopped')).not.toBeInTheDocument();
+  });
+
+  it('ages only what the row shows, and never adds an expired source', async () => {
+    // Two environments behind one physical name: one measured twelve seconds
+    // ago, one an hour ago. The expired one contributes nothing to this row —
+    // its containers have been stopped or started since it reported — so it
+    // must be neither added to the count nor allowed to set the row's age.
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          host: 'gpu-box',
+          labels: { physical_host: 'gpu-box' },
+          capacity: capacity({ sample_age_seconds: 12, freshness: 'fresh', cpu_percent: 5 }),
+        }),
+        host({
+          host: 'gpu-box-legacy',
+          labels: { physical_host: 'gpu-box' },
+          sandbox_runtime: 'runc',
+          capacity: capacity({
+            sample_age_seconds: 400,
+            freshness: 'stale',
+            cpu_percent: 95,
+            inventory: inventory({ namespace: 'example-agent-runc', running: 1, stopped: 2 }),
+          }),
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'gpu-box' })).closest('tr')!;
+    // The freshest observation is what the machine's load cells show, and it
+    // is the only thing on the row whose age is being described.
+    expect(within(row).getByText('5%')).toBeInTheDocument();
+    expect(within(row).getByText('12s ago')).toBeInTheDocument();
+    // The row still says that something on it has expired, and the count is a
+    // lower bound rather than a total that includes an hour-old reading.
+    expect(within(row).getByText('stale')).toBeInTheDocument();
+    expect(within(row).getByText('≥10 observed · Partial')).toBeInTheDocument();
+    expect(within(row).getByText(reasonLabel('source_stale'))).toBeInTheDocument();
+    // The expired environment is still named, with its own last count.
+    expect(within(row).queryByText('11 running · 9 stopped')).not.toBeInTheDocument();
+  });
+
+  it('renders a control plane that has never sent a capacity block', async () => {
+    // The UI half can ship before the collector does. An older control plane
+    // omits the keys entirely rather than sending nulls, and the page an
+    // operator uses to fix a bad host must not be the page that breaks on it.
+    const legacy = host({ host: 'legacy' });
+    delete (legacy as Record<string, unknown>).capacity;
+    delete (legacy as Record<string, unknown>).capacity_epoch;
+    mocked.list.mockResolvedValue({
+      hosts: [legacy],
+      active_host: null,
+      runtime_versions: {},
+      execution_profile: 'untrusted-kata-v1',
+    });
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'legacy' })).closest('tr')!;
+    // Both load cells say they have nothing, and neither says zero.
+    expect(within(row).getAllByText('Not measured').length).toBeGreaterThanOrEqual(2);
+    expect(within(row).queryByText('0%')).not.toBeInTheDocument();
+    // The rest of the row is untouched: slots and actions still work.
+    expect(within(row).getByText('0 / 4 in use')).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Drain' })).toBeEnabled();
+  });
+
+  it('says a partial count is a lower bound', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          capacity: capacity({
+            inventory: inventory({ status: 'partial', stopped: null, reason: 'unknown_state' }),
+          }),
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    const row = (await screen.findByRole('rowheader', { name: 'runner-a' })).closest('tr')!;
+    expect(within(row).getByText('≥3 observed · Partial')).toBeInTheDocument();
+    expect(within(row).getByText(/outside the fixed vocabulary/)).toBeInTheDocument();
+  });
+});
+
+describe('capacity panel', () => {
+  beforeEach(() => {
+    auth.role = 'admin';
+    Object.values(mocked).forEach((m) => m.mockReset());
+    mocked.list.mockResolvedValue(pool([host({ capacity: capacity() })]));
+    mocked.history.mockResolvedValue(history());
+  });
+
+  afterEach(() => {
+    cleanup();
+    setDocumentHidden(false);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('opens one server at a time and closes again', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({ host: 'runner-a', labels: { physical_host: 'box-a' }, capacity: capacity() }),
+        host({ host: 'runner-b', labels: { physical_host: 'box-b' }, capacity: capacity() }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+
+    const toggleA = await screen.findByRole('button', { name: 'Show capacity for box-a' });
+    const toggleB = screen.getByRole('button', { name: 'Show capacity for box-b' });
+    expect(toggleA).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(toggleA);
+    expect(screen.getByText('Capacity · box-a')).toBeInTheDocument();
+    expect(toggleA).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(toggleB);
+    expect(screen.queryByText('Capacity · box-a')).not.toBeInTheDocument();
+    expect(screen.getByText('Capacity · box-b')).toBeInTheDocument();
+    expect(toggleA).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(toggleB);
+    expect(screen.queryByText('Capacity · box-b')).not.toBeInTheDocument();
+  });
+
+  it('reads one hour by default and switches window on request', async () => {
+    render(<AdminHostsPage />);
+    await openPanel();
+
+    await waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('runner-a', '1h', expect.anything()),
+    );
+    expect(await screen.findByRole('img', { name: 'CPU usage (%)' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Memory usage (%)' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Last 1h' })).toHaveAttribute('aria-pressed', 'true');
+
+    mocked.history.mockResolvedValue(
+      history({ points: [historyPoint(0, 88), historyPoint(1, 89)] }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Last 6h' }));
+
+    await waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('runner-a', '6h', expect.anything()),
+    );
+    // Only the CPU curve reached 89; the memory fixture stays where it was.
+    expect((await screen.findAllByText(/Highest observed in range: 89.0%/)).length).toBe(1);
+  });
+
+  it('lets an operator read the other enrollment behind one physical server', async () => {
+    // A physical row can be two deployments, and they are never added: each
+    // keeps its own curve, and the operator says which one they meant.
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          host: 'gpu-box-kata',
+          labels: { physical_host: 'gpu-box' },
+          capacity: capacity({ sample_age_seconds: 5 }),
+        }),
+        host({
+          host: 'gpu-box-runc',
+          labels: { physical_host: 'gpu-box' },
+          sandbox_runtime: 'runc',
+          capacity_epoch: '33333333-3333-4333-8333-333333333333',
+          capacity: capacity({
+            sample_age_seconds: 400,
+            freshness: 'stale',
+            cpu_percent: 95,
+            inventory: inventory({ namespace: 'example-agent-runc', running: 1, stopped: 2 }),
+          }),
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+    await openPanel('gpu-box');
+
+    // The default is the enrollment the row's own numbers came from.
+    const switcher = await screen.findByLabelText('Curve source');
+    expect(switcher).toHaveValue('gpu-box-kata');
+    await waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('gpu-box-kata', '1h', expect.anything()),
+    );
+
+    mocked.history.mockClear();
+    mocked.history.mockResolvedValue(
+      history({ host: 'gpu-box-runc', capacity_epoch: '33333333-3333-4333-8333-333333333333' }),
+    );
+    fireEvent.change(switcher, { target: { value: 'gpu-box-runc' } });
+
+    await waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('gpu-box-runc', '1h', expect.anything()),
+    );
+    // The curve is drawn under the window and generation it was asked for.
+    expect((await screen.findAllByRole('img', { name: 'CPU usage (%)' })).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('discards a history answer that no longer matches the open panel', async () => {
+    // A response for the previous window, carrying the previous generation,
+    // lands after the operator has moved on. Drawing it would put one
+    // machine's curve under another's title.
+    mocked.history.mockImplementation(async (_host: string) =>
+      history({ capacity_epoch: '22222222-2222-4222-8222-222222222222' }),
+    );
+    render(<AdminHostsPage />);
+    await openPanel();
+
+    await waitFor(() => expect(mocked.history).toHaveBeenCalled());
+    // Nothing that arrived is shown, because nothing that arrived matches.
+    await waitFor(() =>
+      expect(screen.queryByText(/Highest observed in range/)).not.toBeInTheDocument(),
+    );
+    expect(
+      await screen.findByText(/No history is available for this server yet/),
+    ).toBeInTheDocument();
+  });
+
+  it('drops the cached curve and says so when the host re-enrolls', async () => {
     vi.useFakeTimers();
+    let epoch = RUNNER_A_EPOCH;
+    let cpu = 10;
+    mocked.history.mockImplementation(async () =>
+      history({
+        capacity_epoch: epoch,
+        points: [historyPoint(0, cpu), historyPoint(1, cpu)],
+      }),
+    );
+    render(<AdminHostsPage />);
+    await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
+    await openPanel();
+    await vi.waitFor(() =>
+      expect(screen.getAllByText(/Highest observed in range: 10.0%/).length).toBe(1),
+    );
+
+    epoch = '33333333-3333-4333-8333-333333333333';
+    cpu = 90;
+    mocked.list.mockResolvedValue(pool([host({ capacity_epoch: epoch, capacity: capacity() })]));
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    await vi.waitFor(() =>
+      expect(screen.getByText(/history restarts from the new enrollment/)).toBeInTheDocument(),
+    );
+    await vi.waitFor(() =>
+      expect(screen.getAllByText(/Highest observed in range: 90.0%/).length).toBe(1),
+    );
+  });
+
+  it('polls the open panel and pauses both channels while the tab is hidden', async () => {
+    vi.useFakeTimers();
+    render(<AdminHostsPage />);
+    await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
+    await openPanel();
+    await vi.waitFor(() => expect(mocked.history).toHaveBeenCalledTimes(1));
+    const poolCalls = mocked.list.mock.calls.length;
+
+    setDocumentHidden(true);
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(mocked.history).toHaveBeenCalledTimes(1);
+    expect(mocked.list).toHaveBeenCalledTimes(poolCalls);
+
+    // Becoming visible again refreshes immediately rather than waiting out the
+    // rest of an interval that ran while nobody was looking.
+    setDocumentHidden(false);
+    fireEvent(document, new Event('visibilitychange'));
+    await vi.waitFor(() => expect(mocked.history).toHaveBeenCalledTimes(2));
+    expect(mocked.list.mock.calls.length).toBeGreaterThan(poolCalls);
+  });
+
+  it('keeps the enrollment it fell back to when nothing was measured yet', async () => {
+    // Neither enrollment has reported capacity, so the panel opens on the
+    // representative one. When the other starts reporting, the curve must not
+    // follow it: the operator opened a server, not "whichever machine answers
+    // next".
+    vi.useFakeTimers();
+    const onBox = (name: string, epoch: string, measured: boolean) =>
+      host({
+        host: name,
+        labels: { physical_host: 'box' },
+        capacity_epoch: epoch,
+        capacity: measured ? capacity() : null,
+      });
+    mocked.list.mockResolvedValue(
+      pool([onBox('box-a', 'epoch-a', false), onBox('box-b', 'epoch-b', false)]),
+    );
+    mocked.history.mockImplementation(async (name: string) =>
+      history({ host: name, capacity_epoch: name === 'box-b' ? 'epoch-b' : 'epoch-a' }),
+    );
+    render(<AdminHostsPage />);
+    await vi.waitFor(() =>
+      expect(screen.getByRole('rowheader', { name: 'box' })).toBeInTheDocument(),
+    );
+    await openPanel('box');
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything()),
+    );
+
+    // box-b is the first to report; the choice made at open still stands.
+    mocked.history.mockClear();
+    mocked.list.mockResolvedValue(
+      pool([onBox('box-a', 'epoch-a', false), onBox('box-b', 'epoch-b', true)]),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything());
+    expect(mocked.history).not.toHaveBeenCalledWith('box-b', '1h', expect.anything());
+  });
+
+  it('adopts the generation of the source the operator switched to', async () => {
+    // Switching sources is not a re-enrollment, and saying it is would tell an
+    // operator their machine was rebuilt when they merely looked at the other
+    // deployment on it.
+    const onBox = (name: string, epoch: string, cpu: number) =>
+      host({
+        host: name,
+        labels: { physical_host: 'box' },
+        capacity_epoch: epoch,
+        capacity: capacity({ cpu_percent: cpu }),
+      });
+    mocked.list.mockResolvedValue(
+      pool([onBox('box-a', 'epoch-a', 11), onBox('box-b', 'epoch-b', 22)]),
+    );
+    mocked.history.mockImplementation(async (name: string) =>
+      history({ host: name, capacity_epoch: name === 'box-b' ? 'epoch-b' : 'epoch-a' }),
+    );
+    render(<AdminHostsPage />);
+
+    await openPanel('box');
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything()),
+    );
+    expect(screen.queryByText(/re-enrolled/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Curve source'), { target: { value: 'box-b' } });
+
+    await waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-b', '1h', expect.anything()),
+    );
+    expect(screen.queryByText(/re-enrolled/)).not.toBeInTheDocument();
+  });
+
+  it('stops polling a panel that has been closed', async () => {
+    vi.useFakeTimers();
+    render(<AdminHostsPage />);
+    await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
+    await openPanel();
+    await vi.waitFor(() => expect(mocked.history).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide capacity for runner-a' }));
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(mocked.history).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows accumulating history, per-source counts and the reasons behind them', async () => {
+    mocked.history.mockResolvedValue(
+      history({
+        points: [
+          historyPoint(0, null, { sampled_at: null }),
+          historyPoint(1, null, { sampled_at: null }),
+          historyPoint(2, 20),
+        ],
+      }),
+    );
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          capacity: capacity({
+            inventory: inventory({ status: 'partial', stopped: null, reason: 'unknown_state' }),
+          }),
+        }),
+      ]),
+    );
+    render(<AdminHostsPage />);
+    await openPanel();
+
+    const panel = panelFor();
+    expect((await screen.findAllByText(/History is accumulating/)).length).toBe(2);
+    expect(within(panel).getByText('Retained sandboxes')).toBeInTheDocument();
+    expect(within(panel).getByText('≥3 observed · Partial')).toBeInTheDocument();
+    expect(within(panel).getByText(/outside the fixed vocabulary/)).toBeInTheDocument();
+    // The enrollment that contributed the count is named, not just summed.
+    expect(within(panel).getByText('example-agent-kata')).toBeInTheDocument();
+  });
+});
+
+describe('polling and actions', () => {
+  beforeEach(() => {
+    auth.role = 'admin';
+    Object.values(mocked).forEach((m) => m.mockReset());
+    mocked.history.mockResolvedValue(history());
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the last good pool when a background refresh fails, and its age keeps moving', async () => {
+    vi.useFakeTimers();
+    const clock = { ms: 1_000 };
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => clock.ms);
     try {
-      mocked.list.mockResolvedValueOnce(pool([host()]));
+      mocked.list.mockResolvedValueOnce(pool([host({ capacity: capacity() })]));
       render(<AdminHostsPage />);
       await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
+      expect(screen.getByText('12s ago')).toBeInTheDocument();
 
       mocked.list.mockRejectedValue(new Error('gateway down'));
+      clock.ms += 30_000;
       await vi.advanceTimersByTimeAsync(30_000);
 
-      // Stale numbers are a smaller lie than an empty page.
+      // Stale numbers are a smaller lie than an empty page — but unlabelled
+      // stale numbers are the lie, so the failure is stated.
       expect(screen.getByText('runner-a')).toBeInTheDocument();
+      expect(screen.getByText('37%')).toBeInTheDocument();
       expect(screen.queryByText('gateway down')).not.toBeInTheDocument();
+      expect(screen.getByText(/Refresh failed/)).toBeInTheDocument();
+
+      // The age advances on local monotonic time; it never freezes at 12s.
+      expect(screen.getByText('42s ago')).toBeInTheDocument();
+      clock.ms += 5_000;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(screen.getByText('47s ago')).toBeInTheDocument();
     } finally {
-      vi.useRealTimers();
+      spy.mockRestore();
     }
+  });
+
+  it('expires a reading locally when the pool goes quiet', async () => {
+    // The server's `freshness` describes the moment it answered. Two minutes
+    // of failing polls later the reading is 132 seconds old, and a page that
+    // kept calling it fresh — while the age beside it climbed — would be the
+    // one combination that looks current and is not.
+    vi.useFakeTimers();
+    const clock = { ms: 1_000 };
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => clock.ms);
+    try {
+      mocked.list.mockResolvedValueOnce(
+        pool([host({ capacity: capacity({ sample_age_seconds: 12, freshness: 'fresh' }) })]),
+      );
+      render(<AdminHostsPage />);
+      await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
+      expect(screen.queryByText('stale')).not.toBeInTheDocument();
+
+      mocked.list.mockRejectedValue(new Error('gateway down'));
+      clock.ms += 120_000;
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(screen.getByText('2m ago')).toBeInTheDocument();
+      expect(screen.getByText('stale')).toBeInTheDocument();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('pins the curve source when the panel opens rather than following the newest reporter', async () => {
+    // Two environments behind one physical name, both reporting. Left to pick
+    // the newest fresh observation on every poll, the curve would swap between
+    // them whenever they alternated — under one title, with no operator action
+    // — and the epoch check would call the swap a re-enrollment.
+    vi.useFakeTimers();
+    // The source the row shows is the one sampled most recently, so the two
+    // polls below swap which environment that is.
+    const onBoxAt = (name: string, sampledAt: string, cpu: number) =>
+      host({
+        host: name,
+        labels: { physical_host: 'box' },
+        capacity: capacity({ sample_age_seconds: 5, cpu_percent: cpu, sampled_at: sampledAt }),
+      });
+    mocked.list.mockResolvedValue(
+      pool([
+        onBoxAt('box-a', '2026-09-11T12:34:30Z', 11),
+        onBoxAt('box-b', '2026-09-11T12:34:00Z', 22),
+      ]),
+    );
+    mocked.history.mockImplementation(async (name: string) => history({ host: name }));
+    render(<AdminHostsPage />);
+
+    await vi.waitFor(() =>
+      expect(screen.getByRole('rowheader', { name: 'box' })).toBeInTheDocument(),
+    );
+    await openPanel('box');
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything()),
+    );
+    await vi.waitFor(() => expect(screen.getByLabelText('Curve source')).toHaveValue('box-a'));
+
+    // box-b becomes the newest reporter on the next poll.
+    mocked.history.mockClear();
+    mocked.list.mockResolvedValue(
+      pool([
+        onBoxAt('box-a', '2026-09-11T12:30:00Z', 11),
+        onBoxAt('box-b', '2026-09-11T12:34:30Z', 22),
+      ]),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(screen.getByLabelText('Curve source')).toHaveValue('box-a');
+    expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything());
+    expect(mocked.history).not.toHaveBeenCalledWith('box-b', '1h', expect.anything());
+  });
+
+  it('does not let a poll issued before an action overwrite the action result', async () => {
+    vi.useFakeTimers();
+    mocked.list.mockResolvedValueOnce(pool([host()]));
+    render(<AdminHostsPage />);
+    await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
+
+    // A poll starts and hangs.
+    let landPoll: (value: AgentRunnerHostPool) => void = () => {};
+    mocked.list.mockImplementationOnce(
+      () =>
+        new Promise<AgentRunnerHostPool>((resolve) => {
+          landPoll = resolve;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    // The action answers first.
+    mocked.drain.mockResolvedValue(pool([host({ status: 'draining' })]));
+    fireEvent.click(screen.getByRole('button', { name: 'Drain' }));
+    await vi.waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Undrain' })).toBeInTheDocument(),
+    );
+
+    // The older read lands afterwards and must be discarded.
+    landPoll(pool([host()]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.getByRole('button', { name: 'Undrain' })).toBeInTheDocument();
   });
 });
 
@@ -349,11 +1036,6 @@ describe('formatting', () => {
     expect(formatAge(7200)).toBe('2h ago');
     expect(formatAge(172800)).toBe('2d ago');
   });
-
-  it('omits the ceiling for a host that declares none', () => {
-    expect(formatSlots({ slots_used: 2, slots_total: 4 } as never)).toBe('2 / 4');
-    expect(formatSlots({ slots_used: 2, slots_total: null } as never)).toBe('2');
-  });
 });
 
 describe('harness version selection', () => {
@@ -361,6 +1043,7 @@ describe('harness version selection', () => {
     auth.role = 'admin';
     Object.values(mocked).forEach((m) => m.mockReset());
     mocked.list.mockResolvedValue(pool([host()]));
+    mocked.history.mockResolvedValue(history());
   });
 
   afterEach(cleanup);
@@ -424,26 +1107,12 @@ describe('harness version selection', () => {
   });
 });
 
-describe('version and image cells', () => {
-  it('unions menus across hosts without losing the default ordering', () => {
-    const menu = runtimeMenu([
-      host({ runtime_versions_available: { 'claude-code': ['2.1.220'] } }),
-      host({
-        runtime_versions_available: { 'claude-code': ['2.1.220', '2.1.235'], pi: ['0.73.1'] },
-      }),
-    ] as never);
-    expect(menu).toEqual([
-      ['claude-code', ['2.1.220', '2.1.235']],
-      ['pi', ['0.73.1']],
-    ]);
-  });
-});
-
 describe('the harness section reads as a choice, not a list', () => {
   beforeEach(() => {
     auth.role = 'admin';
     Object.values(mocked).forEach((m) => m.mockReset());
     mocked.list.mockResolvedValue(pool([host()]));
+    mocked.history.mockResolvedValue(history());
   });
 
   afterEach(cleanup);
@@ -480,5 +1149,20 @@ describe('the harness section reads as a choice, not a list', () => {
 
     const codex = (await screen.findByLabelText('codex')) as HTMLSelectElement;
     expect([...codex.options].map((o) => o.textContent)).toEqual(['Image default', '0.145.0']);
+  });
+});
+
+describe('version and image cells', () => {
+  it('unions menus across hosts without losing the default ordering', () => {
+    const menu = runtimeMenu([
+      host({ runtime_versions_available: { 'claude-code': ['2.1.220'] } }),
+      host({
+        runtime_versions_available: { 'claude-code': ['2.1.220', '2.1.235'], pi: ['0.73.1'] },
+      }),
+    ] as never);
+    expect(menu).toEqual([
+      ['claude-code', ['2.1.220', '2.1.235']],
+      ['pi', ['0.73.1']],
+    ]);
   });
 });

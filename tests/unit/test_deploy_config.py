@@ -705,6 +705,10 @@ def test_production_deploy_uses_the_same_parallel_topology() -> None:
     assert "PROD_HOST_SLOTS" in host_env["AGENT_HOST_SLOTS"]
     assert host_env["AGENT_RUNNER_REPLICAS"] == host_env["AGENT_HOST_SLOTS"]
     assert "PROD_RETAINED_DOCKER_DATA_ROOT" in host_env["AGENT_RETAINED_DOCKER_DATA_ROOT"]
+    assert host_env["SIBLING_COMPOSE_PROJECTS"] == (
+        "${{ vars.PROD_SIBLING_COMPOSE_PROJECTS || vars.STAGING_SANDBOX_COMPOSE_PROJECT }}"
+    )
+    assert "ALLOW_STRAY_STACK" not in host_env
     assert ".deploy-orchestrator/deploy/control-plane/deploy.sh" in control_deploy["run"]
     assert ".deploy-orchestrator/deploy/host/deploy.sh" in host_deploy["run"]
 

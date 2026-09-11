@@ -27,16 +27,16 @@ opened with was replaced, and it no longer moves for a claim that wrote nothing.
 The same shape already fences the attempt-ledger refresh in
 ``agent_attempt_ledger``; this table gets it for the same reason.
 
-Revision ID: 0006_mcp_refresh_lease
-Revises: 0005_generic_mcp_connections
+Revision ID: 0008_mcp_refresh_lease
+Revises: 0007_generic_mcp_connections
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0006_mcp_refresh_lease"
-down_revision = "0005_generic_mcp_connections"
+revision = "0008_mcp_refresh_lease"
+down_revision = "0007_generic_mcp_connections"
 branch_labels = None
 depends_on = None
 

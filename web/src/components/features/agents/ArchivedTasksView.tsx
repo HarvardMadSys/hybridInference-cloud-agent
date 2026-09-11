@@ -11,13 +11,13 @@ import {
   type AgentSessionApi,
   type AgentSessionListOptions,
   type AgentSessionProjectApi,
-  type AgentSessionState,
 } from '@/lib/api/agents';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { APIError } from '@/lib/utils/errors';
 import { ARCHIVE_FOCUS, ArchiveDeleteDialog, ArchiveIcon } from './ArchiveControls';
 import { ArchiveAutoLoad } from './ArchiveAutoLoad';
-import { ArchiveProjectSection, ARCHIVE_STATE_KEYS } from './ArchiveProjectSection';
+import { ArchiveProjectSection } from './ArchiveProjectSection';
+import { CONVERSATION_STATE_KEYS, type ConversationState } from './conversationState';
 
 const GROUPS_PER_PAGE = 6;
 const BULK_PAGE_SIZE = 100;
@@ -48,7 +48,7 @@ export function ArchivedTasksView() {
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [repo, setRepo] = useState('');
-  const [state, setState] = useState<AgentSessionState | ''>('');
+  const [state, setState] = useState<ConversationState | ''>('');
   const [projects, setProjects] = useState<AgentSessionProjectApi[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -442,11 +442,11 @@ export function ArchivedTasksView() {
           <select
             value={state}
             disabled={controlsDisabled}
-            onChange={(event) => setState(event.target.value as AgentSessionState | '')}
+            onChange={(event) => setState(event.target.value as ConversationState | '')}
             className="w-full min-w-0 cursor-pointer appearance-none bg-transparent py-2.5 pr-8 text-xs text-gray-700 outline-none disabled:opacity-50 dark:text-gray-200 dark:[color-scheme:dark]"
           >
             <option value="">{t('archive.allStates')}</option>
-            {Object.entries(ARCHIVE_STATE_KEYS).map(([value, key]) => (
+            {Object.entries(CONVERSATION_STATE_KEYS).map(([value, key]) => (
               <option key={value} value={value}>
                 {t(key)}
               </option>

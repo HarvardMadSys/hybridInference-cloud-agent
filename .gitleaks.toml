@@ -2,10 +2,10 @@
 # this repository actually needs.
 #
 # Division of labour: gitleaks runs its default rules over the tree AND the
-# history (secret-scan.yml). Its one allowlist entry below is the exact fake
-# Slack token line in the patch gate's detector tests — never a path. That
-# precision matters for the history scan: a path exemption would also hide a
-# real credential committed to a test and removed in a later commit.
+# history (secret-scan.yml). Its allowlist entries below are exact fake values
+# in tests — never a path. That precision matters for the history scan: a path
+# exemption would also hide a real credential committed to a test and removed
+# in a later commit.
 # tests/unit/test_no_committed_credentials.py complements the default rules by
 # scanning every tracked file for credential formats this project and its
 # gateway issue but gitleaks may not know, including hyi- and ajt. tokens.
@@ -23,4 +23,18 @@ description = "Known fake Slack token in the patch-gate detector test."
 regexTarget = "line"
 regexes = [
   '''\("slack_token", "xoxb-123456789012-abcdefghijkl"\),''',
+]
+
+[[allowlists]]
+description = "Known fake MCP signing secret in the end-to-end chain test."
+regexTarget = "line"
+regexes = [
+  '''_MCP_TOKEN_SECRET = "e2e-signing-secret-32-bytes-long"''',
+]
+
+[[allowlists]]
+description = "Fixed conversation row identifier in sidebar status tests."
+regexTarget = "line"
+regexes = [
+  '''^\s*key: 'conversation-1',$''',
 ]

@@ -432,6 +432,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "mypy" },
     { name = "openapi-spec-validator" },
     { name = "pre-commit" },
@@ -465,6 +466,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "jsonschema", specifier = ">=4.21" },
     { name = "mypy", specifier = ">=1.20.2" },
     { name = "openapi-spec-validator", specifier = ">=0.7.1" },
     { name = "pre-commit", specifier = ">=3.6.0" },

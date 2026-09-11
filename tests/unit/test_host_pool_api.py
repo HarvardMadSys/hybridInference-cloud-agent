@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -66,6 +67,9 @@ class FakeHostPoolStore:
         self.release_calls: list[tuple[str, int, str, int | None]] = []
         self.sandbox_observations: list[dict[str, Any]] = []
         self.sandbox_stop_due: dict[str, Any] | None = None
+        #: History rows per host, as the capacity-history route would read
+        #: them out of ``agent_host_capacity_history``.
+        self.history: dict[str, list[dict[str, Any]]] = {}
 
     # -- enrollment tokens
 
@@ -108,6 +112,11 @@ class FakeHostPoolStore:
             "sandbox_image_digest": None,
             "runtime_versions": None,
             "runtime_versions_available": None,
+            "capacity_snapshot": None,
+            "capacity_received_at": None,
+            "capacity_sampled_at": None,
+            "capacity_sample_id": None,
+            "capacity_epoch": uuid4(),
             "enrolled": False,
             "credential_hash": None,
         }
@@ -136,6 +145,9 @@ class FakeHostPoolStore:
             labels=labels or {},
             credential_hash=credential_hash,
             enrolled=True,
+            # Re-enrollment rotates the epoch and clears the observation, the
+            # same two facts the real upsert writes.
+            capacity_epoch=uuid4(),
         )
 
     async def authenticate_host(self, *, host: str, credential_hash: str) -> dict[str, Any] | None:
@@ -150,6 +162,9 @@ class FakeHostPoolStore:
         self,
         *,
         host: str,
+        credential_hash: str | None = None,
+        capacity: dict[str, Any] | None = None,
+        capacity_sample_age_ms: int | None = None,
         physical_host: str | None = None,
         slots_total: int | None = None,
         runner_version: str | None = None,
@@ -183,7 +198,42 @@ class FakeHostPoolStore:
             row["labels"]["physical_host"] = physical_host
         if capabilities is not None:
             row["capabilities"] = normalize_capabilities(capabilities)
+        if capacity is not None and capacity_sample_age_ms is not None:
+            self._apply_capacity(
+                row,
+                credential_hash=credential_hash,
+                capacity=capacity,
+                sample_age_ms=capacity_sample_age_ms,
+            )
         return dict(row)
+
+    def _apply_capacity(
+        self,
+        row: dict[str, Any],
+        *,
+        credential_hash: str | None,
+        capacity: dict[str, Any],
+        sample_age_ms: int,
+    ) -> None:
+        """Mirror the store's three acceptance conditions, in memory.
+
+        A stale credential, a sample this host has already stored, and an
+        observation older than the one on the row are each refused; the test
+        tier that proves it in SQL lives in the ``dbtest`` suite.
+        """
+        if credential_hash is None or row["credential_hash"] != credential_hash:
+            return
+        sample_id = str(capacity["sample_id"])
+        if row["capacity_sample_id"] == sample_id:
+            return
+        received_at = datetime.now(UTC)
+        sampled_at = received_at - timedelta(milliseconds=sample_age_ms)
+        if row["capacity_sampled_at"] is not None and row["capacity_sampled_at"] >= sampled_at:
+            return
+        row["capacity_snapshot"] = capacity
+        row["capacity_received_at"] = received_at
+        row["capacity_sampled_at"] = sampled_at
+        row["capacity_sample_id"] = sample_id
 
     async def get_host(self, *, host: str) -> dict[str, Any] | None:
         row = self.rows.get(host)
@@ -209,9 +259,26 @@ class FakeHostPoolStore:
         row["enrolled"] = False
         return "ok"
 
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
+    async def runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], datetime]:
         rows = [{**row, "is_active": row["host"] == self.active_host} for row in self.rows.values()]
-        return rows, self.active_host, dict(self.runtime_versions)
+        return rows, self.active_host, dict(self.runtime_versions), datetime.now(UTC)
+
+    async def host_capacity_history(
+        self, *, host: str, range_seconds: int
+    ) -> dict[str, Any] | None:
+        row = self.rows.get(host)
+        if row is None:
+            return None
+        until = datetime.now(UTC).replace(second=0, microsecond=0)
+        return {
+            "capacity_epoch": row["capacity_epoch"],
+            "since": until - timedelta(seconds=range_seconds),
+            "until": until,
+            "observed_at": datetime.now(UTC),
+            "rows": self.history.get(host, []),
+        }
 
     async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
         if version is None:
@@ -1464,3 +1531,231 @@ async def test_an_answer_without_a_grant_id_has_nothing_to_revoke() -> None:
     assert credential is None
     assert grants.revoked == []
     assert store.linked == []
+
+
+# ── Host capacity: the optional block and the history endpoint ─────────
+#
+# The wire rules themselves live in ``test_capacity_protocol.py``; what these
+# cover is the part only an HTTP round trip can show — that a monitoring field
+# never becomes a reason to refuse a heartbeat, that what the store accepted is
+# what the admin page reads back, and that the history endpoint answers gaps
+# rather than inventing values for them.
+
+
+def _capacity_block(**overrides: Any) -> dict[str, Any]:
+    block: dict[str, Any] = {
+        "schema_version": 1,
+        "sample_id": "00000000-0000-4000-8000-000000000001",
+        "sample_age_ms": 120,
+        "linux_boot_id": "00000000-0000-4000-8000-000000000002",
+        "source": "linux_host_proc_and_docker_list",
+        "cpu_percent": 37.2,
+        "cpu_logical_count": 32,
+        "cpu_window_seconds": 30.01,
+        "memory_total_bytes": 128 * 1024**3,
+        "memory_available_bytes": 86 * 1024**3,
+        "inventory": {
+            "namespace": "staging-agent",
+            "status": "available",
+            "running": 3,
+            "stopped": 7,
+            "other_states": {
+                "created": 0,
+                "paused": 0,
+                "restarting": 0,
+                "removing": 0,
+                "dead": 0,
+            },
+            "reason": None,
+        },
+        "missing": {"cpu": None, "memory": None},
+    }
+    block.update(overrides)
+    return block
+
+
+async def _beat(async_client, credential: str, **body: Any):
+    return await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json=body,
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+
+async def test_a_heartbeat_carries_capacity_to_the_admin_page(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    response = await _beat(async_client, credential, capacity=_capacity_block())
+    assert response.status_code == 200
+
+    listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+    assert listed["observed_at"] is not None
+    (shown,) = listed["hosts"]
+    assert shown["capacity_epoch"]
+    capacity = shown["capacity"]
+    assert capacity["cpu_percent"] == pytest.approx(37.2)
+    assert capacity["cpu_logical_count"] == 32
+    assert capacity["memory_total_bytes"] == 128 * 1024**3
+    # The percentage is derived server-side from the same helper the chart
+    # uses, so the table and the curve cannot disagree.
+    assert capacity["memory_used_bytes"] == 42 * 1024**3
+    assert capacity["memory_used_percent"] == pytest.approx(32.8125)
+    assert capacity["inventory"]["running"] == 3
+    assert capacity["inventory"]["stopped"] == 7
+    assert capacity["freshness"] == "fresh"
+    assert capacity["sample_age_seconds"] == pytest.approx(0.12, abs=1.0)
+
+
+async def test_an_unusable_capacity_block_never_refuses_a_heartbeat(client):
+    """A gap in a graph must not cost a host that is alive."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    response = await _beat(
+        async_client,
+        credential,
+        slots_total=5,
+        capacity={"schema_version": 99, "sample_id": "not-a-uuid"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "online"
+    assert store.rows["runner-a"]["slots_total"] == 5
+    listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+    assert listed["hosts"][0]["capacity"] is None
+
+
+async def test_a_host_that_never_reported_capacity_is_not_reported_as_idle(client):
+    """An older runner omits the block; the page must say so, not say zero."""
+    async_client, store = client
+    await _enroll(async_client, store)
+
+    listed = (await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)).json()
+    (shown,) = listed["hosts"]
+    assert shown["capacity"] is None
+    assert shown["capacity_epoch"]
+
+
+async def test_a_replayed_sample_does_not_refresh_its_age(client):
+    """The same observation sent twice is still the same observation."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    await _beat(async_client, credential, capacity=_capacity_block())
+    first = store.rows["runner-a"]["capacity_sampled_at"]
+    await _beat(async_client, credential, capacity=_capacity_block(sample_age_ms=1))
+
+    assert store.rows["runner-a"]["capacity_sampled_at"] == first
+
+
+async def test_an_older_observation_cannot_overwrite_a_newer_one(client):
+    """Replicas report out of order; the younger reading is the true one."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    await _beat(async_client, credential, capacity=_capacity_block(sample_age_ms=100))
+    younger = store.rows["runner-a"]["capacity_sampled_at"]
+    await _beat(
+        async_client,
+        credential,
+        capacity=_capacity_block(
+            sample_id="00000000-0000-4000-8000-000000000009", sample_age_ms=60_000
+        ),
+    )
+
+    assert store.rows["runner-a"]["capacity_sampled_at"] == younger
+    assert store.rows["runner-a"]["capacity_snapshot"]["sample_age_ms"] == 100
+
+
+async def test_a_newer_observation_is_accepted(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    await _beat(async_client, credential, capacity=_capacity_block(sample_age_ms=60_000))
+    stale = store.rows["runner-a"]["capacity_sampled_at"]
+    await _beat(
+        async_client,
+        credential,
+        capacity=_capacity_block(
+            sample_id="00000000-0000-4000-8000-000000000009", sample_age_ms=100
+        ),
+    )
+
+    assert store.rows["runner-a"]["capacity_sampled_at"] > stale
+
+
+async def test_the_pool_response_is_not_cached(client):
+    async_client, store = client
+    await _enroll(async_client, store)
+
+    response = await async_client.get("/admin/agent/runner-hosts", headers=ADMIN)
+
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_capacity_history_of_an_unknown_host_is_not_found(client):
+    async_client, _store = client
+    response = await async_client.get(
+        "/admin/agent/runner-hosts/nobody/capacity-history", headers=ADMIN
+    )
+    assert response.status_code == 404
+
+
+async def test_capacity_history_refuses_a_range_it_does_not_serve(client):
+    """A substituted default would draw a window the label does not name."""
+    async_client, store = client
+    await _enroll(async_client, store)
+
+    response = await async_client.get(
+        "/admin/agent/runner-hosts/runner-a/capacity-history?range=7d", headers=ADMIN
+    )
+
+    assert response.status_code == 422
+    assert "1h" in response.text
+
+
+async def test_capacity_history_returns_an_explicit_gap_per_missing_minute(client):
+    async_client, store = client
+    await _enroll(async_client, store)
+    await _beat(
+        async_client,
+        credential := store.rows["runner-a"]["credential_hash"] and "",
+    )
+
+    until = datetime.now(UTC).replace(second=0, microsecond=0)
+    store.history["runner-a"] = [
+        {
+            "bucket_at": until - timedelta(minutes=3),
+            "sampled_at": until - timedelta(minutes=3) + timedelta(seconds=20),
+            "linux_boot_id": "00000000-0000-4000-8000-000000000002",
+            "cpu_percent": 37.2,
+            "cpu_logical_count": 32,
+            "cpu_window_seconds": 30.0,
+            "cpu_missing_reason": None,
+            "memory_total_bytes": 128 * 1024**3,
+            "memory_available_bytes": 86 * 1024**3,
+            "memory_missing_reason": None,
+        }
+    ]
+
+    response = await async_client.get(
+        "/admin/agent/runner-hosts/runner-a/capacity-history?range=1h", headers=ADMIN
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["resolution_seconds"] == 60
+    assert body["semantics"] == "sampled_observation"
+    assert body["capacity_epoch"]
+    assert len(body["points"]) == 61
+    observed = [point for point in body["points"] if point["sampled_at"] is not None]
+    assert len(observed) == 1
+    assert observed[0]["cpu_percent"] == pytest.approx(37.2)
+    assert observed[0]["memory_used_percent"] == pytest.approx(32.8125)
+    # Everything else is a hole, and a hole is null rather than zero.
+    assert all(
+        point["cpu_percent"] is None for point in body["points"] if point["sampled_at"] is None
+    )
+    assert credential == ""

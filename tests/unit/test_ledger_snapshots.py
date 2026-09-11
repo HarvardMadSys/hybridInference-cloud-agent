@@ -4,14 +4,28 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from cloud_agent import ledger
+from cloud_agent.admin_usage import MAX_USAGE_LEDGER_ROWS
 from cloud_agent.gateway import GatewayError
-from cloud_agent.grant_usage import GrantUsageReport
-from cloud_agent.ledger import collect_usage_snapshots, refresh_ledger_entry, summarize_ledger
+from cloud_agent.grant_usage import (
+    DECIMAL_DIGITS,
+    DERIVED_AMOUNT_CHARS,
+    USAGE_METRICS,
+    GrantUsageReport,
+)
+from cloud_agent.ledger import (
+    _sum_amounts,
+    _sum_reports,
+    collect_usage_snapshots,
+    refresh_ledger_entry,
+    summarize_ledger,
+)
 
 START = datetime(2026, 9, 9, 10, tzinfo=UTC)
 END = START + timedelta(minutes=1)
@@ -195,6 +209,167 @@ def test_public_shape_excludes_grants_bindings_and_arbitrary_gateway_keys():
     for private in ("agr_actual", "gw_one", "upstream-secret", "authorization", "secret-error"):
         assert private not in public
     assert "refresh_failed" in public
+
+
+def test_a_sum_wider_than_one_report_stays_exact_and_no_longer_fails():
+    """One report may hold 128 integer digits; two of them already overflow it."""
+    wide = "1" * 128
+    summary = summarize_ledger(
+        [
+            ledger_row(
+                snapshot=report_payload(
+                    totals={
+                        **report_payload()["totals"],
+                        "spent_usd": wide,
+                    }
+                )
+            ),
+            ledger_row(
+                id=2,
+                grant_id="agr_next",
+                snapshot=report_payload(
+                    grant_id="agr_next",
+                    totals={
+                        **report_payload()["totals"],
+                        "spent_usd": "0." + "9" * 126,
+                    },
+                ),
+            ),
+        ]
+    )
+    assert summary.status == "available"
+    assert summary.totals is not None
+    # 128 nines plus 0.999... on top of them: every digit of the exact sum is
+    # kept, including the 126 places the second report contributed.
+    assert summary.totals.spent_usd == "1" * 128 + "." + "9" * 126
+    assert len(summary.totals.spent_usd) == 255
+    assert summary.attempts[0].status == "available"
+
+
+def test_many_operands_are_added_without_the_default_context_rounding_them():
+    """A long sum must not be cut to the 28 digits a default context carries."""
+    amount = "12345678901234567890.12345678"
+    report = report_payload(totals={**report_payload()["totals"], "spent_usd": amount})
+    summary = summarize_ledger([ledger_row(snapshot=report) for _ in range(50)])
+    assert summary.totals is not None
+    assert summary.totals.spent_usd == "617283945061728394506.17283900"
+
+
+def test_amounts_are_never_rounded_however_they_are_split_up():
+    """A total must not depend on how the gateway split its reports.
+
+    The reducer returns the exact sum at every scale. Rounding here would make
+    one job's answer differ from two jobs carrying the same requests, and a
+    small amount added to a large one would vanish entirely.
+    """
+    cases = [
+        ["0.01", "0.00012345"],
+        ["0", "0.00978569"],
+        ["0.00000000001"],
+        ["1.00"],
+        ["1.005", "0.005"],
+        ["0.10", "0.20"],
+    ]
+    for amounts in cases:
+        assert _sum_amounts(amounts) == format(
+            sum((Decimal(amount) for amount in amounts), Decimal(0)), "f"
+        ), amounts
+    # Values beyond a display precision survive in full rather than being cut.
+    long_amount = "0." + "1" * 126
+    assert _sum_amounts([long_amount] * 50) == "5." + "5" * 125 + "0"
+
+
+def test_a_small_amount_survives_being_summed_beside_a_large_one():
+    small = report_payload(totals={**report_payload()["totals"], "spent_usd": "0.00012345"})
+    large = report_payload(totals={**report_payload()["totals"], "spent_usd": "1000.00"})
+    summary = summarize_ledger(
+        [
+            ledger_row(snapshot=large),
+            ledger_row(
+                id=2,
+                attempt_id=11,
+                attempt_no=2,
+                grant_id="agr_next",
+                snapshot={**small, "grant_id": "agr_next"},
+            ),
+        ]
+    )
+    assert summary.totals is not None
+    assert summary.totals.spent_usd == "1000.00012345"
+
+
+def test_a_derived_amount_beyond_the_contract_is_refused_not_rounded(monkeypatch):
+    """The refusal path is exercised at a lowered bound.
+
+    With the real constants the bound sits above anything valid reports can add
+    up to, which the next test checks; this one proves that crossing it refuses
+    the amount instead of rounding or truncating it.
+    """
+    # One operand occupies 128 characters; a sum of four carries one more
+    # integer digit, so the bound is set exactly there.
+    monkeypatch.setattr(ledger, "_derived_amount_chars", 128)
+    huge = "9" * DECIMAL_DIGITS
+    report = SimpleNamespace(
+        totals=SimpleNamespace(
+            calls=1,
+            tokens_in=1,
+            tokens_out=1,
+            cache_read=1,
+            cache_write=1,
+            reasoning=None,
+            spent_usd=huge,
+        ),
+        unknown_rows=SimpleNamespace(**dict.fromkeys(USAGE_METRICS, 0)),
+        estimated_calls=0,
+    )
+    reasons: list[str] = []
+    assert len(report.totals.spent_usd) == 128
+    assert _sum_reports([report], reasons) is not None
+    assert reasons == []
+    assert _sum_reports([report] * 4, reasons) is None
+    assert reasons == ["usage_invalid_response"]
+
+
+def test_the_derived_width_covers_every_amount_valid_reports_can_add_up_to():
+    """Stored reports cannot outgrow the derived amount contract.
+
+    One operand carries at most ``DECIMAL_DIGITS`` digits and a selection holds at
+    most ``MAX_USAGE_LEDGER_ROWS`` of them, so the widest possible amount is 133
+    integer digits plus its point and two places. No real selection is ever
+    refused; the guard only exists so that an impossible input still cannot
+    produce a rounded total.
+    """
+    widest = _sum_amounts(["9" * DECIMAL_DIGITS] * MAX_USAGE_LEDGER_ROWS)
+    # 50,000 whole operands of 128 nines need len(str(49999)) more integer
+    # digits than one operand, and no fractional places at all.
+    assert len(widest) == len(str(MAX_USAGE_LEDGER_ROWS - 1)) + DECIMAL_DIGITS
+    assert len(widest) == 133 <= DERIVED_AMOUNT_CHARS
+    # A full-width fraction stays a fraction: 50,000 of them sum just below
+    # 50,000, so its 128 places need five integer digits and no more.
+    fractional = _sum_amounts(["0." + "9" * DECIMAL_DIGITS] * MAX_USAGE_LEDGER_ROWS)
+    assert len(fractional) == len(str(MAX_USAGE_LEDGER_ROWS - 1)) + 1 + DECIMAL_DIGITS
+    assert len(fractional) == 134 <= DERIVED_AMOUNT_CHARS
+
+
+def test_a_job_whose_sum_is_refused_reads_as_partial_with_why(monkeypatch):
+    """A refused sum is reported as incomplete, never as a smaller number."""
+    # Four operands of 128 nines sum to 129 digits; the bound is set below that.
+    monkeypatch.setattr(ledger, "_derived_amount_chars", 128)
+    huge = "9" * DECIMAL_DIGITS
+    payload = report_payload(totals={**report_payload()["totals"], "spent_usd": huge})
+    summary = summarize_ledger(
+        [
+            ledger_row(id=index, attempt_id=10 + index, attempt_no=index, snapshot=payload)
+            for index in range(1, 9)
+        ]
+    )
+    # No smaller number is reported in place of the real total, and a refresh
+    # failure is not misreported as the reason. Each single report is still
+    # readable, so the attempt rows do not inherit the job's refusal.
+    assert summary.totals is None
+    assert summary.unknown_rows is None
+    assert summary.status == "partial"
+    assert [attempt.status for attempt in summary.attempts] == ["available"] * 8
 
 
 @pytest.mark.asyncio

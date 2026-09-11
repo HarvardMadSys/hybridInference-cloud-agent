@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SidebarConversation } from './useConversationList';
+import { getConversationState } from './conversationState';
 
 const COMPLETED_STATES = new Set(['done', 'needs_review', 'failed', 'cancelled']);
 interface Receipt {
@@ -23,6 +24,8 @@ const numberOrNull = (value: unknown): number | null =>
 
 /** Attempt identity is consistent between list and detail, unlike execution telemetry. */
 function completionReceipt(row: SidebarConversation): Receipt | null {
+  const state = getConversationState(row.job);
+  if (state === 'running' || state === 'queued') return null;
   if (!COMPLETED_STATES.has(row.job.state)) return null;
   return {
     jobId: row.job.id,

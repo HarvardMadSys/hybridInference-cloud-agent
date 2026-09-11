@@ -15,6 +15,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud_agent.agent_access import AgentAccess  # noqa: TC001 — Pydantic resolves this at runtime.
+from cloud_agent.capacity_protocol import (
+    AgentHostCapacity,
+    HostCapacityReport,
+    parse_capacity_block,
+)
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
@@ -303,6 +308,7 @@ class AgentJobResponse(BaseModel):
     base_sha: str | None = None
     output_branch: str | None = None
     state: str
+    conversation_state: Literal["queued", "running", "idle", "failed"] | None = None
     cancel_requested: bool = False
     current_attempt_id: int | None = None
     published_pr_url: str | None = None
@@ -386,7 +392,9 @@ class AgentJobListResponse(BaseModel):
     jobs: list[AgentJobResponse]
 
 
-AgentSessionState = Literal["running", "queued", "needs_review", "done", "failed", "cancelled"]
+AgentSessionState = Literal[
+    "running", "queued", "idle", "needs_review", "done", "failed", "cancelled"
+]
 AgentSessionDeleteBlockReason = Literal[
     "not_archived", "session_active", "fork_in_progress", "publication_pending"
 ]
@@ -1686,6 +1694,23 @@ class AgentRunnerHost(BaseModel):  # type: ignore[no-any-unimported]
             "plane cannot serve a version absent from it."
         ),
     )
+    capacity_epoch: str | None = Field(
+        None,
+        description=(
+            "Generation of this host's capacity data; rotated by re-enrollment. "
+            "A client uses it to drop a curve that belongs to the machine this "
+            "one replaced."
+        ),
+    )
+    capacity: AgentHostCapacity | None = Field(
+        None,
+        description=(
+            "The last accepted host observation, with the server's own "
+            "received/sampled times and freshness. Null means no usable "
+            "observation has ever arrived — which is not the same as an idle "
+            "machine, and is rendered as unavailable rather than as zero."
+        ),
+    )
 
 
 class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported]
@@ -1708,6 +1733,14 @@ class ListAgentRunnerHostsResponse(BaseModel):  # type: ignore[no-any-unimported
         description=(
             "The deployment's chosen CLI version per runtime id. A runtime "
             "absent here runs its claiming host's default."
+        ),
+    )
+    observed_at: datetime | None = Field(
+        None,
+        description=(
+            "When the database answered this read, by its own clock. Every "
+            "pool response carries it, so an operation's answer and a poll's "
+            "answer are comparable without the client's clock."
         ),
     )
 
@@ -1977,6 +2010,16 @@ class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
             "reported and leaves the control plane's last knowledge in place."
         ),
     )
+    capacity: HostCapacityReport | None = Field(
+        None,
+        description=(
+            "Optional host CPU / memory / retained-container observation, "
+            "taken on the runner's own clock within the last five minutes. A "
+            "runner that does not collect it simply omits the field, and one "
+            "whose block is unusable has the block dropped rather than the "
+            "heartbeat refused."
+        ),
+    )
     residencies: list[ResidencyBeat] | None = Field(
         None,
         max_length=128,
@@ -1996,6 +2039,26 @@ class HostHeartbeatRequest(BaseModel):  # type: ignore[no-any-unimported]
             "generations and never treats an omitted row as deletion."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unusable_capacity(cls, data: Any) -> Any:
+        """Turn an unusable capacity block into an absent one.
+
+        The block is optional, and its absence is a first-class answer: an
+        older runner sends none, and a newer one may send a version or a shape
+        this control plane does not know. Refusing the whole heartbeat over it
+        would trade a gap in a graph for a host that reads as dead — so the
+        block is dropped here, before validation, and the liveness fields are
+        validated exactly as strictly as they were.
+        """
+        if (
+            isinstance(data, dict)
+            and data.get("capacity") is not None
+            and parse_capacity_block(data["capacity"]) is None
+        ):
+            return {**data, "capacity": None}
+        return data
 
 
 class HostResidencyEstablishResponse(BaseModel):  # type: ignore[no-any-unimported]

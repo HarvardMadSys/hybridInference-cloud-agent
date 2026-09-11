@@ -613,7 +613,7 @@ describe('agents api', () => {
   it('keeps the follow-up idempotency key while the response is lost', async () => {
     fetchWithAuth
       .mockRejectedValueOnce(new TypeError('network error'))
-      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_child', state: 'waiting' }, 201));
+      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_child', state: 'queued' }, 201));
 
     await expect(followUpAgentJob('ajob_parent', { prompt: 'and then' })).rejects.toThrow();
     await expect(followUpAgentJob('ajob_parent', { prompt: 'and then' })).resolves.toMatchObject({
@@ -633,7 +633,7 @@ describe('agents api', () => {
           409,
         ),
       )
-      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_edited', state: 'waiting' }, 201));
+      .mockResolvedValueOnce(jsonResponse({ id: 'ajob_edited', state: 'queued' }, 201));
 
     await expect(
       followUpAgentJob('ajob_edited_parent', { prompt: 'edited text' }),
@@ -646,7 +646,7 @@ describe('agents api', () => {
   });
 
   it('queues a follow-up in the same conversation', async () => {
-    fetchWithAuth.mockResolvedValue(jsonResponse({ id: 'ajob_child', state: 'waiting' }));
+    fetchWithAuth.mockResolvedValue(jsonResponse({ id: 'ajob_child', state: 'queued' }));
 
     const child = await followUpAgentJob('ajob_parent', { prompt: 'please add a test' });
 

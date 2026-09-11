@@ -31,7 +31,13 @@ import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
@@ -48,6 +54,35 @@ logger = get_logger(__name__)
 ENV_DATABASE_URL = "AGENT_DATABASE_URL"
 ENV_PUBLISH_BASE_BRANCH = "AGENT_PUBLISH_BASE_BRANCH"
 ENV_GITHUB_TOKEN = "AGENT_GITHUB_TOKEN"
+
+#: The admin observation reads. Their bodies are time-varying and describe
+#: other users' runs, so no intermediary may store one.
+ADMIN_READ_PREFIX = "/admin/agent/runs"
+
+
+def install_admin_no_store(app: FastAPI, *, prefix: str = ADMIN_READ_PREFIX) -> None:
+    """Keep admin read responses, refusals included, out of every cache.
+
+    A route dependency can set a header on a response the route returns, but
+    FastAPI builds a fresh response for a raised refusal and for its own
+    validation errors. These handlers wrap the defaults instead of replacing
+    them, and are registered here rather than as middleware: middleware would
+    also sit in front of the event streams, which are long-lived by design.
+    """
+    prefix = prefix.rstrip("/")
+
+    async def with_no_store(request: Request, exc: Exception) -> Response:
+        if isinstance(exc, RequestValidationError):
+            response = await request_validation_exception_handler(request, exc)
+        else:
+            response = await http_exception_handler(request, exc)  # type: ignore[arg-type]
+        if request.url.path == prefix or request.url.path.startswith(f"{prefix}/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    app.add_exception_handler(StarletteHTTPException, with_no_store)
+    app.add_exception_handler(RequestValidationError, with_no_store)
+
 
 #: Held so the event loop cannot collect a running background task. Without
 #: this the reaper and publisher are eligible for garbage collection the moment
@@ -647,15 +682,14 @@ async def reap_expired_attempts(
             await _reap_lapsed_residencies(store, grants)
         except Exception:
             logger.warning("Residency reaper pass failed", exc_info=True)
-        # Waiting follow-ups after residencies, before the attempt pass: the
-        # terminal writers promote their own children in-transaction, and
-        # this is the safety net for a child stranded between a parent's
-        # terminal write and that promotion. Cheap — it walks the partial
-        # waiting/queued indexes, not the job history.
+        # Queued follow-ups after residencies, before the attempt pass: give
+        # legacy turns a terminal answer if their native context is missing.
+        # Normal ordering is enforced at claim time; this cleanup uses the
+        # partial queued indexes instead of running on every runner poll.
         try:
-            await store.sweep_waiting_follow_ups()
+            await store.sweep_queued_follow_ups()
         except Exception:
-            logger.warning("Waiting follow-up sweep failed", exc_info=True)
+            logger.warning("Queued follow-up sweep failed", exc_info=True)
         try:
             actions = await store.reap_expired(max_attempts=max_attempts)
             await _cleanup_reaped_shared_residencies(store, actions, grants)
@@ -814,6 +848,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     """
     import asyncpg
 
+    from cloud_agent.capacity_history import collect_host_capacity_history
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
@@ -860,21 +895,30 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         reaper = asyncio.create_task(reap_expired_attempts(store, grants=app.state.grants))
         snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(store))
         ledger_collector = asyncio.create_task(collect_usage_snapshots(store, app.state.grants))
+        # Host capacity history keeps filling whether or not anybody has the
+        # admin page open — that is the whole reason it lives here rather than
+        # in the browser. Its own task and its own budgets, so a slow write
+        # cannot delay a heartbeat or the reaper.
+        capacity_history = asyncio.create_task(collect_host_capacity_history(store))
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
         _BACKGROUND_TASKS.add(ledger_collector)
+        _BACKGROUND_TASKS.add(capacity_history)
         reaper.add_done_callback(_BACKGROUND_TASKS.discard)
         snapshot_coordinator.add_done_callback(_BACKGROUND_TASKS.discard)
         ledger_collector.add_done_callback(_BACKGROUND_TASKS.discard)
+        capacity_history.add_done_callback(_BACKGROUND_TASKS.discard)
         app.state.reaper_task = reaper
         app.state.snapshot_task = snapshot_coordinator
         app.state.ledger_task = ledger_collector
+        app.state.capacity_task = capacity_history
         _start_publisher(app, store)
         logger.info("cloud agent control plane started")
     else:
         app.state.reaper_task = None
         app.state.snapshot_task = None
         app.state.ledger_task = None
+        app.state.capacity_task = None
         app.state.publish_task = None
         logger.info("cloud agent relay listener started")
 
@@ -885,6 +929,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.reaper_task,
             app.state.snapshot_task,
             app.state.ledger_task,
+            app.state.capacity_task,
             app.state.publish_task,
         ):
             if task is None:
@@ -902,7 +947,9 @@ def create_app() -> FastAPI:
 
     from cloud_agent.api import (
         admin_hosts,
+        admin_llm_requests,
         admin_runs,
+        admin_usage,
         hosts,
         mcp_connections,
         mcp_relay,
@@ -930,6 +977,12 @@ def create_app() -> FastAPI:
     app.include_router(hosts.router)
     app.include_router(admin_hosts.router)
     app.include_router(admin_runs.router)
+    app.include_router(admin_usage.router)
+    # Per-request LLM detail reads a second service and stays in its own module
+    # for the same reason it is a separate page load: the default run detail
+    # must not acquire a gateway I/O path.
+    app.include_router(admin_llm_requests.router)
+    install_admin_no_store(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
     # to one configured service account. Its own module because its caller is a
     # service holding a dispatch token, not a browser holding a session.

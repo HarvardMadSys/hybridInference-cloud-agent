@@ -30,6 +30,7 @@ removes the fence.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -41,7 +42,13 @@ from urllib.parse import quote
 import httpx
 
 from cloud_agent.gateway import ENV_BASE_URL, ENV_DISPATCH_TOKEN, GatewayError
-from cloud_agent.grant_usage import GrantUsageReport, parse_usage_report
+from cloud_agent.grant_usage import (
+    MAX_REQUEST_PAGE_BYTES,
+    GrantUsageReport,
+    GrantUsageRequestPage,
+    parse_usage_report,
+    parse_usage_request_page,
+)
 from cloud_agent.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -51,6 +58,84 @@ _CONNECT_TIMEOUT_S = 5.0
 ENV_GRANT_BASE_PATH = "GATEWAY_GRANT_BASE_PATH"
 ENV_GRANT_BINDING_ID = "GATEWAY_GRANT_BINDING_ID"
 _DEFAULT_GRANT_BASE_PATH = "/internal/agent-grants"
+
+#: Request pages are a bounded administrator read, not scheduling work. Four in
+#: flight at once keeps a browser refreshing a panel from crowding out the grant
+#: renewals and ledger refreshes that share the gateway with it. The control
+#: plane holds one grant client per process, so a per-client limit is the
+#: process limit -- and unlike a module global it cannot be bound to a loop that
+#: has already closed.
+_MAX_CONCURRENT_REQUEST_PAGES = 4
+
+#: Total budget for one request page, from waiting for a slot to the last byte
+#: of the body. ``httpx.Timeout`` cannot express this: its read timeout applies
+#: between chunks, so a gateway that trickles bytes forever never trips it, and
+#: it says nothing about how long the slot above took to free up.
+_REQUEST_PAGE_DEADLINE_S = _TIMEOUT_S
+
+
+def _validated_window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
+    """Normalize one ordered, offset-aware window, or refuse to query at all.
+
+    Raises:
+        GatewayError: If either bound is naive, or the window is empty.
+    """
+    if (
+        any(
+            not isinstance(bound, datetime) or bound.tzinfo is None or bound.utcoffset() is None
+            for bound in (since, until)
+        )
+        or since >= until
+    ):
+        raise GatewayError(
+            "usage requires an ordered window with UTC offsets",
+            error_type="usage_query_invalid",
+        )
+    return since.astimezone(UTC), until.astimezone(UTC)
+
+
+def _gateway_error_type(payload: Any) -> str:
+    """Read a bounded machine reason from a gateway error body, if there is one.
+
+    The message is deliberately dropped: it can quote request data, and only
+    the type is a stable contract.
+    """
+    error = payload.get("error") if isinstance(payload, dict) else None
+    raw_type = error.get("type") if isinstance(error, dict) else None
+    if isinstance(raw_type, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", raw_type):
+        return raw_type
+    return "usage_http_error"
+
+
+async def _bounded_json(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    headers: dict[str, str],
+    timeout: httpx.Timeout,
+) -> tuple[int, Any]:
+    """Read one JSON response under a byte ceiling, then decode it.
+
+    The body is consumed as a stream because ``Content-Length`` is not a
+    control: it can be absent, wrong, or describe the compressed size. A body
+    past the ceiling is refused whole rather than truncated or partially
+    parsed.
+    """
+    body = bytearray()
+    async with client.stream("GET", url, params=params, headers=headers, timeout=timeout) as reply:
+        async for chunk in reply.aiter_bytes():
+            if len(body) + len(chunk) > MAX_REQUEST_PAGE_BYTES:
+                raise GatewayError(
+                    "gateway request details exceed the response limit",
+                    error_type="usage_response_too_large",
+                )
+            body.extend(chunk)
+        status = reply.status_code
+    try:
+        payload = json.loads(body) if body else None
+    except ValueError:
+        payload = None
+    return status, payload
 
 
 # ── The cadence and the lifetime are one decision ──────────────────────
@@ -138,6 +223,7 @@ class GrantClient:
         binding = json.dumps(binding_parts, separators=(",", ":"))
         self._binding_id = "gw_" + hashlib.sha256(binding.encode()).hexdigest()
         self._client = client
+        self._request_page_slots = asyncio.Semaphore(_MAX_CONCURRENT_REQUEST_PAGES)
 
     @property
     def configured(self) -> bool:
@@ -286,20 +372,9 @@ class GrantClient:
             GatewayError: For invalid bounds, unavailable service, gateway
                 refusal, an unsupported schema, or a mismatched report.
         """
-        if (
-            any(
-                not isinstance(bound, datetime) or bound.tzinfo is None or bound.utcoffset() is None
-                for bound in (since, until)
-            )
-            or since >= until
-        ):
-            raise GatewayError(
-                "usage requires an ordered window with UTC offsets",
-                error_type="usage_query_invalid",
-            )
+        since, until = _validated_window(since, until)
         if not self.configured:
             raise GatewayError("gateway usage is not configured", error_type="usage_unconfigured")
-        since, until = since.astimezone(UTC), until.astimezone(UTC)
         path = f"{self._base_path}/{quote(grant_id, safe='')}/usage"
         params = {"since": since.isoformat(), "until": until.isoformat(), "detail": "totals"}
         headers = {"Authorization": f"Bearer {self._token}"}
@@ -319,15 +394,10 @@ class GrantClient:
                 "gateway usage is unreachable", error_type="usage_unavailable"
             ) from None
         if response.status_code != 200:
-            error_type = "usage_http_error"
             try:
-                payload = response.json()
-                error = payload.get("error") if isinstance(payload, dict) else None
-                raw_type = error.get("type") if isinstance(error, dict) else None
-                if isinstance(raw_type, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", raw_type):
-                    error_type = raw_type
+                error_type = _gateway_error_type(response.json())
             except ValueError:
-                pass
+                error_type = "usage_http_error"
             raise GatewayError(
                 "gateway refused the usage query",
                 status_code=response.status_code,
@@ -340,6 +410,102 @@ class GrantClient:
                 "gateway returned invalid usage JSON", error_type="usage_invalid_response"
             ) from None
         return parse_usage_report(payload, grant_id=grant_id, since=since, until=until)
+
+    async def usage_requests(
+        self,
+        grant_id: str,
+        *,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        external_job_id: str,
+        cursor: str | None = None,
+        after: tuple[datetime, str] | None = None,
+    ) -> GrantUsageRequestPage:
+        """Read one page of the request rows behind a window's totals.
+
+        Same grant, same fixed window and same attribution as :meth:`usage`,
+        one row per request the gateway admitted. This is a read-only detail
+        view: it neither replaces the totals snapshot nor writes anything back
+        to it, so opening it cannot change what accounting reports.
+
+        Args:
+            grant_id: The grant whose rows to read.
+            since: Inclusive lower bound on request start time.
+            until: Exclusive upper bound, fixed for the whole pagination run.
+            limit: Rows to ask for; the gateway accepts 1..500.
+            external_job_id: The attribution key this reference implies. A
+                report keyed to anything else is refused rather than shown.
+            cursor: Opaque gateway continuation from the previous page.
+            after: The previous page's last ``(request_started_at,
+                request_id)``, kept locally so a continuation is checked
+                without decoding the gateway's opaque cursor.
+
+        Returns:
+            The validated page.
+
+        Raises:
+            GatewayError: If unconfigured, unreachable, refused, oversized,
+                slower than this call's whole deadline, or not a valid page for
+                this exact query.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise GatewayError(
+                "request pages require a limit between 1 and 500",
+                error_type="usage_query_invalid",
+            )
+        since, until = _validated_window(since, until)
+        if not self.configured:
+            raise GatewayError("gateway usage is not configured", error_type="usage_unconfigured")
+        path = f"{self._base_path}/{quote(grant_id, safe='')}/usage"
+        params: dict[str, Any] = {
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+            "detail": "requests",
+            "limit": limit,
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        url = f"{self._base_url}{path}"
+        headers = {"Authorization": f"Bearer {self._token}"}
+        timeout = httpx.Timeout(_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+        try:
+            # One deadline over everything this call waits for on the wire:
+            # the slot, the connection, and every chunk of the body. Without it
+            # a slow-drip response holds a slot until the gateway decides to
+            # finish, whatever the per-operation timeout says.
+            async with asyncio.timeout(_REQUEST_PAGE_DEADLINE_S), self._request_page_slots:
+                if self._client is not None:
+                    status, payload = await _bounded_json(
+                        self._client, url, params, headers, timeout
+                    )
+                else:
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        status, payload = await _bounded_json(client, url, params, headers, timeout)
+        except TimeoutError:
+            raise GatewayError(
+                "gateway request details timed out", error_type="usage_unavailable"
+            ) from None
+        except httpx.HTTPError:
+            raise GatewayError(
+                "gateway request details are unreachable", error_type="usage_unavailable"
+            ) from None
+        if status != 200:
+            raise GatewayError(
+                "gateway refused the request-detail query",
+                status_code=status,
+                error_type=_gateway_error_type(payload),
+            )
+        return parse_usage_request_page(
+            payload,
+            grant_id=grant_id,
+            since=since,
+            until=until,
+            limit=limit,
+            external_job_id=external_job_id,
+            cursor=cursor,
+            after=after,
+        )
 
     async def revoke(self, grant_id: str) -> bool:
         """Withdraw a grant now rather than waiting for its TTL.

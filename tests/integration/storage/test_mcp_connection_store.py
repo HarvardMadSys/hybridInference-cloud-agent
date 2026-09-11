@@ -23,7 +23,7 @@ Postgres, and each item below is a race or a scope that a fake cannot fail:
   mutual-exclusion mechanism; a check-then-write passes every sequential test
   and loses these races.
 - **A decision after the deadline does not revive a call.**
-- **``0005`` maps the legacy provider-name list onto bindings**, and quarantines
+- **``0007`` maps the legacy provider-name list onto bindings**, and quarantines
   what it cannot map, instead of guessing which connection a name meant.
 """
 
@@ -50,7 +50,7 @@ _ALLOWED_TEST_DB_PATTERN = "_test_"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _URL = "https://mcp.example.com/mcp"
-_PREVIOUS_REVISION = "0004_residency_on_membership"
+_PREVIOUS_REVISION = "0006_host_capacity"
 
 
 def _db_config() -> dict[str, Any]:
@@ -743,7 +743,7 @@ async def test_saving_capabilities_moves_the_revision_it_is_fenced_against(
     assert [tool["name"] for tool in replaced["tools"]] == ["list_issues"]
 
 
-# -- the 0005 migration ------------------------------------------------
+# -- the 0007 migration ------------------------------------------------
 
 
 async def test_an_edit_is_conditional_on_the_revision_that_was_read(
@@ -1312,8 +1312,8 @@ async def test_a_per_service_timeout_is_stored_without_moving_the_versions(
     assert plain["request_timeout_s"] is None
 
 
-async def test_the_0005_migration_maps_legacy_server_names_onto_bindings() -> None:
-    """Build the pre-0005 shape, upgrade over it, and read what it decided.
+async def test_the_0007_migration_maps_legacy_server_names_onto_bindings() -> None:
+    """Build the pre-0007 shape, upgrade over it, and read what it decided.
 
     A legacy entry maps only when the thread's owner has exactly one connection
     for that provider. Anything else is quarantined rather than guessed at: a
@@ -1432,7 +1432,7 @@ async def test_the_0005_migration_maps_legacy_server_names_onto_bindings() -> No
 
 
 async def test_the_ambiguous_quarantine_branch_cannot_be_reached_from_the_old_schema() -> None:
-    """The one shape ``0005`` quarantines as ambiguous cannot exist at ``0004``.
+    """The one shape ``0007`` quarantines as ambiguous cannot exist at ``0006``.
 
     The migration maps a legacy name only when exactly one connection matches,
     and quarantines it as ``ambiguous_connection`` otherwise. But duplicates for

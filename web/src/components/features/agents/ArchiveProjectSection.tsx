@@ -12,17 +12,10 @@ import {
 import { ArchiveAutoLoad } from './ArchiveAutoLoad';
 import { toDisplayState } from './adapt';
 import { projectLabel } from './conversations';
+import { CONVERSATION_STATE_KEYS, toConversationState } from './conversationState';
 import { ARCHIVE_FOCUS, ArchiveIcon, ArchiveProjectMenu } from './ArchiveControls';
 
 const ROWS_PER_PAGE = 5;
-export const ARCHIVE_STATE_KEYS = {
-  running: 'archive.state.running',
-  queued: 'archive.state.queued',
-  needs_review: 'archive.state.needsReview',
-  done: 'archive.state.done',
-  failed: 'archive.state.failed',
-  cancelled: 'archive.state.cancelled',
-} as const;
 const TEXT_BUTTON = `rounded px-1 py-1 text-xs font-medium text-crimson hover:underline disabled:opacity-50 dark:text-rose-300 ${ARCHIVE_FOCUS}`;
 
 export function ArchiveProjectSection({
@@ -66,7 +59,8 @@ export function ArchiveProjectSection({
   const needsRefresh =
     !collapsed &&
     visible.some((session) => {
-      const state = toDisplayState(session.job);
+      const state =
+        session.job.conversation_state ?? toConversationState(toDisplayState(session.job));
       return state === 'running' || state === 'queued' || !session.can_delete;
     });
   const formatter = useMemo(
@@ -203,7 +197,8 @@ export function ArchiveProjectSection({
         className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white px-3 sm:px-4 dark:divide-white/5 dark:border-white/10 dark:bg-gray-900"
       >
         {visible.map((session) => {
-          const displayState = toDisplayState(session.job);
+          const displayState =
+            session.job.conversation_state ?? toConversationState(toDisplayState(session.job));
           const active = displayState === 'running' || displayState === 'queued';
           const date = session.archived_at ? new Date(session.archived_at) : null;
           const validDate = date !== null && !Number.isNaN(date.getTime());
@@ -232,10 +227,10 @@ export function ArchiveProjectSection({
                       title={t('archive.runningHint')}
                     >
                       <span className="h-1 w-1 rounded-full bg-current" />
-                      {t(ARCHIVE_STATE_KEYS[displayState])}
+                      {t(CONVERSATION_STATE_KEYS[displayState])}
                     </span>
                   ) : (
-                    <span className="sr-only">{t(ARCHIVE_STATE_KEYS[displayState])}</span>
+                    <span className="sr-only">{t(CONVERSATION_STATE_KEYS[displayState])}</span>
                   )}
                 </div>
               </Link>

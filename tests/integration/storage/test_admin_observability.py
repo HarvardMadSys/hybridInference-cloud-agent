@@ -107,6 +107,44 @@ async def test_list_is_cross_user_content_free_and_filters_do_not_duplicate_turn
     assert "event_count" not in run
 
 
+async def test_run_physical_hosts_group_runners_without_changing_ids_or_filters(store):
+    job = await _create_job(store)
+    hosts = {
+        "gpu-box": {"physical_host": "gpu-box"},
+        "gpu-box-kata": {"physical_host": "  gpu-box  "},
+        "legacy-kata": {},
+        "blank-label": {"physical_host": "   "},
+        "invalid-label": {"physical_host": {"unexpected": "object"}},
+        "null-label": {"physical_host": None},
+    }
+    for number, (host, labels) in enumerate(hosts.items(), 1):
+        _, attempt, _ = await _seed_attempt(store, job=job, attempt_no=number, grant_id=None)
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO agent_runner_hosts (host, labels, first_seen_at, last_seen_at) "
+                "VALUES ($1, $2::jsonb, NOW(), NOW())",
+                host,
+                json.dumps(labels),
+            )
+            await conn.execute(
+                "UPDATE agent_attempts SET host_id = $1 WHERE id = $2", host, attempt
+            )
+    async with store._pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET created_at = $1 WHERE id = $2", START, job["id"])
+    queries = AdminRunQueries(store._pool)
+    # Filtering still targets the exact runner, even when its display name is shared.
+    page = await queries.list_runs(
+        filters=RunFilters(host="gpu-box-kata"), since=START, until=END, cursor=None, limit=20
+    )
+    assert [run.id for run in page.runs] == [job["id"]]
+    expected = ["blank-label", "gpu-box", "invalid-label", "legacy-kata", "null-label"]
+    assert page.runs[0].physical_hosts == expected
+    assert page.runs[0].hosts == sorted(hosts)
+    detail = await queries.get_run(job["id"])
+    assert detail["physical_hosts"] == expected
+    assert detail["hosts"] == sorted(hosts)
+
+
 @pytest.mark.parametrize("title_source", ["fallback", "generated", "manual"])
 async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypatch, title_source):
     job = await _create_job(store, task_prompt="PRIVATE-PROMPT-FIRST-LINE\nMore private content")
@@ -145,6 +183,48 @@ async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypa
         assert "event_count" not in response.text
     assert listing.json()["runs"][0]["title"] == expected
     assert detail.json()["run"]["title"] == expected
+
+
+async def test_run_status_filters_exact_states_before_pagination(store, monkeypatch):
+    states = ("queued", "running", "succeeded", "failed", "cancelled")
+    jobs = {}
+    for state in states:
+        job = await _create_job(store)
+        jobs[state] = job["id"]
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_jobs SET state = $2, created_at = $3, "
+                "native_turn_no = CASE WHEN $2 = 'succeeded' THEN 1 END WHERE id = $1",
+                job["id"],
+                state,
+                START,
+            )
+    monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
+    app = FastAPI()
+    app.include_router(admin_runs.router)
+    app.dependency_overrides[get_agent_job_store] = lambda: store
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for selected in (None, *states):
+            expected = states if selected is None else (selected,)
+            params = {"since": START.isoformat(), "until": END.isoformat(), "limit": 1}
+            if selected is not None:
+                params["state"] = selected
+            seen = []
+            for _ in range(len(states) + 1):
+                response = await client.get(
+                    "/admin/agent/runs",
+                    params=params,
+                    headers={"Authorization": "Bearer db-admin-observation-test"},
+                )
+                assert response.status_code == 200, response.text
+                page = response.json()
+                seen.extend((run["id"], run["state"]) for run in page["runs"])
+                if page["next_cursor"] is None:
+                    break
+                params["cursor"] = page["next_cursor"]
+            else:
+                pytest.fail("Run status pagination did not terminate")
+            assert seen == sorted(((jobs[state], state) for state in expected), reverse=True)
 
 
 async def test_run_cursor_keeps_tied_timestamps_and_the_original_filter_window(store):
@@ -252,9 +332,28 @@ async def test_metadata_projection_bounds_names_and_never_fetches_nested_content
     inputs = await queries.usage_inputs(job["id"])
     assert "PRIVATE" not in json.dumps(inputs, default=str)
     projected = inputs["events"][0]["payload"]
-    assert set(projected) == {"usage", "usage_id", "usage_scope", "has_text"}
+    assert set(projected) == {"usage", "usage_id", "usage_scope", "has_text", "id", "tool_use_id"}
     assert projected["usage"] == {"output_tokens": 20}
     assert len(projected["usage_id"]) == 64
+    assert len(projected["id"]) == 64
+    assert projected["tool_use_id"] is None
+    assert inputs["attempts"][0]["attempt_id"] == attempt
+
+
+async def test_usage_projection_pairs_hashed_tools_without_fetching_their_content(store):
+    job, attempt, _ = await _seed_attempt(store, grant_id=None)
+    identity = "PRIVATE-TOOL-IDENTITY"
+    await _event(store, job, attempt, 1, "tool_use", {"id": identity, "input": "PRIVATE-INPUT"})
+    await _event(
+        store, job, attempt, 2, "tool_result", {"tool_use_id": identity, "text": "PRIVATE-RESULT"}
+    )
+    await _event(store, job, attempt, 3, "tool_use", {"id": {"hidden": "PRIVATE-OBJECT"}})
+    inputs = await AdminRunQueries(store._pool).usage_inputs(job["id"])
+    assert "PRIVATE" not in json.dumps(inputs, default=str)
+    start, result, malformed = [event["payload"] for event in inputs["events"]]
+    assert start["id"] == result["tool_use_id"]
+    assert len(start["id"]) == 64
+    assert malformed["id"] is None
 
 
 async def test_numeric_projection_matches_owner_accounting_for_blocks_and_attempt_totals(store):

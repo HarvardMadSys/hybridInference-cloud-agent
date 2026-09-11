@@ -179,14 +179,14 @@ describe('sidebar navigation interactions', () => {
     api.list.mockResolvedValue({ conversations: [running, base[1]], next_cursor: null });
     const { rerender } = render(<AgentsSidebar />);
     await screen.findByRole('link', { name: 'Task a' });
-    expect(screen.getAllByLabelText('In progress')).toHaveLength(1);
+    expect(screen.getAllByLabelText('Running')).toHaveLength(1);
     expect(screen.getAllByLabelText('Unread result')).toHaveLength(1);
     fireEvent.click(screen.getByRole('link', { name: 'Task b' }));
     await waitFor(() => expect(screen.queryByLabelText('Unread result')).not.toBeInTheDocument());
     api.list.mockResolvedValue({ conversations: base, next_cursor: null });
     api.pathname = '/integrations';
     rerender(<AgentsSidebar />);
-    await waitFor(() => expect(screen.queryByLabelText('In progress')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByLabelText('Running')).not.toBeInTheDocument());
     expect(screen.getAllByLabelText('Unread result')).toHaveLength(1);
     api.pathname = '/a';
     rerender(<AgentsSidebar />);

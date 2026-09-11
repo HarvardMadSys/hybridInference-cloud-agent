@@ -31,6 +31,20 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('conversation completion read receipts', () => {
+  it.each(['running', 'queued'] as const)(
+    'does not mark a cancelled head read while its conversation is %s',
+    (conversationState) => {
+      const { result } = renderHook(() => useConversationReadState('alice'));
+      const active = row({ state: 'cancelled', conversationState });
+      expect(result.current.isUnread(active)).toBe(false);
+      act(() => result.current.markRead(active));
+      expect(localStorage.getItem(conversationReadStorageKey('alice'))).toBeNull();
+      const idle = row({ state: 'cancelled', conversationState: 'idle' });
+      expect(result.current.isUnread(idle)).toBe(true);
+      act(() => result.current.markRead(idle));
+      expect(result.current.isUnread(idle)).toBe(false);
+    },
+  );
   it('leaves historical completions unread and never writes when rows are merely polled', () => {
     const write = vi.spyOn(Storage.prototype, 'setItem');
     const { result, rerender } = renderHook(() => useConversationReadState('alice'));

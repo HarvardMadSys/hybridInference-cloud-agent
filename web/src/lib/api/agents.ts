@@ -19,7 +19,6 @@ const API_BASE = config.apiBase;
 
 /** Server-side job states. The UI maps these onto its own display states. */
 export type AgentJobApiState =
-  | 'waiting'
   | 'queued'
   | 'running'
   | 'publishing'
@@ -207,6 +206,8 @@ export interface AgentJobApi {
   /** Server-authoritative branch used by the publisher. */
   output_branch?: string | null;
   state: AgentJobApiState;
+  /** Current activity across the conversation, independent of the viewed turn. */
+  conversation_state?: 'queued' | 'running' | 'idle' | 'failed' | null;
   cancel_requested: boolean;
   current_attempt_id: number | null;
   published_pr_url: string | null;
@@ -589,6 +590,7 @@ export interface AgentThreadArchiveApi {
 export type AgentSessionState =
   | 'running'
   | 'queued'
+  | 'idle'
   | 'needs_review'
   | 'done'
   | 'failed'

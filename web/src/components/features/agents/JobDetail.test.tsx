@@ -8,6 +8,7 @@ import {
   cancelAgentJob,
   createAgentTerminal,
   deleteAgentTerminal,
+  getAgentAttemptTelemetry,
   followUpAgentJob,
   forkAgentJob,
   getAgentConfig,
@@ -50,6 +51,7 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJobFiles: vi.fn(),
   getAgentJobGit: vi.fn(),
   getAgentJobUsage: vi.fn(),
+  getAgentAttemptTelemetry: vi.fn(),
   getAgentThreadStats: vi.fn(),
   listAgentTerminals: vi.fn(),
   resizeAgentTerminal: vi.fn(),
@@ -181,6 +183,16 @@ const HISTORY = [
 ];
 
 describe('JobDetail', () => {
+  it.each([undefined, 'previous-job'])(
+    'uses the same queue message with parent %s',
+    async (parentJobId) => {
+      render(<JobDetail job={makeJob({ state: 'queued', events: [], parentJobId })} />);
+      expect(await screen.findByText('Waiting to start')).toBeInTheDocument();
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Queued$/);
+      expect(screen.queryByText(/Queued after (the )?current run/)).not.toBeInTheDocument();
+    },
+  );
+
   beforeEach(() => {
     navigation.push.mockReset();
     vi.mocked(cancelAgentJob).mockReset();
@@ -461,7 +473,7 @@ describe('JobDetail', () => {
     expect(activity).toHaveTextContent('router source');
     expect(within(turn).getByText('Earlier answer')).toBeInTheDocument();
     expect(screen.getAllByText('Earlier answer')).toHaveLength(1);
-    expect(within(turn).getByText('Turn 1 · 1 tool call')).toBeInTheDocument();
+    expect(within(turn).getByRole('button', { name: 'View execution' })).toBeInTheDocument();
     expect(screen.getByText(/with all of its detail/)).toBeInTheDocument();
   });
 
@@ -671,10 +683,54 @@ describe('JobDetail', () => {
     (state) => {
       const stateNote = 'agent completed (shared workspace; publication snapshot pending)';
       render(<JobDetail job={makeJob({ state, stateNote, sandbox: 'io.containerd.kata.v2' })} />);
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
       expect(screen.queryByText(stateNote)).not.toBeInTheDocument();
       expect(screen.queryByText(/^(Done|Completed|Outcome|Needs review)$/)).not.toBeInTheDocument();
       expect(screen.queryByRole('dialog', { name: 'Run details' })).not.toBeInTheDocument();
       expect(screen.queryByText('Sandbox')).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(['queued', 'running', 'failed'] as const)(
+    'shows the %s conversation state without changing the current turn',
+    (state) => {
+      render(<JobDetail job={makeJob({ state })} />);
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(
+        state[0].toUpperCase() + state.slice(1),
+      );
+      expect(screen.getByLabelText('Agent activity')).toHaveTextContent('I found the cause.');
+      expect(screen.queryByText(/Execution history/)).not.toBeInTheDocument();
+      if (state === 'failed') {
+        expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+      } else {
+        expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+      }
+    },
+  );
+
+  it('becomes idle after stopping while preserving the stopped result and follow-up', () => {
+    const job = makeJob();
+    const { rerender } = render(<JobDetail job={job} />);
+    expect(screen.getByLabelText('Conversation status')).toHaveTextContent('Running');
+    rerender(<JobDetail job={{ ...job, state: 'cancelled' }} />);
+    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
+    expect(screen.getByText('Run stopped')).toBeInTheDocument();
+    expect(screen.getByLabelText('Add a follow-up')).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+  });
+
+  it.each(['done', 'cancelled'] as const)(
+    'shows ongoing conversation activity when the selected turn is %s',
+    (state) => {
+      const job = makeJob({ state, conversationState: 'running' });
+      const { rerender } = render(<JobDetail job={job} />);
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Running$/);
+      // A historical turn does not gain a Stop action for another turn.
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+      if (state === 'cancelled') expect(screen.getByText('Run stopped')).toBeInTheDocument();
+      rerender(<JobDetail job={{ ...job, conversationState: 'idle' }} />);
+      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
+      expect(screen.getByLabelText('Agent activity')).toHaveTextContent('I found the cause.');
     },
   );
 
@@ -781,6 +837,7 @@ describe('JobDetail', () => {
         })}
       />,
     );
+    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
     const workspace = screen.getByRole('region', { name: 'Task progress' });
     expect(within(workspace).getByText(message)).toBeVisible();
     expect(
@@ -897,13 +954,30 @@ describe('JobDetail', () => {
       />,
     );
     expect(await screen.findByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    const history = screen.getByText('Execution history (2)').closest('details');
+    expect(history).not.toHaveAttribute('open');
+    expect(screen.getByText('Final answer')).toBeVisible();
+    expect(screen.queryByText('Superseded answer')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Execution history (2)'));
+    expect(history).toHaveAttribute('open');
     fireEvent.click(screen.getByRole('button', { name: '1 · superseded' }));
+    expect(screen.getByRole('button', { name: '1 · superseded' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByText(/Viewing execution 1/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
     expect(screen.getByText('Superseded answer')).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Usage' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '2 · finished' }));
+    fireEvent.click(screen.getByText(/Execution history \(2\)/));
+    await waitFor(() => expect(screen.getByText('Final answer')).toBeVisible());
+    expect(history).not.toHaveAttribute('open');
+    expect(screen.queryByText(/Viewing execution 1/)).not.toBeInTheDocument();
     expect(screen.getByLabelText('Run usage')).toHaveTextContent('2 model calls');
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
     expect(refreshAgentJobUsage).not.toHaveBeenCalled();
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    expect(followUpAgentJob).not.toHaveBeenCalled();
   });
 
   it.each([null, 0])('preserves an absent or zero Gateway model-call count (%s)', async (turns) => {
@@ -1594,6 +1668,7 @@ describe('JobDetail', () => {
       />,
     );
 
+    fireEvent.click(screen.getByText('Execution history (2)'));
     fireEvent.click(screen.getByRole('button', { name: '1 · superseded' }));
     expect(screen.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
 
@@ -1914,7 +1989,53 @@ describe('JobDetail reasoning effort', () => {
 });
 
 describe('the trajectory tab', () => {
+  beforeEach(() => {
+    vi.mocked(getAgentConfig).mockReset().mockResolvedValue(AGENT_CONFIG);
+    vi.mocked(getAgentJobGit).mockReset().mockResolvedValue({
+      available: false,
+      branch: '',
+      changes: [],
+      patch: '',
+      commits: [],
+    });
+    vi.mocked(getAgentJobUsage).mockReset().mockResolvedValue(null);
+    vi.mocked(refreshAgentJobUsage).mockReset().mockResolvedValue(null);
+    vi.mocked(getAgentThreadStats).mockReset().mockResolvedValue(null);
+    vi.mocked(getAgentAttemptTelemetry).mockReset().mockResolvedValue({
+      attempt_id: 1,
+      attempt_no: 1,
+      continuity_mode: null,
+      context_status: null,
+      duration_ms: null,
+      resources: null,
+    });
+    localStorage.clear();
+  });
+
   afterEach(() => cleanup());
+
+  const STORED_CALL = [
+    {
+      id: 1,
+      job_id: 'ajob_1',
+      turn_no: 1,
+      attempt_id: 1,
+      seq: 1,
+      event_type: 'tool_use',
+      payload: { id: 't1', name: 'Bash', input: { command: 'pytest -q' } },
+      created_at: '2026-08-19T10:00:00.000Z',
+    },
+    {
+      id: 2,
+      job_id: 'ajob_1',
+      turn_no: 1,
+      attempt_id: 1,
+      seq: 2,
+      event_type: 'tool_result',
+      payload: { tool_use_id: 't1', content: '2 passed' },
+      created_at: '2026-08-19T10:00:05.000Z',
+    },
+  ] as never;
 
   it('switches between the reading of the stream and the stream itself', () => {
     const job = makeJob({ events: [{ kind: 'message', text: 'the build passes' }] });
@@ -1932,16 +2053,16 @@ describe('the trajectory tab', () => {
     render(<JobDetail job={job} events={stored} />);
 
     // Chat first: the reading, with no trajectory chrome.
-    expect(screen.queryByLabelText('Search events')).toBeNull();
+    expect(screen.queryByLabelText('Search steps')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
 
-    expect(screen.getByLabelText('Search events')).toBeInTheDocument();
+    expect(screen.getByLabelText('Search steps')).toBeInTheDocument();
     expect(screen.getByText('Bash')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'chat' }));
 
-    expect(screen.queryByLabelText('Search events')).toBeNull();
+    expect(screen.queryByLabelText('Search steps')).toBeNull();
   });
 
   it('separates stored events by conversation turn', () => {
@@ -1986,6 +2107,98 @@ describe('the trajectory tab', () => {
 
     expect(screen.getByText(/stored no events/)).toBeInTheDocument();
   });
+
+  it('opens the selected step in the right-hand region, not under the row', () => {
+    render(<JobDetail job={makeJob()} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+
+    const panel = screen.getByRole('region', { name: 'Step details' });
+    expect(within(panel).getByText(/Tool · Turn 1 · Step 1/)).toBeInTheDocument();
+    expect(within(panel).getByRole('tab', { name: 'Schema' })).toBeInTheDocument();
+    // The result joined its call rather than becoming a second row.
+    expect(within(panel).getByText(/2 passed/)).toBeInTheDocument();
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
+  });
+
+  it('keeps one right-hand region: opening the workspace closes the details', () => {
+    render(<JobDetail job={makeJob()} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+
+    openWorkspace();
+
+    expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Bash'));
+
+    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+  });
+
+  it('closes the details on Escape without also stopping the run', () => {
+    render(<JobDetail job={makeJob({ state: 'running' })} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+
+    expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('leaves Escape alone while the reader is typing', () => {
+    render(<JobDetail job={makeJob()} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+
+    const search = screen.getByLabelText('Search steps');
+    search.focus();
+    fireEvent.keyDown(search, { key: 'Escape' });
+
+    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+  });
+
+  it('opens the turn the chat footer points at, even for an older turn', () => {
+    const job = makeJob({
+      turnNo: 2,
+      threadMessages: HISTORY,
+      historyTurns: [
+        {
+          jobId: 'ajob_0',
+          turnNo: 1,
+          forkable: true,
+          messages: HISTORY,
+          events: [{ kind: 'message', text: 'Earlier answer' }],
+        },
+      ],
+    });
+    render(<JobDetail job={job} events={STORED_CALL} threadJobs={[]} />);
+
+    fireEvent.click(
+      within(screen.getByLabelText('Turn 1')).getByRole('button', { name: 'View execution' }),
+    );
+
+    const panel = screen.getByRole('region', { name: 'Run details' });
+    expect(within(panel).getByRole('heading', { name: 'Run details' })).toBeInTheDocument();
+    expect(within(panel).getByText('Run · Turn 1')).toBeInTheDocument();
+  });
+
+  it('closes the details when the reader goes back to the conversation', () => {
+    render(<JobDetail job={makeJob()} events={STORED_CALL} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+
+    expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
+  });
 });
 
 describe('sending a follow-up', () => {
@@ -2005,5 +2218,163 @@ describe('sending a follow-up', () => {
     await waitFor(() => expect(followUpAgentJob).toHaveBeenCalled());
     await waitFor(() => expect((box as HTMLTextAreaElement).value).toBe(''));
     expect(box).not.toBeDisabled();
+  });
+});
+
+describe('conversation turn navigation', () => {
+  beforeEach(() => {
+    navigation.push.mockReset();
+    vi.mocked(forkAgentJob).mockReset();
+  });
+  afterEach(() => cleanup());
+
+  const EARLIER_TURN = {
+    jobId: 'ajob_0',
+    turnNo: 1,
+    forkable: false,
+    messages: [
+      {
+        id: 1,
+        role: 'user' as const,
+        content: 'Earlier question',
+        jobId: 'ajob_0',
+        createdAt: null,
+      },
+      {
+        id: 2,
+        role: 'assistant' as const,
+        content: 'Earlier answer',
+        jobId: 'ajob_0',
+        createdAt: null,
+      },
+    ],
+    events: [{ kind: 'message' as const, text: 'Earlier answer', attemptNo: 1, sourceEventId: 11 }],
+  };
+
+  // Turn two of a conversation that already has turn one behind it.
+  function multiTurnJob(overrides: Partial<AgentJob> = {}) {
+    return makeJob({ turnNo: 2, historyTurns: [EARLIER_TURN], ...overrides });
+  }
+
+  // A settled, shared conversation, where the stored turns offer actions.
+  function forkableJob(historyForkable: boolean) {
+    return multiTurnJob({
+      state: 'done',
+      sandboxId: 'asbx_1',
+      workspaceShared: true,
+      nativeForkAvailable: true,
+      historyTurns: [{ ...EARLIER_TURN, forkable: historyForkable }],
+    });
+  }
+
+  function renderNavigableChat() {
+    const view = render(<JobDetail job={multiTurnJob()} />);
+    // jsdom supplies no layout. Give the Chat a wide reading area so its
+    // actual rail, rather than a separate directory, can be exercised.
+    const region = screen.getByRole('region', { name: 'Task progress' });
+    Object.defineProperty(region, 'clientWidth', { configurable: true, value: 1024 });
+    Object.defineProperty(region, 'clientHeight', { configurable: true, value: 800 });
+    return view;
+  }
+
+  it('lists exactly the turns the transcript renders, in order', async () => {
+    renderNavigableChat();
+    const rail = await screen.findByRole('navigation', { name: 'Conversation turns' });
+    const marks = within(rail).getAllByRole('button');
+    expect(marks).toHaveLength(2);
+    expect(marks[0]).toHaveAccessibleName('Go to turn 1');
+    expect(marks[1]).toHaveAccessibleName('Go to turn 2');
+    fireEvent.focus(marks[0]);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Earlier question');
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Earlier answer');
+    // Which turn the reader is on is measured a frame after layout rather than
+    // guessed from the focused preview.
+    await waitFor(() => expect(marks[1]).toHaveAttribute('aria-current', 'true'));
+  });
+
+  it('offers forking on a stored turn as soon as the API says it is ready', () => {
+    // Nothing about the turn's structure changes when the platform finishes
+    // preparing its native session; a cache keyed on counts would keep serving
+    // the stored turn it derived before that, with no Fork button on it.
+    const { container, rerender } = render(<JobDetail job={forkableJob(false)} />);
+    const storedTurn = () => {
+      const section = container.querySelector('[data-turn-key="ajob_0"]');
+      if (section === null) throw new Error('the stored turn is not rendered');
+      return within(section as HTMLElement);
+    };
+    expect(storedTurn().queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
+
+    rerender(<JobDetail job={forkableJob(true)} />);
+    expect(storedTurn().getByRole('button', { name: 'Fork from here' })).toBeInTheDocument();
+  });
+
+  it('renders a stored row that changed without the list growing', () => {
+    // A tool result folding into its call leaves the row count alone and
+    // rewrites the row's content; the body must show what the events say now.
+    const withOutput = {
+      ...EARLIER_TURN,
+      events: [
+        {
+          kind: 'tool_use' as const,
+          tool: 'Bash',
+          detail: 'pytest -q',
+          output: ['711 tests passed in the stored turn'],
+          attemptNo: 1,
+          sourceEventId: 11,
+        },
+      ],
+    };
+    const withoutOutput = {
+      ...withOutput,
+      events: [{ ...withOutput.events[0], output: undefined }],
+    };
+    const { rerender } = render(
+      <JobDetail job={multiTurnJob({ historyTurns: [withoutOutput] })} />,
+    );
+    expect(screen.getByText('Waiting for the tool result…')).toBeInTheDocument();
+
+    rerender(<JobDetail job={multiTurnJob({ historyTurns: [withOutput] })} />);
+    expect(screen.getByText('711 tests passed in the stored turn')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
+  });
+
+  it('anchors every rendered turn and row for the scroll controller', () => {
+    const { container } = render(<JobDetail job={multiTurnJob()} />);
+
+    // The rail addresses turns by job id; the reading position is restored by
+    // row, so both identities have to be on the elements the transcript draws.
+    const turnKeys = [...container.querySelectorAll('[data-turn-key]')].map((element) =>
+      element.getAttribute('data-turn-key'),
+    );
+    expect(turnKeys).toEqual(['ajob_0', 'ajob_1']);
+    expect(container.querySelector('[data-block-key="ajob_0:m1"]')).not.toBeNull();
+    expect(container.querySelector('[data-block-key="ajob_0:e11"]')).not.toBeNull();
+    expect(container.querySelector('[data-block-key="ajob_1:prompt"]')).not.toBeNull();
+  });
+
+  it('jumps inside the chat without navigating, forking or switching attempts', async () => {
+    renderNavigableChat();
+    const rail = await screen.findByRole('navigation', { name: 'Conversation turns' });
+    fireEvent.click(within(rail).getAllByRole('button')[0]);
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(forkAgentJob).not.toHaveBeenCalled();
+    // The queued frame that recalibrates the mark runs outside this commit.
+    await waitFor(() =>
+      expect(screen.queryByText('That turn could not be located.')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('takes the rail away with the Chat view', async () => {
+    renderNavigableChat();
+    expect(
+      await screen.findByRole('navigation', { name: 'Conversation turns' }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    expect(
+      screen.queryByRole('navigation', { name: 'Conversation turns' }),
+    ).not.toBeInTheDocument();
   });
 });

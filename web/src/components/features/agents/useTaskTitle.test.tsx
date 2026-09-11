@@ -47,6 +47,35 @@ afterEach(() => {
   vi.useRealTimers();
   vi.resetAllMocks();
 });
+
+describe('queued turn lifecycle', () => {
+  it('streams a queued follow-up and shows it running when its attempt starts', async () => {
+    vi.mocked(getAgentJob).mockResolvedValue({
+      ...initial,
+      state: 'queued',
+      parent_job_id: 'previous-job',
+      turn_no: 2,
+    });
+    const { result } = renderHook(() => useAgentJob(initial.id));
+    await act(async () => {});
+    expect(result.current.job?.state).toBe('queued');
+    expect(streamAgentJob).toHaveBeenCalledWith(initial.id, expect.any(Object));
+
+    await act(async () => {
+      vi.mocked(streamAgentJob).mock.lastCall![1].onEvent({
+        id: 1,
+        attempt_id: 10,
+        seq: 1,
+        event_type: 'lifecycle',
+        payload: { phase: 'started' },
+        created_at: null,
+      });
+    });
+    expect(result.current.job?.state).toBe('running');
+    expect(result.current.job?.currentAttemptId).toBe(10);
+  });
+});
+
 describe('automatic task title refresh', () => {
   it.each(['running', 'succeeded'] as const)(
     'shows the generated title for a %s task despite an older thread snapshot',

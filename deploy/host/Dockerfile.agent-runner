@@ -74,6 +74,19 @@ RUN chmod 0555 /usr/local/libexec/member-process-reaper
 # socket to create/start/stop retained containers. Repository source is cloned
 # into a short-lived runner directory, credential-scrubbed, and streamed into
 # the container; that directory is never bind-mounted into the sandbox.
+# What this image is, in the two places a deployment looks: OCI's own labels,
+# and one of ours naming the artifact's role. A resolver reads both out of the
+# platform image it is about to run and compares them with the release
+# manifest — the revision against the manifest's source commit, the role
+# against the artifact it stands in for — so a build matrix that swaps two
+# digests is caught where the release is consumed rather than where it is
+# deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
+# built by hand says `unknown`, and a resolver refuses it.
+ARG SOURCE_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      io.hybridinference.artifact.role="runner"
+
 USER root
 
 CMD ["python", "-m", "cloud_agent_host.runner"]

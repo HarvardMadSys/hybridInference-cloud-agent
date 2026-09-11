@@ -438,12 +438,12 @@ unique partial index per thread and a CHECK that a `succeeded` job has one.
 The settlement transaction assigns the ordinal explicitly before the job's
 terminal transition — for a turn that settled its native context and then
 failed as much as for a successful one — so no trigger reconstructs it and no
-rolling-deploy guard remains. A waiting follow-up is promoted only when its
-parent failed or was cancelled before producing native context, or when the
-thread's retained membership is still usable; a child whose parent succeeded
+rolling-deploy guard remains. Follow-ups are stored as `queued`; claiming
+requires all earlier turns in the thread to be terminal. A successful parent
+also requires a usable retained membership. A child whose parent succeeded
 but whose membership is since lost fails instead of being materialized as a
 fresh native session. An actual retained membership is the only proof that a
-chat remains runnable.
+chat remains runnable after successful execution.
 
 When either the old API or the MCP relay is absent, readiness cannot complete
 (a true cold start has neither). The control script starts Postgres, migrates,

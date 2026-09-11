@@ -46,10 +46,27 @@ jobs:
     # be a single conclusion. It was four workflows until #31; gating on one of
     # four would have meant treating "that workflow was filtered out" and "that
     # workflow has not started" as the same thing, and deploying on the second.
+    #
+    # **The fuse.** `LEGACY_DIRECT_STAGING_DEPLOY` is the migration switch that
+    # hands this environment to FreeInference: while it is `true`, merging to
+    # `dev` deploys exactly as it always has; `false`, `yes`, an empty value, or
+    # no variable at all skips both jobs and touches no host. Fail-closed on
+    # purpose: a fuse that fires when it cannot read itself is not a fuse.
+    #
+    # Case is GitHub's, not ours — its `==` ignores case when comparing
+    # strings, so `True` and `TRUE` deploy as well. Recorded rather than fought:
+    # the half that matters is the other one, and it fails closed.
+    #
+    # The gate sits on the job rather than on a step, because a step-level check
+    # still allocates the runner and runs every other step of the job.
+    #
+    # It is a migration artifact, not the terminal architecture: this workflow
+    # is deleted once FreeInference deploys staging from its own lock.
     if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
+      ${{ vars.LEGACY_DIRECT_STAGING_DEPLOY == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.conclusion == 'success') }}
+      github.event.workflow_run.conclusion == 'success')) }}
     runs-on: [self-hosted, Linux, deploy-cloud-agent-control-staging]
     # Records the deployment, so staging appears in the repository's
     # Deployments panel beside production instead of being visible only to
@@ -122,10 +139,15 @@ jobs:
     # This job may run alongside the control build/migration work. Its exact-SHA
     # ready marker is what lets deploy.sh prove this generation before it
     # replaces the old API.
+    #
+    # The same fuse as the control job above, and the same variable: an
+    # environment is handed over whole, so disabling it must not leave the host
+    # half deploying into a control plane that FreeInference now owns.
     if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
+      ${{ vars.LEGACY_DIRECT_STAGING_DEPLOY == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.conclusion == 'success') }}
+      github.event.workflow_run.conclusion == 'success')) }}
     runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-staging]
     environment: staging
     timeout-minutes: 45
