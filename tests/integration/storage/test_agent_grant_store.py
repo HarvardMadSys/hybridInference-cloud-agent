@@ -26,6 +26,7 @@ import os
 import pytest
 import pytest_asyncio
 
+from cloud_agent.storage.repositories.grants import GrantRepository
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -44,7 +45,7 @@ _ALLOWED_TEST_DB_PATTERN = "_test_"
 
 
 @pytest_asyncio.fixture
-async def store():
+async def db():
     """Provide a clean AgentJobStore over the shared test database."""
     import asyncpg
 
@@ -67,18 +68,29 @@ async def store():
         pytest.skip(f"PostgreSQL not available: {exc}")
         return  # unreachable
 
-    job_store = AgentJobStore(pool)
     apply_migrations(db_config)
     async with pool.acquire() as conn:
         await reset_agent_tables(conn)
         await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
     try:
-        yield job_store
+        yield pool
     finally:
         async with pool.acquire() as conn:
             await reset_agent_tables(conn)
             await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
         await pool.close()
+
+
+@pytest_asyncio.fixture
+async def store(db):
+    """Everything else this test needs, to set a claim up."""
+    return AgentJobStore(db)
+
+
+@pytest_asyncio.fixture
+async def grants(db):
+    """The capability under test, on the repository that now owns it."""
+    return GrantRepository(db)
 
 
 async def _claimed(store: AgentJobStore, *, prompt: str = "fix it") -> dict:
@@ -123,21 +135,25 @@ async def _claimed(store: AgentJobStore, *, prompt: str = "fix it") -> dict:
     return claim
 
 
-async def test_a_live_attempts_grant_is_renewable(store: AgentJobStore) -> None:
+async def test_a_live_attempts_grant_is_renewable(
+    store: AgentJobStore, grants: GrantRepository
+) -> None:
     claim = await _claimed(store)
 
-    assert await store.record_attempt_grant(
+    assert await grants.record_attempt_grant(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         grant_id="agr_1",
     )
 
-    renewable = await store.list_renewable_grants()
+    renewable = await grants.list_renewable_grants()
     assert [row["grant_id"] for row in renewable] == ["agr_1"]
-    assert await store.take_revocable_grants() == []
+    assert await grants.take_revocable_grants() == []
 
 
-async def test_a_renewable_row_carries_the_fence_that_can_end_it(store: AgentJobStore) -> None:
+async def test_a_renewable_row_carries_the_fence_that_can_end_it(
+    store: AgentJobStore, grants: GrantRepository
+) -> None:
     """The give-up path, end to end in SQL.
 
     ``_renew_live_grants`` abandons an attempt whose grant the gateway keeps
@@ -148,13 +164,13 @@ async def test_a_renewable_row_carries_the_fence_that_can_end_it(store: AgentJob
     to prevent.
     """
     claim = await _claimed(store)
-    await store.record_attempt_grant(
+    await grants.record_attempt_grant(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         grant_id="agr_1",
     )
 
-    row = (await store.list_renewable_grants())[0]
+    row = (await grants.list_renewable_grants())[0]
     assert await store.release_claim(
         job_id=row["job_id"],
         attempt_id=row["attempt_id"],
@@ -163,16 +179,18 @@ async def test_a_renewable_row_carries_the_fence_that_can_end_it(store: AgentJob
 
     # And the abandoned attempt's grant is now the revocation pass's problem,
     # exactly once — nothing had to revoke it inline.
-    assert await store.list_renewable_grants() == []
-    assert [taken["grant_id"] for taken in await store.take_revocable_grants()] == ["agr_1"]
-    assert await store.take_revocable_grants() == []
+    assert await grants.list_renewable_grants() == []
+    assert [taken["grant_id"] for taken in await grants.take_revocable_grants()] == ["agr_1"]
+    assert await grants.take_revocable_grants() == []
 
 
-async def test_a_superseded_attempts_grant_flips_sides(store: AgentJobStore) -> None:
+async def test_a_superseded_attempts_grant_flips_sides(
+    store: AgentJobStore, grants: GrantRepository
+) -> None:
     """The fence, in SQL. One reaper pass moves the grant from one set to the
     other, and nothing else has to be told."""
     claim = await _claimed(store)
-    await store.record_attempt_grant(
+    await grants.record_attempt_grant(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         grant_id="agr_1",
@@ -186,18 +204,20 @@ async def test_a_superseded_attempts_grant_flips_sides(store: AgentJobStore) -> 
         )
 
     # Immediately, before any reaper pass: an expired lease is dead now.
-    assert await store.list_renewable_grants() == []
+    assert await grants.list_renewable_grants() == []
 
     await store.reap_expired()
-    assert await store.list_renewable_grants() == []
-    assert [row["grant_id"] for row in await store.take_revocable_grants()] == ["agr_1"]
+    assert await grants.list_renewable_grants() == []
+    assert [row["grant_id"] for row in await grants.take_revocable_grants()] == ["agr_1"]
 
 
-async def test_a_grant_is_handed_over_exactly_once(store: AgentJobStore) -> None:
+async def test_a_grant_is_handed_over_exactly_once(
+    store: AgentJobStore, grants: GrantRepository
+) -> None:
     """``take_`` detaches as it returns, so a second pass — or a second control
     plane — is not handed the same grant to revoke again."""
     claim = await _claimed(store)
-    await store.record_attempt_grant(
+    await grants.record_attempt_grant(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"],
         grant_id="agr_1",
@@ -208,21 +228,23 @@ async def test_a_grant_is_handed_over_exactly_once(store: AgentJobStore) -> None
             claim["attempt_id"],
         )
 
-    assert len(await store.take_revocable_grants()) == 1
-    assert await store.take_revocable_grants() == []
+    assert len(await grants.take_revocable_grants()) == 1
+    assert await grants.take_revocable_grants() == []
 
 
-async def test_recording_against_a_stale_fence_is_refused(store: AgentJobStore) -> None:
+async def test_recording_against_a_stale_fence_is_refused(
+    store: AgentJobStore, grants: GrantRepository
+) -> None:
     """A grant minted for an attempt that was superseded meanwhile must not be
     attached to it: it would then be renewed for as long as the row lived."""
     claim = await _claimed(store)
 
-    assert not await store.record_attempt_grant(
+    assert not await grants.record_attempt_grant(
         attempt_id=claim["attempt_id"],
         lease_generation=claim["lease_generation"] + 1,
         grant_id="agr_1",
     )
-    assert await store.list_renewable_grants() == []
+    assert await grants.list_renewable_grants() == []
 
 
 async def test_an_admin_action_is_recorded(store: AgentJobStore) -> None:
