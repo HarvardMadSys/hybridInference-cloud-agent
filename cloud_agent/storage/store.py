@@ -73,6 +73,8 @@ from cloud_agent.host_pool import (
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABILITY_JSON, THREAD_SANDBOX_SOURCE
+from cloud_agent.storage.repositories.audit import AuditRepository
+from cloud_agent.storage.repositories.credential_queries import CredentialQueries
 from cloud_agent.storage.repositories.grants import GrantRepository
 from cloud_agent.storage.repositories.host_capacity import HostCapacityRepository
 from cloud_agent.storage.repositories.host_pool import HostPoolRepository
@@ -398,6 +400,8 @@ class AgentJobStore:
         """
         self._pool = pool
         self._mcp = McpConnectionRepository(pool)
+        self._credential_queries = CredentialQueries(pool)
+        self._audit = AuditRepository(pool)
         self._host_pool = HostPoolRepository(pool)
         self._source_control = SourceControlRepository(pool)
         self._ledger = LedgerRepository(pool)
@@ -2175,46 +2179,10 @@ class AgentJobStore:
         attempt_id: int,
         lease_generation: int,
     ) -> dict[str, Any] | None:
-        """Resolve Agent-owned job metadata for the MCP relay's live fence.
-
-        Return the job's owner, model and MCP server scope only while its
-        current attempt has a live lease and the job is running or publishing.
-        The relay uses that owner to resolve stored MCP connections and checks
-        the admitted server scope before forwarding a request.
-
-        Only Agent job and attempt tables participate. Gateway account roles
-        and status do not belong to this database. Inference authorization
-        uses Gateway-issued grants separately from this MCP lookup.
-        """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT j.user_id, j.id AS job_id, j.model, j.state,
-                       t.mcp_servers
-                FROM agent_attempts a
-                JOIN agent_jobs j ON j.id = a.job_id
-                JOIN agent_threads t ON t.id = j.thread_id
-                WHERE a.id = $1
-                  AND a.lease_generation = $2
-                  AND a.status = 'running'
-                  AND a.lease_expires_at > NOW()
-                  AND j.id = $3
-                  AND j.current_attempt_id = a.id
-                  AND j.state = 'running'
-                """,
-                attempt_id,
-                lease_generation,
-                job_id,
-            )
-            if row is None:
-                return None
-        return {
-            "user_id": row["user_id"],
-            "job_id": row["job_id"],
-            # Read the MCP allowlist under the same fence as its owner metadata.
-            "mcp_servers": list(row["mcp_servers"] or []),
-            "model": row["model"],
-        }
+        """Delegates to the repository that implements this capability."""
+        return await self._credential_queries.resolve_model_credential(
+            job_id=job_id, attempt_id=attempt_id, lease_generation=lease_generation
+        )
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Fetch one job by id."""
@@ -6621,35 +6589,12 @@ class AgentJobStore:
         details: dict[str, Any] | None = None,
         success: bool = True,
     ) -> int:
-        """Append one row to this service's admin audit trail.
-
-        The gateway's ``admin_audit_log`` stayed with the gateway. This one is
-        ours, and it is append-only by convention rather than by constraint —
-        there is no code here that updates or deletes a row.
-
-        Args:
-            action: Dotted action name, e.g. ``agent.runner_host.drain``.
-            actor_id: The authenticated administrator who acted.
-            admin_ip: Best-effort caller address.
-            target_user_id: The user acted upon, where there is one.
-            details: Structured context. Never a credential.
-            success: Whether the action succeeded.
-
-        Returns:
-            The new row's id.
-        """
-        async with self._pool.acquire() as conn:
-            return await conn.fetchval(
-                """
-                INSERT INTO agent_admin_audit_log
-                    (action, actor_id, admin_ip, target_user_id, details, success)
-                VALUES ($1, $6, $2, $3, $4::jsonb, $5)
-                RETURNING id
-                """,
-                action,
-                admin_ip,
-                target_user_id,
-                json.dumps(details) if details is not None else None,
-                success,
-                actor_id,
-            )
+        """Delegates to the repository that implements this capability."""
+        return await self._audit.record_admin_action(
+            action=action,
+            actor_id=actor_id,
+            admin_ip=admin_ip,
+            target_user_id=target_user_id,
+            details=details,
+            success=success,
+        )
