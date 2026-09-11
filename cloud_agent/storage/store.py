@@ -88,20 +88,6 @@ EVENT_ATTEMPT_ABORTED = "attempt_aborted"
 ATTEMPT_ABORTED = "aborted"
 
 
-def request_fingerprint(kind: str, payload: dict[str, Any]) -> str:
-    """Hash what a submission asked for, so a replayed key must ask the same thing.
-
-    A client resending a create or follow-up after a lost response carries the
-    same ``Idempotency-Key``; the fingerprint is how the store tells that
-    resend apart from the same key reused for different content. ``kind``
-    keeps a create and a follow-up from ever fingerprinting alike.
-    """
-    canonical = json.dumps(
-        {"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), default=str
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 def _check_client_request(client_request_id: str | None, fingerprint: str | None) -> None:
     """A submission key travels with its fingerprint, or not at all."""
     if (client_request_id is None) != (fingerprint is None):

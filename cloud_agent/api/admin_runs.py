@@ -33,10 +33,10 @@ from cloud_agent.api.deps import (
     verify_admin_access,
 )
 from cloud_agent.api.routes import _attempt_duration_ms, _attempt_resources
+from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry
-from cloud_agent.storage.store import TERMINAL_STATES
 
 if TYPE_CHECKING:
     from cloud_agent.ports.audit import AuditRepository
