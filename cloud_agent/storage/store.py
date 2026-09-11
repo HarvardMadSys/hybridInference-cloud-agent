@@ -3605,8 +3605,9 @@ class AgentJobStore:
         operator re-enrolls the name under credential B, and A's delayed
         request arrives afterwards. Checking "is this still the right
         credential" outside the write would let exactly that request through.
-        A rejected capacity block costs the host nothing: the liveness half of
-        the same call has already committed.
+        That second statement runs in its own savepoint, so a block the
+        database refuses costs the host nothing but the block: the liveness
+        half of the same call still commits.
 
         Args:
             host: The authenticated host name.
@@ -3674,7 +3675,7 @@ class AgentJobStore:
                 and capacity_sample_age_ms is not None
                 and credential_hash is not None
             ):
-                await self._record_host_capacity(
+                await self._record_host_capacity_isolated(
                     conn,
                     host=host,
                     credential_hash=credential_hash,
@@ -3682,6 +3683,45 @@ class AgentJobStore:
                     sample_age_ms=capacity_sample_age_ms,
                 )
         return self._host_row_to_dict(row)
+
+    @staticmethod
+    async def _record_host_capacity_isolated(
+        conn: Any,
+        *,
+        host: str,
+        credential_hash: str,
+        capacity: Mapping[str, Any],
+        sample_age_ms: int,
+    ) -> None:
+        """Store a capacity observation without ever risking the heartbeat.
+
+        The two halves of this request share a transaction, and a transaction
+        that has raised is finished: catching the exception in Python would not
+        un-abort it, so the heartbeat's own write would be rolled back with the
+        monitoring field that failed. A nested transaction is a SAVEPOINT,
+        which is the only thing that lets the failure be contained here.
+
+        That matters because the failure modes are the database's, not this
+        code's: a namespace carrying U+0000 passes any string validation and is
+        then refused by JSONB, and a constraint added tomorrow could refuse
+        something else. A host that is alive must be recorded as alive whatever
+        the control plane thinks of its monitoring data.
+        """
+        try:
+            async with conn.transaction():
+                await AgentJobStore._record_host_capacity(
+                    conn,
+                    host=host,
+                    credential_hash=credential_hash,
+                    capacity=capacity,
+                    sample_age_ms=sample_age_ms,
+                )
+        except Exception:
+            logger.warning(
+                "agent_host_capacity_write_failed",
+                exc_info=True,
+                extra={"event": "agent_host_capacity_write_failed", "host": host},
+            )
 
     @staticmethod
     async def _record_host_capacity(

@@ -134,6 +134,14 @@ async def _record_round(
 ) -> str | None:
     """Run one round, returning the cursor the next round should resume from.
 
+    The budget is checked before every write, not only before every page. A
+    page is up to a hundred hosts and each write has its own timeout, so a
+    database that has become slow turns one page into a hundred timeouts —
+    a round that runs a hundred times longer than it was allowed to while
+    still reporting that it finished. The cursor advances per host for the
+    same reason: whatever this round did manage to write is what the next one
+    resumes after, and nothing is measured twice or skipped.
+
     Returns:
         The last host written, when the round stopped early with work left; or
         ``None`` when the pool was walked to its end, so the next round starts
@@ -143,10 +151,7 @@ async def _record_round(
     deadline = clock() + round_budget_seconds
     while True:
         if clock() >= deadline:
-            logger.info(
-                "agent_host_capacity_history_round_truncated",
-                extra={"event": "agent_host_capacity_history_round_truncated"},
-            )
+            _log_truncated()
             return cursor
         try:
             rows = await asyncio.wait_for(
@@ -173,10 +178,21 @@ async def _record_round(
         if not rows:
             return None
         for row in rows:
+            if clock() >= deadline:
+                _log_truncated()
+                return cursor
             await _write_point(store, row, timeout_seconds=batch_timeout_seconds)
-        cursor = str(rows[-1]["host"])
+            cursor = str(row["host"])
         if len(rows) < batch_size:
             return None
+
+
+def _log_truncated() -> None:
+    """Record that a round yielded to the next one rather than finishing."""
+    logger.info(
+        "agent_host_capacity_history_round_truncated",
+        extra={"event": "agent_host_capacity_history_round_truncated"},
+    )
 
 
 async def _write_point(

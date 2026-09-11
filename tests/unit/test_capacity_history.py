@@ -158,13 +158,46 @@ async def test_a_truncated_round_resumes_where_it_stopped() -> None:
     clock = TickingClock(step=1.0)
     store = FakeStore([candidate(f"host-{index}") for index in range(5)], clock=clock)
     cursor = await run_round(store, None, batch_size=1, round_budget_seconds=3.0)
-    assert cursor == "host-2"
-    assert [host for host, _, _ in store.written] == ["host-0", "host-1", "host-2"]
+    assert [host for host, _, _ in store.written] == ["host-0", "host-1"]
+    assert cursor == "host-1"
 
     clock.step = 0.0
     resumed = await run_round(store, cursor, batch_size=1, round_budget_seconds=100.0)
     assert resumed is None
-    assert [host for host, _, _ in store.written][3:] == ["host-3", "host-4"]
+    assert [host for host, _, _ in store.written][2:] == ["host-2", "host-3", "host-4"]
+
+
+async def test_the_budget_is_checked_before_every_write_not_only_every_page() -> None:
+    """A page is a hundred hosts, and each write has a timeout of its own.
+
+    Checking the clock at the page boundary only means one slow page can run a
+    hundred timeouts long — the round overruns the budget it was given while
+    still reporting that it finished, and the next round starts late with no
+    cursor to show for the work.
+    """
+    budget_seconds, seconds_per_write = 10.0, 1.0
+    clock = TickingClock(step=1.0)
+    store = FakeStore([candidate(f"host-{index:03d}") for index in range(100)], clock=clock)
+    original = store.record_capacity_history_point
+
+    async def slow_write(*, host: str, capacity_epoch: Any, point: Any) -> bool:
+        clock.tick()
+        return await original(host=host, capacity_epoch=capacity_epoch, point=point)
+
+    store.record_capacity_history_point = slow_write  # type: ignore[method-assign]
+
+    cursor = await run_round(store, None, batch_size=100, round_budget_seconds=budget_seconds)
+
+    assert len(store.written) <= budget_seconds / seconds_per_write
+    # The cursor names the last host actually written, so the next round
+    # resumes after it rather than re-measuring the whole page.
+    assert cursor == store.written[-1][0]
+
+    clock.step = 0.0
+    resumed = await run_round(store, cursor, batch_size=100, round_budget_seconds=100.0)
+    assert resumed is None
+    written = [host for host, _, _ in store.written]
+    assert len(written) == len(set(written)) == 100
 
 
 async def test_a_completed_round_starts_over_so_new_hosts_are_seen() -> None:

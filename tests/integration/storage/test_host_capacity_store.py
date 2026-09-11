@@ -29,7 +29,7 @@ from cloud_agent.capacity_protocol import (
     HostCapacityReport,
     bucket_for,
 )
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.host_pool import HOST_ONLINE, hash_secret
 from cloud_agent.storage.store import AgentJobStore
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
@@ -449,6 +449,67 @@ async def test_forgetting_a_host_takes_its_history_with_it(store):
             "SELECT count(*) FROM agent_host_capacity_history WHERE capacity_epoch = $1", epoch
         )
     assert remaining == 0
+
+
+async def test_a_block_the_database_refuses_cannot_roll_back_the_heartbeat(store):
+    """The liveness half of a heartbeat is not hostage to the monitoring half.
+
+    The schema already refuses the namespace this uses, so the store is handed
+    the block directly: the guarantee has to hold for whatever a future
+    constraint rejects, not only for the one input known today. Without the
+    savepoint the two writes share a transaction, a raised statement finishes
+    it, and the host that just reported in is recorded as never having done so.
+    """
+    digest = await _enrol(store)
+    poisoned = {
+        "sample_id": "00000000-0000-4000-8000-000000000001",
+        "inventory": {"namespace": "staging-agent\u0000evil"},
+    }
+
+    await store.record_host_heartbeat(
+        host="runner-a",
+        credential_hash=digest,
+        capacity=poisoned,
+        capacity_sample_age_ms=100,
+        slots_total=9,
+    )
+
+    row = await store.get_host(host="runner-a")
+    assert row is not None
+    assert row["slots_total"] == 9
+    assert row["last_heartbeat_at"] is not None
+    assert row["status"] == HOST_ONLINE
+    (listed,) = await store.list_runner_hosts()
+    assert listed["capacity_snapshot"] is None
+
+
+async def test_the_history_endpoint_maps_real_database_rows(store):
+    """The route's own mapping, over the types a real database hands back.
+
+    asyncpg returns a UUID column as a ``UUID`` object, and the response model
+    wants a string. Every unit fixture used strings, so nothing caught this
+    until a window with rows in it was built end to end — which is what this
+    does: real insert, real read, the endpoint function itself.
+    """
+    from cloud_agent.api import admin_hosts
+
+    digest = await _enrol(store)
+    await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
+    assert await _record_point(store, "runner-a") is True
+
+    response = await admin_hosts.get_agent_runner_host_capacity_history(
+        host="runner-a", window="1h", _admin_id="admin", store=store
+    )
+
+    assert response.host == "runner-a"
+    assert response.capacity_epoch is not None
+    observed = [point for point in response.points if point.sampled_at is not None]
+    assert len(observed) == 1
+    assert observed[0].linux_boot_id == "00000000-0000-4000-8000-000000000002"
+    assert observed[0].cpu_percent == pytest.approx(37.2)
+    assert observed[0].memory_used_bytes == 128 * 1024**3 - 86 * 1024**3
+    # Every bucket nobody observed is still a hole, not a zero.
+    assert all(point.cpu_percent is None for point in response.points if point.sampled_at is None)
 
 
 # ── The migration over rows that predate it ───────────────────────────

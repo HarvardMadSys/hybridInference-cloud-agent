@@ -77,6 +77,13 @@ MAX_HISTORY_POINTS = 1500
 #: than silently rounded somewhere the reader cannot see.
 _MAX_JSON_INT = 2**53 - 1
 
+#: No C0 control byte and no DEL. A namespace is an identifier, and the one
+#: that matters here is U+0000: PostgreSQL cannot encode it inside JSONB, so a
+#: block carrying it is refused by the database rather than by this service —
+#: which, without this rule, is a failure that takes the heartbeat's own write
+#: down with it.
+_NO_CONTROL_CHARACTERS = r"^[^\x00-\x1f\x7f]*$"
+
 CpuMissingReason = Literal[
     CPU_MISSING_WARMING_UP,
     CPU_MISSING_COUNTER_RESET,
@@ -102,7 +109,14 @@ class HostCapacityInventory(BaseModel):
     namespace: str | None = Field(
         None,
         max_length=255,
-        description="Deployment namespace the counts were scoped to. Never empty for a counted run.",
+        pattern=_NO_CONTROL_CHARACTERS,
+        description=(
+            "Deployment namespace the counts were scoped to. Never empty for "
+            "a counted run, and never carrying a control byte: this string is "
+            "stored as JSONB, which cannot represent U+0000 at all, and a "
+            "monitoring field must not be able to fail the write that carries "
+            "the liveness signal."
+        ),
     )
     status: InventoryStatus = Field(
         ...,
@@ -536,7 +550,15 @@ def history_point_grid(
 
 
 def _point_from_row(bucket_at: datetime, row: Mapping[str, Any] | None) -> AgentHostCapacityPoint:
-    """Build one history point, with nulls for a bucket nobody observed."""
+    """Build one history point, with nulls for a bucket nobody observed.
+
+    The row comes straight from asyncpg, which hands a ``UUID`` column back as
+    a ``UUID`` object and not as text — so the boot id is normalized here
+    rather than left for the response model, which expects a string and would
+    otherwise refuse the whole window. The same conversion the write path uses
+    is applied in both directions, so an identifier cannot be canonical on the
+    way in and different on the way out.
+    """
     if row is None:
         return AgentHostCapacityPoint(bucket_at=bucket_at)
     usage = memory_usage(
@@ -545,7 +567,7 @@ def _point_from_row(bucket_at: datetime, row: Mapping[str, Any] | None) -> Agent
     return AgentHostCapacityPoint(
         bucket_at=bucket_at,
         sampled_at=row.get("sampled_at"),
-        linux_boot_id=row.get("linux_boot_id"),
+        linux_boot_id=_uuid_text(row.get("linux_boot_id")),
         cpu_percent=row.get("cpu_percent"),
         cpu_logical_count=row.get("cpu_logical_count"),
         cpu_window_seconds=row.get("cpu_window_seconds"),

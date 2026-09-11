@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
@@ -121,6 +122,24 @@ def test_an_oversized_block_is_refused_before_parsing() -> None:
         "reason": "x" * (MAX_CAPACITY_BYTES + 1),
     }
     assert parse_capacity_block(padded) is None
+
+
+def test_a_namespace_jsonb_cannot_store_is_refused() -> None:
+    """U+0000 is not representable in JSONB, and the database says so loudly.
+
+    Left to the database, the rejection arrives as an exception inside the
+    heartbeat's own transaction — which is a monitoring field taking the
+    liveness write down with it. It is refused here instead, where the cost is
+    the block.
+    """
+    block = capacity_block()
+    block["inventory"] = {**block["inventory"], "namespace": "staging\u0000agent"}
+    assert parse_capacity_block(block) is None
+
+    for control in ("\n", "\t", "\x7f"):
+        poisoned = capacity_block()
+        poisoned["inventory"] = {**poisoned["inventory"], "namespace": f"staging{control}agent"}
+        assert parse_capacity_block(poisoned) is None
 
 
 def test_an_unknown_state_key_is_refused() -> None:
@@ -352,6 +371,42 @@ def test_a_non_uuid_boot_id_is_stored_as_no_boot_id() -> None:
     point = history_point_write_from_row(candidate_row(linux_boot_id="hand-edited"))
     assert point is not None
     assert point.linux_boot_id is None
+
+
+def test_a_uuid_column_value_is_normalized_before_the_response_model() -> None:
+    """asyncpg returns UUID columns as UUID objects, not strings.
+
+    The write path converts on the way in; this is the same conversion on the
+    way out. Without it the response model refuses the row and the whole
+    history window becomes a 500 — but only once real history exists, which is
+    why the unit fixtures (all strings) never saw it.
+    """
+    since = datetime(2026, 9, 11, 12, 0, 0, tzinfo=UTC)
+    row = history_row(since)
+    row["linux_boot_id"] = UUID("00000000-0000-4000-8000-000000000002")
+    (point,) = history_point_grid(rows=[row], since=since, until=since)
+    assert point.linux_boot_id == "00000000-0000-4000-8000-000000000002"
+
+    # And the response the endpoint returns is built from exactly those points.
+    response = AgentHostCapacityHistoryResponse(
+        host="gpu-box",
+        capacity_epoch="00000000-0000-4000-8000-0000000000ff",
+        since=since,
+        until=since,
+        observed_at=since,
+        points=[point],
+    )
+    assert response.points[0].linux_boot_id == "00000000-0000-4000-8000-000000000002"
+
+
+def test_a_boot_id_that_cannot_be_read_is_a_gap_not_a_failure() -> None:
+    """A hand-edited row must cost one field, not the whole window."""
+    since = datetime(2026, 9, 11, 12, 0, 0, tzinfo=UTC)
+    row = history_row(since)
+    row["linux_boot_id"] = "not-a-uuid"
+    (point,) = history_point_grid(rows=[row], since=since, until=since)
+    assert point.linux_boot_id is None
+    assert point.cpu_percent == pytest.approx(10.0)
 
 
 def test_bucketing_floors_to_the_minute_in_utc() -> None:
