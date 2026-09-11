@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from cloud_agent.storage.repositories.grants import GrantRepository
 from cloud_agent.storage.repositories.host_capacity import HostCapacityRepository
+from cloud_agent.storage.repositories.host_pool import HostPoolRepository
 from cloud_agent.storage.repositories.ledger import LedgerRepository
 from cloud_agent.storage.repositories.mcp import McpConnectionRepository
 from cloud_agent.storage.repositories.source_control import SourceControlRepository
@@ -17,6 +18,7 @@ from cloud_agent.storage.repositories.source_control import SourceControlReposit
 __all__ = [
     "GrantRepository",
     "HostCapacityRepository",
+    "HostPoolRepository",
     "LedgerRepository",
     "McpConnectionRepository",
     "SourceControlRepository",
