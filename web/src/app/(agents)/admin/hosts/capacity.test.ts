@@ -383,11 +383,21 @@ describe('one physical server', () => {
   it('shows the freshest fresh observation, and ages only what it shows', () => {
     const fresh = host({
       host: 'runner-a',
-      capacity: capacity({ sample_age_seconds: 12, freshness: 'fresh', cpu_percent: 11 }),
+      capacity: capacity({
+        sample_age_seconds: 12,
+        freshness: 'fresh',
+        cpu_percent: 11,
+        inventory: inventory({ namespace: 'example-agent-a' }),
+      }),
     });
     const stale = host({
       host: 'runner-b',
-      capacity: capacity({ sample_age_seconds: 400, freshness: 'stale', cpu_percent: 90 }),
+      capacity: capacity({
+        sample_age_seconds: 400,
+        freshness: 'stale',
+        cpu_percent: 90,
+        inventory: inventory({ namespace: 'example-agent-b' }),
+      }),
       labels: { physical_host: 'runner-a' },
     });
     const facts = groupCapacityFacts([stale, fresh]);
@@ -472,8 +482,108 @@ describe('one physical server', () => {
     expect(summary.text).toBe('9 running · 0 stopped');
     expect(summary.staleOnly).toBe(true);
     expect(summary.partial).toBe(true);
-    expect(summary.contributingHosts).toEqual([]);
+    // The counts in `text` are this host's, so it is the row's ingredient —
+    // `staleOnly` is what says they are not current.
+    expect(summary.contributingHosts).toEqual(['runner-old']);
+    expect(summary.stale).toBe(true);
     expect(summary.explanation).toContain('runner-old');
+  });
+
+  it('never turns an unavailable listing into zero, however old it is', () => {
+    // A listing that timed out has no counts at all. Showing it as the last
+    // observation is right; showing the nulls it carries as zeroes would state
+    // a number that was never measured, and this is the one branch where that
+    // could happen — the fresh path refuses unavailable reports already.
+    const failed = host({
+      host: 'runner-a',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        inventory: inventory({
+          status: 'unavailable',
+          running: null,
+          stopped: null,
+          other_states: null,
+          reason: 'docker_timeout',
+        }),
+      }),
+    });
+
+    const summary = summarizeSandboxes([failed], () => true);
+
+    expect(summary.text).toBe('Unavailable');
+    expect(summary.staleOnly).toBe(false);
+    expect(summary.contributingHosts).toEqual([]);
+    expect(summary.reasons).toContain('docker_timeout');
+  });
+
+  it('shows the newest expired observation, with its own age', () => {
+    // Two expired environments. The older one happens to come first in the
+    // array; pairing its counts with the newer one's age is how a row ends up
+    // describing two machines at once.
+    const older = host({
+      host: 'older',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        sampled_at: '2026-09-11T11:34:00Z',
+        inventory: inventory({ namespace: 'ns-old', running: 9, stopped: 0 }),
+      }),
+    });
+    const newer = host({
+      host: 'newer',
+      capacity: capacity({
+        sample_age_seconds: 120,
+        freshness: 'stale',
+        sampled_at: '2026-09-11T12:32:00Z',
+        inventory: inventory({ namespace: 'ns-new', running: 2, stopped: 0 }),
+      }),
+    });
+
+    const facts = groupCapacityFacts([older, newer]);
+    const summary = facts.sandboxes;
+
+    expect(summary.text).toBe('2 running · 0 stopped');
+    expect(summary.explanation).toContain('newer');
+    expect(summary.contributingHosts).toEqual(['newer']);
+    // The number and the age describe the same machine.
+    expect(facts.source?.host).toBe('newer');
+    expect(facts.oldestSampleAgeSeconds).toBe(120);
+    expect(facts.stale).toBe(true);
+  });
+
+  it('does not call a superseded duplicate missing coverage', () => {
+    // Three replicas share one namespace; one of them is a beat behind. That
+    // is not an uncovered environment — the namespace is fully counted by a
+    // report that is right here — and marking it Partial would put the badge
+    // on every healthy server whose replicas report at slightly different
+    // moments.
+    const fresh = host({
+      host: 'replica-a',
+      capacity: capacity({
+        sample_age_seconds: 5,
+        freshness: 'fresh',
+        inventory: inventory({ namespace: 'example-agent', running: 2, stopped: 0 }),
+      }),
+    });
+    const duplicate = host({
+      host: 'replica-b',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        inventory: inventory({ namespace: 'example-agent', running: 2, stopped: 0 }),
+      }),
+    });
+
+    const facts = groupCapacityFacts([fresh, duplicate]);
+
+    expect(facts.sandboxes.text).toBe('2 running · 0 stopped');
+    expect(facts.sandboxes.partial).toBe(false);
+    expect(facts.sandboxes.reasons).not.toContain('source_stale');
+    expect(facts.stale).toBe(false);
+    expect(facts.oldestSampleAgeSeconds).toBe(5);
+    // Both are still listed, so the panel can show which replica is behind.
+    expect(facts.sandboxes.perSource.map((line) => line.host)).toEqual(['replica-a', 'replica-b']);
   });
 
   it('falls back to a stale observation when that is all there is', () => {

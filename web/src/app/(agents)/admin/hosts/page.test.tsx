@@ -765,6 +765,78 @@ describe('capacity panel', () => {
     expect(mocked.list.mock.calls.length).toBeGreaterThan(poolCalls);
   });
 
+  it('keeps the enrollment it fell back to when nothing was measured yet', async () => {
+    // Neither enrollment has reported capacity, so the panel opens on the
+    // representative one. When the other starts reporting, the curve must not
+    // follow it: the operator opened a server, not "whichever machine answers
+    // next".
+    vi.useFakeTimers();
+    const onBox = (name: string, epoch: string, measured: boolean) =>
+      host({
+        host: name,
+        labels: { physical_host: 'box' },
+        capacity_epoch: epoch,
+        capacity: measured ? capacity() : null,
+      });
+    mocked.list.mockResolvedValue(
+      pool([onBox('box-a', 'epoch-a', false), onBox('box-b', 'epoch-b', false)]),
+    );
+    mocked.history.mockImplementation(async (name: string) =>
+      history({ host: name, capacity_epoch: name === 'box-b' ? 'epoch-b' : 'epoch-a' }),
+    );
+    render(<AdminHostsPage />);
+    await vi.waitFor(() =>
+      expect(screen.getByRole('rowheader', { name: 'box' })).toBeInTheDocument(),
+    );
+    await openPanel('box');
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything()),
+    );
+
+    // box-b is the first to report; the choice made at open still stands.
+    mocked.history.mockClear();
+    mocked.list.mockResolvedValue(
+      pool([onBox('box-a', 'epoch-a', false), onBox('box-b', 'epoch-b', true)]),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything());
+    expect(mocked.history).not.toHaveBeenCalledWith('box-b', '1h', expect.anything());
+  });
+
+  it('adopts the generation of the source the operator switched to', async () => {
+    // Switching sources is not a re-enrollment, and saying it is would tell an
+    // operator their machine was rebuilt when they merely looked at the other
+    // deployment on it.
+    const onBox = (name: string, epoch: string, cpu: number) =>
+      host({
+        host: name,
+        labels: { physical_host: 'box' },
+        capacity_epoch: epoch,
+        capacity: capacity({ cpu_percent: cpu }),
+      });
+    mocked.list.mockResolvedValue(
+      pool([onBox('box-a', 'epoch-a', 11), onBox('box-b', 'epoch-b', 22)]),
+    );
+    mocked.history.mockImplementation(async (name: string) =>
+      history({ host: name, capacity_epoch: name === 'box-b' ? 'epoch-b' : 'epoch-a' }),
+    );
+    render(<AdminHostsPage />);
+
+    await openPanel('box');
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything()),
+    );
+    expect(screen.queryByText(/re-enrolled/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Curve source'), { target: { value: 'box-b' } });
+
+    await waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-b', '1h', expect.anything()),
+    );
+    expect(screen.queryByText(/re-enrolled/)).not.toBeInTheDocument();
+  });
+
   it('stops polling a panel that has been closed', async () => {
     vi.useFakeTimers();
     render(<AdminHostsPage />);

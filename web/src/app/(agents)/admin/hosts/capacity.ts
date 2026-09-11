@@ -247,6 +247,14 @@ export interface SandboxSummary {
    * thing measured, and the caller must not draw it as the current count.
    */
   staleOnly: boolean;
+  /**
+   * True when this server's coverage is incomplete because an observation has
+   * expired — either the counts shown are themselves the last observation, or
+   * an environment this server holds is no longer being reported on. A stale
+   * report that a current one already covers is neither: it is a superseded
+   * duplicate of the same Docker host, not something missing.
+   */
+  stale: boolean;
 }
 
 interface Tally {
@@ -401,6 +409,7 @@ export function summarizeSandboxes(
       perSource,
       contributingHosts: [],
       staleOnly: false,
+      stale: false,
     };
   }
 
@@ -435,24 +444,43 @@ export function summarizeSandboxes(
   if (unreported > 0) reasons.add('inventory_not_reported');
   if (stale.length > 0) reasons.add('source_stale');
 
+  // An expired report only means something is missing when nothing current
+  // covers the same environment. The default deployment runs three replicas
+  // against one namespace, so the usual "stale" report is a superseded
+  // duplicate of a report that is right here — counting that as incomplete
+  // coverage would put "Partial" on every server whose replicas beat at
+  // slightly different moments.
+  const coveredNamespaces = new Set(
+    contributing.map((report) => report.inventory.namespace?.trim() ?? ''),
+  );
+  const missing = stale.filter((report) => {
+    const namespace = report.inventory.namespace?.trim() ?? '';
+    return namespace !== '' && !coveredNamespaces.has(namespace);
+  });
+  if (missing.length > 0) reasons.add('source_stale');
+
   const counted = contributing.length > 0 ? contributing : unscoped;
   const countable = counted.filter((report) => report.inventory.status !== 'unavailable');
   if (countable.length === 0) {
-    if (stale.length > 0) {
-      // Nothing current was measured, so what is left is the last observation.
-      // It is shown — an operator wants to know what the server last looked
-      // like — but as a stale one, never as the current total.
-      const last = stale[0];
+    // Nothing current was counted. The newest expired report that actually
+    // established a count is still worth showing — an operator wants to know
+    // what the server last looked like — but never as the current total, and
+    // never with counts that were never taken.
+    const last = newestWithCounts(stale);
+    if (last !== null) {
       return {
         text: countPhrase(tallyOf(last.inventory)),
         partial: true,
         reasons: [...reasons],
         explanation:
-          `The newest observation is stale. This is what ${last.host} last reported, ` +
-          'not the current count.',
+          `The newest observation for this server is stale. This is what ${last.host} ` +
+          'last reported, not the current count.',
         perSource,
-        contributingHosts: [],
+        // The counts in `text` do belong to this host, so the row's age is
+        // this host's age. `staleOnly` is what says they are not current.
+        contributingHosts: [last.host],
         staleOnly: true,
+        stale: true,
       };
     }
     return {
@@ -463,6 +491,7 @@ export function summarizeSandboxes(
       perSource,
       contributingHosts: [],
       staleOnly: false,
+      stale: false,
     };
   }
 
@@ -492,6 +521,7 @@ export function summarizeSandboxes(
       perSource,
       contributingHosts: countedHosts,
       staleOnly: false,
+      stale: missing.length > 0,
     };
   }
 
@@ -503,7 +533,7 @@ export function summarizeSandboxes(
   const complete =
     unscoped.length === 0 &&
     unreported === 0 &&
-    stale.length === 0 &&
+    missing.length === 0 &&
     countable.length === contributing.length &&
     countable.every((report) => report.inventory.status === 'available') &&
     reports.every((report) => (report.inventory.unscoped_legacy_containers ?? 0) === 0);
@@ -516,17 +546,35 @@ export function summarizeSandboxes(
       perSource,
       contributingHosts: countedHosts,
       staleOnly: false,
+      stale: false,
     };
   }
   return {
     text: `≥${tallyTotal(total)} observed · Partial`,
     partial: true,
     reasons: [...reasons],
-    explanation: staleExplanations(stale, unreported, countable, contributing, unscoped),
+    explanation: staleExplanations(missing, unreported, countable, contributing, unscoped),
     perSource,
     contributingHosts: countedHosts,
     staleOnly: false,
+    // The row is missing coverage from an environment whose last reading has
+    // expired: what is on screen is current, but it is not the whole server.
+    stale: missing.length > 0,
   };
+}
+
+/**
+ * The expired report with a real count that was sampled most recently.
+ *
+ * Ordered by observation time, not by array position: the two are different
+ * facts, and pairing the first element's counts with the newest element's age
+ * is how a row ends up describing two machines at once. Reports whose listing
+ * failed are skipped — their counts are null, and a null is not a zero.
+ */
+function newestWithCounts(reports: InventoryReport[]): InventoryReport | null {
+  const usable = reports.filter((report) => report.inventory.status !== 'unavailable');
+  if (usable.length === 0) return null;
+  return [...usable].sort((a, b) => observedAtMs(b.capacity) - observedAtMs(a.capacity))[0];
 }
 
 /** Why a total came out a lower bound, in the words the panel shows. */
@@ -619,7 +667,13 @@ export function groupCapacityFacts(members: AgentRunnerHost[], elapsedMs = 0): H
     // The oldest ingredient decides: a fresh CPU sample must not pass an
     // inventory from ten minutes ago off as having just been collected.
     oldestSampleAgeSeconds: ages.length === 0 ? null : Math.max(...ages),
-    stale: measured.some(isStale),
+    // Expired data on this row, in either of the two shapes it takes: the
+    // counts shown are a last observation, or an environment this server
+    // holds has stopped reporting. A stale report that a current one already
+    // covers is a superseded duplicate of the same Docker host and is neither
+    // — the sandbox summary is where that distinction is made, because it is
+    // the only place that knows which reports were deduped away.
+    stale: sandboxes.stale || (source !== null && isStale(source)),
     sandboxes,
   };
 }

@@ -572,12 +572,33 @@ function HostsView() {
     // operator, and the epoch check would call the swap a re-enrollment.
     // Opening the panel is the moment the choice is made; only the operator
     // changes it afterwards.
-    setSourceChoice(facts.source?.host ?? null);
+    //
+    // The fallback is pinned too, and it has to be: when nothing has been
+    // measured yet the panel opens on the representative enrollment, and
+    // leaving the choice null would let the first enrollment to report — a
+    // different machine — take the chart without anybody asking.
+    const opened = facts.source ?? servers.find((item) => item.name === server)?.host ?? null;
+    setSourceChoice(opened?.host ?? null);
     // Recorded so a re-enrollment while the panel is open can be named as
     // such, rather than looking like a curve that lost its history.
-    setPanelEpoch(facts.source?.capacity_epoch ?? null);
+    setPanelEpoch(opened?.capacity_epoch ?? null);
     setHistory(null);
     setHistoryError(null);
+  };
+
+  /**
+   * Follow the operator's choice of source, and its generation with it.
+   *
+   * The two move together: the restart note is a comparison between the
+   * generation on screen and the one the panel opened on, so a switch that
+   * changed only the host would read as the new host having re-enrolled. The
+   * operator asked to look at another deployment on this machine, not to be
+   * told the machine was rebuilt.
+   */
+  const selectSource = (host: string) => {
+    const member = openServer?.members.find((item) => item.host === host) ?? null;
+    setSourceChoice(host);
+    setPanelEpoch(member?.capacity_epoch ?? null);
   };
 
   if (denied) {
@@ -874,7 +895,7 @@ function HostsView() {
                                 name={name}
                                 source={openSource?.host ?? null}
                                 sources={openSources}
-                                onSourceChange={setSourceChoice}
+                                onSourceChange={selectSource}
                                 sandboxes={openFacts.sandboxes}
                                 oldestAgeSeconds={
                                   openFacts.oldestSampleAgeSeconds === null
