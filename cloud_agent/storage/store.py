@@ -139,16 +139,26 @@ _NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], se
 # attempt may start before a delayed predecessor is marked finished; clamp
 # that predecessor rather than counting the same requests twice. PostgreSQL
 # LEAST ignores the NULL produced when there is no following attempt.
-_LEDGER_WINDOW_UNTIL_SQL = """
+#
+# The successor lookup is named separately because a second reader asks a
+# different question of the same definition: whether an attempt's window is
+# still open (no end of its own and no successor) or already bounded.
+# Duplicating the subquery to answer that would be a second algorithm free to
+# drift from this one. ``a`` and ``j`` are the attempt and job aliases.
+NEXT_ATTEMPT_START_SQL = """
+(
+    SELECT MIN(next_attempt.started_at)
+    FROM agent_attempts next_attempt
+    JOIN agent_jobs next_job ON next_job.id = next_attempt.job_id
+    WHERE next_job.thread_id = j.thread_id
+      AND (next_attempt.started_at, next_attempt.id) > (a.started_at, a.id)
+)
+"""
+
+LEDGER_WINDOW_UNTIL_SQL = f"""
 LEAST(
     COALESCE(a.finished_at, NOW()),
-    (
-        SELECT MIN(next_attempt.started_at)
-        FROM agent_attempts next_attempt
-        JOIN agent_jobs next_job ON next_job.id = next_attempt.job_id
-        WHERE next_job.thread_id = j.thread_id
-          AND (next_attempt.started_at, next_attempt.id) > (a.started_at, a.id)
-    )
+    {NEXT_ATTEMPT_START_SQL}
 )
 """
 
@@ -2382,7 +2392,7 @@ class AgentJobStore:
                 SELECT a.id AS attempt_id, a.job_id, a.attempt_no,
                        a.status AS attempt_status, a.started_at, a.finished_at,
                        l.id, l.grant_id, l.residency_generation, l.binding_id,
-                       l.window_since, {_LEDGER_WINDOW_UNTIL_SQL} AS window_until,
+                       l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
                        l.snapshot, l.queried_at, l.last_error_code, l.next_refresh_at,
                        l.last_refresh_attempt_at, l.refresh_generation,
                        l.refresh_lease_expires_at, l.terminal_refresh_count,
@@ -2471,7 +2481,7 @@ class AgentJobStore:
                 f"""
                 WITH due AS (
                     SELECT l.id, a.job_id, a.status <> 'running' AS terminal,
-                           {_LEDGER_WINDOW_UNTIL_SQL} AS window_until
+                           {LEDGER_WINDOW_UNTIL_SQL} AS window_until
                     FROM agent_attempt_ledger l
                     JOIN agent_attempts a ON a.id = l.attempt_id
                     JOIN agent_jobs j ON j.id = a.job_id

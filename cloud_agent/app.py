@@ -31,7 +31,13 @@ import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
@@ -48,6 +54,35 @@ logger = get_logger(__name__)
 ENV_DATABASE_URL = "AGENT_DATABASE_URL"
 ENV_PUBLISH_BASE_BRANCH = "AGENT_PUBLISH_BASE_BRANCH"
 ENV_GITHUB_TOKEN = "AGENT_GITHUB_TOKEN"
+
+#: The admin observation reads. Their bodies are time-varying and describe
+#: other users' runs, so no intermediary may store one.
+ADMIN_READ_PREFIX = "/admin/agent/runs"
+
+
+def install_admin_no_store(app: FastAPI, *, prefix: str = ADMIN_READ_PREFIX) -> None:
+    """Keep admin read responses, refusals included, out of every cache.
+
+    A route dependency can set a header on a response the route returns, but
+    FastAPI builds a fresh response for a raised refusal and for its own
+    validation errors. These handlers wrap the defaults instead of replacing
+    them, and are registered here rather than as middleware: middleware would
+    also sit in front of the event streams, which are long-lived by design.
+    """
+    prefix = prefix.rstrip("/")
+
+    async def with_no_store(request: Request, exc: Exception) -> Response:
+        if isinstance(exc, RequestValidationError):
+            response = await request_validation_exception_handler(request, exc)
+        else:
+            response = await http_exception_handler(request, exc)  # type: ignore[arg-type]
+        if request.url.path == prefix or request.url.path.startswith(f"{prefix}/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    app.add_exception_handler(StarletteHTTPException, with_no_store)
+    app.add_exception_handler(RequestValidationError, with_no_store)
+
 
 #: Held so the event loop cannot collect a running background task. Without
 #: this the reaper and publisher are eligible for garbage collection the moment
@@ -901,6 +936,7 @@ def create_app() -> FastAPI:
 
     from cloud_agent.api import (
         admin_hosts,
+        admin_llm_requests,
         admin_runs,
         admin_usage,
         hosts,
@@ -924,6 +960,11 @@ def create_app() -> FastAPI:
     app.include_router(admin_hosts.router)
     app.include_router(admin_runs.router)
     app.include_router(admin_usage.router)
+    # Per-request LLM detail reads a second service and stays in its own module
+    # for the same reason it is a separate page load: the default run detail
+    # must not acquire a gateway I/O path.
+    app.include_router(admin_llm_requests.router)
+    install_admin_no_store(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
     # to one configured service account. Its own module because its caller is a
     # service holding a dispatch token, not a browser holding a session.
