@@ -188,7 +188,6 @@ describe('JobDetail', () => {
     async (parentJobId) => {
       render(<JobDetail job={makeJob({ state: 'queued', events: [], parentJobId })} />);
       expect(await screen.findByText('Waiting to start')).toBeInTheDocument();
-      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Queued$/);
       expect(screen.queryByText(/Queued after (the )?current run/)).not.toBeInTheDocument();
     },
   );
@@ -683,7 +682,6 @@ describe('JobDetail', () => {
     (state) => {
       const stateNote = 'agent completed (shared workspace; publication snapshot pending)';
       render(<JobDetail job={makeJob({ state, stateNote, sandbox: 'io.containerd.kata.v2' })} />);
-      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
       expect(screen.queryByText(stateNote)).not.toBeInTheDocument();
       expect(screen.queryByText(/^(Done|Completed|Outcome|Needs review)$/)).not.toBeInTheDocument();
       expect(screen.queryByRole('dialog', { name: 'Run details' })).not.toBeInTheDocument();
@@ -692,12 +690,9 @@ describe('JobDetail', () => {
   );
 
   it.each(['queued', 'running', 'failed'] as const)(
-    'shows the %s conversation state without changing the current turn',
+    'keeps the current turn actionable while the conversation is %s',
     (state) => {
       render(<JobDetail job={makeJob({ state })} />);
-      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(
-        state[0].toUpperCase() + state.slice(1),
-      );
       expect(screen.getByLabelText('Agent activity')).toHaveTextContent('I found the cause.');
       expect(screen.queryByText(/Execution history/)).not.toBeInTheDocument();
       if (state === 'failed') {
@@ -708,28 +703,23 @@ describe('JobDetail', () => {
     },
   );
 
-  it('becomes idle after stopping while preserving the stopped result and follow-up', () => {
+  it('preserves the stopped result and follow-up after stopping', () => {
     const job = makeJob();
     const { rerender } = render(<JobDetail job={job} />);
-    expect(screen.getByLabelText('Conversation status')).toHaveTextContent('Running');
     rerender(<JobDetail job={{ ...job, state: 'cancelled' }} />);
-    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
     expect(screen.getByText('Run stopped')).toBeInTheDocument();
     expect(screen.getByLabelText('Add a follow-up')).toBeEnabled();
     expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
   });
 
   it.each(['done', 'cancelled'] as const)(
-    'shows ongoing conversation activity when the selected turn is %s',
+    'keeps a historical %s turn free of the Stop action',
     (state) => {
       const job = makeJob({ state, conversationState: 'running' });
-      const { rerender } = render(<JobDetail job={job} />);
-      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Running$/);
+      render(<JobDetail job={job} />);
       // A historical turn does not gain a Stop action for another turn.
       expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
       if (state === 'cancelled') expect(screen.getByText('Run stopped')).toBeInTheDocument();
-      rerender(<JobDetail job={{ ...job, conversationState: 'idle' }} />);
-      expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
       expect(screen.getByLabelText('Agent activity')).toHaveTextContent('I found the cause.');
     },
   );
@@ -837,7 +827,6 @@ describe('JobDetail', () => {
         })}
       />,
     );
-    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
     const workspace = screen.getByRole('region', { name: 'Task progress' });
     expect(within(workspace).getByText(message)).toBeVisible();
     expect(
@@ -966,7 +955,6 @@ describe('JobDetail', () => {
       'true',
     );
     expect(screen.getByText(/Viewing execution 1/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Conversation status')).toHaveTextContent(/^Idle$/);
     expect(screen.getByText('Superseded answer')).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Usage' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByText(/Execution history \(2\)/));

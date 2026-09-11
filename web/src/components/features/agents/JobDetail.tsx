@@ -30,11 +30,6 @@ import {
 import { lifecyclePhaseLabel, ownerFailureMessage, toDiffFileDetails } from './adapt';
 import { isComposerSubmit } from './composerKeys';
 import {
-  CONVERSATION_STATE_KEYS,
-  getConversationState,
-  type ConversationState,
-} from './conversationState';
-import {
   conversationNavigationScope,
   describeCurrentTurn,
   describeHistoryTurns,
@@ -100,27 +95,6 @@ const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'terminal', label: 'Terminal' },
   { key: 'files', label: 'Files' },
 ];
-
-const STATE_PILL: Record<ConversationState, { className: string; dot?: string }> = {
-  running: {
-    className:
-      'bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 ring-1 ring-inset ring-blue-100 dark:ring-blue-500/25',
-    dot: 'bg-blue-500',
-  },
-  queued: {
-    className:
-      'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400 ring-1 ring-inset ring-gray-200/70 dark:ring-white/10',
-    dot: 'bg-gray-400 dark:bg-gray-600',
-  },
-  idle: {
-    className:
-      'bg-gray-100 dark:bg-white/5 text-gray-500 dark:text-gray-400 ring-1 ring-inset ring-gray-200/70 dark:ring-white/10',
-  },
-  failed: {
-    className:
-      'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 ring-1 ring-inset ring-red-100 dark:ring-red-500/25',
-  },
-};
 
 const DIFF_LINE_CLASS = {
   hunk: 'bg-gray-50 dark:bg-gray-950 py-1 text-gray-400 dark:text-gray-500',
@@ -1183,8 +1157,6 @@ export function JobDetail({
 
   const selectedAttempt = job.attempts.find((attempt) => attempt.no === attemptNo);
   const runNote = ownerRunNote(job);
-  const conversationState = getConversationState(job);
-  const pill = STATE_PILL[conversationState];
   const isArchived = Boolean(job.archivedAt);
   const isActive = job.state === 'running' || job.state === 'queued';
   const isSuccessful = job.state === 'done' || job.state === 'needs_review';
@@ -1623,17 +1595,6 @@ export function JobDetail({
               </button>
             ))}
           </nav>
-          <span
-            aria-label={t('conversation.status')}
-            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.className}`}
-          >
-            {pill.dot ? (
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${pill.dot} ${isActive ? 'animate-pulse' : ''}`}
-              />
-            ) : null}
-            {t(CONVERSATION_STATE_KEYS[conversationState])}
-          </span>
           {job.diffFiles.length ? (
             <button
               type="button"

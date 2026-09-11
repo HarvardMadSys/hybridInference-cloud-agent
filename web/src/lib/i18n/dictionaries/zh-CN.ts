@@ -143,7 +143,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'turnNavigation.state.failed': '失败',
   'turnNavigation.state.cancelled': '已停止',
 
-  'conversation.status': '对话状态',
   'conversation.state.queued': '排队中',
   'conversation.state.running': '运行中',
   'conversation.state.idle': '空闲',
