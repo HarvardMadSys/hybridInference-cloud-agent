@@ -359,8 +359,9 @@ async def log_admin_action(
     """Append one admin action to this service's audit trail.
 
     The gateway's ``admin_audit_log`` stayed with the gateway, so this service
-    grew its own — migration ``0005_grants_and_audit`` — rather than a
-    documented no-op. The
+    grew its own rather than a documented no-op: the ``agent_admin_audit_log``
+    table, created with the rest of the schema by
+    ``migrations/versions/0001_schema_baseline.py``. The
     actions logged here revoke a machine's credential, retarget every future
     claim and remove hosts from the pool; a service that owns that surface and
     keeps no record of who used it has no answer to the only question asked
