@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class ExecutionQueries:
+class PostgresExecutionQueries:
     """Reading events, attempts and telemetry for one thread or job."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

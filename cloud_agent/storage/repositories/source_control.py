@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class SourceControlRepository:
+class PostgresSourceControlRepository:
     """Repository authorization and the GitLab credentials behind it."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

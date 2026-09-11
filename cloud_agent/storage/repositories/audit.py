@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class AuditRepository:
+class PostgresAuditRepository:
     """The admin audit trail: recorded, never read back."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

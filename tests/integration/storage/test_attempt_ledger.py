@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 
 from cloud_agent.ledger import summarize_conversation
-from cloud_agent.storage.repositories.ledger import LedgerRepository
+from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent.thread_stats import summarize_thread
 from tests.integration.storage.test_agent_job_store import (
@@ -73,7 +73,7 @@ async def store(db):
 @pytest_asyncio.fixture
 async def ledger(db):
     """The capability under test, on the repository that now owns it."""
-    return LedgerRepository(db)
+    return PostgresLedgerRepository(db)
 
 
 def _fence(job: dict, claim: dict, sandbox: dict) -> dict:
@@ -175,7 +175,7 @@ async def _force_due(store: AgentJobStore, ledger_id: int) -> None:
 
 
 async def test_conversation_usage_is_owner_scoped_and_does_not_include_other_threads(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """One read includes sibling turns, keeps unstarted ones, and excludes forks."""
     # Real turns of one thread: the schema ties a job's parent, messages and
@@ -222,7 +222,7 @@ async def _complete(
     *,
     calls: int | None = 2,
     error: str | None = None,
-    ledger: LedgerRepository,
+    ledger: PostgresLedgerRepository,
 ) -> bool:
     return await ledger.complete_ledger_refresh(
         ledger_id=claim["id"],
@@ -234,7 +234,7 @@ async def _complete(
 
 
 async def test_capture_actual_residency_grant_before_cli_and_preserve_rotations(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """Grant cleanup and a new residency cannot rewrite an executed attempt."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -287,7 +287,7 @@ async def test_capture_actual_residency_grant_before_cli_and_preserve_rotations(
 
 
 async def test_hot_followup_captures_same_grant_for_its_own_attempt(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """A retained CLI gets a durable reference when its next prompt is admitted."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -354,7 +354,7 @@ async def test_hot_followup_captures_same_grant_for_its_own_attempt(
 
 @pytest.mark.parametrize("missing", ["binding", "grant"])
 async def test_missing_historical_attribution_remains_untracked(
-    store, missing, ledger: LedgerRepository
+    store, missing, ledger: PostgresLedgerRepository
 ):
     """No grant or no binding must never become a false zero."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -434,7 +434,9 @@ async def test_attribution_insert_failure_rolls_back_the_cli_admission(store, wr
 
 
 @pytest.mark.parametrize("expired", [False, True])
-async def test_stale_attempt_cannot_capture_a_grant(store, expired, ledger: LedgerRepository):
+async def test_stale_attempt_cannot_capture_a_grant(
+    store, expired, ledger: PostgresLedgerRepository
+):
     """The execution fence, including expiry, protects both capture paths."""
     job, claim, sandbox = await _reserve_shared_chat(store)
     residency = await _residency(store, job, sandbox)
@@ -458,7 +460,7 @@ async def test_stale_attempt_cannot_capture_a_grant(store, expired, ledger: Ledg
 async def test_capture_serializes_with_finish_without_inverting_attempt_membership_locks(
     store,
     write,
-    ledger: LedgerRepository,
+    ledger: PostgresLedgerRepository,
 ):
     """A finish owning the attempt can still close membership while capture waits."""
     job, claim, sandbox = await _reserve_shared_chat(store)
@@ -518,7 +520,7 @@ async def test_capture_serializes_with_finish_without_inverting_attempt_membersh
 
 
 async def test_all_retry_attempts_visible_and_windows_do_not_overlap(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """A delayed finish is clamped without extending a turn through idle gaps."""
     start = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -555,7 +557,7 @@ async def test_all_retry_attempts_visible_and_windows_do_not_overlap(
 
 
 async def test_refresh_claims_are_exclusive_and_expired_writes_are_fenced(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """Two workers cannot fetch one row, and an old response cannot replace a new one."""
     job, _, ledger_id = await _seed_attempt(store)
@@ -588,7 +590,7 @@ async def test_refresh_claims_are_exclusive_and_expired_writes_are_fenced(
 
 
 async def test_failure_preserves_cached_snapshot_and_throttles_manual_retry(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """Snapshot freshness and last-attempt time are intentionally different."""
     job, _, ledger_id = await _seed_attempt(store)
@@ -617,7 +619,7 @@ async def test_failure_preserves_cached_snapshot_and_throttles_manual_retry(
 
 
 async def test_terminal_refresh_retries_are_bounded_and_failures_consume_attempts(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """Terminal jobs refresh immediately, after 30 s, and at least 5 min after finish."""
     end = datetime.now(timezone.utc)
@@ -669,7 +671,7 @@ async def test_terminal_refresh_retries_are_bounded_and_failures_consume_attempt
 
 
 async def test_early_manual_reads_preserve_both_terminal_reconciliations(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """Refresh clicks can replace cached data without spending the later stages."""
     end = datetime.now(timezone.utc)
@@ -723,7 +725,7 @@ async def test_early_manual_reads_preserve_both_terminal_reconciliations(
 
 @pytest.mark.parametrize("failure", [False, True])
 async def test_slow_early_read_cannot_consume_the_five_minute_reconciliation(
-    store, failure, ledger: LedgerRepository
+    store, failure, ledger: PostgresLedgerRepository
 ):
     """A query started at +299 seconds stays early even if it finishes after +300."""
     end = datetime.now(timezone.utc) - timedelta(seconds=301)
@@ -760,7 +762,7 @@ async def test_slow_early_read_cannot_consume_the_five_minute_reconciliation(
 
 
 async def test_running_query_finishing_after_attempt_still_gets_closed_window_refresh(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """An in-flight running snapshot cannot satisfy the first terminal refresh."""
     job, attempt_id, _ = await _seed_attempt(store)
@@ -830,7 +832,7 @@ async def test_job_runtime_usage_includes_retries_but_excludes_other_turns(store
 
 
 async def test_deleting_attempt_cascades_its_snapshot_but_not_other_attempts(
-    store, ledger: LedgerRepository
+    store, ledger: PostgresLedgerRepository
 ):
     """New references follow the existing Agent database retention boundary."""
     job, first, _ = await _seed_attempt(store)

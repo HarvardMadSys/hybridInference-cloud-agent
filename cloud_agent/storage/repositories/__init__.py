@@ -8,26 +8,26 @@ transaction ownership it has here.
 
 from __future__ import annotations
 
-from cloud_agent.storage.repositories.audit import AuditRepository
-from cloud_agent.storage.repositories.conversation_queries import ConversationQueries
-from cloud_agent.storage.repositories.credential_queries import CredentialQueries
-from cloud_agent.storage.repositories.execution_queries import ExecutionQueries
-from cloud_agent.storage.repositories.grants import GrantRepository
-from cloud_agent.storage.repositories.host_capacity import HostCapacityRepository
-from cloud_agent.storage.repositories.host_pool import HostPoolRepository
-from cloud_agent.storage.repositories.ledger import LedgerRepository
-from cloud_agent.storage.repositories.mcp import McpConnectionRepository
-from cloud_agent.storage.repositories.source_control import SourceControlRepository
+from cloud_agent.storage.repositories.audit import PostgresAuditRepository
+from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
+from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
+from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
+from cloud_agent.storage.repositories.grants import PostgresGrantRepository
+from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
+from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
+from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
+from cloud_agent.storage.repositories.mcp import PostgresMcpConnectionRepository
+from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
 
 __all__ = [
-    "AuditRepository",
-    "ConversationQueries",
-    "CredentialQueries",
-    "ExecutionQueries",
-    "GrantRepository",
-    "HostCapacityRepository",
-    "HostPoolRepository",
-    "LedgerRepository",
-    "McpConnectionRepository",
-    "SourceControlRepository",
+    "PostgresAuditRepository",
+    "PostgresConversationQueries",
+    "PostgresCredentialQueries",
+    "PostgresExecutionQueries",
+    "PostgresGrantRepository",
+    "PostgresHostCapacityRepository",
+    "PostgresHostPoolRepository",
+    "PostgresLedgerRepository",
+    "PostgresMcpConnectionRepository",
+    "PostgresSourceControlRepository",
 ]

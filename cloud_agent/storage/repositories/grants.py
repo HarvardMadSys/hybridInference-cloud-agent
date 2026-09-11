@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class GrantRepository:
+class PostgresGrantRepository:
     """Attempt grants: what was issued, what may be renewed, what to revoke."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

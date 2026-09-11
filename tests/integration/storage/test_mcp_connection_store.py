@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 
-from cloud_agent.storage.repositories.mcp import McpConnectionRepository
+from cloud_agent.storage.repositories.mcp import PostgresMcpConnectionRepository
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -73,10 +73,12 @@ async def pool():
 @pytest_asyncio.fixture
 async def store(pool):
     """The MCP-connection capability, on the repository that now owns it."""
-    return McpConnectionRepository(pool)
+    return PostgresMcpConnectionRepository(pool)
 
 
-async def _connect(store: McpConnectionRepository, user_id: str, server: str, token: str) -> int:
+async def _connect(
+    store: PostgresMcpConnectionRepository, user_id: str, server: str, token: str
+) -> int:
     """Store one connection the way the OAuth flow will."""
     return await store.upsert_mcp_connection(
         user_id=user_id,
@@ -88,7 +90,9 @@ async def _connect(store: McpConnectionRepository, user_id: str, server: str, to
     )
 
 
-async def test_a_connection_is_only_ever_read_by_its_owner(store: McpConnectionRepository) -> None:
+async def test_a_connection_is_only_ever_read_by_its_owner(
+    store: PostgresMcpConnectionRepository,
+) -> None:
     """Two users, the same server: the query must not blur them together."""
     await _connect(store, _OWNER, "github", "ciphertext-owner")
     await _connect(store, _OTHER, "github", "ciphertext-other")
@@ -105,7 +109,7 @@ async def test_a_connection_is_only_ever_read_by_its_owner(store: McpConnectionR
 
 
 async def test_reconnecting_replaces_the_credential_rather_than_adding_one(
-    store: McpConnectionRepository,
+    store: PostgresMcpConnectionRepository,
 ) -> None:
     """One row per user per server, or which credential is used is row order."""
     first = await _connect(store, _OWNER, "github", "ciphertext-old")
@@ -117,7 +121,7 @@ async def test_reconnecting_replaces_the_credential_rather_than_adding_one(
 
 
 async def test_reconnecting_does_not_disturb_another_users_row(
-    store: McpConnectionRepository,
+    store: PostgresMcpConnectionRepository,
 ) -> None:
     """The uniqueness constraint is on the pair, not on the server alone."""
     await _connect(store, _OTHER, "github", "ciphertext-other")
@@ -128,7 +132,9 @@ async def test_reconnecting_does_not_disturb_another_users_row(
     assert [row["access_token_ciphertext"] for row in theirs] == ["ciphertext-other"]
 
 
-async def test_disconnecting_removes_only_the_callers_row(store: McpConnectionRepository) -> None:
+async def test_disconnecting_removes_only_the_callers_row(
+    store: PostgresMcpConnectionRepository,
+) -> None:
     """A delete without its user scope would disconnect everyone at once."""
     await _connect(store, _OWNER, "github", "ciphertext-owner")
     await _connect(store, _OTHER, "github", "ciphertext-other")
@@ -140,14 +146,14 @@ async def test_disconnecting_removes_only_the_callers_row(store: McpConnectionRe
 
 
 async def test_disconnecting_something_not_connected_reports_it(
-    store: McpConnectionRepository,
+    store: PostgresMcpConnectionRepository,
 ) -> None:
     """Distinguishable from a successful delete, so the API can 404."""
     assert await store.delete_mcp_connection(user_id=_OWNER, server="github") is False
 
 
 async def test_a_connection_may_carry_no_refresh_token_or_expiry(
-    store: McpConnectionRepository,
+    store: PostgresMcpConnectionRepository,
 ) -> None:
     """Providers vary, and a NULL here means "nothing to refresh".
 
@@ -162,7 +168,7 @@ async def test_a_connection_may_carry_no_refresh_token_or_expiry(
 
 
 async def test_a_stored_expiry_round_trips_as_an_aware_timestamp(
-    store: McpConnectionRepository,
+    store: PostgresMcpConnectionRepository,
 ) -> None:
     """Resolution compares this against ``now``; a naive value there raises.
 

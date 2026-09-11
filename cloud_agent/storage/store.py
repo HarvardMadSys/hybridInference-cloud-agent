@@ -84,16 +84,16 @@ from cloud_agent.storage._sql.jobs import (
 )
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABILITY_JSON, THREAD_SANDBOX_SOURCE
-from cloud_agent.storage.repositories.audit import AuditRepository
-from cloud_agent.storage.repositories.conversation_queries import ConversationQueries
-from cloud_agent.storage.repositories.credential_queries import CredentialQueries
-from cloud_agent.storage.repositories.execution_queries import ExecutionQueries
-from cloud_agent.storage.repositories.grants import GrantRepository
-from cloud_agent.storage.repositories.host_capacity import HostCapacityRepository
-from cloud_agent.storage.repositories.host_pool import HostPoolRepository
-from cloud_agent.storage.repositories.ledger import LedgerRepository
-from cloud_agent.storage.repositories.mcp import McpConnectionRepository
-from cloud_agent.storage.repositories.source_control import SourceControlRepository
+from cloud_agent.storage.repositories.audit import PostgresAuditRepository
+from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
+from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
+from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
+from cloud_agent.storage.repositories.grants import PostgresGrantRepository
+from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
+from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
+from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
+from cloud_agent.storage.repositories.mcp import PostgresMcpConnectionRepository
+from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
 from cloud_agent.task_titles import fallback_title
 
 if TYPE_CHECKING:
@@ -114,16 +114,16 @@ class AgentJobStore:
         connection.
         """
         self._pool = pool
-        self._mcp = McpConnectionRepository(pool)
-        self._conversation_queries = ConversationQueries(pool)
-        self._execution_queries = ExecutionQueries(pool)
-        self._credential_queries = CredentialQueries(pool)
-        self._audit = AuditRepository(pool)
-        self._host_pool = HostPoolRepository(pool)
-        self._source_control = SourceControlRepository(pool)
-        self._ledger = LedgerRepository(pool)
-        self._host_capacity = HostCapacityRepository(pool)
-        self._grants = GrantRepository(pool)
+        self._mcp = PostgresMcpConnectionRepository(pool)
+        self._conversation_queries = PostgresConversationQueries(pool)
+        self._execution_queries = PostgresExecutionQueries(pool)
+        self._credential_queries = PostgresCredentialQueries(pool)
+        self._audit = PostgresAuditRepository(pool)
+        self._host_pool = PostgresHostPoolRepository(pool)
+        self._source_control = PostgresSourceControlRepository(pool)
+        self._ledger = PostgresLedgerRepository(pool)
+        self._host_capacity = PostgresHostCapacityRepository(pool)
+        self._grants = PostgresGrantRepository(pool)
 
     async def sweep_queued_follow_ups(self) -> None:
         """Fail queued follow-ups whose earlier native context is unavailable.

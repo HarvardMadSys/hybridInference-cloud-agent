@@ -22,7 +22,7 @@ import pytest
 import pytest_asyncio
 
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.storage.repositories.audit import AuditRepository
+from cloud_agent.storage.repositories.audit import PostgresAuditRepository
 from tests.support.migrations import apply_migrations
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -73,10 +73,10 @@ async def pool():
 @pytest_asyncio.fixture
 async def store(pool):
     """The capability under test, on the repository that owns it."""
-    return AuditRepository(pool)
+    return PostgresAuditRepository(pool)
 
 
-async def _record(store: AuditRepository, **overrides) -> int:
+async def _record(store: PostgresAuditRepository, **overrides) -> int:
     """Append one row the way an admin route will."""
     payload = {
         "action": "agent.runner_host.drain",
@@ -90,7 +90,9 @@ async def _record(store: AuditRepository, **overrides) -> int:
     return await store.record_admin_action(**payload)
 
 
-async def test_a_recorded_action_round_trips_field_by_field(store: AuditRepository, pool) -> None:
+async def test_a_recorded_action_round_trips_field_by_field(
+    store: PostgresAuditRepository, pool
+) -> None:
     """Every column the caller named comes back as it was given."""
     row_id = await _record(store)
 
@@ -108,7 +110,7 @@ async def test_a_recorded_action_round_trips_field_by_field(store: AuditReposito
 
 
 async def test_no_detail_is_stored_as_absent_rather_than_as_null(
-    store: AuditRepository, pool
+    store: PostgresAuditRepository, pool
 ) -> None:
     """``None`` must not become the JSON literal ``null`` in a JSONB column."""
     row_id = await _record(store, details=None)
@@ -125,7 +127,7 @@ async def test_no_detail_is_stored_as_absent_rather_than_as_null(
 
 
 async def test_a_failed_action_is_recorded_rather_than_skipped(
-    store: AuditRepository, pool
+    store: PostgresAuditRepository, pool
 ) -> None:
     """A trail that keeps only what worked is not a trail."""
     row_id = await _record(store, success=False)
@@ -137,7 +139,9 @@ async def test_a_failed_action_is_recorded_rather_than_skipped(
     assert success is False
 
 
-async def test_the_actor_and_the_target_are_separate_columns(store: AuditRepository, pool) -> None:
+async def test_the_actor_and_the_target_are_separate_columns(
+    store: PostgresAuditRepository, pool
+) -> None:
     """An action taken on nobody records no target, and still names the actor."""
     row_id = await _record(store, target_user_id=None)
 
@@ -148,7 +152,9 @@ async def test_the_actor_and_the_target_are_separate_columns(store: AuditReposit
     assert row["target_user_id"] is None
 
 
-async def test_recording_twice_appends_rather_than_replaces(store: AuditRepository, pool) -> None:
+async def test_recording_twice_appends_rather_than_replaces(
+    store: PostgresAuditRepository, pool
+) -> None:
     """There is no code here that updates or deletes a row, and this pins that."""
     first = await _record(store, action="agent.runner_host.drain")
     second = await _record(store, action="agent.runner_host.forget")

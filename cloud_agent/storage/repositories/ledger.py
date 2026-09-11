@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class LedgerRepository:
+class PostgresLedgerRepository:
     """The usage ledger and the refresh queue behind it."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

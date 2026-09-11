@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class HostPoolRepository:
+class PostgresHostPoolRepository:
     """The runner-host pool: enrollment, heartbeats, and placement."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
@@ -719,7 +719,7 @@ class HostPoolRepository:
         """
         try:
             async with conn.transaction():
-                await HostPoolRepository._record_host_capacity(
+                await PostgresHostPoolRepository._record_host_capacity(
                     conn,
                     host=host,
                     credential_hash=credential_hash,

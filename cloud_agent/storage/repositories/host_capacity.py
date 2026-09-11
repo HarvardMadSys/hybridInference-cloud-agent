@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from cloud_agent.capacity_protocol import CapacityHistoryPointWrite
 
 
-class HostCapacityRepository:
+class PostgresHostCapacityRepository:
     """Host capacity: what each machine is actually doing."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

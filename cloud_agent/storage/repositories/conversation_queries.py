@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class ConversationQueries:
+class PostgresConversationQueries:
     """Reading conversations, their jobs, and the project list."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

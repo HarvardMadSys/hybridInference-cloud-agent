@@ -27,7 +27,7 @@ from cloud_agent.host_pool import (
     HOST_ONLINE,
     hash_secret,
 )
-from cloud_agent.storage.repositories.host_pool import HostPoolRepository
+from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -95,7 +95,7 @@ async def store(db):
 @pytest_asyncio.fixture
 async def hosts(db):
     """The capability under test, on the repository that now owns it."""
-    return HostPoolRepository(db)
+    return PostgresHostPoolRepository(db)
 
 
 async def _create_job(store: AgentJobStore, **overrides) -> dict:
@@ -126,7 +126,9 @@ async def _settled(store: AgentJobStore, job_id: str) -> None:
         )
 
 
-async def _enrol(store: AgentJobStore, host: str, hosts: HostPoolRepository, **overrides) -> dict:
+async def _enrol(
+    store: AgentJobStore, host: str, hosts: PostgresHostPoolRepository, **overrides
+) -> dict:
     """Register a host and put it online, the way a real boot does."""
     row = await hosts.register_host(
         host=host, credential_hash=hash_secret(f"cred-{host}"), **overrides
@@ -209,7 +211,9 @@ async def _claim(
 # ── G2: enrollment tokens ──────────────────────────────────────────────
 
 
-async def test_an_enrollment_token_is_spendable_exactly_once(store, hosts: HostPoolRepository):
+async def test_an_enrollment_token_is_spendable_exactly_once(
+    store, hosts: PostgresHostPoolRepository
+):
     """Same name both times: the second refusal must be replay, not the binding."""
     await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=900)
 
@@ -219,7 +223,9 @@ async def test_an_enrollment_token_is_spendable_exactly_once(store, hosts: HostP
     assert (first, second) == (True, False)
 
 
-async def test_two_machines_racing_one_token_produce_one_winner(store, hosts: HostPoolRepository):
+async def test_two_machines_racing_one_token_produce_one_winner(
+    store, hosts: PostgresHostPoolRepository
+):
     """The single-use property is the UPDATE's predicate, not a read-then-write.
 
     A token pasted into two consoles at once is exactly how a fleet gets
@@ -239,13 +245,15 @@ async def test_two_machines_racing_one_token_produce_one_winner(store, hosts: Ho
     assert sum(results) == 1
 
 
-async def test_an_expired_token_cannot_be_spent(store, hosts: HostPoolRepository):
+async def test_an_expired_token_cannot_be_spent(store, hosts: PostgresHostPoolRepository):
     await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-a", ttl_seconds=-1)
 
     assert not await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
 
 
-async def test_a_token_is_spendable_only_under_the_name_it_names(store, hosts: HostPoolRepository):
+async def test_a_token_is_spendable_only_under_the_name_it_names(
+    store, hosts: PostgresHostPoolRepository
+):
     """The name is the token's, not the registering machine's.
 
     ``register_host`` upserts, so spending a token under a live host's name
@@ -258,7 +266,7 @@ async def test_a_token_is_spendable_only_under_the_name_it_names(store, hosts: H
     assert not await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
 
 
-async def test_a_mismatched_name_does_not_spend_the_token(store, hosts: HostPoolRepository):
+async def test_a_mismatched_name_does_not_spend_the_token(store, hosts: PostgresHostPoolRepository):
     """A typo is retried, not re-issued: the name is a predicate, not a check."""
     await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-b", ttl_seconds=900)
     await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-a")
@@ -266,7 +274,9 @@ async def test_a_mismatched_name_does_not_spend_the_token(store, hosts: HostPool
     assert await hosts.consume_enroll_token(token_hash=hash_secret("t"), host="runner-b")
 
 
-async def test_a_typo_cannot_revoke_a_live_hosts_credential(store, hosts: HostPoolRepository):
+async def test_a_typo_cannot_revoke_a_live_hosts_credential(
+    store, hosts: PostgresHostPoolRepository
+):
     """The eviction the binding removes, end to end against the real schema."""
     await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
     await hosts.issue_enroll_token(token_hash=hash_secret("t"), host="runner-b", ttl_seconds=900)
@@ -285,7 +295,7 @@ async def test_a_typo_cannot_revoke_a_live_hosts_credential(store, hosts: HostPo
 # ── G2/G3: registration, authentication, heartbeat ─────────────────────
 
 
-async def test_registration_stores_what_the_host_declared(store, hosts: HostPoolRepository):
+async def test_registration_stores_what_the_host_declared(store, hosts: PostgresHostPoolRepository):
     await hosts.register_host(
         host="runner-a",
         credential_hash=hash_secret("cred"),
@@ -305,14 +315,14 @@ async def test_registration_stores_what_the_host_declared(store, hosts: HostPool
     assert row["enrolled"] is True
 
 
-async def test_the_credential_hash_never_leaves_the_store(store, hosts: HostPoolRepository):
+async def test_the_credential_hash_never_leaves_the_store(store, hosts: PostgresHostPoolRepository):
     """Reading it back out would make the row as good as the credential."""
     await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
 
     assert "credential_hash" not in (await hosts.get_host(host="runner-a"))
 
 
-async def test_only_the_current_credential_authenticates(store, hosts: HostPoolRepository):
+async def test_only_the_current_credential_authenticates(store, hosts: PostgresHostPoolRepository):
     await hosts.register_host(host="runner-a", credential_hash=hash_secret("first"))
     await hosts.register_host(host="runner-a", credential_hash=hash_secret("second"))
 
@@ -322,7 +332,7 @@ async def test_only_the_current_credential_authenticates(store, hosts: HostPoolR
     assert await hosts.authenticate_host(host="runner-a", credential_hash=hash_secret("second"))
 
 
-async def test_a_disabled_host_authenticates_nothing(store, hosts: HostPoolRepository):
+async def test_a_disabled_host_authenticates_nothing(store, hosts: PostgresHostPoolRepository):
     await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
     await hosts.remove_host(host="runner-a")
 
@@ -331,7 +341,7 @@ async def test_a_disabled_host_authenticates_nothing(store, hosts: HostPoolRepos
     )
 
 
-async def test_the_first_heartbeat_promotes_and_records(store, hosts: HostPoolRepository):
+async def test_the_first_heartbeat_promotes_and_records(store, hosts: PostgresHostPoolRepository):
     await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
 
     row = await hosts.record_host_heartbeat(host="runner-a", runner_version="9.9")
@@ -342,7 +352,7 @@ async def test_the_first_heartbeat_promotes_and_records(store, hosts: HostPoolRe
 
 
 async def test_a_heartbeat_does_not_resurrect_a_drained_or_disabled_host(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     await _enrol(store, "runner-a", hosts=hosts)
     await hosts.set_host_status(host="runner-a", status=HOST_DRAINING)
@@ -351,7 +361,7 @@ async def test_a_heartbeat_does_not_resurrect_a_drained_or_disabled_host(
 
 
 async def test_re_registration_recounts_slots_rather_than_zeroing_them(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     """A machine rebuilt mid-job must not be told it is empty.
 
@@ -371,7 +381,9 @@ async def test_re_registration_recounts_slots_rather_than_zeroing_them(
 # ── G3: the status machine and the reaper ──────────────────────────────
 
 
-async def test_an_illegal_transition_is_refused_by_the_store(store, hosts: HostPoolRepository):
+async def test_an_illegal_transition_is_refused_by_the_store(
+    store, hosts: PostgresHostPoolRepository
+):
     await _enrol(store, "runner-a", hosts=hosts)
     await hosts.remove_host(host="runner-a")
 
@@ -379,11 +391,13 @@ async def test_an_illegal_transition_is_refused_by_the_store(store, hosts: HostP
     assert (await hosts.get_host(host="runner-a"))["status"] == HOST_DISABLED
 
 
-async def test_an_unknown_host_cannot_be_transitioned(store, hosts: HostPoolRepository):
+async def test_an_unknown_host_cannot_be_transitioned(store, hosts: PostgresHostPoolRepository):
     assert await hosts.set_host_status(host="nope", status=HOST_DRAINING) == "unknown"
 
 
-async def test_the_reaper_marks_a_silent_enrolled_host_offline(store, hosts: HostPoolRepository):
+async def test_the_reaper_marks_a_silent_enrolled_host_offline(
+    store, hosts: PostgresHostPoolRepository
+):
     await _enrol(store, "runner-a", hosts=hosts)
     await _age_heartbeat(store, "runner-a", seconds=600)
 
@@ -393,14 +407,16 @@ async def test_the_reaper_marks_a_silent_enrolled_host_offline(store, hosts: Hos
     assert (await hosts.get_host(host="runner-a"))["status"] == HOST_OFFLINE
 
 
-async def test_the_reaper_leaves_a_recently_seen_host_alone(store, hosts: HostPoolRepository):
+async def test_the_reaper_leaves_a_recently_seen_host_alone(
+    store, hosts: PostgresHostPoolRepository
+):
     await _enrol(store, "runner-a", hosts=hosts)
 
     assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == []
 
 
 async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     """The operator's instruction must survive the machine's absence.
 
@@ -425,7 +441,7 @@ async def test_a_drained_host_stays_drained_when_it_goes_quiet_and_returns(
 
 
 async def test_a_host_that_registered_and_never_came_up_ages_out_of_enrolling(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred"))
     async with store._pool.acquire() as conn:
@@ -437,7 +453,7 @@ async def test_a_host_that_registered_and_never_came_up_ages_out_of_enrolling(
     assert await hosts.reap_offline_hosts(interval_seconds=30, missed_intervals=3) == ["runner-a"]
 
 
-async def test_a_disabled_host_is_not_reaped_again(store, hosts: HostPoolRepository):
+async def test_a_disabled_host_is_not_reaped_again(store, hosts: PostgresHostPoolRepository):
     """Nothing to say: it is already out, and re-reporting it is noise."""
     await _enrol(store, "runner-a", hosts=hosts)
     await hosts.remove_host(host="runner-a")
@@ -461,7 +477,9 @@ async def _age_heartbeat(store: AgentJobStore, host: str, *, seconds: int) -> No
 # ── G4: host-aware claiming ────────────────────────────────────────────
 
 
-async def test_a_claim_takes_a_slot_and_stamps_the_attempt(store, hosts: HostPoolRepository):
+async def test_a_claim_takes_a_slot_and_stamps_the_attempt(
+    store, hosts: PostgresHostPoolRepository
+):
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
 
@@ -472,7 +490,7 @@ async def test_a_claim_takes_a_slot_and_stamps_the_attempt(store, hosts: HostPoo
     assert (await hosts.host_for_attempt(attempt_id=claim["attempt_id"]))["host"] == "runner-a"
 
 
-async def test_a_heartbeat_round_trips_the_version_stamp(store, hosts: HostPoolRepository):
+async def test_a_heartbeat_round_trips_the_version_stamp(store, hosts: PostgresHostPoolRepository):
     """'' and {} are answers, and a stampless beat does not erase them."""
     await _enrol(store, "runner-a", hosts=hosts)
     row = await hosts.record_host_heartbeat(
@@ -493,7 +511,7 @@ async def test_a_heartbeat_round_trips_the_version_stamp(store, hosts: HostPoolR
 
 
 async def test_a_claim_stamps_its_replicas_attestation_not_the_host_heartbeat(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     """Rolling replicas sharing a host row are judged and stamped independently."""
     await _enrol(store, "runner-a", hosts=hosts)
@@ -745,7 +763,7 @@ async def test_shared_or_superseded_host_credential_cannot_claim_secure_work(sto
 
 
 async def test_reenrollment_revokes_an_already_authenticated_claim_generation(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     await _enrol(store, "runner-a", hosts=hosts)
     old_hash = hash_secret("cred-runner-a")
@@ -802,7 +820,7 @@ async def test_the_job_a_full_host_could_not_take_is_still_queued(store, hosts):
     assert queued == 1
 
 
-async def test_an_unmetered_host_keeps_claiming(store, hosts: HostPoolRepository):
+async def test_an_unmetered_host_keeps_claiming(store, hosts: PostgresHostPoolRepository):
     """Null slots_total is the pre-pool shape and must stay unlimited."""
     await _enrol(store, "runner-a", hosts=hosts)
     for _ in range(3):
@@ -817,7 +835,7 @@ async def test_an_unmetered_host_keeps_claiming(store, hosts: HostPoolRepository
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 3
 
 
-async def test_a_draining_host_receives_no_new_claims(store, hosts: HostPoolRepository):
+async def test_a_draining_host_receives_no_new_claims(store, hosts: PostgresHostPoolRepository):
     await _enrol(store, "runner-a", slots_total=4, hosts=hosts)
     await _create_job(store)
     await hosts.set_host_status(host="runner-a", status=HOST_DRAINING)
@@ -868,7 +886,7 @@ async def test_a_runner_without_an_enrolled_host_never_claims(store):
     assert await _claim(store, worker_id="w1", lease_ttl_seconds=60) is None
 
 
-async def test_finishing_a_job_gives_the_slot_back(store, hosts: HostPoolRepository):
+async def test_finishing_a_job_gives_the_slot_back(store, hosts: PostgresHostPoolRepository):
     await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
@@ -885,7 +903,9 @@ async def test_finishing_a_job_gives_the_slot_back(store, hosts: HostPoolReposit
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
-async def test_releasing_an_unstarted_claim_gives_the_slot_back(store, hosts: HostPoolRepository):
+async def test_releasing_an_unstarted_claim_gives_the_slot_back(
+    store, hosts: PostgresHostPoolRepository
+):
     await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
@@ -899,7 +919,7 @@ async def test_releasing_an_unstarted_claim_gives_the_slot_back(store, hosts: Ho
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
-async def test_a_reaped_attempt_gives_the_slot_back(store, hosts: HostPoolRepository):
+async def test_a_reaped_attempt_gives_the_slot_back(store, hosts: PostgresHostPoolRepository):
     await _enrol(store, "runner-a", slots_total=1, hosts=hosts)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=-1, host="runner-a")
@@ -910,7 +930,7 @@ async def test_a_reaped_attempt_gives_the_slot_back(store, hosts: HostPoolReposi
 
 
 async def test_a_double_terminal_transition_releases_one_slot_not_two(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     """The counter must survive a caller that retries a finish."""
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
@@ -933,7 +953,7 @@ async def test_a_double_terminal_transition_releases_one_slot_not_two(
 
 
 async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     """Two paths out of ``running`` that can both be attempted for one attempt."""
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
@@ -960,7 +980,9 @@ async def test_reaping_and_finishing_the_same_attempt_releases_one_slot(
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 1
 
 
-async def test_slots_never_go_negative_under_concurrent_release(store, hosts: HostPoolRepository):
+async def test_slots_never_go_negative_under_concurrent_release(
+    store, hosts: PostgresHostPoolRepository
+):
     """The invariant, hammered.
 
     A counter that drifts below zero makes a host look permanently
@@ -1007,7 +1029,9 @@ async def test_slots_never_go_negative_under_concurrent_release(store, hosts: Ho
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
-async def test_concurrent_claims_never_oversubscribe_a_host(store, hosts: HostPoolRepository):
+async def test_concurrent_claims_never_oversubscribe_a_host(
+    store, hosts: PostgresHostPoolRepository
+):
     """Capacity is decided by the UPDATE, not by the read that preceded it.
 
     Eight runners polling a two-slot host at once is the ordinary steady state
@@ -1026,7 +1050,9 @@ async def test_concurrent_claims_never_oversubscribe_a_host(store, hosts: HostPo
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 2
 
 
-async def test_the_release_helper_refuses_to_decrement_past_zero(store, hosts: HostPoolRepository):
+async def test_the_release_helper_refuses_to_decrement_past_zero(
+    store, hosts: PostgresHostPoolRepository
+):
     """Tested directly, because nothing above can currently reach it twice.
 
     The job-level fence in ``transition`` already makes a second terminal
@@ -1084,7 +1110,9 @@ async def test_the_schema_refuses_a_status_it_does_not_know(store, hosts):
 # ── G6 / #1158 interaction ─────────────────────────────────────────────
 
 
-async def test_removing_keeps_the_row_and_forgetting_drops_it(store, hosts: HostPoolRepository):
+async def test_removing_keeps_the_row_and_forgetting_drops_it(
+    store, hosts: PostgresHostPoolRepository
+):
     await _enrol(store, "runner-a", hosts=hosts)
 
     assert await hosts.remove_host(host="runner-a") == "ok"
@@ -1093,7 +1121,9 @@ async def test_removing_keeps_the_row_and_forgetting_drops_it(store, hosts: Host
     assert await hosts.get_host(host="runner-a") is None
 
 
-async def test_removing_a_busy_host_is_refused_unless_forced(store, hosts: HostPoolRepository):
+async def test_removing_a_busy_host_is_refused_unless_forced(
+    store, hosts: PostgresHostPoolRepository
+):
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
@@ -1102,7 +1132,9 @@ async def test_removing_a_busy_host_is_refused_unless_forced(store, hosts: HostP
     assert await hosts.remove_host(host="runner-a", force=True) == "ok"
 
 
-async def test_forgetting_a_host_does_not_break_its_attempts(store, hosts: HostPoolRepository):
+async def test_forgetting_a_host_does_not_break_its_attempts(
+    store, hosts: PostgresHostPoolRepository
+):
     """The FK is ON DELETE SET NULL, so history survives its machine.
 
     A RESTRICT here would make #1158's housekeeping start failing on any
@@ -1124,7 +1156,7 @@ async def test_forgetting_a_host_does_not_break_its_attempts(store, hosts: HostP
     assert await hosts.host_for_attempt(attempt_id=claim["attempt_id"]) is None
 
 
-async def test_the_pin_and_the_pool_both_have_to_agree(store, hosts: HostPoolRepository):
+async def test_the_pin_and_the_pool_both_have_to_agree(store, hosts: PostgresHostPoolRepository):
     """They compose: the pin says which host, the pool says whether it can.
 
     #1158's switch is untouched by phase G, and a pinned host that has been
@@ -1151,7 +1183,9 @@ async def _running_claim(store, host: str, **overrides) -> tuple[dict, dict]:
     return job, claim
 
 
-async def _resident_chat(store, host: str, hosts: HostPoolRepository) -> tuple[dict, dict, dict]:
+async def _resident_chat(
+    store, host: str, hosts: PostgresHostPoolRepository
+) -> tuple[dict, dict, dict]:
     """A running claim on ``host`` with the retained membership a residency lives on."""
     job, claim = await _running_claim(store, host)
     await hosts.record_host_heartbeat(
@@ -1539,7 +1573,7 @@ MENU = ["2.1.220", "2.1.235"]
 
 
 async def _menu_host(
-    store, host: str, *, menu: list[str] = MENU, hosts: HostPoolRepository
+    store, host: str, *, menu: list[str] = MENU, hosts: PostgresHostPoolRepository
 ) -> None:
     """A host whose *heartbeat* advertises a default and its image's menu.
 
@@ -1579,7 +1613,7 @@ async def _menu_claim(store, worker: str, *, menu: list[str] = MENU):
 
 
 async def test_a_heartbeat_round_trips_the_menu_beside_the_default(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     """Two facts, two columns; a stampless beat erases neither."""
     await _menu_host(store, "runner-a", hosts=hosts)
@@ -1590,7 +1624,9 @@ async def test_a_heartbeat_round_trips_the_menu_beside_the_default(
     assert row["runtime_versions_available"] == {"claude-code": ["2.1.220", "2.1.235"]}
 
 
-async def test_a_selection_reaches_the_attempt_the_claim_stamps(store, hosts: HostPoolRepository):
+async def test_a_selection_reaches_the_attempt_the_claim_stamps(
+    store, hosts: PostgresHostPoolRepository
+):
     """The feature, end to end in SQL: admin picks, the next attempt records it."""
     await _menu_host(store, "runner-a", hosts=hosts)
     assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
@@ -1602,7 +1638,7 @@ async def test_a_selection_reaches_the_attempt_the_claim_stamps(store, hosts: Ho
     assert claim["runtime_version"] == "2.1.235"
 
 
-async def test_a_version_no_host_offers_is_refused(store, hosts: HostPoolRepository):
+async def test_a_version_no_host_offers_is_refused(store, hosts: PostgresHostPoolRepository):
     """Refused rather than stored: the claim would fall back and say nothing."""
     await _menu_host(store, "runner-a", menu=["2.1.220"], hosts=hosts)
 
@@ -1612,7 +1648,9 @@ async def test_a_version_no_host_offers_is_refused(store, hosts: HostPoolReposit
     assert selected == {}
 
 
-async def test_clearing_a_selection_returns_to_the_host_default(store, hosts: HostPoolRepository):
+async def test_clearing_a_selection_returns_to_the_host_default(
+    store, hosts: PostgresHostPoolRepository
+):
     await _menu_host(store, "runner-a", hosts=hosts)
     await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
 
@@ -1625,7 +1663,7 @@ async def test_clearing_a_selection_returns_to_the_host_default(store, hosts: Ho
 
 
 async def test_a_selection_the_image_lost_falls_back_instead_of_parking(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     """The drift the fallback exists for, reachable in exactly this order.
 
@@ -1650,7 +1688,7 @@ async def test_a_selection_the_image_lost_falls_back_instead_of_parking(
 
 
 async def test_physical_server_grouping_preserves_deployment_identity_and_labels(
-    store, hosts: HostPoolRepository
+    store, hosts: PostgresHostPoolRepository
 ):
     """Display metadata cannot merge credentials, brokers, capacity or placement."""
     for name in ("gpu-box", "gpu-box-kata"):

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class McpConnectionRepository:
+class PostgresMcpConnectionRepository:
     """Per-user MCP connections: one credential per person per server."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

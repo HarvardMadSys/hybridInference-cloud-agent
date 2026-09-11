@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 
-class CredentialQueries:
+class PostgresCredentialQueries:
     """Resolving the model credential an attempt runs with."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

@@ -26,7 +26,7 @@ import os
 import pytest
 import pytest_asyncio
 
-from cloud_agent.storage.repositories.grants import GrantRepository
+from cloud_agent.storage.repositories.grants import PostgresGrantRepository
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -90,7 +90,7 @@ async def store(db):
 @pytest_asyncio.fixture
 async def grants(db):
     """The capability under test, on the repository that now owns it."""
-    return GrantRepository(db)
+    return PostgresGrantRepository(db)
 
 
 async def _claimed(store: AgentJobStore, *, prompt: str = "fix it") -> dict:
@@ -136,7 +136,7 @@ async def _claimed(store: AgentJobStore, *, prompt: str = "fix it") -> dict:
 
 
 async def test_a_live_attempts_grant_is_renewable(
-    store: AgentJobStore, grants: GrantRepository
+    store: AgentJobStore, grants: PostgresGrantRepository
 ) -> None:
     claim = await _claimed(store)
 
@@ -152,7 +152,7 @@ async def test_a_live_attempts_grant_is_renewable(
 
 
 async def test_a_renewable_row_carries_the_fence_that_can_end_it(
-    store: AgentJobStore, grants: GrantRepository
+    store: AgentJobStore, grants: PostgresGrantRepository
 ) -> None:
     """The give-up path, end to end in SQL.
 
@@ -185,7 +185,7 @@ async def test_a_renewable_row_carries_the_fence_that_can_end_it(
 
 
 async def test_a_superseded_attempts_grant_flips_sides(
-    store: AgentJobStore, grants: GrantRepository
+    store: AgentJobStore, grants: PostgresGrantRepository
 ) -> None:
     """The fence, in SQL. One reaper pass moves the grant from one set to the
     other, and nothing else has to be told."""
@@ -212,7 +212,7 @@ async def test_a_superseded_attempts_grant_flips_sides(
 
 
 async def test_a_grant_is_handed_over_exactly_once(
-    store: AgentJobStore, grants: GrantRepository
+    store: AgentJobStore, grants: PostgresGrantRepository
 ) -> None:
     """``take_`` detaches as it returns, so a second pass — or a second control
     plane — is not handed the same grant to revoke again."""
@@ -233,7 +233,7 @@ async def test_a_grant_is_handed_over_exactly_once(
 
 
 async def test_recording_against_a_stale_fence_is_refused(
-    store: AgentJobStore, grants: GrantRepository
+    store: AgentJobStore, grants: PostgresGrantRepository
 ) -> None:
     """A grant minted for an attempt that was superseded meanwhile must not be
     attached to it: it would then be renewed for as long as the row lived."""

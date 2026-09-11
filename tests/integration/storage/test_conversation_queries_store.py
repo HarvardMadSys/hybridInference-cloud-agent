@@ -26,7 +26,7 @@ import os
 import pytest
 import pytest_asyncio
 
-from cloud_agent.storage.repositories.conversation_queries import ConversationQueries
+from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.store import AgentJobStore
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.support.db import reset_agent_tables
@@ -89,13 +89,13 @@ async def store(db):
 @pytest_asyncio.fixture
 async def queries(db):
     """The capability under test, on the repository that owns it."""
-    return ConversationQueries(db)
+    return PostgresConversationQueries(db)
 
 
 # ── Ownership ─────────────────────────────────────────────────────────
 
 
-async def test_a_job_is_only_read_by_its_owner(store, queries: ConversationQueries) -> None:
+async def test_a_job_is_only_read_by_its_owner(store, queries: PostgresConversationQueries) -> None:
     """Another user's id answers nothing, and answers it as absence."""
     job = await _create_job(store)
 
@@ -104,13 +104,15 @@ async def test_a_job_is_only_read_by_its_owner(store, queries: ConversationQueri
     assert await queries.get_thread_for_job(job_id=job["id"], user_id=_OTHER) is None
 
 
-async def test_an_unknown_job_answers_nothing(queries: ConversationQueries) -> None:
+async def test_an_unknown_job_answers_nothing(queries: PostgresConversationQueries) -> None:
     """Absence and refusal are the same answer, which callers rely on."""
     assert await queries.get_job("ajob_does_not_exist") is None
     assert await queries.get_thread_for_job(job_id="ajob_does_not_exist", user_id=_OWNER) is None
 
 
-async def test_the_job_list_is_scoped_to_its_owner(store, queries: ConversationQueries) -> None:
+async def test_the_job_list_is_scoped_to_its_owner(
+    store, queries: PostgresConversationQueries
+) -> None:
     """Two users, one page each: neither sees the other's job."""
     mine = await _create_job(store, user_id=_OWNER, task_prompt="mine")
     theirs = await _create_job(store, user_id=_OTHER, task_prompt="theirs")
@@ -122,7 +124,9 @@ async def test_the_job_list_is_scoped_to_its_owner(store, queries: ConversationQ
     assert theirs["id"] in theirs_page and mine["id"] not in theirs_page
 
 
-async def test_the_job_list_narrows_to_one_repo(store, queries: ConversationQueries) -> None:
+async def test_the_job_list_narrows_to_one_repo(
+    store, queries: PostgresConversationQueries
+) -> None:
     """``repo`` is how the sidebar pages a single project past the global window."""
     here = await _create_job(store, repo="org/here")
     there = await _create_job(store, repo="org/there")
@@ -136,7 +140,9 @@ async def test_the_job_list_narrows_to_one_repo(store, queries: ConversationQuer
 # ── Projects ──────────────────────────────────────────────────────────
 
 
-async def test_projects_group_by_repo_and_stay_scoped(store, queries: ConversationQueries) -> None:
+async def test_projects_group_by_repo_and_stay_scoped(
+    store, queries: PostgresConversationQueries
+) -> None:
     """A repo only somebody else has run in is not this user's project."""
     await _create_job(store, user_id=_OWNER, repo="org/mine")
     await _create_job(store, user_id=_OWNER, repo="org/mine")
@@ -149,7 +155,7 @@ async def test_projects_group_by_repo_and_stay_scoped(store, queries: Conversati
 
 
 async def test_an_archived_project_leaves_the_default_list(
-    store, queries: ConversationQueries
+    store, queries: PostgresConversationQueries
 ) -> None:
     """The archive filter is applied to the thread, not to the jobs."""
     job = await _create_job(store, repo="org/archived")
@@ -165,7 +171,7 @@ async def test_an_archived_project_leaves_the_default_list(
 
 
 async def test_a_conversation_page_carries_its_own_thread(
-    store, queries: ConversationQueries
+    store, queries: PostgresConversationQueries
 ) -> None:
     """The page is complete conversations, keyed by the thread they belong to."""
     job = await _create_job(store, task_prompt="a conversation")
@@ -177,7 +183,9 @@ async def test_a_conversation_page_carries_its_own_thread(
     assert [item["job"]["thread_id"] for item in page["conversations"]] == [job["thread_id"]]
 
 
-async def test_a_conversation_page_stays_scoped(store, queries: ConversationQueries) -> None:
+async def test_a_conversation_page_stays_scoped(
+    store, queries: PostgresConversationQueries
+) -> None:
     """Another user's conversation is not in this user's page."""
     await _create_job(store, user_id=_OTHER, task_prompt="not mine")
 
@@ -186,7 +194,7 @@ async def test_a_conversation_page_stays_scoped(store, queries: ConversationQuer
     assert page["conversations"] == []
 
 
-async def test_a_session_page_stays_scoped(store, queries: ConversationQueries) -> None:
+async def test_a_session_page_stays_scoped(store, queries: PostgresConversationQueries) -> None:
     """The session list is the same scoping question, answered in another shape."""
     job = await _create_job(store, task_prompt="a session")
     await _create_job(store, user_id=_OTHER, task_prompt="not mine")
@@ -197,7 +205,7 @@ async def test_a_session_page_stays_scoped(store, queries: ConversationQueries) 
 
 
 async def test_a_row_only_session_page_skips_the_history_aggregate(
-    store, queries: ConversationQueries
+    store, queries: PostgresConversationQueries
 ) -> None:
     """``include_summary=False`` returns null counts rather than wrong ones."""
     await _create_job(store)

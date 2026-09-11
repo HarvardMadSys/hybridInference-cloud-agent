@@ -30,7 +30,7 @@ from cloud_agent.capacity_protocol import (
     bucket_for,
 )
 from cloud_agent.host_pool import HOST_ONLINE, hash_secret
-from cloud_agent.storage.repositories.host_capacity import HostCapacityRepository
+from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
 from cloud_agent.storage.store import AgentJobStore
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
@@ -96,7 +96,7 @@ async def store(db):
 @pytest_asyncio.fixture
 async def capacity(db):
     """The capability under test, on the repository that now owns it."""
-    return HostCapacityRepository(db)
+    return PostgresHostCapacityRepository(db)
 
 
 def capacity_block(
@@ -268,7 +268,7 @@ async def test_re_enrollment_clears_the_observation_and_rotates_the_epoch(store)
 
 
 async def test_the_candidate_read_only_returns_fresh_observations(
-    store, capacity: HostCapacityRepository
+    store, capacity: PostgresHostCapacityRepository
 ):
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=120_000)
@@ -290,7 +290,9 @@ async def test_the_candidate_read_only_returns_fresh_observations(
     assert candidate["memory_available_bytes"] == str(86 * 1024**3)
 
 
-async def test_the_candidate_read_pages_by_host_name(store, capacity: HostCapacityRepository):
+async def test_the_candidate_read_pages_by_host_name(
+    store, capacity: PostgresHostCapacityRepository
+):
     for name in ("runner-a", "runner-b", "runner-c"):
         digest = await _enrol(store, name)
         await _beat(store, name, digest, block=capacity_block(), age_ms=100)
@@ -306,7 +308,7 @@ async def test_the_candidate_read_pages_by_host_name(store, capacity: HostCapaci
 
 async def _record_point(
     store: AgentJobStore,
-    capacity: HostCapacityRepository,
+    capacity: PostgresHostCapacityRepository,
     host: str,
     *,
     minutes_ago: int = 0,
@@ -339,7 +341,7 @@ async def _record_point(
 
 
 async def test_one_minute_keeps_the_first_observation_selected(
-    store, capacity: HostCapacityRepository
+    store, capacity: PostgresHostCapacityRepository
 ):
     """Three replicas report the same minute; the chart must not wobble."""
     digest = await _enrol(store)
@@ -363,7 +365,7 @@ async def test_one_minute_keeps_the_first_observation_selected(
 
 
 async def test_the_same_sample_cannot_produce_a_second_point(
-    store, capacity: HostCapacityRepository
+    store, capacity: PostgresHostCapacityRepository
 ):
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
@@ -372,7 +374,9 @@ async def test_the_same_sample_cannot_produce_a_second_point(
     assert await _record_point(store, capacity, "runner-a", minutes_ago=1) is False
 
 
-async def test_a_cpu_gap_still_stores_its_memory_half(store, capacity: HostCapacityRepository):
+async def test_a_cpu_gap_still_stores_its_memory_half(
+    store, capacity: PostgresHostCapacityRepository
+):
     """A CPU that is warming up must not hide a perfectly good memory reading."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
@@ -397,7 +401,9 @@ async def test_a_cpu_gap_still_stores_its_memory_half(store, capacity: HostCapac
     assert point["memory_total_bytes"] == 128 * 1024**3
 
 
-async def test_history_is_scoped_to_the_current_epoch(store, capacity: HostCapacityRepository):
+async def test_history_is_scoped_to_the_current_epoch(
+    store, capacity: PostgresHostCapacityRepository
+):
     """A rebuilt machine keeps its name; the old curve is not its curve."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
@@ -420,7 +426,7 @@ async def test_history_is_scoped_to_the_current_epoch(store, capacity: HostCapac
 
 
 async def test_a_host_with_no_history_is_an_empty_window_not_a_missing_host(
-    store, capacity: HostCapacityRepository
+    store, capacity: PostgresHostCapacityRepository
 ):
     await _enrol(store)
     history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
@@ -431,7 +437,7 @@ async def test_a_host_with_no_history_is_an_empty_window_not_a_missing_host(
 
 
 async def test_pruning_removes_only_expired_rows_and_is_bounded(
-    store, capacity: HostCapacityRepository
+    store, capacity: PostgresHostCapacityRepository
 ):
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
@@ -451,7 +457,7 @@ async def test_pruning_removes_only_expired_rows_and_is_bounded(
     assert len(history["rows"]) == 2
 
 
-async def test_removing_a_host_keeps_its_history(store, capacity: HostCapacityRepository):
+async def test_removing_a_host_keeps_its_history(store, capacity: PostgresHostCapacityRepository):
     """``Remove`` revokes a credential; it does not rewrite the record."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
@@ -464,7 +470,9 @@ async def test_removing_a_host_keeps_its_history(store, capacity: HostCapacityRe
     assert len(history["rows"]) == 1
 
 
-async def test_forgetting_a_host_takes_its_history_with_it(store, capacity: HostCapacityRepository):
+async def test_forgetting_a_host_takes_its_history_with_it(
+    store, capacity: PostgresHostCapacityRepository
+):
     """The one hard delete in the lifecycle, and the graph goes with it."""
     digest = await _enrol(store)
     await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
@@ -515,7 +523,7 @@ async def test_a_block_the_database_refuses_cannot_roll_back_the_heartbeat(store
 
 
 async def test_the_history_endpoint_maps_real_database_rows(
-    store, capacity: HostCapacityRepository
+    store, capacity: PostgresHostCapacityRepository
 ):
     """The route's own mapping, over the types a real database hands back.
 
