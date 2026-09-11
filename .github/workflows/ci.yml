@@ -681,6 +681,28 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     runs-on: ${{ fromJSON(matrix.artifact.runner) }}
+    # `docker/setup-buildx-action` makes its builder *the current builder* and
+    # its post step deletes that builder when the job ends. Both halves go
+    # through `$HOME/.docker/buildx/current`, which everything running as this
+    # user on this machine shares: the other cells of this job, the staging
+    # deploy on the same host, an operator's shell. The pointer records no
+    # owner, so a cell that finishes while somebody else is mid-build deletes
+    # the builder out from under them. The 2026-09-11 staging deploy died that
+    # way four seconds into its build — `target migrate: failed to receive
+    # status`, `Unavailable`, `graceful_stop`, EOF — and the retry below had
+    # been reading the same collision as a transient buildkit recycle.
+    #
+    # `BUILDX_CONFIG` gives this cell a config directory nobody else reads, so
+    # its builder and the pointer to it stay private. It has to be job-level,
+    # because the action's setup and its post-step cleanup both resolve the
+    # variable from here; the path has to be per-cell, because cells of this
+    # matrix share a machine, and it has to be outside the workspace, because
+    # the checkout here is the build context. Leaving the directory behind is
+    # deliberate too: the post step still has to reach it to remove its
+    # builder, and post steps run after every step below. One small pointer
+    # file per cell is what stays.
+    env:
+      BUILDX_CONFIG: /tmp/cloud-agent-buildx/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact.name }}
     strategy:
       fail-fast: false
       matrix:
@@ -766,8 +788,11 @@ jobs:
       # asserts it arrived.
       - name: Build ${{ matrix.artifact.name }}
         id: build
-        # A transient buildkit/runner recycle surfaces as graceful_stop on this
-        # pool. Recreate the builder and retry once before failing the cell.
+        # The graceful_stop this retry was written for is not a transient
+        # recycle: it is another job on this machine deleting the builder this
+        # cell is building through, which the job-level BUILDX_CONFIG above now
+        # prevents. Kept as a backstop, because a builder can still die for
+        # reasons of its own and building once more is cheaper than a red cell.
         continue-on-error: true
         uses: docker/build-push-action@v6
         with:

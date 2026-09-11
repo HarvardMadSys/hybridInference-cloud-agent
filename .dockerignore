@@ -31,3 +31,4 @@ workspaces
 *.swp
 api_key
 .shared-live-ready
+.buildx
