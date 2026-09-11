@@ -33,7 +33,7 @@ import os
 import re
 import secrets
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
@@ -75,6 +75,19 @@ from cloud_agent.identity import SESSION_COOKIE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp_catalogue import catalogue as mcp_catalogue
 from cloud_agent.mcp_registry import connection_states, registry_for_user
+from cloud_agent.ports import (
+    attempt_commands,
+    conversation_commands,
+    conversation_queries,
+    execution_queries,
+    grants,
+    host_pool,
+    mcp,
+    residency,
+    sandbox,
+    session_fork,
+    source_control,
+)
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     EVENT_TYPE_PATTERN,
@@ -201,10 +214,39 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from cloud_agent.gateway import GatewayClient
-    from cloud_agent.ports import ConversationQueries, HostPoolRepository, SandboxRepository
-    from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
+
+
+class _JobCreationStorage(
+    conversation_commands.ConversationCommands,
+    mcp.McpConnectionRepository,
+    Protocol,
+):
+    """What creating a job reaches for: the write surface, and MCP resolution."""
+
+
+class _RoutesStorage(
+    attempt_commands.AttemptCommands,
+    conversation_commands.ConversationCommands,
+    conversation_queries.ConversationQueries,
+    execution_queries.ExecutionQueries,
+    grants.GrantRepository,
+    host_pool.HostPoolRepository,
+    mcp.McpConnectionRepository,
+    residency.ResidencyRepository,
+    sandbox.SandboxRepository,
+    session_fork.SessionForkRepository,
+    source_control.SourceControlRepository,
+    Protocol,
+):
+    """The capabilities this module's handlers reach the store for.
+
+    Named here so that reaching for one more is a deliberate edit to
+    this list rather than a call that happens to type-check.
+    """
+
+
 #: The MCP relay's address **as a sandbox can reach it** — a host-local relay,
 #: not this process's own bind address, which is why it is configured rather
 #: than derived. Unset means this deployment offers no MCP: the claim carries
@@ -327,7 +369,7 @@ def _sse_frame(event: dict[str, Any]) -> str:
     return f"id: {event['id']}\nevent: {event_type}\ndata: {data}\n\n"
 
 
-def _require_store(store: AgentJobStore | None) -> AgentJobStore:
+def _require_store(store: _RoutesStorage | None) -> _RoutesStorage:
     """Return the store or fail with a clear 503 when the DB is absent."""
     if store is None:
         raise HTTPException(
@@ -531,7 +573,7 @@ def _event_response(event: dict[str, Any]) -> AgentJobEvent:
 
 
 async def _owned_job(
-    store: ConversationQueries,
+    store: conversation_queries.ConversationQueries,
     job_id: str,
     user: dict[str, Any],
 ) -> dict[str, Any]:
@@ -555,7 +597,7 @@ async def _owned_job(
 @router.get("/config", response_model=AgentConfigResponse)
 async def get_agent_config(
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentConfigResponse:
@@ -633,7 +675,7 @@ async def _connect_github_for_user(
     *,
     body: GitHubConnectRequest | OAuthConnectRequest,
     user_id: str,
-    store: AgentJobStore,
+    store: _RoutesStorage,
     app_credentials: Any,
 ) -> GitHubConnectionResponse:
     await consume_oauth_state(
@@ -670,7 +712,7 @@ async def _connect_github_for_user(
 async def _source_control_providers(
     *,
     user_id: str,
-    store: AgentJobStore,
+    store: _RoutesStorage,
     app_credentials: Any | None,
     gitlab_oauth: Any | None,
 ) -> list[SourceControlProviderResponse]:
@@ -785,7 +827,7 @@ async def _source_control_providers(
     return providers
 
 
-async def _mcp_integrations(*, user_id: str, store: AgentJobStore) -> list[McpIntegrationResponse]:
+async def _mcp_integrations(*, user_id: str, store: _RoutesStorage) -> list[McpIntegrationResponse]:
     """The catalogue, marked with what this user has connected.
 
     The whole catalogue, not just the connected part: a page that listed only
@@ -826,7 +868,7 @@ async def _mcp_integrations(*, user_id: str, store: AgentJobStore) -> list[McpIn
 @router.get("/integrations", response_model=SourceControlIntegrationsResponse)
 async def list_source_control_integrations(
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlIntegrationsResponse:
@@ -847,7 +889,7 @@ async def list_source_control_integrations(
 async def disconnect_mcp_integration(
     server: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlIntegrationsResponse:
@@ -894,7 +936,7 @@ async def disconnect_mcp_integration(
 async def connect_github_integration(
     body: OAuthConnectRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> GitHubConnectionResponse:
     """Complete a GitHub App authorization protected by one-time state."""
@@ -918,7 +960,7 @@ async def connect_github_integration(
 async def connect_gitlab_integration(
     body: OAuthConnectRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlProviderResponse:
     """Verify a GitLab user and persist only encrypted, refreshable tokens."""
@@ -982,7 +1024,7 @@ async def connect_gitlab_integration(
 async def disconnect_gitlab_integration(
     connection_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gitlab_oauth: Any | None = Depends(get_agent_gitlab_oauth),
 ) -> SourceControlIntegrationsResponse:
@@ -1019,7 +1061,7 @@ async def disconnect_gitlab_integration(
 async def disconnect_github_integration(
     installation_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> GitHubConnectionResponse:
     """Drop only the authenticated user's GitHub installation grant."""
@@ -1037,7 +1079,7 @@ async def disconnect_github_integration(
 async def connect_github(
     body: GitHubConnectRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> GitHubConnectionResponse:
     """Record the installations this user proved they can reach.
@@ -1076,7 +1118,7 @@ async def connect_github(
 async def disconnect_github(
     installation_id: int,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> GitHubConnectionResponse:
     """Drop one connection. Uninstalling on GitHub is the other half."""
@@ -1094,7 +1136,7 @@ async def disconnect_github(
 async def list_repo_branches(
     repo: str = Query(..., description="owner/name"),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> RepoBranchesResponse:
     """List a repository's branches, for the composer's branch picker.
@@ -1161,7 +1203,9 @@ async def _require_resolvable_model(
     )
 
 
-async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict[str, Any]]:
+async def _mcp_servers_for_user(
+    store: mcp.McpConnectionRepository, user_id: str
+) -> list[dict[str, Any]]:
     """The MCP servers *this user* has connected, for the composer.
 
     Names and display metadata only. A server's URL and its credential never
@@ -1194,7 +1238,7 @@ async def _mcp_servers_for_user(store: AgentJobStore, user_id: str) -> list[dict
 
 
 async def _resolve_mcp_servers(
-    requested: list[str] | None, *, runtime: str, store: AgentJobStore, user_id: str
+    requested: list[str] | None, *, runtime: str, store: mcp.McpConnectionRepository, user_id: str
 ) -> list[str]:
     """Settle which MCP servers a new job runs with, or refuse to create it.
 
@@ -1343,7 +1387,7 @@ async def _create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
     *,
-    job_store: AgentJobStore,
+    job_store: _JobCreationStorage,
     app_credentials: Any | None,
     gateway: Any,
     reserved_metadata: dict[str, Any] | None = None,
@@ -1488,7 +1532,7 @@ async def create_agent_job(
     body: AgentJobCreate,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobResponse:
@@ -1516,7 +1560,7 @@ async def list_agent_jobs(
     archived: bool = Query(False),
     repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentJobListResponse:
     """List jobs from the authenticated user's active or archived threads.
 
@@ -1541,7 +1585,7 @@ async def list_agent_sessions(
     repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
     state: AgentSessionState | None = Query(None),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentSessionListResponse:
     """Search complete conversations by stable title, project and display state."""
     job_store = _require_store(store)
@@ -1598,7 +1642,7 @@ def _raise_session_mutation_error(result: dict[str, Any]) -> None:
 async def archive_agent_sessions(
     body: AgentSessionArchiveRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentSessionArchiveResponse:
     """Archive or unarchive an explicit owner-selected snapshot atomically."""
     result = await _require_store(store).set_sessions_archived(
@@ -1621,7 +1665,7 @@ async def archive_agent_sessions(
 async def delete_agent_sessions(
     body: AgentSessionSelection,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentSessionDeleteResponse:
     """Permanently remove archived sessions from owner history, retaining audit data."""
     result = await _require_store(store).delete_sessions(
@@ -1640,7 +1684,7 @@ async def list_agent_conversations(
     limit: int = Query(50, ge=1, le=200),
     cursor: str | None = Query(None, min_length=1, max_length=2048),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentConversationListResponse:
     """Search owned conversation titles and repositories across all history."""
     job_store = _require_store(store)
@@ -1674,7 +1718,7 @@ async def list_agent_conversations(
 async def list_agent_projects(
     archived: bool = Query(False),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentProjectListResponse:
     """Summarize the caller's projects for the sidebar's task tree."""
     job_store = _require_store(store)
@@ -1699,7 +1743,7 @@ async def get_agent_job(
     job_id: str,
     include_resources: bool = Query(True),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     log_store: Any | None = Depends(get_log_store),
 ) -> AgentJobResponse:
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
@@ -1726,7 +1770,7 @@ async def get_agent_attempt_telemetry(
     job_id: str,
     attempt_id: int = Path(..., ge=1),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentAttemptTelemetry:
     """Read measurements for one attempt belonging to the caller's job."""
     job_store = _require_store(store)
@@ -1744,7 +1788,7 @@ async def get_agent_attempt_telemetry(
 async def cancel_agent_job(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one of the caller's agent jobs.
 
@@ -1778,7 +1822,7 @@ async def _set_agent_thread_archived(
     job_id: str,
     archived: bool,
     user: dict[str, Any],
-    store: AgentJobStore | None,
+    store: _RoutesStorage | None,
 ) -> AgentThreadArchiveResponse:
     """Set archive state without exposing whether another user's job exists."""
     job_store = _require_store(store)
@@ -1803,7 +1847,7 @@ async def _set_agent_thread_archived(
 async def archive_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentThreadArchiveResponse:
     """Archive the entire task thread containing an owned job."""
     return await _set_agent_thread_archived(job_id=job_id, archived=True, user=user, store=store)
@@ -1813,7 +1857,7 @@ async def archive_agent_thread(
 async def restore_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentThreadArchiveResponse:
     """Restore the entire task thread containing an owned job."""
     return await _set_agent_thread_archived(job_id=job_id, archived=False, user=user, store=store)
@@ -1824,7 +1868,7 @@ async def rename_agent_thread(
     job_id: str,
     body: AgentThreadRenameRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentThreadRenameResponse:
     """Rename the entire conversation containing an owned job."""
     result = await _require_store(store).set_thread_title(
@@ -1843,7 +1887,7 @@ async def _set_agent_thread_pinned(
     job_id: str,
     pinned: bool,
     user: dict[str, Any],
-    store: AgentJobStore | None,
+    store: _RoutesStorage | None,
 ) -> AgentThreadPinResponse:
     """Set pin state without exposing whether another user's job exists."""
     job_store = _require_store(store)
@@ -1868,7 +1912,7 @@ async def _set_agent_thread_pinned(
 async def pin_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentThreadPinResponse:
     """Pin the entire task thread containing an owned job."""
     return await _set_agent_thread_pinned(job_id=job_id, pinned=True, user=user, store=store)
@@ -1878,7 +1922,7 @@ async def pin_agent_thread(
 async def unpin_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentThreadPinResponse:
     """Unpin the entire task thread containing an owned job."""
     return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, store=store)
@@ -1931,7 +1975,7 @@ async def create_agent_follow_up(
     body: AgentFollowUpRequest,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobResponse:
@@ -2091,7 +2135,7 @@ async def fork_agent_job(
     job_id: str,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     grants: Any = Depends(get_grant_client),
 ) -> AgentJobResponse:
     """Fork one settled native session into the same shared Docker workspace."""
@@ -2460,7 +2504,7 @@ async def fork_agent_job(
 async def get_agent_thread(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentThreadResponse:
     """Return the durable conversation containing one of the caller's jobs."""
     job_store = _require_store(store)
@@ -2496,7 +2540,7 @@ async def get_agent_thread(
 async def get_agent_thread_stats(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentThreadStatsResponse:
     """Summarize the thread containing a job: turns, timings, tokens.
 
@@ -2526,7 +2570,7 @@ async def list_agent_thread_events(
     after: int = Query(0, ge=0, description="Return events with a global id greater than this."),
     limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentThreadEventsResponse:
     """Page every turn's event log, with payloads and turn labels intact."""
     job_store = _require_store(store)
@@ -2560,7 +2604,7 @@ async def list_agent_job_events(
     after: int = Query(0, ge=0, description="Return events with a global id greater than this."),
     limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> AgentJobEventsResponse:
     """Page through a job's append-only event log (non-streaming)."""
     job_store = _require_store(store)
@@ -2611,7 +2655,7 @@ def _workspace_not_materialized(exc: WorkspaceBrokerError) -> bool:
 
 
 async def _workspace_broker_for_job(
-    store: AgentJobStore,
+    store: _RoutesStorage,
     job: dict[str, Any],
 ) -> WorkspaceBrokerClient | None:
     """Resolve the owning broker and restore shared aliases before use."""
@@ -2650,7 +2694,7 @@ def _workspace_not_ready() -> HTTPException:
 
 
 async def _require_mutable_workspace_ready(
-    *, job: dict[str, Any], store: SandboxRepository
+    *, job: dict[str, Any], store: sandbox.SandboxRepository
 ) -> None:
     """Fence retained mutations through the durable thread-wide barrier."""
     if job.get("thread_sandbox") is None:
@@ -2686,7 +2730,7 @@ async def _terminal_owner_workspace(
     *,
     job_id: str,
     user: dict[str, Any],
-    store: AgentJobStore | None,
+    store: _RoutesStorage | None,
     app_credentials: Any | None,
     require_ready: bool = False,
     recheck_entitlement: bool = True,
@@ -2754,7 +2798,7 @@ async def get_agent_job_workspace_file(
     job_id: str,
     path: str = Query("", max_length=4096),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentWorkspaceResponse:
     """Browse the chat's retained workspace through its owning host broker."""
@@ -2795,7 +2839,7 @@ async def write_agent_job_workspace_file(
     body: AgentWorkspaceWriteRequest,
     path: str = Query(..., min_length=1, max_length=4096),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentWorkspaceResponse:
     """Save one text file directly into the retained chat workspace."""
@@ -2848,7 +2892,7 @@ async def run_agent_job_terminal_command(
     job_id: str,
     body: AgentTerminalRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalResponse:
     """Run an owner-entered command inside the retained chat sandbox."""
@@ -2886,7 +2930,7 @@ async def create_agent_job_terminal(
     job_id: str,
     body: AgentTerminalSessionCreateRequest,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Open an interactive PTY in the agent's workspace."""
@@ -2918,7 +2962,7 @@ async def create_agent_job_terminal(
 async def list_agent_job_terminals(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionListResponse:
     """List interactive terminals, including exited sessions kept for replay."""
@@ -2942,7 +2986,7 @@ async def stream_agent_job_terminal(
     terminal_id: str = Path(..., pattern=_TERMINAL_ID_PATTERN),
     after: int = Query(0, ge=0, le=2**63 - 1),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> StreamingResponse:
     """Relay a resumable private PTY stream without exposing its broker token."""
@@ -2982,7 +3026,7 @@ async def write_agent_job_terminal_input(
     body: AgentTerminalSessionInputRequest,
     terminal_id: str = Path(..., pattern=_TERMINAL_ID_PATTERN),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Write bounded base64 input to an active interactive terminal."""
@@ -3011,7 +3055,7 @@ async def resize_agent_job_terminal(
     body: AgentTerminalSessionResizeRequest,
     terminal_id: str = Path(..., pattern=_TERMINAL_ID_PATTERN),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Resize an active interactive terminal."""
@@ -3043,7 +3087,7 @@ async def delete_agent_job_terminal(
     job_id: str,
     terminal_id: str = Path(..., pattern=_TERMINAL_ID_PATTERN),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Idempotently kill an interactive terminal, even while a new job runs."""
@@ -3066,7 +3110,7 @@ async def delete_agent_job_terminal(
 async def get_agent_job_git_workspace(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentGitWorkspaceResponse:
     """Read live retained-workspace status, diff and recent commits."""
@@ -3095,7 +3139,7 @@ async def stream_agent_job_events(
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     after: int = Query(0, ge=0),
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> StreamingResponse:
     """Stream a job's events as SSE, resumable via ``Last-Event-ID``.
 
@@ -3185,7 +3229,7 @@ _HOST_TOKEN_HINT = "aht."
 
 async def verify_claiming_host(
     authorization: str | None = Header(None),
-    store: HostPoolRepository | None = Depends(get_agent_job_store),
+    store: host_pool.HostPoolRepository | None = Depends(get_agent_job_store),
 ) -> dict[str, str]:
     """Authenticate the enrolled host that is claiming retained work.
 
@@ -3321,7 +3365,7 @@ async def _restore_terminal_suspension(
 
 
 async def _worker_workspace_broker(
-    job_store: AgentJobStore,
+    job_store: _RoutesStorage,
     job: dict[str, Any],
     *,
     attempt_id: int,
@@ -3357,7 +3401,7 @@ async def _worker_workspace_broker(
 
 
 async def _mint_sandbox_grant(
-    job_store: AgentJobStore,
+    job_store: _RoutesStorage,
     grants: Any,
     claim: dict[str, Any],
 ) -> str:
@@ -3524,7 +3568,7 @@ async def worker_claim(
     body: WorkerClaimRequest,
     background_tasks: BackgroundTasks,
     claiming_host: dict[str, str] = Depends(verify_claiming_host),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     grants: Any = Depends(get_grant_client),
 ) -> WorkerClaimResponse | None:
@@ -3728,7 +3772,7 @@ async def worker_heartbeat(
     job_id: str,
     body: WorkerHeartbeatRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerHeartbeatResponse:
     """Renew the attempt's lease and learn about pending cancellation."""
     job_store = _require_store(store)
@@ -3751,7 +3795,7 @@ async def worker_append_event(
     job_id: str,
     body: WorkerEventRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerEventResponse:
     """Append one normalized event to the job's append-only log."""
     job_store = _require_store(store)
@@ -3774,7 +3818,7 @@ async def worker_report_continuity(
     job_id: str,
     body: WorkerContinuityRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerAckResponse:
     """Record which continuity rung this attempt runs on (design §9).
 
@@ -3795,7 +3839,9 @@ async def worker_report_continuity(
     return WorkerAckResponse(ok=True)
 
 
-async def _worker_thread_id(job_store: ConversationQueries, job_id: str) -> str:
+async def _worker_thread_id(
+    job_store: conversation_queries.ConversationQueries, job_id: str
+) -> str:
     """Resolve the claimed job's thread for restartable-sandbox writes."""
     job = await job_store.get_job(job_id)
     thread_id = None if job is None else job.get("thread_id")
@@ -3812,7 +3858,7 @@ async def worker_reserve_thread_sandbox(
     job_id: str,
     body: WorkerSandboxReserveRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerThreadSandbox:
     """Reserve immutable one-chat/one-container identity before Docker create."""
     job_store = _require_store(store)
@@ -3851,7 +3897,7 @@ async def worker_mark_thread_sandbox_running(
     job_id: str,
     body: WorkerSandboxRunningRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerThreadSandbox:
     """Confirm the exact retained container reached RUNNING."""
     job_store = _require_store(store)
@@ -3880,7 +3926,7 @@ async def worker_establish_shared_sandbox_residency(
     job_id: str,
     body: WorkerSandboxResidencyRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     grants: Any = Depends(get_grant_client),
 ) -> HostResidencyEstablishResponse:
     """Mint the renewable member grant before the supervisor opens a CLI."""
@@ -3947,7 +3993,7 @@ async def worker_record_thread_sandbox_process(
     job_id: str,
     body: WorkerSandboxProcessRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerAckResponse:
     """Fence and record a replacement Agent CLI process generation."""
     job_store = _require_store(store)
@@ -3975,7 +4021,7 @@ async def worker_admit_thread_sandbox_turn(
     job_id: str,
     body: WorkerSandboxAdmissionRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerAckResponse:
     """Persist at-most-once admission before the prompt reaches the CLI."""
     job_store = _require_store(store)
@@ -4003,7 +4049,7 @@ async def worker_settle_thread_sandbox(
     job_id: str,
     body: WorkerSandboxSettleRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerThreadSandbox:
     """Persist the native context boundary before arming idle deactivation."""
     job_store = _require_store(store)
@@ -4035,7 +4081,7 @@ async def worker_abandon_thread_sandbox(
     job_id: str,
     body: WorkerSandboxAbandonRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
     grants: Any = Depends(get_grant_client),
 ) -> WorkerThreadSandbox:
     """Release a failed activation; ambiguous admission becomes LOST."""
@@ -4076,7 +4122,7 @@ async def worker_report_resources(
     job_id: str,
     body: WorkerResourcesRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerAckResponse:
     """Record one closed attempt's resource and timing telemetry.
 
@@ -4102,7 +4148,7 @@ async def worker_suspend_terminals(
     job_id: str,
     body: WorkerTerminalSuspendRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerAckResponse:
     """Fence terminal writes, then freeze retained PTYs for a protected phase."""
     job_store = _require_store(store)
@@ -4147,7 +4193,7 @@ async def worker_suspend_terminals(
 async def worker_resume_terminals(
     job_id: str,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerAckResponse:
     """Resume retained PTYs, then atomically publish workspace readiness."""
     job_store = _require_store(store)
@@ -4220,7 +4266,7 @@ async def worker_finish(
     job_id: str,
     body: WorkerFinishRequest,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _RoutesStorage | None = Depends(get_agent_job_store),
 ) -> WorkerAckResponse:
     """Drive the fenced terminal transition for this attempt."""
     job_store = _require_store(store)

@@ -34,7 +34,7 @@ tools it is spending.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -49,14 +49,28 @@ from cloud_agent.mcp_proxy import (
     plan_request,
 )
 from cloud_agent.mcp_registry import McpServer, registry_for_user
+from cloud_agent.ports import credential_queries, mcp
 from cloud_agent.tokens import SCOPE_MCP, InvalidAgentToken, parse_worker_token
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
+
+
+class _McpRelayStorage(
+    mcp.McpConnectionRepository,
+    credential_queries.CredentialQueries,
+    Protocol,
+):
+    """The capabilities this module's handlers reach the store for.
+
+    Named here so that reaching for one more is a deliberate edit to
+    this list rather than a call that happens to type-check.
+    """
+
+
 router = APIRouter(prefix="/v1/agent/mcp")
 
 # An MCP call is a tool call: it can be a repository search or an issue fetch,
@@ -109,7 +123,7 @@ def _bearer(authorization: str | None) -> str:
 async def _authorize(
     server_name: str,
     authorization: str | None,
-    store: AgentJobStore | None,
+    store: _McpRelayStorage | None,
 ) -> tuple[McpServer, str]:
     """Resolve the token and the named server, or raise the right HTTP error."""
     token = _bearer(authorization)
@@ -391,7 +405,7 @@ async def mcp_post(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _McpRelayStorage | None = Depends(get_agent_job_store),
 ) -> Any:
     """Relay one MCP request, refusing tools the allowlist does not cover."""
     server, job_id = await _authorize(server_name, authorization, store)
@@ -422,7 +436,7 @@ async def mcp_get(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _McpRelayStorage | None = Depends(get_agent_job_store),
 ) -> Any:
     """Open the server-to-client stream for an established session."""
     server, job_id = await _authorize(server_name, authorization, store)
@@ -434,7 +448,7 @@ async def mcp_delete(
     server_name: str,
     request: Request,
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _McpRelayStorage | None = Depends(get_agent_job_store),
 ) -> Any:
     """Terminate an MCP session."""
     server, job_id = await _authorize(server_name, authorization, store)

@@ -2,26 +2,43 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends
 
-from cloud_agent.api.deps import get_agent_job_store
-from cloud_agent.api.routes import _owned_job, _require_store, require_agent_owner
+from cloud_agent.api.deps import get_agent_job_store, require_store
+from cloud_agent.api.routes import _owned_job, require_agent_owner
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.ledger import (
     JobUsageResponse,
     summarize_conversation,
     summarize_job_usage,
 )
+from cloud_agent.ports import conversation_queries, execution_queries, ledger
 
-if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+
+class _UsageStorage(
+    conversation_queries.ConversationQueries,
+    execution_queries.ExecutionQueries,
+    ledger.LedgerRepository,
+    Protocol,
+):
+    """The capabilities this module's handlers reach the store for.
+
+    Named here so that reaching for one more is a deliberate edit to
+    this list rather than a call that happens to type-check.
+    """
+
+
+def _require_store(store: _UsageStorage | None) -> _UsageStorage:
+    """This surface's capabilities, or 503 when no database is configured."""
+    return require_store(store)
+
 
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
 
 
-async def _usage_response(store: AgentJobStore, job: dict[str, Any]) -> JobUsageResponse:
+async def _usage_response(store: _UsageStorage, job: dict[str, Any]) -> JobUsageResponse:
     job_id = job["id"]
     rows = await store.ledger_rows_for_job(job_id=job_id)
     inputs = await store.job_usage_inputs(job_id=job_id)
@@ -40,7 +57,7 @@ async def _usage_response(store: AgentJobStore, job: dict[str, Any]) -> JobUsage
 async def get_job_usage(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _UsageStorage | None = Depends(get_agent_job_store),
 ) -> JobUsageResponse:
     """Read cached Gateway snapshots and runtime usage for the same job."""
     job_store = _require_store(store)
@@ -52,7 +69,7 @@ async def get_job_usage(
 async def refresh_job_usage(
     job_id: str,
     user: dict[str, Any] = Depends(require_agent_owner),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _UsageStorage | None = Depends(get_agent_job_store),
 ) -> JobUsageResponse:
     """Queue a bounded refresh and return cached data without waiting for HTTP."""
     job_store = _require_store(store)

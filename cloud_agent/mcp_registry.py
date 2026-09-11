@@ -40,7 +40,6 @@ from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
     from cloud_agent.ports import McpConnectionRepository
-    from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
 
@@ -337,7 +336,7 @@ async def connection_states(
 
 
 async def registry_for_user(
-    store: AgentJobStore,
+    store: McpConnectionRepository,
     *,
     user_id: str,
     cipher: SourceControlCipher | None = None,

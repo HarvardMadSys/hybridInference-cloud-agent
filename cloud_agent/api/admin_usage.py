@@ -28,8 +28,7 @@ from cloud_agent.admin_usage import (
     prepare_jobs,
     resolve_usage_window,
 )
-from cloud_agent.api.deps import get_agent_job_store, verify_admin_access
-from cloud_agent.api.routes import _require_store
+from cloud_agent.api.deps import get_agent_job_store, require_store, verify_admin_access
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage.admin_usage_queries import (
@@ -42,6 +41,16 @@ if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
+
+
+def _require_store(store: AgentJobStore | None) -> AgentJobStore:
+    """The store, or 503.
+
+    Still the concrete class: this module reads its pool directly, which
+    stage 3 removes.
+    """
+    return require_store(store)
+
 
 _TOO_LARGE = "usage_query_too_large"
 _UNAVAILABLE = "usage_temporarily_unavailable"

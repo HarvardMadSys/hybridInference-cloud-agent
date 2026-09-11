@@ -22,7 +22,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
@@ -32,6 +32,7 @@ from cloud_agent.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
 )
+from cloud_agent.ports import grants, host_pool, residency, sandbox
 from cloud_agent.schemas import (
     HostHeartbeatRequest,
     HostHeartbeatResponse,
@@ -44,9 +45,20 @@ from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_tok
 
 logger = logging.getLogger(__name__)
 
-if TYPE_CHECKING:
-    from cloud_agent.ports import GrantRepository
-    from cloud_agent.storage.store import AgentJobStore
+
+class _HostsStorage(
+    grants.GrantRepository,
+    host_pool.HostPoolRepository,
+    residency.ResidencyRepository,
+    sandbox.SandboxRepository,
+    Protocol,
+):
+    """The capabilities this module's handlers reach the store for.
+
+    Named here so that reaching for one more is a deliberate edit to
+    this list rather than a call that happens to type-check.
+    """
+
 
 router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
 
@@ -57,7 +69,7 @@ router = APIRouter(prefix="/v1/agent/host", tags=["agent-hosts"])
 RESIDENCY_TTL_S = float(os.environ.get("AGENT_RESIDENCY_TTL_S") or 1800.0)
 
 
-def _require_store(store: AgentJobStore | None) -> AgentJobStore:
+def _require_store(store: _HostsStorage | None) -> _HostsStorage:
     """Return the store or 503 — agent jobs are an optional deployment part."""
     if store is None:
         raise HTTPException(
@@ -82,7 +94,7 @@ def _unauthorized(message: str) -> HTTPException:
 
 async def authenticate_host(
     authorization: str | None = Header(None),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _HostsStorage | None = Depends(get_agent_job_store),
 ) -> dict[str, Any]:
     """Resolve the host behind a host credential, or refuse.
 
@@ -143,7 +155,7 @@ def _checked_broker_url(url: str | None) -> str | None:
 @router.post("/register", response_model=HostRegisterResponse)
 async def register_host(
     body: HostRegisterRequest,
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _HostsStorage | None = Depends(get_agent_job_store),
 ) -> HostRegisterResponse:
     """Spend a one-time enrollment token and receive a host credential.
 
@@ -212,7 +224,7 @@ async def register_host(
 async def heartbeat_host(
     body: HostHeartbeatRequest,
     host: dict[str, Any] = Depends(authenticate_host),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _HostsStorage | None = Depends(get_agent_job_store),
     grants: Any = Depends(get_grant_client),
 ) -> HostHeartbeatResponse:
     """Report liveness, and whatever about this machine has changed.
@@ -252,25 +264,25 @@ async def heartbeat_host(
     # so a beat from a taken-over residency extends nothing — it comes back in
     # residencies_lost and the host tears that sandbox down.
     lost: list[ResidencyBeat] = []
-    for residency in body.residencies or []:
+    for residency_beat in body.residencies or []:
         extended = await job_store.heartbeat_residency(
-            thread_id=residency.thread_id,
-            generation=residency.generation,
+            thread_id=residency_beat.thread_id,
+            generation=residency_beat.generation,
             host=updated["host"],
             ttl_seconds=RESIDENCY_TTL_S,
         )
         if extended and grants is not None:
-            # The credential lives exactly as long as the residency: the residency
+            # The credential lives exactly as long as the residency_beat: the residency_beat
             # that extends the lease extends the grant. Best-effort — a missed
             # renewal starves hot turns into warm, never into an outage.
             with contextlib.suppress(Exception):
                 await grants.renew(extended)
         if extended is None:
-            # Echo the generation back (review finding 5): a residency carrying
+            # Echo the generation back (review finding 5): a residency_beat carrying
             # gen N can be answered after the host re-established gen N+1,
             # and a thread-id-only loss would let the stale answer kill the
             # successor. The host drops only on an exact generation match.
-            lost.append(residency)
+            lost.append(residency_beat)
     # Docker is the lifecycle authority for retained chat containers; the
     # database is the scheduling/fencing authority.  Heartbeats join those
     # views without treating absence as deletion. In particular, a broker's
@@ -360,7 +372,7 @@ async def heartbeat_host(
 
 
 async def _mint_residency_grant(
-    job_store: GrantRepository, grants: Any, *, row: dict[str, Any]
+    job_store: grants.GrantRepository, grants: Any, *, row: dict[str, Any]
 ) -> str | None:
     """Mint the worker-fenced grant for one supervisor-owned member process."""
     if grants is None:

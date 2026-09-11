@@ -22,8 +22,13 @@ from cloud_agent.admin_observability import (
     decode_cursor,
     resolve_run_window,
 )
-from cloud_agent.api.deps import get_agent_job_store, get_client_ip, verify_admin_access
-from cloud_agent.api.routes import _attempt_duration_ms, _attempt_resources, _require_store
+from cloud_agent.api.deps import (
+    get_agent_job_store,
+    get_client_ip,
+    require_store,
+    verify_admin_access,
+)
+from cloud_agent.api.routes import _attempt_duration_ms, _attempt_resources
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.ledger import summarize_job_usage
 from cloud_agent.logging_utils import get_logger
@@ -35,6 +40,15 @@ if TYPE_CHECKING:
     from cloud_agent.storage.store import AgentJobStore
 
 logger = get_logger(__name__)
+
+
+def _require_store(store: AgentJobStore | None) -> AgentJobStore:
+    """The store, or 503.
+
+    Still the concrete class: this module reads its pool directly, which
+    stage 3 removes.
+    """
+    return require_store(store)
 
 
 def _no_store(response: Response) -> None:

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import os
 import secrets
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
@@ -45,6 +45,7 @@ from cloud_agent.api.deps import (
     get_agent_job_store,
     get_gateway_client,
     require_agent_access,
+    require_store,
     verify_admin_access,
 )
 from cloud_agent.api.routes import (
@@ -53,9 +54,15 @@ from cloud_agent.api.routes import (
     _event_response,
     _job_response,
     _owned_job,
-    _require_store,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.ports import (
+    attempt_commands,
+    conversation_commands,
+    conversation_queries,
+    execution_queries,
+    mcp,
+)
 from cloud_agent.schemas import (
     AgentJobCancelResponse,
     AgentJobCreate,
@@ -63,10 +70,28 @@ from cloud_agent.schemas import (
     AgentJobResponse,
 )
 
-if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
-
 logger = get_logger(__name__)
+
+
+def _require_store(store: _ServiceJobsStorage | None) -> _ServiceJobsStorage:
+    """This surface's capabilities, or 503 when no database is configured."""
+    return require_store(store)
+
+
+class _ServiceJobsStorage(
+    mcp.McpConnectionRepository,
+    conversation_commands.ConversationCommands,
+    attempt_commands.AttemptCommands,
+    conversation_queries.ConversationQueries,
+    execution_queries.ExecutionQueries,
+    Protocol,
+):
+    """The capabilities this module's handlers reach the store for.
+
+    Named here so that reaching for one more is a deliberate edit to
+    this list rather than a call that happens to type-check.
+    """
+
 
 router = APIRouter(prefix="/v1/agent/service/oncall")
 
@@ -135,7 +160,7 @@ def _oncall_owner() -> dict[str, Any]:
 async def create_oncall_job(
     body: AgentJobCreate,
     _caller: str = Depends(verify_oncall_dispatch),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _ServiceJobsStorage | None = Depends(get_agent_job_store),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobResponse:
@@ -170,7 +195,7 @@ async def create_oncall_job(
 async def get_oncall_job(
     job_id: str,
     _caller: str = Depends(verify_oncall_dispatch),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _ServiceJobsStorage | None = Depends(get_agent_job_store),
 ) -> AgentJobResponse:
     """Return one on-call job's state, for the relay's poll loop.
 
@@ -188,7 +213,7 @@ async def list_oncall_job_events(
     after: int = Query(0, ge=0, description="Return events with a global id greater than this."),
     limit: int = Query(_EVENT_PAGE_SIZE, ge=1, le=1000),
     _caller: str = Depends(verify_oncall_dispatch),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _ServiceJobsStorage | None = Depends(get_agent_job_store),
 ) -> AgentJobEventsResponse:
     """Page through an on-call job's event log, fenced like the job itself.
 
@@ -209,7 +234,7 @@ async def list_oncall_job_events(
 async def cancel_oncall_job(
     job_id: str,
     _caller: str = Depends(verify_oncall_dispatch),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _ServiceJobsStorage | None = Depends(get_agent_job_store),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one on-call job.
 

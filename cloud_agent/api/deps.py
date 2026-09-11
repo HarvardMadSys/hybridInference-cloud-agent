@@ -46,12 +46,15 @@ from __future__ import annotations
 
 import hmac
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import jwt
 from fastapi import Depends, Header, HTTPException, Request
 
 from cloud_agent import identity
+
+#: Whatever a surface narrowed the store to; this only removes the ``None``.
+_StoreT = TypeVar("_StoreT")
 from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api.errors import AgentConfigurationError
 from cloud_agent.gateway import GatewayError
@@ -405,3 +408,22 @@ async def log_admin_action(
             exc_info=True,
             extra={"event": "agent_admin_audit_write_failed", "action": action},
         )
+
+
+def require_store(store: _StoreT | None) -> _StoreT:
+    """Return the store or fail with a clear 503 when the DB is absent.
+
+    Shared by the surfaces that answer with this shape. A router that answers
+    with a different refusal keeps its own, so no response body changes.
+    """
+    if store is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "type": "unavailable",
+                    "message": "Agent jobs require a configured database.",
+                }
+            },
+        )
+    return store

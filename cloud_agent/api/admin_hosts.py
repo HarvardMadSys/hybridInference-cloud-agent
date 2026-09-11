@@ -20,7 +20,7 @@ all.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
@@ -45,6 +45,7 @@ from cloud_agent.host_pool import (
     hash_secret,
     new_enroll_token,
 )
+from cloud_agent.ports import host_capacity, host_pool
 from cloud_agent.schemas import (
     AgentRunnerHost,
     IssueHostEnrollTokenRequest,
@@ -54,9 +55,17 @@ from cloud_agent.schemas import (
     SetRuntimeVersionRequest,
 )
 
-if TYPE_CHECKING:
-    from cloud_agent.ports import HostPoolRepository
-    from cloud_agent.storage.store import AgentJobStore
+
+class _AdminHostsStorage(
+    host_capacity.HostCapacityRepository,
+    host_pool.HostPoolRepository,
+    Protocol,
+):
+    """The capabilities this module's handlers reach the store for.
+
+    Named here so that reaching for one more is a deliberate edit to
+    this list rather than a call that happens to type-check.
+    """
 
 
 def _no_store(response: Response) -> None:
@@ -71,7 +80,7 @@ def _no_store(response: Response) -> None:
 router = APIRouter(prefix="/admin", dependencies=[Depends(_no_store)])
 
 
-def _require_store(store: AgentJobStore | None) -> AgentJobStore:
+def _require_store(store: _AdminHostsStorage | None) -> _AdminHostsStorage:
     """Return the store or 503 — agent jobs are an optional deployment part."""
     if store is None:
         raise HTTPException(
@@ -125,7 +134,7 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
     )
 
 
-async def _snapshot(store: HostPoolRepository) -> ListAgentRunnerHostsResponse:
+async def _snapshot(store: host_pool.HostPoolRepository) -> ListAgentRunnerHostsResponse:
     """The pool as it stands — the response every endpoint here returns.
 
     Every part comes from one read. ``active_host`` is the policy's own value
@@ -153,7 +162,7 @@ async def _snapshot(store: HostPoolRepository) -> ListAgentRunnerHostsResponse:
 @router.get("/agent/runner-hosts", response_model=ListAgentRunnerHostsResponse)
 async def list_agent_runner_hosts(
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> ListAgentRunnerHostsResponse:
     """List every machine that has polled for agent work, and the pinned one."""
     return await _snapshot(_require_store(store))
@@ -164,7 +173,7 @@ async def set_active_agent_runner_host(
     request: Request,
     payload: SetActiveAgentRunnerHostRequest,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> ListAgentRunnerHostsResponse:
     """Pin new chat placement to one host, or let any host materialize it.
 
@@ -207,7 +216,7 @@ async def set_agent_runtime_version(
     request: Request,
     payload: SetRuntimeVersionRequest,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> ListAgentRunnerHostsResponse:
     """Choose the agent CLI version this deployment runs for one runtime.
 
@@ -253,7 +262,7 @@ async def forget_agent_runner_host(
     request: Request,
     host: str,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> ListAgentRunnerHostsResponse:
     """Drop a decommissioned host from the list.
 
@@ -298,7 +307,7 @@ async def issue_host_enroll_token(
     request: Request,
     payload: IssueHostEnrollTokenRequest,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> IssueHostEnrollTokenResponse:
     """Mint a one-time token that lets one named machine join the pool.
 
@@ -359,7 +368,7 @@ async def _set_status(
     host: str,
     status: str,
     action: str,
-    job_store: AgentJobStore,
+    job_store: _AdminHostsStorage,
     actor_id: str,
 ) -> ListAgentRunnerHostsResponse:
     """Apply one table-driven status change, or say why it was refused."""
@@ -389,7 +398,7 @@ async def drain_agent_runner_host(
     request: Request,
     host: str,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> ListAgentRunnerHostsResponse:
     """Stop this host taking new work; let what it has finish.
 
@@ -414,7 +423,7 @@ async def undrain_agent_runner_host(
     request: Request,
     host: str,
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> ListAgentRunnerHostsResponse:
     """Put a drained host back to work.
 
@@ -446,7 +455,7 @@ async def remove_agent_runner_host(
         ),
     ),
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> ListAgentRunnerHostsResponse:
     """Revoke this host's credential and take it out of the pool.
 
@@ -505,7 +514,7 @@ async def get_agent_runner_host_capacity_history(
         description="How far back to read: 1h, 6h or 24h. Anything else is refused.",
     ),
     _admin_id: str = Depends(verify_admin_access),
-    store: AgentJobStore | None = Depends(get_agent_job_store),
+    store: _AdminHostsStorage | None = Depends(get_agent_job_store),
 ) -> AgentHostCapacityHistoryResponse:
     """Read one host's stored CPU and memory history.
 
