@@ -253,6 +253,18 @@ jobs:
           else
             echo "PUBLISH_REPOSITORY=${IMAGE_REPOSITORY}" >> "${GITHUB_ENV}"
           fi
+          # Credentials of this job's own. The runners on this machine share
+          # one $HOME, and docker/login-action's post step logs *out* at the
+          # end of its job — from the shared ~/.docker/config.json. On the
+          # first live run of this workflow (2026-09-11) web-root's logout at
+          # 14:44:16 removed the credentials control was tagging with three
+          # seconds later, and the sandbox push arrived after the runner cell
+          # had logged the shared file out: three cells failed with anonymous
+          # 401s and a "denied" while the token was perfectly valid. A config
+          # directory per job makes the logout a no-op for everyone else.
+          # Buildx state is unaffected; it lives in BUILDX_CONFIG.
+          mkdir -p "${RUNNER_TEMP}/docker-config"
+          echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"
 
       # Authenticated base-image pulls: the anonymous allowance is per IP and
       # shared with the other repository's CI, and it ran out twice in one day.

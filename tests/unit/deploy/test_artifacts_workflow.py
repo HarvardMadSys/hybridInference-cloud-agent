@@ -193,3 +193,16 @@ def test_the_gate_waits_for_the_image_jobs() -> None:
     assert "build" not in gate["needs"], "the old build-only job is gone"
     results = str(step("Every job succeeded", job="ci-gate")["env"]["RESULTS"])
     assert "artifacts=" in results
+
+
+def test_the_job_logs_in_to_a_config_of_its_own() -> None:
+    """The login's post step logs out of $DOCKER_CONFIG, and $HOME is shared.
+
+    Without a directory of its own, every finished cell logged the runner
+    user out of Docker Hub — the persistent login the service containers and
+    `docker pull` steps on this machine rely on.
+    """
+    naming = str(step("Name this cell")["run"])
+    assert 'echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"' in naming
+    names = [str(s.get("name", "")) for s in workflow()["jobs"]["artifacts"]["steps"]]
+    assert names.index("Name this cell's artifacts") < names.index("Log in to Docker Hub")

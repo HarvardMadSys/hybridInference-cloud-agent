@@ -316,3 +316,18 @@ def test_a_release_becomes_visible_only_with_both_assets_on_it() -> None:
     )
     summary = str(step("What a distribution pins", "publish")["run"])
     assert "${MANIFEST_SHA256}" in summary and "GITHUB_STEP_SUMMARY" in summary
+
+
+def test_each_cell_logs_in_to_a_config_of_its_own() -> None:
+    """Runners on one host share $HOME, and login-action's post step logs out of it.
+
+    First live run, 2026-09-11: web-root's logout at 14:44:16 removed the
+    credentials control was tagging with three seconds later, and the sandbox
+    push arrived after the runner cell had logged the shared file out. A
+    config directory per job makes the logout reach nobody else.
+    """
+    naming = str(step("Name this cell")["run"])
+    assert 'echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"' in naming
+    assert (
+        position("Name this cell") < position("Log in to Docker Hub") < position("Log in to GHCR")
+    )

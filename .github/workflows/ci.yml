@@ -821,6 +821,18 @@ jobs:
           suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
           echo "IMAGE_TAG=${{ matrix.artifact.name }}:ci-${suffix}" >> "${GITHUB_ENV}"
           echo "SUFFIX=${suffix}" >> "${GITHUB_ENV}"
+          # Credentials of this job's own. The runners on this machine share
+          # one $HOME, and docker/login-action's post step logs *out* at the
+          # end of its job — from the shared ~/.docker/config.json. That is
+          # where the runner user's persistent Docker Hub login lives, the one
+          # the service containers and the `docker pull` in Tests rely on, so
+          # every image cell that finished was logging the whole machine out
+          # again. (In the publication workflow the same logout stripped the
+          # credentials of the cells still running beside it.) A config
+          # directory per job makes the logout a no-op for everyone else.
+          # Buildx state is unaffected; it lives in BUILDX_CONFIG.
+          mkdir -p "${RUNNER_TEMP}/docker-config"
+          echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"
 
       # Authenticated pulls. Rate limits are per *account* once logged in and
       # per *IP* when not — and this machine's egress address is shared with the
