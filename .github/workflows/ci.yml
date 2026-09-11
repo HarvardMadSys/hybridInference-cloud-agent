@@ -742,9 +742,15 @@ jobs:
       # Named per run, so a retry and a concurrent attempt stay independently
       # diagnosable and a run that dies before cleanup leaves something
       # identifiable behind rather than a bare image id.
-      - name: Name this run's artifacts
+      - name: Name this cell's artifacts
         run: |
-          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Run, attempt *and artifact*: the seven cells of one run share the
+          # first two, several of them land on the same Docker host, and the
+          # cleanup below removes containers by this label. Without the artifact
+          # name, the first cell to finish deletes the others' containers while
+          # they are still being tested — which is exactly what the control and
+          # egress cells did, twice, before this.
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.artifact.name }}"
           echo "IMAGE_TAG=${{ matrix.artifact.name }}:ci-${suffix}" >> "${GITHUB_ENV}"
           echo "SUFFIX=${suffix}" >> "${GITHUB_ENV}"
 
@@ -831,15 +837,16 @@ jobs:
       - name: Drop this run's containers and image
         if: always()
         run: |
-          # Scoped by this run's label, not by the name prefix: a shared runner
-          # hosts two jobs at once, so `--filter name=smoke-` reaches into a
-          # concurrent run and kills its containers mid-check.
+          # Scoped by this cell's label, not by the name prefix: a shared
+          # runner hosts several cells at once, so `--filter name=smoke-`
+          # reaches into the others and kills their containers mid-check.
           docker ps -aq --filter "label=io.hybridinference.smoke.run=${SUFFIX}" \
             | xargs -r docker rm -f || true
-          # Not `-f`: two runs of the same commit build the same image id under
-          # different tags, and a forced removal takes their containers with it.
-          # A refused removal leaves an image behind, which is the cheaper
-          # mistake on a shared runner.
+          # Not `-f`. Forced removal untags an image another cell or run may
+          # still be starting containers from; a plain `rm` refuses while any
+          # container references it, so the worst case is a leftover image
+          # rather than a tag pulled out from under somebody else. (It does not
+          # delete containers — the removals above are what did that.)
           docker image rm "${IMAGE_TAG}" >/dev/null 2>&1 || true
 
   compose:

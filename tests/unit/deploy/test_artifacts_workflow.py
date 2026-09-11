@@ -97,7 +97,7 @@ def test_the_start_check_runs_the_image_this_job_built() -> None:
         "the revision label is what a resolver compares with the release manifest, and the "
         "build argument that fills it is only proven to arrive by checking it here"
     )
-    naming = str(step("Name this run")["run"])
+    naming = str(step("Name this cell")["run"])
     assert "IMAGE_TAG=" in naming
     assert "GITHUB_RUN_ID" in naming and "GITHUB_RUN_ATTEMPT" in naming, (
         "per-run names are what keep a retry and a concurrent attempt independently diagnosable"
@@ -130,7 +130,24 @@ def test_the_build_tags_the_image_the_smoke_starts() -> None:
         "Build ${{ matrix.artifact.name }} (retry)",
     ):
         assert step(fragment)["with"]["tags"] == "${{ env.IMAGE_TAG }}"
-    assert "IMAGE_TAG=" in str(step("Name this run")["run"])
+    assert "IMAGE_TAG=" in str(step("Name this cell")["run"])
+
+
+def test_cleanup_cannot_reach_another_cell() -> None:
+    """Seven cells of one run share a run id, an attempt — and often a Docker host.
+
+    A label built from the first two is identical for all of them, so the first
+    cell to finish removes the others' containers while they are still being
+    tested. That is what happened to the control and egress cells, twice, before
+    the artifact name went into the label.
+    """
+    naming = str(step("Name this cell")["run"])
+    assert "matrix.artifact.name" in naming, (
+        "the label has to differ per cell, or cleanup reaches into the other six"
+    )
+    labels = {f"345-1-{cell['name']}" for cell in cells()}
+    assert len(labels) == len(cells())
+    assert "label=io.hybridinference.smoke.run=${SUFFIX}" in str(step("Drop this run's")["run"])
 
 
 def test_the_build_passes_the_commit_every_image_must_name() -> None:

@@ -163,3 +163,85 @@ def test_list_answers_what_the_roles_are_without_an_image(capsys: pytest.Capture
 def test_a_role_and_an_image_are_required() -> None:
     with pytest.raises(SystemExit):
         smoke.main([])
+
+
+class Recorder:
+    """The order events happened in, which is the whole assertion below."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+
+def test_the_control_check_stops_containers_before_it_removes_the_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Order is invisible in the happy path and wrong in the first draft.
+
+    Removing a network that still has endpoints attached fails, and the failure
+    is ignored because there is nothing useful to do about it — so the wrong
+    order leaves the network on the runner rather than failing anything. The
+    first version returned from inside the network context, which removed the
+    network first; this records the order the real function produces with
+    in-memory doubles, so the next reordering fails here instead of on a host.
+    """
+    recorder = Recorder()
+
+    class FakeNetwork:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def create(self) -> None:
+            recorder.events.append("network.create")
+
+        def remove(self) -> None:
+            recorder.events.append("network.remove")
+
+    class FakeContainer:
+        def __init__(self, name: str, run: str) -> None:
+            self.name = name
+            self.run = run
+            self.published = {8000: 1234}
+
+        @classmethod
+        def for_run(cls, kind: str, run: str) -> FakeContainer:
+            return cls(name=f"smoke-{kind}-{run}", run=run)
+
+        def start(self, image: str, **kwargs: object) -> None:
+            recorder.events.append(f"start:{self.name}")
+
+        def wait(self, timeout: int = 0) -> None:
+            recorder.events.append(f"wait:{self.name}")
+
+        def exit_code(self) -> int:
+            return 0
+
+        def logs(self) -> str:
+            return "database system is ready to accept connections"
+
+        def url(self, port: int, path: str = "/") -> str:
+            return f"http://127.0.0.1:{self.published[port]}{path}"
+
+        def stop(self) -> None:
+            recorder.events.append(f"stop:{self.name}")
+
+    monkeypatch.setattr(smoke, "Network", FakeNetwork)
+    monkeypatch.setattr(smoke, "Container", FakeContainer)
+    monkeypatch.setattr(smoke, "wait_for_http", lambda url, **kwargs: (200, ""))
+    monkeypatch.setattr(smoke, "_control_environment", lambda dsn: {})
+    monkeypatch.setattr(smoke, "_drop_image", lambda image: recorder.events.append("drop-image"))
+
+    assert smoke.verify_control("control:ci-1", suffix="1", keep=True)
+
+    lifelines = [
+        event for event in recorder.events if event.startswith(("start:", "stop:", "network."))
+    ]
+    assert lifelines == [
+        "network.create",
+        "start:smoke-control-pg-1",
+        "start:smoke-control-migrate-1",
+        "start:smoke-control-app-1",
+        "stop:smoke-control-app-1",
+        "stop:smoke-control-migrate-1",
+        "stop:smoke-control-pg-1",
+        "network.remove",
+    ], lifelines

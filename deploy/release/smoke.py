@@ -276,13 +276,21 @@ class Container:
 
 @dataclass
 class Network:
+    """A network this check creates, and removes after its containers are gone.
+
+    Explicit rather than a context manager: the ordering that matters is
+    containers-then-network, and a `with` block invites the opposite — a
+    `return` inside it removes the network while the containers are still
+    attached, which fails, and the failure is swallowed because there is nothing
+    useful to do about it. That leaves the network on the runner for good.
+    """
+
     name: str
 
-    def __enter__(self) -> Network:
+    def create(self) -> None:
         docker("network", "create", self.name)
-        return self
 
-    def __exit__(self, *_: object) -> None:
+    def remove(self) -> None:
         run("docker", "network", "rm", self.name, check=False)
 
 
@@ -331,15 +339,17 @@ def image_labels(image: str) -> dict[str, str]:
 
 
 def _drop_image(image: str) -> None:
-    """Remove this run's image tag, and never at another run's expense.
+    """Remove this cell's image tag, and never at another cell's expense.
 
-    Not `-f`. Two runs of the same commit build the same image *id* under
-    different tags, and a forced removal takes the containers using it with it —
-    which is how this check's own egress cell failed on a shared runner: its
-    container vanished between `docker run` and the first `docker inspect`
-    because an earlier run's cleanup had force-removed the image underneath it.
-    A plain `rm` refuses while a container still references the image, so the
-    worst case here is a leftover image rather than somebody else's dead job.
+    Not `-f`. Forced removal untags an image that another cell or run may still
+    be starting containers from, and a tag pulled out from under a concurrent
+    build is a failure nobody can explain afterwards. A plain `rm` refuses while
+    any container references the image, so the worst case is a leftover image.
+
+    To be exact about what this is *not*: removing an image does not remove the
+    containers using it. The containers this check lost went missing because
+    cleanup was keyed on a name prefix and a label that several cells shared,
+    and those removals are the ones that had to be scoped.
     """
     run("docker", "image", "rm", image, check=False)
 
@@ -413,8 +423,14 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
     network = Network(f"smoke-control-{suffix}")
     postgres = Container.for_run("control-pg", suffix)
     app = Container.for_run("control-app", suffix)
+    migrate = Container.for_run("control-migrate", suffix)
+
+    network.create()
     try:
-        with network:
+        # Containers stop inside this block, before the network is removed: an
+        # endpoint still attached makes the removal fail, and a failure nobody
+        # handles is a network left behind on a shared runner.
+        try:
             postgres.start(
                 "postgres:16-alpine",
                 env={
@@ -424,8 +440,7 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
                 },
                 network=network.name,
             )
-            # The image ships its own healthcheck-free postgres here; poll the
-            # log line rather than sleeping a guessed interval.
+            # Poll the log line rather than sleeping a guessed interval.
             deadline = time.monotonic() + STARTUP_TIMEOUT_S
             while time.monotonic() < deadline:
                 if "database system is ready to accept connections" in postgres.logs():
@@ -434,28 +449,24 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
             else:
                 raise SmokeFailure(f"postgres never became ready\n{postgres.logs()}")
 
-            dsn = f"postgresql+asyncpg://cloudagent:smoke@smoke-control-pg-{suffix}:5432/cloudagent"
-            common = _control_environment(dsn)
+            dsn = f"postgresql+asyncpg://cloudagent:smoke@{postgres.name}:5432/cloudagent"
+            environment = _control_environment(dsn)
 
-            migrate = Container.for_run("control-migrate", suffix)
-            try:
-                migrate.start(
-                    image,
-                    env=common,
-                    network=network.name,
-                    entrypoint="alembic",
-                    command=("upgrade", "head"),
+            migrate.start(
+                image,
+                env=environment,
+                network=network.name,
+                entrypoint="alembic",
+                command=("upgrade", "head"),
+            )
+            migrate.wait(timeout=STARTUP_TIMEOUT_S * 2)
+            if migrate.exit_code() != 0:
+                raise SmokeFailure(
+                    f"`alembic upgrade head` exited {migrate.exit_code()} in the image the "
+                    f"deploy runs it from\n{migrate.logs()}"
                 )
-                migrate.wait(timeout=STARTUP_TIMEOUT_S * 2)
-                if migrate.exit_code() != 0:
-                    raise SmokeFailure(
-                        f"`alembic upgrade head` exited {migrate.exit_code()} in the image the "
-                        f"deploy runs it from\n{migrate.logs()}"
-                    )
-            finally:
-                migrate.stop()
 
-            app.start(image, env=common, network=network.name, publish=(8000,))
+            app.start(image, env=environment, network=network.name, publish=(8000,))
             status, _ = wait_for_http(app.url(8000, "/healthz"), container=app)
             if status != 200:
                 raise SmokeFailure(f"/healthz answered {status}\n{app.logs()}")
@@ -463,9 +474,12 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
                 "`alembic upgrade head` ran to completion in this image",
                 "the API answered /healthz 200 against a real database",
             ]
+        finally:
+            app.stop()
+            migrate.stop()
+            postgres.stop()
     finally:
-        app.stop()
-        postgres.stop()
+        network.remove()
         if not keep:
             _drop_image(image)
 
