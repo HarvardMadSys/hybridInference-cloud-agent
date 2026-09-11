@@ -842,21 +842,21 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     """
     import asyncpg
 
+    from cloud_agent.bootstrap import build_persistence
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ledger import collect_usage_snapshots
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.storage.admin_queries import AdminRunQueries
 
     dsn = os.environ.get(ENV_DATABASE_URL, "")
     if not dsn:
         raise RuntimeError(f"{ENV_DATABASE_URL} must be set")
 
     pool = await asyncpg.create_pool(dsn)
-    store = AgentJobStore(pool)
-    # Schema is Alembic's; this is a no-op kept so the call site is honest
-    # about when the store becomes usable.
+    # Schema is Alembic's, so there is nothing to build here. The database is
+    # usable the moment the pool exists, and the namespace check below is what
+    # proves it: it is the first thing that reads a row.
     try:
-        await store.initialize()
         from cloud_agent.identity import ENV_ISSUER, gateway_issuer
         from cloud_agent.identity_namespace import ensure_gateway_namespace
 
@@ -867,7 +867,16 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         await pool.close()
         raise
 
-    app.state.store = store
+    # The capabilities are built once, over the pool the namespace check just
+    # proved usable. Callers take the port they need; none of them receives the
+    # container.
+    persistence = build_persistence(pool)
+    app.state.persistence = persistence
+    # Purpose-built admin projections, built here rather than in a route: they
+    # open their own read-only transaction, and a route reaching for a pool to
+    # build one is what this refactor removes.
+    app.state.admin_queries = AdminRunQueries(pool)
+
     app.state.gateway = GatewayClient()
     # The sandbox's credential is minted at the gateway now (E9), so the claim
     # path and the renewal/revocation passes share one client — and one
@@ -885,9 +894,25 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     # So this is a parameter of the lifespan rather than a property of it, and
     # `create_mcp_app` says no.
     if background:
-        reaper = asyncio.create_task(reap_expired_attempts(store, grants=app.state.grants))
-        snapshot_coordinator = asyncio.create_task(coordinate_shared_snapshots(store))
-        ledger_collector = asyncio.create_task(collect_usage_snapshots(store, app.state.grants))
+        reaper = asyncio.create_task(
+            reap_expired_attempts(
+                persistence.attempts,
+                persistence.residencies,
+                persistence.hosts,
+                persistence.sandboxes,
+                persistence.conversation_queries,
+                persistence.session_forks,
+                persistence.snapshots,
+                persistence.grants,
+                grants=app.state.grants,
+            )
+        )
+        snapshot_coordinator = asyncio.create_task(
+            coordinate_shared_snapshots(persistence.snapshots, persistence.hosts)
+        )
+        ledger_collector = asyncio.create_task(
+            collect_usage_snapshots(persistence.ledger, app.state.grants)
+        )
         _BACKGROUND_TASKS.add(reaper)
         _BACKGROUND_TASKS.add(snapshot_coordinator)
         _BACKGROUND_TASKS.add(ledger_collector)

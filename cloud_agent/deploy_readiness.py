@@ -29,7 +29,9 @@ import asyncpg
 
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, probe_broker
 from cloud_agent.host_pool import HOST_ONLINE
-from cloud_agent.storage.store import AgentJobStore
+from cloud_agent.storage.repositories.host_pool import (
+    PostgresHostPoolRepository,
+)
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
@@ -38,6 +40,8 @@ from cloud_agent_host.shared_protocol import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from cloud_agent.ports.host_pool import HostPoolRepository
 
     BrokerProbe = Callable[..., Awaitable[str | None]]
 
@@ -96,7 +100,7 @@ def _host_rejection(
 
 
 async def shared_live_readiness(
-    store: AgentJobStore,
+    hosts: HostPoolRepository,
     *,
     not_before: datetime,
     broker_token: str,
@@ -119,7 +123,7 @@ async def shared_live_readiness(
             f"control plane has no {ENV_BROKER_TOKEN}; broker operations cannot authenticate",
         )
 
-    rows, active_host, _, retained_hosts = await store.deployment_runner_pool()
+    rows, active_host, _, retained_hosts = await hosts.deployment_runner_pool()
     rows_by_host = {str(row.get("host")): row for row in rows if row.get("host")}
     if active_host is not None:
         placement_rows = [row for row in rows if row.get("host") == active_host]
@@ -232,7 +236,7 @@ async def shared_live_readiness(
         current_active_host,
         _,
         current_retained_hosts,
-    ) = await store.deployment_runner_pool()
+    ) = await hosts.deployment_runner_pool()
     current_by_host = {str(row.get("host")): row for row in current_rows if row.get("host")}
     if current_active_host != active_host or set(current_retained_hosts) != set(retained_hosts):
         return SharedLiveReadiness(
@@ -323,13 +327,13 @@ async def wait_for_shared_live(
     not_before = datetime.now(UTC)
     deadline = time.monotonic() + timeout_seconds
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
-    store = AgentJobStore(pool)
+    hosts = PostgresHostPoolRepository(pool)
     last_detail = ""
     try:
         while True:
             try:
                 verdict = await shared_live_readiness(
-                    store,
+                    hosts,
                     not_before=not_before,
                     broker_token=broker_token,
                     expected_deployment_sha=expected_deployment_sha,

@@ -2,7 +2,7 @@
 
 Ported from the gateway with assertions untouched. One piece of wiring changed
 and could not not change: the gateway's ``AppServices`` container became
-``app.state.store``. ``verify_admin_access`` is this repository's own since E7
+``app.state.persistence``. ``verify_admin_access`` is this repository's own since E7
 and is left real — the ``ADMIN_TOKEN`` these tests knock with is the door it
 actually opens.
 """
@@ -17,7 +17,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import admin_hosts as admin_router
-from cloud_agent.api.deps import get_agent_job_store
+from cloud_agent.api.deps import get_audit_repository
+from tests.support.storage_fakes import capability_overrides
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
@@ -88,12 +89,25 @@ class FakeHostStore:
         return "deleted" if self.rows.pop(host, None) is not None else "unknown"
 
 
+class _NoAudit:
+    """An audit trail that accepts a write and keeps nothing."""
+
+    async def record_admin_action(self, **kwargs: object) -> int:
+        """Accept one action."""
+        return 0
+
+
 def _admin_app(store: FakeHostStore | None) -> FastAPI:
     """Mount the admin router over one store, with E7's gate stood in for."""
     app = FastAPI()
-    app.state.store = store
     app.include_router(admin_router.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    # The admin routes take the pool and the audit trail, not the store they
+    # were split from. This fake answers the pool; the audit is stubbed out.
+    capability_overrides(app, store, "hosts")
+    # The audit trail is its own capability. This fake does not hold it, so the
+    # fixture answers with one that records nothing: the subject here is the
+    # pool, and the trail is pinned in test_admin_runs.
+    app.dependency_overrides[get_audit_repository] = _NoAudit
     return app
 
 

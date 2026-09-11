@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 from fastapi import FastAPI
@@ -17,15 +18,34 @@ from cloud_agent.admin_observability import (
     decode_cursor,
 )
 from cloud_agent.api import admin_runs
-from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.api.routes import _attempt_resources
+from cloud_agent.bootstrap import build_persistence
 from cloud_agent.ledger import summarize_job_usage
+from cloud_agent.storage._sql.rows import load_json as _load_json
 from cloud_agent.storage.admin_queries import AdminRunQueries
-from cloud_agent.storage.store import _load_json
 from cloud_agent_host.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, store as store
 from tests.unit.test_ledger_snapshots import END, START
+
+if TYPE_CHECKING:
+    from cloud_agent.storage.store import AgentJobStore
+
+
+def _admin_app(store: AgentJobStore) -> FastAPI:
+    """Assemble the admin app the way bootstrap does, over the store's pool.
+
+    The routes take injected capabilities rather than reaching for a pool, so a
+    test that drives them needs the real implementations behind the real
+    getters. This is the one place in the suite that builds them from a live
+    database, which is what the dbtest tier is for.
+    """
+    app = FastAPI()
+    app.include_router(admin_runs.router)
+    app.state.persistence = build_persistence(store._pool)
+    app.state.admin_queries = AdminRunQueries(store._pool)
+    return app
+
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -128,9 +148,7 @@ async def test_admin_metadata_routes_hide_prompt_fallback_titles(store, monkeypa
                 == "PRIVATE-PROMPT-FIRST-LINE"
             )
     monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
-    app = FastAPI()
-    app.include_router(admin_runs.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app = _admin_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         headers = {"Authorization": "Bearer db-admin-observation-test"}
         listing = await client.get(
@@ -401,9 +419,7 @@ async def test_legacy_large_content_is_bounded_in_sql_and_real_http_reveal_is_au
     assert await queries.event_content(job["id"], other_event) is None
 
     monkeypatch.setenv("ADMIN_TOKEN", "db-admin-observation-test")
-    app = FastAPI()
-    app.include_router(admin_runs.router)
-    app.dependency_overrides[get_agent_job_store] = lambda: store
+    app = _admin_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             f"/admin/agent/runs/{job['id']}/events/{event}/content",
