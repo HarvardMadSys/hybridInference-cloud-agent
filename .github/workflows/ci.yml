@@ -307,10 +307,10 @@ jobs:
       # `-n 4 --dist load`, deliberately not the `--dist loadfile` the other
       # suites use: loadfile groups by file, and here the file *is* the suite,
       # so it would hand all four tests to a single worker and change nothing.
-      # Each test already gets its own tmp_path, its own config/home
-      # (monkeypatched), its own CLI process and its own loopback port —
-      # `FakeAnthropicGateway` binds port 0 — so there is nothing for parallel
-      # workers to collide over.
+      # Each test already gets its own tmp_path, its own HOME and config
+      # directory (monkeypatched), its own CLI process and its own loopback
+      # port — `FakeAnthropicGateway` binds port 0 — so there is nothing for
+      # parallel workers to collide over.
       - name: Native history survives close, restore and failed-turn retry
         timeout-minutes: 10
         run: uv run pytest -q -n 4 --dist load -m external tests/external/test_claude_driver_context.py
