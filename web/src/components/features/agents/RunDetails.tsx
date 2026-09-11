@@ -42,7 +42,6 @@ export const RUN_TABS: Array<{ key: RunTab; label: string }> = [
 ];
 
 const STATE_LABEL: Record<AgentJobApiState, string> = {
-  waiting: 'Waiting',
   queued: 'Queued',
   running: 'Running',
   publishing: 'Publishing',

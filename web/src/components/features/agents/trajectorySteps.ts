@@ -134,7 +134,9 @@ export interface TurnContext {
   isAttemptActive: (jobId: string, attemptId: number) => boolean;
 }
 
-const ACTIVE_JOB_STATES = new Set(['running', 'queued', 'waiting', 'publishing']);
+// Server-side job states that can still produce a record. A queued turn is one
+// that has not started yet; the rest are running or finishing.
+const ACTIVE_JOB_STATES = new Set(['running', 'queued', 'publishing']);
 
 /**
  * Build the default context from thread job rows: the newest attempt of a live
