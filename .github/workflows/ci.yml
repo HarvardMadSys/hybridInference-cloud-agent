@@ -802,6 +802,16 @@ jobs:
       # Reused across jobs, and self-healing: a builder whose buildkitd will not
       # start is removed and recreated rather than failing every later cell.
       # `--bootstrap` is what proves it started, so it doubles as the check.
+      #
+      # The *name* carries the runner too, and that is not decoration. A config
+      # directory keeps the builder definitions apart, but buildx names the
+      # buildkitd container after the builder alone: two runners whose builder
+      # is both called `ci-persistent` share one
+      # `buildx_buildkit_ci-persistent0`, and one runner's self-heal deletes the
+      # container the other is building through. Verified on spark2 — with a
+      # shared name, removing A's builder takes the container with it; with
+      # `ci-<runner>` each keeps its own, and B's buildkitd start time does not
+      # move while A rebuilds.
       - name: Reuse this runner's builder, or make one
         run: |
           set -euo pipefail
@@ -809,14 +819,15 @@ jobs:
           mkdir -p "${buildx_config}"
           export BUILDX_CONFIG="${buildx_config}"
           echo "BUILDX_CONFIG=${buildx_config}" >> "${GITHUB_ENV}"
-          if ! docker buildx inspect ci-persistent --bootstrap >/dev/null 2>&1; then
-            docker buildx rm ci-persistent >/dev/null 2>&1 || true
-            docker buildx create --name ci-persistent --driver docker-container --use >/dev/null
-            docker buildx inspect ci-persistent --bootstrap >/dev/null
+          builder="ci-${RUNNER_NAME}"
+          if ! docker buildx inspect "${builder}" --bootstrap >/dev/null 2>&1; then
+            docker buildx rm "${builder}" >/dev/null 2>&1 || true
+            docker buildx create --name "${builder}" --driver docker-container --use >/dev/null
+            docker buildx inspect "${builder}" --bootstrap >/dev/null
           fi
-          docker buildx use ci-persistent >/dev/null
-          docker buildx inspect ci-persistent >/dev/null
-          echo "builder ci-persistent ready in ${buildx_config}"
+          docker buildx use "${builder}" >/dev/null
+          echo "BUILDER=${builder}" >> "${GITHUB_ENV}"
+          echo "builder ${builder} ready in ${buildx_config}"
 
       # `push: false` still: nothing here publishes, and these images carry no
       # credentials. `load: true` is what puts the image on this runner's
@@ -836,7 +847,7 @@ jobs:
         continue-on-error: true
         uses: docker/build-push-action@v6
         with:
-          builder: ci-persistent
+          builder: ${{ env.BUILDER }}
           context: .
           file: ${{ matrix.artifact.dockerfile }}
           push: false
@@ -858,7 +869,7 @@ jobs:
         if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v6
         with:
-          builder: ci-persistent
+          builder: ${{ env.BUILDER }}
           context: .
           file: ${{ matrix.artifact.dockerfile }}
           push: false
