@@ -55,7 +55,12 @@ from cloud_agent.mcp.models import (
     ToolPolicy,
     Transport,
 )
-from cloud_agent.mcp.net_policy import EgressPolicy, EndpointRejected, validate_endpoint
+from cloud_agent.mcp.net_policy import (
+    EgressPolicy,
+    EndpointRejected,
+    policy_from_environment,
+    validate_endpoint,
+)
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
     McpRegistryError,
@@ -112,17 +117,10 @@ def _public_base_url() -> str:
 def _policy() -> EgressPolicy:
     """The egress policy for user-added connections.
 
-    Private space is refused by default. A deployment that runs a connector
-    bridge on a private network widens this deliberately, through the one
-    variable that says so, rather than every connection being allowed to reach
-    the platform's own network.
+    Delegates to the shared reader so the relay host dials under exactly the
+    policy this API validates against: two doors, one policy.
     """
-    return EgressPolicy(
-        allow_private=os.environ.get("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "").lower()
-        in ("1", "true", "yes"),
-        allow_plain_http=os.environ.get("AGENT_MCP_ALLOW_PLAIN_HTTP", "").lower()
-        in ("1", "true", "yes"),
-    )
+    return policy_from_environment()
 
 
 def _require_store(store: AgentJobStore | None) -> AgentJobStore:

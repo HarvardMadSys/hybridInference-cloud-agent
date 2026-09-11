@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
+from cloud_agent.mcp.registry import binding_from_row
 from cloud_agent.schemas import WorkerEventRequest
 from cloud_agent.storage.store import AgentJobStore
 from cloud_agent.thread_stats import summarize_thread
@@ -3350,6 +3351,16 @@ async def test_model_credential_uses_only_agent_owned_metadata(
             assert identity["model"] == job["model"]
             assert identity["thread_id"] == job["thread_id"]
             assert [entry["alias"] for entry in identity["mcp_bindings"]] == ["docs"]
+            # The relay reads these rows through ``binding_from_row`` on every
+            # forwarded call, so the query has to hand back every field that
+            # reader needs. It did not: ``thread_id`` was selected for
+            # ``list_mcp_bindings`` and omitted from the fence, and the fakes
+            # supplied it, so nothing failed until the merged host endpoint
+            # drove the real store. Asserted here, on the real row.
+            binding = binding_from_row(identity["mcp_bindings"][0])
+            assert binding.thread_id == job["thread_id"]
+            assert binding.alias == "docs"
+            assert binding.connection_id == str(connection["id"])
             assert await conn.fetchval("SELECT 1") == 1
         finally:
             # Roll back even a passing test, including all temporary objects

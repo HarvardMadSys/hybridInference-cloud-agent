@@ -47,9 +47,11 @@ from cloud_agent.api.deps import get_agent_job_store
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
-from cloud_agent.mcp.host import arguments_digest
+from cloud_agent.mcp.host import HostError, McpHost, SessionKey, arguments_digest
 from cloud_agent.mcp.invocations import deadline_for
+from cloud_agent.mcp.jsonrpc import INTERNAL_ERROR, INVALID_REQUEST, PARSE_ERROR
 from cloud_agent.mcp.models import CapabilityKind, McpServer
+from cloud_agent.mcp.net_policy import policy_from_environment
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
     binding_from_row,
@@ -122,21 +124,40 @@ class Authorized:
     binding: Any
     connection: Any
     snapshot: Any
+    #: The decrypted upstream credential, or ``None`` for a connection that
+    #: authenticates by position or not at all. Carried because the merged host
+    #: dials the upstream itself; the per-connection route builds its header set
+    #: from the same value one field over and never reads this.
+    secret: str | None = None
 
 
-def protocol_error(payload: dict[str, Any], message: str) -> dict[str, Any]:
-    """Build a JSON-RPC error reply that mirrors one request's id.
+def _error_reply(request_id: Any, message: str, code: int = METHOD_NOT_FOUND) -> dict[str, Any]:
+    """Build a JSON-RPC error reply for one request id.
 
     Answered as a *protocol* error rather than an HTTP failure on purpose: the
     transport hop succeeded and the call did not, which is a thing models
     handle. A 403 here would look to the CLI like a broken connection and take
     the whole server down for the rest of the job.
     """
-    return {
-        "jsonrpc": "2.0",
-        "id": payload.get("id"),
-        "error": {"code": METHOD_NOT_FOUND, "message": message},
-    }
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def protocol_error(payload: dict[str, Any], message: str) -> dict[str, Any]:
+    """Build a JSON-RPC error reply mirroring a whole request payload."""
+    return _error_reply(payload.get("id"), message)
+
+
+def _result_reply(request_id: Any, result: Any, *, stateless: bool) -> dict[str, Any]:
+    """Build a JSON-RPC result reply, discriminated when the client is modern.
+
+    The stateless revision requires every result to carry ``resultType``. A
+    client that asked in that shape treats a result without one as complete
+    anyway, but sending it costs nothing and keeps the reply honest about which
+    contract it was built for.
+    """
+    if stateless and isinstance(result, dict):
+        result = {**result, "resultType": protocol.RESULT_TYPE_COMPLETE}
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
 def _bearer(authorization: str | None) -> str:
@@ -164,12 +185,18 @@ def _refused(status_code: int, kind: str, message: str) -> HTTPException:
     )
 
 
-async def _authorize(
-    alias: str,
+async def _authorize_fence(
     authorization: str | None,
     store: AgentJobStore | None,
-) -> Authorized:
-    """Resolve the token, the session's binding and the owner's connection."""
+) -> dict[str, Any]:
+    """Resolve the token to the job it was minted for, or refuse.
+
+    Split from the per-alias resolution below because the host endpoint serves
+    every binding of one job from a single URL: it needs the fence once and the
+    bindings many times, and re-reading the fence per tool would make a
+    revocation take effect at a different moment depending on which endpoint
+    asked.
+    """
     token = _bearer(authorization)
 
     try:
@@ -205,7 +232,15 @@ async def _authorize(
         raise _refused(
             401, "invalid_request_error", "This job token is no longer valid for tool calls."
         )
+    return identity
 
+
+async def _resolve_binding(
+    identity: dict[str, Any],
+    alias: str,
+    store: AgentJobStore,
+) -> Authorized:
+    """Resolve one binding alias into the server this job may reach."""
     job_id = identity["job_id"]
     binding_row = next(
         (item for item in identity.get("mcp_bindings") or [] if item.get("alias") == alias),
@@ -313,6 +348,107 @@ async def _authorize(
         binding=binding,
         connection=resolved.connection,
         snapshot=resolved.snapshot,
+        secret=resolved.credential.get("secret"),
+    )
+
+
+async def _authorize(
+    alias: str,
+    authorization: str | None,
+    store: AgentJobStore | None,
+) -> Authorized:
+    """Resolve the token, the session's binding and the owner's connection."""
+    identity = await _authorize_fence(authorization, store)
+    if store is None:  # pragma: no cover - _authorize_fence refuses a missing store
+        raise _refused(
+            503, "invalid_request_error", "MCP is unavailable without a configured database."
+        )
+    return await _resolve_binding(identity, alias, store)
+
+
+async def _decide_call(
+    authorized: Authorized,
+    store: AgentJobStore,
+    *,
+    name: str,
+    arguments: Any,
+    capability: Any,
+    attempt_id: int | None,
+    lease_generation: int,
+    request_id: Any,
+) -> dict[str, Any] | None:
+    """Decide one ``tools/call``, or return ``None`` when it may be dispatched.
+
+    The single decision point on this surface. Both the per-connection route and
+    the merged host route call it, because two copies of an authorization rule
+    is one copy that will be forgotten -- and the copy that gets forgotten is
+    always the newer one.
+    """
+    decision = decide(
+        connection=authorized.connection,
+        binding=authorized.binding,
+        capability=capability,
+        kind=CapabilityKind.TOOL,
+        name=name,
+        user_id=authorized.user_id,
+    )
+    if decision.allowed:
+        return None
+    if decision.refused:
+        logger.warning(
+            "agent_mcp_tool_refused",
+            extra={
+                "event": "agent_mcp_tool_refused",
+                "job_id": authorized.job_id,
+                "alias": authorized.alias,
+                "tool": name,
+                "code": decision.code,
+            },
+        )
+        return _error_reply(request_id, decision.message or "this tool is not enabled")
+
+    digest = arguments_digest(arguments if isinstance(arguments, dict) else None)
+    approved = await store.find_approved_mcp_invocation(
+        job_id=authorized.job_id,
+        connection_id=authorized.connection_id,
+        capability_name=name,
+        arguments_digest=digest,
+    )
+    if approved is not None:
+        claimed = await store.claim_mcp_invocation(invocation_id=int(approved["id"]))
+        if claimed is not None:
+            # Exactly one dispatcher ever wins this UPDATE, which is why a
+            # retry storm cannot send a write twice.
+            return None
+    invocation = await store.create_mcp_invocation(
+        job_id=authorized.job_id,
+        attempt_id=attempt_id,
+        lease_generation=lease_generation,
+        thread_id=authorized.thread_id,
+        connection_id=authorized.connection_id,
+        capability_name=name,
+        arguments_digest=digest,
+        arguments_ciphertext=_protect_arguments(arguments),
+        config_revision=authorized.connection.config_revision,
+        authorization_epoch=authorized.connection.authorization_epoch,
+        capability_revision=authorized.connection.capability_revision,
+        policy_revision=authorized.binding.policy_revision,
+        expires_at=deadline_for(created_at=datetime.now(timezone.utc)).expires_at,
+    )
+    logger.info(
+        "agent_mcp_call_held",
+        extra={
+            "event": "agent_mcp_call_held",
+            "job_id": authorized.job_id,
+            "alias": authorized.alias,
+            "tool": name,
+            "invocation_id": invocation["id"],
+        },
+    )
+    return _error_reply(
+        request_id,
+        f"Calling {name!r} needs your approval. It is waiting on the Integrations page; "
+        "ask again once it is approved.",
     )
 
 
@@ -324,14 +460,10 @@ async def _capability_decision(
     attempt_id: int | None,
     lease_generation: int,
 ) -> Any | None:
-    """Decide one ``tools/call``, or return ``None`` when there is nothing to decide.
+    """Decide one relayed body's ``tools/call``, or ``None`` to forward it.
 
-    Returns the JSON-RPC body to answer with when the call must not be
-    dispatched, and ``None`` when it may proceed. A held call is recorded as a
-    pending invocation and answered with a protocol error the model can read:
-    a CLI-driven relay cannot block until a person answers, so the honest
-    contract is "this needs approval -- ask again once it is granted", and an
-    approval is consumed by the retry that matches it.
+    A thin adapter over :func:`_decide_call` for the per-connection route, whose
+    caller speaks raw JSON-RPC rather than tool names.
     """
     try:
         document = json.loads(body or b"{}")
@@ -352,72 +484,18 @@ async def _capability_decision(
             ),
             None,
         )
-        decision = decide(
-            connection=authorized.connection,
-            binding=authorized.binding,
-            capability=capability,
-            kind=CapabilityKind.TOOL,
+        held = await _decide_call(
+            authorized,
+            store,
             name=name,
-            user_id=authorized.user_id,
-        )
-        if decision.allowed:
-            return None
-        if decision.refused:
-            logger.warning(
-                "agent_mcp_tool_refused",
-                extra={
-                    "event": "agent_mcp_tool_refused",
-                    "job_id": authorized.job_id,
-                    "alias": authorized.alias,
-                    "tool": name,
-                    "code": decision.code,
-                },
-            )
-            return protocol_error(payload, decision.message or "this tool is not enabled")
-
-        digest = arguments_digest(arguments if isinstance(arguments, dict) else None)
-        approved = await store.find_approved_mcp_invocation(
-            job_id=authorized.job_id,
-            connection_id=authorized.connection_id,
-            capability_name=name,
-            arguments_digest=digest,
-        )
-        if approved is not None:
-            claimed = await store.claim_mcp_invocation(invocation_id=int(approved["id"]))
-            if claimed is not None:
-                # Exactly one dispatcher ever wins this UPDATE, which is why a
-                # retry storm cannot send a write twice.
-                return None
-        invocation = await store.create_mcp_invocation(
-            job_id=authorized.job_id,
+            arguments=arguments,
+            capability=capability,
             attempt_id=attempt_id,
             lease_generation=lease_generation,
-            thread_id=authorized.thread_id,
-            connection_id=authorized.connection_id,
-            capability_name=name,
-            arguments_digest=digest,
-            arguments_ciphertext=_protect_arguments(arguments),
-            config_revision=authorized.connection.config_revision,
-            authorization_epoch=authorized.connection.authorization_epoch,
-            capability_revision=authorized.connection.capability_revision,
-            policy_revision=authorized.binding.policy_revision,
-            expires_at=deadline_for(created_at=datetime.now(timezone.utc)).expires_at,
+            request_id=payload.get("id"),
         )
-        logger.info(
-            "agent_mcp_call_held",
-            extra={
-                "event": "agent_mcp_call_held",
-                "job_id": authorized.job_id,
-                "alias": authorized.alias,
-                "tool": name,
-                "invocation_id": invocation["id"],
-            },
-        )
-        return protocol_error(
-            payload,
-            f"Calling {name!r} needs your approval. It is waiting on the Integrations page; "
-            "ask again once it is approved.",
-        )
+        if held is not None:
+            return held
     return None
 
 
@@ -592,6 +670,313 @@ async def _stream_sse(
     finally:
         await upstream.aclose()
         await client.aclose()
+
+
+# --------------------------------------------------------------------------
+# The merged host endpoint
+# --------------------------------------------------------------------------
+#
+# One URL that presents every connection this job is bound to as a single MCP
+# server, with tool names namespaced by binding alias.
+#
+# The per-connection route above exists because a CLI can be pointed at one
+# server at a time. That is enough for the three CLIs whose MCP client the
+# platform configures directly, and not enough for a runtime whose MCP entries
+# are gated by a name-and-identity allowlist it cannot extend at run time: there
+# the *name* has to be knowable before the job starts, and a per-conversation
+# alias never is. One fixed name and one fixed URL is the shape that fits.
+#
+# It is also the design's "relay as protocol host" step. The per-connection
+# route forwards JSON-RPC and lets the CLI own the protocol; here the platform
+# owns it -- it answers ``initialize``, merges the catalogues, routes a call by
+# its namespaced name and normalizes what comes back. Which is why the
+# authorization path is *shared* rather than reimplemented: the merged route is
+# a second door onto the same decision function, never a second decision.
+
+#: The tool-name separator. Two underscores, because one appears inside real
+#: tool names (``get_issue``) and the split has to be unambiguous -- which is
+#: also why calls are routed by looking the presented name up in the catalogue
+#: rather than by splitting the string at all.
+_HOST_SEPARATOR = "__"
+
+
+def _host() -> McpHost:
+    """The process-wide protocol host, built once against the deployment policy."""
+    global _HOST_INSTANCE
+    if _HOST_INSTANCE is None:
+        _HOST_INSTANCE = McpHost(policy=policy_from_environment())
+    return _HOST_INSTANCE
+
+
+_HOST_INSTANCE: McpHost | None = None
+
+
+async def _host_catalogue(
+    identity: dict[str, Any], store: AgentJobStore
+) -> dict[str, tuple[Authorized, Any]]:
+    """Every tool this job may call, keyed by the name the model will see.
+
+    A binding that cannot be resolved is skipped rather than fatal. One
+    disconnected server must not take the others out of the catalogue -- the
+    agent would lose every tool it does have, which is a far worse failure than
+    the one that caused it. The per-connection route still refuses loudly for
+    the server that is actually broken.
+
+    Routing is a lookup in this map, not a string split. An alias may itself
+    contain the separator, so splitting would send ``a__b__tool`` to the wrong
+    server; the map is built from the catalogue, so a name that is not in it is
+    genuinely not callable.
+    """
+    catalogue: dict[str, tuple[Authorized, Any]] = {}
+    for binding_row in identity.get("mcp_bindings") or []:
+        alias = str(binding_row.get("alias") or "")
+        if not alias:
+            continue
+        try:
+            authorized = await _resolve_binding(identity, alias, store)
+        except HTTPException as exc:
+            logger.warning(
+                "agent_mcp_host_binding_unavailable",
+                extra={
+                    "event": "agent_mcp_host_binding_unavailable",
+                    "job_id": identity["job_id"],
+                    "alias": alias,
+                    "detail": str(exc.detail),
+                },
+            )
+            continue
+        allowed = visible_capabilities(
+            authorized.binding,
+            authorized.snapshot.tools if authorized.snapshot else (),
+            CapabilityKind.TOOL,
+        )
+        for capability in allowed:
+            presented = protocol.presented_name(alias, capability.name, taken=catalogue)
+            catalogue[presented] = (authorized, capability)
+    return catalogue
+
+
+def _host_tool_entry(presented: str, authorized: Authorized, capability: Any) -> dict[str, Any]:
+    """Render one merged catalogue entry the way a client reads it."""
+    return {
+        "name": presented,
+        "description": capability.description
+        or f"{capability.name} on the {authorized.alias} MCP server",
+        "inputSchema": capability.input_schema
+        if isinstance(capability.input_schema, dict)
+        else {"type": "object", "properties": {}},
+    }
+
+
+async def _host_initialize(payload: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
+    """Answer the handshake for the merged surface.
+
+    The requested revision is echoed when this platform implements it, because
+    the client decides in the handshake era and a server that answers with
+    something else is asking the client to disconnect. When it is not one we
+    implement, the newest we do is offered instead: a client that understands
+    the list will pick from it, and one that does not is at least told what it
+    is talking to rather than being driven with a guessed header.
+    """
+    params = payload.get("params")
+    requested = str(params.get("protocolVersion") or "") if isinstance(params, dict) else ""
+    agreed = requested if requested in protocol.PROFILES else protocol.PREFERRED_PROTOCOL_VERSION
+    aliases = sorted(str(row.get("alias") or "") for row in identity.get("mcp_bindings") or [])
+    return {
+        "protocolVersion": agreed,
+        "capabilities": {"tools": {"listChanged": False}},
+        "serverInfo": {"name": "hybridinference-cloud-agent", "version": "1"},
+        "instructions": (
+            "Tools are named <connection>"
+            f"{_HOST_SEPARATOR}<tool>. This session's connections: "
+            + (", ".join(alias for alias in aliases if alias) or "none")
+        ),
+    }
+
+
+async def _host_post(
+    *,
+    identity: dict[str, Any],
+    store: AgentJobStore,
+    request: Request,
+    authorization: str | None,
+) -> Any:
+    """Dispatch one JSON-RPC message addressed to the merged surface."""
+    body = await request.body()
+    try:
+        document = json.loads(body or b"{}")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return JSONResponse(
+            _error_reply(None, f"invalid JSON: {exc}", PARSE_ERROR), status_code=400
+        )
+
+    payloads = document if isinstance(document, list) else [document]
+    replies: list[dict[str, Any]] = []
+    stateless = False
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            replies.append(_error_reply(None, "every message must be an object", INVALID_REQUEST))
+            continue
+        params = payload.get("params")
+        meta = params.get("_meta") if isinstance(params, dict) else None
+        stateless = stateless or isinstance(meta, dict)
+        method = str(payload.get("method") or "")
+        if "id" not in payload:
+            # A notification. ``notifications/initialized`` is the only one this
+            # surface expects, and it is answered with an empty 202.
+            continue
+        request_id = payload.get("id")
+        if method == protocol.INITIALIZE:
+            replies.append(
+                _result_reply(
+                    request_id,
+                    await _host_initialize(payload, identity),
+                    stateless=False,
+                )
+            )
+            continue
+        if method == protocol.PING:
+            replies.append(_result_reply(request_id, {}, stateless=stateless))
+            continue
+        if method == protocol.TOOLS_LIST:
+            catalogue = await _host_catalogue(identity, store)
+            replies.append(
+                _result_reply(
+                    request_id,
+                    {
+                        "tools": [
+                            _host_tool_entry(name, authorized, capability)
+                            for name, (authorized, capability) in sorted(catalogue.items())
+                        ]
+                    },
+                    stateless=stateless,
+                )
+            )
+            continue
+        if method == protocol.TOOLS_CALL:
+            replies.append(
+                await _host_call(
+                    payload,
+                    request_id=request_id,
+                    identity=identity,
+                    store=store,
+                    authorization=authorization,
+                    stateless=stateless,
+                )
+            )
+            continue
+        replies.append(_error_reply(request_id, f"this surface does not implement {method!r}"))
+
+    if not replies:
+        return Response(status_code=202)
+    return JSONResponse(replies if isinstance(document, list) else replies[0])
+
+
+async def _host_call(
+    payload: dict[str, Any],
+    *,
+    request_id: Any,
+    identity: dict[str, Any],
+    store: AgentJobStore,
+    authorization: str | None,
+    stateless: bool,
+) -> dict[str, Any]:
+    """Authorize and dispatch one namespaced tool call."""
+    params = payload.get("params")
+    name = str(params.get("name") or "") if isinstance(params, dict) else ""
+    arguments = params.get("arguments") if isinstance(params, dict) else None
+    catalogue = await _host_catalogue(identity, store)
+    entry = catalogue.get(name)
+    if entry is None:
+        return _error_reply(
+            request_id,
+            f"{name!r} is not one of this session's tools. Call tools/list for the current set.",
+        )
+    authorized, capability = entry
+    held = await _decide_call(
+        authorized,
+        store,
+        name=capability.name,
+        arguments=arguments,
+        capability=capability,
+        attempt_id=_attempt_id_of(authorization),
+        lease_generation=_lease_of(authorization),
+        request_id=request_id,
+    )
+    if held is not None:
+        return held
+
+    # The member identity is the job and attempt the token names, and the owner
+    # lease generation is part of the session key: a takeover produces a new key
+    # and leaves the superseded session to be reaped, rather than handing the
+    # new owner the old one's upstream state.
+    key = SessionKey(
+        connection_id=str(authorized.connection_id),
+        member=f"{authorized.job_id}:{_attempt_id_of(authorization) or 0}",
+        owner_lease_generation=_lease_of(authorization),
+    )
+    try:
+        session = await _host().open(authorized.connection, secret=authorized.secret, key=key)
+        outcome = await _host().call_tool(
+            session,
+            name=capability.name,
+            arguments=arguments if isinstance(arguments, dict) else {},
+        )
+    except HostError as exc:
+        logger.warning(
+            "agent_mcp_host_call_failed",
+            extra={
+                "event": "agent_mcp_host_call_failed",
+                "job_id": authorized.job_id,
+                "alias": authorized.alias,
+                "tool": capability.name,
+                "kind": exc.kind,
+            },
+        )
+        return _error_reply(request_id, str(exc), INTERNAL_ERROR)
+    return _result_reply(request_id, outcome.as_dict(), stateless=stateless)
+
+
+@router.post("")
+async def mcp_host_post(
+    request: Request,
+    authorization: str | None = Header(None),
+    store: AgentJobStore | None = Depends(get_agent_job_store),
+) -> Any:
+    """Serve every connection of one job from a single MCP endpoint.
+
+    Registered on the bare prefix, which is why it cannot be shadowed: the
+    per-connection route is ``/{server_name}`` and needs a non-empty segment, so
+    there is no ordering to get wrong. A reserved alias would have needed one,
+    and a name a user could pick would have been a collision waiting to happen.
+    """
+    if store is None:
+        raise _refused(
+            503, "invalid_request_error", "MCP is unavailable without a configured database."
+        )
+    identity = await _authorize_fence(authorization, store)
+    return await _host_post(
+        identity=identity, store=store, request=request, authorization=authorization
+    )
+
+
+@router.get("")
+async def mcp_host_get() -> Any:
+    """Refuse the server-initiated stream, and say why.
+
+    This surface is request/response: it merges what its connections offer and
+    answers questions about them. A long-lived stream would have to relay
+    notifications from servers whose sessions it does not hold open between
+    calls, and answering 200 with a stream that never carries anything is worse
+    than saying so.
+    """
+    return JSONResponse(
+        _error_reply(
+            None,
+            "this endpoint answers requests only; it does not open a server-initiated stream",
+        ),
+        status_code=405,
+    )
 
 
 @router.post("/{server_name}")

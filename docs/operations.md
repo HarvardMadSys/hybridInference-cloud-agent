@@ -226,6 +226,23 @@ Five things about this that look like details and are not:
 - **A connection is not a job.** Bindings are read fresh on every tool call
   rather than copied onto a job, so narrowing a session takes effect on its
   next call instead of at its next turn.
+- **Two endpoints, one decision path.** `/v1/agent/mcp/<alias>` forwards to one
+  connection and leaves the protocol to the CLI. `/v1/agent/mcp` — the bare
+  prefix, which `/<alias>` cannot match — is the merged host: the platform
+  answers `initialize`, presents every connection of that job as one catalogue
+  with names namespaced `<alias>__<tool>`, and routes a call back to its own
+  server. It exists because a runtime whose MCP entries are gated by a
+  name-and-identity allowlist cannot be given a per-conversation alias at run
+  time, and one fixed name and URL is the shape that fits. Both routes call the
+  same `decide`, so an approval granted on the Integrations page is consumed by
+  whichever surface the retry arrives on, and neither is a way around the other.
+  Routing on the merged surface is a lookup in the catalogue built from the
+  bindings, never a split on the separator: an alias may itself contain `__`, so
+  `a__b` plus tool `c` and `a` plus tool `b__c` present the same string, and
+  only the map can tell them apart. A connection that cannot be resolved is
+  skipped with a log rather than failing the listing — losing every other tool
+  is a worse outcome than the failure that caused it — while the per-connection
+  route still refuses loudly for the server that is actually broken.
 
 **An adapter may claim MCP only when it can do both halves**: point the CLI at
 the platform's relay, *and* stop it reading any other MCP source. A runtime that

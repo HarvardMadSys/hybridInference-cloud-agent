@@ -340,6 +340,25 @@ def resource_covers(resource: str | None, target: str) -> bool:
     return actual.path.startswith(declared.path.rstrip("/") + "/") or actual.path == declared.path
 
 
+def policy_from_environment() -> EgressPolicy:
+    """Build the deployment's egress policy from its two switches.
+
+    Read here rather than at each call site because there are now two of them --
+    the connection API that tests a server and the relay host that dials one --
+    and a policy applied at one of two doors is not a policy. Both default off:
+    private space is reached through a connector, and plain HTTP would put the
+    credential on the wire in the clear.
+    """
+    import os
+
+    return EgressPolicy(
+        allow_private=os.environ.get("AGENT_MCP_ALLOW_PRIVATE_TARGETS", "").lower()
+        in ("1", "true", "yes"),
+        allow_plain_http=os.environ.get("AGENT_MCP_ALLOW_PLAIN_HTTP", "").lower()
+        in ("1", "true", "yes"),
+    )
+
+
 def parse_header_pairs(raw: Any) -> dict[str, str]:
     """Accept the several shapes a user's header list arrives in.
 
@@ -378,6 +397,7 @@ __all__ = [
     "check_addresses",
     "normalize_url",
     "parse_header_pairs",
+    "policy_from_environment",
     "resource_covers",
     "sanitize_headers",
     "validate_endpoint",

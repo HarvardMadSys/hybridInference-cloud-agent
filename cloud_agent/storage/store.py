@@ -3596,7 +3596,7 @@ class AgentJobStore:
                 return None
             bindings = await conn.fetch(
                 """
-                SELECT b.connection_id, b.alias, b.enabled, b.selection_pending,
+                SELECT b.thread_id, b.connection_id, b.alias, b.enabled, b.selection_pending,
                        b.config_revision, b.authorization_epoch, b.capability_revision,
                        b.policy_revision, b.rules, b.resource_rules, b.prompt_rules,
                        c.user_id AS owner_id, c.status AS connection_status,
