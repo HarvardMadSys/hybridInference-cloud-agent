@@ -425,6 +425,21 @@ jobs:
                   password=os.environ["TEST_DB_PASSWORD"],
               )
               print(await conn.fetchval("SELECT version()"))
+              # A throwaway database does not need durability, and this one is
+              # asked to give it up hundreds of times a run: the fixtures
+              # truncate 25 tables around every test, and each TRUNCATE fsyncs
+              # a directory entry. Measured on this runner — 445ms per call
+              # with fsync on, 10ms with it off, across 329 tests. The
+              # container is deleted with the job; there is nothing to lose.
+              await conn.execute("ALTER SYSTEM SET fsync = off")
+              await conn.execute("SELECT pg_reload_conf()")
+              # The reload is asynchronous. Confirm it landed before pytest
+              # opens its own connections, or the saving disappears silently.
+              for _ in range(50):
+                  if await conn.fetchval("SHOW fsync") == "off":
+                      break
+                  await asyncio.sleep(0.1)
+              print("fsync:", await conn.fetchval("SHOW fsync"))
               # One database per xdist worker. The fixtures already derive their
               # name from PYTEST_XDIST_WORKER and each runs its own
               # `alembic upgrade head`; the service container creates only the
