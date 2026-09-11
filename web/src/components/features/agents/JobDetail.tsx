@@ -36,6 +36,7 @@ import { Picker } from './Picker';
 import { TerminalWorkspace } from './TerminalWorkspace';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { ThreadActions } from './ThreadActions';
+import { McpSessionPanel } from './mcp/McpSessionPanel';
 import type { AgentEvent, AgentHistoryTurn, AgentJob, AgentThreadMessage } from './types';
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { AttemptTurnFooter } from './AttemptTurnFooter';
@@ -43,7 +44,7 @@ import { TrajectoryView } from './TrajectoryView';
 import { useResizablePane } from './useResizablePane';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
-type WorkspaceTab = 'git' | 'terminal' | 'files';
+type WorkspaceTab = 'git' | 'terminal' | 'files' | 'tools';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -57,6 +58,10 @@ const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'git', label: 'Git' },
   { key: 'terminal', label: 'Terminal' },
   { key: 'files', label: 'Files' },
+  // MCP selection and approvals are per conversation, so they belong beside
+  // the workspace rather than on the account-wide Integrations page: a held
+  // call is decided against this session's rules, not the user's.
+  { key: 'tools', label: 'Tools' },
 ];
 
 const STATE_PILL: Record<AgentJob['state'], { label: string; className: string; dot?: string }> = {
@@ -1828,6 +1833,19 @@ export function JobDetail({
             className="min-h-0 flex-1 overflow-y-auto p-5"
           >
             <WorkspaceFiles job={job} active={workspaceOpen && workspaceTab === 'files'} />
+          </div>
+          <div
+            id="workspace-panel-tools"
+            role="tabpanel"
+            aria-labelledby="workspace-tab-tools"
+            hidden={workspaceTab !== 'tools'}
+            className="min-h-0 flex-1 overflow-y-auto p-5"
+          >
+            <McpSessionPanel
+              jobId={job.id}
+              threadId={job.threadId ?? job.id}
+              active={workspaceOpen && workspaceTab === 'tools'}
+            />
           </div>
         </aside>
       </div>

@@ -3250,7 +3250,31 @@ async def test_model_credential_uses_only_agent_owned_metadata(
     store: AgentJobStore, users_surface: str
 ):
     """Local objects named users cannot change or break fenced MCP resolution."""
-    job = await _create_job(store, mcp_servers=["github", "docs"])
+    connection = await store.create_mcp_connection(
+        user_id="user-1",
+        label="Docs",
+        transport="streamable-http",
+        location="remote",
+        url="https://mcp.example.com/mcp",
+        launch_spec=None,
+        auth_kind="none",
+        auth_config={},
+        template="docs",
+    )
+    job = await _create_job(
+        store,
+        mcp_bindings=[
+            {
+                "connection_id": int(connection["id"]),
+                "alias": "docs",
+                "enabled": True,
+                "config_revision": 1,
+                "authorization_epoch": 1,
+                "capability_revision": 1,
+                "rules": {},
+            }
+        ],
+    )
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     fence = {
         "job_id": job["id"],
@@ -3271,6 +3295,17 @@ async def test_model_credential_uses_only_agent_owned_metadata(
             # The thread carries the tool servers now; still agent-owned.
             await conn.execute(
                 "CREATE TEMP VIEW agent_threads AS SELECT * FROM public.agent_threads"
+            )
+            # The bindings and their connections are joined on every fenced
+            # resolution, so they are exposed the same way rather than read
+            # through a second code path this test would not be checking.
+            await conn.execute(
+                "CREATE TEMP VIEW agent_mcp_thread_bindings "
+                "AS SELECT * FROM public.agent_mcp_thread_bindings"
+            )
+            await conn.execute(
+                "CREATE TEMP VIEW agent_mcp_connections "
+                "AS SELECT * FROM public.agent_mcp_connections"
             )
             await conn.execute("SET LOCAL search_path = pg_temp, pg_catalog")
             if users_surface == "unrelated":
@@ -3307,12 +3342,14 @@ async def test_model_credential_uses_only_agent_owned_metadata(
 
             scoped_store = AgentJobStore(SimpleNamespace(acquire=borrow_connection))
             identity = await scoped_store.resolve_model_credential(**fence)
-            assert identity == {
-                "user_id": job["user_id"],
-                "job_id": job["id"],
-                "model": job["model"],
-                "mcp_servers": ["github", "docs"],
-            }
+            # The owner, the model and the session's bindings all still resolve,
+            # and nothing about them comes from a ``users`` table this platform
+            # does not own.
+            assert identity["user_id"] == job["user_id"]
+            assert identity["job_id"] == job["id"]
+            assert identity["model"] == job["model"]
+            assert identity["thread_id"] == job["thread_id"]
+            assert [entry["alias"] for entry in identity["mcp_bindings"]] == ["docs"]
             assert await conn.fetchval("SELECT 1") == 1
         finally:
             # Roll back even a passing test, including all temporary objects

@@ -11,9 +11,12 @@ This module is the deciding part, kept free of HTTP so it can be tested by
 calling it. It answers two questions:
 
 - **May this request proceed?** A ``tools/call`` naming a tool outside the
-  server's allowlist is refused here, before anything leaves the relay. That
-  is the enforcement point that matters: the agent is driving on untrusted
-  repository content, so "the model was told not to" is not a control.
+  session binding's allowed set is refused here, before anything leaves the
+  relay. That is the enforcement point that matters: the agent is driving on
+  untrusted repository content, so "the model was told not to" is not a
+  control. An empty set is not a wildcard -- it means the session enabled
+  nothing on that connection, which is the shape the picker produces when a
+  user turns a server off.
 - **What does the agent get to see?** A ``tools/list`` result is filtered on
   the way back, so a tool that is not allowed is not merely refused when called
   — it is never advertised. A model cannot be talked into using a tool it was
@@ -40,7 +43,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from cloud_agent.mcp_registry import McpServer
+    from cloud_agent.mcp.models import McpServer
 
 # JSON-RPC's "method not found". A blocked tool is reported as an ordinary
 # protocol error rather than a transport failure, so the agent CLI surfaces it
@@ -96,8 +99,11 @@ def plan_request(body: bytes, server: McpServer) -> RequestPlan:
     ``tools/call`` it failed to notice, since noticing one is the same parse,
     and the response filter is independent of this decision.
     """
-    if server.unfiltered:
-        return RequestPlan()
+    # No early return for an "unfiltered" server: there is no such server. An
+    # empty reachable set means nothing is callable, and a body that cannot be
+    # parsed is still forwarded untouched -- the response filter is independent
+    # of this decision, so nothing is weakened by letting the upstream answer a
+    # malformed request itself.
     try:
         document = json.loads(body or b"{}")
     except (json.JSONDecodeError, ValueError):
@@ -156,8 +162,6 @@ def filter_message(payload: Any, server: McpServer) -> Any:
 
 def filter_json_body(body: bytes, server: McpServer) -> bytes:
     """Filter a buffered ``application/json`` reply, if it needs it."""
-    if server.unfiltered:
-        return body
     try:
         document = json.loads(body or b"null")
     except (json.JSONDecodeError, ValueError):
@@ -177,8 +181,6 @@ def filter_sse_frame(frame: bytes, server: McpServer) -> bytes:
     upstream wrote them: the transport is its business, and only the tool list
     is ours.
     """
-    if server.unfiltered:
-        return frame
     lines = frame.split(b"\n")
     data = b"\n".join(line[5:].lstrip() for line in lines if line.startswith(b"data:"))
     if not data:

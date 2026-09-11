@@ -904,6 +904,7 @@ def create_app() -> FastAPI:
         admin_hosts,
         admin_runs,
         hosts,
+        mcp_connections,
         mcp_relay,
         routes,
         service_jobs,
@@ -919,6 +920,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(routes.router)
     app.include_router(usage.router)
+    # Registered before the relay, and never on the relay's own listener. The
+    # order matters: the relay's ``/{server_name}`` catch-all would otherwise
+    # match a connection-management path and answer it as an MCP request. The
+    # listener separation matters more: adding a connection or approving a call
+    # is owner-facing work, and a sandbox must not be able to reach it at all.
+    app.include_router(mcp_connections.router)
     app.include_router(mcp_relay.router)
     app.include_router(hosts.router)
     app.include_router(admin_hosts.router)

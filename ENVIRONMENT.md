@@ -119,13 +119,16 @@ MCP belongs to this service: it owns the catalogue, each user's credential and
 the attempt fence, so it is the only place that can decide a tool call. The
 gateway serves models and answers nothing about MCP.
 
-**Which servers exist is not configuration.** The catalogue is a reviewed,
-in-code list (`cloud_agent/mcp_catalogue.py`) and a user connects their
-own account to an entry in it; there is no variable that adds a server, and no
-variable that grants one to somebody. Credentials live per user in
+**Which servers exist is the user's decision, not configuration.** A person
+adds a standard MCP server — a remote URL, an imported `mcpServers` snippet, or
+a stdio launch spec — and the platform discovers what it offers. There is no
+variable that adds a server and no variable that grants one to somebody.
+Catalogued templates (`cloud_agent/api/mcp_connections.py`) only prefill a form;
+a server with no template is added the same way. Credentials live per user in
 `agent_mcp_connections`, wrapped with
 [`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`](#own-secrets). The variables below
-are all about *reaching* the relay, never about what it may reach.
+are all about *reaching* the relay, plus the three that bound what a
+user-added connection may dial.
 
 | Variable | New? | Value / who provisions |
 |---|---|---|
@@ -135,6 +138,9 @@ are all about *reaching* the relay, never about what it may reach.
 | `AGENT_MCP_HOSTNAME` | **NEW** | The relay's alias on both container networks. Defaults to `agent-mcp`. |
 | `AGENT_CONTROL_PLANE_TUNNEL_*` | **NEW** | The remote-runner host's **third** relay, and the only one the sandbox cannot reach: `SSH_DESTINATION`, `SSH_KEY`, `SSH_KNOWN_HOSTS`, plus the optional `SSH_PORT` / `REMOTE_HOST` / `REMOTE_PORT` / `LISTEN_PORT`. Its far end is the control plane's main listener (8000) — jobs, host registration, sessions, admin — which is why it is aliased on the runner's network only. Its own key again: a key that also opened the MCP tunnel would put 8000 one compromise away from the closed network. |
 | `AGENT_CONTROL_PLANE_HOSTNAME` | **NEW** | That tunnel's alias, on the runner network only. Defaults to `agent-control-plane`. |
+| `AGENT_MCP_PUBLIC_BASE_URL` | **NEW** | The browser-facing base URL this service builds an MCP OAuth callback from — for example `https://agent.example.com`. Configured rather than derived from the request because a redirect URI is registered with the authorization server in advance, and a value read from whatever host a request arrived on would differ per proxy and fail that registration. Unset means static credentials still work and only the browser flow is refused, with that reason shown. |
+| `AGENT_MCP_ALLOW_PRIVATE_TARGETS` | **NEW** | Whether a user-added MCP connection may dial private and loopback addresses. Off by default: a remote connection that reaches loopback reaches **this** service, and a user who needs a private network should run a connector instead. Turning it on still refuses the ranges this platform never dials, so it cannot be used to reach the cloud metadata service. |
+| `AGENT_MCP_ALLOW_PLAIN_HTTP` | **NEW** | Whether a user-added MCP connection may use `http://` as well as `https://`. Off by default because the credential would travel in the clear. A deployment whose connector bridge is genuinely HTTP inside a private network turns it on deliberately; it is a separate variable from the private-target one because it is a separate risk. |
 | `AGENT_MCP_TOKEN` | **NEW** | **Not operator-set — listed so nobody provisions it.** The name the generated sandbox runtime config *references* (`${AGENT_MCP_TOKEN}`) for the per-attempt relay credential the runner injects at launch. A value put here by hand would be a static tool credential shared by every job, which is the thing the per-attempt token exists to avoid. |
 
 ### Scheduling
