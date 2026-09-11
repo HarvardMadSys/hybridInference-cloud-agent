@@ -304,9 +304,16 @@ jobs:
             "@anthropic-ai/claude-code@${version}"
           echo "CLOUD_AGENT_TEST_CLAUDE_BINARY=${RUNNER_TEMP}/claude-context/node_modules/.bin/claude" >> "${GITHUB_ENV}"
 
+      # `-n 4 --dist load`, deliberately not the `--dist loadfile` the other
+      # suites use: loadfile groups by file, and here the file *is* the suite,
+      # so it would hand all four tests to a single worker and change nothing.
+      # Each test already gets its own tmp_path, its own config/home
+      # (monkeypatched), its own CLI process and its own loopback port —
+      # `FakeAnthropicGateway` binds port 0 — so there is nothing for parallel
+      # workers to collide over.
       - name: Native history survives close, restore and failed-turn retry
         timeout-minutes: 10
-        run: uv run pytest -q -m external tests/external/test_claude_driver_context.py
+        run: uv run pytest -q -n 4 --dist load -m external tests/external/test_claude_driver_context.py
 
   # The other half of that command. `test` above deselects `dbtest`, and until
   # this job existed nothing selected it — 158 tests that are written, green,
@@ -418,19 +425,41 @@ jobs:
                   password=os.environ["TEST_DB_PASSWORD"],
               )
               print(await conn.fetchval("SELECT version()"))
+              # One database per xdist worker. The fixtures already derive their
+              # name from PYTEST_XDIST_WORKER and each runs its own
+              # `alembic upgrade head`; the service container creates only the
+              # base one, so without these the parallel run cannot connect at
+              # all — and a fixture that cannot connect skips rather than
+              # fails. The "tier actually ran" step below is what would catch
+              # that, but creating them here is what makes it not happen.
+              for index in range(4):
+                  name = f"{os.environ['TEST_DB_NAME']}_gw{index}"
+                  exists = await conn.fetchval(
+                      "SELECT 1 FROM pg_database WHERE datname = $1", name
+                  )
+                  if not exists:
+                      await conn.execute(f'CREATE DATABASE "{name}"')
+                      print(f"created {name}")
               await conn.close()
 
           asyncio.run(main())
           PY
 
-      # Serial, and not `-n 4` like the job above. The fixtures derive a
-      # per-worker database name (`..._gw0`, `..._gw1`, …) so that xdist
-      # workers cannot truncate each other's tables — but the service
-      # container creates one database, so under `-n 4` all four workers would
-      # fail to connect and every test would skip. The tier runs in about 15
-      # seconds; there is nothing here worth sharding.
+      # `-n 4 --dist loadfile`, and loadfile is the load-bearing half: the
+      # fixtures shard by worker database (`..._gw0`…`..._gw3`, created above),
+      # and `reset_agent_tables` empties a whole schema with one
+      # `TRUNCATE ... CASCADE`. Sharding finer than a file would let two workers
+      # truncate the same database out from under each other; sharding by file
+      # also matches how the fixtures are written, since several files import
+      # another file's `store` fixture rather than opening their own.
+      #
+      # Serial until now for exactly one reason: the service container created a
+      # single database, so four workers would have failed to connect and
+      # skipped, and the guard below would have had to catch it. Measured on
+      # spark2 with the worker databases present: 343s serial, 166s this way,
+      # the same 329 tests, zero skips.
       - name: Pytest (dbtest tier)
-        run: uv run pytest -q -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml"
+        run: uv run pytest -q -n 4 --dist loadfile -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml"
 
       # The second half of the same guard. A fixture that skips on a database
       # it cannot reach turns a broken service container into a passing job,
