@@ -194,11 +194,21 @@ def extract_recipe(archive: Path, into: Path) -> Path:
 def run_deploy(
     recipe: Path, root: Path, manifest: Path, *, fence_timeout: int
 ) -> subprocess.CompletedProcess[str]:
-    """The real deploy script, in artifact mode, with no source anywhere near it."""
+    """The real deploy script, in artifact mode, with no source anywhere near it.
+
+    The manifest is passed absolute, and that is not tidiness. `deploy.sh` cds
+    into the deployment root before it reads anything, so a relative path is
+    resolved against a directory the caller never saw: the first live run of
+    this acceptance died on `release manifest does not exist: release/release.json`,
+    a file that was right there in the workspace. The recipe's own helper does
+    absolutize the value, but only *after* the existence check it had already
+    failed, and `deploy/release/README.md` tells an operator to pass an absolute
+    path for the same reason.
+    """
     environment = {
         **os.environ,
         "AGENT_DEPLOY_MODE": "artifacts",
-        "AGENT_RELEASE_MANIFEST": str(manifest),
+        "AGENT_RELEASE_MANIFEST": str(manifest.resolve()),
         # The interpreter carrying the recipe's own requirements. Running this
         # module at all proves they are installed.
         "AGENT_DEPLOY_PYTHON": sys.executable,
@@ -406,6 +416,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--project", required=True, help="Compose project, unique to this run.")
     parser.add_argument("--keep", action="store_true", help="Leave the stack up for inspection.")
     arguments = parser.parse_args(argv)
+    # Resolved once, here: the deploy script runs from the deployment root and
+    # the recipe is extracted from wherever this process happens to be.
+    arguments.manifest = arguments.manifest.resolve()
+    arguments.recipe = arguments.recipe.resolve()
+    arguments.workdir = arguments.workdir.resolve()
 
     print(f"acceptance: deploying the control-plane stack, {arguments.variant} variant")
     try:

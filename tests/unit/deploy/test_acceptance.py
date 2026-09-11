@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -211,3 +212,59 @@ def test_the_real_recipe_unpacks_as_one(tmp_path: Path) -> None:
     root = ac.extract_recipe(source, tmp_path / "out")
     assert (root / "deploy/control-plane/deploy.sh").is_file()
     assert (root / "deploy/release/release_env.py").is_file()
+
+
+# --------------------------------------------------------------------- paths
+
+
+def test_the_deploy_script_is_handed_an_absolute_manifest(tmp_path: Path, monkeypatch) -> None:
+    """`deploy.sh` cds into the deployment root before it reads anything.
+
+    A relative path is therefore resolved against a directory the caller never
+    saw. The first live run of this acceptance died on `release manifest does
+    not exist: release/release.json`, a file that was right there in the
+    workspace — and the recipe's helper does absolutize the value, but only
+    after the existence check it had already failed.
+    """
+    manifest = tmp_path / "release" / "release.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}")
+    captured: dict[str, str] = {}
+
+    def fake_run(_command, **kwargs):
+        captured.update(kwargs["env"])
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    ac.run_deploy(
+        tmp_path / "recipe", tmp_path / "root", Path("release/release.json"), fence_timeout=1
+    )
+
+    passed = captured["AGENT_RELEASE_MANIFEST"]
+    assert Path(passed).is_absolute(), f"{passed!r} is resolved against the deployment root"
+    assert Path(passed).resolve() == manifest.resolve()
+
+
+def test_the_deploy_never_inherits_a_commit_or_a_source_checkout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Variables a CI runner may already carry, and which would change the run."""
+    captured: dict[str, str] = {}
+
+    def fake_run(_command, **kwargs):
+        captured.update(kwargs["env"])
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+
+    for name in ("DEPLOY_SHA", "SOURCE_REPO", "COMPOSE_PROJECT", "ALLOW_DIRTY"):
+        monkeypatch.setenv(name, "inherited")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    ac.run_deploy(tmp_path / "recipe", tmp_path / "root", tmp_path / "m.json", fence_timeout=1)
+
+    assert not [
+        name
+        for name in ("DEPLOY_SHA", "SOURCE_REPO", "COMPOSE_PROJECT", "ALLOW_DIRTY")
+        if name in captured
+    ]
+    assert captured["AGENT_DEPLOY_MODE"] == "artifacts"
+    assert captured["AGENT_DEPLOY_PYTHON"] == sys.executable
