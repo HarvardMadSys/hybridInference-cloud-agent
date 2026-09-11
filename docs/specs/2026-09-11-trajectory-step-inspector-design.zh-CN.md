@@ -1,7 +1,7 @@
 # Trajectory 步骤详情与 Run details 设计
 
 - 日期：2026-09-11。
-- 状态：交互方向已确认，供实现使用；本文档不表示产品代码已完成。
+- 状态：交互方向已确认，并已按本文实现；实现与本文档在同一个 PR。
 - 代码基线：`dev`，`b7a24c6`。实现前重新检查最新 `dev` 的相关变更。
 - 目标仓库：`HarvardMadSys/hybridInference-cloud-agent`，本地目录名也可能为 `freeinference-cloud-agent`。
 
@@ -504,4 +504,4 @@ npm run build
 
 实现时从最新 `dev` 开始，保留本文标注的当前数据边界；先检查是否已有其他 PR 改动上述组件。实际落地若需要修改身份采集/用量归属契约，清楚拆出它的范围，不把未经验证的数据猜测写进前端。
 
-最终交付应包括可运行的交互、测试与构建结果、真实数据缺项说明及 PR。本文当前只交付设计文档，未执行产品代码修改。
+最终交付包括可运行的交互、测试与构建结果、真实数据缺项说明及 PR。实现见同一 PR：新增 trajectorySteps.ts 投影、TrajectoryInspector / AssistantStepDetails / ToolStepDetails / RunDetails 组件，以及 JobDetail 的单一右侧区域；未改动后端采集契约。
