@@ -85,7 +85,7 @@ class FakeOnCallStore:
         if job is None or (user_id is not None and job["user_id"] != user_id):
             return None
         job["cancel_requested"] = True
-        if job["state"] in {"queued", "waiting"}:
+        if job["state"] == "queued":
             job["state"] = "cancelled"
         return job["state"]
 

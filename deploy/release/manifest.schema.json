@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/deploy/release/manifest.schema.json",
+  "title": "Cloud Agent release manifest",
+  "description": "One Cloud Agent release: the commit it was built from, every artifact the deployment must run, pinned by digest, and what those artifacts claim about themselves. Written by deploy/release/release_manifest.py. FreeInference pins the sha256 of this document's bytes and nothing else, so the fields here are the whole contract between the two repositories.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_repository",
+    "source_commit",
+    "deploy_protocol",
+    "artifacts",
+    "runtime_catalog",
+    "recipe",
+    "database_revision",
+    "compatibility",
+    "publisher_run_url"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Manifest format version. A consumer that does not know this number must refuse the document rather than guess."
+    },
+    "source_repository": {
+      "const": "HarvardMadSys/hybridInference-cloud-agent",
+      "description": "The repository whose commit produced every artifact below."
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full 40-hex commit. Must equal the org.opencontainers.image.revision label of every platform image in every artifact, which is what a resolver checks against the registry rather than taking this document's word for it."
+    },
+    "deploy_protocol": {
+      "const": "shared-live-exact-sha-v3",
+      "description": "The deployment protocol these artifacts require, read from deploy/DEPLOY_PROTOCOL rather than typed. A deployer that does not implement it must refuse the release; an application rollback must not carry an old deployer back with it."
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 7,
+      "description": "Every image the deployment runs: exactly one entry per role, and web exactly one per build variant because basePath is resolved at build time. A release is not consumable until all of them exist: a missing artifact is not a smaller release, it is a broken one, and a list of the right length holding the wrong roles is the same failure wearing a valid-looking shape. The cardinality is enforced with contains/minContains/maxContains per role rather than by counting entries.",
+      "items": {
+        "$ref": "#/$defs/artifact"
+      },
+      "maxItems": 7,
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "control"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "runner"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "sandbox"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "tunnel"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "egress"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "web"
+              },
+              "variant": {
+                "const": "root"
+              }
+            },
+            "required": [
+              "role",
+              "variant"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "web"
+              },
+              "variant": {
+                "const": "agents"
+              }
+            },
+            "required": [
+              "role",
+              "variant"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "runtime_catalog": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "The Agent CLIs the sandbox image actually contains, read from that image's own org.freeinference.runtime.* labels rather than from Dockerfile defaults \u2014 the labels are derived from the effective build arguments and cross-checked against the installed binaries at build time.",
+      "additionalProperties": {
+        "$ref": "#/$defs/runtime"
+      }
+    },
+    "recipe": {
+      "$ref": "#/$defs/recipe"
+    },
+    "database_revision": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The Alembic revision this release migrates to, derived from migrations/versions rather than typed. A preflight compares it with the database it is about to migrate."
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    },
+    "publisher_run_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/[0-9]+$",
+      "description": "The trusted workflow run that built and published this release, so the document points at the process that produced it rather than at whoever handed it over."
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "image",
+        "platforms"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "control",
+            "web",
+            "runner",
+            "sandbox",
+            "tunnel",
+            "egress"
+          ],
+          "description": "What the image is for. Verified against the image's own io.hybridinference.artifact.role label, not against the registry path: which package or tag an image lives in is storage layout, and a deployment must not depend on it."
+        },
+        "variant": {
+          "enum": [
+            "root",
+            "agents"
+          ],
+          "description": "Web only. The build variant, implied by basePath."
+        },
+        "base_path": {
+          "enum": [
+            "",
+            "/agents"
+          ],
+          "description": "Web only. The prefix the app is built to serve under, which is a property of the image rather than of the deployment."
+        },
+        "image": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$",
+          "description": "A full digest reference. Tags may exist for humans; nothing selects on one."
+        },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "linux/amd64",
+              "linux/arm64"
+            ]
+          },
+          "description": "The platforms this artifact was built and started on. Declared per artifact: a single-platform image is not a multi-architecture one, and the resolver verifies the index really carries them."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "web"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "then": {
+            "required": [
+              "variant",
+              "base_path"
+            ],
+            "oneOf": [
+              {
+                "properties": {
+                  "variant": {
+                    "const": "root"
+                  },
+                  "base_path": {
+                    "const": ""
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "variant": {
+                    "const": "agents"
+                  },
+                  "base_path": {
+                    "const": "/agents"
+                  }
+                }
+              }
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "variant"
+                  ]
+                },
+                {
+                  "required": [
+                    "base_path"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default",
+        "versions"
+      ],
+      "properties": {
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The version a session runs when it does not ask for one. Must appear in versions."
+        },
+        "versions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Every version installed in the sandbox, default first, in the order the image declares them."
+        }
+      }
+    },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "sha256",
+        "format_version"
+      ],
+      "description": "The generic deployment recipe: Compose files, protocol files and host helpers, archived so a deployment can be prepared without a source checkout.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://",
+          "description": "Where the archive is fetched from. A release asset, so it is immutable once published."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "format_version": {
+          "const": 1,
+          "description": "Recipe layout version, so a deployer can refuse a recipe it does not know how to use."
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_deployer",
+        "verified_upgrade_from",
+        "verified_rollback_to"
+      ],
+      "description": "What this release has actually been exercised against. Deliberately not inferred from the Alembic revision: a schema that is backwards compatible says nothing about whether a rollback was rehearsed.",
+      "properties": {
+        "minimum_deployer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The deployment protocol a deployer must implement to install this release."
+        },
+        "verified_upgrade_from": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "description": "Source commits this release has been upgraded from in an acceptance run. Empty means none has been."
+        },
+        "verified_rollback_to": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "description": "Source commits this release has been rolled back to in an acceptance run. Empty means none has been, and a deployment must not assume otherwise."
+        }
+      }
+    }
+  }
+}

@@ -361,8 +361,7 @@ def summarize_conversation(rows: list[dict[str, Any]]) -> ConversationUsage:
         refreshing=summary.refreshing,
         next_refresh_at=summary.next_refresh_at,
         active=any(
-            row.get("job_state") in {"queued", "waiting", "preparing", "running", "publishing"}
-            for row in rows
+            row.get("job_state") in {"queued", "preparing", "running", "publishing"} for row in rows
         ),
     )
 

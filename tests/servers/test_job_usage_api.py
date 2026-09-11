@@ -117,7 +117,6 @@ async def test_another_owner_cannot_read_or_queue_usage(app, store, method, path
         ("failed", "unavailable"),
         ("succeeded", "unavailable"),
         ("queued", "pending"),
-        ("waiting", "pending"),
     ],
 )
 async def test_jobs_without_attempts_only_wait_for_usage_while_still_runnable(

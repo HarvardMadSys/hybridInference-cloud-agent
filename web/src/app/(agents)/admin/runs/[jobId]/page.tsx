@@ -105,6 +105,9 @@ function RunDetails({ jobId }: { jobId: string }) {
               </h2>
               <RunState state={detail.run.state} />
             </div>
+            {detail.run.state === 'queued' && (
+              <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">Waiting to start</p>
+            )}
             <p className="mt-2 break-all font-mono text-xs text-gray-400 dark:text-gray-500">
               {detail.run.id}
             </p>

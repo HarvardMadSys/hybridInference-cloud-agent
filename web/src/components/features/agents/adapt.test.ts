@@ -113,7 +113,6 @@ describe('toDisplayState', () => {
   });
 
   it.each([
-    ['waiting', 'queued'],
     ['queued', 'queued'],
     ['running', 'running'],
     ['failed', 'failed'],
@@ -253,6 +252,15 @@ describe('toDisplayEvent', () => {
 });
 
 describe('toDisplayJob', () => {
+  it.each([null, 'ajob_previous'])(
+    'does not infer a queue reason from the parent ID %s',
+    (parent_job_id) => {
+      const job = toDisplayJob({ ...JOB, state: 'queued', parent_job_id, detail: null });
+      expect(job.state).toBe('queued');
+      expect(job.stateNote).toBeUndefined();
+    },
+  );
+
   it('states the branch the publisher will use', () => {
     expect(toDisplayJob(JOB).branch).toBe('agent/ajob_1');
   });

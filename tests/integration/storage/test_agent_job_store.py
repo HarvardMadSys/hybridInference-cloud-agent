@@ -1196,7 +1196,7 @@ async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_fa
         user_id=first["user_id"],
         prompt="continue after a lost final response",
     )
-    assert second is not None and second["state"] == "waiting"
+    assert second is not None and second["state"] == "queued"
     # This is the finalization-only failure case: the native exchange is
     # already durable, even though the platform outcome is failed.
     assert await store.transition(
@@ -1830,10 +1830,10 @@ async def test_concurrent_follow_ups_form_one_linear_thread(store: AgentJobStore
     assert [job["turn_no"] for job in ordered] == [2, 3]
     assert ordered[0]["parent_job_id"] == parent["id"]
     assert ordered[1]["parent_job_id"] == ordered[0]["id"]
-    assert [job["state"] for job in ordered] == ["waiting", "waiting"]
+    assert [job["state"] for job in ordered] == ["queued", "queued"]
 
 
-async def test_shared_waiting_follow_up_releases_before_snapshot_publish(store: AgentJobStore):
+async def test_shared_queued_follow_up_runs_before_snapshot_publish(store: AgentJobStore):
     """A queued live turn never waits for the asynchronous group publisher."""
     parent, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
@@ -1852,7 +1852,17 @@ async def test_shared_waiting_follow_up_releases_before_snapshot_publish(store: 
     child = await store.create_follow_up(
         parent_job_id=parent["id"], user_id=parent["user_id"], prompt="already waiting"
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
+    assert (
+        await _claim(
+            store,
+            worker_id="other-worker",
+            lease_ttl_seconds=60,
+            host="shared-runner",
+            host_credential_hash="test-credential-hash",
+        )
+        is None
+    )
     assert await store.settle_thread_sandbox(
         **fence,
         job_id=parent["id"],
@@ -1860,6 +1870,18 @@ async def test_shared_waiting_follow_up_releases_before_snapshot_publish(store: 
         native_session_id="native-shared-waiting",
         idle_timeout_seconds=1800,
         base_sha=parent["base_sha"],
+    )
+    # Settlement releases native activation, but the earlier job still owns
+    # its attempt until its terminal transition commits.
+    assert (
+        await _claim(
+            store,
+            worker_id="other-worker",
+            lease_ttl_seconds=60,
+            host="shared-runner",
+            host_credential_hash="test-credential-hash",
+        )
+        is None
     )
     assert await store.transition(
         job_id=parent["id"],
@@ -1872,6 +1894,117 @@ async def test_shared_waiting_follow_up_releases_before_snapshot_publish(store: 
     released = await store.get_job(child["id"])
     assert released is not None
     assert released["state"] == "queued"
+    next_claim = await _claim(
+        store,
+        worker_id="other-worker",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+    )
+    assert next_claim is not None and next_claim["id"] == child["id"]
+
+
+async def test_concurrent_claims_keep_queued_turns_in_order(store: AgentJobStore):
+    """SKIP LOCKED must never turn the next row in one chat into parallel work."""
+    parent = await _create_job(store)
+    first = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
+    )
+    second = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="third turn"
+    )
+    other = await _create_job(store, task_prompt="an independent chat")
+    assert first is not None and second is not None
+    # Enroll before racing claims, so host registration is not the race under test.
+    await store.register_host(
+        host="runner-a",
+        credential_hash="runner-a-credential-hash",
+        slots_total=128,
+        capabilities=_SHARED_HOST_CAPABILITIES,
+    )
+    await store.record_host_heartbeat(
+        host="runner-a",
+        capabilities=_SHARED_HOST_CAPABILITIES,
+        sandbox_image_digest="sha256:shared-image",
+    )
+
+    async def race_claims() -> list[dict]:
+        results = await asyncio.gather(
+            *(
+                _claim(store, worker_id=f"worker-{number}", lease_ttl_seconds=60)
+                for number in range(8)
+            )
+        )
+        return [result for result in results if result is not None]
+
+    claims = await race_claims()
+    assert {claim["id"] for claim in claims} == {parent["id"], other["id"]}
+    assert len(claims) == 2
+    assert (await store.get_host(host="runner-a"))["slots_used"] == 2
+    parent_claim = next(claim for claim in claims if claim["id"] == parent["id"])
+    assert await store.transition(
+        job_id=parent["id"],
+        attempt_id=parent_claim["attempt_id"],
+        lease_generation=parent_claim["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+        detail="failed before sandbox admission",
+    )
+    claims = await race_claims()
+    assert len(claims) == 1 and claims[0]["id"] == first["id"]
+    assert await store.transition(
+        job_id=first["id"],
+        attempt_id=claims[0]["attempt_id"],
+        lease_generation=claims[0]["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+        detail="failed before sandbox admission",
+    )
+    claims = await race_claims()
+    assert len(claims) == 1 and claims[0]["id"] == second["id"]
+    assert (await store.get_host(host="runner-a"))["slots_used"] == 2
+
+
+@pytest.mark.parametrize("parent_already_running", [False, True])
+async def test_cancelled_intermediate_turns_do_not_bypass_unfinished_ancestor(
+    store: AgentJobStore,
+    parent_already_running: bool,
+):
+    """A terminal direct parent does not imply all previous turns are finished."""
+    parent = await _create_job(store)
+    parent_claim = (
+        await _claim(store, worker_id="parent-worker", lease_ttl_seconds=60)
+        if parent_already_running
+        else None
+    )
+    children = []
+    for number in range(3):
+        child = await store.create_follow_up(
+            parent_job_id=parent["id"], user_id="user-1", prompt=f"follow-up {number}"
+        )
+        assert child is not None and child["state"] == "queued"
+        children.append(child)
+    for child in children[:2]:
+        assert await store.request_cancel(job_id=child["id"], user_id="user-1") == "cancelled"
+    other = await _create_job(store, task_prompt="runnable behind blocked follow-ups")
+    if parent_claim is None:
+        parent_claim = await _claim(store, worker_id="parent-worker", lease_ttl_seconds=60)
+    assert parent_claim is not None and parent_claim["id"] == parent["id"]
+    other_claim = await _claim(store, worker_id="other-worker", lease_ttl_seconds=60)
+    assert other_claim is not None and other_claim["id"] == other["id"]
+    assert await _claim(store, worker_id="third-worker", lease_ttl_seconds=60) is None
+    assert (await store.get_job(children[-1]["id"]))["state"] == "queued"
+
+    assert await store.transition(
+        job_id=parent["id"],
+        attempt_id=parent_claim["attempt_id"],
+        lease_generation=parent_claim["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+        detail="failed before sandbox admission",
+    )
+    next_claim = await _claim(store, worker_id="third-worker", lease_ttl_seconds=60)
+    assert next_claim is not None and next_claim["id"] == children[-1]["id"]
 
 
 async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: AgentJobStore):
@@ -1945,7 +2078,7 @@ async def test_settlement_and_concurrent_follow_up_use_one_lock_order(store: Age
             await conn.execute("DROP FUNCTION IF EXISTS test_delay_membership_update()")
 
     assert settled is not None
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
 
 
 async def test_settlement_and_host_reconciliation_use_one_lock_order(store: AgentJobStore):
@@ -2727,7 +2860,7 @@ async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost
         user_id=job["user_id"],
         prompt="do not leave this turn waiting forever",
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
 
     abandoned = await store.abandon_thread_sandbox(
         thread_id=job["thread_id"],
@@ -2753,7 +2886,7 @@ async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost
     ) == {"error": "sandbox_context_lost"}
 
 
-async def test_failed_admitted_turn_does_not_promote_queued_follow_up(
+async def test_failed_admitted_turn_fails_queued_follow_up(
     store: AgentJobStore,
 ):
     """A terminal job and a LOST context are different scheduling signals."""
@@ -2776,7 +2909,7 @@ async def test_failed_admitted_turn_does_not_promote_queued_follow_up(
         user_id=job["user_id"],
         prompt="this cannot run after an ambiguous turn",
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
 
     assert await store.transition(
         job_id=job["id"],
@@ -2886,7 +3019,7 @@ async def test_expired_shared_admission_loses_only_that_member_and_residency(
         user_id=job["user_id"],
         prompt="must not run after an ambiguous shared turn",
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
 
     sibling = await _create_job(store, task_prompt="independent fork sibling")
     async with store._pool.acquire() as conn:
@@ -2999,7 +3132,7 @@ async def test_expired_shared_finalization_preserves_context_and_snapshot_progre
         user_id=job["user_id"],
         prompt="continue from the settled shared context",
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
     await _expire_attempt(store, claim["attempt_id"])
 
     actions = await store.reap_expired(max_attempts=3)
@@ -3061,7 +3194,7 @@ async def test_expired_job_finalization_preserves_an_already_settled_context(
         user_id=job["user_id"],
         prompt="continue from the already-settled context",
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
     await _expire_attempt(store, claim["attempt_id"])
 
     actions = await store.reap_expired(max_attempts=3)
@@ -3106,7 +3239,7 @@ async def test_expired_retained_admission_fails_closed_instead_of_replaying(
         user_id=job["user_id"],
         prompt="must not run after an expired admitted turn",
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
     await _expire_attempt(store, claim["attempt_id"])
 
     actions = await store.reap_expired(max_attempts=3)
@@ -4468,14 +4601,13 @@ async def test_successful_short_task_accepts_delayed_title(store: AgentJobStore)
     assert saved["title_source"] == "generated"
 
 
-async def test_a_cancelled_parent_released_by_the_platform_promotes_its_waiting_child(
+async def test_a_cancelled_parent_released_by_the_platform_unblocks_its_queued_child(
     store: AgentJobStore,
 ):
     """A platform-side release that lands as ``cancelled`` is a turn boundary too.
 
-    The waiting child moves in the same transaction as the parent's terminal
-    write — not on the next claim poll, which no longer sweeps, and not on the
-    reaper's periodic safety net.
+    The child is already queued and becomes eligible as soon as the parent's
+    terminal write commits, without waiting for a periodic sweep.
     """
     parent = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
@@ -4483,7 +4615,7 @@ async def test_a_cancelled_parent_released_by_the_platform_promotes_its_waiting_
     child = await store.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
 
     assert await store.request_cancel(job_id=parent["id"], user_id="user-1") == "running"
     assert await store.release_claim(job_id=parent["id"], attempt_id=claim["attempt_id"])
@@ -4491,24 +4623,23 @@ async def test_a_cancelled_parent_released_by_the_platform_promotes_its_waiting_
     assert (await store.get_job(parent["id"]))["state"] == "cancelled"
     assert (await store.get_job(child["id"]))["state"] == "queued"
     # And it is the next thing a runner is handed.
-    promoted = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    assert promoted is not None and promoted["id"] == child["id"]
+    next_claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert next_claim is not None and next_claim["id"] == child["id"]
 
 
-async def test_the_sweep_recovers_a_child_stranded_by_a_crashed_terminal_write(
+async def test_queued_follow_up_needs_no_promotion_after_parent_finishes(
     store: AgentJobStore,
 ):
-    """The periodic sweep is the safety net for a promotion that never ran."""
+    """Eligibility follows the parent state even if no terminal cleanup ran."""
     parent = await _create_job(store)
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
     child = await store.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="and then this"
     )
-    assert child is not None and child["state"] == "waiting"
-    # A parent that reached its terminal state without the scoped promotion
-    # that every store writer performs — the shape a crash between the two
-    # writes would leave behind.
+    assert child is not None and child["state"] == "queued"
+    # A terminal parent without the scoped continuity cleanup, as can exist
+    # in legacy data. Claiming does not depend on a second state update.
     async with store._pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_jobs SET state = 'failed', current_attempt_id = NULL WHERE id = $1",
@@ -4518,13 +4649,98 @@ async def test_the_sweep_recovers_a_child_stranded_by_a_crashed_terminal_write(
             "UPDATE agent_attempts SET status = 'finished', finished_at = NOW() WHERE id = $1",
             claim["attempt_id"],
         )
-    # Claiming no longer promotes on the runner's behalf.
-    assert await _claim(store, worker_id="w1", lease_ttl_seconds=60) is None
-    assert (await store.get_job(child["id"]))["state"] == "waiting"
-
-    await store.sweep_waiting_follow_ups()
-
     assert (await store.get_job(child["id"]))["state"] == "queued"
+    next_claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert next_claim is not None and next_claim["id"] == child["id"]
+
+
+async def test_queued_cleanup_fails_tail_after_success_without_retained_context(
+    store: AgentJobStore,
+):
+    """Legacy success cannot cause a queued follow-up to start a fresh sandbox."""
+    parent = await _create_job(store)
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
+    )
+    grandchild = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="third turn"
+    )
+    assert child is not None and grandchild is not None
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1 WHERE id = $1",
+            parent["id"],
+        )
+    other = await _create_job(store, task_prompt="independent runnable turn")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None and claim["id"] == other["id"]
+    assert await _claim(store, worker_id="w2", lease_ttl_seconds=60) is None
+    await store.sweep_queued_follow_ups()
+    for pending in (child, grandchild):
+        saved = await store.get_job(pending["id"])
+        assert saved["state"] == "failed"
+        assert "predates retained-session continuity" in saved["detail"]
+
+
+@pytest.mark.parametrize("lost_field", ["context_status", "native_state"])
+async def test_queued_child_with_lost_membership_is_not_claimed_before_cleanup(
+    store: AgentJobStore,
+    lost_field: str,
+):
+    """A running group does not prove its member's native context is usable."""
+    parent, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": parent["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-lost-member",
+        context_status="new",
+    )
+    assert await store.admit_thread_sandbox_turn(**fence, job_id=parent["id"])
+    child = await store.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="second turn"
+    )
+    assert child is not None and child["state"] == "queued"
+    assert await store.settle_thread_sandbox(
+        **fence,
+        job_id=parent["id"],
+        context_status="live",
+        native_session_id="native-lost-member",
+        idle_timeout_seconds=1800,
+        base_sha=parent["base_sha"],
+    )
+    assert await store.transition(
+        job_id=parent["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    # Model legacy membership loss without the same-transaction tail cleanup.
+    async with store._pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE agent_thread_sandbox_memberships SET {lost_field} = 'lost' "
+            "WHERE thread_id = $1",
+            parent["thread_id"],
+        )
+    assert (
+        await _claim(
+            store,
+            worker_id="w2",
+            lease_ttl_seconds=60,
+            host="shared-runner",
+            host_credential_hash="test-credential-hash",
+        )
+        is None
+    )
+    assert (await store.get_job(child["id"]))["state"] == "queued"
+    await store.sweep_queued_follow_ups()
+    assert (await store.get_job(child["id"]))["state"] == "failed"
 
 
 async def test_a_success_that_skipped_settlement_is_refused_loudly(store: AgentJobStore):
@@ -4557,7 +4773,7 @@ async def test_conversations_activity_counts_an_earlier_turn_finishing_last(
     child = await store.create_follow_up(
         parent_job_id=parent["id"], user_id="user-1", prompt="never mind"
     )
-    assert child is not None and child["state"] == "waiting"
+    assert child is not None and child["state"] == "queued"
     assert await store.request_cancel(job_id=child["id"], user_id="user-1") == "cancelled"
     other = await _create_job(store, task_prompt="second conversation")
     before = await store.list_conversations(user_id="user-1")

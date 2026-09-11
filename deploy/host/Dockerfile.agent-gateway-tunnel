@@ -21,4 +21,17 @@ RUN chmod +x /usr/local/bin/agent-gateway-tunnel
 # is wrong about its own tooling reports a working tunnel as unhealthy forever.
 # What actually answers the question is `sandbox_host.sh check`, which
 # asks from inside the closed network where it matters.
+# What this image is, in the two places a deployment looks: OCI's own labels,
+# and one of ours naming the artifact's role. A resolver reads both out of the
+# platform image it is about to run and compares them with the release
+# manifest — the revision against the manifest's source commit, the role
+# against the artifact it stands in for — so a build matrix that swaps two
+# digests is caught where the release is consumed rather than where it is
+# deployed. `SOURCE_COMMIT` is supplied by the publication build; an image
+# built by hand says `unknown`, and a resolver refuses it.
+ARG SOURCE_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/HarvardMadSys/hybridInference-cloud-agent" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      io.hybridinference.artifact.role="tunnel"
+
 ENTRYPOINT ["/usr/local/bin/agent-gateway-tunnel"]

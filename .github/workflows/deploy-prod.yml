@@ -51,6 +51,24 @@ jobs:
     # for a fresh heartbeat plus reverse-broker probe before replacing this
     # stack. The protocol fence preserves host-before-API compatibility without
     # serializing image builds and migrations in Actions.
+    #
+    # **The fuse.** `LEGACY_DIRECT_PRODUCTION_DEPLOY` is the migration switch
+    # that hands production to FreeInference. Fail-closed: `false`, `yes`, an
+    # empty value, a deleted variable or no variable at all leaves the hosts
+    # untouched rather than shipping on a value nobody meant. GitHub's `==`
+    # ignores case when comparing strings, so `True` and `TRUE` deploy as well;
+    # that is its semantics rather than a choice made here, and the direction
+    # that matters is the one that fails closed.
+    #
+    # Set it to `true` before this guard lands; set it to `false` as the last
+    # step of the production handover, once the private deploy has been
+    # exercised and rolled back.
+    #
+    # A migration artifact, not the terminal architecture: this workflow is
+    # deleted with the source checkouts once FreeInference deploys production
+    # from its own lock. Until then it is also the rehearsed rollback path, so
+    # it is disarmed rather than removed.
+    if: ${{ vars.LEGACY_DIRECT_PRODUCTION_DEPLOY == 'true' }}
     runs-on: [self-hosted, Linux, deploy-cloud-agent-control-prod]
     # Records the deployment and gives protection rules somewhere to live.
     # Required-reviewer rules need a public repository or a paid plan, so on
@@ -129,6 +147,11 @@ jobs:
     name: Deploy sandbox host
     # Runs in parallel with the control build. The control deployment cannot
     # replace its old API until this exact SHA has passed host readiness.
+    #
+    # The same fuse as the control job above, and the same variable: production
+    # is handed over whole, so a switch that left the host half deploying would
+    # be a second control plane in everything but name.
+    if: ${{ vars.LEGACY_DIRECT_PRODUCTION_DEPLOY == 'true' }}
     runs-on: [self-hosted, Linux, deploy-cloud-agent-sandbox-prod]
     environment: production
     timeout-minutes: 45

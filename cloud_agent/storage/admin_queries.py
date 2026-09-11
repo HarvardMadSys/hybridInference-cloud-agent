@@ -45,6 +45,13 @@ _RUN_COLUMNS = """
     ARRAY(SELECT DISTINCT LEFT(a.host_id, 256) FROM agent_attempts a
           WHERE a.job_id = j.id AND a.host_id IS NOT NULL
           ORDER BY 1) AS hosts,
+    ARRAY(SELECT DISTINCT LEFT(COALESCE(
+              CASE WHEN jsonb_typeof(h.labels->'physical_host') = 'string'
+                   THEN NULLIF(BTRIM(h.labels->>'physical_host'), '') END,
+              a.host_id), 256)
+          FROM agent_attempts a LEFT JOIN agent_runner_hosts h ON h.host = a.host_id
+          WHERE a.job_id = j.id AND a.host_id IS NOT NULL
+          ORDER BY 1) AS physical_hosts,
     (SELECT COUNT(*) FROM agent_job_events e
      WHERE e.job_id = j.id AND e.event_type = 'tool_use') AS tool_calls
 """

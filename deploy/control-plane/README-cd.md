@@ -4,11 +4,53 @@ Two branches, two environments, and they federate with the matching gateway:
 
 | Branch | Environment | Deploys | Gateway it talks to |
 |---|---|---|---|
-| `dev` | staging | automatically, on green CI | the gateway's own `dev`, i.e. its staging deployment |
-| `main` | production | only when dispatched | the gateway's `main`, i.e. its production deployment |
+| `dev` | staging | automatically, on green CI, while `LEGACY_DIRECT_STAGING_DEPLOY` is `true` | the gateway's own `dev`, i.e. its staging deployment |
+| `main` | production | only when dispatched, and only while `LEGACY_DIRECT_PRODUCTION_DEPLOY` is `true` | the gateway's `main`, i.e. its production deployment |
 
 `main` is not a branch anyone commits to: `sync-main.yml` fast-forwards it to
 `dev` on request, and that is the only way it moves.
+
+## The fuse: who is allowed to deploy
+
+The direct-deploy path — this repository's workflows replacing FreeInference's
+hosts — is moving to the FreeInference repository, which will choose an Agent
+release and own staging, production, promotion and rollback. Until that path is
+proven, each environment carries a switch:
+
+| Workflow | Variable | `true` | anything else, including unset |
+|---|---|---|---|
+| `deploy-staging.yml` | `LEGACY_DIRECT_STAGING_DEPLOY` | merging to `dev` deploys, as it always has | both jobs skip; no host is touched |
+| `deploy-prod.yml` | `LEGACY_DIRECT_PRODUCTION_DEPLOY` | a dispatch deploys | both jobs skip; no host is touched |
+
+Both are fail-closed and both gate *every* job in their workflow, because an
+environment is handed over whole: a switch that left half of one deploying would
+be a second control plane in everything but name. Only `true` deploys — `false`,
+`yes`, `1`, an empty value, a deleted variable and an unset variable all skip,
+which is the direction that matters: nothing ships because the switch could not
+be read.
+
+One caveat, and it is GitHub's rather than a choice made here: an Actions `==`
+comparison **ignores case**, so `True` and `TRUE` deploy as well. It is written
+down because a reviewer reading `== 'true'` will reasonably assume otherwise,
+and because `tests/unit/test_legacy_deploy_fuse.py` can check the YAML but
+cannot check an expression language — this paragraph is the only place that
+semantic is visible to a person. The same test requires the paragraph to stay.
+
+The sequence is deliberate:
+
+1. Set both variables to `true` **before** the guard lands, so the commit that
+   adds it exercises the same pipeline it always did.
+2. Hand staging over: deploy it from FreeInference's lock, then set
+   `LEGACY_DIRECT_STAGING_DEPLOY` to `false`. The skipped jobs are the point —
+   they are how "upstream merged" stops meaning "staging changed".
+3. Hand production over the same way, last, after the private deploy has been
+   exercised and rolled back. Production's workflow stays **disarmed, not
+   deleted**: it is the rehearsed rollback path until the private one has been
+   through a full rollback window.
+
+These switches are a migration artifact. Once both environments are deployed by
+FreeInference, both workflows are deleted here — a fuse that outlives the
+migration is wiring nobody dares remove.
 
 ## Staging
 

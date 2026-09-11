@@ -215,9 +215,7 @@ class FakeAgentJobStore:
                 if reset_reasoning_effort
                 else (reasoning_effort or parent.get("reasoning_effort"))
             ),
-            "state": (
-                "queued" if parent["state"] in {"succeeded", "failed", "cancelled"} else "waiting"
-            ),
+            "state": "queued",
             "cancel_requested": False,
             "terminal_resume_pending": False,
             "current_attempt_id": None,
@@ -685,7 +683,7 @@ class FakeAgentJobStore:
             )
             project["_threads"].add(job["thread_id"])
             project["task_count"] = len(project["_threads"])
-            if job["state"] in {"queued", "waiting", "running", "publishing"}:
+            if job["state"] in {"queued", "running", "publishing"}:
                 project["active_count"] += 1
             pinned_at = self.pinned_threads.get(job["thread_id"])
             if pinned_at is not None:
@@ -756,7 +754,7 @@ class FakeAgentJobStore:
         if job is None or (user_id is not None and job["user_id"] != user_id):
             return None
         job["cancel_requested"] = True
-        if job["state"] in {"queued", "waiting"}:
+        if job["state"] == "queued":
             job["state"] = "cancelled"
             job["terminal_resume_pending"] = True
         return job["state"]
@@ -841,7 +839,17 @@ class FakeAgentJobStore:
     ) -> dict[str, Any] | None:
         if self.active_host is not None and host != self.active_host:
             return None
-        queued = [job for job in self.jobs.values() if job["state"] == "queued"]
+        queued = [
+            job
+            for job in self.jobs.values()
+            if job["state"] == "queued"
+            and not any(
+                earlier["thread_id"] == job["thread_id"]
+                and earlier["turn_no"] < job["turn_no"]
+                and earlier["state"] not in {"succeeded", "failed", "cancelled"}
+                for earlier in self.jobs.values()
+            )
+        ]
         if not queued:
             return None
         job = queued[0]
@@ -944,10 +952,6 @@ class FakeAgentJobStore:
         # lacked, never overwrite one the owner pinned.
         if base_sha and not job.get("base_sha"):
             job["base_sha"] = base_sha
-        if to_state in {"succeeded", "failed", "cancelled"}:
-            for child in self.jobs.values():
-                if child.get("parent_job_id") == job_id and child["state"] == "waiting":
-                    child["state"] = "queued"
         return True
 
     async def release_claim(
@@ -1708,7 +1712,7 @@ async def test_follow_up_queues_after_parent_and_uses_native_session_context(
     )
     assert follow_up.status_code == 201
     child = follow_up.json()
-    assert child["state"] == "waiting"
+    assert child["state"] == "queued"
     assert child["parent_job_id"] == parent_id
     assert child["turn_no"] == 2
     assert child["model"] == "qwen-next"
@@ -1722,6 +1726,10 @@ async def test_follow_up_queues_after_parent_and_uses_native_session_context(
 
     claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
     assert claim["job_id"] == parent_id
+    blocked = await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})
+    assert blocked.status_code == 200
+    assert blocked.json() is None
+    assert store.jobs[child["id"]]["state"] == "queued"
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
     await client.post(
         f"/v1/agent/worker/jobs/{parent_id}/events",
@@ -1741,6 +1749,46 @@ async def test_follow_up_queues_after_parent_and_uses_native_session_context(
     assert "context_patch" not in child_claim
     assert "context_messages" not in child_claim
     assert "context_checkpoint" not in child_claim
+
+
+async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
+    client: AsyncClient, store: FakeAgentJobStore
+):
+    """Every unfinished earlier turn blocks a claim, even across a cancellation."""
+    parent_id = await _create_job(client)
+    middle = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "skip this follow-up"},
+    )
+    assert middle.status_code == 201
+    middle_id = middle.json()["id"]
+    latest = await client.post(
+        f"/v1/agent/jobs/{parent_id}/follow-ups",
+        json={"prompt": "run this after the first turn"},
+    )
+    assert latest.status_code == 201
+    latest_id = latest.json()["id"]
+    assert latest.json()["parent_job_id"] == middle_id
+    assert latest.json()["state"] == "queued"
+
+    cancelled = await client.post(f"/v1/agent/jobs/{middle_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["state"] == "cancelled"
+    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    assert claim["job_id"] == parent_id
+    blocked = await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})
+    assert blocked.status_code == 200
+    assert blocked.json() is None
+    assert store.jobs[latest_id]["state"] == "queued"
+
+    finished = await client.post(
+        f"/v1/agent/worker/jobs/{parent_id}/finish",
+        json={"state": "succeeded"},
+        headers={"Authorization": f"Bearer {claim['worker_token']}"},
+    )
+    assert finished.status_code == 200
+    next_claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})).json()
+    assert next_claim["job_id"] == latest_id
 
 
 async def test_create_fails_fast_on_a_model_this_deployment_cannot_serve(client: AsyncClient):
@@ -1843,7 +1891,7 @@ async def test_follow_ups_append_to_latest_turn_and_reject_blank_prompts(
     assert second.status_code == 201
     assert second.json()["parent_job_id"] == first.json()["id"]
     assert second.json()["turn_no"] == 3
-    assert second.json()["state"] == "waiting"
+    assert second.json()["state"] == "queued"
 
     blank = await client.post(
         f"/v1/agent/jobs/{parent_id}/follow-ups",
