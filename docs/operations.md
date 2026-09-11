@@ -239,7 +239,14 @@ Five things about this that look like details and are not:
   Routing on the merged surface is a lookup in the catalogue built from the
   bindings, never a split on the separator: an alias may itself contain `__`, so
   `a__b` plus tool `c` and `a` plus tool `b__c` present the same string, and
-  only the map can tell them apart. A connection that cannot be resolved is
+  only the map can tell them apart. The same endpoint serves resources and
+  prompts, resolved through that one catalogue and decided by the same function
+  as a tool call — the design gives them their own *scopes* so that they are not
+  a way round tool authorization, and a separate code path is exactly how they
+  would become one. A tool and a prompt are namespaced by alias because a bare
+  name is ambiguous the moment two connections offer one; a resource keeps its
+  own URI, because the design treats an external URI as that server's identifier
+  for it and a presented name would invent one the server never issued. A connection that cannot be resolved is
   skipped with a log rather than failing the listing — losing every other tool
   is a worse outcome than the failure that caused it — while the per-connection
   route still refuses loudly for the server that is actually broken.

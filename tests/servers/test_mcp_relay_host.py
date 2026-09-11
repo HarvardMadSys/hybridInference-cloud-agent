@@ -127,9 +127,13 @@ def _binding(connection_id: int, alias: str, **overrides: Any) -> dict[str, Any]
 
 
 def _snapshot(
-    connection_id: int, *tools: str, partial: dict[str, Any] | None = None
+    connection_id: int,
+    *tools: str,
+    resources: tuple[str, ...] = (),
+    prompts: tuple[str, ...] = (),
+    partial: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """A discovery result offering exactly ``tools``."""
+    """A discovery result offering exactly what it is given."""
     return {
         "connection_id": connection_id,
         "capability_revision": 1,
@@ -146,9 +150,14 @@ def _snapshot(
             }
             for name in tools
         ],
-        "resources": [],
+        "resources": [
+            {"name": uri, "description": f"{uri} on {connection_id}", "input_schema": None}
+            for uri in resources
+        ],
         "resource_templates": [],
-        "prompts": [],
+        "prompts": [
+            {"name": name, "description": f"{name} on {connection_id}"} for name in prompts
+        ],
         "support": partial or {},
         "discovered_at": None,
     }
@@ -241,6 +250,8 @@ class StubHost:
         """Start with nothing opened and a canned successful result."""
         self.opened: list[dict[str, Any]] = []
         self.called: list[dict[str, Any]] = []
+        self.read: list[dict[str, Any]] = []
+        self.prompts: list[dict[str, Any]] = []
         self.result = ToolResult(content=(ContentBlock(type="text", text="upstream says hi"),))
 
     async def open(self, connection: Any, *, secret: str | None, key: Any) -> Session:
@@ -254,6 +265,14 @@ class StubHost:
     async def call_tool(self, session: Session, **kwargs: Any) -> ToolResult:
         self.called.append(kwargs)
         return self.result
+
+    async def read_resource(self, session: Session, *, uri: str) -> dict[str, Any]:
+        self.read.append({"uri": uri})
+        return {"uri": uri, "content": [{"type": "text", "text": "resource body"}]}
+
+    async def get_prompt(self, session: Session, **kwargs: Any) -> dict[str, Any]:
+        self.prompts.append(kwargs)
+        return {"description": "a prompt", "messages": [{"role": "user", "content": "hello"}]}
 
 
 @pytest.fixture()
@@ -522,7 +541,7 @@ class TestTheHandshake:
 
     async def test_an_unimplemented_method_is_named(self, client: AsyncClient) -> None:
         """Rather than answered as though it had worked."""
-        response = await client.post(_HOST_URL, json=_rpc("resources/list"), headers=_auth())
+        response = await client.post(_HOST_URL, json=_rpc("completion/complete"), headers=_auth())
         assert "does not implement" in response.json()["error"]["message"]
 
     async def test_no_server_initiated_stream_is_offered(self, client: AsyncClient) -> None:
@@ -707,3 +726,114 @@ class TestAgainstARealProtocolHost:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
             response = await api.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         assert [tool["name"] for tool in _result(response)["tools"]] == ["github__get_issue"]
+
+
+class TestResourcesAndPrompts:
+    """The other two surfaces, under their own scopes.
+
+    The design gives resources and prompts separate reading and selection scopes
+    so that they are not a way round tool authorization. These pin that they are
+    resolved through the same catalogue and decided by the same function, and
+    that what a session did not enable is neither listed nor readable.
+    """
+
+    def _store(self, **overrides: Any) -> FakeStore:
+        """One connection offering a resource and a prompt, both enabled."""
+        return FakeStore(
+            snapshots={
+                7: _snapshot(
+                    7,
+                    "get_issue",
+                    resources=("repo://notes", "repo://secrets"),
+                    prompts=("summarize",),
+                )
+            },
+            bindings=[
+                _binding(
+                    7,
+                    "github",
+                    rules={"get_issue": {"policy": "allow", "fingerprint": ""}},
+                    resource_rules={"repo://notes": "allow", "repo://secrets": "deny"},
+                    prompt_rules={"summarize": "allow"},
+                )
+            ],
+            **overrides,
+        )
+
+    async def test_only_enabled_resources_are_listed(self, host: StubHost) -> None:
+        """And they keep the URI the server issued for them.
+
+        The design treats an external URI as that server's own identifier for
+        the resource, so a presented name for one would invent an identifier the
+        server never had.
+        """
+        app = FastAPI()
+        app.include_router(agent_mcp_router.router)
+        app.dependency_overrides[get_agent_job_store] = lambda: self._store()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+            response = await api.post(_HOST_URL, json=_rpc("resources/list"), headers=_auth())
+        assert [entry["uri"] for entry in _result(response)["resources"]] == ["repo://notes"]
+
+    async def test_a_resource_outside_the_scope_is_not_readable(self, host: StubHost) -> None:
+        """Refused without dialling: the scope is checked before the call."""
+        app = FastAPI()
+        app.include_router(agent_mcp_router.router)
+        app.dependency_overrides[get_agent_job_store] = lambda: self._store()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+            response = await api.post(
+                _HOST_URL,
+                json=_rpc("resources/read", uri="repo://secrets"),
+                headers=_auth(),
+            )
+        assert "error" in response.json(), response.json()
+        assert host.read == []
+        assert host.opened == []
+
+    async def test_an_enabled_resource_is_read_through_the_host(self, host: StubHost) -> None:
+        """The upstream URI is what travels; the scope is what allowed it."""
+        app = FastAPI()
+        app.include_router(agent_mcp_router.router)
+        app.dependency_overrides[get_agent_job_store] = lambda: self._store()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+            response = await api.post(
+                _HOST_URL, json=_rpc("resources/read", uri="repo://notes"), headers=_auth()
+            )
+        assert _result(response)["content"][0]["text"] == "resource body"
+        assert host.read == [{"uri": "repo://notes"}]
+        assert host.opened[-1]["connection"].connection_id == "7"
+
+    async def test_a_prompt_is_listed_namespaced_and_fetched_by_its_own_name(
+        self, host: StubHost
+    ) -> None:
+        """Two connections may both offer `summarize`; only one name is callable.
+
+        A prompt has no URI to disambiguate it, so it is namespaced like a tool
+        and mapped back on the way out -- the same reason the tool catalogue is
+        keyed by the presented name rather than the server's.
+        """
+        app = FastAPI()
+        app.include_router(agent_mcp_router.router)
+        app.dependency_overrides[get_agent_job_store] = lambda: self._store()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+            listed = await api.post(_HOST_URL, json=_rpc("prompts/list"), headers=_auth())
+            fetched = await api.post(
+                _HOST_URL,
+                json=_rpc("prompts/get", name="github__summarize", arguments={"style": "tldr"}),
+                headers=_auth(),
+            )
+        assert [entry["name"] for entry in _result(listed)["prompts"]] == ["github__summarize"]
+        assert _result(fetched)["messages"][0]["content"] == "hello"
+        assert host.prompts[-1]["name"] == "summarize"
+        assert host.prompts[-1]["arguments"] == {"style": "tldr"}
+
+    async def test_an_unknown_prompt_name_is_refused(self, host: StubHost) -> None:
+        """A name that is not in the catalogue is not a server to guess at."""
+        app = FastAPI()
+        app.include_router(agent_mcp_router.router)
+        app.dependency_overrides[get_agent_job_store] = lambda: self._store()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
+            response = await api.post(
+                _HOST_URL, json=_rpc("prompts/get", name="summarize"), headers=_auth()
+            )
+        assert "prompts/list" in response.json()["error"]["message"]
+        assert host.prompts == []

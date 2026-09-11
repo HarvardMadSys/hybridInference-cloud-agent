@@ -393,19 +393,23 @@ async def _decide_call(
     attempt_id: int | None,
     lease_generation: int,
     request_id: Any,
+    kind: CapabilityKind = CapabilityKind.TOOL,
 ) -> dict[str, Any] | None:
-    """Decide one ``tools/call``, or return ``None`` when it may be dispatched.
+    """Decide one call, or return ``None`` when it may be dispatched.
 
-    The single decision point on this surface. Both the per-connection route and
-    the merged host route call it, because two copies of an authorization rule
-    is one copy that will be forgotten -- and the copy that gets forgotten is
-    always the newer one.
+    The single decision point on this surface, for all three of them. The
+    per-connection route and the merged host route call it, and so do tools,
+    resources and prompts -- because two copies of an authorization rule is one
+    copy that will be forgotten, and the copy that gets forgotten is always the
+    newer one. ``kind`` selects the scope: a resource read is checked against
+    the resource rules, which is what stops it being a way to reach something
+    the session did not enable.
     """
     decision = decide(
         connection=authorized.connection,
         binding=authorized.binding,
         capability=capability,
-        kind=CapabilityKind.TOOL,
+        kind=kind,
         name=name,
         user_id=authorized.user_id,
     )
@@ -729,9 +733,17 @@ _HOST_INSTANCE: McpHost | None = None
 
 
 async def _host_catalogue(
-    identity: dict[str, Any], store: AgentJobStore
+    identity: dict[str, Any],
+    store: AgentJobStore,
+    kind: CapabilityKind = CapabilityKind.TOOL,
 ) -> dict[str, tuple[Authorized, Any]]:
-    """Every tool this job may call, keyed by the name the model will see.
+    """Every capability of one kind this job may use, keyed by what it is called.
+
+    One builder for all three surfaces, because they differ only in what the
+    client uses as the key: a tool and a prompt by name, a resource by URI.
+    Building them separately is how a surface ends up with its own idea of which
+    bindings are reachable, and the design is explicit that resources and
+    prompts get their own *scopes* -- not their own resolution rules.
 
     A binding that cannot be resolved is skipped rather than fatal. One
     disconnected server must not take the others out of the catalogue -- the
@@ -762,15 +774,58 @@ async def _host_catalogue(
                 },
             )
             continue
-        allowed = visible_capabilities(
-            authorized.binding,
-            authorized.snapshot.tools if authorized.snapshot else (),
-            CapabilityKind.TOOL,
-        )
-        for capability in allowed:
-            presented = protocol.presented_name(alias, capability.name, taken=catalogue)
-            catalogue[presented] = (authorized, capability)
+        available = authorized.snapshot.of_kind(kind) if authorized.snapshot else ()
+        for capability in visible_capabilities(authorized.binding, available, kind):
+            # A resource keeps its own URI as its key: the design treats an
+            # external URI as that server's identifier for the resource, so
+            # renaming it would invent an identifier the server never issued.
+            # Everything else is namespaced by the alias, because a bare name is
+            # ambiguous the moment two connections offer one.
+            key = (
+                capability.name
+                if kind in (CapabilityKind.RESOURCE, CapabilityKind.RESOURCE_TEMPLATE)
+                else protocol.presented_name(alias, capability.name, taken=catalogue)
+            )
+            catalogue.setdefault(key, (authorized, capability))
     return catalogue
+
+
+def _resource_entry(capability: Any) -> dict[str, Any]:
+    """Render one resource the way a client reads it."""
+    schema = capability.input_schema if isinstance(capability.input_schema, dict) else {}
+    entry: dict[str, Any] = {"uri": capability.name, "name": capability.name}
+    if capability.description:
+        entry["description"] = capability.description
+    if schema.get("mimeType"):
+        entry["mimeType"] = schema["mimeType"]
+    return entry
+
+
+def _prompt_entry(presented: str, capability: Any) -> dict[str, Any]:
+    """Render one prompt, under the name this session will call it by."""
+    schema = capability.input_schema if isinstance(capability.input_schema, dict) else {}
+    entry: dict[str, Any] = {"name": presented}
+    if capability.description:
+        entry["description"] = capability.description
+    if isinstance(schema.get("arguments"), list):
+        entry["arguments"] = schema["arguments"]
+    return entry
+
+
+async def _host_session(authorized: Authorized, authorization: str | None) -> Any:
+    """Open or reuse the host session for one connection, fenced to this attempt.
+
+    The member identity is the job and attempt the token names, and the owner
+    lease generation is part of the session key: a takeover produces a new key
+    and leaves the superseded session to be reaped, rather than handing the new
+    owner the old one's upstream state.
+    """
+    key = SessionKey(
+        connection_id=str(authorized.connection_id),
+        member=f"{authorized.job_id}:{_attempt_id_of(authorization) or 0}",
+        owner_lease_generation=_lease_of(authorization),
+    )
+    return await _host().open(authorized.connection, secret=authorized.secret, key=key)
 
 
 def _host_tool_entry(presented: str, authorized: Authorized, capability: Any) -> dict[str, Any]:
@@ -882,11 +937,171 @@ async def _host_post(
                 )
             )
             continue
+        if method in (
+            protocol.RESOURCES_LIST,
+            protocol.RESOURCES_TEMPLATES_LIST,
+            protocol.PROMPTS_LIST,
+        ):
+            replies.append(
+                await _host_listing(
+                    method,
+                    request_id=request_id,
+                    identity=identity,
+                    store=store,
+                    stateless=stateless,
+                )
+            )
+            continue
+        if method in (protocol.RESOURCES_READ, protocol.PROMPTS_GET):
+            replies.append(
+                await _host_fetch(
+                    payload,
+                    method=method,
+                    request_id=request_id,
+                    identity=identity,
+                    store=store,
+                    authorization=authorization,
+                    stateless=stateless,
+                )
+            )
+            continue
         replies.append(_error_reply(request_id, f"this surface does not implement {method!r}"))
 
     if not replies:
         return Response(status_code=202)
     return JSONResponse(replies if isinstance(document, list) else replies[0])
+
+
+async def _host_listing(
+    method: str,
+    *,
+    request_id: Any,
+    identity: dict[str, Any],
+    store: AgentJobStore,
+    stateless: bool,
+) -> dict[str, Any]:
+    """Answer one of the catalogue reads, filtered by this session's scopes.
+
+    Only what the binding enabled is listed. That is the rule the tool catalogue
+    already follows, and for the same reason: a model cannot be talked into
+    reading a resource it was never offered, and a server with a hundred
+    resources does not spend a small model's context on the ninety-nine this
+    session may not touch.
+    """
+    if method == protocol.RESOURCES_LIST:
+        catalogue = await _host_catalogue(identity, store, CapabilityKind.RESOURCE)
+        return _result_reply(
+            request_id,
+            {"resources": [_resource_entry(capability) for _, capability in catalogue.values()]},
+            stateless=stateless,
+        )
+    if method == protocol.RESOURCES_TEMPLATES_LIST:
+        catalogue = await _host_catalogue(identity, store, CapabilityKind.RESOURCE_TEMPLATE)
+        return _result_reply(
+            request_id,
+            {
+                "resourceTemplates": [
+                    {
+                        "uriTemplate": capability.name,
+                        "name": capability.name,
+                        **(
+                            {"description": capability.description}
+                            if capability.description
+                            else {}
+                        ),
+                    }
+                    for _, capability in catalogue.values()
+                ]
+            },
+            stateless=stateless,
+        )
+    catalogue = await _host_catalogue(identity, store, CapabilityKind.PROMPT)
+    return _result_reply(
+        request_id,
+        {
+            "prompts": [
+                _prompt_entry(presented, capability)
+                for presented, (_, capability) in sorted(catalogue.items())
+            ]
+        },
+        stateless=stateless,
+    )
+
+
+async def _host_fetch(
+    payload: dict[str, Any],
+    *,
+    method: str,
+    request_id: Any,
+    identity: dict[str, Any],
+    store: AgentJobStore,
+    authorization: str | None,
+    stateless: bool,
+) -> dict[str, Any]:
+    """Read one resource or fetch one prompt, under its own scope.
+
+    Resolved through the same catalogue and decided by the same function as a
+    tool call, which is the whole point: the design gives resources and prompts
+    their own scopes so that they are not a way round tool authorization, and a
+    separate code path is exactly how they would become one.
+    """
+    params = payload.get("params")
+    settings = params if isinstance(params, dict) else {}
+    reading = method == protocol.RESOURCES_READ
+    kind = CapabilityKind.RESOURCE if reading else CapabilityKind.PROMPT
+    key = str(settings.get("uri") if reading else settings.get("name") or "")
+    if not key:
+        return _error_reply(request_id, f"{method} needs a {'uri' if reading else 'name'}")
+
+    catalogue = await _host_catalogue(identity, store, kind)
+    entry = catalogue.get(key)
+    if entry is None:
+        listing = "resources/list" if reading else "prompts/list"
+        return _error_reply(
+            request_id,
+            f"{key!r} is not one of this session's "
+            f"{'resources' if reading else 'prompts'}. Call {listing} for the current set.",
+        )
+    authorized, capability = entry
+    held = await _decide_call(
+        authorized,
+        store,
+        name=capability.name,
+        arguments=settings.get("arguments") if not reading else None,
+        capability=capability,
+        attempt_id=_attempt_id_of(authorization),
+        lease_generation=_lease_of(authorization),
+        request_id=request_id,
+        kind=kind,
+    )
+    if held is not None:
+        return held
+
+    try:
+        session = await _host_session(authorized, authorization)
+        if reading:
+            result = await _host().read_resource(session, uri=capability.name)
+        else:
+            arguments = settings.get("arguments")
+            result = await _host().get_prompt(
+                session,
+                name=capability.name,
+                arguments=arguments if isinstance(arguments, dict) else None,
+            )
+    except HostError as exc:
+        logger.warning(
+            "agent_mcp_host_read_failed",
+            extra={
+                "event": "agent_mcp_host_read_failed",
+                "job_id": authorized.job_id,
+                "alias": authorized.alias,
+                "kind": kind.value,
+                "method": method,
+                "detail": exc.kind,
+            },
+        )
+        return _error_reply(request_id, str(exc), INTERNAL_ERROR)
+    return _result_reply(request_id, result, stateless=stateless)
 
 
 async def _host_call(
@@ -927,13 +1142,8 @@ async def _host_call(
     # lease generation is part of the session key: a takeover produces a new key
     # and leaves the superseded session to be reaped, rather than handing the
     # new owner the old one's upstream state.
-    key = SessionKey(
-        connection_id=str(authorized.connection_id),
-        member=f"{authorized.job_id}:{_attempt_id_of(authorization) or 0}",
-        owner_lease_generation=_lease_of(authorization),
-    )
     try:
-        session = await _host().open(authorized.connection, secret=authorized.secret, key=key)
+        session = await _host_session(authorized, authorization)
         outcome = await _host().call_tool(
             session,
             name=capability.name,
