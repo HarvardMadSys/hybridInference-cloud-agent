@@ -13,6 +13,7 @@ import { AdminNavigation } from '../../AdminNavigation';
 import { Activity } from '../Activity';
 import { LLMRequests } from '../LLMRequests';
 import { Resources } from '../Resources';
+import { SessionStatistics } from '../SessionStatistics';
 import {
   accessDenied,
   AdminRequired,
@@ -178,6 +179,7 @@ function RunDetails({ jobId }: { jobId: string }) {
                 onAccessDenied={onAccessDenied}
               />
             )}
+            <SessionStatistics statistics={detail.session_statistics} />
             <UsageSnapshot usage={detail.usage} />
             {detail.capabilities.llm_requests ? (
               <LLMRequests

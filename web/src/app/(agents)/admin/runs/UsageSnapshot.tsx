@@ -37,7 +37,10 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
     },
     {
       label: 'Cost (USD)',
-      gateway: cost.display,
+      gateway:
+        cost.exact && unknownRows?.spent_usd
+          ? `${cost.display} (${number(unknownRows.spent_usd)} unknown)`
+          : cost.display,
       runtime: 'Unavailable',
       title: cost.exact ?? undefined,
     },
@@ -45,98 +48,130 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
   const unknown = Object.entries(unknownRows ?? {}).filter(([, count]) => count > 0);
 
   return (
-    <section aria-labelledby="usage-heading" className="mt-8">
-      <h2 id="usage-heading" className="text-lg font-semibold text-gray-900 dark:text-gray-50">
-        Usage
+    <section aria-labelledby="token-usage-heading" className="mt-8">
+      <h2
+        id="token-usage-heading"
+        className="text-lg font-semibold text-gray-900 dark:text-gray-50"
+      >
+        Token usage
       </h2>
       <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        Totals for this run across all its executions, independent of the execution selected above.
+        Gateway totals for this run across all its executions, independent of the execution selected
+        above.
       </p>
       <div className={`${CARD} mt-4 overflow-hidden`}>
         <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
           <span>
             Gateway: <strong className="font-medium">{ledger.status}</strong>
           </span>
-          <span>Snapshot: {dateTime(ledger.queried_at)}</span>
           <span>{ledger.finalized ? 'Finalized' : 'Not finalized'}</span>
           {ledger.refreshing && <span>Accounting update in progress</span>}
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="text-xs text-gray-500 dark:text-gray-400">
-              <tr>
-                <th className="px-5 py-3 font-medium">Metric</th>
-                <th className="px-5 py-3 font-medium">Gateway ledger</th>
-                <th className="px-5 py-3 font-medium">Runtime reported</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-white/5">
-              {rows.map((row) => (
-                <tr key={row.label}>
-                  <th
-                    scope="row"
-                    className="px-5 py-2.5 font-normal text-gray-600 dark:text-gray-400"
-                  >
-                    {row.label}
-                  </th>
-                  <td className="px-5 py-2.5 tabular-nums" title={row.title}>
-                    {row.gateway}
-                  </td>
-                  <td className="px-5 py-2.5 tabular-nums">{row.runtime}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="space-y-2 border-t border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-          <p>
-            Gateway totals use each execution’s grant time window. Runtime totals are deduplicated
-            reports; activity messages are not model-call counts.
-          </p>
           {ledger.missing_attempts > 0 && (
-            <p className="text-amber-700 dark:text-amber-400">
+            <span className="text-amber-700 dark:text-amber-400">
               {ledger.missing_attempts} execution(s) have no gateway totals.
-            </p>
+            </span>
           )}
           {ledger.estimated_calls > 0 && (
-            <p>{number(ledger.estimated_calls)} calls contain estimated usage.</p>
-          )}
-          {unknown.length > 0 && (
-            <p>
-              Rows missing metrics: {unknown.map(([key, count]) => `${key}: ${count}`).join(' · ')}
-            </p>
-          )}
-          {ledger.attempts.some((attempt) => attempt.reason) && (
-            <p>
-              Availability:{' '}
-              {Array.from(
-                new Set(ledger.attempts.map((attempt) => attempt.reason).filter(Boolean)),
-              ).join(', ')}
-            </p>
+            <span>{number(ledger.estimated_calls)} calls contain estimated usage.</span>
           )}
         </div>
-        <details className="border-t border-gray-100 px-5 py-4 text-xs dark:border-white/5">
-          <summary className="cursor-pointer font-medium text-gray-600 dark:text-gray-400">
-            Attribution windows
-          </summary>
-          <ul className="mt-3 space-y-3 text-gray-500 dark:text-gray-400">
-            {ledger.attempts.map((attempt) => (
-              <li key={attempt.attempt_id}>
-                <p>
-                  Execution {attempt.attempt_no} · {attempt.status}
-                </p>
-                {attempt.windows.length ? (
-                  attempt.windows.map((window, index) => (
-                    <p key={index} className="mt-1">
-                      {dateTime(window.since)} – {dateTime(window.until)} · request start time
-                    </p>
-                  ))
-                ) : (
-                  <p className="mt-1">Attribution window unavailable.</p>
-                )}
-              </li>
+        <table aria-label="Token usage totals" className="w-full text-left text-sm">
+          <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+            {rows.map((row) => (
+              <tr key={row.label}>
+                <th
+                  scope="row"
+                  className="px-5 py-2.5 font-normal text-gray-600 dark:text-gray-400"
+                >
+                  {row.label}
+                </th>
+                <td className="px-5 py-2.5 text-right tabular-nums" title={row.title}>
+                  {row.gateway}
+                </td>
+              </tr>
             ))}
-          </ul>
+          </tbody>
+        </table>
+        <details className="border-t border-gray-100 text-xs dark:border-white/5">
+          <summary className="cursor-pointer px-5 py-4 font-medium text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson dark:text-gray-400 dark:focus-visible:ring-crimson-light">
+            Usage details
+          </summary>
+          <div className="space-y-2 px-5 pb-4 text-gray-500 dark:text-gray-400">
+            <p>Snapshot: {dateTime(ledger.queried_at)}</p>
+            <p>
+              Gateway totals use each execution’s grant time window. Runtime totals are deduplicated
+              reports from the agent, provided for comparison; do not add the two sources together.
+              Activity messages are not model-call counts.
+            </p>
+            {unknown.length > 0 && (
+              <p>
+                Rows missing metrics:{' '}
+                {unknown.map(([key, count]) => `${key}: ${count}`).join(' · ')}
+              </p>
+            )}
+            {ledger.attempts.some((attempt) => attempt.reason) && (
+              <p>
+                Availability:{' '}
+                {Array.from(
+                  new Set(ledger.attempts.map((attempt) => attempt.reason).filter(Boolean)),
+                ).join(', ')}
+              </p>
+            )}
+          </div>
+          <div className="overflow-x-auto">
+            <table aria-label="Usage source comparison" className="w-full text-left text-sm">
+              <thead className="text-xs text-gray-500 dark:text-gray-400">
+                <tr>
+                  <th scope="col" className="px-5 py-3 font-medium">
+                    Metric
+                  </th>
+                  <th scope="col" className="px-5 py-3 font-medium">
+                    Gateway ledger
+                  </th>
+                  <th scope="col" className="px-5 py-3 font-medium">
+                    Runtime reported
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-white/5">
+                {rows.map((row) => (
+                  <tr key={row.label}>
+                    <th
+                      scope="row"
+                      className="px-5 py-2.5 font-normal text-gray-600 dark:text-gray-400"
+                    >
+                      {row.label}
+                    </th>
+                    <td className="px-5 py-2.5 tabular-nums" title={row.title}>
+                      {row.gateway}
+                    </td>
+                    <td className="px-5 py-2.5 tabular-nums">{row.runtime}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="border-t border-gray-100 px-5 py-4 dark:border-white/5">
+            <h3 className="font-medium text-gray-600 dark:text-gray-400">Attribution windows</h3>
+            <ul className="mt-3 space-y-3 text-gray-500 dark:text-gray-400">
+              {ledger.attempts.map((attempt) => (
+                <li key={attempt.attempt_id}>
+                  <p>
+                    Execution {attempt.attempt_no} · {attempt.status}
+                  </p>
+                  {attempt.windows.length ? (
+                    attempt.windows.map((window, index) => (
+                      <p key={index} className="mt-1">
+                        {dateTime(window.since)} – {dateTime(window.until)} · request start time
+                      </p>
+                    ))
+                  ) : (
+                    <p className="mt-1">Attribution window unavailable.</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
         </details>
       </div>
     </section>

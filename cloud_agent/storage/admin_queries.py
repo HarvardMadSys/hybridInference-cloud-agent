@@ -283,15 +283,17 @@ class AdminRunQueries:
         return dict(row) if row is not None else None
 
     async def usage_inputs(self, job_id: str) -> dict[str, Any]:
-        """Project only numeric usage and response identity for existing accounting.
+        """Project numeric usage and hashed identities for accounting and timing.
 
-        Hashing response IDs preserves their equality without fetching their
-        arbitrary text. Attempt totals, duplicate blocks, zero-output detection
-        and each runtime's cache convention still use the shared summarizer.
+        Hashing response and tool IDs preserves equality without fetching their
+        arbitrary text. Tool pairs stay within an execution. Attempt totals,
+        duplicate blocks, zero-output detection and each runtime's cache
+        convention still use the shared summarizer.
         """
         async with self._read() as conn:
             attempts = await conn.fetch(
-                "SELECT job_id, started_at FROM agent_attempts WHERE job_id = $1", job_id
+                "SELECT id AS attempt_id, job_id, started_at FROM agent_attempts WHERE job_id = $1",
+                job_id,
             )
             rows = await conn.fetch(
                 f"""
@@ -316,6 +318,16 @@ class AdminRunQueries:
                            END,
                            'usage_scope', CASE WHEN e.payload->>'usage_scope' = 'attempt'
                                THEN 'attempt' END,
+                           'id', CASE WHEN e.event_type = 'tool_use'
+                               AND jsonb_typeof(e.payload->'id') = 'string'
+                               AND e.payload->>'id' <> ''
+                               THEN encode(sha256(convert_to(e.payload->>'id', 'UTF8')), 'hex')
+                           END,
+                           'tool_use_id', CASE WHEN e.event_type = 'tool_result'
+                               AND jsonb_typeof(e.payload->'tool_use_id') = 'string'
+                               AND e.payload->>'tool_use_id' <> ''
+                               THEN encode(sha256(convert_to(e.payload->>'tool_use_id', 'UTF8')), 'hex')
+                           END,
                            'has_text', COALESCE(e.payload->>'text', '') ~ '[^[:space:]]'
                        ) AS payload
                 FROM agent_job_events e
