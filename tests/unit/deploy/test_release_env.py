@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -49,6 +50,139 @@ def manifest() -> dict[str, Any]:
             {"role": "egress", "image": image("egress")},
         ],
     }
+
+
+def full_manifest() -> dict[str, Any]:
+    """A document the published schema accepts, which the CLI now requires.
+
+    The mapping below reads four fields; a manifest has ten, and the ones it does
+    not read are what a deployment is entitled to assume. Review asked for the
+    full check at the entry point, so the CLI tests use a document that would
+    pass one.
+    """
+    platforms = {"control": "linux/arm64", "web": "linux/arm64"}
+    artifacts = [
+        {"role": "control", "image": image("control"), "platforms": ["linux/arm64"]},
+        {
+            "role": "web",
+            "variant": "root",
+            "base_path": "",
+            "image": image("web", "root"),
+            "platforms": ["linux/arm64"],
+        },
+        {
+            "role": "web",
+            "variant": "agents",
+            "base_path": "/agents",
+            "image": image("web", "agents"),
+            "platforms": ["linux/arm64"],
+        },
+    ]
+    for role in ("runner", "sandbox", "tunnel", "egress"):
+        artifacts.append({"role": role, "image": image(role), "platforms": ["linux/amd64"]})
+    del platforms
+    return {
+        "schema_version": 1,
+        "source_repository": "HarvardMadSys/hybridInference-cloud-agent",
+        "source_commit": COMMIT,
+        "deploy_protocol": "shared-live-exact-sha-v3",
+        "artifacts": artifacts,
+        "runtime_catalog": {"codex": {"default": "0.145.0", "versions": ["0.145.0"]}},
+        "recipe": {
+            "url": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/x/r.tgz",
+            "sha256": "a" * 64,
+            "format_version": 1,
+        },
+        "database_revision": "0004_residency_on_membership",
+        "compatibility": {
+            "minimum_deployer": "shared-live-exact-sha-v3",
+            "verified_upgrade_from": [],
+            "verified_rollback_to": [],
+        },
+        "publisher_run_url": (
+            "https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/1"
+        ),
+    }
+
+
+def test_a_partial_document_is_not_a_manifest(tmp_path: Path) -> None:
+    """Four fields are enough to map and not enough to deploy.
+
+    Caught at the entry point rather than at the mapping, because the mapping
+    cannot tell "no recipe" from "no recipe field it reads".
+    """
+    path = tmp_path / "partial.json"
+    path.write_text(json.dumps({"source_commit": COMMIT, "artifacts": manifest()["artifacts"]}))
+    output = tmp_path / "release.env"
+    assert (
+        re_.main(
+            ["--manifest", str(path), "--stack", "host", "--output", str(output)],
+        )
+        == 1
+    )
+    assert not output.exists()
+
+
+def test_the_fragment_reaches_a_child_process_and_a_host_conflict_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The handoff, executed: dotenv in, bash in between, environment out.
+
+    Review reproduced the gap this closes — a host `.env` naming a different SHA
+    was invisible to a helper reading `os.environ`, the fragment was sourced over
+    the top of it, and the values never reached a child process at all. A unit
+    test that passes an ambient dictionary cannot see any of that, so this one
+    runs the real thing.
+    """
+    manifest_path = tmp_path / "release.json"
+    manifest_path.write_text(json.dumps(full_manifest()))
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"AGENT_DEPLOYMENT_SHA={'b' * 40}\n")
+    fragment = tmp_path / "release.env"
+
+    refused = re_.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--stack",
+            "host",
+            "--ambient-file",
+            str(dotenv),
+            "--output",
+            str(fragment),
+        ]
+    )
+    assert refused == 1, "a host that names another release must not be deployed over"
+    assert not fragment.exists()
+
+    dotenv.write_text("AGENT_HOST_SLOTS=3\n")
+    assert (
+        re_.main(
+            [
+                "--manifest",
+                str(manifest_path),
+                "--stack",
+                "host",
+                "--ambient-file",
+                str(dotenv),
+                "--output",
+                str(fragment),
+            ]
+        )
+        == 0
+    )
+
+    child = 'import os; print(os.environ["AGENT_DEPLOYMENT_SHA"])'
+    seen = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail; source {fragment}; python3 -c '{child}'"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert seen.stdout.strip() == COMMIT, (
+        "the fragment has to be exported, or the readiness probe and Compose — both children "
+        "— see nothing"
+    )
 
 
 def test_the_control_stack_takes_images_and_the_commit_from_the_release() -> None:
@@ -176,7 +310,7 @@ def test_a_variant_and_a_base_path_must_agree() -> None:
 
 def test_the_cli_writes_a_file_and_refuses_a_bad_manifest(tmp_path: Path) -> None:
     manifest_path = tmp_path / "release.json"
-    manifest_path.write_text(json.dumps(manifest()))
+    manifest_path.write_text(json.dumps(full_manifest()))
     output = tmp_path / "release.env"
     assert (
         re_.main(
@@ -195,7 +329,7 @@ def test_the_cli_writes_a_file_and_refuses_a_bad_manifest(tmp_path: Path) -> Non
     )
     assert "AGENT_WEB_IMAGE=" in output.read_text()
 
-    broken = manifest()
+    broken = full_manifest()
     broken["artifacts"] = [a for a in broken["artifacts"] if a["role"] != "control"]
     manifest_path.write_text(json.dumps(broken))
     missing = tmp_path / "missing.env"

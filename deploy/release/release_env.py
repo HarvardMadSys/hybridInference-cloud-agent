@@ -17,6 +17,11 @@ intended.
 Values are validated before they are written, because these are shell variables
 and the manifest is a document from somewhere else. Nothing here may contain a
 character the shell would treat as syntax.
+
+The document is checked against the published schema first, and the values a
+host has already configured are passed in explicitly — from the same dotenv
+files the deploy script loads — because `os.environ` never sees a shell
+variable, and a conflict that cannot be seen cannot be refused.
 """
 
 from __future__ import annotations
@@ -31,6 +36,9 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
     from collections.abc import Mapping, Sequence
+
+#: The published contract this module checks a manifest against before mapping it.
+SCHEMA_PATH = Path(__file__).resolve().parent / "manifest.schema.json"
 
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
 
@@ -67,6 +75,71 @@ def _checked(name: str, value: str, pattern: re.Pattern[str], what: str) -> str:
     if not pattern.match(value or ""):
         raise ReleaseEnvError(f"{name} is {value!r}, which is not {what}")
     return value
+
+
+def ambient_from_files(paths: Sequence[Path]) -> dict[str, str]:
+    """The values a deploy host has already configured, read the way it reads them.
+
+    The deploy scripts load `.env` into *shell variables*, not into the
+    environment, so `os.environ` is the wrong place to look for a conflict: a
+    host that named a different image is invisible there, the fragment is
+    sourced over the top of it, and the deployment runs a release nobody
+    reviewed. Passing the same files the script loads is what closes that.
+    """
+    from dotenv import dotenv_values
+
+    values: dict[str, str] = {}
+    for path in paths:
+        if not path.exists():
+            raise ReleaseEnvError(f"{path} does not exist, so its values cannot be honoured")
+        for key, value in dotenv_values(path).items():
+            if value is not None:
+                values[key] = value
+    return values
+
+
+def parsed_ambient(pairs: Sequence[str]) -> dict[str, str]:
+    """`KEY=VALUE` arguments, for values that came from somewhere else entirely."""
+    values: dict[str, str] = {}
+    for pair in pairs:
+        key, separator, value = pair.partition("=")
+        if not separator or not key:
+            raise ReleaseEnvError(f"--ambient expects KEY=VALUE, got {pair!r}")
+        values[key] = value
+    return values
+
+
+def validate_manifest(manifest: Mapping[str, Any], schema_path: Path | None = None) -> None:
+    """Refuse a document that is not a release manifest at all.
+
+    The mapping below needs four fields; the document has ten, and the ones it
+    does not read — the protocol, the recipe, the runtime catalog — are what a
+    deployment is entitled to assume. Treating a partial document as a manifest
+    is how a deployment ends up running images from a release that was never
+    published as one.
+
+    `jsonschema` is a development dependency, so a deploy host needs it named in
+    the recipe's requirements; an environment that cannot import it refuses
+    rather than skipping the check.
+    """
+    path = schema_path or SCHEMA_PATH
+    try:
+        import jsonschema
+    except ImportError as error:  # pragma: no cover - the deploy host installs it
+        raise ReleaseEnvError(
+            f"jsonschema is not installed, so this manifest cannot be checked against "
+            f"{path.name}. Install the deployment requirements before deploying; an "
+            "unchecked manifest is not a release."
+        ) from error
+
+    schema = json.loads(path.read_text())
+    try:
+        jsonschema.validate(instance=dict(manifest), schema=schema)
+    except jsonschema.ValidationError as error:
+        where = "/".join(str(part) for part in error.absolute_path) or "<document>"
+        raise ReleaseEnvError(
+            f"this is not a release manifest: {path.name} rejects it at {where}: {error.message}"
+        ) from error
 
 
 def environment_for(
@@ -149,6 +222,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--stack", required=True, choices=sorted(STACK_ROLES))
     parser.add_argument("--variant", choices=("root", "agents"), default=None)
     parser.add_argument(
+        "--ambient-file",
+        type=Path,
+        action="append",
+        default=[],
+        help="A dotenv file this host has already loaded. Repeatable; passed by the deploy "
+        "scripts so a conflict is found where it happens rather than in os.environ, which "
+        "never sees a shell variable.",
+    )
+    parser.add_argument(
+        "--ambient",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="An already-resolved value from somewhere that is not a file. Repeatable.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         help="Write the fragment here. Omit to print it, which is what a person debugging a "
@@ -158,9 +247,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         manifest = json.loads(arguments.manifest.read_text())
-        environment = environment_for(
-            manifest, arguments.stack, arguments.variant, ambient=os.environ
-        )
+        validate_manifest(manifest)
+        ambient = {
+            **os.environ,
+            **ambient_from_files(arguments.ambient_file),
+            **parsed_ambient(arguments.ambient),
+        }
+        environment = environment_for(manifest, arguments.stack, arguments.variant, ambient=ambient)
     except (ReleaseEnvError, json.JSONDecodeError) as error:
         print(f"refusing to configure this deployment: {error}", file=sys.stderr)
         return 1
