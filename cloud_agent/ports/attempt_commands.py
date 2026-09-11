@@ -1,8 +1,7 @@
 """Port: the attempt lifecycle -- claim, heartbeat, transition, retire.
 
-Where the lease and its fencing generation live. Every write here is
-fenced or idempotent, because a superseded attempt must not be able to
-publish anything.
+Where the lease and its fencing generation live. Every write here is fenced
+or idempotent, because a superseded attempt must not publish anything.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.

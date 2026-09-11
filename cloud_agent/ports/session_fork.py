@@ -1,8 +1,8 @@
 """Port: forking a native session into a sibling sandbox member.
 
-A fork is a multi-step operation with its own claim, materialization
-record, and failure cleanup; each step is exposed so the caller can be
-resumed at any point without forking twice.
+A fork is a multi-step operation with its own claim, materialization record,
+and failure cleanup; each step is exposed so the caller can be resumed at any
+point without forking twice.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.

@@ -1,7 +1,7 @@
 """Port: which host holds a sandbox group resident.
 
-Establishment, heartbeat, release, and the reaper that expires what
-stopped heartbeating.
+Establishment, heartbeat, release, and the reaper that expires what stopped
+heartbeating.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.

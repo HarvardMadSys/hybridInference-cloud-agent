@@ -9,7 +9,11 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from datetime import datetime
 
 
 class HostPoolRepository(Protocol):
@@ -84,6 +88,12 @@ class HostPoolRepository(Protocol):
         name. :meth:`consume_enroll_token` will only spend a token under the
         name an admin bound to it, so reaching this method under a live host's
         name is an operator's decision rather than a machine's.
+
+        Re-enrollment also **rotates the capacity epoch and clears the stored
+        observation**. A rebuilt machine keeps its name, so nothing else
+        distinguishes the new box from the one it replaced; without the
+        rotation the admin chart would join the two machines' histories into
+        one line that no machine ever drew.
         """
         ...
 
@@ -102,6 +112,9 @@ class HostPoolRepository(Protocol):
         self,
         *,
         host: str,
+        credential_hash: str | None = None,
+        capacity: Mapping[str, Any] | None = None,
+        capacity_sample_age_ms: int | None = None,
         physical_host: str | None = None,
         slots_total: int | None = None,
         runner_version: str | None = None,
@@ -124,6 +137,38 @@ class HostPoolRepository(Protocol):
         Returns ``None`` for an unknown host. Every field is optional and only
         overwrites when supplied, so a heartbeat that carries nothing but
         liveness does not blank out what enrollment declared.
+
+        **The capacity block is written by a second statement, deliberately.**
+        Its acceptance conditions are not the heartbeat's: the credential must
+        still be the one this request authenticated with, the sample must not
+        be one already stored, and an older observation must not overwrite a
+        younger one. They are enforced in SQL rather than here because the
+        sequence they guard against is a race — credential A authenticates, an
+        operator re-enrolls the name under credential B, and A's delayed
+        request arrives afterwards. Checking "is this still the right
+        credential" outside the write would let exactly that request through.
+        That second statement runs in its own savepoint, so a block the
+        database refuses costs the host nothing but the block: the liveness
+        half of the same call still commits.
+
+        Args:
+            host: The authenticated host name.
+            credential_hash: Digest the request authenticated with. The
+                capacity write is refused unless the row still holds it.
+            capacity: The validated, normalized capacity block to store.
+            capacity_sample_age_ms: How old the observation was when sent.
+            physical_host: Admin grouping label; never an identity.
+            slots_total: Claim ceiling this host now reports.
+            runner_version: Runner build the host is running.
+            broker_url: Address the control plane reaches this host's broker.
+            capabilities: What this host can run.
+            sandbox_runtime: Attested container runtime.
+            sandbox_image_digest: Digest of the sandbox image it launches.
+            runtime_versions: Default CLI version per runtime.
+            runtime_versions_available: Every CLI version its image holds.
+
+        Returns:
+            The updated host row, or ``None`` when the host no longer exists.
         """
         ...
 
@@ -204,7 +249,9 @@ class HostPoolRepository(Protocol):
         """The new-chat placement host, or ``None`` when any may materialize."""
         ...
 
-    async def runner_pool(self) -> tuple[list[dict[str, Any]], str | None, dict[str, str]]:
+    async def runner_pool(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, str], datetime]:
         """The pool, the pinned host and the version selection, read together.
 
         One transaction because all three are shown side by side: read
@@ -213,6 +260,18 @@ class HostPoolRepository(Protocol):
         the operator is using to fix a bug. The version selection joined that
         for the same reason — a page offering a menu that no longer contains
         the selection it displays is the same failure wearing a different hat.
+
+        **Repeatable read, and read-only.** The pool is the page an operator
+        reads while changing things, so a claim, a pin and a drain landing
+        between the policy read and the host read used to be able to produce a
+        list that never existed: slots already spent shown against a pin not
+        yet switched. One snapshot for all of it removes that class of answer,
+        and ``observed_at`` is the database's own instant for the same
+        snapshot, so the ages the page renders are measured from the moment the
+        data was taken rather than from whenever the client's clock says.
+
+        Returns:
+            ``(hosts, active_host, selected_versions, observed_at)``.
         """
         ...
 

@@ -1,7 +1,7 @@
 """Port: sandbox snapshots -- capture, publication, and base import.
 
-Two queues with different failure modes: capturing a sandbox, and
-publishing or importing the artifact that capture produced.
+Two queues with different failure modes: capturing a sandbox, and publishing
+or importing the artifact that capture produced.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.

@@ -15,6 +15,7 @@ from cloud_agent.ports.conversation_queries import ConversationQueries
 from cloud_agent.ports.credential_queries import CredentialQueries
 from cloud_agent.ports.execution_queries import ExecutionQueries
 from cloud_agent.ports.grants import GrantRepository
+from cloud_agent.ports.host_capacity import HostCapacityRepository
 from cloud_agent.ports.host_pool import HostPoolRepository
 from cloud_agent.ports.ledger import LedgerRepository
 from cloud_agent.ports.mcp import McpConnectionRepository
@@ -32,6 +33,7 @@ __all__ = [
     "CredentialQueries",
     "ExecutionQueries",
     "GrantRepository",
+    "HostCapacityRepository",
     "HostPoolRepository",
     "LedgerRepository",
     "McpConnectionRepository",

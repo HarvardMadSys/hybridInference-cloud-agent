@@ -1,7 +1,7 @@
 """Port: reading conversations, their jobs, and the project list.
 
-The read half of the conversation surface. Routes and the worker both
-read through it; nothing here writes.
+The read half of the conversation surface. Routes and the worker both read
+through it; nothing here writes.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.

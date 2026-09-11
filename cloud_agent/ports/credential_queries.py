@@ -1,7 +1,7 @@
 """Port: resolving the model credential an attempt runs with.
 
-One operation, because the credential lookup is the only piece of the
-store the inference relay needs.
+One operation, because the credential lookup is the only piece of the store
+the inference relay needs.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.

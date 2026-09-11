@@ -1,7 +1,7 @@
 """Port: repository authorization and the GitLab credentials behind it.
 
-Repo grants, OAuth state, and the stored GitLab connection. Declared
-here because the publishing path needs it without the whole store.
+Repo grants, OAuth state, and the stored GitLab connection. Declared here
+because the publishing path needs it without the whole store.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.
