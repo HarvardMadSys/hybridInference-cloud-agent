@@ -241,7 +241,7 @@ Timing ›
 证据优先级：
 
 1. 对应 job + attempt + call 的 tool telemetry，且 `timing_source` 表明精确执行边界：显示 `Tool execution hooks`。
-2. 正确配对的调用/结果事件时间：显示 `Session timestamps`。在本页说明其区间是 call-record → result-record，可能包含排队、runtime/转发延迟；不是纯工具 CPU 时间。
+2. 正确配对的调用/结果事件时间：显示 `Session timestamps`。该区间是 call-record → result-record，可能包含排队、runtime/转发延迟；页签不为此另加说明。
 3. 没有可用证据：`Not recorded`。
 
 若精确 duration 来自执行钩子而只有事件接收时间，不能把事件接收时间标为精确 Started；分别标识 `Recorded at` 与 duration 的来源。不同证据的开始和结束时间不能混搭求差。

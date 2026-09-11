@@ -283,7 +283,7 @@ describe('TrajectoryInspector', () => {
     expect(screen.getAllByText('Bash').length).toBeGreaterThan(0);
   });
 
-  it('times a call from its records and says what that interval covers', () => {
+  it('times a call from its records', () => {
     const key = toolKeyOf(ASSISTANT_WITH_TOOL);
     render(
       <Harness
@@ -294,7 +294,6 @@ describe('TrajectoryInspector', () => {
 
     expect(screen.getByText('Session timestamps')).toBeInTheDocument();
     expect(screen.getByText('2s')).toBeInTheDocument();
-    expect(screen.getByText(/not pure tool execution time/)).toBeInTheDocument();
   });
 
   it('prefers the sandbox hooks when the attempt recorded exact timing', async () => {

@@ -133,6 +133,17 @@ export function ToolStepDetails({
       </DetailRow>
     </DetailRows>
   );
+  // Only the readings that need a caveat get a sentence. Exact hook timing has
+  // no exposed boundaries, and a call whose records disagree claims no
+  // measurement at all. An interval bracketed by two stored records is named by
+  // the Timing source row, so it is not explained again here.
+  const timingNote = exactTiming
+    ? 'The duration comes from the sandbox hooks that bracket the call. The exact start and finish boundaries are not exposed here.'
+    : step.ambiguity
+      ? 'The records for this call disagree, so no measurement is attributed to it: not the sandbox timing and not the interval between the stored records.'
+      : step.timing.source === 'session_timestamps'
+        ? null
+        : 'No evidence for this call\u2019s execution window was recorded.';
 
   if (tab === 'payload') {
     return (
@@ -247,15 +258,9 @@ export function ToolStepDetails({
     return (
       <TabPanel idPrefix={idPrefix} tab="timing">
         {timingRows}
-        <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          {exactTiming
-            ? 'The duration comes from the sandbox hooks that bracket the call. The exact start and finish boundaries are not exposed here.'
-            : step.ambiguity
-              ? 'The records for this call disagree, so no measurement is attributed to it: not the sandbox timing and not the interval between the stored records.'
-              : step.timing.source === 'session_timestamps'
-                ? 'This interval runs from the stored call record to the stored result record. It includes queueing and runtime or forwarding delay, so it is not pure tool execution time.'
-                : 'No evidence for this call\u2019s execution window was recorded.'}
-        </p>
+        {timingNote ? (
+          <p className="text-[11px] text-gray-400 dark:text-gray-500">{timingNote}</p>
+        ) : null}
       </TabPanel>
     );
   }
