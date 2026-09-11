@@ -8,6 +8,7 @@ import type {
 } from '@/lib/api/admin';
 
 import {
+  CAPACITY_FRESH_SECONDS,
   CHART_VIEW,
   capacitySeries,
   chartGeometry,
@@ -379,7 +380,7 @@ describe('retained sandboxes', () => {
 });
 
 describe('one physical server', () => {
-  it('shows the freshest fresh observation and the oldest contributing age', () => {
+  it('shows the freshest fresh observation, and ages only what it shows', () => {
     const fresh = host({
       host: 'runner-a',
       capacity: capacity({ sample_age_seconds: 12, freshness: 'fresh', cpu_percent: 11 }),
@@ -387,13 +388,92 @@ describe('one physical server', () => {
     const stale = host({
       host: 'runner-b',
       capacity: capacity({ sample_age_seconds: 400, freshness: 'stale', cpu_percent: 90 }),
+      labels: { physical_host: 'runner-a' },
     });
     const facts = groupCapacityFacts([stale, fresh]);
     expect(facts.source?.host).toBe('runner-a');
     expect(facts.capacity?.cpu_percent).toBe(11);
-    // A fresh CPU sample must not pass the old inventory off as just collected.
-    expect(facts.oldestSampleAgeSeconds).toBe(400);
+    // The expired source contributes nothing to this row — not its CPU, not
+    // its sandbox count — so it must not set the row's age either. Its own
+    // time is listed in the panel, next to the number it belongs to.
+    expect(facts.oldestSampleAgeSeconds).toBe(12);
+    // The row still says something on it has expired.
     expect(facts.stale).toBe(true);
+  });
+
+  it('expires an observation locally once the page stops hearing from the pool', () => {
+    // The server's `freshness` describes the moment it answered. A page that
+    // has been open, or failing to poll, for another two minutes is showing a
+    // reading that has since expired — and the stale marker has to say so, or
+    // the age ticking up beside a "fresh" label is the one reading that looks
+    // current and is not.
+    const members = [host({ capacity: capacity({ sample_age_seconds: 5, freshness: 'fresh' }) })];
+    const expiresAfterMs = (CAPACITY_FRESH_SECONDS - 5) * 1000 + 1;
+    expect(groupCapacityFacts(members, 0).stale).toBe(false);
+    expect(groupCapacityFacts(members, 30_000).stale).toBe(false);
+    // The threshold is on the age by now, not on the wait: exactly at it the
+    // reading is still current, and one millisecond later it is not.
+    expect(groupCapacityFacts(members, expiresAfterMs - 1).stale).toBe(false);
+    expect(groupCapacityFacts(members, expiresAfterMs).stale).toBe(true);
+  });
+
+  it('excludes an expired source from the current sandbox count', () => {
+    // Two environments behind one physical name, one of them measured an hour
+    // ago. Adding them states a total for a machine nobody measured: the old
+    // one still holds containers that have since been stopped and cannot know
+    // about any started since. It is excluded, named, and the total becomes a
+    // lower bound.
+    const now = host({
+      host: 'runner-now',
+      labels: { physical_host: 'box' },
+      capacity: capacity({
+        sample_age_seconds: 5,
+        inventory: inventory({ namespace: 'example-a', running: 2, stopped: 0 }),
+      }),
+    });
+    const old = host({
+      host: 'runner-old',
+      labels: { physical_host: 'box' },
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        inventory: inventory({ namespace: 'example-b', running: 9, stopped: 0 }),
+      }),
+    });
+
+    const summary = summarizeSandboxes([now, old], (member) => member.host === 'runner-old');
+
+    expect(summary.text).toBe('≥2 observed · Partial');
+    expect(summary.partial).toBe(true);
+    expect(summary.reasons).toContain('source_stale');
+    expect(summary.contributingHosts).toEqual(['runner-now']);
+    expect(summary.explanation).toContain('runner-old');
+
+    // Both sources are still listed, each with the time it belongs to.
+    expect(summary.perSource.map((line) => line.host)).toEqual(['runner-now', 'runner-old']);
+    expect(summary.perSource[1].counts).toBe('9 running · 0 stopped');
+  });
+
+  it('shows a last observation as stale rather than as the current count', () => {
+    // Nothing current was measured, so there is no total to give. The last
+    // reading is still worth showing — with the host and the fact that it has
+    // expired attached to it, and with nothing counted as current.
+    const only = host({
+      host: 'runner-old',
+      capacity: capacity({
+        sample_age_seconds: 3600,
+        freshness: 'stale',
+        inventory: inventory({ running: 9, stopped: 0 }),
+      }),
+    });
+
+    const summary = summarizeSandboxes([only], () => true);
+
+    expect(summary.text).toBe('9 running · 0 stopped');
+    expect(summary.staleOnly).toBe(true);
+    expect(summary.partial).toBe(true);
+    expect(summary.contributingHosts).toEqual([]);
+    expect(summary.explanation).toContain('runner-old');
   });
 
   it('falls back to a stale observation when that is all there is', () => {

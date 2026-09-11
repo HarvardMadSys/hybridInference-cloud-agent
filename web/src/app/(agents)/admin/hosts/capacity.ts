@@ -203,6 +203,7 @@ const REASON_LABELS: Record<string, string> = {
   docker_timeout: 'The Docker container listing timed out',
   duplicate_sandbox_id: 'One sandbox id was seen on two containers',
   sources_not_summed: 'Two sources cannot be proven to describe the same Docker host',
+  source_stale: 'An expired observation is excluded from the current count',
   inventory_not_reported: 'At least one enrollment on this server reported no inventory',
 };
 
@@ -235,6 +236,17 @@ export interface SandboxSummary {
   explanation: string | null;
   /** Every contributing enrollment, newest first, for the expanded panel. */
   perSource: SandboxSourceLine[];
+  /**
+   * The enrollments whose counts are inside `text`. Empty when nothing was
+   * counted, which is what tells the caller that a number on screen is a last
+   * observation rather than a current total.
+   */
+  contributingHosts: string[];
+  /**
+   * True when every report behind `text` is stale: the number is the last
+   * thing measured, and the caller must not draw it as the current count.
+   */
+  staleOnly: boolean;
 }
 
 interface Tally {
@@ -340,10 +352,25 @@ function sourceLine(report: InventoryReport): SandboxSourceLine {
  *   * a report with no measurement at all — an older runner, a host that has
  *     only just enrolled — leaves the total a lower bound rather than letting
  *     the machines that did report look like the whole server;
- *   * any partial, unavailable or unscoped contributor makes the whole a lower
- *     bound, and the reasons travel with it.
+ *   * any partial, unavailable or unscoped contributor makes the whole a
+ *     lower bound, and the reasons travel with it;
+ *   * a stale report is not part of the current count at all. It describes a
+ *     machine as it was an hour ago — a container that has since been stopped
+ *     is still in it, and one started since is not — so counting it would
+ *     state a total nobody measured. It is listed per source, with its time,
+ *     and it makes the coverage incomplete.
+ *
+ * Args:
+ *   members: The enrollment rows grouped under one physical name.
+ *   isStale: Whether a member's observation has expired, by the server's own
+ *     age plus however long ago that answer arrived. Passed in rather than
+ *     read off `freshness` so that one definition of "stale" serves the row,
+ *     the panel and this count.
  */
-export function summarizeSandboxes(members: AgentRunnerHost[]): SandboxSummary {
+export function summarizeSandboxes(
+  members: AgentRunnerHost[],
+  isStale: (member: AgentRunnerHost) => boolean = () => false,
+): SandboxSummary {
   const reports: InventoryReport[] = [];
   for (const member of members) {
     const capacity = member.capacity;
@@ -356,6 +383,11 @@ export function summarizeSandboxes(members: AgentRunnerHost[]): SandboxSummary {
   const perSource = [...reports]
     .sort((a, b) => observedAtMs(b.capacity) - observedAtMs(a.capacity))
     .map(sourceLine);
+  const staleHosts = new Set(
+    members.filter((member) => isStale(member)).map((member) => member.host),
+  );
+  const fresh = reports.filter((report) => !staleHosts.has(report.host));
+  const stale = reports.filter((report) => staleHosts.has(report.host));
 
   if (reports.length === 0) {
     const measured = members.some((member) => member.capacity !== null);
@@ -367,12 +399,14 @@ export function summarizeSandboxes(members: AgentRunnerHost[]): SandboxSummary {
         ? 'A capacity observation arrived without a container inventory.'
         : 'No capacity observation has arrived from this server.',
       perSource,
+      contributingHosts: [],
+      staleOnly: false,
     };
   }
 
   const byNamespace = new Map<string, InventoryReport>();
   const unscoped: InventoryReport[] = [];
-  for (const report of reports) {
+  for (const report of fresh) {
     const namespace = report.inventory.namespace?.trim() ?? '';
     if (!namespace) {
       unscoped.push(report);
@@ -399,19 +433,40 @@ export function summarizeSandboxes(members: AgentRunnerHost[]): SandboxSummary {
     reasons.add('unscoped_legacy_containers');
   }
   if (unreported > 0) reasons.add('inventory_not_reported');
+  if (stale.length > 0) reasons.add('source_stale');
 
   const counted = contributing.length > 0 ? contributing : unscoped;
   const countable = counted.filter((report) => report.inventory.status !== 'unavailable');
   if (countable.length === 0) {
+    if (stale.length > 0) {
+      // Nothing current was measured, so what is left is the last observation.
+      // It is shown — an operator wants to know what the server last looked
+      // like — but as a stale one, never as the current total.
+      const last = stale[0];
+      return {
+        text: countPhrase(tallyOf(last.inventory)),
+        partial: true,
+        reasons: [...reasons],
+        explanation:
+          `The newest observation is stale. This is what ${last.host} last reported, ` +
+          'not the current count.',
+        perSource,
+        contributingHosts: [],
+        staleOnly: true,
+      };
+    }
     return {
       text: 'Unavailable',
       partial: true,
       reasons: [...reasons],
       explanation: 'No source established a count for this server.',
       perSource,
+      contributingHosts: [],
+      staleOnly: false,
     };
   }
 
+  const countedHosts = countable.map((report) => report.host);
   const bootIds = new Set(
     countable
       .map((report) => report.capacity.linux_boot_id)
@@ -435,29 +490,64 @@ export function summarizeSandboxes(members: AgentRunnerHost[]): SandboxSummary {
         'These sources cannot be proven to describe the same Docker host, so their counts are' +
         ' listed per environment rather than added together.',
       perSource,
+      contributingHosts: countedHosts,
+      staleOnly: false,
     };
   }
 
   const total = emptyTally();
   for (const report of countable) addTally(total, tallyOf(report.inventory));
   // A total is complete only when every report that could be attributed was
-  // counted in full and nothing was left outside the sum.
+  // counted in full and nothing was left outside the sum — including anything
+  // that has since expired, which is outside it by definition.
   const complete =
     unscoped.length === 0 &&
     unreported === 0 &&
+    stale.length === 0 &&
     countable.length === contributing.length &&
     countable.every((report) => report.inventory.status === 'available') &&
     reports.every((report) => (report.inventory.unscoped_legacy_containers ?? 0) === 0);
   if (complete) {
-    return { text: countPhrase(total), partial: false, reasons: [], explanation: null, perSource };
+    return {
+      text: countPhrase(total),
+      partial: false,
+      reasons: [],
+      explanation: null,
+      perSource,
+      contributingHosts: countedHosts,
+      staleOnly: false,
+    };
   }
   return {
     text: `≥${tallyTotal(total)} observed · Partial`,
     partial: true,
     reasons: [...reasons],
-    explanation: 'The count is a lower bound: at least one source could not count everything.',
+    explanation: staleExplanations(stale, unreported, countable, contributing, unscoped),
     perSource,
+    contributingHosts: countedHosts,
+    staleOnly: false,
   };
+}
+
+/** Why a total came out a lower bound, in the words the panel shows. */
+function staleExplanations(
+  stale: InventoryReport[],
+  unreported: number,
+  counted: InventoryReport[],
+  contributing: InventoryReport[],
+  unscoped: InventoryReport[],
+): string | null {
+  if (stale.length > 0) {
+    const names = stale.map((report) => report.host).join(', ');
+    return (
+      `Expired observations are excluded from the total: ${names}. ` +
+      'Their last counts are listed per source below.'
+    );
+  }
+  if (unreported > 0 || counted.length !== contributing.length || unscoped.length > 0) {
+    return 'The count is a lower bound: at least one source could not count everything.';
+  }
+  return null;
 }
 
 // ── One physical server's capacity facts ───────────────────────────────
@@ -495,11 +585,31 @@ function capacitySource(reports: MeasuredHost[]): MeasuredHost | null {
   );
 }
 
-/** Every fact the row and its expanded panel need, derived in one place. */
-export function groupCapacityFacts(members: AgentRunnerHost[]): HostGroupCapacity {
+/**
+ * Every fact the row and its expanded panel need, derived in one place.
+ *
+ * `elapsedMs` is how long ago the pool answer arrived, by the browser's
+ * monotonic clock. It is what makes staleness a live property: the server's
+ * `freshness` describes the moment it answered, and a page that has been open
+ * — or that has been failing to poll — goes on showing a reading that expired
+ * some time ago. Without it the age ticks up in the Observed column while the
+ * stale marker never appears, which is the one combination that reads as
+ * current.
+ */
+export function groupCapacityFacts(members: AgentRunnerHost[], elapsedMs = 0): HostGroupCapacity {
   const measured = members.filter((member): member is MeasuredHost => member.capacity !== null);
-  const source = capacitySource(measured);
+  const isStale = (member: AgentRunnerHost): boolean => capacityIsStale(member.capacity, elapsedMs);
+  const fresh = measured.filter((member) => !isStale(member));
+  const source = capacitySource(fresh) ?? capacitySource(measured);
+  const sandboxes = summarizeSandboxes(members, isStale);
+  // The age is the oldest of what the row actually shows: the CPU and memory
+  // source, plus the sources whose counts are in the sandbox cell. A source
+  // that was deduped away or has expired is not one of them — letting it set
+  // the age would make the row look older than anything on it.
+  const ingredients = new Set(sandboxes.contributingHosts);
+  if (source !== null) ingredients.add(source.host);
   const ages = measured
+    .filter((member) => ingredients.has(member.host))
     .map((member) => member.capacity.sample_age_seconds)
     .filter((age) => Number.isFinite(age))
     .map((age) => Math.max(0, age));
@@ -509,12 +619,37 @@ export function groupCapacityFacts(members: AgentRunnerHost[]): HostGroupCapacit
     // The oldest ingredient decides: a fresh CPU sample must not pass an
     // inventory from ten minutes ago off as having just been collected.
     oldestSampleAgeSeconds: ages.length === 0 ? null : Math.max(...ages),
-    stale: measured.some((member) => member.capacity.freshness === 'stale'),
-    sandboxes: summarizeSandboxes(members),
+    stale: measured.some(isStale),
+    sandboxes,
   };
 }
 
 // ── Age ────────────────────────────────────────────────────────────────
+
+/**
+ * How old an observation may be before the page stops calling it current.
+ *
+ * The control plane's own threshold (`FRESH_AFTER_SECONDS` in
+ * `cloud_agent/capacity_protocol.py`). Mirrored rather than re-derived: the
+ * two answer the same question and must not drift, or a host would be stale on
+ * one side of the wire and fresh on the other.
+ */
+export const CAPACITY_FRESH_SECONDS = 90;
+
+/**
+ * Whether an observation has expired by now, rather than when it was read.
+ *
+ * The server's `freshness` is true as of its answer and stays true on screen
+ * however long ago that was. Adding locally observed monotonic elapsed time to
+ * the age it reported is what keeps a page that stopped polling from going on
+ * presenting an old reading as a current one.
+ */
+export function capacityIsStale(capacity: AgentHostCapacity | null, elapsedMs: number): boolean {
+  if (capacity === null) return false;
+  if (capacity.freshness === 'stale') return true;
+  const age = capacity.sample_age_seconds + Math.max(0, elapsedMs) / 1000;
+  return Number.isFinite(age) && age > CAPACITY_FRESH_SECONDS;
+}
 
 /**
  * A monotonic instant, in milliseconds.

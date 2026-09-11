@@ -454,7 +454,7 @@ function HostsView() {
   const elapsedMs = pool === null ? 0 : Math.max(0, nowMs - pool.appliedAtMs);
 
   const openServer = expanded === null ? null : (servers.find((s) => s.name === expanded) ?? null);
-  const openFacts = openServer === null ? null : groupCapacityFacts(openServer.members);
+  const openFacts = openServer === null ? null : groupCapacityFacts(openServer.members, elapsedMs);
   // Every enrollment behind this physical name is a candidate curve, because a
   // server that reports as one row can be several deployments and only the
   // operator knows which one they came to look at. The default is the source
@@ -565,10 +565,14 @@ function HostsView() {
       return;
     }
     setExpanded(server);
-    // A choice made on the previous server must not follow the operator to
-    // this one: the two have different enrollments, and reusing a name would
-    // either select nothing or select the wrong machine's curve.
-    setSourceChoice(null);
+    // **Pinned here, to the source the row is showing.** Left null, the
+    // default would be recomputed on every poll and the curve would follow
+    // whichever enrollment happened to report most recently — two
+    // environments alternating their beats would swap the chart under the
+    // operator, and the epoch check would call the swap a re-enrollment.
+    // Opening the panel is the moment the choice is made; only the operator
+    // changes it afterwards.
+    setSourceChoice(facts.source?.host ?? null);
     // Recorded so a re-enrollment while the panel is open can be named as
     // such, rather than looking like a curve that lost its history.
     setPanelEpoch(facts.source?.capacity_epoch ?? null);
@@ -735,7 +739,7 @@ function HostsView() {
                 <tbody className="divide-y divide-gray-100 dark:divide-white/5">
                   {visibleServers.map(({ name, host, members }) => {
                     if (!host) return null;
-                    const facts = groupCapacityFacts(members);
+                    const facts = groupCapacityFacts(members, elapsedMs);
                     const ageSeconds =
                       facts.oldestSampleAgeSeconds === null
                         ? null
@@ -794,7 +798,13 @@ function HostsView() {
                             <CapabilityCell cell={memoryCell(facts.capacity)} muted={facts.stale} />
                           </td>
                           <td className="px-3 py-4" title={sandboxTitle || undefined}>
-                            <span className="block whitespace-nowrap text-gray-800 dark:text-gray-200">
+                            <span
+                              className={`block whitespace-nowrap ${
+                                facts.sandboxes.staleOnly
+                                  ? 'text-amber-700 dark:text-amber-300'
+                                  : 'text-gray-800 dark:text-gray-200'
+                              }`}
+                            >
                               {facts.sandboxes.text}
                             </span>
                             {facts.sandboxes.partial && (

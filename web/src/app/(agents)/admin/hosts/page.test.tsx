@@ -47,6 +47,7 @@ import {
   setAgentRuntimeVersion,
 } from '@/lib/api/admin';
 
+import { reasonLabel } from './capacity';
 import { formatAge, runtimeMenu } from './format';
 import AdminHostsPage from './page';
 
@@ -497,7 +498,11 @@ describe('capacity columns', () => {
     expect(within(silent).queryByText('0 running · 0 stopped')).not.toBeInTheDocument();
   });
 
-  it('shows the oldest contributing age and greys a stale observation', async () => {
+  it('ages only what the row shows, and never adds an expired source', async () => {
+    // Two environments behind one physical name: one measured twelve seconds
+    // ago, one an hour ago. The expired one contributes nothing to this row —
+    // its containers have been stopped or started since it reported — so it
+    // must be neither added to the count nor allowed to set the row's age.
     mocked.list.mockResolvedValue(
       pool([
         host({
@@ -521,13 +526,17 @@ describe('capacity columns', () => {
     render(<AdminHostsPage />);
 
     const row = (await screen.findByRole('rowheader', { name: 'gpu-box' })).closest('tr')!;
-    // The freshest observation is what the machine's load cells show, but the
-    // row is only as fresh as its oldest ingredient.
+    // The freshest observation is what the machine's load cells show, and it
+    // is the only thing on the row whose age is being described.
     expect(within(row).getByText('5%')).toBeInTheDocument();
-    expect(within(row).getByText('6m ago')).toBeInTheDocument();
+    expect(within(row).getByText('12s ago')).toBeInTheDocument();
+    // The row still says that something on it has expired, and the count is a
+    // lower bound rather than a total that includes an hour-old reading.
     expect(within(row).getByText('stale')).toBeInTheDocument();
-    // Distinct namespaces on one server are added, not listed twice.
-    expect(within(row).getByText('4 running · 9 stopped')).toBeInTheDocument();
+    expect(within(row).getByText('≥10 observed · Partial')).toBeInTheDocument();
+    expect(within(row).getByText(reasonLabel('source_stale'))).toBeInTheDocument();
+    // The expired environment is still named, with its own last count.
+    expect(within(row).queryByText('11 running · 9 stopped')).not.toBeInTheDocument();
   });
 
   it('renders a control plane that has never sent a capacity block', async () => {
@@ -842,6 +851,80 @@ describe('polling and actions', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it('expires a reading locally when the pool goes quiet', async () => {
+    // The server's `freshness` describes the moment it answered. Two minutes
+    // of failing polls later the reading is 132 seconds old, and a page that
+    // kept calling it fresh — while the age beside it climbed — would be the
+    // one combination that looks current and is not.
+    vi.useFakeTimers();
+    const clock = { ms: 1_000 };
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => clock.ms);
+    try {
+      mocked.list.mockResolvedValueOnce(
+        pool([host({ capacity: capacity({ sample_age_seconds: 12, freshness: 'fresh' }) })]),
+      );
+      render(<AdminHostsPage />);
+      await vi.waitFor(() => expect(screen.getByText('runner-a')).toBeInTheDocument());
+      expect(screen.queryByText('stale')).not.toBeInTheDocument();
+
+      mocked.list.mockRejectedValue(new Error('gateway down'));
+      clock.ms += 120_000;
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(screen.getByText('2m ago')).toBeInTheDocument();
+      expect(screen.getByText('stale')).toBeInTheDocument();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('pins the curve source when the panel opens rather than following the newest reporter', async () => {
+    // Two environments behind one physical name, both reporting. Left to pick
+    // the newest fresh observation on every poll, the curve would swap between
+    // them whenever they alternated — under one title, with no operator action
+    // — and the epoch check would call the swap a re-enrollment.
+    vi.useFakeTimers();
+    // The source the row shows is the one sampled most recently, so the two
+    // polls below swap which environment that is.
+    const onBoxAt = (name: string, sampledAt: string, cpu: number) =>
+      host({
+        host: name,
+        labels: { physical_host: 'box' },
+        capacity: capacity({ sample_age_seconds: 5, cpu_percent: cpu, sampled_at: sampledAt }),
+      });
+    mocked.list.mockResolvedValue(
+      pool([
+        onBoxAt('box-a', '2026-09-11T12:34:30Z', 11),
+        onBoxAt('box-b', '2026-09-11T12:34:00Z', 22),
+      ]),
+    );
+    mocked.history.mockImplementation(async (name: string) => history({ host: name }));
+    render(<AdminHostsPage />);
+
+    await vi.waitFor(() =>
+      expect(screen.getByRole('rowheader', { name: 'box' })).toBeInTheDocument(),
+    );
+    await openPanel('box');
+    await vi.waitFor(() =>
+      expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything()),
+    );
+    await vi.waitFor(() => expect(screen.getByLabelText('Curve source')).toHaveValue('box-a'));
+
+    // box-b becomes the newest reporter on the next poll.
+    mocked.history.mockClear();
+    mocked.list.mockResolvedValue(
+      pool([
+        onBoxAt('box-a', '2026-09-11T12:30:00Z', 11),
+        onBoxAt('box-b', '2026-09-11T12:34:30Z', 22),
+      ]),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(screen.getByLabelText('Curve source')).toHaveValue('box-a');
+    expect(mocked.history).toHaveBeenCalledWith('box-a', '1h', expect.anything());
+    expect(mocked.history).not.toHaveBeenCalledWith('box-b', '1h', expect.anything());
   });
 
   it('does not let a poll issued before an action overwrite the action result', async () => {
