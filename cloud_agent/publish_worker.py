@@ -41,7 +41,11 @@ from cloud_agent.schemas import BASE_REF_METADATA_KEY
 from cloud_agent_host.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.ports.host_pool import HostPoolRepository
+    from cloud_agent.ports.snapshots import SnapshotRepository
+    from cloud_agent.ports.source_control import (
+        SourceControlRepository as SourceControlGrants,
+    )
 
 logger = get_logger(__name__)
 
@@ -180,7 +184,8 @@ def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
 
 
 async def _import_snapshot_base(
-    store: AgentJobStore,
+    snapshots: SnapshotRepository,
+    hosts: HostPoolRepository,
     *,
     snapshot: dict[str, Any],
     commit_sha: str,
@@ -189,16 +194,16 @@ async def _import_snapshot_base(
     """Import a published commit into Docker without changing HEAD or files."""
     snapshot_id = int(snapshot["snapshot_id"])
     if not bundle:
-        await store.record_snapshot_base_import_failure(
+        await snapshots.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
             detail="the publisher produced no retained base bundle",
         )
         return False
     from cloud_agent.broker_routing import broker_for_job
 
-    broker = await broker_for_job(store, snapshot["anchor_job_id"])
+    broker = await broker_for_job(hosts, snapshot["anchor_job_id"])
     if broker is None:
-        await store.record_snapshot_base_import_failure(
+        await snapshots.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
             detail="the owning workspace broker is unavailable for base import",
         )
@@ -206,35 +211,34 @@ async def _import_snapshot_base(
     try:
         await broker.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
     except Exception as exc:
-        await store.record_snapshot_base_import_failure(
+        await snapshots.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
             detail=f"published base import failed: {exc}",
         )
         return False
-    return await store.complete_snapshot_base_import(
+    return await snapshots.complete_snapshot_base_import(
         snapshot_id=snapshot_id,
         commit_sha=commit_sha,
     )
 
 
 async def retry_snapshot_base_import(
-    store: AgentJobStore,
+    snapshots: SnapshotRepository,
+    source_control: SourceControlGrants,
+    hosts: HostPoolRepository,
     *,
     credential: GitHubCredential | None,
     app_credentials: Any | None,
 ) -> bool:
     """Retry one durable post-publish object import after a broker outage."""
-    getter = getattr(store, "pending_snapshot_base_import", None)
-    if getter is None:
-        return False
-    snapshot = await getter()
+    snapshot = await snapshots.pending_snapshot_base_import()
     if snapshot is None:
         return False
     try:
         await require_entitled_repo(
             snapshot["repo"],
             snapshot.get("user_id", ""),
-            grants_repo=store,
+            grants_repo=source_control,
             app_credentials=app_credentials,
         )
         if app_credentials is not None:
@@ -254,13 +258,14 @@ async def retry_snapshot_base_import(
             commit_sha=commit_sha,
         )
         return await _import_snapshot_base(
-            store,
+            snapshots,
+            hosts,
             snapshot=snapshot,
             commit_sha=commit_sha,
             bundle=bundle,
         )
     except Exception as exc:
-        await store.record_snapshot_base_import_failure(
+        await snapshots.record_snapshot_base_import_failure(
             snapshot_id=int(snapshot["snapshot_id"]),
             detail=f"published base import retry failed: {exc}",
         )
@@ -268,7 +273,9 @@ async def retry_snapshot_base_import(
 
 
 async def publish_one(
-    store: AgentJobStore,
+    snapshots: SnapshotRepository,
+    source_control: SourceControlGrants,
+    hosts: HostPoolRepository,
     *,
     credential: GitHubCredential | None = None,
     app_credentials: Any | None = None,
@@ -283,7 +290,7 @@ async def publish_one(
     Never raises for an individual job: a failure is recorded against that job
     so the owner sees why, and the loop stays alive for the next one.
     """
-    job = await store.claim_for_publish()
+    job = await snapshots.claim_for_publish()
     if job is None:
         return None
 
@@ -292,7 +299,7 @@ async def publish_one(
     pr_base = _pr_base_branch(job, base_branch)
 
     async def fail(detail: str) -> None:
-        await store.fail_snapshot_publish(
+        await snapshots.fail_snapshot_publish(
             snapshot_id=int(job["snapshot_id"]),
             detail=detail,
         )
@@ -307,7 +314,7 @@ async def publish_one(
         await require_entitled_repo(
             job["repo"],
             job.get("user_id", ""),
-            grants_repo=store,
+            grants_repo=source_control,
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
@@ -375,7 +382,7 @@ async def publish_one(
         await fail(f"publish failed: {exc}")
         return None
 
-    recorded = await store.record_snapshot_publish(
+    recorded = await snapshots.record_snapshot_publish(
         snapshot_id=int(job["snapshot_id"]),
         pr_url=pr_url,
         commit_sha=result.commit_sha,
@@ -390,7 +397,8 @@ async def publish_one(
         return None
 
     await _import_snapshot_base(
-        store,
+        snapshots,
+        hosts,
         snapshot=job,
         commit_sha=result.commit_sha,
         bundle=result.base_bundle,
@@ -410,7 +418,9 @@ async def publish_one(
 
 
 async def publish_loop(
-    store: AgentJobStore,
+    snapshots: SnapshotRepository,
+    source_control: SourceControlGrants,
+    hosts: HostPoolRepository,
     *,
     credential_provider: Any = None,
     app_credentials: Any | None = None,
@@ -434,12 +444,16 @@ async def publish_loop(
             if credential is None and app_credentials is None:
                 continue
             await retry_snapshot_base_import(
-                store,
+                snapshots,
+                source_control,
+                hosts,
                 credential=credential,
                 app_credentials=app_credentials,
             )
             while await publish_one(
-                store,
+                snapshots,
+                source_control,
+                hosts,
                 credential=credential,
                 app_credentials=app_credentials,
                 base_branch=base_branch,

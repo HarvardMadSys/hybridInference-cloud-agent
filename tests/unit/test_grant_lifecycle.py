@@ -227,7 +227,7 @@ async def test_a_live_attempts_grant_is_renewed() -> None:
     store.add(1, "agr_1")
     store.add(2, "agr_2")
 
-    await _renew_live_grants(store, grants, failures={})
+    await _renew_live_grants(store, store, grants, failures={})
 
     assert grants.renewed == ["agr_1", "agr_2"]
 
@@ -246,11 +246,11 @@ async def test_a_superseded_attempt_stops_being_renewed() -> None:
     store.add(2, "agr_2")
     failures: dict[str, int] = {}
 
-    await _renew_live_grants(store, grants, failures=failures)
+    await _renew_live_grants(store, store, grants, failures=failures)
     assert grants.renewed == ["agr_1", "agr_2"]
 
     store.supersede(1)
-    await _renew_live_grants(store, grants, failures=failures)
+    await _renew_live_grants(store, store, grants, failures=failures)
 
     assert grants.renewed == ["agr_1", "agr_2", "agr_2"], "the superseded attempt was renewed"
 
@@ -260,7 +260,7 @@ async def test_an_attempt_with_no_grant_is_not_renewed() -> None:
     store, grants = _AttemptStore(), _Grants()
     store.add(1, None)
 
-    await _renew_live_grants(store, grants, failures={})
+    await _renew_live_grants(store, store, grants, failures={})
 
     assert grants.renewed == []
 
@@ -271,7 +271,7 @@ async def test_a_refused_renewal_does_not_stop_the_pass() -> None:
     store.add(1, "agr_1")
     store.add(2, "agr_2")
 
-    await _renew_live_grants(store, grants, failures={})
+    await _renew_live_grants(store, store, grants, failures={})
 
     assert grants.renewed == ["agr_1", "agr_2"]
 
@@ -292,7 +292,7 @@ async def test_a_permanently_refused_grant_is_eventually_given_up_on() -> None:
     failures: dict[str, int] = {}
 
     for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER + 4):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
 
     assert len(grants.renewed) == control_plane.GRANT_RENEWAL_GIVE_UP_AFTER
 
@@ -311,7 +311,7 @@ async def test_giving_up_stops_the_attempt_rather_than_the_renewals() -> None:
     failures: dict[str, int] = {}
 
     for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
 
     assert store.released == [("ajob_1", 1, 1)], "the attempt was left running without capability"
     assert store.attempts[1]["status"] == "aborted"
@@ -325,7 +325,7 @@ async def test_the_abandoned_grant_is_then_revoked_exactly_once() -> None:
     failures: dict[str, int] = {}
 
     for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
     await _revoke_dead_grants(store, grants)
     await _revoke_dead_grants(store, grants)
 
@@ -340,7 +340,7 @@ async def test_one_bad_pass_does_not_count_toward_a_give_up() -> None:
     failures: dict[str, int] = {}
 
     for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER * 3):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
         grants.renew_fails = not grants.renew_fails
 
     assert store.released == []
@@ -373,7 +373,7 @@ async def test_a_gateway_outage_does_not_abandon_the_fleet() -> None:
     failures: dict[str, int] = {}
 
     for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER * 5):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
 
     assert store.released == [], "a gateway outage abandoned running attempts"
     assert all(row["status"] == "running" for row in store.attempts.values())
@@ -411,7 +411,7 @@ async def test_a_failure_that_is_not_about_the_grant_never_gives_up(
     failures: dict[str, int] = {}
 
     for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER * 3):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
 
     assert store.released == []
     assert store.attempts[1]["status"] == "running"
@@ -429,16 +429,16 @@ async def test_an_outage_neither_advances_nor_forgives_the_count() -> None:
     failures: dict[str, int] = {}
 
     for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER - 1):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
     assert store.released == []
 
     grants.renew_error = _refusal(status=None)
     for _ in range(20):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
     assert store.released == [], "an outage advanced a count it knows nothing about"
 
     grants.renew_error = _refusal()
-    await _renew_live_grants(store, grants, failures=failures)
+    await _renew_live_grants(store, store, grants, failures=failures)
 
     assert store.released == [("ajob_1", 1, 1)], "the outage forgave a refusal already counted"
 
@@ -453,7 +453,7 @@ async def test_a_suspended_subject_is_given_up_on() -> None:
     failures: dict[str, int] = {}
 
     for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER):
-        await _renew_live_grants(store, grants, failures=failures)
+        await _renew_live_grants(store, store, grants, failures=failures)
 
     assert store.attempts[1]["status"] == "aborted"
 
@@ -482,11 +482,11 @@ async def test_a_finished_attempt_leaves_no_failure_count_behind() -> None:
     store.add(1, "agr_1")
     failures: dict[str, int] = {}
 
-    await _renew_live_grants(store, grants, failures=failures)
+    await _renew_live_grants(store, store, grants, failures=failures)
     assert failures == {"agr_1": 1}
 
     store.supersede(1)
-    await _renew_live_grants(store, grants, failures=failures)
+    await _renew_live_grants(store, store, grants, failures=failures)
 
     assert failures == {}
 
@@ -546,7 +546,7 @@ async def test_a_revoked_grant_is_not_then_renewed() -> None:
     store.supersede(1)
 
     await _revoke_dead_grants(store, grants)
-    await _renew_live_grants(store, grants, failures={})
+    await _renew_live_grants(store, store, grants, failures={})
 
     assert grants.revoked == ["agr_1"]
     assert grants.renewed == []
@@ -611,7 +611,7 @@ async def test_a_pass_that_runs_long_gives_up_its_tail_and_says_so(monkeypatch, 
     grants = _SlowGrants()
 
     with caplog.at_level(logging.WARNING):
-        await _renew_live_grants(store, grants, failures={})
+        await _renew_live_grants(store, store, grants, failures={})
 
     assert grants.renewed == ["grant_1"], grants.renewed
     timed_out = [r for r in caplog.records if "timed_out" in getattr(r, "event", "")]
@@ -639,7 +639,7 @@ async def test_a_cancelled_renewal_does_not_forget_its_refusal_count(monkeypatch
     monkeypatch.setattr(app, "GRANT_RENEWAL_PASS_DEADLINE_S", 0.05)
     failures = {"grant_1": 2, "grant_2": 1}
 
-    await _renew_live_grants(store, _SlowGrants(), failures=failures)
+    await _renew_live_grants(store, store, _SlowGrants(), failures=failures)
 
     assert failures == {"grant_1": 2, "grant_2": 1}, (
         "a cancelled renewal reset a refusal count the give-up rule needs"

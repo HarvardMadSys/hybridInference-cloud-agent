@@ -28,7 +28,7 @@ class _ClaimStore:
 async def test_snapshot_coordinator_runs_on_its_own_short_schedule():
     store = _ClaimStore()
     task = asyncio.create_task(
-        control_plane.coordinate_shared_snapshots(store, interval_seconds=0.001)  # type: ignore[arg-type]
+        control_plane.coordinate_shared_snapshots(store, store, interval_seconds=0.001)  # type: ignore[arg-type]
     )
     try:
         await asyncio.wait_for(store.called.wait(), timeout=1)
@@ -43,7 +43,7 @@ async def test_snapshot_coordinator_runs_on_its_own_short_schedule():
 async def test_snapshot_coordinator_survives_one_failed_pass():
     store = _ClaimStore(fail_once=True)
     task = asyncio.create_task(
-        control_plane.coordinate_shared_snapshots(store, interval_seconds=0.001)  # type: ignore[arg-type]
+        control_plane.coordinate_shared_snapshots(store, store, interval_seconds=0.001)  # type: ignore[arg-type]
     )
     try:
         await asyncio.wait_for(store.called.wait(), timeout=1)
@@ -57,7 +57,7 @@ async def test_snapshot_coordinator_survives_one_failed_pass():
 def test_snapshot_coordinator_rejects_a_non_positive_interval():
     async def run() -> None:
         await control_plane.coordinate_shared_snapshots(  # type: ignore[arg-type]
-            _ClaimStore(), interval_seconds=0
+            _ClaimStore(), _ClaimStore(), interval_seconds=0
         )
 
     with pytest.raises(ValueError, match="positive"):

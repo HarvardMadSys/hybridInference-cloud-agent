@@ -86,6 +86,14 @@ class FakeStore:
         self.import_completed = (snapshot_id, commit_sha)
         return True
 
+    async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
+        """No durable import is waiting unless a test seeds one."""
+        return None
+
+    async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
+        """No host is enrolled, so the publisher has no broker to route to."""
+        return None
+
 
 def _patch_publish(monkeypatch, result_or_exc):
     """Stand in for the git-side publisher."""
@@ -113,7 +121,7 @@ def _patch_pr(monkeypatch, url: str = "https://github.com/o/n/pull/7"):
 async def test_empty_queue_is_a_no_op():
     """Nothing pending means nothing happens."""
     store = FakeStore(None)
-    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert await publish_one(store, store, store, credential=GitHubCredential("t")) is None
     assert store.snapshot_recorded is None and store.snapshot_failed is None
 
 
@@ -125,7 +133,9 @@ async def test_successful_publish_records_the_pr(monkeypatch):
     )
     captured = _patch_pr(monkeypatch)
 
-    url = await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
+    url = await publish_one(
+        store, store, store, credential=GitHubCredential("t"), base_branch="dev"
+    )
     assert url == "https://github.com/o/n/pull/7"
     assert store.snapshot_recorded == (9, url, "s")
     assert captured["head_branch"] == "agent/ajob_1"
@@ -173,7 +183,7 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
 
     monkeypatch.setattr(broker_routing, "broker_for_job", route)
 
-    url = await publish_one(store, credential=GitHubCredential("t"))
+    url = await publish_one(store, store, store, credential=GitHubCredential("t"))
 
     assert url == "https://github.com/o/n/pull/7"
     assert store.snapshot_recorded == (9, url, "b" * 40)
@@ -197,7 +207,7 @@ async def test_shared_snapshot_rejection_does_not_fail_its_successful_turn(monke
     store = FakeStore(snapshot)
     _patch_publish(monkeypatch, PublishError("patch rejected"))
 
-    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert await publish_one(store, store, store, credential=GitHubCredential("t")) is None
     assert store.snapshot_failed == (9, "patch rejected")
 
 
@@ -214,7 +224,7 @@ async def test_the_pr_targets_the_branch_the_job_was_started_from(monkeypatch):
     )
     captured = _patch_pr(monkeypatch)
 
-    await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
+    await publish_one(store, store, store, credential=GitHubCredential("t"), base_branch="dev")
 
     assert captured["base_branch"] == "release/x"
 
@@ -227,7 +237,7 @@ async def test_a_job_that_named_no_branch_targets_the_deployment_default(monkeyp
     )
     captured = _patch_pr(monkeypatch)
 
-    await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
+    await publish_one(store, store, store, credential=GitHubCredential("t"), base_branch="dev")
 
     assert captured["base_branch"] == "dev"
 
@@ -245,7 +255,7 @@ async def test_a_base_ref_that_cannot_be_a_pr_base_falls_back(monkeypatch):
     )
     captured = _patch_pr(monkeypatch)
 
-    await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
+    await publish_one(store, store, store, credential=GitHubCredential("t"), base_branch="dev")
 
     assert captured["base_branch"] == "dev"
 
@@ -271,7 +281,7 @@ async def test_follow_up_fast_forwards_the_thread_branch_without_opening_another
     monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
     pr_called = _patch_pr(monkeypatch)
 
-    url = await publish_one(store, credential=GitHubCredential("t"))
+    url = await publish_one(store, store, store, credential=GitHubCredential("t"))
 
     assert url == "https://github.com/o/n/pull/7"
     assert captured_publish["branch_id"] == "athr_1"
@@ -285,7 +295,7 @@ async def test_gate_rejection_fails_the_job_and_never_pushes(monkeypatch):
     _patch_publish(monkeypatch, PublishError("patch rejected: modifies .github/"))
     pr_called = _patch_pr(monkeypatch)
 
-    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert await publish_one(store, store, store, credential=GitHubCredential("t")) is None
     assert store.snapshot_recorded is None
     assert store.snapshot_failed is not None
     assert store.snapshot_failed[0] == 9
@@ -300,7 +310,7 @@ async def test_missing_base_sha_fails_instead_of_guessing(monkeypatch):
     store = FakeStore(job)
     pr_called = _patch_pr(monkeypatch)
 
-    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert await publish_one(store, store, store, credential=GitHubCredential("t")) is None
     assert store.snapshot_failed is not None
     assert "base_sha" in store.snapshot_failed[1]
     assert pr_called == {}
@@ -314,14 +324,14 @@ async def test_lost_race_does_not_claim_success(monkeypatch):
     )
     _patch_pr(monkeypatch)
 
-    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert await publish_one(store, store, store, credential=GitHubCredential("t")) is None
 
 
 async def test_unexpected_failure_is_recorded_not_swallowed(monkeypatch):
     """An unexpected error still surfaces on the job instead of vanishing."""
     store = FakeStore(dict(_JOB))
     _patch_publish(monkeypatch, RuntimeError("disk full"))
-    assert await publish_one(store, credential=GitHubCredential("t")) is None
+    assert await publish_one(store, store, store, credential=GitHubCredential("t")) is None
     assert store.snapshot_failed is not None
     assert "disk full" in store.snapshot_failed[1]
 
@@ -399,7 +409,7 @@ async def test_credential_never_appears_in_the_pr_body(monkeypatch):
         monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
     )
     captured = _patch_pr(monkeypatch)
-    await publish_one(store, credential=GitHubCredential("super-secret-token"))
+    await publish_one(store, store, store, credential=GitHubCredential("super-secret-token"))
     assert "super-secret-token" not in captured["body"]
     assert "super-secret-token" not in captured["title"]
 
@@ -435,6 +445,8 @@ async def test_app_only_deployment_actually_publishes(monkeypatch):
     task = asyncio.create_task(
         publish_loop(
             store,
+            store,
+            store,
             credential_provider=lambda: None,  # no static token configured
             app_credentials=app,
             interval_seconds=0.01,
@@ -457,7 +469,7 @@ async def test_app_only_deployment_actually_publishes(monkeypatch):
 async def test_no_credential_at_all_fails_the_job_rather_than_hanging(monkeypatch):
     """With neither source configured the job says so instead of stalling."""
     store = FakeStore(dict(_JOB))
-    assert await publish_one(store, credential=None, app_credentials=None) is None
+    assert await publish_one(store, store, store, credential=None, app_credentials=None) is None
     assert store.snapshot_failed is not None
     assert "credential" in store.snapshot_failed[1]
 
@@ -478,7 +490,7 @@ async def test_publishing_stops_when_the_entitlement_was_withdrawn(monkeypatch):
             minted.append(repo)
             return "ghs_should_not_happen"
 
-    assert await publish_one(store, app_credentials=App()) is None
+    assert await publish_one(store, store, store, app_credentials=App()) is None
     assert minted == [], "no credential may be minted for a repo no longer entitled"
     assert store.snapshot_failed is not None
     assert "entitled" in store.snapshot_failed[1]
@@ -518,7 +530,7 @@ async def test_a_created_pr_with_no_usable_url_fails_instead_of_recording(
 
     monkeypatch.setattr(publish_worker.httpx.AsyncClient, "post", _post)
 
-    await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
+    await publish_one(store, store, store, credential=GitHubCredential("t"), base_branch="dev")
 
     assert store.snapshot_recorded is None, f"an unusable url was recorded ({why})"
     assert store.snapshot_failed is not None, f"the snapshot was not failed ({why})"
@@ -544,7 +556,7 @@ async def test_a_branch_name_that_merely_starts_like_a_sha_is_kept(monkeypatch, 
     )
     captured = _patch_pr(monkeypatch)
 
-    await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
+    await publish_one(store, store, store, credential=GitHubCredential("t"), base_branch="dev")
 
     assert captured["base_branch"] == base_ref
 
@@ -557,6 +569,6 @@ async def test_a_base_ref_that_is_only_a_commit_id_falls_back(monkeypatch):
     )
     captured = _patch_pr(monkeypatch)
 
-    await publish_one(store, credential=GitHubCredential("t"), base_branch="dev")
+    await publish_one(store, store, store, credential=GitHubCredential("t"), base_branch="dev")
 
     assert captured["base_branch"] == "dev"

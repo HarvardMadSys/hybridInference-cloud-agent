@@ -41,7 +41,14 @@ from cloud_agent.logging_utils import configure_process_logging, get_logger
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent.storage.store import AgentJobStore
+    from cloud_agent.ports.attempts import AttemptCommands
+    from cloud_agent.ports.conversation_queries import ConversationQueries
+    from cloud_agent.ports.grants import GrantRepository
+    from cloud_agent.ports.host_pool import HostPoolRepository
+    from cloud_agent.ports.residencies import ResidencyRepository
+    from cloud_agent.ports.sandboxes import SandboxRepository
+    from cloud_agent.ports.session_forks import SessionForkRepository
+    from cloud_agent.ports.snapshots import SnapshotRepository
 
 logger = get_logger(__name__)
 
@@ -141,7 +148,11 @@ GRANT_RENEWAL_CONCURRENCY = 16
 GRANT_RENEWAL_PASS_DEADLINE_S = (GRANT_TTL_S - RENEWAL_INTERVAL_S) / 2
 
 
-async def _reconcile_settled_terminals(store: AgentJobStore) -> None:
+async def _reconcile_settled_terminals(
+    sandboxes: SandboxRepository,
+    conversations: ConversationQueries,
+    hosts: HostPoolRepository,
+) -> None:
     """Replay durable settled-terminal recovery markers after restarts.
 
     The broker is resolved per job, because with a host pool there is no
@@ -152,22 +163,22 @@ async def _reconcile_settled_terminals(store: AgentJobStore) -> None:
     from cloud_agent.broker_routing import broker_for_job, hydrate_shared_broker
     from cloud_agent.terminal_coordination import resume_settled_terminal
 
-    for job_id in await store.list_terminal_resumes_pending():
+    for job_id in await sandboxes.list_terminal_resumes_pending():
         try:
-            job = await store.get_job(job_id)
+            job = await conversations.get_job(job_id)
             if job is None or job.get("thread_sandbox") is None:
                 # No retained group exists to resume (for example, a queued
                 # job cancelled before its first claim). This marker has no
                 # external side effect behind it and can be retired.
-                await store.mark_terminal_resume_complete(job_id=job_id)
+                await sandboxes.mark_terminal_resume_complete(job_id=job_id)
                 continue
-            broker = await hydrate_shared_broker(job, await broker_for_job(store, job_id))
+            broker = await hydrate_shared_broker(job, await broker_for_job(hosts, job_id))
             if await resume_settled_terminal(
                 str(job["thread_id"]),
                 job_id=job_id,
                 broker=broker,
             ):
-                await store.mark_terminal_resume_complete(job_id=job_id)
+                await sandboxes.mark_terminal_resume_complete(job_id=job_id)
         except Exception:
             # One unavailable host must not prevent reconciliation of markers
             # owned by every other host in this pass. The marker remains set,
@@ -179,7 +190,7 @@ async def _reconcile_settled_terminals(store: AgentJobStore) -> None:
             )
 
 
-async def _revoke_dead_grants(store: AgentJobStore, grants: Any) -> None:
+async def _revoke_dead_grants(grant_records: GrantRepository, grants: Any) -> None:
     """Withdraw the grants of attempts that are no longer current.
 
     Runs on the reaper's schedule rather than at the moment an attempt ends,
@@ -195,7 +206,7 @@ async def _revoke_dead_grants(store: AgentJobStore, grants: Any) -> None:
     and not a retry every pass. ``GrantClient.revoke`` reports rather than
     raises for the same reason.
     """
-    for row in await store.take_revocable_grants():
+    for row in await grant_records.take_revocable_grants():
         if not await grants.revoke(row["grant_id"]):
             logger.warning(
                 "agent_grant_not_revoked",
@@ -207,7 +218,7 @@ async def _revoke_dead_grants(store: AgentJobStore, grants: Any) -> None:
             )
 
 
-async def _abandon_unrenewable_attempt(store: AgentJobStore, row: dict[str, Any]) -> None:
+async def _abandon_unrenewable_attempt(attempts: AttemptCommands, row: dict[str, Any]) -> None:
     """Stop an attempt whose grant the gateway will not renew.
 
     **Giving up has to be something the attempt notices.** Simply stopping the
@@ -226,10 +237,10 @@ async def _abandon_unrenewable_attempt(store: AgentJobStore, row: dict[str, Any]
     decided the TTL is the backstop.
 
     Args:
-        store: The agent store.
+        attempts: The attempt commands, for the fenced release.
         row: A ``list_renewable_grants`` row, carrying the attempt's fence.
     """
-    released = await store.release_claim(
+    released = await attempts.release_claim(
         job_id=row["job_id"],
         attempt_id=row["attempt_id"],
         lease_generation=row["lease_generation"],
@@ -246,7 +257,11 @@ async def _abandon_unrenewable_attempt(store: AgentJobStore, row: dict[str, Any]
 
 
 async def _renew_live_grants(
-    store: AgentJobStore, grants: Any, *, failures: dict[str, int]
+    grant_records: GrantRepository,
+    attempts: AttemptCommands,
+    grants: Any,
+    *,
+    failures: dict[str, int],
 ) -> None:
     """Extend the grants of attempts that are still current — and only those.
 
@@ -277,7 +292,8 @@ async def _renew_live_grants(
     successful renewal clears those.
 
     Args:
-        store: The agent store.
+        grant_records: The renewable-grant read and the revocation handover.
+        attempts: The attempt commands, used when a grant is given up on.
         grants: The grant client.
         failures: Consecutive definitive refusals per grant id, owned by the
             caller so it survives between passes. Pruned here to the grants
@@ -285,7 +301,7 @@ async def _renew_live_grants(
     """
     seen: set[str] = set()
     renewed: list[str] = []
-    renewable = await store.list_renewable_grants()
+    renewable = await grant_records.list_renewable_grants()
     if len(renewable) >= GRANT_RENEWAL_PAGE:
         # The pass was capped, so some live attempt was not renewed this time
         # round. The ordering makes the window rotate, but a pool this size
@@ -323,7 +339,7 @@ async def _renew_live_grants(
             )
             if definitive and refusals >= GRANT_RENEWAL_GIVE_UP_AFTER:
                 try:
-                    await _abandon_unrenewable_attempt(store, row)
+                    await _abandon_unrenewable_attempt(attempts, row)
                 except Exception:
                     # Leave the count at or above the threshold, so the next
                     # pass that is again definitively refused retries the
@@ -397,7 +413,7 @@ async def _renew_live_grants(
         del failures[grant_id]
 
 
-async def _reap_offline_hosts(store: AgentJobStore) -> None:
+async def _reap_offline_hosts(hosts: HostPoolRepository) -> None:
     """Move hosts that stopped heartbeating to ``offline``.
 
     Runs on the same loop as the attempt reaper rather than on its own, because
@@ -406,7 +422,7 @@ async def _reap_offline_hosts(store: AgentJobStore) -> None:
     them into two schedules would make the interval between them a race that
     only shows up under load.
     """
-    offline = await store.reap_offline_hosts(
+    offline = await hosts.reap_offline_hosts(
         interval_seconds=HEARTBEAT_INTERVAL_S,
         missed_intervals=MISSED_HEARTBEATS_BEFORE_OFFLINE,
     )
@@ -417,7 +433,7 @@ async def _reap_offline_hosts(store: AgentJobStore) -> None:
         )
 
 
-async def _reap_lapsed_residencies(store: AgentJobStore, grants: Any | None) -> None:
+async def _reap_lapsed_residencies(residencies: ResidencyRepository, grants: Any | None) -> None:
     """Lapse residencies whose lease ran out — and kill their credentials.
 
     A lapsed residency's grant dies with it (retained-session design §6): the credential
@@ -426,7 +442,7 @@ async def _reap_lapsed_residencies(store: AgentJobStore, grants: Any | None) -> 
     ``revoke()`` never raises, and a deployment without a grant client simply
     has nothing to revoke — the lapse itself already happened in the store.
     """
-    lapsed = await store.reap_expired_residencies()
+    lapsed = await residencies.reap_expired_residencies()
     if not lapsed:
         return
     logger.info(
@@ -444,7 +460,7 @@ async def _reap_lapsed_residencies(store: AgentJobStore, grants: Any | None) -> 
 
 
 async def _cleanup_reaped_shared_residencies(
-    store: AgentJobStore,
+    hosts: HostPoolRepository,
     actions: list[dict[str, Any]],
     grants: Any | None,
 ) -> None:
@@ -461,7 +477,7 @@ async def _cleanup_reaped_shared_residencies(
 
     for action, cleanup in cleanups:
         try:
-            broker = await broker_for_job(store, str(action["job_id"]))
+            broker = await broker_for_job(hosts, str(action["job_id"]))
             if broker is not None:
                 await broker.shared_residency_lost(
                     str(cleanup["thread_id"]),
@@ -486,12 +502,11 @@ async def _cleanup_reaped_shared_residencies(
                 await grants.revoke(grant_id)
 
 
-async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
+async def _capture_due_shared_snapshot(
+    snapshots: SnapshotRepository, hosts: HostPoolRepository
+) -> None:
     """Capture at most one quiescent shared workspace without blocking turns."""
-    claim = getattr(store, "claim_due_sandbox_snapshot", None)
-    if claim is None:
-        return
-    snapshot = await claim()
+    snapshot = await snapshots.claim_due_sandbox_snapshot()
     if snapshot is None:
         return
 
@@ -499,9 +514,9 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
     from cloud_agent_host.workspace_broker_client import WorkspaceBrokerError
 
     try:
-        broker = await broker_for_job(store, snapshot["anchor_job_id"])
+        broker = await broker_for_job(hosts, snapshot["anchor_job_id"])
         if broker is None:
-            await store.defer_sandbox_snapshot_capture(
+            await snapshots.defer_sandbox_snapshot_capture(
                 snapshot_id=int(snapshot["snapshot_id"]),
                 sandbox_id=str(snapshot["sandbox_id"]),
                 sandbox_generation=int(snapshot["generation"]),
@@ -524,7 +539,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         digest = receipt.get("content_sha256")
         if not isinstance(patch, str) or not isinstance(digest, str):
             raise ValueError("shared snapshot host receipt omitted its patch or hash")
-        recorded = await store.record_sandbox_snapshot_capture(
+        recorded = await snapshots.record_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),
             sandbox_generation=int(snapshot["generation"]),
@@ -537,7 +552,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         if recorded is None:
             raise ValueError("shared snapshot receipt lost its durable generation fence")
     except WorkspaceBrokerError as exc:
-        await store.defer_sandbox_snapshot_capture(
+        await snapshots.defer_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),
             sandbox_generation=int(snapshot["generation"]),
@@ -546,7 +561,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
             dirty=exc.status_code in {410, 422, 502},
         )
     except ValueError as exc:
-        await store.defer_sandbox_snapshot_capture(
+        await snapshots.defer_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),
             sandbox_generation=int(snapshot["generation"]),
@@ -558,7 +573,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         # A graceful control-plane stop must not leave this claim invisible
         # until the much longer stalled-capture timeout elapses.
         with contextlib.suppress(Exception):
-            await store.defer_sandbox_snapshot_capture(
+            await snapshots.defer_sandbox_snapshot_capture(
                 snapshot_id=int(snapshot["snapshot_id"]),
                 sandbox_id=str(snapshot["sandbox_id"]),
                 sandbox_generation=int(snapshot["generation"]),
@@ -571,7 +586,7 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
         # Release the durable claim before surfacing it to the coordinator's
         # log-and-continue boundary.
         with contextlib.suppress(Exception):
-            await store.defer_sandbox_snapshot_capture(
+            await snapshots.defer_sandbox_snapshot_capture(
                 snapshot_id=int(snapshot["snapshot_id"]),
                 sandbox_id=str(snapshot["sandbox_id"]),
                 sandbox_generation=int(snapshot["generation"]),
@@ -582,7 +597,8 @@ async def _capture_due_shared_snapshot(store: AgentJobStore) -> None:
 
 
 async def coordinate_shared_snapshots(
-    store: AgentJobStore,
+    snapshots: SnapshotRepository,
+    hosts: HostPoolRepository,
     *,
     interval_seconds: float = SNAPSHOT_CAPTURE_INTERVAL_S,
 ) -> None:
@@ -592,13 +608,20 @@ async def coordinate_shared_snapshots(
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            await _capture_due_shared_snapshot(store)
+            await _capture_due_shared_snapshot(snapshots, hosts)
         except Exception:
             logger.warning("Shared workspace snapshot pass failed", exc_info=True)
 
 
 async def reap_expired_attempts(
-    store: AgentJobStore,
+    attempts: AttemptCommands,
+    residencies: ResidencyRepository,
+    hosts: HostPoolRepository,
+    sandboxes: SandboxRepository,
+    conversations: ConversationQueries,
+    forks: SessionForkRepository,
+    snapshots: SnapshotRepository,
+    grant_records: GrantRepository,
     *,
     interval_seconds: float = REAP_INTERVAL_S,
     max_attempts: int = MAX_ATTEMPTS,
@@ -607,7 +630,14 @@ async def reap_expired_attempts(
     """Periodically close attempts whose lease expired.
 
     Args:
-        store: The agent store.
+        attempts: Claim, lease, transition and the expired-attempt reaper.
+        residencies: Residency lapse, run before the attempt pass.
+        hosts: The host reader, for offline hosts and broker routing.
+        sandboxes: Sandbox reconciliation and the stalled-capture reaper.
+        conversations: The job projection the reconciler reads.
+        forks: Fork recovery and stalled-fork reaping.
+        snapshots: The stalled snapshot-capture and publish reapers.
+        grant_records: The renewable-grant read and revocation handover.
         interval_seconds: Delay between passes.
         max_attempts: How many attempts a job gets before it fails for good.
         grants: The grant client, when this deployment mints grants. ``None``
@@ -615,7 +645,7 @@ async def reap_expired_attempts(
             their own TTL, which is the same backstop revocation accelerates.
     """
     try:
-        await _reconcile_settled_terminals(store)
+        await _reconcile_settled_terminals(sandboxes, conversations, hosts)
     except Exception:
         logger.warning("Initial settled terminal reconciliation failed", exc_info=True)
     # Consecutive renewal refusals, per grant. Held by the loop rather than by
@@ -636,7 +666,7 @@ async def reap_expired_attempts(
         # publishes for that pass, which is a strictly worse outage than the
         # one it was reporting: jobs stop being recovered at all.
         try:
-            await _reap_offline_hosts(store)
+            await _reap_offline_hosts(hosts)
         except Exception:
             logger.warning("Host reaper pass failed", exc_info=True)
         # Residencies after hosts, before attempts: a lapsed hot sandbox must
@@ -644,7 +674,7 @@ async def reap_expired_attempts(
         # attempt pass requeues anything that might route back to it. Its own
         # try, for the same reason as the host pass above.
         try:
-            await _reap_lapsed_residencies(store, grants)
+            await _reap_lapsed_residencies(residencies, grants)
         except Exception:
             logger.warning("Residency reaper pass failed", exc_info=True)
         # Queued follow-ups after residencies, before the attempt pass: give
@@ -656,37 +686,33 @@ async def reap_expired_attempts(
         except Exception:
             logger.warning("Queued follow-up sweep failed", exc_info=True)
         try:
-            actions = await store.reap_expired(max_attempts=max_attempts)
-            await _cleanup_reaped_shared_residencies(store, actions, grants)
-            await _reconcile_settled_terminals(store)
+            actions = await attempts.reap_expired(max_attempts=max_attempts)
+            await _cleanup_reaped_shared_residencies(hosts, actions, grants)
+            await _reconcile_settled_terminals(sandboxes, conversations, hosts)
             if actions:
                 logger.info(
                     "agent_attempts_reaped",
                     extra={"event": "agent_attempts_reaped", "count": len(actions)},
                 )
-            snapshot_reaper = getattr(store, "reap_stalled_sandbox_snapshot_captures", None)
-            if snapshot_reaper is not None:
-                stalled_captures = await snapshot_reaper()
-                if stalled_captures:
-                    logger.warning(
-                        "agent_snapshot_captures_stalled",
-                        extra={
-                            "event": "agent_snapshot_captures_stalled",
-                            "snapshot_ids": stalled_captures,
-                        },
-                    )
-            snapshot_publish_reaper = getattr(store, "reap_stalled_snapshot_publishes", None)
-            if snapshot_publish_reaper is not None:
-                stalled_snapshot_publishes = await snapshot_publish_reaper()
-                if stalled_snapshot_publishes:
-                    logger.warning(
-                        "agent_snapshot_publishes_stalled",
-                        extra={
-                            "event": "agent_snapshot_publishes_stalled",
-                            "snapshot_ids": stalled_snapshot_publishes,
-                        },
-                    )
-            stalled_session_forks = await store.reap_stalled_session_forks()
+            stalled_captures = await snapshots.reap_stalled_sandbox_snapshot_captures()
+            if stalled_captures:
+                logger.warning(
+                    "agent_snapshot_captures_stalled",
+                    extra={
+                        "event": "agent_snapshot_captures_stalled",
+                        "snapshot_ids": stalled_captures,
+                    },
+                )
+            stalled_snapshot_publishes = await snapshots.reap_stalled_snapshot_publishes()
+            if stalled_snapshot_publishes:
+                logger.warning(
+                    "agent_snapshot_publishes_stalled",
+                    extra={
+                        "event": "agent_snapshot_publishes_stalled",
+                        "snapshot_ids": stalled_snapshot_publishes,
+                    },
+                )
+            stalled_session_forks = await forks.reap_stalled_session_forks()
             if stalled_session_forks:
                 from cloud_agent.broker_routing import broker_for_job
 
@@ -695,10 +721,10 @@ async def reap_expired_attempts(
                 for operation in stalled_session_forks:
                     operation_id = str(operation["id"])
                     if operation.get("recovery_action") == "finalize":
-                        if await store.finalize_session_fork(operation_id=operation_id):
+                        if await forks.finalize_session_fork(operation_id=operation_id):
                             recovered.append(operation_id)
                         continue
-                    broker = await broker_for_job(store, operation["source_job_id"])
+                    broker = await broker_for_job(hosts, operation["source_job_id"])
                     for residency in operation.get("cleanup_residencies") or []:
                         if broker is not None:
                             with contextlib.suppress(Exception):
@@ -727,11 +753,11 @@ async def reap_expired_attempts(
         # attempts being recovered.
         if grants is not None:
             try:
-                await _revoke_dead_grants(store, grants)
+                await _revoke_dead_grants(grant_records, grants)
             except Exception:
                 logger.warning("Grant revocation pass failed", exc_info=True)
             try:
-                await _renew_live_grants(store, grants, failures=renewal_failures)
+                await _renew_live_grants(grant_records, attempts, grants, failures=renewal_failures)
             except Exception:
                 logger.warning("Grant renewal pass failed", exc_info=True)
 
@@ -769,7 +795,7 @@ def _build_source_control(app: FastAPI) -> None:
         logger.warning("GitLab OAuth config present but unusable", exc_info=True)
 
 
-def _start_publisher(app: FastAPI, store: AgentJobStore) -> None:
+def _start_publisher(app: FastAPI) -> None:
     """Start the publish loop, idle if no git credential is configured."""
     from cloud_agent.publish_worker import GitHubCredential, publish_loop
 
@@ -784,9 +810,12 @@ def _start_publisher(app: FastAPI, store: AgentJobStore) -> None:
         token = os.getenv(ENV_GITHUB_TOKEN, static_token)
         return GitHubCredential(token) if token else None
 
+    persistence = app.state.persistence
     task = asyncio.create_task(
         publish_loop(
-            store,
+            persistence.snapshots,
+            persistence.source_control,
+            persistence.hosts,
             credential_provider=credential_provider,
             app_credentials=app.state.app_credentials,
             base_branch=os.getenv(ENV_PUBLISH_BASE_BRANCH, "dev"),
@@ -868,7 +897,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         app.state.reaper_task = reaper
         app.state.snapshot_task = snapshot_coordinator
         app.state.ledger_task = ledger_collector
-        _start_publisher(app, store)
+        _start_publisher(app)
         logger.info("cloud agent control plane started")
     else:
         app.state.reaper_task = None
