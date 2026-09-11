@@ -710,14 +710,40 @@ class CodexRuntime(AgentRuntime):
 
         A non-empty ``mcp_config`` is refused, and :meth:`capabilities`
         reports ``mcp=False`` so the platform turns such a job away at creation
-        rather than running one whose tools silently never appear. Codex
-        configures MCP servers through ``mcp_servers.*`` config keys whose
-        remote-URL form has moved between releases, and there is no flag
-        equivalent to Claude Code's ``--strict-mcp-config`` verified against
-        the pinned CLI. Shipping a guess would give a job either no tools or —
-        far worse — the repository's own MCP servers. Wiring this up is a
-        matter of verifying two flags against ``CODEX_VERSION`` in
-        ``Dockerfile.agent-sandbox``, not of design.
+        rather than running one whose tools silently never appear.
+
+        **What the pinned binary was checked to do.** Declaring the server is
+        not the problem: ``-c 'mcp_servers.agent_mcp={url="...",
+        bearer_token_env_var="AGENT_MCP_TOKEN"}'`` declares a remote server, and
+        0.145.0's own ``codex mcp list`` reports it enabled with "Bearer token"
+        auth. A repository's ``.codex/config.toml`` reaches the model only when
+        the project is trusted, and ``--ignore-user-config`` removes the usual
+        place a trust entry lives.
+
+        What is missing is the *gate*. ``/etc/codex/requirements.toml`` is the
+        layer applied after every other one, and its MCP allowlist matches a
+        server by name **and exact identity** -- the pinned binary's only
+        matchers are ``RawMcpServerUrlIdentity { url }`` and
+        ``RawMcpServerCommandIdentity { command }``, with no prefix or regex
+        form. So the file has to name the deployment's exact relay URL, while
+        the file is baked into the image and that URL is a runtime value
+        (``AGENT_SANDBOX_MCP_URL``). Keeping the allowlist empty is what makes
+        the current state safe: it disables every MCP server regardless of
+        layer, which is why a job on this runtime is refused rather than run
+        with the repository's own servers.
+
+        Enabling Codex is therefore a packaging change, not an adapter flag:
+        the image -- or a config mounted over ``/etc/codex/`` -- has to be built
+        per deployment with that deployment's relay address. The merged relay
+        endpoint at ``/v1/agent/mcp`` is the other half, because a single fixed
+        server name is what makes one allowlist entry possible at all.
+
+        Separately, and worth knowing before touching this: in 0.145.0 MCP tools
+        are not advertised to the model directly. They are reached through the
+        ``exec``/``code_mode`` JavaScript orchestration layer as
+        ``tools.mcp__<server>__<tool>``, and the servers are contacted lazily. A
+        verification harness has to drive that path, not read the request's
+        top-level tool list.
 
         Mirrors the invocation this repository already runs in production
         (.github/workflows/codex-oncall.yml), because that one is known to work

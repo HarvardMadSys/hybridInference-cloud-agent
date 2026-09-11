@@ -256,7 +256,7 @@ family a CLI belongs to.
 | `claude-code` | 2.1.220 | `--mcp-config` with the platform's servers | `--strict-mcp-config`, verified against the CLI: without it a committed `.mcp.json` is loaded alongside ours with no approval step |
 | `opencode` | 1.18.9 | the reviewed `opencode-freeinference` wrapper merges the relay endpoints into the `OPENCODE_CONFIG` it writes | the wrapper exports `OPENCODE_DISABLE_PROJECT_CONFIG`, which covers both `opencode.json` and `.opencode/` |
 | `kilo` | 7.4.17 | not wired | `KILO_DISABLE_PROJECT_CONFIG` covers the project `kilo.json` and the project `.kilo`/`.kilocode` directories — **but not the fork's legacy migrator**, which reads `<project>/.kilo/mcp.json` and `<project>/.kilocode/mcp.json` unconditionally. A committed file would hand the agent tools the repository chose, so the runtime refuses the feature rather than promising a bound it does not have |
-| `codex` | 0.145.0 | not wired | `/etc/codex/requirements.toml` is a *name-and-identity allowlist* and cannot declare a server, so it can gate our entries but not arbitrary per-conversation aliases; `--ignore-user-config` does not cover a trusted repository's `.codex/config.toml`, and `mcp_servers` is not in that layer's denylist. The requirements file is kept empty, which disables every MCP server regardless of layer — the fail-closed P0 policy |
+| `codex` | 0.145.0 | not wired | `/etc/codex/requirements.toml` is the layer applied after every other one, and its MCP allowlist matches a server by name **and exact identity**: the pinned binary's only matchers are `RawMcpServerUrlIdentity { url }` and `RawMcpServerCommandIdentity { command }`, with no prefix or regex form. The file is baked into the image and would have to name the deployment's exact relay URL, which is a runtime value. Kept empty, which disables every MCP server regardless of layer — the fail-closed P0 policy. Declaring the server is *not* the problem: `-c 'mcp_servers.agent_mcp={url=..., bearer_token_env_var=...}'` works and `codex mcp list` shows it enabled with Bearer-token auth |
 | `pi` | 0.73.1 | the reviewed `pi-mcp-bridge.ts` shipped at `/usr/local/libexec/`, loaded with an explicit `-e` | `--no-extensions` disables every other extension source — the project's `.pi/extensions/`, the global directory, and anything a settings file names — so the explicit path is the only way in. Verified against the pinned binary: a repository's own extension does not load, the relay's tools are registered as `<alias>__<tool>`, and a call reaches the upstream |
 
 A job naming connections on a runtime that has not declared them is refused at
@@ -264,10 +264,11 @@ creation rather than run with the tools silently missing.
 
 **What would unblock the two that remain.** Kilo needs a way to stop the
 legacy migrator — either a supported switch, or a deployment that mounts the
-workspace without `.kilo/mcp.json` reachable. Codex needs the server *name* to
-be knowable in advance, because its allowlist is keyed by name: a single
-job-scoped relay endpoint that multiplexes the conversation's connections would
-make one fixed entry possible, and that is relay work rather than adapter work.
+workspace without `.kilo/mcp.json` reachable. Codex needs the image — or a
+config mounted over `/etc/codex/` — built per deployment with that deployment's
+relay address, because its allowlist matches an exact URL identity. The merged
+relay endpoint at `/v1/agent/mcp` supplies the other half: one fixed server
+name, which is what makes a single allowlist entry possible at all.
 
 **The credential is referenced, not embedded, and the syntax is not portable.**
 Claude Code expands `${AGENT_MCP_TOKEN}`; the OpenCode family substitutes
