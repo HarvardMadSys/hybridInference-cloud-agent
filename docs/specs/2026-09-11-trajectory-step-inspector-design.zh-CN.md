@@ -346,7 +346,26 @@ interface TrajectoryStep {
 
 `input`、`context`、`lifecycle`、`error`、`raw`、`diff` 和未知 event type 仍可查看，使用适当 actor 与通用 **Summary / Raw**。不能为了只剩 Assistant/Tool 而把未知事件删掉。
 
-已有明确 identity 的 message-scoped usage 可关联到 Assistant；attempt-scoped usage 和无法归属的 usage 保留 context 记录，不硬挂到临近 Assistant。
+已确认 identity 的 message-scoped usage 可关联到 Assistant；attempt-scoped usage 和无法归属的 usage 保留 context 记录，不硬挂到临近 Assistant。
+
+### 8.6 Harness 报告事件
+
+runtime 在启动时对自己的配置所做的陈述，作为可选证据字段 `harness` 挂在对应的 `lifecycle` 事件 payload 上。带该报告的 step 在 **Summary / Raw** 之外增加两个页签：
+
+| 选中对象 | 详情页签，按顺序 |
+| --- | --- |
+| 带 `harness` 报告的 lifecycle 事件 | **Summary / System Prompt / Tools / Raw** |
+| 其余事件 | **Summary / Raw**，不出现空页签 |
+
+数据边界：
+
+1. **没有 system prompt 可展示。** Claude Code 在 CLI 内部组装 system prompt，从不写入 stream-json；这一点对着镜像锁定的 2.1.220 二进制核对过。`System Prompt` 页签因此明确说明平台从未收到该文本，并展示 runtime 确实陈述过的会话配置（runtime 版本、model、permission mode），不编造提示词。
+2. **`Tools` 页签展示 runtime 自己列出的工具名**，以及它报告的 MCP server 与状态；CLI 不上报每个工具的参数或 schema，因此不展示这两项。
+3. **只取会话自身的 init。** 子 agent 会发出同一 subtype 但范围更窄的 init，归一化事件没有区分标记，因此不把它的清单当作会话的清单。
+4. **名称照抄，不从命名约定推断归属**；工具名上限 200 条，越界通过 `tools_truncated` 显式报告，不静默截短。
+5. **旧数据兼容。** 改动前存储的 lifecycle 事件没有 `harness` 字段，这些 step 保持 Summary / Raw，不显示空页签。payload 被平台限额截断成文本时同样不显示，因为文本不是"加载了什么"的证据。
+
+实现位置：`cloud_agent_host/runtimes.py`（采集与归一化）、`trajectorySteps.ts`（投影与拒绝规则）、`HarnessDetails.tsx` 与 `TrajectoryInspector.tsx`（页签）。
 
 ## 9. 状态规则
 
@@ -429,6 +448,8 @@ interface TrajectoryStep {
 若要让尚未记录的 Source / Schema / 请求时间在新运行中完整出现，需要另行扩展 runtime→stored event 的可选证据字段，例如 native message identity、parent identity、schema snapshot、模型请求时间与 usage scope。
 
 这些不是当前 API 已存在的标准字段。不能只在 TypeScript interface 里声明后就假设后端会返回。采集扩展需逐 runtime 验证，保留 payload 限额、归属边界和旧数据兼容；本次 UI 可先以明确空状态上线。
+
+已落地的一项：`harness`（见 §8.6）。Claude Code 适配器此前只保留 init 事件的 `phase`、`model`、`runtime_version`、`session_id`，把工具清单丢掉；现在同时保留工具名、MCP server 与 permission mode，并按上述规则归一化。其余 runtime 目前不报告这些字段，因此它们的 step 不出现对应页签 —— 这是"未报告"，不是"没有工具"。system prompt 本身无法采集：CLI 不上报它，除非将来由平台自己注入（`--append-system-prompt` 之类）才有文本可存。
 
 ## 12. 原始内容与权限
 

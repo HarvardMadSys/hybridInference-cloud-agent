@@ -492,4 +492,90 @@ describe('TrajectoryInspector', () => {
     expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Summary', 'Raw']);
     expect(screen.getByText(/Event · Turn 7/)).toBeInTheDocument();
   });
+
+  it('reads the harness a lifecycle event reported', () => {
+    const events = [
+      event({
+        id: 1,
+        event_type: 'lifecycle',
+        payload: {
+          phase: 'init',
+          model: 'glm-5.1',
+          runtime_version: '2.1.220',
+          harness: {
+            tools: ['Bash', 'Read', 'mcp__relay__search'],
+            mcp_servers: [{ name: 'relay', status: 'connected' }],
+            permission_mode: 'bypassPermissions',
+          },
+        },
+      }),
+    ];
+    const key = buildTrajectorySteps(events)[0].key;
+    render(<Harness events={events} initial={{ kind: 'step', stepKey: key, tab: 'summary' }} />);
+
+    // The two views exist only because this event carries a report to read.
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      'Summary',
+      'System Prompt',
+      'Tools',
+      'Raw',
+    ]);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+    expect(screen.getByText('mcp__relay__search')).toBeInTheDocument();
+    expect(screen.getByText('connected')).toBeInTheDocument();
+    expect(screen.getByText(/does not report what each tool accepts/)).toBeInTheDocument();
+  });
+
+  it('says the runtime reported no system prompt rather than showing one', () => {
+    const events = [
+      event({
+        id: 1,
+        event_type: 'lifecycle',
+        payload: {
+          phase: 'init',
+          model: 'glm-5.1',
+          runtime_version: '2.1.220',
+          harness: { tools: ['Bash'], permission_mode: 'bypassPermissions' },
+        },
+      }),
+    ];
+    const key = buildTrajectorySteps(events)[0].key;
+    render(
+      <Harness events={events} initial={{ kind: 'step', stepKey: key, tab: 'systemPrompt' }} />,
+    );
+
+    expect(screen.getByText(/builds its system prompt inside the CLI/)).toBeInTheDocument();
+    expect(screen.getByText('2.1.220')).toBeInTheDocument();
+    expect(screen.getByText('bypassPermissions')).toBeInTheDocument();
+  });
+
+  it('says when the platform kept only part of the reported tool list', () => {
+    const events = [
+      event({
+        id: 1,
+        event_type: 'lifecycle',
+        payload: { phase: 'init', harness: { tools: ['Bash'], tools_truncated: true } },
+      }),
+    ];
+    const key = buildTrajectorySteps(events)[0].key;
+    render(<Harness events={events} initial={{ kind: 'step', stepKey: key, tab: 'tools' }} />);
+
+    expect(screen.getByText(/stored the first 1 tool name\./)).toBeInTheDocument();
+  });
+
+  it('opens no harness view for a report the platform truncated to text', () => {
+    const events = [
+      event({
+        id: 1,
+        event_type: 'lifecycle',
+        payload: { phase: 'init', harness: '{"tools": ["Bash"]}', truncated: true },
+      }),
+    ];
+    const key = buildTrajectorySteps(events)[0].key;
+    render(<Harness events={events} initial={{ kind: 'step', stepKey: key, tab: 'summary' }} />);
+
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Summary', 'Raw']);
+  });
 });

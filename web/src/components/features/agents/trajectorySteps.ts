@@ -85,6 +85,33 @@ export interface StepTiming {
   durationMs: number | null;
 }
 
+/** One MCP server a runtime named at init, and the status it gave it. */
+export interface HarnessMcpServer {
+  name: string;
+  status: string | null;
+}
+
+/**
+ * What a runtime said about the harness it started, quoted from the record.
+ *
+ * Claude Code builds its own system prompt inside the CLI and never puts one on
+ * the wire, so this is not a prompt and is never presented as one. It is the
+ * configuration the CLI itself attested at init: the tool menu it loaded, the
+ * servers it reached, and the permission mode it ran under. Nothing here is
+ * derived from a name or a convention — a reader sees what the runtime said.
+ */
+export interface HarnessInventory {
+  /** The runtime's own statement of the CLI it ran, when it made one. */
+  runtimeVersion: string | null;
+  /** The model the runtime reported starting with. */
+  model: string | null;
+  permissionMode: string | null;
+  tools: string[];
+  /** True when the platform's bound cut the tool list short. */
+  toolsTruncated: boolean;
+  mcpServers: HarnessMcpServer[];
+}
+
 export interface TrajectoryStep {
   /** Stable across backfill: derived from recorded identity, never a position. */
   key: string;
@@ -126,6 +153,12 @@ export interface TrajectoryStep {
    * call. The step stays visible and stops claiming a verified pairing.
    */
   ambiguity?: 'duplicate_call' | 'duplicate_result';
+  /**
+   * Event steps: what the runtime reported about the harness it started. Only
+   * an event that carries such a report has one; the inspector shows the tabs
+   * that read it only then.
+   */
+  harness?: HarnessInventory;
 }
 
 /** What the projection needs to know about a turn that the events cannot say. */
@@ -196,6 +229,54 @@ function firstCount(record: Record<string, unknown>, keys: string[]): number | n
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value;
   }
   return null;
+}
+
+/** The tool names a report listed, in the order it listed them. */
+function harnessTools(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((name): name is string => typeof name === 'string' && name.trim().length > 0);
+}
+
+/** The MCP servers a report named, each with the status it gave that server. */
+function harnessMcpServers(value: unknown): HarnessMcpServer[] {
+  if (!Array.isArray(value)) return [];
+  const servers: HarnessMcpServer[] = [];
+  for (const entry of value) {
+    const server = asRecord(entry);
+    const name = typeof server.name === 'string' ? server.name.trim() : '';
+    if (!name) continue;
+    servers.push({ name, status: typeof server.status === 'string' ? server.status : null });
+  }
+  return servers;
+}
+
+/**
+ * Read the harness a lifecycle event reported, if it reported one.
+ *
+ * An inventory is an object or it is nothing. The platform bounds an event
+ * payload by replacing an oversized value with a text preview, and a preview is
+ * not a record of what a session loaded, so it is refused here rather than
+ * parsed for whatever names it happens to contain. An inventory that names no
+ * tool, no server and no permission mode is nothing either: the tabs it would
+ * open have nothing to show.
+ */
+function harnessOf(payload: Record<string, unknown>): HarnessInventory | null {
+  const reported = payload.harness;
+  if (!reported || typeof reported !== 'object' || Array.isArray(reported)) return null;
+  const harness = reported as Record<string, unknown>;
+  const tools = harnessTools(harness.tools);
+  const mcpServers = harnessMcpServers(harness.mcp_servers);
+  const mode = harness.permission_mode;
+  const permissionMode = typeof mode === 'string' && mode.trim() ? mode : null;
+  if (tools.length === 0 && mcpServers.length === 0 && permissionMode === null) return null;
+  return {
+    runtimeVersion: typeof payload.runtime_version === 'string' ? payload.runtime_version : null,
+    model: typeof payload.model === 'string' ? payload.model : null,
+    permissionMode,
+    tools,
+    toolsTruncated: harness.tools_truncated === true,
+    mcpServers,
+  };
 }
 
 function scopeOf(event: StoredEvent): string {
@@ -507,6 +588,7 @@ export function buildTrajectorySteps(
     }
 
     const row = toTrajectory([event])[0];
+    const harness = harnessOf(payload);
     steps.push({
       key: `event:${jobIdOf(event)}:${event.attempt_id}:${event.id}`,
       kind: 'event',
@@ -525,6 +607,7 @@ export function buildTrajectorySteps(
       status: event.event_type === 'error' ? 'failed' : 'recorded',
       truncated: isTruncatedPayload(payload),
       timing: { source: null, startedAt: null, finishedAt: null, durationMs: null },
+      ...(harness ? { harness } : {}),
     });
   }
 

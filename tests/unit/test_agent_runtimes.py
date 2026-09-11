@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from cloud_agent_host.runtimes import (
+    MAX_INIT_TOOLS,
     ClaudeCodeRuntime,
     CodexRuntime,
     GenericRuntime,
@@ -723,6 +724,97 @@ def test_real_milestones_still_arrive_as_lifecycle():
 
     compacted = runtime.parse_event(json.dumps({"type": "system", "subtype": "compact_boundary"}))
     assert compacted is not None and compacted.event_type == "lifecycle"
+
+
+def _init(payload: dict[str, object]) -> dict[str, object]:
+    """Parse one synthetic init event and return the payload we stored."""
+    runtime = ClaudeCodeRuntime()
+    event = runtime.parse_event(json.dumps({"type": "system", "subtype": "init", **payload}))
+    assert event is not None and event.event_type == "lifecycle"
+    return event.payload
+
+
+def test_init_republishes_the_harness_the_cli_reported():
+    """The CLI's own statement of what it loaded survives normalization.
+
+    Claude Code never puts its system prompt on the wire, so the tool menu and
+    the permission mode it reports at init are the only evidence the platform
+    has of what the session actually started with.
+    """
+    payload = _init(
+        {
+            "session_id": "sess-1",
+            "model": "glm-5.1",
+            "claude_code_version": "2.1.220",
+            "permissionMode": "bypassPermissions",
+            "tools": ["Bash", "Read", "Read", "mcp__relay__search"],
+            "mcp_servers": [{"name": "relay", "status": "connected"}],
+        }
+    )
+    assert payload["harness"] == {
+        "tools": ["Bash", "Read", "mcp__relay__search"],
+        "mcp_servers": [{"name": "relay", "status": "connected"}],
+        "permission_mode": "bypassPermissions",
+    }
+
+
+def test_init_without_a_harness_report_carries_none():
+    """A runtime that says nothing about itself gets no empty inventory."""
+    assert "harness" not in _init({"model": "glm-5.1"})
+    assert "harness" not in _init({"tools": [], "mcp_servers": [], "permissionMode": "  "})
+
+
+def test_subagent_init_is_not_the_sessions_inventory():
+    """A subagent emits init too, for a narrower menu, and is not the session.
+
+    The normalized event carries no marker distinguishing the two, so
+    republishing a subagent's menu would read as the session's own.
+    """
+    payload = _init(
+        {
+            "parent_tool_use_id": "toolu_1",
+            "permissionMode": "bypassPermissions",
+            "tools": ["Read"],
+        }
+    )
+    assert "harness" not in payload
+
+
+def test_harness_inventory_keeps_only_what_it_can_attribute():
+    """Entries the CLI did not send in the stated shape name nothing."""
+    payload = _init(
+        {
+            "tools": ["Bash", 7, None, {"name": "Read"}, "   "],
+            "mcp_servers": [{"status": "connected"}, "relay", {"name": "ok"}],
+            "permissionMode": 7,
+        }
+    )
+    assert payload["harness"] == {
+        "tools": ["Bash"],
+        "mcp_servers": [{"name": "ok", "status": None}],
+    }
+
+
+def test_harness_tools_are_bounded_and_say_so():
+    """The bound is reported, so a short list is never a short menu."""
+    over = _init({"tools": [f"tool-{index}" for index in range(MAX_INIT_TOOLS + 1)]})["harness"]
+    assert isinstance(over, dict)
+    assert len(over["tools"]) == MAX_INIT_TOOLS
+    assert over["tools_truncated"] is True
+
+    exact = _init({"tools": [f"tool-{index}" for index in range(MAX_INIT_TOOLS)]})["harness"]
+    assert isinstance(exact, dict)
+    assert len(exact["tools"]) == MAX_INIT_TOOLS
+    assert "tools_truncated" not in exact
+
+
+def test_the_contract_fixture_carries_the_harness_fields():
+    """The synthetic stream is pinned to the shape the CLI was observed to emit."""
+    runtime = ClaudeCodeRuntime()
+    events = [event for line in _contract_lines() if (event := runtime.parse_event(line))]
+    init = next(event for event in events if event.payload.get("phase") == "init")
+    assert init.payload["harness"]["tools"] == ["bash", "read"]
+    assert init.payload["harness"]["permission_mode"] == "default"
 
 
 def test_suppression_does_not_leak_between_jobs():

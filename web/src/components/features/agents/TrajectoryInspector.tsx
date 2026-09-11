@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { getAgentAttemptTelemetry, type AgentJobApi } from '@/lib/api/agents';
 
 import { AssistantStepDetails, ASSISTANT_TABS, type AssistantTab } from './AssistantStepDetails';
+import { HarnessDetails, HARNESS_TABS, type HarnessTab } from './HarnessDetails';
 import {
   DetailRow,
   DetailRows,
@@ -33,7 +34,7 @@ import { STATUS_LABEL, type StoredEvent, type TrajectoryStep } from './trajector
 import type { AgentJob } from './types';
 
 export type EventTab = 'summary' | 'raw';
-export type StepTab = AssistantTab | ToolTab | EventTab;
+export type StepTab = AssistantTab | ToolTab | EventTab | HarnessTab;
 
 export type { RunTab };
 
@@ -43,19 +44,28 @@ export type InspectorSelection =
    *  even when the conversation's rows have not been read yet. */
   | { kind: 'run'; jobId: string; turnNo: number; tab: RunTab };
 
-/** The tabs a step of this kind actually has. */
-export function tabsForKind(kind: TrajectoryStep['kind']): Array<{ key: StepTab; label: string }> {
-  if (kind === 'assistant') return ASSISTANT_TABS;
-  if (kind === 'tool') return TOOL_TABS;
-  return [
-    { key: 'summary', label: 'Summary' },
-    { key: 'raw', label: 'Raw' },
-  ];
+const EVENT_TABS: Array<{ key: EventTab; label: string }> = [
+  { key: 'summary', label: 'Summary' },
+  { key: 'raw', label: 'Raw' },
+];
+
+/**
+ * The tabs a step actually has.
+ *
+ * A step takes a tab only when it holds something to put in it: an event whose
+ * runtime reported a harness gets the two tabs that read that report, and an
+ * event that reported none keeps Summary and Raw rather than opening views
+ * that would have to explain their own emptiness.
+ */
+export function tabsForStep(step: TrajectoryStep): Array<{ key: StepTab; label: string }> {
+  if (step.kind === 'assistant') return ASSISTANT_TABS;
+  if (step.kind === 'tool') return TOOL_TABS;
+  return step.harness ? [EVENT_TABS[0], ...HARNESS_TABS, EVENT_TABS[1]] : EVENT_TABS;
 }
 
 /** Whether a tab belongs to the newly selected step, or must fall back. */
-export function normalizeStepTab(kind: TrajectoryStep['kind'], tab: StepTab): StepTab {
-  return tabsForKind(kind).some((item) => item.key === tab) ? tab : 'summary';
+export function normalizeStepTab(step: TrajectoryStep, tab: StepTab): StepTab {
+  return tabsForStep(step).some((item) => item.key === tab) ? tab : 'summary';
 }
 
 /**
@@ -242,6 +252,7 @@ export function TrajectoryInspector({
   }
 
   const idPrefix = `step-${step.key}`;
+  const activeTab = normalizeStepTab(step, selection.tab);
   const tools = (step.toolKeys ?? [])
     .map((key) => byKey.get(key))
     .filter((item): item is TrajectoryStep => Boolean(item));
@@ -278,14 +289,14 @@ export function TrajectoryInspector({
       ) : null}
       <TabStrip
         idPrefix={idPrefix}
-        tabs={tabsForKind(step.kind)}
-        active={normalizeStepTab(step.kind, selection.tab)}
+        tabs={tabsForStep(step)}
+        active={activeTab}
         onSelect={(tab) => onSelectTab(tab)}
       />
       {step.kind === 'assistant' ? (
         <AssistantStepDetails
           step={step}
-          tab={normalizeStepTab(step.kind, selection.tab) as AssistantTab}
+          tab={activeTab as AssistantTab}
           tools={tools}
           onSelectStep={onSelectStep}
           onSelectTab={(tab) => onSelectTab(tab)}
@@ -293,18 +304,16 @@ export function TrajectoryInspector({
       ) : step.kind === 'tool' ? (
         <ToolStepDetails
           step={step}
-          tab={normalizeStepTab(step.kind, selection.tab) as ToolTab}
+          tab={activeTab as ToolTab}
           parent={parent}
           telemetry={telemetry}
           onSelectStep={onSelectStep}
           onSelectTab={(tab) => onSelectTab(tab)}
         />
+      ) : activeTab === 'systemPrompt' || activeTab === 'tools' ? (
+        <HarnessDetails step={step} tab={activeTab} />
       ) : (
-        <EventStepDetails
-          step={step}
-          tab={normalizeStepTab(step.kind, selection.tab) as EventTab}
-          idPrefix={idPrefix}
-        />
+        <EventStepDetails step={step} tab={activeTab as EventTab} idPrefix={idPrefix} />
       )}
     </div>
   );

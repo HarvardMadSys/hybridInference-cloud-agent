@@ -1271,7 +1271,7 @@ export function JobDetail({
       setInspector((current) => {
         const keepTab = current?.kind === 'step' && current.stepKey === stepKey;
         const tab: StepTab = keepTab ? current.tab : 'summary';
-        return { kind: 'step', stepKey, tab: step ? normalizeStepTab(step.kind, tab) : 'summary' };
+        return { kind: 'step', stepKey, tab: step ? normalizeStepTab(step, tab) : 'summary' };
       });
     },
     [rememberInspectorTrigger, trajectorySteps],

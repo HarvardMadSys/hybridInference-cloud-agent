@@ -464,19 +464,25 @@ class ClaudeCodeRuntime(AgentRuntime):
                     return None
                 self._reported_subtypes.add(subtype)
                 return self._raw(line, f"unclassified system subtype {subtype!r}")
+            # Only the session's own init is republished as its inventory. A
+            # subagent emits the same subtype for a narrower menu, and the
+            # normalized event carries no marker saying which one it was, so
+            # attaching the inventory there would read as the session's.
+            harness: dict[str, Any] | None = None
             if subtype == "init" and not event.get("parent_tool_use_id"):
                 captured = str(event.get("session_id") or "").strip()
                 if captured:
                     self.session_id = captured
-            return NormalizedEvent(
-                LIFECYCLE,
-                {
-                    "phase": subtype,
-                    "model": event.get("model"),
-                    "runtime_version": event.get("claude_code_version"),
-                    "session_id": self.session_id,
-                },
-            )
+                harness = _harness_inventory(event)
+            payload: dict[str, Any] = {
+                "phase": subtype,
+                "model": event.get("model"),
+                "runtime_version": event.get("claude_code_version"),
+                "session_id": self.session_id,
+            }
+            if harness is not None:
+                payload["harness"] = harness
+            return NormalizedEvent(LIFECYCLE, payload)
         if kind == "assistant":
             return self._from_assistant(event)
         if kind == "user":
@@ -1562,6 +1568,95 @@ def get_runtime(name: str) -> AgentRuntime:
         return runtime_cls()
     known = ", ".join(sorted(_REGISTRY))
     raise KeyError(f"Unknown agent runtime {name!r}. Known: {known}")
+
+
+#: How many tool names one ``init`` event may republish. Claude Code ships a
+#: menu of a few dozen and an MCP server adds more, so the bound sits far above
+#: any real session. It exists because the alternative is unbounded: a CLI that
+#: reported thousands would otherwise put the largest object in the stream on a
+#: single lifecycle row. Overflow is reported rather than hidden — see
+#: ``tools_truncated`` below.
+MAX_INIT_TOOLS = 200
+
+
+def _harness_inventory(event: dict[str, Any]) -> dict[str, Any] | None:
+    """What an ``init`` event says the CLI started with, quoted not inferred.
+
+    Claude Code composes its system prompt inside the CLI and never puts it on
+    the wire, so there is no prompt here to republish. What the CLI does report
+    is the configuration it actually started under: the tool menu it loaded, the
+    MCP servers it reached, and the permission mode it ran in. The mode is the
+    one a reader has a reason to check — the platform asks for
+    ``bypassPermissions``, and the CLI's own copy of what it used is evidence
+    the ask was honoured, which a flag in an argv is not.
+
+    Returns ``None`` when the CLI reported none of it, so a lifecycle event
+    carries an inventory only when there is one to carry.
+    """
+    tools, tools_truncated = _reported_tool_names(event.get("tools"))
+    servers = _reported_mcp_servers(event.get("mcp_servers"))
+    mode = event.get("permissionMode")
+    permission_mode = mode.strip() if isinstance(mode, str) else ""
+    if not tools and not servers and not permission_mode:
+        return None
+    inventory: dict[str, Any] = {}
+    if tools:
+        inventory["tools"] = tools
+        if tools_truncated:
+            inventory["tools_truncated"] = True
+    if servers:
+        inventory["mcp_servers"] = servers
+    if permission_mode:
+        inventory["permission_mode"] = permission_mode
+    return inventory
+
+
+def _reported_tool_names(value: Any) -> tuple[list[str], bool]:
+    """The tool names an ``init`` event listed, in the order it listed them.
+
+    Names are copied, never derived: a name the CLI did not send as a non-empty
+    string names no tool this platform can vouch for. Repeats collapse because a
+    menu is a set. The second value says whether the bound cut the list, so a
+    short list is never mistaken for a short menu.
+    """
+    if not isinstance(value, list):
+        return [], False
+    seen: set[str] = set()
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names[:MAX_INIT_TOOLS], len(names) > MAX_INIT_TOOLS
+
+
+def _reported_mcp_servers(value: Any) -> list[dict[str, Any]]:
+    """The MCP servers an ``init`` event listed, with the status it gave each.
+
+    A server the CLI named without a status keeps its name and reports no
+    status. Which servers the platform meant to load is a different claim from
+    which ones the CLI says it loaded, and only the second is evidence.
+    """
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    servers: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str):
+            continue
+        name = name.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        status = item.get("status")
+        servers.append({"name": name, "status": status if isinstance(status, str) else None})
+    return servers
 
 
 def _truncate(value: Any, limit: int = 4000) -> str:

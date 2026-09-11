@@ -699,3 +699,83 @@ describe('buildTrajectorySteps', () => {
     expect(steps[0].result?.isError).toBe(true);
   });
 });
+
+describe('harness inventory', () => {
+  function init(payload: Record<string, unknown>) {
+    return buildTrajectorySteps(
+      [event({ id: 1, job_id: 'a', turn_no: 1, event_type: 'lifecycle', payload })],
+      idle,
+    )[0];
+  }
+
+  it('projects what the runtime reported about the session it started', () => {
+    const step = init({
+      phase: 'init',
+      model: 'glm-5.1',
+      runtime_version: '2.1.220',
+      harness: {
+        tools: ['Bash', 'Read', 'mcp__relay__search'],
+        mcp_servers: [{ name: 'relay', status: 'connected' }, { name: 'quiet' }],
+        permission_mode: 'bypassPermissions',
+      },
+    });
+
+    expect(step.harness).toEqual({
+      runtimeVersion: '2.1.220',
+      model: 'glm-5.1',
+      permissionMode: 'bypassPermissions',
+      tools: ['Bash', 'Read', 'mcp__relay__search'],
+      toolsTruncated: false,
+      mcpServers: [
+        { name: 'relay', status: 'connected' },
+        { name: 'quiet', status: null },
+      ],
+    });
+  });
+
+  it('carries no inventory for an event that reported none', () => {
+    // Every lifecycle event reports a model and a version; that is not a
+    // harness report, and the tabs must not open for it.
+    expect(
+      init({ phase: 'init', model: 'glm-5.1', runtime_version: '2.1.220' }).harness,
+    ).toBeUndefined();
+    expect(init({ phase: 'init', harness: {} }).harness).toBeUndefined();
+  });
+
+  it('refuses a text preview of a report the platform truncated', () => {
+    // The payload bound replaces an oversized value with text. Text is not a
+    // record of what a session loaded, so it is not read as one.
+    const step = init({
+      phase: 'init',
+      truncated: true,
+      harness: '{"tools": ["Bash"], "permission_mode": "bypassPermissions"}',
+    });
+
+    expect(step.harness).toBeUndefined();
+    expect(step.truncated).toBe(true);
+  });
+
+  it('keeps only the entries the runtime sent in the stated shape', () => {
+    const step = init({
+      phase: 'init',
+      harness: {
+        tools: ['Bash', 7, null, '', { name: 'Read' }],
+        mcp_servers: [{ status: 'connected' }, 'relay', { name: '   ' }, { name: 'ok' }],
+        permission_mode: '  ',
+      },
+    });
+
+    expect(step.harness?.tools).toEqual(['Bash']);
+    expect(step.harness?.mcpServers).toEqual([{ name: 'ok', status: null }]);
+    expect(step.harness?.permissionMode).toBeNull();
+  });
+
+  it('reports a tool list the platform cut short', () => {
+    const step = init({
+      phase: 'init',
+      harness: { tools: ['Bash', 'Read'], tools_truncated: true },
+    });
+
+    expect(step.harness?.toolsTruncated).toBe(true);
+  });
+});
