@@ -968,6 +968,8 @@ class AgentJobStore:
             # Two sends of one submission racing: the loser reads the winner.
             if exc.constraint_name != "uq_agent_jobs_client_request":
                 raise
+            # The violated constraint is on client_request_id, so the winner has one.
+            assert client_request_id is not None
             replayed = await self.replayed_submission(
                 user_id=user_id,
                 client_request_id=client_request_id,
@@ -1035,6 +1037,8 @@ class AgentJobStore:
         except asyncpg.UniqueViolationError as exc:
             if exc.constraint_name != "uq_agent_jobs_client_request":
                 raise
+            # The violated constraint is on client_request_id, so the winner has one.
+            assert client_request_id is not None
             replayed = await self.replayed_submission(
                 user_id=user_id,
                 client_request_id=client_request_id,
