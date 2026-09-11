@@ -219,7 +219,22 @@ class Container:
         return int(value)
 
     def logs(self) -> str:
-        return run("docker", "logs", self.name, check=False) or ""
+        """Everything the container wrote, in order, stderr included.
+
+        `docker logs` sends the container's stderr to *this* process's stderr, so
+        a plain capture loses half of what a container says — and the half it
+        loses is where postgres announces that it is ready and where squid
+        announces that it is accepting connections. Both were read as silence
+        on this check's first real run.
+        """
+        result = subprocess.run(
+            ["docker", "logs", self.name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=120,
+        )
+        return result.stdout
 
     def wait(self, timeout: int = STARTUP_TIMEOUT_S) -> None:
         """Block until the container exits, and fail if it does not in time."""
@@ -514,9 +529,18 @@ def verify_sandbox(image: str, *, suffix: str, keep: bool) -> list[str]:
     for runtime, claimed in sorted(claims.items()):
         container = Container(name=f"smoke-sandbox-{runtime}-{suffix}")
         try:
+            # The same query the build makes, for the same reason: the version
+            # may arrive on stderr, and a CLI that prints a banner first puts it
+            # on the last line. `install-runtimes.sh` compares `2>&1 | tail -1`
+            # against the pin it installed, so this compares the same thing
+            # against the same label.
             container.start(
                 image,
-                command=("/bin/bash", "-lc", f"{RUNTIME_COMMANDS[runtime]} --version"),
+                command=(
+                    "/bin/bash",
+                    "-lc",
+                    f"{RUNTIME_COMMANDS[runtime]} --version 2>&1 | tail -1",
+                ),
             )
             container.wait()
             output = container.logs()
